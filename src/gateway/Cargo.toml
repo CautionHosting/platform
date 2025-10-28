@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: 2025 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+[package]
+name = "gateway"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# From workspace
+axum = { workspace = true, features = ["macros"] }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["cors", "limit", "fs"] }
+sqlx = { workspace = true, features = ["macros", "time"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
+sha2 = { workspace = true }
+dotenvy = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+regex = { workspace = true }
+async-trait = { workspace = true }
+
+# Gateway-specific dependencies
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }
+webauthn-rs-proto = "0.5"
+russh = "0.44"
+russh-keys = "0.44"
+thiserror = { workspace = true }

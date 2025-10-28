@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: 2025 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+[package]
+name = "enclave-builder"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures-util = "0.3"
+
+# Docker interaction
+bollard = "0.17"
+
+# Filesystem operations
+tempfile = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+dirs = "5.0"
+
+# Logging
+tracing = { workspace = true }
+
+# Path handling
+walkdir = "2"
+
+# UUID generation
+uuid = { workspace = true }
+
+# Tar archive handling
+tar = "0.4"
+flate2 = "1.0"
+
+# HTTP client for downloading archives
+reqwest = { workspace = true }
+
+# CBOR for attestation parsing
+serde_cbor = "0.11"
+base64 = { workspace = true }

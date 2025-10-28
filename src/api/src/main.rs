@@ -1,0 +1,1884 @@
+// SPDX-FileCopyrightText: 2025 Caution SEZC
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+use axum::{
+    extract::{Extension, Path, State, Request},
+    http::{StatusCode, HeaderMap},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{get, post, patch, delete},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+use sqlx::{postgres::PgPoolOptions, PgPool, FromRow};
+use std::sync::Arc;
+use tower_http::trace::TraceLayer;
+use tracing::info;
+use chrono::{DateTime, Utc, NaiveDateTime};
+use uuid::Uuid;
+
+mod provisioning;
+mod deployment;
+mod validation;
+mod validated_types;
+mod onboarding;
+mod types;
+mod errors;
+
+#[derive(Clone)]
+struct AppState {
+    db: PgPool,
+    git_hostname: String,
+}
+
+#[derive(Clone)]
+struct AuthContext {
+    user_id: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+struct User {
+    id: i64,
+    username: String,
+    email: Option<String>,
+    is_active: bool,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+use validated_types::UpdateUserRequest;
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+struct Organization {
+    id: Uuid,
+    name: String,
+    is_active: bool,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+use validated_types::{CreateOrganizationRequest, UpdateOrganizationRequest};
+
+#[derive(Debug, Serialize, FromRow)]
+struct OrganizationMember {
+    id: i64,
+    organization_id: Uuid,
+    user_id: i64,
+    role: String,
+    joined_at: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+use validated_types::{AddMemberRequest, UpdateMemberRequest};
+
+#[derive(Debug, Serialize, FromRow)]
+struct ComputeResource {
+    id: i64,
+    organization_id: Uuid,
+    provider_account_id: i64,
+    resource_type_id: i64,
+    provider_resource_id: String,
+    resource_name: Option<String>,
+    state: String,
+    region: Option<String>,
+    public_ip: Option<String>,
+    billing_tag: Option<String>,
+    created_at: chrono::NaiveDateTime,
+    updated_at: chrono::NaiveDateTime,
+}
+
+use validated_types::{CreateResourceRequest, CreateResourceResponse};
+use validated_types::{DeployRequest, DeployResponse};
+
+async fn auth_middleware(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, (StatusCode, String)> {
+    if let Some(user_id_str) = headers.get("x-authenticated-user-id").and_then(|h| h.to_str().ok()) {
+        if let Ok(user_id) = user_id_str.parse::<i64>() {
+            tracing::debug!("Auth middleware: internal service auth for user_id={}", user_id);
+            request.extensions_mut().insert(AuthContext { user_id });
+            return Ok(next.run(request).await);
+        }
+    }
+
+    let Some(session_id) = headers.get("x-session-id").and_then(|h| h.to_str().ok()) else {
+        tracing::debug!("Auth middleware: no authentication header provided");
+        return Err((StatusCode::UNAUTHORIZED, "No authentication provided".to_string()));
+    };
+
+    tracing::debug!("Auth middleware: validating session {}", session_id);
+    let user_id = validate_session(&state.db, session_id).await.map_err(|status| {
+        let msg = match status {
+            StatusCode::UNAUTHORIZED => "Invalid or expired session".to_string(),
+            _ => "Authentication failed".to_string(),
+        };
+        (status, msg)
+    })?;
+    tracing::debug!("Session validated: user_id={}", user_id);
+
+    request.extensions_mut().insert(AuthContext { user_id });
+    Ok(next.run(request).await)
+}
+
+async fn onboarding_middleware(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    ensure_user_has_org(&state.db, auth.user_id).await?;
+
+    request.extensions_mut().insert(auth);
+    Ok(next.run(request).await)
+}
+
+async fn validate_session(db: &PgPool, session_id: &str) -> Result<i64, StatusCode> {
+    let result: Option<(i64,)> = sqlx::query_as(
+        "SELECT u.id
+         FROM auth_sessions s
+         INNER JOIN fido2_credentials c ON s.credential_id = c.credential_id
+         INNER JOIN users u ON c.user_id = u.id
+         WHERE s.session_id = $1 AND s.expires_at > NOW()"
+    )
+    .bind(session_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Session validation query failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    result.map(|(user_id,)| user_id).ok_or_else(|| {
+        tracing::warn!("Invalid or expired session: {}", session_id);
+        StatusCode::UNAUTHORIZED
+    })
+}
+
+async fn ensure_user_has_org(db: &PgPool, user_id: i64) -> Result<(), StatusCode> {
+    tracing::debug!("ensure_user_has_org: checking user {}", user_id);
+
+    let is_onboarded = onboarding::check_onboarding_status(db, user_id).await?;
+
+    if !is_onboarded {
+        tracing::warn!("User {} has not completed onboarding", user_id);
+        return Err(StatusCode::PAYMENT_REQUIRED);
+    }
+
+    let has_org: Option<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT organization_id FROM organization_members WHERE user_id = $1 LIMIT 1"
+    )
+    .bind(user_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to check user org membership: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if has_org.is_some() {
+        tracing::debug!("User {} already has organization", user_id);
+        return Ok(());
+    }
+
+    tracing::info!("User {} has no organization, initializing new account", user_id);
+
+    provisioning::initialize_user_account(db, user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to initialize user account: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    tracing::info!("Successfully initialized account for user {}", user_id);
+    Ok(())
+}
+
+async fn check_org_access(
+    db: &PgPool,
+    user_id: i64,
+    org_id: Uuid,
+) -> Result<types::UserRole, StatusCode> {
+    let member: Option<(types::UserRole,)> = sqlx::query_as(
+        "SELECT role FROM organization_members
+         WHERE organization_id = $1 AND user_id = $2"
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    member.map(|m| m.0).ok_or(StatusCode::FORBIDDEN)
+}
+
+fn can_manage_org(role: &types::UserRole) -> bool {
+    role.can_manage_org()
+}
+
+fn is_owner(role: &types::UserRole) -> bool {
+    role.is_owner()
+}
+
+async fn get_user_primary_org(db: &PgPool, user_id: i64) -> Result<Uuid, StatusCode> {
+    let org_id: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT organization_id FROM organization_members
+         WHERE user_id = $1
+         ORDER BY created_at ASC
+         LIMIT 1"
+    )
+    .bind(user_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    org_id.map(|o| o.0).ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn get_or_create_provider_account(
+    db: &PgPool,
+    org_id: Uuid,
+) -> Result<i64, StatusCode> {
+    let aws_account_id = std::env::var("AWS_ACCOUNT_ID")
+        .map_err(|_| {
+            tracing::error!("AWS_ACCOUNT_ID environment variable not set");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let existing: Option<(i64, Option<String>, Option<bool>)> = sqlx::query_as(
+        "SELECT id, role_arn, is_active FROM provider_accounts
+         WHERE organization_id = $1 AND provider_id = $2
+         LIMIT 1"
+    )
+    .bind(org_id)
+    .bind(types::CloudProvider::AWS.provider_id())
+    .fetch_optional(db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some((id, role_arn, is_active)) = existing {
+        if role_arn.is_none() || is_active != Some(true) {
+            let role_arn = format!("arn:aws:iam::{}:role/OrganizationAccountAccessRole", aws_account_id);
+
+            sqlx::query(
+                "UPDATE provider_accounts
+                 SET role_arn = $1, is_active = true, external_account_id = $2
+                 WHERE id = $3"
+            )
+            .bind(&role_arn)
+            .bind(&aws_account_id)
+            .bind(id)
+            .execute(db)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to update provider account: {:?}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+            tracing::info!("Updated provider account {} for org {}", id, org_id);
+        }
+        return Ok(id);
+    }
+
+    let role_arn = format!("arn:aws:iam::{}:role/OrganizationAccountAccessRole", aws_account_id);
+
+    let account_id: (i64,) = sqlx::query_as(
+        "INSERT INTO provider_accounts
+         (organization_id, provider_id, external_account_id, account_name, role_arn, is_active)
+         VALUES ($1, 1, $2, $3, $4, true)
+         RETURNING id"
+    )
+    .bind(org_id)
+    .bind(&aws_account_id)
+    .bind(format!("AWS Account {}", aws_account_id))
+    .bind(&role_arn)
+    .fetch_one(db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to create provider account: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::info!("Created provider account {} for org {} using AWS account {}", account_id.0, org_id, aws_account_id);
+
+    Ok(account_id.0)
+}
+
+async fn get_or_create_resource_type(db: &PgPool) -> Result<i64, StatusCode> {
+    let existing: Option<(i64,)> = sqlx::query_as(
+        "SELECT id FROM resource_types
+         WHERE provider_id = $1 AND type_code = $2
+         LIMIT 1"
+    )
+    .bind(types::CloudProvider::AWS.provider_id())
+    .bind(types::AWSResourceType::EC2Instance.as_str())
+    .fetch_optional(db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some((id,)) = existing {
+        return Ok(id);
+    }
+
+    let type_id: (i64,) = sqlx::query_as(
+        "INSERT INTO resource_types
+         (provider_id, type_code, display_name, category)
+         VALUES ($1, $2, 'EC2 Instance', 'compute')
+         RETURNING id"
+    )
+    .bind(types::CloudProvider::AWS.provider_id())
+    .bind(types::AWSResourceType::EC2Instance.as_str())
+    .fetch_one(db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(type_id.0)
+}
+
+async fn health_check() -> impl IntoResponse {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+async fn get_current_user(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<User>, StatusCode> {
+    let user = sqlx::query_as::<_, User>(
+        "SELECT id, username, email, is_active, created_at, updated_at 
+         FROM users WHERE id = $1"
+    )
+    .bind(auth.user_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    Ok(Json(user))
+}
+
+async fn update_current_user(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    validated_types::Validated(payload): validated_types::Validated<UpdateUserRequest>,
+) -> Result<Json<User>, StatusCode> {
+    if payload.username.is_none() && payload.email.is_none() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let mut query_builder = sqlx::QueryBuilder::new("UPDATE users SET ");
+    let mut has_updates = false;
+
+    if let Some(username) = &payload.username {
+        if has_updates {
+            query_builder.push(", ");
+        }
+        query_builder.push("username = ");
+        query_builder.push_bind(username);
+        has_updates = true;
+    }
+
+    if let Some(email) = &payload.email {
+        if has_updates {
+            query_builder.push(", ");
+        }
+        query_builder.push("email = ");
+        query_builder.push_bind(email);
+        has_updates = true;
+    }
+
+    query_builder.push(" WHERE id = ");
+    query_builder.push_bind(auth.user_id);
+    query_builder.push(" RETURNING id, username, email, is_active, created_at, updated_at");
+
+    let user = query_builder
+        .build_query_as::<User>()
+        .fetch_one(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(user))
+}
+
+async fn delete_current_user(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<StatusCode, StatusCode> {
+    sqlx::query("UPDATE users SET is_active = false WHERE id = $1")
+        .bind(auth.user_id)
+        .execute(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_organizations(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<Vec<Organization>>, StatusCode> {
+    let orgs = sqlx::query_as::<_, Organization>(
+        "SELECT o.id, o.name, o.slug, o.is_active, o.created_at, o.updated_at 
+         FROM organizations o
+         INNER JOIN organization_members om ON o.id = om.organization_id
+         WHERE om.user_id = $1"
+    )
+    .bind(auth.user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(orgs))
+}
+
+async fn create_organization(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    validated_types::Validated(payload): validated_types::Validated<CreateOrganizationRequest>,
+) -> Result<Json<Organization>, StatusCode> {
+    let org = sqlx::query_as::<_, Organization>(
+        "INSERT INTO organizations (name)
+         VALUES ($1)
+         RETURNING id, name, is_active, created_at, updated_at"
+    )
+    .bind(&payload.name)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    sqlx::query(
+        "INSERT INTO organization_members (organization_id, user_id, role)
+         VALUES ($1, $2, $3)"
+    )
+    .bind(org.id)
+    .bind(auth.user_id)
+    .bind(types::UserRole::Owner)
+    .execute(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(org))
+}
+
+async fn get_organization(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(org_id): Path<Uuid>,
+) -> Result<Json<Organization>, StatusCode> {
+    check_org_access(&state.db, auth.user_id, org_id).await?;
+
+    let org = sqlx::query_as::<_, Organization>(
+        "SELECT id, name, slug, is_active, created_at, updated_at 
+         FROM organizations WHERE id = $1"
+    )
+    .bind(org_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    Ok(Json(org))
+}
+
+async fn update_organization(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(org_id): Path<Uuid>,
+    validated_types::Validated(payload): validated_types::Validated<UpdateOrganizationRequest>,
+) -> Result<Json<Organization>, StatusCode> {
+    let role = check_org_access(&state.db, auth.user_id, org_id).await?;
+
+    if !can_manage_org(&role) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    if payload.name.is_none() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let mut query_builder = sqlx::QueryBuilder::new("UPDATE organizations SET ");
+
+    if let Some(name) = &payload.name {
+        query_builder.push("name = ");
+        query_builder.push_bind(name);
+    }
+
+    query_builder.push(" WHERE id = ");
+    query_builder.push_bind(org_id);
+    query_builder.push(" RETURNING id, name, is_active, created_at, updated_at");
+
+    let org = query_builder
+        .build_query_as::<Organization>()
+        .fetch_one(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(org))
+}
+
+async fn delete_organization(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(org_id): Path<Uuid>,
+) -> Result<StatusCode, StatusCode> {
+    let role = check_org_access(&state.db, auth.user_id, org_id).await?;
+    
+    if !is_owner(&role) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    sqlx::query("UPDATE organizations SET is_active = false WHERE id = $1")
+        .bind(org_id)
+        .execute(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_members(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(org_id): Path<Uuid>,
+) -> Result<Json<Vec<OrganizationMember>>, StatusCode> {
+    check_org_access(&state.db, auth.user_id, org_id).await?;
+
+    let members = sqlx::query_as::<_, OrganizationMember>(
+        "SELECT id, organization_id, user_id, role::text as role, joined_at, created_at, updated_at 
+         FROM organization_members 
+         WHERE organization_id = $1"
+    )
+    .bind(org_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(members))
+}
+
+async fn add_member(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(org_id): Path<Uuid>,
+    validated_types::Validated(payload): validated_types::Validated<AddMemberRequest>,
+) -> Result<Json<OrganizationMember>, StatusCode> {
+    let role = check_org_access(&state.db, auth.user_id, org_id).await?;
+    
+    if !can_manage_org(&role) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let member = sqlx::query_as::<_, OrganizationMember>(
+        "INSERT INTO organization_members (organization_id, user_id, role, invited_by) 
+         VALUES ($1, $2, $3::user_role, $4) 
+         RETURNING id, organization_id, user_id, role::text as role, joined_at, created_at, updated_at"
+    )
+    .bind(org_id)
+    .bind(payload.user_id)
+    .bind(&payload.role)
+    .bind(auth.user_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(member))
+}
+
+async fn update_member(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path((org_id, member_user_id)): Path<(Uuid, i64)>,
+    validated_types::Validated(payload): validated_types::Validated<UpdateMemberRequest>,
+) -> Result<Json<OrganizationMember>, StatusCode> {
+    let role = check_org_access(&state.db, auth.user_id, org_id).await?;
+    
+    if !can_manage_org(&role) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let member = sqlx::query_as::<_, OrganizationMember>(
+        "UPDATE organization_members 
+         SET role = $1::user_role 
+         WHERE organization_id = $2 AND user_id = $3 
+         RETURNING id, organization_id, user_id, role::text as role, joined_at, created_at, updated_at"
+    )
+    .bind(&payload.role)
+    .bind(org_id)
+    .bind(member_user_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(member))
+}
+
+async fn remove_member(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path((org_id, member_user_id)): Path<(Uuid, i64)>,
+) -> Result<StatusCode, StatusCode> {
+    let role = check_org_access(&state.db, auth.user_id, org_id).await?;
+    
+    if !can_manage_org(&role) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    sqlx::query(
+        "DELETE FROM organization_members 
+         WHERE organization_id = $1 AND user_id = $2"
+    )
+    .bind(org_id)
+    .bind(member_user_id)
+    .execute(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_commit_sha(app_name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    use tokio::process::Command;
+
+    let repo_path = format!("/git-repos/{}.git", app_name);
+
+    let output = Command::new("git")
+        .args(&["--git-dir", &repo_path, "rev-parse", "HEAD"])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to get commit SHA: {}", stderr).into());
+    }
+
+    let commit_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(commit_sha)
+}
+
+async fn build_image_from_repo(
+    app_name: &str,
+    build_config: &types::BuildConfig,
+    image_name: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use tokio::fs;
+    use tokio::process::Command;
+
+    let repo_path = format!("/git-repos/{}.git", app_name);
+    let work_dir = format!("/app/build-cache/{}-build", app_name);
+
+    tracing::info!("Cloning repository from {} to {}", repo_path, work_dir);
+
+    fs::create_dir_all("/app/build-cache").await?;
+
+    let _ = fs::remove_dir_all(&work_dir).await;
+
+    let _ = Command::new("git")
+        .args(&["config", "--global", "--add", "safe.directory", &repo_path])
+        .output()
+        .await;
+
+    let output = Command::new("git")
+        .args(&["clone", &repo_path, &work_dir])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Git clone failed: {}", stderr).into());
+    }
+
+    tracing::info!("Successfully cloned repository");
+
+    let commit_output = Command::new("git")
+        .args(&["rev-parse", "HEAD"])
+        .current_dir(&work_dir)
+        .output()
+        .await?;
+
+    let commit_sha = if commit_output.status.success() {
+        String::from_utf8_lossy(&commit_output.stdout).trim().to_string()
+    } else {
+        "unknown".to_string()
+    };
+
+    tracing::info!("Building commit: {}", commit_sha);
+
+    let build_command = build_config.build.clone()
+        .unwrap_or_else(|| "docker build -t app .".to_string());
+
+    tracing::info!("Executing build command: {}", build_command);
+
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(&build_command)
+        .current_dir(&work_dir)
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        tracing::error!("Build failed:\nstdout: {}\nstderr: {}", stdout, stderr);
+        return Err(format!("Build command failed: {}", stderr).into());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    tracing::info!("Build output: {}", stdout);
+
+    tracing::info!("Checking for OCI tarball. build_config.oci_tarball = {:?}", build_config.oci_tarball);
+    if let Some(oci_tarball) = &build_config.oci_tarball {
+        let tarball_path = format!("{}/{}", work_dir, oci_tarball);
+        tracing::info!("Loading OCI tarball from {} and tagging as {}", tarball_path, image_name);
+
+        let load_output = Command::new("docker")
+            .args(&["load", "-i", &tarball_path])
+            .output()
+            .await?;
+
+        if !load_output.status.success() {
+            let stderr = String::from_utf8_lossy(&load_output.stderr);
+            tracing::error!("Failed to load OCI tarball: {}", stderr);
+            return Err(format!("Failed to load OCI tarball: {}", stderr).into());
+        }
+
+        let load_stdout = String::from_utf8_lossy(&load_output.stdout);
+        tracing::info!("Docker load output: {}", load_stdout);
+
+        let loaded_line = load_stdout.lines().find(|l| l.contains("Loaded image"))
+            .ok_or_else(|| format!("Docker load output didn't contain 'Loaded image' line. Output: {}", load_stdout))?;
+
+        let loaded_image = if loaded_line.contains("Loaded image ID:") {
+            loaded_line.split("Loaded image ID:").nth(1).map(|s| s.trim().to_string())
+        } else if loaded_line.contains("Loaded image:") {
+            loaded_line.split("Loaded image:").nth(1).map(|s| s.trim().to_string())
+        } else {
+            None
+        }.ok_or_else(|| format!("Could not parse loaded image name from: {}", loaded_line))?;
+
+        tracing::info!("Loaded image: {}, tagging as {}", loaded_image, image_name);
+
+        let tag_output = Command::new("docker")
+            .args(&["tag", &loaded_image, image_name])
+            .output()
+            .await?;
+
+        if !tag_output.status.success() {
+            let stderr = String::from_utf8_lossy(&tag_output.stderr);
+            tracing::error!("Failed to tag image: {}", stderr);
+            return Err(format!("Failed to tag image: {}", stderr).into());
+        }
+
+        tracing::info!("Successfully tagged image as {}", image_name);
+    } else {
+        tracing::info!("No OCI tarball specified, checking if image needs tagging");
+
+        let inspect_output = Command::new("docker")
+            .args(&["inspect", "--type=image", image_name])
+            .output()
+            .await;
+
+        if let Ok(output) = inspect_output {
+            if output.status.success() {
+                tracing::info!("Image already exists with correct tag: {}", image_name);
+            } else {
+                tracing::info!("Tagging default image 'app:latest' as {}", image_name);
+
+                let tag_output = Command::new("docker")
+                    .args(&["tag", "app:latest", image_name])
+                    .output()
+                    .await?;
+
+                if !tag_output.status.success() {
+                    let stderr = String::from_utf8_lossy(&tag_output.stderr);
+                    tracing::error!("Failed to tag default image: {}", stderr);
+                    return Err(format!("Failed to tag image 'app:latest' as '{}': {}. The build command should create an image, either by loading into Docker or by producing an OCI tarball.", image_name, stderr).into());
+                }
+
+                tracing::info!("Successfully tagged app:latest as {}", image_name);
+            }
+        } else {
+            tracing::warn!("Could not inspect image, proceeding with assumption it exists");
+        }
+    }
+
+    Ok(commit_sha)
+}
+
+async fn export_image_to_tarball(
+    image_name: &str,
+    tarball_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio::process::Command;
+    use tokio::fs;
+
+    tracing::info!("Exporting image {} to {}", image_name, tarball_path);
+
+    if let Some(parent) = std::path::Path::new(tarball_path).parent() {
+        fs::create_dir_all(parent).await?;
+    }
+
+    let output = Command::new("docker")
+        .args(&["save", "-o", tarball_path, image_name])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Docker save failed: {}", stderr).into());
+    }
+
+    Ok(())
+}
+
+async fn create_ami_from_image(
+    app_name: &str,
+    image_tarball: &str,
+    aws_region: &str,
+    _role_arn: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use tokio::fs;
+    use tokio::process::Command;
+
+    let packer_dir = format!("/app/build-cache/{}-packer", app_name);
+    let _ = fs::remove_dir_all(&packer_dir).await;
+    fs::create_dir_all(&packer_dir).await?;
+
+    let packer_template = format!(
+        r#"{{
+  "variables": {{
+    "aws_region": "{}",
+    "app_name": "{}",
+    "image_tarball": "{}"
+  }},
+  "builders": [
+    {{
+      "type": "amazon-ebs",
+      "region": "{{{{ user `aws_region` }}}}",
+      "source_ami_filter": {{
+        "filters": {{
+          "name": "ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*",
+          "root-device-type": "ebs",
+          "virtualization-type": "hvm"
+        }},
+        "owners": ["099720109477"],
+        "most_recent": true
+      }},
+      "instance_type": "t3.small",
+      "ssh_username": "ubuntu",
+      "ami_name": "caution-{{{{ user `app_name` }}}}-{{{{timestamp}}}}",
+      "ami_description": "Caution app: {{{{ user `app_name` }}}}",
+      "tags": {{
+        "Name": "caution-{{{{ user `app_name` }}}}",
+        "ManagedBy": "Caution",
+        "AppName": "{{{{ user `app_name` }}}}"
+      }}
+    }}
+  ],
+  "provisioners": [
+    {{
+      "type": "shell",
+      "inline": [
+        "sleep 5",
+        "sudo rm -rf /var/lib/apt/lists/*",
+        "sudo apt-get clean",
+        "sudo apt-get update -y || (sleep 5 && sudo apt-get update -y)",
+        "sudo apt-get install -y containerd",
+        "sudo systemctl enable containerd",
+        "sudo systemctl start containerd"
+      ]
+    }},
+    {{
+      "type": "file",
+      "source": "{{{{ user `image_tarball` }}}}",
+      "destination": "/tmp/app.tar"
+    }},
+    {{
+      "type": "shell",
+      "inline": [
+        "sudo ctr -n default images import /tmp/app.tar",
+        "sudo ctr -n default images list",
+        "sudo rm /tmp/app.tar"
+      ]
+    }},
+    {{
+      "type": "shell",
+      "inline": [
+        "cat <<'EOF' | sudo tee /etc/systemd/system/caution-app.service",
+        "[Unit]",
+        "Description=Caution Application Container",
+        "After=containerd.service",
+        "Requires=containerd.service",
+        "",
+        "[Service]",
+        "Type=simple",
+        "ExecStartPre=/usr/bin/ctr -n default images list",
+        "ExecStart=/bin/sh -c '/usr/bin/ctr -n default run --rm --net-host $(/usr/bin/ctr -n default images list -q | head -1) caution-app'",
+        "Restart=always",
+        "RestartSec=10",
+        "",
+        "[Install]",
+        "WantedBy=multi-user.target",
+        "EOF",
+        "sudo systemctl enable caution-app.service"
+      ]
+    }}
+  ]
+}}"#,
+        aws_region, app_name, image_tarball
+    );
+
+    let template_path = format!("{}/template.json", packer_dir);
+    fs::write(&template_path, packer_template.clone()).await?;
+
+    tracing::info!("Running Packer to create AMI for {}", app_name);
+    tracing::debug!("Packer template:\n{}", packer_template);
+    tracing::debug!("Packer template path: {}", template_path);
+    tracing::debug!("Packer working directory: {}", packer_dir);
+
+    match Command::new("packer").arg("version").output().await {
+        Ok(version_output) => {
+            let version = String::from_utf8_lossy(&version_output.stdout);
+            tracing::info!("Packer version: {}", version.trim());
+        }
+        Err(e) => {
+            tracing::warn!("Failed to get Packer version: {}", e);
+        }
+    }
+
+    match Command::new("packer").args(&["plugins", "installed"]).output().await {
+        Ok(plugins_output) => {
+            let plugins_stdout = String::from_utf8_lossy(&plugins_output.stdout);
+            let plugins_stderr = String::from_utf8_lossy(&plugins_output.stderr);
+            tracing::info!("Packer plugins installed:\nstdout: {}\nstderr: {}", plugins_stdout.trim(), plugins_stderr.trim());
+        }
+        Err(e) => {
+            tracing::warn!("Failed to list Packer plugins: {}", e);
+        }
+    }
+
+    tracing::info!("Installing Packer Amazon plugin");
+    match Command::new("packer")
+        .args(&["plugins", "install", "github.com/hashicorp/amazon"])
+        .output()
+        .await
+    {
+        Ok(install_output) => {
+            let install_stdout = String::from_utf8_lossy(&install_output.stdout);
+            let install_stderr = String::from_utf8_lossy(&install_output.stderr);
+            tracing::info!("Packer plugin install output:\nstdout: {}\nstderr: {}", install_stdout.trim(), install_stderr.trim());
+            if !install_output.status.success() && !install_stderr.contains("already installed") {
+                tracing::warn!("Plugin installation returned non-zero exit, but continuing: {}", install_stderr);
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to install packer plugin (may already be installed): {}", e);
+        }
+    }
+
+    let mut cmd = Command::new("packer");
+    cmd.args(&["build", "-force", &template_path])
+        .env("AWS_REGION", aws_region)
+        .current_dir(&packer_dir);
+
+    let has_access_key = std::env::var("AWS_ACCESS_KEY_ID").is_ok();
+    let has_secret_key = std::env::var("AWS_SECRET_ACCESS_KEY").is_ok();
+
+    tracing::info!("AWS credentials available: access_key={}, secret_key={}", has_access_key, has_secret_key);
+
+    if let Ok(access_key) = std::env::var("AWS_ACCESS_KEY_ID") {
+        cmd.env("AWS_ACCESS_KEY_ID", access_key);
+        tracing::debug!("Set AWS_ACCESS_KEY_ID environment variable");
+    }
+    if let Ok(secret_key) = std::env::var("AWS_SECRET_ACCESS_KEY") {
+        cmd.env("AWS_SECRET_ACCESS_KEY", secret_key);
+        tracing::debug!("Set AWS_SECRET_ACCESS_KEY environment variable");
+    }
+
+    tracing::info!("Executing packer command: packer build -force {}", template_path);
+
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take().expect("Failed to capture stdout");
+    let stderr = child.stderr.take().expect("Failed to capture stderr");
+
+    let stdout_task = tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+        let mut all_output = String::new();
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            tracing::info!("Packer stdout: {}", line);
+            all_output.push_str(&line);
+            all_output.push('\n');
+        }
+        all_output
+    });
+
+    let stderr_task = tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let reader = BufReader::new(stderr);
+        let mut lines = reader.lines();
+        let mut all_output = String::new();
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            tracing::warn!("Packer stderr: {}", line);
+            all_output.push_str(&line);
+            all_output.push('\n');
+        }
+        all_output
+    });
+
+    let status = child.wait().await?;
+    let stdout_output = stdout_task.await.unwrap_or_default();
+    let stderr_output = stderr_task.await.unwrap_or_default();
+
+    if !status.success() {
+        tracing::error!("Packer build failed with exit code: {:?}", status.code());
+        tracing::error!("Full stdout:\n{}", stdout_output);
+        tracing::error!("Full stderr:\n{}", stderr_output);
+        return Err(format!("Packer build failed: {}", stderr_output).into());
+    }
+
+    tracing::info!("Packer build completed successfully");
+    tracing::debug!("Packer full output: {}", stdout_output);
+
+    fn strip_ansi_codes(s: &str) -> String {
+        let re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+        re.replace_all(s, "").to_string()
+    }
+
+    let clean_output = strip_ansi_codes(&stdout_output);
+    tracing::debug!("Clean Packer output (first 500 chars): {}", &clean_output.chars().take(500).collect::<String>());
+
+    let ami_id = clean_output
+        .lines()
+        .rev()  // Start from the end to avoid getting source AMI
+        .find(|line| {
+            (line.contains("us-west-2:") || line.contains("AMI:")) && line.contains("ami-")
+        })
+        .and_then(|line| {
+            tracing::debug!("Found AMI line: {}", line);
+            line.split_whitespace()
+                .find(|s| s.starts_with("ami-"))
+        })
+        .ok_or_else(|| {
+            tracing::error!("Could not find created AMI ID in Packer output. Full output:\n{}", clean_output);
+            "Could not find created AMI ID in Packer output"
+        })?
+        .to_string();
+
+    tracing::info!("Created AMI: {}", ami_id);
+
+    Ok(ami_id)
+}
+
+async fn create_resource(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    validated_types::Validated(payload): validated_types::Validated<CreateResourceRequest>,
+) -> Result<Json<CreateResourceResponse>, StatusCode> {
+    tracing::info!("Creating resource for user_id: {}", auth.user_id);
+    tracing::debug!("Resource payload: {:?}", payload);
+
+    let org_id = match get_user_primary_org(&state.db, auth.user_id).await {
+        Ok(id) => {
+            tracing::debug!("Found primary org: {}", id);
+            id
+        }
+        Err(e) => {
+            tracing::error!("Failed to get primary org for user {}: {:?}", auth.user_id, e);
+            return Err(e);
+        }
+    };
+
+    let provider_account_id = match get_or_create_provider_account(&state.db, org_id).await {
+        Ok(id) => {
+            tracing::debug!("Provider account: {}", id);
+            id
+        }
+        Err(e) => {
+            tracing::error!("Failed to get/create provider account: {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let resource_type_id = match get_or_create_resource_type(&state.db).await {
+        Ok(id) => {
+            tracing::debug!("Resource type: {}", id);
+            id
+        }
+        Err(e) => {
+            tracing::error!("Failed to get/create resource type: {:?}", e);
+            return Err(e);
+        }
+    };
+
+    let provider_resource_id = Uuid::new_v4().to_string();
+
+    let resource_slug = format!("resource-{}", &provider_resource_id[..8]);
+
+    let configuration = serde_json::json!({
+        "cmd": payload.cmd
+    });
+
+    tracing::debug!("Creating resource with slug: {}", resource_slug);
+
+    let resource: (i64, types::ResourceState, NaiveDateTime) = match sqlx::query_as(
+        "INSERT INTO compute_resources
+         (organization_id, provider_account_id, resource_type_id, provider_resource_id,
+          resource_name, state, configuration, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, state, created_at"
+    )
+    .bind(org_id)
+    .bind(provider_account_id)
+    .bind(resource_type_id)
+    .bind(&provider_resource_id)
+    .bind(&resource_slug)
+    .bind(types::ResourceState::Pending)
+    .bind(&configuration)
+    .bind(auth.user_id)
+    .fetch_one(&state.db)
+    .await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Database error creating resource: {:?}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    let (resource_id, resource_state, created_at) = resource;
+
+    let git_url = format!("git@{}:{}.git", state.git_hostname, resource_slug);
+
+    tracing::info!("Resource created successfully: id={}, slug={}", resource_id, resource_slug);
+
+    Ok(Json(CreateResourceResponse {
+        id: resource_id,
+        resource_name: resource_slug,
+        git_url,
+        state: resource_state.as_str().to_string(),
+        created_at,
+    }))
+}
+
+async fn list_resources(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<Vec<ComputeResource>>, StatusCode> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id).await?;
+
+    tracing::info!("Listing resources for user {} in org {}", auth.user_id, org_id);
+
+    let resources = sqlx::query_as::<_, ComputeResource>(
+        "SELECT id, organization_id, provider_account_id, resource_type_id,
+                provider_resource_id, resource_name, state::text as state,
+                region, public_ip, billing_tag, created_at, updated_at
+         FROM compute_resources
+         WHERE organization_id = $1 AND destroyed_at IS NULL"
+    )
+    .bind(org_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to list resources: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::info!("Found {} resources", resources.len());
+
+    Ok(Json(resources))
+}
+
+async fn get_resource(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(resource_id): Path<i64>,
+) -> Result<Json<ComputeResource>, StatusCode> {
+    let resource = sqlx::query_as::<_, ComputeResource>(
+        "SELECT cr.id, cr.organization_id, cr.provider_account_id, cr.resource_type_id,
+                cr.provider_resource_id, cr.resource_name, cr.state::text as state,
+                cr.region, cr.public_ip, cr.billing_tag, cr.created_at, cr.updated_at
+         FROM compute_resources cr
+         INNER JOIN organization_members om ON cr.organization_id = om.organization_id
+         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL"
+    )
+    .bind(resource_id)
+    .bind(auth.user_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    Ok(Json(resource))
+}
+
+async fn delete_resource(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(resource_id): Path<i64>,
+) -> Result<StatusCode, StatusCode> {
+    tracing::info!("delete_resource called: resource_id={}, user_id={}", resource_id, auth.user_id);
+
+    tracing::debug!("Querying resource access for user {} on resource {}", auth.user_id, resource_id);
+    let resource: Option<(i64, Uuid, String, Option<String>)> = sqlx::query_as(
+        "SELECT cr.id, cr.organization_id, cr.resource_name, pa.role_arn
+         FROM compute_resources cr
+         INNER JOIN organization_members om ON cr.organization_id = om.organization_id
+         INNER JOIN provider_accounts pa ON cr.provider_account_id = pa.id
+         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL"
+    )
+    .bind(resource_id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Database query failed in delete_resource: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let Some((_, org_id, resource_name, role_arn_opt)) = resource else {
+        tracing::warn!("Resource {} not found or user {} has no access", resource_id, auth.user_id);
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    tracing::info!("Destroying resource {} (id: {})", resource_name, resource_id);
+
+    deployment::destroy_app(org_id, resource_id, resource_name.clone())
+        .await
+        .map_err(|e| {
+            tracing::error!("Terraform destroy failed for resource {}: {}", resource_id, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    sqlx::query(
+        "UPDATE compute_resources
+         SET destroyed_at = NOW(), state = $1
+         WHERE id = $2"
+    )
+    .bind(types::ResourceState::Terminated)
+    .bind(resource_id)
+    .execute(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    
+    tracing::info!("Resource {} soft deleted by user {}", resource_id, auth.user_id);
+    
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn deploy_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    validated_types::Validated(req): validated_types::Validated<DeployRequest>,
+) -> Result<Json<DeployResponse>, (StatusCode, String)> {
+    use tokio::process::Command;
+
+    tracing::info!(
+        "Deployment request: user_id={}, org_id={}, app_name={}",
+        auth.user_id,
+        req.org_id,
+        req.app_name
+    );
+
+    let user_in_org: Option<bool> = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM organization_members 
+            WHERE user_id = $1 AND organization_id = $2
+        )"
+    )
+    .bind(auth.user_id)
+    .bind(req.org_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+    
+    if user_in_org != Some(true) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "User does not belong to this organization".to_string(),
+        ));
+    }
+
+    tracing::info!("Fetching provider account for org {}", req.org_id);
+    let provider_account: Option<(i64, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, external_account_id, role_arn
+         FROM provider_accounts
+         WHERE organization_id = $1 AND is_active = true
+         LIMIT 1"
+    )
+    .bind(req.org_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to fetch provider account: {:?}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error fetching provider account: {}", e))
+    })?;
+
+    tracing::info!("Provider account query result: {:?}", provider_account);
+
+    let (provider_account_id, aws_account_id_opt, role_arn_opt) = provider_account
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "No active provider account found".to_string()))?;
+
+    tracing::info!("Provider account details: id={}, aws_account_id={:?}, role_arn={:?}",
+                   provider_account_id, aws_account_id_opt, role_arn_opt);
+
+    let aws_account_id = aws_account_id_opt
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Provider account has no AWS account ID configured".to_string()))?;
+
+    if let Some(ref role_arn) = role_arn_opt {
+        tracing::info!("Deploying to AWS account {} via role {}", aws_account_id, role_arn);
+    } else {
+        tracing::info!("Deploying to root AWS account {} (no role assumption)", aws_account_id);
+    }
+
+    tracing::info!("Fetching resource type for EC2Instance");
+    let resource_type_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM resource_types WHERE type_code = $1 LIMIT 1"
+    )
+    .bind(types::AWSResourceType::EC2Instance.as_str())
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get resource type: {}", e)))?;
+
+    sqlx::query(
+        "DELETE FROM compute_resources
+         WHERE organization_id = $1 AND resource_name = $2 AND destroyed_at IS NOT NULL"
+    )
+    .bind(req.org_id)
+    .bind(&req.app_name)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    tracing::info!("Checking for existing resource: org={}, name={}", req.org_id, req.app_name);
+    let existing_resource: Option<(i64, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT id, configuration FROM compute_resources
+         WHERE organization_id = $1 AND resource_name = $2 AND destroyed_at IS NULL"
+    )
+    .bind(req.org_id)
+    .bind(&req.app_name)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to check existing resource: {:?}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error checking existing resource: {}", e))
+    })?;
+
+    tracing::info!("Existing resource query result: {:?}", existing_resource.as_ref().map(|(id, _)| id));
+
+    let (resource_id, build_command) = if let Some((id, config_opt)) = existing_resource {
+        let config = config_opt.unwrap_or_else(|| serde_json::json!({}));
+        let build_cmd = config.get("cmd")
+            .and_then(|v| v.as_str())
+            .unwrap_or("docker build -t app .")
+            .to_string();
+        tracing::info!("Using existing resource {} with build command: {}", id, build_cmd);
+        (id, build_cmd)
+    } else {
+        let provider_resource_id = Uuid::new_v4().to_string();
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO compute_resources
+             (organization_id, provider_account_id, resource_type_id, provider_resource_id,
+              resource_name, state, region, created_by, deployed_at)
+             VALUES ($1, $2, $3, $4, $5, $6, 'us-west-2', $7, NOW())
+             RETURNING id"
+        )
+        .bind(req.org_id)
+        .bind(provider_account_id)
+        .bind(resource_type_id)
+        .bind(&provider_resource_id)
+        .bind(&req.app_name)
+        .bind(types::ResourceState::Pending)
+        .bind(auth.user_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create resource: {}", e)))?;
+        (id, "docker build -t app .".to_string())
+    };
+
+    tracing::info!("Build command for {}: {}", req.app_name, build_command);
+
+    let commit_sha = match get_commit_sha(&req.app_name).await {
+        Ok(sha) => {
+            tracing::info!("Latest commit: {}", sha);
+            sha
+        }
+        Err(e) => {
+            tracing::error!("Failed to get commit SHA: {:?}", e);
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get commit SHA: {}", e)));
+        }
+    };
+
+    let git_dir = format!("/git-repos/{}.git", req.app_name);
+    let procfile_output = Command::new("git")
+        .args(&["--git-dir", &git_dir, "show", &format!("{}:Procfile", commit_sha)])
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to run git show for Procfile: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Git command failed: {}", e))
+        })?;
+
+    let build_config = if procfile_output.status.success() {
+        let content = String::from_utf8_lossy(&procfile_output.stdout);
+        match types::BuildConfig::from_procfile(&content) {
+            Ok(config) => {
+                tracing::info!("Loaded build config from Procfile: containerfile={}, binary={}, build={:?}, oci_tarball={:?}",
+                               config.containerfile, config.binary, config.build, config.oci_tarball);
+                config
+            }
+            Err(e) => {
+                tracing::error!("Failed to parse Procfile: {}", e);
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid Procfile: {}", e),
+                ));
+            }
+        }
+    } else {
+        tracing::error!("Procfile not found in repository at commit {}", commit_sha);
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "No Procfile found in repository root. Please add a Procfile with 'containerfile', 'binary', and 'run' fields.".to_string(),
+        ));
+    };
+
+    let cache_dir = format!("/app/build-cache/{}", req.org_id);
+    tokio::fs::create_dir_all(&cache_dir).await.map_err(|e| {
+        tracing::error!("Failed to create cache directory: {:?}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create cache directory: {}", e))
+    })?;
+
+    let image_tarball = format!("{}/{}-{}.tar", cache_dir, req.app_name, commit_sha);
+    let tarball_exists = tokio::fs::metadata(&image_tarball).await.is_ok() && !build_config.no_cache;
+
+    let image_name = format!("caution-{}:latest", req.app_name);
+
+    if build_config.no_cache {
+        tracing::info!("Cache disabled (no_cache=true), forcing rebuild");
+    }
+
+    if tarball_exists {
+        tracing::info!("Cache HIT: Using cached tarball for commit {}", commit_sha);
+
+        tracing::info!("Loading cached image into Docker: {}", image_name);
+        let load_output = Command::new("docker")
+            .args(&["load", "-i", &image_tarball])
+            .output()
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load cached image: {:?}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load cached image: {}", e))
+            })?;
+
+        if !load_output.status.success() {
+            let stderr = String::from_utf8_lossy(&load_output.stderr);
+            tracing::error!("Docker load failed: {}", stderr);
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load cached image: {}", stderr)));
+        }
+
+        let load_stdout = String::from_utf8_lossy(&load_output.stdout);
+        tracing::info!("Cached image loaded successfully. Docker load output: {}", load_stdout);
+
+        let inspect_output = Command::new("docker")
+            .args(&["inspect", "--type=image", &image_name])
+            .output()
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to inspect image: {:?}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to inspect image: {}", e))
+            })?;
+
+        if !inspect_output.status.success() {
+            tracing::warn!("Loaded cached image doesn't have expected tag {}, attempting to parse and tag", image_name);
+
+            if let Some(loaded_line) = load_stdout.lines().find(|l| l.contains("Loaded image")) {
+                let loaded_image = if loaded_line.contains("Loaded image ID:") {
+                    loaded_line.split("Loaded image ID:").nth(1).map(|s| s.trim().to_string())
+                } else if loaded_line.contains("Loaded image:") {
+                    loaded_line.split("Loaded image:").nth(1).map(|s| s.trim().to_string())
+                } else {
+                    None
+                };
+
+                if let Some(loaded_img) = loaded_image {
+                    tracing::info!("Tagging loaded image {} as {}", loaded_img, image_name);
+
+                    let tag_output = Command::new("docker")
+                        .args(&["tag", &loaded_img, &image_name])
+                        .output()
+                        .await
+                        .map_err(|e| {
+                            tracing::error!("Failed to tag cached image: {:?}", e);
+                            (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to tag cached image: {}", e))
+                        })?;
+
+                    if !tag_output.status.success() {
+                        let stderr = String::from_utf8_lossy(&tag_output.stderr);
+                        tracing::error!("Failed to tag cached image: {}", stderr);
+                        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to tag cached image: {}", stderr)));
+                    }
+
+                    tracing::info!("Successfully tagged cached image as {}", image_name);
+                } else {
+                    tracing::error!("Could not parse loaded image name from: {}", loaded_line);
+                    return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to parse loaded image name".to_string()));
+                }
+            } else {
+                tracing::error!("Docker load output didn't contain 'Loaded image' line");
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, "Invalid docker load output".to_string()));
+            }
+        } else {
+            tracing::info!("Cached image already has correct tag: {}", image_name);
+        }
+    } else {
+        tracing::info!("Cache MISS: Building Docker image for commit {}", commit_sha);
+
+        let build_commit_sha = match build_image_from_repo(&req.app_name, &build_config, &image_name).await {
+            Ok(sha) => {
+                tracing::info!("Successfully built image: {} (commit: {})", image_name, sha);
+                sha
+            }
+            Err(e) => {
+                tracing::error!("Failed to build image: {:?}", e);
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Image build failed: {}", e)));
+            }
+        };
+
+        if build_commit_sha != commit_sha {
+            tracing::warn!("Commit SHA mismatch: expected {}, got {}", commit_sha, build_commit_sha);
+        }
+
+        tracing::info!("Exporting image to tarball: {}", image_tarball);
+        match export_image_to_tarball(&image_name, &image_tarball).await {
+            Ok(()) => {
+                tracing::info!("Exported image to: {}", image_tarball);
+            }
+            Err(e) => {
+                tracing::error!("Failed to export image: {:?}", e);
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Image export failed: {}", e)));
+            }
+        }
+    }
+
+    tracing::info!("Building Nitro Enclave EIF for commit {}", commit_sha);
+
+    if build_config.build.is_none() {
+        let containerfile_check = Command::new("git")
+            .args(&["--git-dir", &git_dir, "show", &format!("{}:{}", commit_sha, build_config.containerfile)])
+            .output()
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to check for container file: {}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("Git command failed: {}", e))
+            })?;
+
+        if !containerfile_check.status.success() {
+            tracing::error!("Container file '{}' not found at commit {}", build_config.containerfile, commit_sha);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Container file '{}' not found in repository root", build_config.containerfile),
+            ));
+        }
+    }
+
+    let work_dir = format!("/app/build-cache/build-{}-{}", req.app_name, commit_sha);
+    tokio::fs::create_dir_all(&work_dir).await.map_err(|e| {
+        tracing::error!("Failed to create work directory: {}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create work directory: {}", e))
+    })?;
+
+    let extract_cmd = format!(
+        "git --git-dir={} archive {} | tar -xC {}",
+        git_dir, commit_sha, work_dir
+    );
+    let extract_output = Command::new("bash")
+        .args(&["-c", &extract_cmd])
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to extract repository: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Repository extraction failed: {}", e))
+        })?;
+
+    if !extract_output.status.success() {
+        let stderr = String::from_utf8_lossy(&extract_output.stderr);
+        tracing::error!("Failed to extract repository archive: {}", stderr);
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to extract repository".to_string()));
+    }
+
+    let containerfile_path = format!("{}/{}", work_dir, build_config.containerfile);
+
+    let enclave_config = types::EnclaveConfig {
+        binary_path: build_config.binary.clone(),
+        args: vec![],
+        memory_mb: build_config.memory_mb,
+        cpus: build_config.cpus,
+        debug: build_config.debug,
+    };
+
+    let prebuilt_eif_path = format!("{}/nitro.eif", work_dir);
+    let prebuilt_pcrs_path = format!("{}/nitro.pcrs", work_dir);
+
+    let cached_eif_path = format!("{}/{}-{}.eif", cache_dir, req.app_name, commit_sha);
+    let cached_pcrs_path = format!("{}/{}-{}.pcrs", cache_dir, req.app_name, commit_sha);
+    let eif_cache_exists = tokio::fs::metadata(&cached_eif_path).await.is_ok() && !build_config.no_cache;
+
+    let eif_result = if eif_cache_exists {
+        tracing::info!("EIF Cache HIT: Using cached EIF for commit {}", commit_sha);
+
+        let eif_data = tokio::fs::read(&cached_eif_path).await.map_err(|e| {
+            tracing::error!("Failed to read cached EIF: {:?}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read cached EIF: {}", e))
+        })?;
+
+        let eif_size_bytes = eif_data.len() as u64;
+
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(&eif_data);
+        let eif_hash = format!("{:x}", hasher.finalize());
+
+        tracing::info!("Cached EIF loaded: {} bytes, hash: {}", eif_size_bytes, eif_hash);
+
+        types::EIFBuildResult {
+            eif_path: cached_eif_path.clone(),
+            pcrs_path: cached_pcrs_path.clone(),
+            eif_hash,
+            eif_size_bytes,
+        }
+    } else {
+        tracing::info!("Building EIF using enclave-builder from Docker image: caution-{}:latest", req.app_name);
+
+        let enclave_source = std::env::var("CAUTION_ENCLAVE_SOURCE")
+            .unwrap_or_else(|_| "https://git.distrust.co/public/enclaveos/archive/attestation_service.tar.gz".to_string());
+        let enclave_version = std::env::var("CAUTION_ENCLAVE_VERSION")
+            .unwrap_or_else(|_| "unused".to_string());
+
+        tracing::info!("Using enclave source: {} (version: {})", enclave_source, enclave_version);
+
+        let builder = enclave_builder::EnclaveBuilder::new(
+            "unused-template",
+            "local",
+            &enclave_source,
+            &enclave_version
+        )
+            .map_err(|e| {
+                tracing::error!("Failed to create enclave builder: {:?}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to initialize enclave builder: {}", e))
+            })?
+            .with_work_dir(std::path::PathBuf::from(&work_dir));
+
+        let user_image = enclave_builder::UserImage {
+            reference: format!("caution-{}:latest", req.app_name),
+        };
+
+        let run_command = Some(build_config.run.clone());
+        tracing::info!("Using run command from Procfile: {}", build_config.run);
+
+        let app_source_url = build_config.source.clone().map(|url| {
+            url.replace("${COMMIT}", &commit_sha)
+        });
+        if let Some(ref url) = app_source_url {
+            tracing::info!("Using app source URL: {}", url);
+        }
+
+        let deployment = builder
+            .build_enclave_auto(&user_image, &build_config.binary, run_command, app_source_url, build_config.metadata.clone(), None)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to build enclave: {:?}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("Enclave build failed: {}", e))
+            })?;
+
+        tracing::info!(
+            "EIF built successfully: path={}, size={} bytes, hash={}",
+            deployment.eif.path.display(),
+            deployment.eif.size,
+            deployment.eif.sha256
+        );
+        tracing::info!(
+            "PCR values: PCR0={}, PCR1={}, PCR2={}",
+            deployment.pcrs.pcr0,
+            deployment.pcrs.pcr1,
+            deployment.pcrs.pcr2
+        );
+
+        let built_eif_path = deployment.eif.path.to_string_lossy().to_string();
+        let built_pcrs_path = deployment.eif.path.with_extension("pcrs").to_string_lossy().to_string();
+
+        tracing::info!("Caching EIF to: {}", cached_eif_path);
+        if let Err(e) = tokio::fs::copy(&built_eif_path, &cached_eif_path).await {
+            tracing::warn!("Failed to cache EIF (non-fatal): {:?}", e);
+        }
+        if let Err(e) = tokio::fs::copy(&built_pcrs_path, &cached_pcrs_path).await {
+            tracing::warn!("Failed to cache PCRs (non-fatal): {:?}", e);
+        }
+
+        types::EIFBuildResult {
+            eif_path: cached_eif_path.clone(),
+            pcrs_path: cached_pcrs_path.clone(),
+            eif_hash: deployment.eif.sha256,
+            eif_size_bytes: deployment.eif.size,
+        }
+    };
+
+    let eif_path = eif_result.eif_path.clone();
+    let eif_hash = eif_result.eif_hash.clone();
+
+    tracing::info!("Storing EIF metadata: path={}, hash={}", eif_path, eif_hash);
+
+    let eif_config = serde_json::json!({
+        "eif_path": eif_path,
+        "eif_hash": eif_hash,
+        "pcrs_path": eif_result.pcrs_path,
+        "eif_size_bytes": eif_result.eif_size_bytes,
+        "commit_sha": commit_sha,
+        "enclave_config": enclave_config,
+        "run_command": build_config.run,
+    });
+
+    tracing::info!("Deploying Nitro Enclave for resource {} with memory_mb={}, cpu_count={}, debug={}",
+                   resource_id, enclave_config.memory_mb, enclave_config.cpus, enclave_config.debug);
+
+    let nitro_request = deployment::NitroDeploymentRequest {
+        org_id: req.org_id,
+        resource_id,
+        resource_name: req.app_name.clone(),
+        aws_account_id: aws_account_id.clone(),
+        role_arn: role_arn_opt.clone(),
+        eif_path: eif_path.clone(),
+        memory_mb: enclave_config.memory_mb,
+        cpu_count: enclave_config.cpus,
+        debug_mode: enclave_config.debug,
+    };
+
+    let deployment_result = match deployment::deploy_nitro_enclave(nitro_request).await {
+        Ok(result) => {
+            tracing::info!(
+                "Nitro Enclave deployed: instance_id={}, public_ip={}",
+                result.instance_id,
+                result.public_ip
+            );
+            result
+        }
+        Err(e) => {
+            tracing::error!("Failed to deploy Nitro Enclave: {:?}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Nitro deployment failed: {}", e),
+            ));
+        }
+    };
+
+    sqlx::query(
+        "UPDATE compute_resources
+         SET provider_resource_id = $1, state = $2, public_ip = $3, configuration = configuration || $4::jsonb
+         WHERE id = $5"
+    )
+    .bind(&deployment_result.instance_id)
+    .bind(types::ResourceState::Running)
+    .bind(&deployment_result.public_ip)
+    .bind(&eif_config)
+    .bind(resource_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update resource: {}", e)))?;
+
+    tracing::info!(
+        "EIF deployment complete: resource_id={}, instance_id={}, public_ip={}",
+        resource_id,
+        deployment_result.instance_id,
+        deployment_result.public_ip
+    );
+
+    let app_url = format!("http://{}:8080", deployment_result.public_ip);
+    let attestation_url = format!("http://{}:5000/attestation", deployment_result.public_ip);
+
+    tracing::info!(
+        "Deployment URLs - App: {}, Attestation: {}",
+        app_url,
+        attestation_url
+    );
+
+    Ok(Json(DeployResponse {
+        url: app_url,
+        attestation_url,
+        resource_id,
+    }))
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt::init();
+    if let Err(e) = provisioning::validate_setup() {
+        tracing::warn!("Provisioning validation failed: {:?}", e);
+        tracing::warn!("AWS child account provisioning will not be available");
+    }
+    let database_url = std::env::var("DATABASE_URL")
+        .expect("DATABASE_URL must be set");
+
+    let git_hostname = std::env::var("GIT_HOSTNAME")
+        .unwrap_or_else(|_| "git.caution.dev".to_string());
+
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await?;
+
+    info!("Connected to database");
+
+    let state = Arc::new(AppState {
+        db: pool,
+        git_hostname,
+    });
+
+    let onboarding_routes = Router::new()
+        .route("/user/status", get(onboarding::get_user_status))
+        .route("/onboarding/send-verification", post(onboarding::send_verification_email))
+        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
+
+    let resource_routes = Router::new()
+        .route("/users/me", get(get_current_user))
+        .route("/users/me", patch(update_current_user))
+        .route("/users/me", delete(delete_current_user))
+        .route("/organizations", get(list_organizations))
+        .route("/organizations", post(create_organization))
+        .route("/organizations/{id}", get(get_organization))
+        .route("/organizations/{id}", patch(update_organization))
+        .route("/organizations/{id}", delete(delete_organization))
+        .route("/organizations/{id}/members", get(list_members))
+        .route("/organizations/{id}/members", post(add_member))
+        .route("/organizations/{id}/members/{user_id}", patch(update_member))
+        .route("/organizations/{id}/members/{user_id}", delete(remove_member))
+        .route("/resources", post(create_resource))
+        .route("/resources", get(list_resources))
+        .route("/resources/{id}", get(get_resource))
+        .route("/resources/{id}", delete(delete_resource))
+        .route("/deploy", post(deploy_handler))
+        .layer(middleware::from_fn_with_state(state.clone(), onboarding_middleware))
+        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
+
+    let public_routes = Router::new()
+        .route("/health", get(health_check))
+        .route("/onboarding/verify", get(onboarding::verify_email));
+
+    let app = Router::new()
+        .merge(onboarding_routes)
+        .merge(resource_routes)
+        .merge(public_routes)
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
+        .await?;
+    
+    info!("API server listening on 0.0.0.0:8080");
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}

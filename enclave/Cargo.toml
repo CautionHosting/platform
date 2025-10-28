@@ -1,0 +1,11 @@
+[workspace]
+members = [
+    "src/init",
+    "src/aws",
+    "src/system",
+    "attestation-service",
+]
+resolver = "2"
+
+[workspace.dependencies]
+libc = "0.2"
