@@ -87,10 +87,13 @@
           Use the CLI to create and deploy applications.
         </p>
         <div class="code-block">
-          <pre>caution init my-app
-cd my-app
-git push caution main
-caution deploy</pre>
+          <pre>
+            cd my-app
+            caution init
+            # Adjust Procfile as needed
+            git push caution main
+            caution verify --reproduce
+          </pre>
         </div>
       </section>
     </div>
