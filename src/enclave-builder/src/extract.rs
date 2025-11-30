@@ -105,6 +105,10 @@ async fn export_container_filesystem(
     let tar_file = std::fs::File::open(&tar_path).context("Failed to open tar file")?;
     let mut archive = tar::Archive::new(tar_file);
 
+    archive.set_preserve_permissions(true);
+    archive.set_preserve_mtime(true);
+    archive.set_unpack_xattrs(true);
+
     archive
         .unpack(output_dir)
         .context("Failed to extract tar archive")?;

@@ -53,14 +53,7 @@ pub async fn stage_eif_components(
 
 async fn generate_run_sh(stage_dir: &Path, run_command: Option<String>) -> Result<()> {
     let user_cmd = if let Some(cmd) = run_command {
-        let basename = std::path::Path::new(&cmd)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&cmd);
-
-        let enclave_cmd = format!("/app/{}", basename);
-
-        let escaped_cmd = enclave_cmd.replace("'", "'\\''");
+        let escaped_cmd = cmd.replace("'", "'\\''");
         format!("exec sh -c '{}'", escaped_cmd)
     } else {
         r#"for exe in $(/bin/busybox find /app -type f -executable 2>/dev/null); do
@@ -96,7 +89,7 @@ if /bin/busybox ip link show eth0 2>/dev/null; then
     echo "eth0 interface created successfully"
 
     echo "Requesting IP via DHCP..."
-    /bin/busybox udhcpc -i eth0 -n -q -s /bin/udhcpc-script 2>&1 | grep -E "Lease|obtained" || true
+    /bin/busybox udhcpc -i eth0 -n -q -s /bin/udhcpc-script 2>&1 | /bin/busybox grep -E "Lease|obtained" || true
 
     echo "Network configuration:"
     /bin/busybox ip addr show eth0
@@ -251,6 +244,7 @@ RUN if [ -f /bin/busybox ]; then \
         ln -s busybox mount && \
         ln -s busybox chmod && \
         ln -s busybox ip && \
+        ln -s busybox grep && \
         ln -s busybox udhcpc; \
     fi
 
@@ -270,6 +264,9 @@ RUN if [ -f /etc/ssl/certs/ca-certificates.crt ]; then \
         cp /etc/ssl/certs/ca-certificates.crt /build/initramfs/etc/ssl/certs/ca-certificates.crt; \
     fi
 
+# Copy user app files to initramfs root to preserve original paths
+RUN cp -r /build/app/* /build/initramfs/ 2>/dev/null || true
+# Also copy to /app for backwards compatibility with simple apps
 RUN cp -r /build/app/* /build/initramfs/app/ 2>/dev/null || true
 
 RUN find /build/initramfs -exec touch -hcd "@0" "{}" +
@@ -438,32 +435,39 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 
     fs::create_dir_all(dst).await?;
 
-    for entry in WalkDir::new(src) {
+    for entry in WalkDir::new(src).follow_links(false) {
         let entry = entry?;
         let path = entry.path();
         let rel_path = path.strip_prefix(src)?;
         let dst_path = dst.join(rel_path);
 
-        if entry.file_type().is_dir() {
+        let file_type = entry.file_type();
+
+        if file_type.is_dir() {
             fs::create_dir_all(&dst_path).await?;
+        } else if file_type.is_symlink() {
+            if let Some(parent) = dst_path.parent() {
+                fs::create_dir_all(parent).await?;
+            }
+            let target = std::fs::read_link(path)
+                .with_context(|| format!("Failed to read symlink: {}", path.display()))?;
+            let _ = fs::remove_file(&dst_path).await;
+            std::os::unix::fs::symlink(&target, &dst_path)
+                .with_context(|| format!(
+                    "Failed to create symlink:\n  link: {}\n  target: {}",
+                    dst_path.display(),
+                    target.display()
+                ))?;
         } else {
             if let Some(parent) = dst_path.parent() {
                 fs::create_dir_all(parent).await?;
             }
 
-            let abs_src = std::fs::canonicalize(path)
-                .unwrap_or_else(|_| path.to_path_buf());
-            let src_exists = path.exists();
-            let src_is_file = path.is_file();
-
             fs::copy(path, &dst_path).await
                 .with_context(|| format!(
-                    "Failed to copy file:\n  src: {} (abs: {})\n  dst: {}\n  src exists: {}\n  src is_file: {}",
+                    "Failed to copy file:\n  src: {}\n  dst: {}",
                     path.display(),
-                    abs_src.display(),
-                    dst_path.display(),
-                    src_exists,
-                    src_is_file
+                    dst_path.display()
                 ))?;
         }
     }

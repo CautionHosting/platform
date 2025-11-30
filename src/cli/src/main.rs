@@ -25,6 +25,7 @@ use authenticator::{
     Pin, RegisterResult, SignResult, StatusUpdate,
 };
 use sha2::{Sha256, Digest};
+use enclave_builder::{BuildConfig, build_user_image};
 
 mod loader;
 use loader::{Loader, LoaderStyle};
@@ -1987,75 +1988,19 @@ build: docker build -t app .
         println!("Building Docker image for commit {}...", &commit_sha[..12]);
         log_verbose(self.verbose, &format!("Building Docker image with tag: {}", tag));
 
-        let build_cmd = self.read_procfile_field("build");
-        let oci_tarball = self.read_procfile_field("oci_tarball");
+        let work_dir = std::env::current_dir()
+            .context("Failed to get current directory")?;
 
-        if let (Some(cmd), Some(tarball)) = (build_cmd, oci_tarball) {
-            log_verbose(self.verbose, &format!("Running custom build command: {}", cmd));
+        let config = BuildConfig {
+            build_command: self.read_procfile_field("build"),
+            containerfile: self.read_procfile_field("containerfile"),
+            oci_tarball: self.read_procfile_field("oci_tarball"),
+        };
 
-            let output = Command::new("sh")
-                .args(&["-c", &cmd])
-                .output()
-                .context("Failed to run custom build command")?;
+        println!("DEBUG: work_dir = {:?}", work_dir);
+        println!("DEBUG: BuildConfig = {:?}", config);
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!("Custom build failed: {}", stderr);
-            }
-
-            log_verbose(self.verbose, &format!("Loading OCI tarball: {}", tarball));
-
-            let output = Command::new("docker")
-                .args(&["load", "-i", &tarball])
-                .output()
-                .context("Failed to load OCI tarball")?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!("Failed to load OCI tarball: {}", stderr);
-            }
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let loaded_image = stdout.lines()
-                .find(|line| line.contains("Loaded image"))
-                .and_then(|line| {
-                    if line.contains("Loaded image ID:") {
-                        line.split("Loaded image ID:").nth(1).map(|s| s.trim())
-                    } else if line.contains("Loaded image:") {
-                        line.split("Loaded image:").nth(1).map(|s| s.trim())
-                    } else {
-                        None
-                    }
-                })
-                .context("Failed to parse loaded image name from docker load output")?;
-
-            log_verbose(self.verbose, &format!("Loaded image: {}", loaded_image));
-
-            let output = Command::new("docker")
-                .args(&["tag", loaded_image, &tag])
-                .output()
-                .context("Failed to tag loaded image")?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!("Failed to tag image: {}", stderr);
-            }
-        } else {
-            let containerfile = self.read_procfile_field("containerfile")
-                .unwrap_or_else(|| "Dockerfile".to_string());
-
-            log_verbose(self.verbose, &format!("Using containerfile: {}", containerfile));
-
-            let output = Command::new("docker")
-                .args(&["build", "-f", &containerfile, "-t", &tag, "."])
-                .output()
-                .context("Failed to run docker build")?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!("Docker build failed: {}", stderr);
-            }
-        }
+        build_user_image(&work_dir, &tag, &config)?;
 
         log_verbose(self.verbose, &format!("Docker image built successfully: {}", tag));
         Ok(tag)

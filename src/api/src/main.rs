@@ -16,6 +16,7 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 use chrono::{DateTime, Utc, NaiveDateTime};
 use uuid::Uuid;
+use enclave_builder::{BuildConfig as DockerBuildConfig, build_user_image};
 
 mod provisioning;
 mod deployment;
@@ -705,101 +706,25 @@ async fn build_image_from_repo(
 
     tracing::info!("Building commit: {}", commit_sha);
 
-    let build_command = match build_config.build.clone() {
-        Some(cmd) if !cmd.trim().is_empty() => cmd,
-        _ => {
-            let containerfile = if std::path::Path::new(&work_dir).join("Containerfile").exists() {
-                "Containerfile"
-            } else {
-                "Dockerfile"
-            };
-            format!("docker build -f {} .", containerfile)
-        }
+    // Use shared build logic from enclave-builder
+    let docker_config = DockerBuildConfig {
+        build_command: build_config.build.clone(),
+        containerfile: Some(build_config.containerfile.clone()),
+        oci_tarball: build_config.oci_tarball.clone(),
     };
 
-    let build_command_with_tag = if build_command.starts_with("docker build") {
-        let with_no_cache = if build_command.contains("--no-cache") {
-            build_command.clone()
-        } else {
-            build_command.replacen("docker build", "docker build --no-cache", 1)
-        };
-        if with_no_cache.ends_with(" .") {
-            with_no_cache.replace(" .", &format!(" -t {} .", image_name))
-        } else {
-            format!("{} -t {}", with_no_cache, image_name)
-        }
-    } else if build_command.ends_with(" .") {
-        build_command.replace(" .", &format!(" -t {} .", image_name))
-    } else {
-        format!("{} -t {}", build_command, image_name)
-    };
+    let work_dir_path = std::path::PathBuf::from(&work_dir);
+    let image_name_owned = image_name.to_string();
 
-    tracing::info!("Executing build command: {}", build_command_with_tag);
+    // Run synchronous build in blocking task
+    tokio::task::spawn_blocking(move || {
+        build_user_image(&work_dir_path, &image_name_owned, &docker_config)
+    })
+    .await
+    .map_err(|e| format!("Build task panicked: {}", e))?
+    .map_err(|e| format!("Build failed: {}", e))?;
 
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&build_command_with_tag)
-        .current_dir(&work_dir)
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        tracing::error!("Build failed:\nstdout: {}\nstderr: {}", stdout, stderr);
-        return Err(format!("Build command failed: {}", stderr).into());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    tracing::info!("Build output: {}", stdout);
-
-    tracing::info!("Checking for OCI tarball. build_config.oci_tarball = {:?}", build_config.oci_tarball);
-    if let Some(oci_tarball) = &build_config.oci_tarball {
-        let tarball_path = format!("{}/{}", work_dir, oci_tarball);
-        tracing::info!("Loading OCI tarball from {} and tagging as {}", tarball_path, image_name);
-
-        let load_output = Command::new("docker")
-            .args(&["load", "-i", &tarball_path])
-            .output()
-            .await?;
-
-        if !load_output.status.success() {
-            let stderr = String::from_utf8_lossy(&load_output.stderr);
-            tracing::error!("Failed to load OCI tarball: {}", stderr);
-            return Err(format!("Failed to load OCI tarball: {}", stderr).into());
-        }
-
-        let load_stdout = String::from_utf8_lossy(&load_output.stdout);
-        tracing::info!("Docker load output: {}", load_stdout);
-
-        let loaded_line = load_stdout.lines().find(|l| l.contains("Loaded image"))
-            .ok_or_else(|| format!("Docker load output didn't contain 'Loaded image' line. Output: {}", load_stdout))?;
-
-        let loaded_image = if loaded_line.contains("Loaded image ID:") {
-            loaded_line.split("Loaded image ID:").nth(1).map(|s| s.trim().to_string())
-        } else if loaded_line.contains("Loaded image:") {
-            loaded_line.split("Loaded image:").nth(1).map(|s| s.trim().to_string())
-        } else {
-            None
-        }.ok_or_else(|| format!("Could not parse loaded image name from: {}", loaded_line))?;
-
-        tracing::info!("Loaded image: {}, tagging as {}", loaded_image, image_name);
-
-        let tag_output = Command::new("docker")
-            .args(&["tag", &loaded_image, image_name])
-            .output()
-            .await?;
-
-        if !tag_output.status.success() {
-            let stderr = String::from_utf8_lossy(&tag_output.stderr);
-            tracing::error!("Failed to tag image: {}", stderr);
-            return Err(format!("Failed to tag image: {}", stderr).into());
-        }
-
-        tracing::info!("Successfully tagged image as {}", image_name);
-    } else {
-        tracing::info!("Image built and tagged as {}", image_name);
-    }
+    tracing::info!("Image built and tagged as {}", image_name);
 
     Ok(commit_sha)
 }

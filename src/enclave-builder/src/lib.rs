@@ -7,12 +7,14 @@ pub mod build;
 pub mod pcrs;
 pub mod compile;
 pub mod manifest;
+pub mod docker;
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub use manifest::{EnclaveManifest, AppSource, EnclaveSource};
+pub use docker::{BuildConfig, build_user_image};
 
 #[derive(Debug, Clone)]
 pub struct EnclaveBuilder {
@@ -158,7 +160,7 @@ impl EnclaveBuilder {
         let binary_path = specific_files.as_ref().and_then(|files| files.first().cloned());
 
         tracing::info!("Extracting user image filesystem...");
-        let user_fs = self.extract_user_image(user_image, specific_files).await?;
+        let user_fs = self.extract_user_image(user_image, None).await?;
 
         let enclave_source_path = compile::get_or_clone_enclave_source(
             &self.enclave_source,
