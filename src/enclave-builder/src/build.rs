@@ -207,7 +207,7 @@ COPY app/ /build/app/
 
 COPY run.sh /build/run.sh
 
-COPY enclave/udhcpc-script.sh /build/udhcpc-script.sh
+COPY enclave/rootfs/udhcpc-script.sh /build/udhcpc-script.sh
 
 COPY manifest.json /build/manifest.json
 

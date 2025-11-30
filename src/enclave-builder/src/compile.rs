@@ -35,18 +35,18 @@ ENV TARGET_ARCH="x86_64-unknown-linux-musl"
 WORKDIR /build-enclave
 
 COPY Cargo.toml Cargo.lock ./
-COPY attestation-service/Cargo.toml ./attestation-service/
+COPY src/attestation-service/Cargo.toml ./src/attestation-service/
 COPY src/init/Cargo.toml ./src/init/
 COPY src/aws/Cargo.toml ./src/aws/
 COPY src/system/Cargo.toml ./src/system/
 
-RUN mkdir -p src/init/src src/aws/src src/system/src attestation-service/src && \
+RUN mkdir -p src/init/src src/aws/src src/system/src src/attestation-service/src && \
     echo "fn main() {}" > src/init/src/main.rs && \
     echo "pub fn dummy() {}" > src/aws/src/lib.rs && \
     echo "pub fn dummy() {}" > src/system/src/lib.rs && \
-    echo "fn main() {}" > attestation-service/src/main.rs
+    echo "fn main() {}" > src/attestation-service/src/main.rs
 
-COPY attestation-service/src ./attestation-service/src
+COPY src/attestation-service/src ./src/attestation-service/src
 COPY src/init/init.rs ./src/init/init.rs
 COPY src/aws/src ./src/aws/src
 COPY src/system/src ./src/system/src

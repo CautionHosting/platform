@@ -82,7 +82,7 @@ fn generate_combining_dockerfile(template_dir: &Path, user_fs_path: &Path) -> Re
 FROM stagex/pallet-rust AS attestation-builder
 WORKDIR /build
 COPY template/ /build/
-RUN cargo build --release --manifest-path=/build/attestation-service/Cargo.toml
+RUN cargo build --release --manifest-path=/build/src/attestation-service/Cargo.toml
 
 # Build init from template
 FROM stagex/pallet-rust AS init-builder

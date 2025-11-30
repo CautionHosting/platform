@@ -1569,7 +1569,7 @@ build: docker build -t app .
         println!("You can inspect the exact build process:");
         println!("  • Containerfile.eif - Shows exactly how the EIF is built");
         println!("  • app/ - Your application files");
-        println!("  • enclave/ - Enclave source code (attestation-service, init, init.sh)");
+        println!("  • enclave/ - Enclave source code (src/attestation-service, src/init, rootfs/)");
         println!("  • kernel/ - Kernel files (bzImage, linux.config, nsm.ko)");
         println!("  • output/ - Final EIF and PCRs files\n");
 
@@ -1776,7 +1776,7 @@ build: docker build -t app .
         let remote_pcrs = verify_attestation(&attestation_b64, &nonce)
             .context("Attestation verification failed")?;
 
-        println!("Challenge nonce (received): {}", hex::encode(&remote_pcrs.nonce));
+        println!("✓ Challenge nonce (received): {}", hex::encode(&remote_pcrs.nonce));
         println!("✓ Attestation verified successfully");
 
         println!("\nRemote PCR values (from deployed enclave):");
