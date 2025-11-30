@@ -636,19 +636,20 @@ async fn remove_member(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn get_commit_sha(app_name: &str) -> Result<String, Box<dyn std::error::Error>> {
+async fn get_commit_sha(app_name: &str, branch: &str) -> Result<String, Box<dyn std::error::Error>> {
     use tokio::process::Command;
 
     let repo_path = format!("/git-repos/{}.git", app_name);
+    let ref_spec = format!("refs/heads/{}", branch);
 
     let output = Command::new("git")
-        .args(&["--git-dir", &repo_path, "rev-parse", "HEAD"])
+        .args(&["--git-dir", &repo_path, "rev-parse", &ref_spec])
         .output()
         .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to get commit SHA: {}", stderr).into());
+        return Err(format!("Failed to get commit SHA for branch '{}': {}", branch, stderr).into());
     }
 
     let commit_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -659,6 +660,7 @@ async fn build_image_from_repo(
     app_name: &str,
     build_config: &types::BuildConfig,
     image_name: &str,
+    branch: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     use tokio::fs;
     use tokio::process::Command;
@@ -666,7 +668,7 @@ async fn build_image_from_repo(
     let repo_path = format!("/git-repos/{}.git", app_name);
     let work_dir = format!("/app/build-cache/{}-build", app_name);
 
-    tracing::info!("Cloning repository from {} to {}", repo_path, work_dir);
+    tracing::info!("Cloning repository from {} to {} (branch: {})", repo_path, work_dir, branch);
 
     fs::create_dir_all("/app/build-cache").await?;
 
@@ -678,7 +680,7 @@ async fn build_image_from_repo(
         .await;
 
     let output = Command::new("git")
-        .args(&["clone", &repo_path, &work_dir])
+        .args(&["clone", "--branch", branch, &repo_path, &work_dir])
         .output()
         .await?;
 
@@ -687,7 +689,7 @@ async fn build_image_from_repo(
         return Err(format!("Git clone failed: {}", stderr).into());
     }
 
-    tracing::info!("Successfully cloned repository");
+    tracing::info!("Successfully cloned repository (branch: {})", branch);
 
     let commit_output = Command::new("git")
         .args(&["rev-parse", "HEAD"])
@@ -703,14 +705,40 @@ async fn build_image_from_repo(
 
     tracing::info!("Building commit: {}", commit_sha);
 
-    let build_command = build_config.build.clone()
-        .unwrap_or_else(|| "docker build -t app .".to_string());
+    let build_command = match build_config.build.clone() {
+        Some(cmd) if !cmd.trim().is_empty() => cmd,
+        _ => {
+            let containerfile = if std::path::Path::new(&work_dir).join("Containerfile").exists() {
+                "Containerfile"
+            } else {
+                "Dockerfile"
+            };
+            format!("docker build -f {} .", containerfile)
+        }
+    };
 
-    tracing::info!("Executing build command: {}", build_command);
+    let build_command_with_tag = if build_command.starts_with("docker build") {
+        let with_no_cache = if build_command.contains("--no-cache") {
+            build_command.clone()
+        } else {
+            build_command.replacen("docker build", "docker build --no-cache", 1)
+        };
+        if with_no_cache.ends_with(" .") {
+            with_no_cache.replace(" .", &format!(" -t {} .", image_name))
+        } else {
+            format!("{} -t {}", with_no_cache, image_name)
+        }
+    } else if build_command.ends_with(" .") {
+        build_command.replace(" .", &format!(" -t {} .", image_name))
+    } else {
+        format!("{} -t {}", build_command, image_name)
+    };
+
+    tracing::info!("Executing build command: {}", build_command_with_tag);
 
     let output = Command::new("sh")
         .arg("-c")
-        .arg(&build_command)
+        .arg(&build_command_with_tag)
         .current_dir(&work_dir)
         .output()
         .await?;
@@ -770,35 +798,7 @@ async fn build_image_from_repo(
 
         tracing::info!("Successfully tagged image as {}", image_name);
     } else {
-        tracing::info!("No OCI tarball specified, checking if image needs tagging");
-
-        let inspect_output = Command::new("docker")
-            .args(&["inspect", "--type=image", image_name])
-            .output()
-            .await;
-
-        if let Ok(output) = inspect_output {
-            if output.status.success() {
-                tracing::info!("Image already exists with correct tag: {}", image_name);
-            } else {
-                tracing::info!("Tagging default image 'app:latest' as {}", image_name);
-
-                let tag_output = Command::new("docker")
-                    .args(&["tag", "app:latest", image_name])
-                    .output()
-                    .await?;
-
-                if !tag_output.status.success() {
-                    let stderr = String::from_utf8_lossy(&tag_output.stderr);
-                    tracing::error!("Failed to tag default image: {}", stderr);
-                    return Err(format!("Failed to tag image 'app:latest' as '{}': {}. The build command should create an image, either by loading into Docker or by producing an OCI tarball.", image_name, stderr).into());
-                }
-
-                tracing::info!("Successfully tagged app:latest as {}", image_name);
-            }
-        } else {
-            tracing::warn!("Could not inspect image, proceeding with assumption it exists");
-        }
+        tracing::info!("Image built and tagged as {}", image_name);
     }
 
     Ok(commit_sha)
@@ -1055,7 +1055,7 @@ async fn create_ami_from_image(
 
     let ami_id = clean_output
         .lines()
-        .rev()  // Start from the end to avoid getting source AMI
+        .rev()
         .find(|line| {
             (line.contains("us-west-2:") || line.contains("AMI:")) && line.contains("ami-")
         })
@@ -1400,15 +1400,16 @@ async fn deploy_handler(
     };
 
     tracing::info!("Build command for {}: {}", req.app_name, build_command);
+    tracing::info!("Deploying branch: {}", req.branch);
 
-    let commit_sha = match get_commit_sha(&req.app_name).await {
+    let commit_sha = match get_commit_sha(&req.app_name, &req.branch).await {
         Ok(sha) => {
-            tracing::info!("Latest commit: {}", sha);
+            tracing::info!("Latest commit on branch '{}': {}", req.branch, sha);
             sha
         }
         Err(e) => {
-            tracing::error!("Failed to get commit SHA: {:?}", e);
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get commit SHA: {}", e)));
+            tracing::error!("Failed to get commit SHA for branch '{}': {:?}", req.branch, e);
+            return Err((StatusCode::BAD_REQUEST, format!("Failed to get commit SHA for branch '{}': {}", req.branch, e)));
         }
     };
 
@@ -1455,7 +1456,7 @@ async fn deploy_handler(
     let image_tarball = format!("{}/{}-{}.tar", cache_dir, req.app_name, commit_sha);
     let tarball_exists = tokio::fs::metadata(&image_tarball).await.is_ok() && !build_config.no_cache;
 
-    let image_name = format!("caution-{}:latest", req.app_name);
+    let image_name = format!("caution-{}:{}", req.app_name, &commit_sha[..12]);
 
     if build_config.no_cache {
         tracing::info!("Cache disabled (no_cache=true), forcing rebuild");
@@ -1537,7 +1538,7 @@ async fn deploy_handler(
     } else {
         tracing::info!("Cache MISS: Building Docker image for commit {}", commit_sha);
 
-        let build_commit_sha = match build_image_from_repo(&req.app_name, &build_config, &image_name).await {
+        let build_commit_sha = match build_image_from_repo(&req.app_name, &build_config, &image_name, &req.branch).await {
             Ok(sha) => {
                 tracing::info!("Successfully built image: {} (commit: {})", image_name, sha);
                 sha
@@ -1673,8 +1674,9 @@ async fn deploy_handler(
             .with_work_dir(std::path::PathBuf::from(&work_dir));
 
         let user_image = enclave_builder::UserImage {
-            reference: format!("caution-{}:latest", req.app_name),
+            reference: format!("caution-{}:{}", req.app_name, &commit_sha[..12]),
         };
+        tracing::info!("Using Docker image for enclave build: {}", user_image.reference);
 
         let run_command = Some(build_config.run.clone());
         tracing::info!("Using run command from Procfile: {}", build_config.run);
@@ -1687,7 +1689,16 @@ async fn deploy_handler(
         }
 
         let deployment = builder
-            .build_enclave_auto(&user_image, &build_config.binary, run_command, app_source_url, build_config.metadata.clone(), None)
+            .build_enclave_auto(
+                &user_image,
+                &build_config.binary,
+                run_command,
+                app_source_url,
+                Some(req.branch.clone()),
+                Some(commit_sha.clone()),
+                build_config.metadata.clone(),
+                None
+            )
             .await
             .map_err(|e| {
                 tracing::error!("Failed to build enclave: {:?}", e);

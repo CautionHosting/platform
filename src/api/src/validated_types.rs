@@ -180,6 +180,12 @@ impl Validate for CreateResourceRequest {
 pub struct DeployRequest {
     pub org_id: Uuid,
     pub app_name: String,
+    #[serde(default = "default_branch")]
+    pub branch: String,
+}
+
+fn default_branch() -> String {
+    "main".to_string()
 }
 
 impl Validate for DeployRequest {

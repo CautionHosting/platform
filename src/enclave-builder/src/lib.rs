@@ -152,7 +152,7 @@ impl EnclaveBuilder {
         pcrs::is_debug_mode(pcrs)
     }
 
-    pub async fn build_enclave(&self, user_image: &UserImage, specific_files: Option<Vec<String>>, run_command: Option<String>, app_source_url: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>) -> Result<Deployment> {
+    pub async fn build_enclave(&self, user_image: &UserImage, specific_files: Option<Vec<String>>, run_command: Option<String>, app_source_url: Option<String>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>) -> Result<Deployment> {
         tracing::info!("Starting enclave build for user image: {}", user_image.reference);
 
         let binary_path = specific_files.as_ref().and_then(|files| files.first().cloned());
@@ -196,8 +196,8 @@ impl EnclaveBuilder {
                 } else if url.starts_with("http") || url.starts_with("git@") {
                     AppSource::GitRepository {
                         url,
-                        commit: None,
-                        branch: None,
+                        commit: app_commit.clone(),
+                        branch: app_branch.clone(),
                     }
                 } else {
                     AppSource::DockerImage {
@@ -234,7 +234,7 @@ impl EnclaveBuilder {
         })
     }
 
-    pub async fn build_enclave_from_filesystem(&self, user_fs_path: PathBuf, run_command: Option<String>, app_source_url: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>) -> Result<Deployment> {
+    pub async fn build_enclave_from_filesystem(&self, user_fs_path: PathBuf, run_command: Option<String>, app_source_url: Option<String>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>) -> Result<Deployment> {
         tracing::info!("Starting enclave build from filesystem: {}", user_fs_path.display());
 
         let enclave_source_path = compile::get_or_clone_enclave_source(
@@ -273,8 +273,8 @@ impl EnclaveBuilder {
                 } else if url.starts_with("http") || url.starts_with("git@") {
                     AppSource::GitRepository {
                         url,
-                        commit: None,
-                        branch: None,
+                        commit: app_commit.clone(),
+                        branch: app_branch.clone(),
                     }
                 } else {
                     AppSource::Filesystem {
@@ -312,7 +312,7 @@ impl EnclaveBuilder {
         })
     }
 
-    pub async fn build_enclave_auto(&self, user_image: &UserImage, binary_path: &str, run_command: Option<String>, app_source_url: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>) -> Result<Deployment> {
+    pub async fn build_enclave_auto(&self, user_image: &UserImage, binary_path: &str, run_command: Option<String>, app_source_url: Option<String>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>) -> Result<Deployment> {
         let binary_basename = std::path::Path::new(binary_path)
             .file_name()
             .and_then(|n| n.to_str())
@@ -337,10 +337,10 @@ impl EnclaveBuilder {
 
             tracing::info!("Copied binary to staging: {}", dest_path.display());
 
-            self.build_enclave_from_filesystem(user_service_dir, run_command, app_source_url, metadata, external_manifest).await
+            self.build_enclave_from_filesystem(user_service_dir, run_command, app_source_url, app_branch.clone(), app_commit.clone(), metadata, external_manifest).await
         } else {
             tracing::info!("Binary not found on filesystem, using Docker extraction");
-            self.build_enclave(user_image, Some(vec![binary_path.to_string()]), run_command, app_source_url, metadata, external_manifest).await
+            self.build_enclave(user_image, Some(vec![binary_path.to_string()]), run_command, app_source_url, app_branch, app_commit, metadata, external_manifest).await
         }
     }
 }

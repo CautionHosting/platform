@@ -422,7 +422,13 @@ impl ApiClient {
             }
         }
 
-        bail!("No 'build' command found in Procfile. Expected format: build: docker build -t myapp .")
+        // Auto-detect containerfile: prefer Containerfile, fall back to Dockerfile
+        let containerfile = if PathBuf::from("Containerfile").exists() {
+            "Containerfile"
+        } else {
+            "Dockerfile"
+        };
+        Ok(format!("docker build -f {} -t app .", containerfile))
     }
 
     fn read_procfile_field(&self, field: &str) -> Option<String> {
@@ -1539,7 +1545,7 @@ build: docker build -t app .
         }
 
         let deployment = builder
-            .build_enclave_auto(&user_image, &binary_path, run_command, app_source_url, None, None)
+            .build_enclave_auto(&user_image, &binary_path, run_command, app_source_url, None, None, None, None)
             .await
             .context("Failed to build enclave")?;
 
@@ -1656,7 +1662,7 @@ build: docker build -t app .
             (binary.map(|b| vec![b]), run_cmd, source_url)
         };
 
-        let deployment = builder.build_enclave(&user_image, specific_files, run_command, app_source_url, None, external_manifest).await
+        let deployment = builder.build_enclave(&user_image, specific_files, run_command, app_source_url, None, None, None, external_manifest).await
             .context("Failed to build enclave locally")?;
 
         println!("Enclave built successfully!");

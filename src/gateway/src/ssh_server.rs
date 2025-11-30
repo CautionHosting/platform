@@ -246,30 +246,34 @@ fn ensure_git_repo_exists(repo_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn update_repo_head(repo_path: &str) -> Result<()> {
+fn update_repo_head(repo_path: &str) -> Result<String> {
     use std::process::Command;
 
     let output = Command::new("git")
-        .args(&["--git-dir", repo_path, "show-ref", "--heads"])
+        .args(&[
+            "--git-dir", repo_path,
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+            "refs/heads/",
+            "--count=1"
+        ])
         .output()
         .context("Failed to list branches")?;
 
     if !output.status.success() {
         tracing::debug!("No branches found yet in {}", repo_path);
-        return Ok(());
+        return Ok("main".to_string());
     }
 
-    let refs = String::from_utf8_lossy(&output.stdout);
+    let target_branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-    let target_branch = if refs.contains("refs/heads/main") {
-        "main"
-    } else if refs.contains("refs/heads/master") {
-        "master"
-    } else {
-        tracing::debug!("No main or master branch found");
-        return Ok(());
-    };
+    if target_branch.is_empty() {
+        tracing::debug!("No branches found in {}", repo_path);
+        return Ok("main".to_string());
+    }
 
+    tracing::info!("Most recently updated branch: {}", target_branch);
     tracing::info!("Setting HEAD to refs/heads/{}", target_branch);
 
     let output = Command::new("git")
@@ -284,7 +288,7 @@ fn update_repo_head(repo_path: &str) -> Result<()> {
         tracing::info!("Successfully set HEAD to refs/heads/{}", target_branch);
     }
 
-    Ok(())
+    Ok(target_branch)
 }
 
 async fn get_user_org(pool: &PgPool, user_id: i64) -> Result<Option<Uuid>> {
@@ -439,9 +443,13 @@ async fn handle_git_push(
 
         tracing::info!("Git receive-pack completed successfully");
 
-        if let Err(e) = update_repo_head(&repo_path) {
-            tracing::warn!("Failed to update repo HEAD: {}", e);
-        }
+        let branch = match update_repo_head(&repo_path) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("Failed to update repo HEAD: {}", e);
+                "main".to_string()
+            }
+        };
 
         let deploy_msg = "remote: \nremote: ";
         let _ = session_handle.extended_data(channel, 1, deploy_msg.as_bytes().to_vec().into()).await;
@@ -474,9 +482,10 @@ async fn handle_git_push(
         struct DeployRequest {
             org_id: Uuid,
             app_name: String,
+            branch: String,
         }
 
-        tracing::info!("Triggering deployment for {}", app_name);
+        tracing::info!("Triggering deployment for {} (branch: {})", app_name, branch);
 
         let client = reqwest::Client::new();
         let deploy_url = format!("{}/deploy", api_service_url);
@@ -487,6 +496,7 @@ async fn handle_git_push(
             .json(&DeployRequest {
                 org_id,
                 app_name: app_name.clone(),
+                branch: branch.clone(),
             })
             .timeout(std::time::Duration::from_secs(7200))
             .send()
