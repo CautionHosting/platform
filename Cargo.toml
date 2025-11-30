@@ -65,3 +65,6 @@ dotenvy = "0.15"
 
 # Temp files
 tempfile = "3.8"
+
+# Directories
+dirs = "5"

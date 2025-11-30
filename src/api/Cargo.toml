@@ -38,3 +38,6 @@ enclave-builder = { path = "../enclave-builder" }
 # AWS SDK for S3 uploads
 aws-config = { version = "1.1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1.15"
+
+# Cache directory
+dirs = { workspace = true }
