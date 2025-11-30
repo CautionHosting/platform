@@ -98,6 +98,11 @@ impl EnclaveBuilder {
         }
     }
 
+    pub async fn extract_static_binary(&self, image: &UserImage, binary_path: &str) -> Result<PathBuf> {
+        tracing::info!("Extracting static binary: {}", binary_path);
+        extract::extract_static_binary(&image.reference, binary_path, &self.work_dir).await
+    }
+
     pub async fn build_combined_image(
         &self,
         user_fs_path: PathBuf,
@@ -160,7 +165,13 @@ impl EnclaveBuilder {
         let binary_path = specific_files.as_ref().and_then(|files| files.first().cloned());
 
         tracing::info!("Extracting user image filesystem...");
-        let user_fs = self.extract_user_image(user_image, None).await?;
+        let user_fs = if let Some(ref bin_path) = binary_path {
+            tracing::info!("Binary path specified: {} - extracting static binary only", bin_path);
+            self.extract_static_binary(user_image, bin_path).await?
+        } else {
+            tracing::info!("No binary path specified - extracting full filesystem");
+            self.extract_user_image(user_image, None).await?
+        };
 
         let enclave_source_path = compile::get_or_clone_enclave_source(
             &self.enclave_source,

@@ -310,7 +310,7 @@ impl BuildConfig {
                     "debug" => {
                         debug = Some(value.to_lowercase() == "true");
                     }
-                    "no_cache" => {
+                    "no_cache" | "nocache" => {
                         no_cache = Some(value.to_lowercase() == "true");
                     }
                     _ => {}

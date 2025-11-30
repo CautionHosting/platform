@@ -198,6 +198,125 @@ pub async fn extract_specific_files(
     Ok(output_dir)
 }
 
+pub async fn extract_static_binary(
+    image_ref: &str,
+    binary_path: &str,
+    work_dir: &Path,
+) -> Result<PathBuf> {
+    tracing::info!("Extracting static binary from image: {} (binary: {})", image_ref, binary_path);
+
+    let docker = Docker::connect_with_local_defaults()
+        .context("Failed to connect to Docker daemon")?;
+
+    verify_image_exists_locally(&docker, image_ref).await?;
+
+    let container_id = create_container(&docker, image_ref).await?;
+
+    let output_dir = work_dir.join("user-service");
+    fs::create_dir_all(&output_dir).await?;
+
+    let options = DownloadFromContainerOptions {
+        path: binary_path.to_string(),
+    };
+
+    let mut stream = docker.download_from_container(&container_id, Some(options));
+
+    let tar_path = output_dir.parent().unwrap().join("binary-extract.tar");
+    let mut tar_file = fs::File::create(&tar_path)
+        .await
+        .context("Failed to create tar file")?;
+
+    while let Some(chunk_result) = stream.next().await {
+        match chunk_result {
+            Ok(bytes) => {
+                tar_file
+                    .write_all(&bytes)
+                    .await
+                    .context("Failed to write tar data")?;
+            }
+            Err(e) => {
+                docker.remove_container(&container_id, None).await.ok();
+                return Err(anyhow::anyhow!(
+                    "Failed to download binary '{}' from container: {}",
+                    binary_path,
+                    e
+                ));
+            }
+        }
+    }
+
+    tar_file.flush().await?;
+    drop(tar_file);
+
+    let file_path_obj = std::path::Path::new(binary_path);
+    let parent_dir = file_path_obj.parent().unwrap_or(std::path::Path::new("/"));
+    let target_dir = output_dir.join(parent_dir.strip_prefix("/").unwrap_or(parent_dir));
+
+    std::fs::create_dir_all(&target_dir)
+        .context("Failed to create target directory")?;
+
+    let tar_file = std::fs::File::open(&tar_path).context("Failed to open tar file")?;
+    let mut archive = tar::Archive::new(tar_file);
+
+    archive.set_preserve_permissions(true);
+    archive.set_preserve_mtime(true);
+    archive.set_unpack_xattrs(true);
+
+    archive
+        .unpack(&target_dir)
+        .context("Failed to extract tar archive")?;
+
+    fs::remove_file(&tar_path).await.ok();
+
+    let ca_cert_path = "/etc/ssl/certs/ca-certificates.crt";
+    let ca_options = DownloadFromContainerOptions {
+        path: ca_cert_path.to_string(),
+    };
+
+    let mut ca_stream = docker.download_from_container(&container_id, Some(ca_options));
+    let ca_tar_path = output_dir.parent().unwrap().join("ca-extract.tar");
+
+    if let Ok(mut ca_tar_file) = fs::File::create(&ca_tar_path).await {
+        let mut success = true;
+        while let Some(chunk_result) = ca_stream.next().await {
+            match chunk_result {
+                Ok(bytes) => {
+                    if ca_tar_file.write_all(&bytes).await.is_err() {
+                        success = false;
+                        break;
+                    }
+                }
+                Err(_) => {
+                    success = false;
+                    break;
+                }
+            }
+        }
+
+        if success {
+            ca_tar_file.flush().await.ok();
+            drop(ca_tar_file);
+
+            let ca_target_dir = output_dir.join("etc/ssl/certs");
+            std::fs::create_dir_all(&ca_target_dir).ok();
+
+            if let Ok(tar_file) = std::fs::File::open(&ca_tar_path) {
+                let mut archive = tar::Archive::new(tar_file);
+                archive.unpack(&ca_target_dir).ok();
+            }
+        }
+        fs::remove_file(&ca_tar_path).await.ok();
+    }
+
+    docker
+        .remove_container(&container_id, None)
+        .await
+        .context("Failed to remove temporary container")?;
+
+    tracing::info!("Static binary extracted to: {}", output_dir.display());
+    Ok(output_dir)
+}
+
 pub async fn extract_last_layer_only(image_ref: &str, work_dir: &Path) -> Result<PathBuf> {
     tracing::info!("Extracting last layer from image: {}", image_ref);
 
