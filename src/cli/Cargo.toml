@@ -39,3 +39,7 @@ x509-parser = "0.16"  # X.509 certificate parsing
 ring = "0.17"  # Cryptographic operations
 webpki = "0.22"  # Certificate chain verification
 pem = "3.0"  # PEM encoding/decoding
+
+flate2 = "1.0"
+tar = "0.4"
+tempfile = { workspace = true }

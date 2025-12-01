@@ -564,6 +564,40 @@ build: docker build -t app .
         }
     }
 
+    fn git_url_to_archive_url(&self, git_url: &str, branch: &str) -> Result<String> {
+        let (host, path) = if git_url.starts_with("git@") {
+            let without_prefix = git_url.strip_prefix("git@")
+                .ok_or_else(|| anyhow::anyhow!("Invalid git URL format"))?;
+            let (host, path) = without_prefix.split_once(':')
+                .ok_or_else(|| anyhow::anyhow!("Invalid git SSH URL format"))?;
+            (host.to_string(), path.trim_end_matches(".git").to_string())
+        } else if git_url.starts_with("https://") || git_url.starts_with("http://") {
+            let url = url::Url::parse(git_url)
+                .context("Failed to parse git URL")?;
+            let host = url.host_str()
+                .ok_or_else(|| anyhow::anyhow!("Git URL has no host"))?
+                .to_string();
+            let path = url.path().trim_start_matches('/').trim_end_matches(".git").to_string();
+            (host, path)
+        } else {
+            bail!("Unsupported git URL format: {}", git_url);
+        };
+
+        // Construct archive URL based on the host type
+        let archive_url = if host.contains("github.com") {
+            format!("https://{}/{}/archive/refs/heads/{}.tar.gz", host, path, branch)
+        } else if host.contains("gitlab") {
+            let repo_name = path.rsplit('/').next().unwrap_or("repo");
+            format!("https://{}/{}/-/archive/{}/{}-{}.tar.gz", host, path, branch, repo_name, branch)
+        } else if host.contains("bitbucket") {
+            format!("https://{}/{}/get/{}.tar.gz", host, path, branch)
+        } else {
+            format!("https://{}/{}/archive/{}.tar.gz", host, path, branch)
+        };
+
+        Ok(archive_url)
+    }
+
     async fn register(&self) -> Result<()> {
         log_verbose(self.verbose, "Starting FIDO2 registration...");
         log_verbose(self.verbose, &format!("Target URL: {}", self.base_url));
@@ -1592,7 +1626,33 @@ build: docker build -t app .
     async fn build_and_get_pcrs(&self, external_manifest: Option<enclave_builder::EnclaveManifest>, no_cache: bool) -> Result<enclave_builder::PcrValues> {
         log_verbose(self.verbose, "Building Docker image locally...");
         println!("Building Docker image...");
-        let image_ref = self.build_local_docker_image(no_cache)?;
+
+        let image_ref = if let Some(ref manifest) = external_manifest {
+            let app_source = manifest.app_source.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Manifest does not contain app_source - cannot reproduce without source URL"))?;
+
+            let archive_url = match app_source {
+                enclave_builder::AppSource::GitArchive { url } => {
+                    url.clone()
+                }
+                enclave_builder::AppSource::GitRepository { url, branch, .. } => {
+                    self.git_url_to_archive_url(url, branch.as_deref().unwrap_or("main"))?
+                }
+                enclave_builder::AppSource::DockerImage { reference } => {
+                    bail!("Cannot reproduce from Docker image reference: {} - need source URL", reference);
+                }
+                enclave_builder::AppSource::Filesystem { path } => {
+                    bail!("Cannot reproduce from filesystem path: {} - need source URL", path);
+                }
+            };
+
+            println!("Downloading app source from manifest: {}", archive_url);
+            let app_dir = self.download_and_extract_app_source(&archive_url).await?;
+            self.build_docker_image_from_dir(&app_dir, no_cache)?
+        } else {
+            self.build_local_docker_image(no_cache)?
+        };
+
         println!("Docker image built: {}", image_ref);
 
         log_verbose(self.verbose, "Building EIF locally to calculate expected PCRs...");
@@ -1955,20 +2015,28 @@ build: docker build -t app .
     }
 
     fn build_local_docker_image(&self, no_cache: bool) -> Result<String> {
+        let work_dir = std::env::current_dir()
+            .context("Failed to get current directory")?;
+        self.build_docker_image_from_dir(&work_dir, no_cache)
+    }
+
+    fn build_docker_image_from_dir(&self, work_dir: &std::path::Path, no_cache: bool) -> Result<String> {
         use std::process::Command;
 
+        // Try to get commit SHA from the directory (if it's a git repo)
         let commit_sha = Command::new("git")
             .args(&["rev-parse", "HEAD"])
+            .current_dir(work_dir)
             .output()
-            .context("Failed to get git commit SHA")?;
+            .ok()
+            .and_then(|o| if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            })
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        let commit_sha = if commit_sha.status.success() {
-            String::from_utf8_lossy(&commit_sha.stdout).trim().to_string()
-        } else {
-            uuid::Uuid::new_v4().to_string()
-        };
-
-        let tag = format!("caution-local-build:{}", &commit_sha[..12]);
+        let tag = format!("caution-local-build:{}", &commit_sha[..12.min(commit_sha.len())]);
 
         if !no_cache {
             let inspect = Command::new("docker")
@@ -1977,7 +2045,7 @@ build: docker build -t app .
                 .context("Failed to inspect docker image")?;
 
             if inspect.status.success() {
-                println!("✓ Using cached Docker image for commit {}", &commit_sha[..12]);
+                println!("✓ Using cached Docker image for commit {}", &commit_sha[..12.min(commit_sha.len())]);
                 log_verbose(self.verbose, &format!("Image already exists: {}", tag));
                 return Ok(tag);
             }
@@ -1985,25 +2053,111 @@ build: docker build -t app .
             println!("--no-cache specified, rebuilding Docker image...");
         }
 
-        println!("Building Docker image for commit {}...", &commit_sha[..12]);
+        println!("Building Docker image for commit {}...", &commit_sha[..12.min(commit_sha.len())]);
         log_verbose(self.verbose, &format!("Building Docker image with tag: {}", tag));
 
-        let work_dir = std::env::current_dir()
-            .context("Failed to get current directory")?;
+        // Read Procfile from the work directory
+        let procfile_path = work_dir.join("Procfile");
+        let config = if procfile_path.exists() {
+            let content = std::fs::read_to_string(&procfile_path)
+                .context("Failed to read Procfile")?;
+            let mut build_command = None;
+            let mut containerfile = None;
+            let mut oci_tarball = None;
 
-        let config = BuildConfig {
-            build_command: self.read_procfile_field("build"),
-            containerfile: self.read_procfile_field("containerfile"),
-            oci_tarball: self.read_procfile_field("oci_tarball"),
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((key, value)) = line.split_once(':') {
+                    let key = key.trim().to_lowercase();
+                    let value = value.trim().to_string();
+                    match key.as_str() {
+                        "build" => build_command = Some(value),
+                        "containerfile" => containerfile = Some(value),
+                        "oci_tarball" => oci_tarball = Some(value),
+                        _ => {}
+                    }
+                }
+            }
+
+            BuildConfig {
+                build_command,
+                containerfile,
+                oci_tarball,
+            }
+        } else {
+            BuildConfig {
+                build_command: None,
+                containerfile: None,
+                oci_tarball: None,
+            }
         };
 
         println!("DEBUG: work_dir = {:?}", work_dir);
         println!("DEBUG: BuildConfig = {:?}", config);
 
-        build_user_image(&work_dir, &tag, &config)?;
+        build_user_image(work_dir, &tag, &config)?;
 
         log_verbose(self.verbose, &format!("Docker image built successfully: {}", tag));
         Ok(tag)
+    }
+
+    async fn download_and_extract_app_source(&self, url: &str) -> Result<PathBuf> {
+        use flate2::read::GzDecoder;
+        use tar::Archive;
+
+        println!("Downloading app source from manifest: {}", url);
+
+        // Create temp directory for the app source
+        let temp_dir = tempfile::tempdir()
+            .context("Failed to create temp directory")?;
+        let extract_dir = temp_dir.into_path();
+
+        // Download the archive
+        let response = reqwest::get(url)
+            .await
+            .context("Failed to download app source")?;
+
+        if !response.status().is_success() {
+            bail!("Failed to download app source: HTTP {}", response.status());
+        }
+
+        let archive_bytes = response.bytes()
+            .await
+            .context("Failed to read archive bytes")?;
+
+        println!("Downloaded {} bytes, extracting...", archive_bytes.len());
+
+        // Extract tar.gz archive with strip_components=1
+        let decoder = GzDecoder::new(&archive_bytes[..]);
+        let mut archive = Archive::new(decoder);
+
+        for entry in archive.entries().context("Failed to read archive entries")? {
+            let mut entry = entry.context("Failed to read archive entry")?;
+            let path = entry.path().context("Failed to get entry path")?;
+
+            // Skip the first path component (equivalent to --strip-components=1)
+            let components: Vec<_> = path.components().collect();
+            if components.len() <= 1 {
+                continue;
+            }
+
+            let stripped_path: PathBuf = components[1..].iter().collect();
+            let dest_path = extract_dir.join(&stripped_path);
+
+            if let Some(parent) = dest_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+            }
+
+            entry.unpack(&dest_path)
+                .with_context(|| format!("Failed to extract: {}", stripped_path.display()))?;
+        }
+
+        println!("App source extracted to: {}", extract_dir.display());
+        Ok(extract_dir)
     }
 
     async fn add_ssh_key(&self, title: String, key_file: Option<PathBuf>, key: Option<String>) -> Result<()> {
