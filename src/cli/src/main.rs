@@ -1691,17 +1691,19 @@ build: docker build -t app .
         };
 
         let (specific_files, run_command, app_source_url) = if let Some(ref manifest) = external_manifest {
-            let binary = manifest.binary.clone()
-                .or_else(|| self.read_procfile_field("binary"));
-            let run_cmd = manifest.run_command.clone()
-                .or_else(|| self.read_procfile_field("run"));
-            let source_url = self.read_procfile_field("source");
+            let binary = manifest.binary.clone();
+            let run_cmd = manifest.run_command.clone();
+            let source_url = None; // Not needed for reproduction - already using manifest
 
             if let Some(ref b) = binary {
                 println!("Using binary from manifest: {}", b);
+            } else {
+                println!("Manifest has no binary field - using full filesystem extraction");
             }
             if let Some(ref cmd) = run_cmd {
                 println!("Using run command from manifest: {}", cmd);
+            } else {
+                println!("Manifest has no run command - using auto-detection");
             }
 
             (binary.map(|b| vec![b]), run_cmd, source_url)
