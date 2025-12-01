@@ -1352,7 +1352,7 @@ async fn deploy_handler(
         let content = String::from_utf8_lossy(&procfile_output.stdout);
         match types::BuildConfig::from_procfile(&content) {
             Ok(config) => {
-                tracing::info!("Loaded build config from Procfile: containerfile={}, binary={}, build={:?}, oci_tarball={:?}",
+                tracing::info!("Loaded build config from Procfile: containerfile={}, binary={:?}, build={:?}, oci_tarball={:?}",
                                config.containerfile, config.binary, config.build, config.oci_tarball);
                 config
             }
@@ -1542,7 +1542,7 @@ async fn deploy_handler(
     let containerfile_path = format!("{}/{}", work_dir, build_config.containerfile);
 
     let enclave_config = types::EnclaveConfig {
-        binary_path: build_config.binary.clone(),
+        binary_path: build_config.binary.clone().unwrap_or_else(|| "/app".to_string()),
         args: vec![],
         memory_mb: build_config.memory_mb,
         cpus: build_config.cpus,
@@ -1606,8 +1606,12 @@ async fn deploy_handler(
         };
         tracing::info!("Using Docker image for enclave build: {}", user_image.reference);
 
-        let run_command = Some(build_config.run.clone());
-        tracing::info!("Using run command from Procfile: {}", build_config.run);
+        let run_command = build_config.run.clone();
+        if let Some(ref cmd) = run_command {
+            tracing::info!("Using run command from Procfile: {}", cmd);
+        } else {
+            tracing::info!("No run command specified, using auto-detection");
+        }
 
         let app_source_url = build_config.source.clone().map(|url| {
             url.replace("${COMMIT}", &commit_sha)
@@ -1616,22 +1620,43 @@ async fn deploy_handler(
             tracing::info!("Using app source URL: {}", url);
         }
 
-        let deployment = builder
-            .build_enclave_auto(
-                &user_image,
-                &build_config.binary,
-                run_command,
-                app_source_url,
-                Some(req.branch.clone()),
-                Some(commit_sha.clone()),
-                build_config.metadata.clone(),
-                None
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to build enclave: {:?}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("Enclave build failed: {}", e))
-            })?;
+        let deployment = if let Some(ref binary_path) = build_config.binary {
+            tracing::info!("Using static binary extraction mode: {}", binary_path);
+            builder
+                .build_enclave_auto(
+                    &user_image,
+                    binary_path,
+                    run_command,
+                    app_source_url,
+                    Some(req.branch.clone()),
+                    Some(commit_sha.clone()),
+                    build_config.metadata.clone(),
+                    None
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to build enclave: {:?}", e);
+                    (StatusCode::INTERNAL_SERVER_ERROR, format!("Enclave build failed: {}", e))
+                })?
+        } else {
+            tracing::info!("Using full filesystem extraction mode (no binary specified)");
+            builder
+                .build_enclave(
+                    &user_image,
+                    None,  // No specific files = full filesystem extraction
+                    run_command,
+                    app_source_url,
+                    Some(req.branch.clone()),
+                    Some(commit_sha.clone()),
+                    build_config.metadata.clone(),
+                    None
+                )
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to build enclave: {:?}", e);
+                    (StatusCode::INTERNAL_SERVER_ERROR, format!("Enclave build failed: {}", e))
+                })?
+        };
 
         tracing::info!(
             "EIF built successfully: path={}, size={} bytes, hash={}",

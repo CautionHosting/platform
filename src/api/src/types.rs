@@ -189,9 +189,9 @@ pub struct BuildConfig {
 
     pub oci_tarball: Option<String>,
 
-    pub binary: String,
+    pub binary: Option<String>,
 
-    pub run: String,
+    pub run: Option<String>,
 
     pub source: Option<String>,
 
@@ -214,8 +214,8 @@ impl Default for BuildConfig {
             containerfile: "Dockerfile".to_string(),
             build: Some("docker build -t app .".to_string()),
             oci_tarball: None,
-            binary: "/app".to_string(),
-            run: "/app".to_string(),
+            binary: None, 
+            run: None,
             source: None,
             enclave_source: None,
             metadata: None,
@@ -318,13 +318,14 @@ impl BuildConfig {
             }
         }
 
-        let binary_val = binary.ok_or("Missing 'binary' field in Procfile")?;
+        let run_command = run.or_else(|| binary.clone());
+
         Ok(Self {
             containerfile: containerfile.unwrap_or_else(|| "Dockerfile".to_string()),
             build,
             oci_tarball,
-            binary: binary_val.clone(),
-            run: run.unwrap_or_else(|| binary_val.clone()),
+            binary,
+            run: run_command,
             source,
             enclave_source,
             metadata,
