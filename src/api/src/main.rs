@@ -1372,13 +1372,16 @@ async fn deploy_handler(
         ));
     };
 
-    let cache_dir = format!("/app/build-cache/{}", req.org_id);
+    let home_dir = dirs::home_dir()
+        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to determine home directory".to_string()))?;
+    let cache_dir = home_dir.join(".cache/caution/build").join(req.org_id.to_string());
+    let cache_dir_str = cache_dir.to_string_lossy().to_string();
     tokio::fs::create_dir_all(&cache_dir).await.map_err(|e| {
         tracing::error!("Failed to create cache directory: {:?}", e);
         (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create cache directory: {}", e))
     })?;
 
-    let image_tarball = format!("{}/{}-{}.tar", cache_dir, req.app_name, commit_sha);
+    let image_tarball = format!("{}/{}-{}.tar", cache_dir_str, req.app_name, commit_sha);
     let tarball_exists = tokio::fs::metadata(&image_tarball).await.is_ok() && !build_config.no_cache;
 
     let image_name = format!("caution-{}:{}", req.app_name, &commit_sha[..12]);
@@ -1549,8 +1552,8 @@ async fn deploy_handler(
     let prebuilt_eif_path = format!("{}/nitro.eif", work_dir);
     let prebuilt_pcrs_path = format!("{}/nitro.pcrs", work_dir);
 
-    let cached_eif_path = format!("{}/{}-{}.eif", cache_dir, req.app_name, commit_sha);
-    let cached_pcrs_path = format!("{}/{}-{}.pcrs", cache_dir, req.app_name, commit_sha);
+    let cached_eif_path = format!("{}/{}-{}.eif", cache_dir_str, req.app_name, commit_sha);
+    let cached_pcrs_path = format!("{}/{}-{}.pcrs", cache_dir_str, req.app_name, commit_sha);
     let eif_cache_exists = tokio::fs::metadata(&cached_eif_path).await.is_ok() && !build_config.no_cache;
 
     let eif_result = if eif_cache_exists {

@@ -345,7 +345,12 @@ impl EnclaveBuilder {
 
             tokio::fs::create_dir_all(&user_service_dir).await?;
 
-            let dest_path = user_service_dir.join(binary_basename);
+            let binary_path_obj = std::path::Path::new(binary_path);
+            let parent_dir = binary_path_obj.parent().unwrap_or(std::path::Path::new("/"));
+            let target_dir = user_service_dir.join(parent_dir.strip_prefix("/").unwrap_or(parent_dir));
+            tokio::fs::create_dir_all(&target_dir).await?;
+
+            let dest_path = target_dir.join(binary_basename);
             tokio::fs::copy(&filesystem_binary, &dest_path).await?;
 
             tracing::info!("Copied binary to staging: {}", dest_path.display());
