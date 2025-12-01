@@ -2159,6 +2159,7 @@ build: docker build -t app .
         }
 
         println!("App source extracted to: {}", extract_dir.display());
+
         Ok(extract_dir)
     }
 

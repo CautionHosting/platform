@@ -56,11 +56,7 @@ async fn generate_run_sh(stage_dir: &Path, run_command: Option<String>) -> Resul
         let escaped_cmd = cmd.replace("'", "'\\''");
         format!("exec sh -c '{}'", escaped_cmd)
     } else {
-        r#"for exe in $(/bin/busybox find /app -type f -executable 2>/dev/null); do
-    echo "Executing: $exe"
-    exec "$exe"
-done
-echo "ERROR: No executable found in /app"
+        r#"echo "ERROR: No run command specified in Procfile"
 exit 1"#.to_string()
     };
 
@@ -121,12 +117,12 @@ echo "Starting VSOCK-to-TCP proxies..."
 
 /bin/busybox sleep 2
 
-echo "Looking for user application..."
-cd /app || cd /
+echo "Starting user application..."
+cd /
 
-echo "=== /app directory structure ==="
-/bin/busybox find /app -type f 2>/dev/null | /bin/busybox head -20
-echo "=== Attempting to run user application ==="
+echo "=== Filesystem structure ==="
+/bin/busybox find / -type f 2>/dev/null | /bin/busybox grep -v "^/proc\|^/sys\|^/dev" | /bin/busybox head -20
+echo "=== Running user application ==="
 
 {user_cmd}
 "#);
@@ -213,8 +209,7 @@ COPY manifest.json /build/manifest.json
 
 RUN mkdir -p /build/initramfs/bin && \
     mkdir -p /build/initramfs/lib && \
-    mkdir -p /build/initramfs/etc/ssl/certs && \
-    mkdir -p /build/initramfs/app
+    mkdir -p /build/initramfs/etc/ssl/certs
 
 RUN cp /bin/init /build/initramfs/init && \
     chmod +x /build/initramfs/init
@@ -266,8 +261,6 @@ RUN if [ -f /etc/ssl/certs/ca-certificates.crt ]; then \
 
 # Copy user app files to initramfs root to preserve original paths
 RUN cp -r /build/app/* /build/initramfs/ 2>/dev/null || true
-# Also copy to /app for backwards compatibility with simple apps
-RUN cp -r /build/app/* /build/initramfs/app/ 2>/dev/null || true
 
 RUN find /build/initramfs -exec touch -hcd "@0" "{}" +
 
