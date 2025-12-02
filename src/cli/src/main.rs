@@ -1535,14 +1535,23 @@ build: docker build -t app .
     async fn build_local(&self, keep_staging: bool, output_dir: Option<String>) -> Result<()> {
         println!("Building EIF locally for inspection...\n");
 
-        let work_dir = if let Some(dir) = output_dir {
-            PathBuf::from(dir)
-        } else {
-            PathBuf::from("./eif-build")
-        };
+        let commit_sha = Command::new("git")
+            .args(&["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .and_then(|o| if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            })
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        let no_cache = self.read_procfile_field("no_cache")
+            .map(|v| v.to_lowercase() == "true")
+            .unwrap_or(false);
 
         println!("Step 1: Building Docker image...");
-        let image_ref = self.build_local_docker_image(false)?;
+        let image_ref = self.build_local_docker_image(no_cache)?;
         println!("✓ Docker image built: {}\n", image_ref);
 
         let enclave_source = std::env::var("CAUTION_ENCLAVE_SOURCE")
@@ -1555,12 +1564,24 @@ build: docker build -t app .
         println!("Enclave version: {}", enclave_version);
         println!("This may take a few minutes...\n");
 
-        let builder = enclave_builder::EnclaveBuilder::new(
+        let builder = enclave_builder::EnclaveBuilder::new_with_cache(
             "unused-template",
             "local",
             &enclave_source,
-            &enclave_version
-        )?.with_work_dir(work_dir.clone());
+            &enclave_version,
+            "local",
+            &commit_sha,
+            enclave_builder::CacheType::Build,
+            no_cache,
+        )?;
+
+        let (builder, work_dir) = if let Some(dir) = output_dir {
+            let custom_dir = PathBuf::from(dir);
+            (builder.with_work_dir(custom_dir.clone()), custom_dir)
+        } else {
+            let dir = builder.work_dir.clone();
+            (builder, dir)
+        };
 
         let user_image = enclave_builder::UserImage {
             reference: image_ref.clone(),
@@ -1679,11 +1700,50 @@ build: docker build -t app .
             (source, version)
         };
 
-        let builder = enclave_builder::EnclaveBuilder::new(
+        let cache_key = if let Some(ref manifest) = external_manifest {
+            if let Some(ref app_src) = manifest.app_source {
+                match app_src {
+                    enclave_builder::AppSource::GitArchive { url } => {
+                        use sha2::Digest;
+                        let hash = sha2::Sha256::digest(url.as_bytes());
+                        hex::encode(&hash[..8])
+                    }
+                    enclave_builder::AppSource::GitRepository { commit, url, .. } => {
+                        if let Some(c) = commit {
+                            c.clone()
+                        } else {
+                            use sha2::Digest;
+                            let hash = sha2::Sha256::digest(url.as_bytes());
+                            hex::encode(&hash[..8])
+                        }
+                    }
+                    _ => uuid::Uuid::new_v4().to_string()
+                }
+            } else {
+                uuid::Uuid::new_v4().to_string()
+            }
+        } else {
+            Command::new("git")
+                .args(&["rev-parse", "HEAD"])
+                .output()
+                .ok()
+                .and_then(|o| if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                })
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+        };
+
+        let builder = enclave_builder::EnclaveBuilder::new_with_cache(
             "unused-template",
             "local",
             &enclave_source,
-            &enclave_version
+            &enclave_version,
+            "local",
+            &cache_key,
+            enclave_builder::CacheType::Reproduction,
+            no_cache,
         )?;
 
         let user_image = enclave_builder::UserImage {
@@ -2112,10 +2172,15 @@ build: docker build -t app .
 
         println!("Downloading app source from manifest: {}", url);
 
-        // Create temp directory for the app source
-        let temp_dir = tempfile::tempdir()
-            .context("Failed to create temp directory")?;
-        let extract_dir = temp_dir.into_path();
+        let cache_dir = dirs::home_dir()
+            .context("Failed to determine home directory")?
+            .join(".cache/caution/downloads");
+        std::fs::create_dir_all(&cache_dir)
+            .context("Failed to create downloads cache directory")?;
+
+        use sha2::Digest;
+        let url_hash = sha2::Sha256::digest(url.as_bytes());
+        let extract_dir = cache_dir.join(hex::encode(&url_hash[..8]));
 
         // Download the archive
         let response = reqwest::get(url)

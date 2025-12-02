@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 pub use manifest::{EnclaveManifest, AppSource, EnclaveSource};
 pub use docker::{BuildConfig, build_user_image};
 
+pub use CacheType as BuildCacheType;
+
 #[derive(Debug, Clone)]
 pub struct EnclaveBuilder {
     /// Template repository URL or local path
@@ -58,7 +60,69 @@ pub struct Deployment {
     pub image_ref: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheType {
+    Build,
+    Reproduction,
+}
+
+impl CacheType {
+    fn dir_name(&self) -> &'static str {
+        match self {
+            CacheType::Build => "build",
+            CacheType::Reproduction => "reproductions",
+        }
+    }
+}
+
 impl EnclaveBuilder {
+    pub fn new_with_cache(
+        template_source: impl Into<String>,
+        template_version: impl Into<String>,
+        enclave_source: impl Into<String>,
+        enclave_version: impl Into<String>,
+        org_id: &str,
+        cache_key: &str,
+        cache_type: CacheType,
+        no_cache: bool,
+    ) -> Result<Self> {
+        let base_cache_dir = dirs::home_dir()
+            .context("Failed to determine home directory")?
+            .join(".cache/caution")
+            .join(cache_type.dir_name());
+
+        let safe_org_id = org_id
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect::<String>();
+
+        let safe_cache_key = cache_key
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect::<String>();
+
+        let work_dir = base_cache_dir.join(&safe_org_id).join(&safe_cache_key);
+
+        if no_cache && work_dir.exists() {
+            tracing::info!("no_cache=true, removing cached {:?} at: {}", cache_type, work_dir.display());
+            std::fs::remove_dir_all(&work_dir)
+                .context("Failed to remove cached build directory")?;
+        }
+
+        std::fs::create_dir_all(&work_dir)
+            .context("Failed to create work directory")?;
+
+        tracing::info!("{:?} cache directory: {}", cache_type, work_dir.display());
+
+        Ok(Self {
+            template_source: template_source.into(),
+            template_version: template_version.into(),
+            enclave_source: enclave_source.into(),
+            enclave_version: enclave_version.into(),
+            work_dir,
+        })
+    }
+
     #[allow(deprecated)]
     pub fn new(
         template_source: impl Into<String>,
@@ -86,6 +150,68 @@ impl EnclaveBuilder {
     pub fn with_work_dir(mut self, work_dir: PathBuf) -> Self {
         self.work_dir = work_dir;
         self
+    }
+
+    pub fn get_cached_eif(&self) -> Option<Deployment> {
+        let eif_path = self.work_dir.join("enclave.eif");
+        let pcrs_path = self.work_dir.join("enclave.eif.pcrs");
+
+        if !eif_path.exists() || !pcrs_path.exists() {
+            tracing::info!("No cached EIF found at: {}", eif_path.display());
+            return None;
+        }
+
+        let pcrs_content = match std::fs::read_to_string(&pcrs_path) {
+            Ok(content) => content,
+            Err(e) => {
+                tracing::warn!("Failed to read cached PCRs: {}", e);
+                return None;
+            }
+        };
+
+        let pcrs: PcrValues = match serde_json::from_str(&pcrs_content) {
+            Ok(pcrs) => pcrs,
+            Err(e) => {
+                tracing::warn!("Failed to parse cached PCRs: {}", e);
+                return None;
+            }
+        };
+
+        let metadata = match std::fs::metadata(&eif_path) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("Failed to get EIF metadata: {}", e);
+                return None;
+            }
+        };
+
+        let sha256_path = self.work_dir.join("enclave.eif.sha256");
+        let sha256 = std::fs::read_to_string(&sha256_path)
+            .unwrap_or_else(|_| "unknown".to_string())
+            .trim()
+            .to_string();
+
+        tracing::info!("Found cached EIF: {} ({} bytes)", eif_path.display(), metadata.len());
+
+        Some(Deployment {
+            eif: EifFile {
+                path: eif_path,
+                size: metadata.len(),
+                sha256,
+            },
+            pcrs,
+            image_ref: "cached".to_string(),
+        })
+    }
+
+    fn save_pcrs_to_cache(&self, pcrs: &PcrValues) -> Result<()> {
+        let pcrs_path = self.work_dir.join("enclave.eif.pcrs");
+        let pcrs_json = serde_json::to_string_pretty(pcrs)
+            .context("Failed to serialize PCRs")?;
+        std::fs::write(&pcrs_path, pcrs_json)
+            .context("Failed to write PCRs cache file")?;
+        tracing::info!("Saved PCRs to cache: {}", pcrs_path.display());
+        Ok(())
     }
 
     pub async fn extract_user_image(&self, image: &UserImage, specific_files: Option<Vec<String>>) -> Result<PathBuf> {
@@ -160,6 +286,11 @@ impl EnclaveBuilder {
     }
 
     pub async fn build_enclave(&self, user_image: &UserImage, specific_files: Option<Vec<String>>, run_command: Option<String>, app_source_url: Option<String>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>) -> Result<Deployment> {
+        if let Some(cached) = self.get_cached_eif() {
+            tracing::info!("Using cached EIF from: {}", cached.eif.path.display());
+            return Ok(cached);
+        }
+
         tracing::info!("Starting enclave build for user image: {}", user_image.reference);
 
         let binary_path = specific_files.as_ref().and_then(|files| files.first().cloned());
@@ -183,7 +314,6 @@ impl EnclaveBuilder {
             tracing::info!("Using external manifest for reproducible build");
             ext_manifest
         } else {
-            // Create manifest with build provenance information
             let enclave_src = if self.enclave_source.ends_with(".tar.gz") {
                 EnclaveSource::GitArchive {
                     url: self.enclave_source.clone(),
@@ -201,8 +331,6 @@ impl EnclaveBuilder {
                 }
             };
 
-            // Determine app source from provided URL
-            // If no URL is provided (e.g., private code), app_source will be None in manifest
             let app_src = app_source_url.map(|url| {
                 if url.ends_with(".tar.gz") || url.ends_with(".zip") {
                     AppSource::GitArchive { url }
@@ -239,6 +367,10 @@ impl EnclaveBuilder {
         let pcrs = self.extract_pcrs(&eif)
             .context("Failed to extract PCR values - ensure eif_build generated .pcrs file")?;
 
+        if let Err(e) = self.save_pcrs_to_cache(&pcrs) {
+            tracing::warn!("Failed to save PCRs to cache: {}", e);
+        }
+
         tracing::info!("Enclave build complete!");
         Ok(Deployment {
             eif,
@@ -248,6 +380,11 @@ impl EnclaveBuilder {
     }
 
     pub async fn build_enclave_from_filesystem(&self, user_fs_path: PathBuf, run_command: Option<String>, app_source_url: Option<String>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>) -> Result<Deployment> {
+        if let Some(cached) = self.get_cached_eif() {
+            tracing::info!("Using cached EIF from: {}", cached.eif.path.display());
+            return Ok(cached);
+        }
+
         tracing::info!("Starting enclave build from filesystem: {}", user_fs_path.display());
 
         let enclave_source_path = compile::get_or_clone_enclave_source(
@@ -260,7 +397,6 @@ impl EnclaveBuilder {
             tracing::info!("Using external manifest for reproducible build");
             ext_manifest
         } else {
-            // Create manifest with build provenance information
             let enclave_src = if self.enclave_source.ends_with(".tar.gz") {
                 EnclaveSource::GitArchive {
                     url: self.enclave_source.clone(),
@@ -278,8 +414,6 @@ impl EnclaveBuilder {
                 }
             };
 
-            // Determine app source from provided URL
-            // If no URL is provided (e.g., private code), app_source will be None in manifest
             let app_src = app_source_url.map(|url| {
                 if url.ends_with(".tar.gz") || url.ends_with(".zip") {
                     AppSource::GitArchive { url }
@@ -316,6 +450,10 @@ impl EnclaveBuilder {
         tracing::info!("Extracting PCR values...");
         let pcrs = self.extract_pcrs(&eif)
             .context("Failed to extract PCR values - ensure eif_build generated .pcrs file")?;
+
+        if let Err(e) = self.save_pcrs_to_cache(&pcrs) {
+            tracing::warn!("Failed to save PCRs to cache: {}", e);
+        }
 
         tracing::info!("Enclave build complete!");
         Ok(Deployment {
