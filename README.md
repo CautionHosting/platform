@@ -1,3 +1,5 @@
+**GitHub users:** This repo is mirrored from [Codeberg](https://codeberg.org/caution/platform). Please open issues and PRs there.
+
 # Caution Platform
 
 > **Warning: Alpha Software**
@@ -61,7 +63,7 @@ You may need to adjust the Procfile
 
 ## Limitations
 
-- AWS Nitro Enclaves only 
+- AWS Nitro Enclaves only
 - Requires x86_64 architecture for enclave builds
 - Docker BuildKit required for reproducible builds
 - Attestation verification requires network access to the enclave endpoint
