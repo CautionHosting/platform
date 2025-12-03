@@ -111,7 +111,7 @@ run-api: network postgres
 		-e TF_PLUGIN_CACHE_DIR=/app/terraform-cache \
 		-e DATABASE_URL=$(DATABASE_URL) \
 		-e GIT_HOSTNAME=localhost \
-		--env-file env \
+		--env-file .env \
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(PWD)/build-cache:/app/build-cache \
@@ -128,7 +128,7 @@ run-gateway: network
 		--network $(NETWORK) \
 		-p 8000:8080 \
 		-p 2222:2222 \
-		--env-file env \
+		--env-file .env \
 		-e DATABASE_URL=$(DATABASE_URL) \
 		-e SSH_PORT=2222 \
 		-e SSH_HOST_KEY_PATH=/tmp/ssh_host_ed25519_key \
@@ -141,7 +141,7 @@ run-email: network
 	@docker run -d \
 		--name email \
 		--network $(NETWORK) \
-		--env-file env \
+		--env-file .env \
 		-e FRONTEND_URL=http://localhost:3000 \
 		caution-email
 	@echo "Email service started (internal port 8082)"

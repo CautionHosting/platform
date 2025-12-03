@@ -1,6 +1,7 @@
 out/
 Procfile.json
 env
+.env
 git-repos/
 build-cache/
 terraform-cache/
