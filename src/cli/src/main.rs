@@ -1645,42 +1645,7 @@ build: docker build -t app .
     }
 
     async fn build_and_get_pcrs(&self, external_manifest: Option<enclave_builder::EnclaveManifest>, no_cache: bool) -> Result<enclave_builder::PcrValues> {
-        log_verbose(self.verbose, "Building Docker image locally...");
-        println!("Building Docker image...");
-
-        let image_ref = if let Some(ref manifest) = external_manifest {
-            let app_source = manifest.app_source.as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Manifest does not contain app_source - cannot reproduce without source URL"))?;
-
-            let archive_url = match app_source {
-                enclave_builder::AppSource::GitArchive { url } => {
-                    url.clone()
-                }
-                enclave_builder::AppSource::GitRepository { url, branch, .. } => {
-                    self.git_url_to_archive_url(url, branch.as_deref().unwrap_or("main"))?
-                }
-                enclave_builder::AppSource::DockerImage { reference } => {
-                    bail!("Cannot reproduce from Docker image reference: {} - need source URL", reference);
-                }
-                enclave_builder::AppSource::Filesystem { path } => {
-                    bail!("Cannot reproduce from filesystem path: {} - need source URL", path);
-                }
-            };
-
-            println!("Downloading app source from manifest: {}", archive_url);
-            let app_dir = self.download_and_extract_app_source(&archive_url).await?;
-            self.build_docker_image_from_dir(&app_dir, no_cache)?
-        } else {
-            self.build_local_docker_image(no_cache)?
-        };
-
-        println!("Docker image built: {}", image_ref);
-
-        log_verbose(self.verbose, "Building EIF locally to calculate expected PCRs...");
-        println!("Building enclave image (this may take a few minutes)...");
-
         let (enclave_source, enclave_version) = if let Some(ref manifest) = external_manifest {
-            println!("Using enclave source from remote manifest");
             match &manifest.enclave_source {
                 enclave_builder::EnclaveSource::GitArchive { url, .. } => {
                     (url.clone(), "unused".to_string())
@@ -1735,6 +1700,7 @@ build: docker build -t app .
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
         };
 
+        // Create builder to check cache BEFORE building Docker image
         let builder = enclave_builder::EnclaveBuilder::new_with_cache(
             "unused-template",
             "local",
@@ -1745,6 +1711,49 @@ build: docker build -t app .
             enclave_builder::CacheType::Reproduction,
             no_cache,
         )?;
+
+        // Check if we have a cached EIF - if so, skip Docker build entirely
+        if let Some(cached) = builder.get_cached_eif() {
+            println!("Using cached reproduction build");
+            println!("Cache key: {}", cache_key);
+            return Ok(cached.pcrs);
+        }
+
+        // No cache hit - need to build Docker image and EIF
+        log_verbose(self.verbose, "Building Docker image locally...");
+        println!("Building Docker image...");
+
+        let image_ref = if let Some(ref manifest) = external_manifest {
+            let app_source = manifest.app_source.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Manifest does not contain app_source - cannot reproduce without source URL"))?;
+
+            let archive_url = match app_source {
+                enclave_builder::AppSource::GitArchive { url } => {
+                    url.clone()
+                }
+                enclave_builder::AppSource::GitRepository { url, branch, .. } => {
+                    self.git_url_to_archive_url(url, branch.as_deref().unwrap_or("main"))?
+                }
+                enclave_builder::AppSource::DockerImage { reference } => {
+                    bail!("Cannot reproduce from Docker image reference: {} - need source URL", reference);
+                }
+                enclave_builder::AppSource::Filesystem { path } => {
+                    bail!("Cannot reproduce from filesystem path: {} - need source URL", path);
+                }
+            };
+
+            println!("Downloading app source from manifest: {}", archive_url);
+            let app_dir = self.download_and_extract_app_source(&archive_url).await?;
+            self.build_docker_image_from_dir(&app_dir, no_cache)?
+        } else {
+            self.build_local_docker_image(no_cache)?
+        };
+
+        println!("Docker image built: {}", image_ref);
+
+        log_verbose(self.verbose, "Building EIF locally to calculate expected PCRs...");
+        println!("Building enclave image (this may take a few minutes)...");
+        println!("Using enclave source from remote manifest");
 
         let user_image = enclave_builder::UserImage {
             reference: image_ref.clone(),
