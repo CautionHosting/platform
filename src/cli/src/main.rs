@@ -1554,21 +1554,16 @@ build: docker build -t app .
         let image_ref = self.build_local_docker_image(no_cache)?;
         println!("✓ Docker image built: {}\n", image_ref);
 
-        let enclave_source = std::env::var("CAUTION_ENCLAVE_SOURCE")
-            .unwrap_or_else(|_| "https://git.distrust.co/public/enclaveos/archive/attestation_service.tar.gz".to_string());
-        let enclave_version = std::env::var("CAUTION_ENCLAVE_VERSION")
-            .unwrap_or_else(|_| "unused".to_string());
-
         println!("Step 2: Building enclave image...");
-        println!("Enclave source: {}", enclave_source);
-        println!("Enclave version: {}", enclave_version);
+        println!("Enclave source: {}", enclave_builder::ENCLAVE_SOURCE);
         println!("This may take a few minutes...\n");
 
         let builder = enclave_builder::EnclaveBuilder::new_with_cache(
             "unused-template",
             "local",
-            &enclave_source,
-            &enclave_version,
+            enclave_builder::ENCLAVE_SOURCE,
+            "unused",
+            enclave_builder::FRAMEWORK_SOURCE,
             "local",
             &commit_sha,
             enclave_builder::CacheType::Build,
@@ -1658,11 +1653,7 @@ build: docker build -t app .
                 }
             }
         } else {
-            let source = std::env::var("CAUTION_ENCLAVE_SOURCE")
-                .unwrap_or_else(|_| "https://git.distrust.co/public/enclaveos/archive/attestation_service.tar.gz".to_string());
-            let version = std::env::var("CAUTION_ENCLAVE_VERSION")
-                .unwrap_or_else(|_| "unused".to_string());
-            (source, version)
+            (enclave_builder::ENCLAVE_SOURCE.to_string(), "unused".to_string())
         };
 
         let cache_key = if let Some(ref manifest) = external_manifest {
@@ -1706,6 +1697,7 @@ build: docker build -t app .
             "local",
             &enclave_source,
             &enclave_version,
+            enclave_builder::FRAMEWORK_SOURCE,
             "local",
             &cache_key,
             enclave_builder::CacheType::Reproduction,
@@ -1974,6 +1966,11 @@ build: docker build -t app .
                     println!("  Enclave source: {} (local)", path);
                 }
             }
+            match &m.framework_source {
+                enclave_builder::FrameworkSource::GitArchive { url } => {
+                    println!("  Framework source: {} (git archive)", url);
+                }
+            }
             if let Some(ref metadata) = m.metadata {
                 println!("  Metadata: {}", metadata);
             }
@@ -2067,6 +2064,7 @@ build: docker build -t app .
             println!("\n✓ Attestation verification PASSED");
             println!("The deployed enclave matches the expected PCRs.");
             println!("This means the code running in the enclave is exactly what you expect.");
+            println!("\nPowered by: Caution (https://caution.co)");
             Ok(())
         } else {
             println!("\n✗ Attestation verification FAILED");

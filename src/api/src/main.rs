@@ -1582,18 +1582,14 @@ async fn deploy_handler(
     } else {
         tracing::info!("Building EIF using enclave-builder from Docker image: caution-{}:latest", req.app_name);
 
-        let enclave_source = std::env::var("CAUTION_ENCLAVE_SOURCE")
-            .unwrap_or_else(|_| "https://git.distrust.co/public/enclaveos/archive/attestation_service.tar.gz".to_string());
-        let enclave_version = std::env::var("CAUTION_ENCLAVE_VERSION")
-            .unwrap_or_else(|_| "unused".to_string());
-
-        tracing::info!("Using enclave source: {} (version: {})", enclave_source, enclave_version);
+        tracing::info!("Using enclave source: {}", enclave_builder::ENCLAVE_SOURCE);
 
         let builder = enclave_builder::EnclaveBuilder::new(
             "unused-template",
             "local",
-            &enclave_source,
-            &enclave_version
+            enclave_builder::ENCLAVE_SOURCE,
+            "unused",
+            enclave_builder::FRAMEWORK_SOURCE,
         )
             .map_err(|e| {
                 tracing::error!("Failed to create enclave builder: {:?}", e);

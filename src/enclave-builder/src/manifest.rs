@@ -9,9 +9,11 @@ use tokio::fs;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnclaveManifest {
     pub version: String,
+    pub powered_by: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_source: Option<AppSource>,
     pub enclave_source: EnclaveSource,
+    pub framework_source: FrameworkSource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -58,18 +60,29 @@ pub enum EnclaveSource {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FrameworkSource {
+    GitArchive {
+        url: String,
+    },
+}
+
 impl EnclaveManifest {
     pub fn new(
         app_source: Option<AppSource>,
         enclave_source: EnclaveSource,
+        framework_source: FrameworkSource,
         binary: Option<String>,
         run_command: Option<String>,
         metadata: Option<String>,
     ) -> Self {
         Self {
             version: "1.0".to_string(),
+            powered_by: "https://caution.co".to_string(),
             app_source,
             enclave_source,
+            framework_source,
             binary,
             run_command,
             metadata,

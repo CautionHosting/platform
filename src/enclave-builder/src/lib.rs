@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+pub const ENCLAVE_SOURCE: &str = "http://git.distrust.co/public/enclaveos/archive/c086ca199fbfd6d178bbe16be875a7cef4d63e91.tar.gz";
+pub const FRAMEWORK_SOURCE: &str = "https://codeberg.org/caution/platform/archive/6d2c93ee339573397d3e4f2f58957c9c1ee99641.tar.gz";
+
 pub mod extract;
 pub mod merge;
 pub mod build;
@@ -13,7 +16,7 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
-pub use manifest::{EnclaveManifest, AppSource, EnclaveSource};
+pub use manifest::{EnclaveManifest, AppSource, EnclaveSource, FrameworkSource};
 pub use docker::{BuildConfig, build_user_image};
 
 pub use CacheType as BuildCacheType;
@@ -28,6 +31,8 @@ pub struct EnclaveBuilder {
     pub enclave_source: String,
     /// Enclave version (git tag, commit, or "local")
     pub enclave_version: String,
+    /// Framework source URL
+    pub framework_source: String,
     /// Working directory for builds
     pub work_dir: PathBuf,
 }
@@ -81,6 +86,7 @@ impl EnclaveBuilder {
         template_version: impl Into<String>,
         enclave_source: impl Into<String>,
         enclave_version: impl Into<String>,
+        framework_source: impl Into<String>,
         org_id: &str,
         cache_key: &str,
         cache_type: CacheType,
@@ -119,6 +125,7 @@ impl EnclaveBuilder {
             template_version: template_version.into(),
             enclave_source: enclave_source.into(),
             enclave_version: enclave_version.into(),
+            framework_source: framework_source.into(),
             work_dir,
         })
     }
@@ -129,6 +136,7 @@ impl EnclaveBuilder {
         template_version: impl Into<String>,
         enclave_source: impl Into<String>,
         enclave_version: impl Into<String>,
+        framework_source: impl Into<String>,
     ) -> Result<Self> {
         let cache_dir = dirs::home_dir()
             .context("Failed to determine home directory")?
@@ -143,6 +151,7 @@ impl EnclaveBuilder {
             template_version: template_version.into(),
             enclave_source: enclave_source.into(),
             enclave_version: enclave_version.into(),
+            framework_source: framework_source.into(),
             work_dir,
         })
     }
@@ -347,7 +356,11 @@ impl EnclaveBuilder {
                 }
             });
 
-            EnclaveManifest::new(app_src, enclave_src, binary_path.clone(), run_command.clone(), metadata)
+            let framework_src = FrameworkSource::GitArchive {
+                url: self.framework_source.clone(),
+            };
+
+            EnclaveManifest::new(app_src, enclave_src, framework_src, binary_path.clone(), run_command.clone(), metadata)
         };
 
         tracing::info!("Building EIF...");
@@ -430,7 +443,11 @@ impl EnclaveBuilder {
                 }
             });
 
-            EnclaveManifest::new(app_src, enclave_src, None, run_command.clone(), metadata)
+            let framework_src = FrameworkSource::GitArchive {
+                url: self.framework_source.clone(),
+            };
+
+            EnclaveManifest::new(app_src, enclave_src, framework_src, None, run_command.clone(), metadata)
         };
 
         tracing::info!("Building EIF...");
@@ -521,7 +538,7 @@ mod tests {
             ..pcrs1.clone()
         };
 
-        let builder = EnclaveBuilder::new("test", "v1", "./enclave", "local").unwrap();
+        let builder = EnclaveBuilder::new("test", "v1", "./enclave", "local", "http://test").unwrap();
         assert!(builder.compare_pcrs(&pcrs1, &pcrs2));
         assert!(!builder.compare_pcrs(&pcrs1, &pcrs3));
     }
