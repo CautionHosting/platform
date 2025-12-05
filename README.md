@@ -69,6 +69,16 @@ The [hello-world-enclave](https://codeberg.org/Caution/hello-world-enclave) repo
    caution verify <url>
    ```
 
+## Verifying a deployed app
+
+1. Obtain the attestation endpoint url (`attestation_url`) which is in the following format: http://<IP>:5000/attestation
+2. Build and install the Caution CLI:
+```
+make build-cli
+./utils/install.sh
+```
+3. Run `caution verify --reproduce --url <attestation_url>
+
 ## Limitations
 
 - AWS Nitro Enclaves only
