@@ -1776,7 +1776,8 @@ build: docker build -t app .
                 continue;
             }
 
-            if let Some((key, value)) = line.split_once('=') {
+            let parts = line.split_once('=').or_else(|| line.split_once(':'));
+            if let Some((key, value)) = parts {
                 let key = key.trim().to_lowercase();
                 let value = value.trim().to_string();
 
