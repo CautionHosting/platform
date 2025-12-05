@@ -709,7 +709,7 @@ async fn build_image_from_repo(
     // Use shared build logic from enclave-builder
     let docker_config = DockerBuildConfig {
         build_command: build_config.build.clone(),
-        containerfile: Some(build_config.containerfile.clone()),
+        containerfile: build_config.containerfile.clone(),
         oci_tarball: build_config.oci_tarball.clone(),
     };
 
@@ -1352,7 +1352,7 @@ async fn deploy_handler(
         let content = String::from_utf8_lossy(&procfile_output.stdout);
         match types::BuildConfig::from_procfile(&content) {
             Ok(config) => {
-                tracing::info!("Loaded build config from Procfile: containerfile={}, binary={:?}, build={:?}, oci_tarball={:?}",
+                tracing::info!("Loaded build config from Procfile: containerfile={:?}, binary={:?}, build={:?}, oci_tarball={:?}",
                                config.containerfile, config.binary, config.build, config.oci_tarball);
                 config
             }
@@ -1495,24 +1495,43 @@ async fn deploy_handler(
 
     tracing::info!("Building Nitro Enclave EIF for commit {}", commit_sha);
 
-    if build_config.build.is_none() {
+    let containerfile = if let Some(cf) = build_config.containerfile.clone() {
+        cf
+    } else if build_config.build.is_none() {
         let containerfile_check = Command::new("git")
-            .args(&["--git-dir", &git_dir, "show", &format!("{}:{}", commit_sha, build_config.containerfile)])
+            .args(&["--git-dir", &git_dir, "show", &format!("{}:Containerfile", commit_sha)])
             .output()
             .await
             .map_err(|e| {
-                tracing::error!("Failed to check for container file: {}", e);
+                tracing::error!("Failed to check for Containerfile: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("Git command failed: {}", e))
             })?;
 
-        if !containerfile_check.status.success() {
-            tracing::error!("Container file '{}' not found at commit {}", build_config.containerfile, commit_sha);
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("Container file '{}' not found in repository root", build_config.containerfile),
-            ));
+        if containerfile_check.status.success() {
+            "Containerfile".to_string()
+        } else {
+            let dockerfile_check = Command::new("git")
+                .args(&["--git-dir", &git_dir, "show", &format!("{}:Dockerfile", commit_sha)])
+                .output()
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to check for Dockerfile: {}", e);
+                    (StatusCode::INTERNAL_SERVER_ERROR, format!("Git command failed: {}", e))
+                })?;
+
+            if dockerfile_check.status.success() {
+                "Dockerfile".to_string()
+            } else {
+                tracing::error!("No Containerfile or Dockerfile found at commit {}", commit_sha);
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "No Containerfile or Dockerfile found in repository root".to_string(),
+                ));
+            }
         }
-    }
+    } else {
+        "Dockerfile".to_string()
+    };
 
     let work_dir = format!("/app/build-cache/build-{}-{}", req.app_name, commit_sha);
     tokio::fs::create_dir_all(&work_dir).await.map_err(|e| {
@@ -1539,7 +1558,7 @@ async fn deploy_handler(
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to extract repository".to_string()));
     }
 
-    let containerfile_path = format!("{}/{}", work_dir, build_config.containerfile);
+    let containerfile_path = format!("{}/{}", work_dir, containerfile);
 
     let enclave_config = types::EnclaveConfig {
         binary_path: build_config.binary.clone().unwrap_or_else(|| "/app".to_string()),

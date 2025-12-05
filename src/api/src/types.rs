@@ -183,7 +183,7 @@ pub struct EIFBuildResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildConfig {
-    pub containerfile: String,
+    pub containerfile: Option<String>,
 
     pub build: Option<String>,
 
@@ -211,10 +211,10 @@ pub struct BuildConfig {
 impl Default for BuildConfig {
     fn default() -> Self {
         Self {
-            containerfile: "Dockerfile".to_string(),
-            build: Some("docker build -t app .".to_string()),
+            containerfile: None,
+            build: None,
             oci_tarball: None,
-            binary: None, 
+            binary: None,
             run: None,
             source: None,
             enclave_source: None,
@@ -321,7 +321,7 @@ impl BuildConfig {
         let run_command = run.or_else(|| binary.clone());
 
         Ok(Self {
-            containerfile: containerfile.unwrap_or_else(|| "Dockerfile".to_string()),
+            containerfile,
             build,
             oci_tarball,
             binary,
