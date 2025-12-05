@@ -54,7 +54,9 @@ make up
    ```bash
    caution init
    ```
-You may need to adjust the Procfile
+You may need to adjust the Procfile.
+
+The [hello-world-enclave](https://codeberg.org/Caution/hello-world-enclave) repo is a good test app to deploy.
 
 
 4. Build and deploy:
