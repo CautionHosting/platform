@@ -123,7 +123,6 @@ struct Cli {
 enum Commands {
     Register,
     Login,
-    RegisterAndLogin,
     Init,
     Describe,
     Reproduce {
@@ -715,56 +714,6 @@ build: docker build -t app .
 
         let status: UserStatus = response.json().await?;
         Ok(status)
-    }
-
-    async fn register_and_login(&self) -> Result<()> {
-        log_verbose(self.verbose, "Starting FIDO2 registration...");
-
-        let cookie_store = reqwest::cookie::Jar::default();
-        let client = reqwest::Client::builder()
-            .cookie_provider(std::sync::Arc::new(cookie_store))
-            .build()?;
-
-        let response = client
-            .post(format!("{}/auth/register/begin", self.base_url))
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error = response.text().await?;
-            bail!("Registration begin failed: {}", error);
-        }
-
-        let begin_resp: RegisterBeginResponse = response.json().await?;
-        log_verbose(self.verbose, "Registration challenge received");
-
-        let attestation = self.make_credential(&begin_resp, &self.base_url)?;
-        println!("Credential created on device");
-
-        let response = client
-            .post(format!("{}/auth/register/finish", self.base_url))
-            .json(&attestation)
-            .send()
-            .await?;
-
-        if response.status().is_success() {
-            let finish_resp: RegisterFinishResponse = response.json().await?;
-
-            println!("FIDO2 registration successful!");
-            println!("Credential ID: {}", finish_resp.credential_id);
-
-            println!("\nWaiting for authenticator to reset...");
-            std::thread::sleep(Duration::from_millis(500));
-
-            println!("\nLogging in...");
-            let (session_id, _expires_at) = self.perform_login().await?;
-            println!("Session ID: {}", session_id);
-
-            Ok(())
-        } else {
-            let error = response.text().await?;
-            bail!("Registration failed: {}", error)
-        }
     }
 
     fn make_credential(&self, options: &RegisterBeginResponse, base_url: &str) -> Result<serde_json::Value> {
@@ -2355,7 +2304,7 @@ async fn run() -> Result<()> {
     }
 
     match cli.command {
-        Commands::Register | Commands::Login | Commands::RegisterAndLogin => {
+        Commands::Register | Commands::Login => {
             if let Err(e) = check_gateway_connectivity(&cli.url, cli.verbose).await {
                 eprintln!("Pre-flight check failed");
                 return Err(e);
@@ -2374,9 +2323,6 @@ async fn run() -> Result<()> {
         }
         Commands::Login => {
             client.login().await?;
-        }
-        Commands::RegisterAndLogin => {
-            client.register_and_login().await?;
         }
         Commands::Init => {
             client.init().await?;
