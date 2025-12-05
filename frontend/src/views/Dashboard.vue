@@ -17,85 +17,155 @@
         {{ success }}
       </div>
 
-      <!-- SSH Keys Section -->
-      <section class="section">
-        <h2>SSH Keys</h2>
-        <p class="section-description">
-          Add SSH keys to push code to your applications via Git.
-        </p>
+      <div class="tabs">
+        <button
+          :class="['tab', { active: activeTab === 'apps' }]"
+          @click="activeTab = 'apps'"
+        >
+          Apps
+        </button>
+        <button
+          :class="['tab', { active: activeTab === 'ssh' }]"
+          @click="activeTab = 'ssh'"
+        >
+          SSH Keys
+        </button>
+      </div>
 
-        <!-- Add Key Form -->
-        <div class="add-key-form">
-          <div class="form-group">
-            <label for="keyName">Key Name (optional)</label>
-            <input
-              id="keyName"
-              v-model="newKeyName"
-              type="text"
-              placeholder="e.g., Work Laptop"
-              :disabled="addingKey"
-            />
-          </div>
-          <div class="form-group">
-            <label for="publicKey">Public Key</label>
-            <textarea
-              id="publicKey"
-              v-model="newPublicKey"
-              placeholder="ssh-ed25519 AAAA... or ssh-rsa AAAA..."
-              rows="3"
-              :disabled="addingKey"
-            ></textarea>
-          </div>
-          <button
-            @click="addKey"
-            class="btn-primary"
-            :disabled="addingKey || !newPublicKey.trim()"
-          >
-            {{ addingKey ? 'Adding...' : 'Add SSH Key' }}
-          </button>
-        </div>
+      <div v-if="activeTab === 'apps'" class="tab-content">
+        <section class="section">
+          <h2>Applications</h2>
+          <p class="section-description">
+            Your deployed applications and their status.
+          </p>
 
-        <!-- Keys List -->
-        <div class="keys-list">
-          <div v-if="loadingKeys" class="loading">Loading keys...</div>
-          <div v-else-if="sshKeys.length === 0" class="empty-state">
-            No SSH keys added yet.
-          </div>
-          <div v-else>
-            <div v-for="key in sshKeys" :key="key.fingerprint" class="key-item">
-              <div class="key-info">
-                <span class="key-name">{{ key.name || 'Unnamed Key' }}</span>
-                <code class="key-fingerprint">{{ key.fingerprint }}</code>
-                <span class="key-type">{{ key.key_type }}</span>
+          <div class="apps-list">
+            <div v-if="loadingApps" class="loading">Loading apps...</div>
+            <div v-else-if="apps.length === 0" class="empty-state">
+              <p>No apps deployed yet.</p>
+              <p class="empty-hint">Use the CLI to create your first app:</p>
+              <div class="code-block code-block-inline">
+                <code>caution init && git push caution main</code>
               </div>
-              <button
-                @click="deleteKey(key.fingerprint)"
-                class="btn-danger"
-                :disabled="deletingKey === key.fingerprint"
-              >
-                {{ deletingKey === key.fingerprint ? 'Deleting...' : 'Delete' }}
-              </button>
+            </div>
+            <div v-else class="apps-grid">
+              <div v-for="app in apps" :key="app.id" class="app-card">
+                <div class="app-header">
+                  <span class="app-name">{{ app.resource_name || 'Unnamed App' }}</span>
+                  <span :class="['app-status', `status-${app.state.toLowerCase()}`]">
+                    {{ app.state }}
+                  </span>
+                </div>
+                <div class="app-details">
+                  <div class="app-detail">
+                    <span class="detail-label">ID:</span>
+                    <span class="detail-value">{{ app.id }}</span>
+                  </div>
+                  <div v-if="app.public_ip" class="app-detail">
+                    <span class="detail-label">IP:</span>
+                    <span class="detail-value">{{ app.public_ip }}</span>
+                  </div>
+                  <div v-if="app.public_ip" class="app-links">
+                    <a :href="'http://' + app.public_ip + ':8080'" target="_blank" class="app-link">
+                      Open App
+                    </a>
+                    <a :href="'http://' + app.public_ip + ':5000/attestation'" target="_blank" class="app-link">
+                      Attestation
+                    </a>
+                  </div>
+                </div>
+                <div class="app-actions">
+                  <button
+                    @click="destroyApp(app.id, app.resource_name)"
+                    class="btn-danger"
+                    :disabled="destroyingApp === app.id"
+                  >
+                    {{ destroyingApp === app.id ? 'Destroying...' : 'Destroy' }}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
-      </section>
+        </section>
 
-      <!-- Quick Start Section -->
-      <section class="section">
-        <h2>Quick Start</h2>
-        <p class="section-description">
-          Use the CLI to create and deploy applications.
-        </p>
-        <div class="code-block">
-          <pre>
-            cd my-app
-            caution init
-            # Adjust Procfile as needed
-            git push caution main
-            caution verify --reproduce
-          </pre>
-        </div>
-      </section>
+        <section class="section">
+          <h2>Quick Start</h2>
+          <p class="section-description">
+            Use the CLI to create and deploy applications.
+          </p>
+          <div class="code-block">
+            <pre>cd my-app
+caution init
+# Adjust Procfile as needed
+git push caution main
+caution verify --reproduce</pre>
+          </div>
+        </section>
+      </div>
+
+      <div v-if="activeTab === 'ssh'" class="tab-content">
+        <section class="section">
+          <h2>SSH Keys</h2>
+          <p class="section-description">
+            Add SSH keys to push code to your applications via Git.
+          </p>
+
+          <!-- Add Key Form -->
+          <div class="add-key-form">
+            <div class="form-group">
+              <label for="keyName">Key Name (optional)</label>
+              <input
+                id="keyName"
+                v-model="newKeyName"
+                type="text"
+                placeholder="e.g., Work Laptop"
+                :disabled="addingKey"
+              />
+            </div>
+            <div class="form-group">
+              <label for="publicKey">Public Key</label>
+              <textarea
+                id="publicKey"
+                v-model="newPublicKey"
+                placeholder="ssh-ed25519 AAAA... or ssh-rsa AAAA..."
+                rows="3"
+                :disabled="addingKey"
+              ></textarea>
+            </div>
+            <button
+              @click="addKey"
+              class="btn-primary"
+              :disabled="addingKey || !newPublicKey.trim()"
+            >
+              {{ addingKey ? 'Adding...' : 'Add SSH Key' }}
+            </button>
+          </div>
+
+          <!-- Keys List -->
+          <div class="keys-list">
+            <div v-if="loadingKeys" class="loading">Loading keys...</div>
+            <div v-else-if="sshKeys.length === 0" class="empty-state">
+              No SSH keys added yet.
+            </div>
+            <div v-else>
+              <div v-for="key in sshKeys" :key="key.fingerprint" class="key-item">
+                <div class="key-info">
+                  <span class="key-name">{{ key.name || 'Unnamed Key' }}</span>
+                  <code class="key-fingerprint">{{ key.fingerprint }}</code>
+                  <span class="key-type">{{ key.key_type }}</span>
+                </div>
+                <button
+                  @click="deleteKey(key.fingerprint)"
+                  class="btn-danger"
+                  :disabled="deletingKey === key.fingerprint"
+                >
+                  {{ deletingKey === key.fingerprint ? 'Deleting...' : 'Delete' }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
     </div>
   </div>
 </template>
@@ -111,6 +181,14 @@ export default {
   setup(props) {
     const error = ref(null)
     const success = ref(null)
+    const activeTab = ref('apps')
+
+    // Apps state
+    const apps = ref([])
+    const loadingApps = ref(true)
+    const destroyingApp = ref(null)
+
+    // SSH Keys state
     const sshKeys = ref([])
     const loadingKeys = ref(true)
     const addingKey = ref(false)
@@ -124,12 +202,66 @@ export default {
         return
       }
 
-      await loadKeys()
+      await Promise.all([loadApps(), loadKeys()])
     })
+
+    const loadApps = async () => {
+      loadingApps.value = true
+
+      try {
+        const response = await fetch('/api/resources', {
+          headers: {
+            'X-Session-ID': props.session
+          }
+        })
+
+        if (response.ok) {
+          apps.value = await response.json()
+        } else if (response.status === 401) {
+          window.location.href = '/login'
+        } else {
+          const data = await response.json().catch(() => ({}))
+          error.value = data.error || 'Failed to load apps'
+        }
+      } catch (err) {
+        error.value = 'Failed to connect to server'
+      } finally {
+        loadingApps.value = false
+      }
+    }
+
+    const destroyApp = async (id, name) => {
+      const displayName = name || `App #${id}`
+      if (!confirm(`Are you sure you want to destroy "${displayName}"? This cannot be undone.`)) return
+
+      destroyingApp.value = id
+      error.value = null
+      success.value = null
+
+      try {
+        const response = await fetch(`/api/resources/${id}`, {
+          method: 'DELETE',
+          headers: {
+            'X-Session-ID': props.session
+          }
+        })
+
+        if (response.ok || response.status === 204) {
+          success.value = `App "${displayName}" destroyed`
+          await loadApps()
+        } else {
+          const data = await response.json().catch(() => ({}))
+          error.value = data.error || 'Failed to destroy app'
+        }
+      } catch (err) {
+        error.value = 'Failed to connect to server'
+      } finally {
+        destroyingApp.value = null
+      }
+    }
 
     const loadKeys = async () => {
       loadingKeys.value = true
-      error.value = null
 
       try {
         const response = await fetch('/ssh-keys', {
@@ -227,6 +359,13 @@ export default {
     return {
       error,
       success,
+      activeTab,
+      // Apps
+      apps,
+      loadingApps,
+      destroyingApp,
+      destroyApp,
+      // SSH Keys
       sshKeys,
       loadingKeys,
       addingKey,
@@ -244,7 +383,7 @@ export default {
 <style scoped>
 .dashboard-container {
   width: 100%;
-  max-width: 800px;
+  max-width: 900px;
   margin: 0 auto;
 }
 
@@ -259,7 +398,7 @@ export default {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 32px;
+  margin-bottom: 24px;
 }
 
 h1 {
@@ -276,6 +415,53 @@ h2 {
   margin-bottom: 8px;
 }
 
+/* Tabs */
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 2px solid #eee;
+  margin-bottom: 24px;
+}
+
+.tab {
+  padding: 12px 24px;
+  background: none;
+  border: none;
+  font-size: 15px;
+  font-weight: 500;
+  color: #666;
+  cursor: pointer;
+  position: relative;
+  transition: color 0.2s ease;
+}
+
+.tab:hover {
+  color: #333;
+}
+
+.tab.active {
+  color: #667eea;
+}
+
+.tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+.tab-content {
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 .section {
   margin-bottom: 40px;
 }
@@ -286,6 +472,130 @@ h2 {
   font-size: 14px;
 }
 
+/* Apps List */
+.apps-list {
+  border: 1px solid #eee;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.apps-grid {
+  display: flex;
+  flex-direction: column;
+}
+
+.app-card {
+  padding: 20px;
+  border-bottom: 1px solid #eee;
+}
+
+.app-card:last-child {
+  border-bottom: none;
+}
+
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.app-name {
+  font-weight: 600;
+  font-size: 16px;
+  color: #333;
+}
+
+.app-status {
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.status-running {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.status-pending, .status-provisioning {
+  background: #fff3e0;
+  color: #e65100;
+}
+
+.status-stopped, .status-terminated {
+  background: #fce4ec;
+  color: #c62828;
+}
+
+.status-starting {
+  background: #e3f2fd;
+  color: #1565c0;
+}
+
+.app-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.app-detail {
+  font-size: 13px;
+}
+
+.detail-label {
+  color: #999;
+  margin-right: 4px;
+}
+
+.detail-value {
+  color: #333;
+  font-family: 'Monaco', 'Courier New', monospace;
+}
+
+.app-links {
+  display: flex;
+  gap: 12px;
+}
+
+.app-link {
+  font-size: 13px;
+  color: #667eea;
+  text-decoration: none;
+}
+
+.app-link:hover {
+  text-decoration: underline;
+}
+
+.app-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 12px;
+  border-top: 1px solid #f5f5f5;
+}
+
+.empty-hint {
+  font-size: 13px;
+  color: #999;
+  margin-top: 8px;
+}
+
+.code-block-inline {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 8px 12px;
+}
+
+.code-block-inline code {
+  color: #f8f8f2;
+  font-family: 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+}
+
+/* SSH Keys */
 .add-key-form {
   background: #f8f9fa;
   border-radius: 8px;
