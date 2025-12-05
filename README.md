@@ -18,6 +18,12 @@ This software is a cloud hosting management platform that builds and deploys rep
 
 ### Installation
 
+#### Bootstrapping
+
+Follow the [bootstrapping guide](terraform-bootstrap/README.md)
+
+#### Running the platform
+
 Set up `env` file based on `env.example`
 
 Build the CLI and start services:
