@@ -67,8 +67,20 @@ The [hello-world-enclave](https://codeberg.org/Caution/hello-world-enclave) repo
 
 5. Verify an enclave's attestation:
    ```bash
-   caution verify <url>
+   caution verify --reproduce <url>
+
    ```
+Or you can use a file with the hashes
+```
+# Put the hashes in a file (this is just an example)
+cat pcrs.txt
+PCR0: 3c07ec536432532f86b8c735b740f0d67a8b115e4a5e20cc8ecbb4e6a8335fe016bf42693b18e8560e299636afa8dc84
+PCR1: 3c07ec536432532f86b8c735b740f0d67a8b115e4a5e20cc8ecbb4e6a8335fe016bf42693b18e8560e299636afa8dc84
+PCR2: 21b9efbc184807662e966d34f390821309eeac6802309798826296bf3e8bec7c10edb30948c90ba67310f7b964fc500a
+
+caution verify --pcrs pcrs.txt
+```
+
 
 ## Verifying a deployed app
 
