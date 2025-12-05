@@ -15,6 +15,7 @@ This software is a cloud hosting management platform that builds and deploys rep
 - Docker
   - [containerd](https://docs.docker.com/engine/storage/containerd/#enable-containerd-image-store-on-docker-engine)
 - Gnu Make
+- x86_64 based system (Mac support coming soon)
 
 ### Installation
 
