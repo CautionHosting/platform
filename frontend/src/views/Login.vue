@@ -41,7 +41,7 @@
             :disabled="loading || !betaCode.trim()"
             class="btn btn-secondary"
           >
-            {{ loading ? 'Working...' : 'Register with Beta Code' }}
+            {{ loading ? 'Working...' : 'Register with Alpha Code' }}
           </button>
         </div>
         <br/>
