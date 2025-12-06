@@ -7,6 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use webauthn_rs::prelude::*;
 use time::Duration;
 use serde::{Serialize, Deserialize};
@@ -172,31 +173,64 @@ pub async fn finish_register_handler(
 pub async fn begin_login_handler(
     State(state): State<AppState>,
 ) -> Result<Json<LoginBeginResponse>, AppError> {
-    tracing::debug!("Creating authentication challenge with allow-credentials (UV=preferred)");
 
     let all_credential_ids: Vec<Vec<u8>> = sqlx::query_scalar(
         "SELECT credential_id FROM fido2_credentials"
     )
     .fetch_all(&state.db)
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to fetch credentials: {}", e))?;
+    .map_err(|e| {
+        tracing::error!("Failed to fetch credentials from DB: {:?}", e);
+        anyhow::anyhow!("Failed to fetch credentials: {}", e)
+    })?;
+
+    tracing::info!("Found {} credential IDs in database", all_credential_ids.len());
 
     let mut allow_credentials = Vec::new();
-    for cred_id_bytes in all_credential_ids {
-        let cred_bytes = db::get_credential_public_key(&state.db, &cred_id_bytes)
+    for (i, cred_id_bytes) in all_credential_ids.iter().enumerate() {
+        tracing::info!("Loading credential {}: ID={}", i, hex::encode(cred_id_bytes));
+
+        let cred_bytes = db::get_credential_public_key(&state.db, cred_id_bytes)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to get credential: {}", e))?;
+            .map_err(|e| {
+                tracing::error!("Failed to get credential {}: {:?}", i, e);
+                anyhow::anyhow!("Failed to get credential: {}", e)
+            })?;
+
+        tracing::info!("Credential {} raw data length: {} bytes", i, cred_bytes.len());
+
         let security_key: SecurityKey = serde_json::from_slice(&cred_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize credential: {}", e))?;
+            .map_err(|e| {
+                tracing::error!("Failed to deserialize credential {}: {:?}", i, e);
+                tracing::error!("Raw credential data: {}", String::from_utf8_lossy(&cred_bytes));
+                anyhow::anyhow!("Failed to deserialize credential: {}", e)
+            })?;
+
+        tracing::info!("Credential {} loaded successfully", i);
+        tracing::info!("  Cred ID (base64url): {}", URL_SAFE_NO_PAD.encode(security_key.cred_id()));
+
         allow_credentials.push(security_key);
     }
 
-    tracing::debug!("Found {} credentials for authentication", allow_credentials.len());
+    tracing::info!("Starting authentication challenge with {} credentials", allow_credentials.len());
 
     let (rcr, auth_state) = state
         .webauthn
         .start_securitykey_authentication(&allow_credentials)
-        .map_err(|e| anyhow::anyhow!("Failed to start authentication: {}", e))?;
+        .map_err(|e| {
+            tracing::error!("Failed to start authentication: {:?}", e);
+            anyhow::anyhow!("Failed to start authentication: {}", e)
+        })?;
+
+    tracing::info!("Authentication challenge created:");
+    tracing::info!("  RP ID in challenge: {}", rcr.public_key.rp_id);
+    tracing::info!("  Challenge: {:?}", rcr.public_key.challenge);
+    tracing::info!("  Timeout: {:?}ms", rcr.public_key.timeout);
+    tracing::info!("  User verification: {:?}", rcr.public_key.user_verification);
+    tracing::info!("  Allow credentials count: {}", rcr.public_key.allow_credentials.len());
+    for (i, cred) in rcr.public_key.allow_credentials.iter().enumerate() {
+        tracing::info!("    Credential {}: type={}, id={:?}", i, cred.type_, cred.id);
+    }
 
     let session_key = uuid::Uuid::new_v4().to_string();
     state.auth_states.write().await.insert(session_key.clone(), auth_state);
