@@ -5,7 +5,7 @@
   <div class="login-container">
     <div class="login-card">
       <h1>Caution</h1>
-      <p class="subtitle">Cloud Resource Management</p>
+      <p class="subtitle">The Verifiable Compute Platform</p>
 
       <div v-if="error" class="error-message">
         {{ error }}
