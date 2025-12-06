@@ -61,6 +61,8 @@ make build-cli
               <div class="code-block">
                 <pre>
 cd my-app
+caution login
+# Tap your smart card
 caution init
 # Adjust Procfile as needed
 git push caution main

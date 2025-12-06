@@ -16,10 +16,6 @@
       </div>
 
       <div v-if="!authenticated">
-        <p class="instructions">
-          Authenticate with Passkey
-        </p>
-
         <div class="button-group">
           <button
             @click="handleLogin"
@@ -32,6 +28,7 @@
 
         <div class="register-section">
           <p class="register-label">New user? Enter your beta code to register:</p>
+          <p class="register-label">Register using a smart card (Yubikey, NitroKey), it's required for CLI interactions</p>
           <input
             v-model="betaCode"
             type="text"
