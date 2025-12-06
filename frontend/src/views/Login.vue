@@ -244,10 +244,15 @@ export default {
 
         if (publicKey.allowCredentials) {
           publicKey.allowCredentials = publicKey.allowCredentials.map(cred => {
-            console.log('Converting credential ID:', cred.id)
+            console.log('Converting credential:', JSON.stringify(cred, null, 2))
+            console.log('  ID:', cred.id)
+            console.log('  Type:', cred.type)
+            console.log('  Transports:', cred.transports)
             return {
-              ...cred,
-              id: base64urlToUint8Array(cred.id)
+              type: cred.type,
+              id: base64urlToUint8Array(cred.id),
+              // Only include transports if they exist and are valid
+              ...(cred.transports && cred.transports.length > 0 ? { transports: cred.transports } : {})
             }
           })
         }
@@ -260,12 +265,21 @@ export default {
         let assertion
         try {
           assertion = await navigator.credentials.get({ publicKey })
+          console.log('navigator.credentials.get() SUCCEEDED')
+          console.log('  Assertion ID:', assertion.id)
+          console.log('  Assertion type:', assertion.type)
         } catch (credError) {
           console.error('navigator.credentials.get() FAILED:')
           console.error('  Error name:', credError.name)
           console.error('  Error message:', credError.message)
           console.error('  Error code:', credError.code)
+          console.error('  Error stack:', credError.stack)
           console.error('  Full error:', credError)
+          // Log all enumerable properties
+          console.error('  Error properties:', Object.keys(credError))
+          for (const key of Object.keys(credError)) {
+            console.error(`    ${key}:`, credError[key])
+          }
           throw credError
         }
 
