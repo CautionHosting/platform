@@ -32,7 +32,7 @@
           <input
             v-model="betaCode"
             type="text"
-            placeholder="Enter beta code"
+            placeholder="Enter alpha code"
             class="beta-code-input"
             :disabled="loading"
           />
