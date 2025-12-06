@@ -251,7 +251,17 @@ export default {
         console.log('Final publicKey object:', publicKey)
         console.log('Calling navigator.credentials.get()...')
 
-        const assertion = await navigator.credentials.get({ publicKey })
+        let assertion
+        try {
+          assertion = await navigator.credentials.get({ publicKey })
+        } catch (credError) {
+          console.error('navigator.credentials.get() FAILED:')
+          console.error('  Error name:', credError.name)
+          console.error('  Error message:', credError.message)
+          console.error('  Error code:', credError.code)
+          console.error('  Full error:', credError)
+          throw credError
+        }
 
         if (!assertion) {
           throw new Error('No assertion received')
