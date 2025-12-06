@@ -112,7 +112,7 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
     
-    #[arg(short, long, default_value = "http://localhost:8000")]
+    #[arg(short, long, default_value = "https://beta.caution.co")]
     url: String,
     
     #[arg(short, long)]
