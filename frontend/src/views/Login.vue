@@ -4,7 +4,7 @@
 <template>
   <div class="login-container">
     <div class="login-card">
-      <h1>Caution</h1>
+      <img src="../assets/caution-logo-black.svg" alt="Caution" class="logo" />
       <p class="subtitle">The Verifiable Compute Platform</p>
 
       <div v-if="error" class="error-message">
@@ -320,6 +320,13 @@ export default {
 </script>
 
 <style scoped>
+.logo {
+  display: block;
+  width: 220px;
+  height: auto;
+  margin: 0 auto 32px;
+}
+
 .login-container {
   width: 100%;
   max-width: 500px;

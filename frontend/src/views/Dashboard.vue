@@ -3,6 +3,7 @@
 
 <template>
   <div class="dashboard-container">
+    <img src="../assets/caution-logo-black.svg" alt="Caution" class="logo" />
     <div class="dashboard-card">
       <div class="header">
         <h1>Dashboard</h1>
@@ -63,7 +64,7 @@ cd my-app
 caution init
 # Adjust Procfile as needed
 git push caution main
-caution verify --reproduce
+cautmion verify --reproduce
                 </pre>
               </div>
             </div>
@@ -404,6 +405,13 @@ export default {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 24px;
+}
+
+.logo {
+  display: block;
+  width: 150px;
+  height: auto;
+  margin: 0 auto 24px;
 }
 
 h1 {
