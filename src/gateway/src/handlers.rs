@@ -199,6 +199,11 @@ pub async fn begin_login_handler(
 
         tracing::info!("Credential {} raw data length: {} bytes", i, cred_bytes.len());
 
+        // Log the raw credential JSON to see embedded RP_ID
+        let raw_json: serde_json::Value = serde_json::from_slice(&cred_bytes)
+            .unwrap_or_else(|_| serde_json::json!({"error": "failed to parse"}));
+        tracing::info!("Credential {} raw JSON: {}", i, serde_json::to_string_pretty(&raw_json).unwrap_or_default());
+
         let security_key: SecurityKey = serde_json::from_slice(&cred_bytes)
             .map_err(|e| {
                 tracing::error!("Failed to deserialize credential {}: {:?}", i, e);

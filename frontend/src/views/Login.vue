@@ -227,15 +227,27 @@ export default {
         // Step 2: Get assertion from security key
         status.value = 'Please tap your security key...'
 
+        console.log('Raw beginData:', JSON.stringify(beginData, null, 2))
+
         const publicKey = beginData.publicKey
+        console.log('publicKey.rpId:', publicKey.rpId)
+        console.log('publicKey.challenge (before conversion):', publicKey.challenge)
+        console.log('publicKey.allowCredentials (before conversion):', publicKey.allowCredentials)
+
         publicKey.challenge = base64urlToUint8Array(publicKey.challenge)
 
         if (publicKey.allowCredentials) {
-          publicKey.allowCredentials = publicKey.allowCredentials.map(cred => ({
-            ...cred,
-            id: base64urlToUint8Array(cred.id)
-          }))
+          publicKey.allowCredentials = publicKey.allowCredentials.map(cred => {
+            console.log('Converting credential ID:', cred.id)
+            return {
+              ...cred,
+              id: base64urlToUint8Array(cred.id)
+            }
+          })
         }
+
+        console.log('Final publicKey object:', publicKey)
+        console.log('Calling navigator.credentials.get()...')
 
         const assertion = await navigator.credentials.get({ publicKey })
 
