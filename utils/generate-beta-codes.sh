@@ -9,7 +9,7 @@ echo "Generating $COUNT beta codes..."
 echo ""
 
 for i in $(seq 1 "$COUNT"); do
-    CODE=$(openssl rand -hex 16)
+    CODE=$(openssl rand -hex 6)
     docker exec "$CONTAINER" psql -U postgres -d caution -q -c "INSERT INTO beta_codes (code) VALUES ('$CODE')"
     echo "$CODE"
 done
