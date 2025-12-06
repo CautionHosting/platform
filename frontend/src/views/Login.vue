@@ -47,12 +47,8 @@
             {{ loading ? 'Working...' : 'Register with Beta Code' }}
           </button>
         </div>
-
-        <p class="help-text">
-          You can also use the CLI (<a href="todo">docs</a>)
-        </p>
-        <pre class="code-block">Linux: <a href=""></a></pre>
-        <pre class="code-block">MacOS <a href=""></a></pre>
+        <br/>
+        <pre class="code-block">https://codeberg.org/caution/platform<a href=""></a></pre>
       </div>
 
       <div v-else>
