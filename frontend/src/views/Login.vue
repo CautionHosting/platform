@@ -28,13 +28,23 @@
           >
             {{ loading ? 'Working...' : 'Login' }}
           </button>
+        </div>
 
+        <div class="register-section">
+          <p class="register-label">New user? Enter your beta code to register:</p>
+          <input
+            v-model="betaCode"
+            type="text"
+            placeholder="Enter beta code"
+            class="beta-code-input"
+            :disabled="loading"
+          />
           <button
             @click="handleRegister"
-            :disabled="loading"
+            :disabled="loading || !betaCode.trim()"
             class="btn btn-secondary"
           >
-            {{ loading ? 'Working...' : 'Register New Key' }}
+            {{ loading ? 'Working...' : 'Register with Beta Code' }}
           </button>
         </div>
 
@@ -85,6 +95,7 @@ export default {
     const loading = ref(false)
     const error = ref(null)
     const status = ref(null)
+    const betaCode = ref('')
 
     onMounted(async () => {
       // Check for WebAuthn support
@@ -128,11 +139,13 @@ export default {
       loading.value = true
 
       try {
-        // Step 1: Begin registration
-        status.value = 'Starting registration...'
+        // Step 1: Begin registration with beta code
+        status.value = 'Validating beta code...'
         const beginResponse = await fetch('/auth/register/begin', {
           method: 'POST',
-          credentials: 'include'
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ beta_code: betaCode.value.trim() })
         })
 
         if (!beginResponse.ok) {
@@ -302,6 +315,7 @@ export default {
       loading,
       error,
       status,
+      betaCode,
       handleRegister,
       handleLogin
     }
@@ -439,5 +453,42 @@ h1 {
   color: #2e7d32;
   text-align: center;
   font-size: 14px;
+}
+
+.register-section {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid #e0e0e0;
+}
+
+.register-label {
+  font-size: 14px;
+  color: #666;
+  margin-bottom: 12px;
+  text-align: center;
+}
+
+.beta-code-input {
+  width: 100%;
+  padding: 12px 16px;
+  font-size: 16px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  box-sizing: border-box;
+  font-family: 'Monaco', 'Courier New', monospace;
+  text-align: center;
+  letter-spacing: 2px;
+}
+
+.beta-code-input:focus {
+  outline: none;
+  border-color: #3498db;
+  box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
+}
+
+.beta-code-input:disabled {
+  background: #f5f5f5;
+  cursor: not-allowed;
 }
 </style>

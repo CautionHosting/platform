@@ -41,11 +41,30 @@
 
           <div class="apps-list">
             <div v-if="loadingApps" class="loading">Loading apps...</div>
-            <div v-else-if="apps.length === 0" class="empty-state">
-              <p>No apps deployed yet.</p>
-              <p class="empty-hint">Use the CLI to create your first app:</p>
-              <div class="code-block code-block-inline">
-                <code>caution init && git push caution main</code>
+            <div v-else-if="apps.length === 0" class="quick-start">
+              <h3>Quick Start</h3>
+              <p class="section-description">
+                Download, and install the Caution CLI.
+              </p>
+              <div class="code-block">
+                <pre>
+git clone https://codeberg.org/caution/platform
+make build-cli
+./utils/install.sh
+                </pre>
+              </div>
+              <br/>
+              <p class="section-description">
+                Use the CLI to create and deploy applications.
+              </p>
+              <div class="code-block">
+                <pre>
+cd my-app
+caution init
+# Adjust Procfile as needed
+git push caution main
+caution verify --reproduce
+                </pre>
               </div>
             </div>
             <div v-else class="apps-grid">
@@ -85,20 +104,6 @@
                 </div>
               </div>
             </div>
-          </div>
-        </section>
-
-        <section class="section">
-          <h2>Quick Start</h2>
-          <p class="section-description">
-            Use the CLI to create and deploy applications.
-          </p>
-          <div class="code-block">
-            <pre>cd my-app
-caution init
-# Adjust Procfile as needed
-git push caution main
-caution verify --reproduce</pre>
           </div>
         </section>
       </div>
@@ -708,6 +713,17 @@ h2 {
   text-align: center;
   color: #666;
   font-size: 14px;
+}
+
+.quick-start {
+  padding: 24px;
+}
+
+.quick-start h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #333;
+  margin: 0 0 12px 0;
 }
 
 .key-item {

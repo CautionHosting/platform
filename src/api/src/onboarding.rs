@@ -48,8 +48,8 @@ pub async fn get_user_status(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<UserStatus>, StatusCode> {
-    let result: Option<(Option<NaiveDateTime>, Option<NaiveDateTime>)> = sqlx::query_as(
-        "SELECT email_verified_at, payment_method_added_at
+    let result: Option<(Option<NaiveDateTime>, Option<NaiveDateTime>, Option<i64>)> = sqlx::query_as(
+        "SELECT email_verified_at, payment_method_added_at, beta_code_id
          FROM users
          WHERE id = $1"
     )
@@ -61,17 +61,19 @@ pub async fn get_user_status(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let (email_verified_at, payment_method_added_at) = result
+    let (email_verified_at, payment_method_added_at, beta_code_id) = result
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let email_verified = email_verified_at.is_some();
+    // Beta users skip email verification AND payment
+    let is_beta_user = beta_code_id.is_some();
+    let email_verified = is_beta_user || email_verified_at.is_some();
 
     let skip_payment = std::env::var("SKIP_PAYMENT_REQUIREMENT")
         .unwrap_or_else(|_| "false".to_string())
         .parse::<bool>()
         .unwrap_or(false);
 
-    let payment_method_added = skip_payment || payment_method_added_at.is_some();
+    let payment_method_added = is_beta_user || skip_payment || payment_method_added_at.is_some();
     let onboarding_complete = email_verified && payment_method_added;
 
     Ok(Json(UserStatus {

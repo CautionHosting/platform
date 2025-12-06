@@ -9,16 +9,17 @@ use base64::Engine;
 
 use crate::types::DbSession;
 
-pub async fn create_user(pool: &PgPool, fido2_user_handle: &[u8]) -> Result<i64> {
+pub async fn create_user(pool: &PgPool, fido2_user_handle: &[u8], beta_code_id: i64) -> Result<i64> {
     let username = generate_user_identifier();
-    
+
     let user_id: i64 = sqlx::query_scalar(
-        "INSERT INTO users (fido2_user_handle, username, email) 
-         VALUES ($1, $2, NULL)
+        "INSERT INTO users (fido2_user_handle, username, email, beta_code_id)
+         VALUES ($1, $2, NULL, $3)
          RETURNING id"
     )
     .bind(fido2_user_handle)
     .bind(&username)
+    .bind(beta_code_id)
     .fetch_one(pool)
     .await
     .map_err(|e| {
@@ -27,8 +28,26 @@ pub async fn create_user(pool: &PgPool, fido2_user_handle: &[u8]) -> Result<i64>
         tracing::error!("fido2_user_handle (hex): {}", hex::encode(fido2_user_handle));
         anyhow::anyhow!("Failed to create user: {}", e)
     })?;
-    
+
     Ok(user_id)
+}
+
+/// Validates and redeems a beta code. Returns the code ID if valid, None if invalid/already used.
+pub async fn redeem_beta_code(pool: &PgPool, code: &str) -> Result<Option<i64>> {
+    let code_id: Option<i64> = sqlx::query_scalar(
+        "UPDATE beta_codes
+         SET used_at = NOW()
+         WHERE code = $1
+           AND used_at IS NULL
+           AND (expires_at IS NULL OR expires_at > NOW())
+         RETURNING id"
+    )
+    .bind(code)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to redeem beta code")?;
+
+    Ok(code_id)
 }
 
 pub async fn get_user_id_by_fido2_handle(pool: &PgPool, fido2_user_handle: &[u8]) -> Result<i64> {

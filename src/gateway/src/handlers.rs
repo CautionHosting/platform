@@ -56,8 +56,16 @@ pub async fn health_handler() -> impl IntoResponse {
 
 pub async fn begin_register_handler(
     State(state): State<AppState>,
+    Json(req): Json<crate::types::RegisterBeginRequest>,
 ) -> Result<Json<RegisterBeginResponse>, AppError> {
-    tracing::debug!("Registration started");
+    tracing::debug!("Registration started with beta code");
+
+    // Validate and redeem the beta code first
+    let beta_code_id = db::redeem_beta_code(&state.db, &req.beta_code)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Invalid or expired beta code"))?;
+
+    tracing::debug!("Beta code validated: id={}", beta_code_id);
 
     let user_unique_id = uuid::Uuid::new_v4();
     let user_name = format!("user_{}", user_unique_id);
@@ -75,7 +83,11 @@ pub async fn begin_register_handler(
         .map_err(|e| anyhow::anyhow!("Failed to start registration: {}", e))?;
 
     let state_key = user_unique_id.to_string();
-    state.reg_states.write().await.insert(state_key.clone(), reg_state);
+    let pending = crate::types::PendingRegistration {
+        reg_state,
+        beta_code_id,
+    };
+    state.reg_states.write().await.insert(state_key.clone(), pending);
 
     Ok(Json(RegisterBeginResponse {
         challenge: ccr,
@@ -92,7 +104,7 @@ pub async fn finish_register_handler(
         .ok_or_else(|| anyhow::anyhow!("Missing session field"))?
         .to_string();
 
-    let reg_state = state.reg_states.read().await
+    let pending = state.reg_states.read().await
         .get(&session_key)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("No matching registration state found"))?;
@@ -102,7 +114,7 @@ pub async fn finish_register_handler(
 
     let passkey = state
         .webauthn
-        .finish_securitykey_registration(&reg_response, &reg_state)
+        .finish_securitykey_registration(&reg_response, &pending.reg_state)
         .map_err(|e| anyhow::anyhow!("Failed to finish registration: {}", e))?;
 
     let credential_id = passkey.cred_id().clone();
@@ -118,7 +130,7 @@ pub async fn finish_register_handler(
     let user_unique_id = uuid::Uuid::parse_str(&session_key)
         .map_err(|e| anyhow::anyhow!("Failed to parse user ID: {}", e))?;
 
-    let user_id = db::create_user(&state.db, &user_unique_id.as_bytes()[..])
+    let user_id = db::create_user(&state.db, &user_unique_id.as_bytes()[..], pending.beta_code_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create user: {}", e))?;
 

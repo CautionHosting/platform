@@ -7,12 +7,19 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use std::collections::HashMap;
 
+/// Registration state that includes the beta code ID for closed beta
+#[derive(Clone)]
+pub struct PendingRegistration {
+    pub reg_state: SecurityKeyRegistration,
+    pub beta_code_id: i64,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: sqlx::PgPool,
     pub webauthn: Webauthn,
     pub api_service_url: String,
-    pub reg_states: Arc<RwLock<HashMap<String, SecurityKeyRegistration>>>,
+    pub reg_states: Arc<RwLock<HashMap<String, PendingRegistration>>>,
     pub auth_states: Arc<RwLock<HashMap<String, SecurityKeyAuthentication>>>,
     pub session_timeout_hours: i64,
 }
@@ -100,6 +107,11 @@ pub struct LoginFinishResponse {
     pub session_id: String,
     pub expires_at: String,
     pub credential_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterBeginRequest {
+    pub beta_code: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

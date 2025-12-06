@@ -121,7 +121,10 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    Register,
+    Register {
+        #[arg(long)]
+        beta_code: String,
+    },
     Login,
     Init,
     Describe,
@@ -597,7 +600,7 @@ build: docker build -t app .
         Ok(archive_url)
     }
 
-    async fn register(&self) -> Result<()> {
+    async fn register(&self, beta_code: &str) -> Result<()> {
         log_verbose(self.verbose, "Starting FIDO2 registration...");
         log_verbose(self.verbose, &format!("Target URL: {}", self.base_url));
 
@@ -606,9 +609,10 @@ build: docker build -t app .
             .cookie_provider(std::sync::Arc::new(cookie_store))
             .build()?;
 
-        log_verbose(self.verbose, "Sending registration begin request...");
+        log_verbose(self.verbose, "Sending registration begin request with beta code...");
         let response = client
             .post(format!("{}/auth/register/begin", self.base_url))
+            .json(&serde_json::json!({ "beta_code": beta_code }))
             .send()
             .await
             .context("Failed to send registration begin request")?;
@@ -654,15 +658,18 @@ build: docker build -t app .
             println!("Session ID: {}", finish_resp.session_id);
             println!("Expires: {}", finish_resp.expires_at);
 
+            self.save_config(
+                finish_resp.session_id.clone(),
+                finish_resp.expires_at.clone(),
+            )?;
+
             println!("\n=======================================================");
-            println!("NEXT STEP: Complete your onboarding");
+            println!("BETA ACCESS GRANTED");
             println!("=======================================================");
-            println!("\nPlease visit the following URL to:");
-            println!("  1. Verify your email address");
-            println!("  2. Add payment information");
-            println!("\nOnboarding URL:");
-            println!("  {}/onboarding?session={}", self.frontend_url(), finish_resp.session_id);
-            println!("\nYou must complete onboarding before you can create apps.");
+            println!("\nYou're registered as a beta user. You can now:");
+            println!("  • Create apps with 'caution init'");
+            println!("  • Deploy with 'git push caution main'");
+            println!("\nDashboard: {}/dashboard?session={}", self.frontend_url(), finish_resp.session_id);
             println!("=======================================================\n");
 
             Ok(())
@@ -2319,8 +2326,8 @@ async fn run() -> Result<()> {
     log_verbose(cli.verbose, "API client ready");
     
     match cli.command {
-        Commands::Register => {
-            client.register().await?;
+        Commands::Register { beta_code } => {
+            client.register(&beta_code).await?;
         }
         Commands::Login => {
             client.login().await?;

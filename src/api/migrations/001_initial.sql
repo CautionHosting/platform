@@ -32,14 +32,16 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Function to check if user is fully onboarded (email verified + payment added)
+-- Beta users (with beta_code_id) skip email verification AND payment
 CREATE OR REPLACE FUNCTION user_is_onboarded(user_id_param BIGINT)
 RETURNS BOOLEAN AS $$
 DECLARE
     verified BOOLEAN;
 BEGIN
     SELECT
-        email_verified_at IS NOT NULL
-        AND payment_method_added_at IS NOT NULL
+        -- Beta users are fully onboarded immediately
+        beta_code_id IS NOT NULL
+        OR (email_verified_at IS NOT NULL AND payment_method_added_at IS NOT NULL)
     INTO verified
     FROM users
     WHERE id = user_id_param;
@@ -47,6 +49,24 @@ BEGIN
     RETURN COALESCE(verified, FALSE);
 END;
 $$ LANGUAGE plpgsql;
+
+-- ============================================
+-- BETA CODES (for closed beta registration)
+-- ============================================
+
+CREATE TABLE beta_codes (
+    id BIGSERIAL PRIMARY KEY,
+    code VARCHAR(64) NOT NULL UNIQUE,
+    created_by VARCHAR(255),
+    expires_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    used_at TIMESTAMP  -- NULL if not yet used, set when redeemed
+);
+
+CREATE INDEX idx_beta_codes_code ON beta_codes(code);
+
+-- Generate and insert a random beta code:
+-- code=$(openssl rand -hex 16) && psql -c "INSERT INTO beta_codes (code) VALUES ('$code')" && echo "Beta code: $code"
 
 -- ============================================
 -- CORE ENTITIES
@@ -58,6 +78,9 @@ CREATE TABLE users (
     email VARCHAR(255) UNIQUE,
     fido2_user_handle BYTEA UNIQUE,  -- WebAuthn user.id (32 bytes)
     is_active BOOLEAN NOT NULL DEFAULT true,
+
+    -- Beta code used during registration (skips email verification)
+    beta_code_id BIGINT REFERENCES beta_codes(id),
 
     -- Email verification
     email_verified_at TIMESTAMP,
