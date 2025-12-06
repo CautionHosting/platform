@@ -66,7 +66,7 @@ caution login
 caution init
 # Adjust Procfile as needed
 git push caution main
-cautmion verify --reproduce
+caution verify --reproduce
                 </pre>
               </div>
             </div>
