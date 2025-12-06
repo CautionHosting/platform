@@ -152,7 +152,7 @@ run-frontend: network
 		--name frontend \
 		--network $(NETWORK) \
 		-p 3000:3000 \
-		-e VITE_PROXY_TARGET=http://gateway:8080 \
+		--env-file .env \
 		caution-frontend
 	@echo "Frontend started on port 3000"
 
