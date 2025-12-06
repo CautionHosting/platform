@@ -246,6 +246,8 @@ export default {
           })
         }
 
+        delete publicKey.hints
+
         console.log('Final publicKey object:', publicKey)
         console.log('Calling navigator.credentials.get()...')
 
