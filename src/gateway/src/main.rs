@@ -76,7 +76,10 @@ async fn main() -> Result<()> {
         .build()
         .context("Failed to build WebAuthn")?;
 
-    tracing::info!("WebAuthn configured");
+    tracing::info!("WebAuthn configured:");
+    tracing::info!("  RP ID: {}", config.rp_id);
+    tracing::info!("  RP Display Name: {}", config.rp_display_name);
+    tracing::info!("  RP Origins: {:?}", config.rp_origins);
 
     let host_key = load_or_generate_host_key(&config.ssh_host_key_path)
         .context("Failed to load SSH host key")?;

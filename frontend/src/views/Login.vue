@@ -152,10 +152,16 @@ export default {
         status.value = 'Please tap your security key...'
 
         const publicKey = beginData.publicKey
+        console.log('Registration publicKey from server:', JSON.stringify(publicKey, null, 2))
+        console.log('Registration RP ID:', publicKey.rp?.id)
+        console.log('Registration RP Name:', publicKey.rp?.name)
+
         publicKey.challenge = base64urlToUint8Array(publicKey.challenge)
         publicKey.user.id = base64urlToUint8Array(publicKey.user.id)
 
+        console.log('About to call navigator.credentials.create()')
         const credential = await navigator.credentials.create({ publicKey })
+        console.log('Credential created successfully:', credential?.id)
 
         if (!credential) {
           throw new Error('No credential created')

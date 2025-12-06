@@ -83,6 +83,13 @@ pub async fn begin_register_handler(
         )
         .map_err(|e| anyhow::anyhow!("Failed to start registration: {}", e))?;
 
+    // Log registration challenge details to debug RP_ID issues
+    tracing::info!("Registration challenge created:");
+    tracing::info!("  RP ID: {}", ccr.public_key.rp.id);
+    tracing::info!("  RP Name: {}", ccr.public_key.rp.name);
+    tracing::info!("  User ID: {}", user_unique_id);
+    tracing::info!("  Challenge: {:?}", ccr.public_key.challenge);
+
     let state_key = user_unique_id.to_string();
     let pending = crate::types::PendingRegistration {
         reg_state,
