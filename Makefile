@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: 2025 Caution SEZC
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+-include .env
+export
+
 .PHONY: build-all build-enclave network postgres migrate run-api run-gateway run-frontend up down down-clean logs clean clean-enclave
 
 OUT_DIR := out
@@ -12,6 +15,7 @@ DB_PASSWORD := postgres
 DB_HOST := postgres
 DATABASE_URL := postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):5432/$(DB_NAME)
 DB_VOLUME := caution-postgres-data
+SSH_PORT ?= 22
 
 build-cli:
 	@echo "Building CLI binary..."
@@ -126,14 +130,14 @@ run-gateway: network
 		--name gateway \
 		--network $(NETWORK) \
 		-p 8000:8080 \
-		-p 2222:2222 \
+		-p $(SSH_PORT):$(SSH_PORT) \
 		--env-file .env \
 		-e DATABASE_URL=$(DATABASE_URL) \
-		-e SSH_PORT=2222 \
+		-e SSH_PORT=$(SSH_PORT) \
 		-e SSH_HOST_KEY_PATH=/tmp/ssh_host_ed25519_key \
 		-v $(PWD)/git-repos:/git-repos \
 		caution-gateway
-	@echo "Gateway started on port 8000 (HTTP) and 2222 (SSH)"
+	@echo "Gateway started on port 8000 (HTTP) and $(SSH_PORT) (SSH)"
 
 run-email: network
 	@docker rm -f email 2>/dev/null || true
