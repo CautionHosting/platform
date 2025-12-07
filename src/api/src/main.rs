@@ -1801,7 +1801,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("DATABASE_URL must be set");
 
     let git_hostname = std::env::var("GIT_HOSTNAME")
-        .unwrap_or_else(|_| "git.caution.dev".to_string());
+        .unwrap_or_else(|_| "alpha.caution.co".to_string());
 
     let pool = PgPoolOptions::new()
         .max_connections(5)
