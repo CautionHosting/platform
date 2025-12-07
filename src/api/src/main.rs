@@ -30,6 +30,7 @@ mod errors;
 struct AppState {
     db: PgPool,
     git_hostname: String,
+    git_ssh_port: Option<u16>,
 }
 
 #[derive(Clone)]
@@ -1077,7 +1078,10 @@ async fn create_resource(
 
     let (resource_id, resource_state, created_at) = resource;
 
-    let git_url = format!("git@{}:{}.git", state.git_hostname, resource_slug);
+    let git_url = match state.git_ssh_port {
+        Some(port) => format!("ssh://git@{}:{}/{}.git", state.git_hostname, port, resource_slug),
+        None => format!("git@{}:{}.git", state.git_hostname, resource_slug),
+    };
 
     tracing::info!("Resource created successfully: id={}, slug={}", resource_id, resource_slug);
 
@@ -1803,6 +1807,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let git_hostname = std::env::var("GIT_HOSTNAME")
         .unwrap_or_else(|_| "alpha.caution.co".to_string());
 
+    let git_ssh_port: Option<u16> = std::env::var("SSH_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok());
+
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
@@ -1813,6 +1821,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(AppState {
         db: pool,
         git_hostname,
+        git_ssh_port,
     });
 
     let onboarding_routes = Router::new()

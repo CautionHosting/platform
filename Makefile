@@ -15,7 +15,7 @@ DB_PASSWORD := postgres
 DB_HOST := postgres
 DATABASE_URL := postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):5432/$(DB_NAME)
 DB_VOLUME := caution-postgres-data
-SSH_PORT ?= 22
+SSH_PORT ?= 2222
 
 build-cli:
 	@echo "Building CLI binary..."
