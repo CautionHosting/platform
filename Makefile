@@ -110,7 +110,6 @@ run-api: network postgres
 		-e TERRAFORM_STATE_BUCKET=caution-terraform-state \
 		-e TF_PLUGIN_CACHE_DIR=/app/terraform-cache \
 		-e DATABASE_URL=$(DATABASE_URL) \
-		-e GIT_HOSTNAME=localhost \
 		--env-file .env \
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
