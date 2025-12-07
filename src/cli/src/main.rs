@@ -734,20 +734,18 @@ build: docker build -t app .
                 log_verbose(self.verbose, &format!("First attempt failed: {:?}", e));
                 log_verbose(self.verbose, &format!("Full error details: {:#?}", e));
 
-                if is_pin_related_error(&e) {
-                    match prompt_for_pin()? {
-                        Some(pin_string) => {
-                            let pin = Pin::new(&pin_string);
-                            log_verbose(self.verbose, "Retrying registration with PIN...");
-                            self.try_make_credential(options, base_url, Some(pin))
-                        },
-                        None => {
-                            log_verbose(self.verbose, "No PIN provided, retrying without PIN...");
-                            self.try_make_credential(options, base_url, None)
-                        }
+                // Retry with PIN on any error - some keys won't reveal credentials without PIN
+                println!("Authentication failed. Your security key may require a PIN.");
+                match prompt_for_pin()? {
+                    Some(pin_string) => {
+                        let pin = Pin::new(&pin_string);
+                        log_verbose(self.verbose, "Retrying registration with PIN...");
+                        self.try_make_credential(options, base_url, Some(pin))
+                    },
+                    None => {
+                        log_verbose(self.verbose, "No PIN provided, returning original error");
+                        Err(e)
                     }
-                } else {
-                    Err(e)
                 }
             }
         }
@@ -1002,20 +1000,18 @@ build: docker build -t app .
                 log_verbose(self.verbose, &format!("First attempt failed: {:?}", e));
                 log_verbose(self.verbose, &format!("Full error details: {:#?}", e));
 
-                if is_pin_related_error(&e) {
-                    match prompt_for_pin()? {
-                        Some(pin_string) => {
-                            let pin = Pin::new(&pin_string);
-                            log_verbose(self.verbose, "Retrying assertion with PIN...");
-                            self.try_get_assertion(options, base_url, Some(pin))
-                        },
-                        None => {
-                            log_verbose(self.verbose, "No PIN provided, retrying without PIN...");
-                            self.try_get_assertion(options, base_url, None)
-                        }
+                // Retry with PIN on any error - some keys won't reveal credentials without PIN
+                println!("Authentication failed. Your security key may require a PIN.");
+                match prompt_for_pin()? {
+                    Some(pin_string) => {
+                        let pin = Pin::new(&pin_string);
+                        log_verbose(self.verbose, "Retrying assertion with PIN...");
+                        self.try_get_assertion(options, base_url, Some(pin))
+                    },
+                    None => {
+                        log_verbose(self.verbose, "No PIN provided, returning original error");
+                        Err(e)
                     }
-                } else {
-                    Err(e)
                 }
             }
         }
