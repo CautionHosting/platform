@@ -83,14 +83,14 @@ fn check_dependencies(verbose: bool) -> Result<()> {
 
 async fn check_gateway_connectivity(url: &str, verbose: bool) -> Result<()> {
     log_verbose(verbose, &format!("Testing connectivity to gateway: {}", url));
-    
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()?;
-    
+
     // Just verify we can reach the gateway base URL
     log_verbose(verbose, &format!("HEAD {}", url));
-    
+
     match client.head(url).send().await {
         Ok(resp) => {
             log_verbose(verbose, &format!("Gateway reachable (status: {})", resp.status()));
@@ -111,10 +111,10 @@ async fn check_gateway_connectivity(url: &str, verbose: bool) -> Result<()> {
 struct Cli {
     #[command(subcommand)]
     command: Commands,
-    
-    #[arg(short, long, default_value = "https://beta.caution.co")]
+
+    #[arg(short, long, default_value = "https://alpha.caution.co")]
     url: String,
-    
+
     #[arg(short, long)]
     verbose: bool,
 }
@@ -343,18 +343,18 @@ impl ApiClient {
         std::env::var("FRONTEND_URL")
             .unwrap_or_else(|_| "http://localhost:3000".to_string())
     }
-    
+
     fn save_config(&self, session_id: String, expires_at: String) -> Result<()> {
         let config = Config {
             session_id,
             expires_at,
         };
-        
+
         let json = serde_json::to_string_pretty(&config)?;
         fs::write(&self.config_path, json)?;
         Ok(())
     }
-    
+
     fn load_config(&self) -> Result<Config> {
         let content = fs::read_to_string(&self.config_path)
             .context("Not logged in. Run 'login' command first")?;
@@ -879,7 +879,7 @@ build: docker build -t app .
                 loader.stop();
                 log_verbose(self.verbose, "Got registration result");
                 let register_result = result.context("Registration failed")?;
-                
+
                 let att_obj = &register_result.att_obj;
 
                 let client_data_json = serde_json::json!({
@@ -890,7 +890,7 @@ build: docker build -t app .
                 let client_data_json_bytes = serde_json::to_vec(&client_data_json)?;
 
                 let auth_data_bytes = att_obj.auth_data.to_vec();
-                
+
                 if auth_data_bytes.len() < 37 {
                     bail!("Invalid authenticator data length: {}", auth_data_bytes.len());
                 }
@@ -899,14 +899,14 @@ build: docker build -t app .
                     auth_data_bytes[53],
                     auth_data_bytes[54],
                 ]) as usize;
-                
+
                 let credential_id_start = 55;
                 let credential_id_end = credential_id_start + credential_id_len;
-                
+
                 if auth_data_bytes.len() < credential_id_end {
                     bail!("Authenticator data too short for credential ID");
                 }
-                
+
                 let credential_id = &auth_data_bytes[credential_id_start..credential_id_end];
 
                 log_verbose(self.verbose, &format!("credential_id len: {}", credential_id.len()));
@@ -976,7 +976,7 @@ build: docker build -t app .
 
         if response.status().is_success() {
             let finish_resp: LoginFinishResponse = response.json().await?;
-            
+
             self.save_config(
                 finish_resp.session_id.clone(),
                 finish_resp.expires_at.clone(),
@@ -1182,7 +1182,7 @@ build: docker build -t app .
             std::thread::sleep(Duration::from_millis(100));
         }
     }
-    
+
     async fn create_app(&self) -> Result<()> {
         println!("Creating new app...");
 
@@ -1280,7 +1280,7 @@ build: docker build -t app .
             bail!("Failed to list apps: {}", response.status())
         }
     }
-    
+
     async fn fetch_app(&self, id: i64) -> Result<App> {
         let config = self.load_config()?;
 
@@ -1338,7 +1338,7 @@ build: docker build -t app .
 
         Ok(())
     }
-    
+
     async fn destroy_app(&self, id: i64) -> Result<()> {
         let config = self.load_config()?;
 
@@ -2246,7 +2246,7 @@ build: docker build -t app .
 
         Ok(())
     }
-    
+
     async fn list_ssh_keys(&self) -> Result<()> {
         let config = self.load_config()?;
 
@@ -2324,7 +2324,7 @@ async fn run() -> Result<()> {
     log_verbose(cli.verbose, "Initializing API client...");
     let client = ApiClient::new(&cli.url, cli.verbose).context("Failed to initialize API client")?;
     log_verbose(cli.verbose, "API client ready");
-    
+
     match cli.command {
         Commands::Register { beta_code } => {
             client.register(&beta_code).await?;
@@ -2371,6 +2371,6 @@ async fn run() -> Result<()> {
             }
         }
     }
-    
+
     Ok(())
 }
