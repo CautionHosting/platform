@@ -60,11 +60,11 @@ make build-cli
               </p>
               <div class="code-block">
                 <pre>
-cd my-app
+git clone https://codeberg.org/caution/hello-world-enclave
+cd hello-world-enclave
 caution login
 # Tap your smart card
 caution init
-# Adjust Procfile as needed
 git push caution main
 caution verify --reproduce
                 </pre>
