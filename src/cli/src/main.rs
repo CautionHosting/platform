@@ -2311,8 +2311,8 @@ async fn run() -> Result<()> {
         return Err(e);
     }
 
-    match cli.command {
-        Commands::Register | Commands::Login => {
+    match &cli.command {
+        Commands::Register { .. } | Commands::Login => {
             if let Err(e) = check_gateway_connectivity(&cli.url, cli.verbose).await {
                 eprintln!("Pre-flight check failed");
                 return Err(e);
