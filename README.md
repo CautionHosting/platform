@@ -1,12 +1,22 @@
 **GitHub users:** This repo is mirrored from <a href="https://codeberg.org/caution/platform" target="_blank">Codeberg</a>. Please open issues and PRs there.
 
+**Hosted version:** A hosted deployment is available in closed alpha at <a href="https://alpha.caution.co" target="_blank">alpha.caution.co</a>. To request a registration code, <a href="mailto:info@caution.co?subject=Caution%20Alpha%20Access&body=Hi%2C%0A%0AI%20was%20reviewing%20your%20docs%20at%20https%3A%2F%2Fcodeberg.org%2Fcaution%2Fplatform%20and%20noticed%20that%20you%20are%20also%20offering%20a%20closed%20alpha%20for%20hosted%20deployments.%20Can%20I%20please%20get%20a%20code%20to%20try%20it%20out%3F%0A%0AMy%20details%3A%0AMy%20name%3A%20%0AMy%20company%20name%3A%0A%0AThank%20you">contact info@caution.co</a>.
+
 # Caution Platform
 
 > **Warning: Alpha Software**
 >
 > This software is in early alpha. It may introduce backwards-incompatible changes, has not undergone security audits, and is not production ready. Use at your own risk.
 
-This software is a cloud hosting management platform that builds and deploys reproducible AWS Nitro Enclaves based on <a href="https://git.distrust.co/public/enclaveos" target="_blank">EnclaveOS</a> with cryptographic attestation.
+This software is a cloud hosting management platform that builds and deploys [verifiable](#verifiable-enclaves) secure enclaves using the AWS Nitro System, based on <a href="https://git.distrust.co/public/enclaveos" target="_blank">EnclaveOS</a>.
+
+### Verifiable Enclaves
+
+An enclave is **verifiable** when you can independently confirm that the code running inside it matches the source code you expect. This is achieved through:
+
+1. **Reproducible builds** — Reproducible builds force software to be bit-for-bit identical when built from the same source code, and eliminate certain categories of supply chain attacks. It allows for integrity verification, without which software is opaque and difficult to verify.
+2. **Cryptographic attestation** — The enclave hardware generates a signed attestation document containing measurements (PCR hashes) of the running code.
+3. **Independent verification** — You can compare your locally-built measurements against the attestation from a running enclave to prove they match.
 
 ## Getting Started
 
@@ -53,7 +63,7 @@ make up
 2. Add an SSH key (can be done in browser as well):
 
    ```bash
-   caution keys add ~/.ssh/id_ed25519.pub
+   caution ssh-keys add --title <name_of_key) --key <pub_key_string>
    ```
 
 3. Initialize a project within a Dockerized repo:
