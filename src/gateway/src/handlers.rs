@@ -61,8 +61,7 @@ pub async fn begin_register_handler(
 ) -> Result<Json<RegisterBeginResponse>, AppError> {
     tracing::debug!("Registration started with beta code");
 
-    // Validate and redeem the beta code first
-    let beta_code_id = db::redeem_beta_code(&state.db, &req.beta_code)
+    let beta_code_id = db::validate_beta_code(&state.db, &req.beta_code)
         .await?
         .ok_or_else(|| anyhow::anyhow!("Invalid or expired beta code"))?;
 
@@ -83,7 +82,6 @@ pub async fn begin_register_handler(
         )
         .map_err(|e| anyhow::anyhow!("Failed to start registration: {}", e))?;
 
-    // Log registration challenge details to debug RP_ID issues
     tracing::info!("Registration challenge created:");
     tracing::info!("  RP ID: {}", ccr.public_key.rp.id);
     tracing::info!("  RP Name: {}", ccr.public_key.rp.name);
@@ -142,7 +140,11 @@ pub async fn finish_register_handler(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create user: {}", e))?;
 
-    tracing::debug!("User registered");
+    db::redeem_beta_code(&state.db, pending.beta_code_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to redeem beta code: {}", e))?;
+
+    tracing::debug!("User registered and beta code redeemed");
 
     let passkey_json = serde_json::to_vec(&passkey)
         .map_err(|e| anyhow::anyhow!("Failed to serialize passkey: {}", e))?;

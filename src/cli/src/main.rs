@@ -22,7 +22,7 @@ use authenticator::{
     crypto::COSEAlgorithm,
     errors::AuthenticatorError,
     statecallback::StateCallback,
-    Pin, RegisterResult, SignResult, StatusUpdate,
+    Pin, RegisterResult, SignResult, StatusUpdate, StatusPinUv,
 };
 use sha2::{Sha256, Digest};
 use enclave_builder::{BuildConfig, build_user_image};
@@ -885,6 +885,25 @@ build: docker build -t app .
                         println!("Selected: {}", users[selection].name.as_deref().unwrap_or("Unknown"));
                         sender.send(Some(selection)).context("Failed to send selection")?;
                     }
+                    StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender)) => {
+                        loader.stop();
+                        log_verbose(self.verbose, "PIN required by authenticator");
+                        match prompt_for_pin()? {
+                            Some(pin_string) => {
+                                let pin = Pin::new(&pin_string);
+                                sender.send(pin).context("Failed to send PIN")?;
+                                loader = Loader::new("Tap your security key to continue", LoaderStyle::KeyTap);
+                            }
+                            None => {
+                                bail!("PIN is required but none provided");
+                            }
+                        }
+                    }
+                    StatusUpdate::PinUvError(e) => {
+                        loader.stop();
+                        log_verbose(self.verbose, &format!("PIN/UV error: {:?}", e));
+                        bail!("PIN/UV error: {:?}", e);
+                    }
                     _ => {
                         log_verbose(self.verbose, &format!("Authenticator status: {:?}", status));
                     }
@@ -1147,6 +1166,25 @@ build: docker build -t app .
 
                         println!("Selected: {}", users[selection].name.as_deref().unwrap_or("Unknown"));
                         sender.send(Some(selection)).context("Failed to send selection")?;
+                    }
+                    StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender)) => {
+                        loader.stop();
+                        log_verbose(self.verbose, "PIN required by authenticator");
+                        match prompt_for_pin()? {
+                            Some(pin_string) => {
+                                let pin = Pin::new(&pin_string);
+                                sender.send(pin).context("Failed to send PIN")?;
+                                loader = Loader::new("Tap your security key to continue", LoaderStyle::KeyTap);
+                            }
+                            None => {
+                                bail!("PIN is required but none provided");
+                            }
+                        }
+                    }
+                    StatusUpdate::PinUvError(e) => {
+                        loader.stop();
+                        log_verbose(self.verbose, &format!("PIN/UV error: {:?}", e));
+                        bail!("PIN/UV error: {:?}", e);
                     }
                     _ => {
                         log_verbose(self.verbose, &format!("Authenticator status: {:?}", status));

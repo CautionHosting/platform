@@ -32,22 +32,34 @@ pub async fn create_user(pool: &PgPool, fido2_user_handle: &[u8], beta_code_id: 
     Ok(user_id)
 }
 
-/// Validates and redeems a beta code. Returns the code ID if valid, None if invalid/already used.
-pub async fn redeem_beta_code(pool: &PgPool, code: &str) -> Result<Option<i64>> {
+pub async fn validate_beta_code(pool: &PgPool, code: &str) -> Result<Option<i64>> {
     let code_id: Option<i64> = sqlx::query_scalar(
-        "UPDATE beta_codes
-         SET used_at = NOW()
+        "SELECT id FROM beta_codes
          WHERE code = $1
            AND used_at IS NULL
-           AND (expires_at IS NULL OR expires_at > NOW())
-         RETURNING id"
+           AND (expires_at IS NULL OR expires_at > NOW())"
     )
     .bind(code)
     .fetch_optional(pool)
     .await
-    .context("Failed to redeem beta code")?;
+    .context("Failed to validate beta code")?;
 
     Ok(code_id)
+}
+
+pub async fn redeem_beta_code(pool: &PgPool, code_id: i64) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE beta_codes
+         SET used_at = NOW()
+         WHERE id = $1
+           AND used_at IS NULL"
+    )
+    .bind(code_id)
+    .execute(pool)
+    .await
+    .context("Failed to redeem beta code")?;
+
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn get_user_id_by_fido2_handle(pool: &PgPool, fido2_user_handle: &[u8]) -> Result<i64> {
