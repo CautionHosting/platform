@@ -462,6 +462,18 @@ impl ApiClient {
         None
     }
 
+    fn read_procfile_ports(&self) -> Vec<u16> {
+        match self.read_procfile_field("ports") {
+            Some(ports_str) => {
+                ports_str
+                    .split(',')
+                    .filter_map(|s| s.trim().parse::<u16>().ok())
+                    .collect()
+            }
+            None => vec![8080], // Default port
+        }
+    }
+
     fn set_git_remote(&self, git_url: &str) -> Result<()> {
         let check_output = Command::new("git")
             .args(&["remote", "get-url", "caution"])
@@ -734,18 +746,24 @@ build: docker build -t app .
                 log_verbose(self.verbose, &format!("First attempt failed: {:?}", e));
                 log_verbose(self.verbose, &format!("Full error details: {:#?}", e));
 
-                // Retry with PIN on any error - some keys won't reveal credentials without PIN
-                println!("Authentication failed. Your security key may require a PIN.");
-                match prompt_for_pin()? {
-                    Some(pin_string) => {
-                        let pin = Pin::new(&pin_string);
-                        log_verbose(self.verbose, "Retrying registration with PIN...");
-                        self.try_make_credential(options, base_url, Some(pin))
-                    },
-                    None => {
-                        log_verbose(self.verbose, "No PIN provided, returning original error");
-                        Err(e)
+                // Only ask for PIN if the error is PIN-related
+                if is_pin_related_error(&e) {
+                    println!("Your security key requires a PIN.");
+                    match prompt_for_pin()? {
+                        Some(pin_string) => {
+                            let pin = Pin::new(&pin_string);
+                            log_verbose(self.verbose, "Retrying registration with PIN...");
+                            self.try_make_credential(options, base_url, Some(pin))
+                        },
+                        None => {
+                            log_verbose(self.verbose, "No PIN provided, returning original error");
+                            Err(e)
+                        }
                     }
+                } else {
+                    // Not a PIN error, return the original error
+                    log_verbose(self.verbose, "Error is not PIN-related, not prompting for PIN");
+                    Err(e)
                 }
             }
         }
@@ -1000,18 +1018,24 @@ build: docker build -t app .
                 log_verbose(self.verbose, &format!("First attempt failed: {:?}", e));
                 log_verbose(self.verbose, &format!("Full error details: {:#?}", e));
 
-                // Retry with PIN on any error - some keys won't reveal credentials without PIN
-                println!("Authentication failed. Your security key may require a PIN.");
-                match prompt_for_pin()? {
-                    Some(pin_string) => {
-                        let pin = Pin::new(&pin_string);
-                        log_verbose(self.verbose, "Retrying assertion with PIN...");
-                        self.try_get_assertion(options, base_url, Some(pin))
-                    },
-                    None => {
-                        log_verbose(self.verbose, "No PIN provided, returning original error");
-                        Err(e)
+                // Only ask for PIN if the error is PIN-related
+                if is_pin_related_error(&e) {
+                    println!("Your security key requires a PIN.");
+                    match prompt_for_pin()? {
+                        Some(pin_string) => {
+                            let pin = Pin::new(&pin_string);
+                            log_verbose(self.verbose, "Retrying assertion with PIN...");
+                            self.try_get_assertion(options, base_url, Some(pin))
+                        },
+                        None => {
+                            log_verbose(self.verbose, "No PIN provided, returning original error");
+                            Err(e)
+                        }
                     }
+                } else {
+                    // Not a PIN error, return the original error
+                    log_verbose(self.verbose, "Error is not PIN-related, not prompting for PIN");
+                    Err(e)
                 }
             }
         }
@@ -1547,8 +1571,11 @@ build: docker build -t app .
             println!("Using app source URL from Procfile: {}", url);
         }
 
+        let ports = self.read_procfile_ports();
+        println!("Using ports: {:?}", ports);
+
         let deployment = builder
-            .build_enclave_auto(&user_image, &binary_path, run_command, app_source_url, None, None, None, None)
+            .build_enclave_auto(&user_image, &binary_path, run_command, app_source_url, None, None, None, None, &ports)
             .await
             .context("Failed to build enclave")?;
 
@@ -1738,7 +1765,10 @@ build: docker build -t app .
             (binary.map(|b| vec![b]), run_cmd, source_url)
         };
 
-        let deployment = builder.build_enclave(&user_image, specific_files, run_command, app_source_url, None, None, None, external_manifest).await
+        let ports = self.read_procfile_ports();
+        println!("Using ports: {:?}", ports);
+
+        let deployment = builder.build_enclave(&user_image, specific_files, run_command, app_source_url, None, None, None, external_manifest, &ports).await
             .context("Failed to build enclave locally")?;
 
         println!("Enclave built successfully!");
