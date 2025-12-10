@@ -63,7 +63,7 @@ make up
 2. Add an SSH key (can be done in browser as well):
 
    ```bash
-   caution ssh-keys add --title <name_of_key) --key <pub_key_string>
+   caution ssh-keys add --title <name_of_key> --key <pub_key_string>
    ```
 
 3. Initialize a project within a Dockerized repo:
