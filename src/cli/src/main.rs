@@ -1613,7 +1613,7 @@ build: docker build -t app .
         println!("Using ports: {:?}", ports);
 
         let deployment = builder
-            .build_enclave_auto(&user_image, &binary_path, run_command, app_source_url, None, None, None, None, &ports)
+            .build_enclave_auto(&user_image, &binary_path, run_command, app_source_url, None, None, None, None)
             .await
             .context("Failed to build enclave")?;
 
@@ -1806,7 +1806,7 @@ build: docker build -t app .
         let ports = self.read_procfile_ports();
         println!("Using ports: {:?}", ports);
 
-        let deployment = builder.build_enclave(&user_image, specific_files, run_command, app_source_url, None, None, None, external_manifest, &ports).await
+        let deployment = builder.build_enclave(&user_image, specific_files, run_command, app_source_url, None, None, None, external_manifest).await
             .context("Failed to build enclave locally")?;
 
         println!("Enclave built successfully!");
