@@ -148,6 +148,9 @@ pub struct EnclaveConfig {
 
     #[serde(default)]
     pub debug: bool,
+
+    #[serde(default)]
+    pub ports: Vec<u16>,
 }
 
 fn default_memory_mb() -> u32 {
@@ -166,6 +169,7 @@ impl Default for EnclaveConfig {
             memory_mb: 512,
             cpus: 2,
             debug: false,
+            ports: Vec::new(),
         }
     }
 }
@@ -206,6 +210,9 @@ pub struct BuildConfig {
     pub debug: bool,
 
     pub no_cache: bool,
+
+    #[serde(default)]
+    pub ports: Vec<u16>,
 }
 
 impl Default for BuildConfig {
@@ -223,6 +230,7 @@ impl Default for BuildConfig {
             cpus: 2,
             debug: false,
             no_cache: false,
+            ports: Vec::new(),
         }
     }
 }
@@ -241,6 +249,7 @@ impl BuildConfig {
         let mut cpus = None;
         let mut debug = None;
         let mut no_cache = None;
+        let mut ports: Vec<u16> = Vec::new();
 
         for line in content.lines() {
             let line = line.trim();
@@ -313,6 +322,40 @@ impl BuildConfig {
                     "no_cache" | "nocache" => {
                         no_cache = Some(value.to_lowercase() == "true");
                     }
+                    "ports" => {
+                        ports = value
+                            .split(',')
+                            .filter_map(|s| {
+                                let trimmed = s.trim();
+                                if trimmed.is_empty() {
+                                    return None;
+                                }
+                                match trimmed.parse::<u16>() {
+                                    Ok(port) if port > 0 => {
+                                        if port == 5000 {
+                                            tracing::warn!("Port 5000 is reserved for attestation service, ignoring");
+                                            None
+                                        } else {
+                                            Some(port)
+                                        }
+                                    }
+                                    Ok(_) => {
+                                        tracing::warn!("Invalid port 0 in Procfile, ignoring");
+                                        None
+                                    }
+                                    Err(_) => {
+                                        tracing::warn!("Invalid port '{}' in Procfile, ignoring", trimmed);
+                                        None
+                                    }
+                                }
+                            })
+                            .collect();
+                        ports.sort();
+                        ports.dedup();
+                        if !ports.is_empty() {
+                            tracing::info!("Parsed ports from Procfile: {:?}", ports);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -333,6 +376,7 @@ impl BuildConfig {
             cpus: cpus.unwrap_or(2),
             debug: debug.unwrap_or(false),
             no_cache: no_cache.unwrap_or(false),
+            ports,
         })
     }
 }

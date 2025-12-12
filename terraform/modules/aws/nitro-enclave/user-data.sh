@@ -122,25 +122,10 @@ TimeoutStartSec=300
 WantedBy=multi-user.target
 EOF
 
-cat > /etc/systemd/system/vsock-proxy-app.service <<'EOF'
+# Attestation port (always 5000)
+cat > /etc/systemd/system/vsock-proxy-5000.service <<'EOF'
 [Unit]
-Description=VSock Proxy for Application Port
-After=nitro-enclave.service
-Requires=nitro-enclave.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/socat TCP-LISTEN:8080,reuseaddr,fork VSOCK-CONNECT:16:8080
-Restart=always
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-cat > /etc/systemd/system/vsock-proxy-attestation.service <<'EOF'
-[Unit]
-Description=VSock Proxy for Attestation Port
+Description=VSock Proxy for Attestation Port 5000
 After=nitro-enclave.service
 Requires=nitro-enclave.service
 
@@ -154,14 +139,42 @@ RestartSec=5s
 WantedBy=multi-user.target
 EOF
 
+# Dynamic user ports
+%{ for port in ports ~}
+cat > /etc/systemd/system/vsock-proxy-${port}.service <<EOF
+[Unit]
+Description=VSock Proxy for Port ${port}
+After=nitro-enclave.service
+Requires=nitro-enclave.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat TCP-LISTEN:${port},reuseaddr,fork VSOCK-CONNECT:16:${port}
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+%{ endfor ~}
+
 systemctl daemon-reload
 systemctl enable nitro-enclave.service
-systemctl enable vsock-proxy-app.service
-systemctl enable vsock-proxy-attestation.service
+systemctl enable vsock-proxy-5000.service
+%{ for port in ports ~}
+systemctl enable vsock-proxy-${port}.service
+%{ endfor ~}
 
 systemctl start nitro-enclave.service
-systemctl start vsock-proxy-app.service
-systemctl start vsock-proxy-attestation.service
+
+# Wait for enclave to boot and start internal services before starting host-side proxies
+echo "Waiting for enclave to boot before starting host-side proxies..."
+sleep 15
+
+systemctl start vsock-proxy-5000.service
+%{ for port in ports ~}
+systemctl start vsock-proxy-${port}.service
+%{ endfor ~}
 
 echo "=== Nitro Enclave Setup Complete ==="
 echo "Finished at $(date)"

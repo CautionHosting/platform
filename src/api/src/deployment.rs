@@ -53,6 +53,7 @@ pub struct NitroDeploymentRequest {
     pub memory_mb: u32,
     pub cpu_count: u32,
     pub debug_mode: bool,
+    pub ports: Vec<u16>,
 }
 
 pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<DeploymentResult> {
@@ -373,23 +374,40 @@ fn run_tofu_init(work_dir: &Path) -> Result<()> {
 }
 
 fn run_tofu_apply(work_dir: &Path, resource_name: &str) -> Result<()> {
+    run_tofu_apply_with_vars(work_dir, resource_name, &[])
+}
+
+fn run_tofu_apply_with_vars(work_dir: &Path, resource_name: &str, ports: &[u16]) -> Result<()> {
     tracing::info!("Running tofu apply for {}...", resource_name);
-    
+
+    let mut args = vec!["apply", "-auto-approve", "-no-color"];
+
+    let ports_var = if !ports.is_empty() {
+        let ports_str: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
+        format!("ports=[{}]", ports_str.join(","))
+    } else {
+        "ports=[]".to_string()
+    };
+
+    args.push("-var");
+    let ports_var_ref: &str = &ports_var;
+
     let output = Command::new("tofu")
-        .args(&["apply", "-auto-approve", "-no-color"])
+        .args(&args)
+        .arg(ports_var_ref)
         .current_dir(work_dir)
         .output()
         .context("Failed to execute tofu apply")?;
-    
+
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::error!("Tofu apply failed: {}", stderr);
         bail!("Tofu apply failed: {}", stderr);
     }
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     tracing::debug!("Tofu apply output: {}", stdout);
-    
+
     Ok(())
 }
 
@@ -511,7 +529,7 @@ async fn provision_nitro_enclave(
     run_tofu_init(work_dir)
         .context("Failed to run tofu init")?;
 
-    run_tofu_apply(work_dir, &request.resource_name)
+    run_tofu_apply_with_vars(work_dir, &request.resource_name, &request.ports)
         .context("Failed to run tofu apply")?;
 
     let result = get_tofu_outputs(work_dir)
@@ -747,20 +765,23 @@ resource "aws_route_table_association" "enclave" {{
   route_table_id = aws_route_table.enclave.id
 }}
 
+# Local variable for ports (attestation + user ports)
+locals {{
+  all_ports = concat([5000], var.ports)
+}}
+
+variable "ports" {{
+  type    = list(number)
+  default = []
+}}
+
 # Security group for the enclave
 resource "aws_security_group" "enclave" {{
   name_prefix = "enclave-{resource_name}-"
   description = "Security group for {resource_name} Nitro Enclave"
   vpc_id      = aws_vpc.enclave.id
 
-  ingress {{
-    from_port   = 8080
-    to_port     = 8080
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow app port"
-  }}
-
+  # Attestation port (always open)
   ingress {{
     from_port   = 5000
     to_port     = 5000
@@ -769,12 +790,25 @@ resource "aws_security_group" "enclave" {{
     description = "Allow attestation port"
   }}
 
+  # SSH for debugging
   ingress {{
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
     description = "Allow SSH for debugging"
+  }}
+
+  # Dynamic user ports
+  dynamic "ingress" {{
+    for_each = var.ports
+    content {{
+      from_port   = ingress.value
+      to_port     = ingress.value
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+      description = "Allow user port ${{ingress.value}}"
+    }}
   }}
 
   egress {{
@@ -823,7 +857,8 @@ resource "aws_instance" "enclave" {{
     eif_s3_path = "{eif_s3_path}"
     memory_mb   = {memory_mb}
     cpu_count   = {cpu_count}
-    debug_mode  = {debug_mode}
+    debug_mode  = "{debug_mode}"
+    ports       = var.ports
   }}))
 
   tags = {{

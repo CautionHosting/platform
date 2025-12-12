@@ -16,6 +16,7 @@ pub async fn stage_eif_components(
     work_dir: &Path,
     run_command: Option<String>,
     manifest: Option<EnclaveManifest>,
+    ports: &[u16],
 ) -> Result<PathBuf> {
     let stage_dir = work_dir.join("eif-stage");
     fs::create_dir_all(&stage_dir).await?;
@@ -43,7 +44,7 @@ pub async fn stage_eif_components(
         tracing::info!("Wrote manifest to: {}", manifest_path.display());
     }
 
-    generate_run_sh(&stage_dir, run_command).await?;
+    generate_run_sh(&stage_dir, run_command, ports).await?;
 
     generate_containerfile_eif(&stage_dir).await?;
 
@@ -51,7 +52,7 @@ pub async fn stage_eif_components(
     Ok(stage_dir)
 }
 
-async fn generate_run_sh(stage_dir: &Path, run_command: Option<String>) -> Result<()> {
+async fn generate_run_sh(stage_dir: &Path, run_command: Option<String>, ports: &[u16]) -> Result<()> {
     let user_cmd = if let Some(cmd) = run_command {
         let escaped_cmd = cmd.replace("'", "'\\''");
         format!("exec sh -c '{}'", escaped_cmd)
@@ -59,6 +60,12 @@ async fn generate_run_sh(stage_dir: &Path, run_command: Option<String>) -> Resul
         r#"echo "ERROR: No run command specified in Procfile"
 exit 1"#.to_string()
     };
+
+    let socat_proxies: String = ports
+        .iter()
+        .map(|port| format!("/bin/socat VSOCK-LISTEN:{},reuseaddr,fork TCP:localhost:{} &", port, port))
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let run_sh_content = format!(r#"#!/bin/sh
 set -e
@@ -112,8 +119,10 @@ echo "Starting Attestation Service on port 5000..."
 /attestation-service &
 
 echo "Starting VSOCK-to-TCP proxies..."
+# Attestation service proxy (always on port 5000)
 /bin/socat VSOCK-LISTEN:5000,reuseaddr,fork TCP:localhost:5000 &
-/bin/socat VSOCK-LISTEN:8080,reuseaddr,fork TCP:localhost:8080 &
+# User application proxies
+{socat_proxies}
 
 /bin/busybox sleep 2
 
@@ -297,6 +306,7 @@ pub async fn build_eif_from_filesystems(
     work_dir: &Path,
     run_command: Option<String>,
     manifest: Option<EnclaveManifest>,
+    ports: &[u16],
 ) -> Result<EifFile> {
     tracing::info!("Building EIF using transparent Containerfile approach");
 
@@ -304,7 +314,7 @@ pub async fn build_eif_from_filesystems(
         fs::create_dir_all(parent).await?;
     }
 
-    let stage_dir = stage_eif_components(user_fs_path, enclave_source_path, work_dir, run_command, manifest).await?;
+    let stage_dir = stage_eif_components(user_fs_path, enclave_source_path, work_dir, run_command, manifest, ports).await?;
 
     tracing::info!("Building EIF using Docker and Containerfile.eif");
     let output_dir = stage_dir.join("output");

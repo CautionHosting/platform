@@ -1570,6 +1570,7 @@ async fn deploy_handler(
         memory_mb: build_config.memory_mb,
         cpus: build_config.cpus,
         debug: build_config.debug,
+        ports: build_config.ports.clone(),
     };
 
     let prebuilt_eif_path = format!("{}/nitro.eif", work_dir);
@@ -1650,7 +1651,8 @@ async fn deploy_handler(
                     Some(req.branch.clone()),
                     Some(commit_sha.clone()),
                     build_config.metadata.clone(),
-                    None
+                    None,
+                    &enclave_config.ports,
                 )
                 .await
                 .map_err(|e| {
@@ -1668,7 +1670,8 @@ async fn deploy_handler(
                     Some(req.branch.clone()),
                     Some(commit_sha.clone()),
                     build_config.metadata.clone(),
-                    None
+                    None,
+                    &enclave_config.ports,
                 )
                 .await
                 .map_err(|e| {
@@ -1737,6 +1740,7 @@ async fn deploy_handler(
         memory_mb: enclave_config.memory_mb,
         cpu_count: enclave_config.cpus,
         debug_mode: enclave_config.debug,
+        ports: enclave_config.ports.clone(),
     };
 
     let deployment_result = match deployment::deploy_nitro_enclave(nitro_request).await {
