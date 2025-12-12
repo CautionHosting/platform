@@ -1297,38 +1297,6 @@ async fn deploy_handler(
     })?;
 
     tracing::info!("Existing resource query result: {:?}", existing_resource.as_ref().map(|(id, _)| id));
-
-    let (resource_id, build_command) = if let Some((id, config_opt)) = existing_resource {
-        let config = config_opt.unwrap_or_else(|| serde_json::json!({}));
-        let build_cmd = config.get("cmd")
-            .and_then(|v| v.as_str())
-            .unwrap_or("docker build -t app .")
-            .to_string();
-        tracing::info!("Using existing resource {} with build command: {}", id, build_cmd);
-        (id, build_cmd)
-    } else {
-        let provider_resource_id = Uuid::new_v4().to_string();
-        let id: i64 = sqlx::query_scalar(
-            "INSERT INTO compute_resources
-             (organization_id, provider_account_id, resource_type_id, provider_resource_id,
-              resource_name, state, region, created_by, deployed_at)
-             VALUES ($1, $2, $3, $4, $5, $6, 'us-west-2', $7, NOW())
-             RETURNING id"
-        )
-        .bind(req.org_id)
-        .bind(provider_account_id)
-        .bind(resource_type_id)
-        .bind(&provider_resource_id)
-        .bind(&req.app_name)
-        .bind(types::ResourceState::Pending)
-        .bind(auth.user_id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create resource: {}", e)))?;
-        (id, "docker build -t app .".to_string())
-    };
-
-    tracing::info!("Build command for {}: {}", req.app_name, build_command);
     tracing::info!("Deploying branch: {}", req.branch);
 
     let commit_sha = match get_commit_sha(&req.app_name, &req.branch).await {
@@ -1375,6 +1343,39 @@ async fn deploy_handler(
             "No Procfile found in repository root. Please add a Procfile with 'containerfile', 'binary', and 'run' fields.".to_string(),
         ));
     };
+
+    // Create or get existing resource - only after validation passes
+    let (resource_id, build_command) = if let Some((id, config_opt)) = existing_resource {
+        let config = config_opt.unwrap_or_else(|| serde_json::json!({}));
+        let build_cmd = config.get("cmd")
+            .and_then(|v| v.as_str())
+            .unwrap_or("docker build -t app .")
+            .to_string();
+        tracing::info!("Using existing resource {} with build command: {}", id, build_cmd);
+        (id, build_cmd)
+    } else {
+        let provider_resource_id = Uuid::new_v4().to_string();
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO compute_resources
+             (organization_id, provider_account_id, resource_type_id, provider_resource_id,
+              resource_name, state, region, created_by, deployed_at)
+             VALUES ($1, $2, $3, $4, $5, $6, 'us-west-2', $7, NOW())
+             RETURNING id"
+        )
+        .bind(req.org_id)
+        .bind(provider_account_id)
+        .bind(resource_type_id)
+        .bind(&provider_resource_id)
+        .bind(&req.app_name)
+        .bind(types::ResourceState::Pending)
+        .bind(auth.user_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create resource: {}", e)))?;
+        (id, "docker build -t app .".to_string())
+    };
+
+    tracing::info!("Build command for {}: {}", req.app_name, build_command);
 
     let home_dir = dirs::home_dir()
         .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to determine home directory".to_string()))?;
