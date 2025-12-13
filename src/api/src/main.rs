@@ -31,6 +31,7 @@ struct AppState {
     db: PgPool,
     git_hostname: String,
     git_ssh_port: Option<u16>,
+    data_dir: String,
 }
 
 #[derive(Clone)]
@@ -638,10 +639,10 @@ async fn remove_member(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn get_commit_sha(app_name: &str, branch: &str) -> Result<String, Box<dyn std::error::Error>> {
+async fn get_commit_sha(app_name: &str, branch: &str, data_dir: &str) -> Result<String, Box<dyn std::error::Error>> {
     use tokio::process::Command;
 
-    let repo_path = format!("/git-repos/{}.git", app_name);
+    let repo_path = format!("{}/git-repos/{}.git", data_dir, app_name);
     let ref_spec = format!("refs/heads/{}", branch);
 
     let output = Command::new("git")
@@ -663,16 +664,17 @@ async fn build_image_from_repo(
     build_config: &types::BuildConfig,
     image_name: &str,
     branch: &str,
+    data_dir: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     use tokio::fs;
     use tokio::process::Command;
 
-    let repo_path = format!("/git-repos/{}.git", app_name);
-    let work_dir = format!("/app/build-cache/{}-build", app_name);
+    let repo_path = format!("{}/git-repos/{}.git", data_dir, app_name);
+    let work_dir = format!("{}/build/{}-build", data_dir, app_name);
 
     tracing::info!("Cloning repository from {} to {} (branch: {})", repo_path, work_dir, branch);
 
-    fs::create_dir_all("/app/build-cache").await?;
+    fs::create_dir_all(format!("{}/build", data_dir)).await?;
 
     let _ = fs::remove_dir_all(&work_dir).await;
 
@@ -761,11 +763,12 @@ async fn create_ami_from_image(
     image_tarball: &str,
     aws_region: &str,
     _role_arn: Option<&str>,
+    data_dir: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     use tokio::fs;
     use tokio::process::Command;
 
-    let packer_dir = format!("/app/build-cache/{}-packer", app_name);
+    let packer_dir = format!("{}/build/{}-packer", data_dir, app_name);
     let _ = fs::remove_dir_all(&packer_dir).await;
     fs::create_dir_all(&packer_dir).await?;
 
@@ -1299,7 +1302,7 @@ async fn deploy_handler(
     tracing::info!("Existing resource query result: {:?}", existing_resource.as_ref().map(|(id, _)| id));
     tracing::info!("Deploying branch: {}", req.branch);
 
-    let commit_sha = match get_commit_sha(&req.app_name, &req.branch).await {
+    let commit_sha = match get_commit_sha(&req.app_name, &req.branch, &state.data_dir).await {
         Ok(sha) => {
             tracing::info!("Latest commit on branch '{}': {}", req.branch, sha);
             sha
@@ -1310,7 +1313,7 @@ async fn deploy_handler(
         }
     };
 
-    let git_dir = format!("/git-repos/{}.git", req.app_name);
+    let git_dir = format!("{}/git-repos/{}.git", state.data_dir, req.app_name);
     let procfile_output = Command::new("git")
         .args(&["--git-dir", &git_dir, "show", &format!("{}:Procfile", commit_sha)])
         .output()
@@ -1377,10 +1380,8 @@ async fn deploy_handler(
 
     tracing::info!("Build command for {}: {}", req.app_name, build_command);
 
-    let home_dir = dirs::home_dir()
-        .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "Failed to determine home directory".to_string()))?;
-    let cache_dir = home_dir.join(".cache/caution/build").join(req.org_id.to_string());
-    let cache_dir_str = cache_dir.to_string_lossy().to_string();
+    let cache_dir = format!("{}/build/{}", state.data_dir, req.org_id);
+    let cache_dir_str = cache_dir.clone();
     tokio::fs::create_dir_all(&cache_dir).await.map_err(|e| {
         tracing::error!("Failed to create cache directory: {:?}", e);
         (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create cache directory: {}", e))
@@ -1471,7 +1472,7 @@ async fn deploy_handler(
     } else {
         tracing::info!("Cache MISS: Building Docker image for commit {}", commit_sha);
 
-        let build_commit_sha = match build_image_from_repo(&req.app_name, &build_config, &image_name, &req.branch).await {
+        let build_commit_sha = match build_image_from_repo(&req.app_name, &build_config, &image_name, &req.branch, &state.data_dir).await {
             Ok(sha) => {
                 tracing::info!("Successfully built image: {} (commit: {})", image_name, sha);
                 sha
@@ -1538,7 +1539,7 @@ async fn deploy_handler(
         "Dockerfile".to_string()
     };
 
-    let work_dir = format!("/app/build-cache/build-{}-{}", req.app_name, commit_sha);
+    let work_dir = format!("{}/build/work-{}-{}", state.data_dir, req.app_name, commit_sha);
     tokio::fs::create_dir_all(&work_dir).await.map_err(|e| {
         tracing::error!("Failed to create work directory: {}", e);
         (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create work directory: {}", e))
@@ -1816,6 +1817,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|p| p.parse().ok());
 
+    let data_dir = std::env::var("CAUTION_DATA_DIR")
+        .unwrap_or_else(|_| "/var/cache/caution".to_string());
+
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
@@ -1827,6 +1831,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db: pool,
         git_hostname,
         git_ssh_port,
+        data_dir,
     });
 
     let onboarding_routes = Router::new()

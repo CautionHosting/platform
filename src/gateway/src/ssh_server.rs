@@ -18,13 +18,15 @@ use uuid::Uuid;
 pub struct SshServer {
     pub pool: PgPool,
     pub api_service_url: String,
+    pub data_dir: String,
 }
 
 impl SshServer {
-    pub fn new(pool: PgPool, api_service_url: String) -> Self {
+    pub fn new(pool: PgPool, api_service_url: String, data_dir: String) -> Self {
         Self {
             pool,
             api_service_url,
+            data_dir,
         }
     }
 }
@@ -32,6 +34,7 @@ impl SshServer {
 pub struct SshSession {
     pool: PgPool,
     api_service_url: String,
+    data_dir: String,
     user_id: Option<i64>,
     org_id: Option<Uuid>,
     git_processes: Arc<Mutex<HashMap<ChannelId, Child>>>,
@@ -45,6 +48,7 @@ impl russh::server::Server for SshServer {
         SshSession {
             pool: self.pool.clone(),
             api_service_url: self.api_service_url.clone(),
+            data_dir: self.data_dir.clone(),
             user_id: None,
             org_id: None,
             git_processes: Arc::new(Mutex::new(HashMap::new())),
@@ -138,6 +142,7 @@ impl russh::server::Handler for SshSession {
             match handle_git_push(
                 &self.pool,
                 &self.api_service_url,
+                &self.data_dir,
                 user_id,
                 org_id,
                 &app_name,
@@ -306,6 +311,7 @@ async fn get_user_org(pool: &PgPool, user_id: i64) -> Result<Option<Uuid>> {
 async fn handle_git_push(
     pool: &PgPool,
     api_service_url: &str,
+    data_dir: &str,
     user_id: i64,
     org_id: Uuid,
     app_name: &str,
@@ -335,7 +341,7 @@ async fn handle_git_push(
         }
     }
 
-    let repo_path = format!("/git-repos/{}.git", app_name);
+    let repo_path = format!("{}/git-repos/{}.git", data_dir, app_name);
     ensure_git_repo_exists(&repo_path)?;
 
     tracing::info!("Spawning git receive-pack for {}", repo_path);
@@ -566,6 +572,7 @@ async fn handle_git_push(
 pub async fn run_ssh_server(
     pool: PgPool,
     api_service_url: String,
+    data_dir: String,
     host_key: KeyPair,
     bind_addr: &str,
 ) -> Result<()> {
@@ -576,8 +583,8 @@ pub async fn run_ssh_server(
         keys: vec![host_key],
         ..Default::default()
     });
-    
-    let mut server = SshServer::new(pool, api_service_url);
+
+    let mut server = SshServer::new(pool, api_service_url, data_dir);
     
     tracing::info!("Starting SSH server on {}", bind_addr);
     

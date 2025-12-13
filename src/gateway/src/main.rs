@@ -193,9 +193,10 @@ async fn main() -> Result<()> {
 
     let ssh_pool = pool.clone();
     let ssh_api_url = config.api_service_url.clone();
+    let ssh_data_dir = config.data_dir.clone();
     let ssh_bind_addr = format!("0.0.0.0:{}", config.ssh_port);
     tokio::spawn(async move {
-        if let Err(e) = ssh_server::run_ssh_server(ssh_pool, ssh_api_url, host_key, &ssh_bind_addr).await {
+        if let Err(e) = ssh_server::run_ssh_server(ssh_pool, ssh_api_url, ssh_data_dir, host_key, &ssh_bind_addr).await {
             tracing::error!("SSH server error: {:?}", e);
         }
     });

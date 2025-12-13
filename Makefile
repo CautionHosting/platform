@@ -16,6 +16,8 @@ DB_HOST := postgres
 DATABASE_URL := postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):5432/$(DB_NAME)
 DB_VOLUME := caution-postgres-data
 SSH_PORT ?= 2222
+CAUTION_DATA_DIR ?= $(PWD)/caution-cache
+CONTAINER_DATA_DIR := /var/cache/caution
 
 build-cli:
 	@echo "Building CLI binary..."
@@ -103,7 +105,7 @@ migrate: postgres
 
 run-api: network postgres
 	@docker rm -f api 2>/dev/null || true
-	@mkdir -p $(PWD)/git-repos $(PWD)/build-cache $(PWD)/terraform-cache
+	@mkdir -p $(CAUTION_DATA_DIR)/git-repos $(CAUTION_DATA_DIR)/build $(CAUTION_DATA_DIR)/terraform
 	@docker run -d \
 		--name api \
 		--network $(NETWORK) \
@@ -112,20 +114,19 @@ run-api: network postgres
 		--group-add $$(stat -c '%g' /var/run/docker.sock) \
 		-e AWS_REGION=us-west-2 \
 		-e TERRAFORM_STATE_BUCKET=caution-terraform-state \
-		-e TF_PLUGIN_CACHE_DIR=/app/terraform-cache \
+		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
+		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
 		-e DATABASE_URL=$(DATABASE_URL) \
 		--env-file .env \
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
-		-v $(PWD)/build-cache:/app/build-cache \
-		-v $(PWD)/terraform-cache:/app/terraform-cache \
-		-v $(PWD)/git-repos:/git-repos \
+		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		caution-api
 	@echo "API service started (internal port 8080)"
 
 run-gateway: network
 	@docker rm -f gateway 2>/dev/null || true
-	@mkdir -p $(PWD)/git-repos
+	@mkdir -p $(CAUTION_DATA_DIR)/git-repos
 	@docker run -d \
 		--name gateway \
 		--network $(NETWORK) \
@@ -135,7 +136,8 @@ run-gateway: network
 		-e DATABASE_URL=$(DATABASE_URL) \
 		-e SSH_PORT=$(SSH_PORT) \
 		-e SSH_HOST_KEY_PATH=/tmp/ssh_host_ed25519_key \
-		-v $(PWD)/git-repos:/git-repos \
+		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
+		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		caution-gateway
 	@echo "Gateway started on port 8000 (HTTP) and $(SSH_PORT) (SSH)"
 

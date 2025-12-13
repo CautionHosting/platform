@@ -16,6 +16,7 @@ pub struct Config {
     pub ssh_port: u16,
     pub ssh_host_key_path: String,
     pub session_timeout_hours: i64,
+    pub data_dir: String,
 }
 
 impl Config {
@@ -69,6 +70,9 @@ impl Config {
             .parse()
             .context("Invalid SESSION_TIMEOUT_HOURS")?;
 
+        let data_dir = env::var("CAUTION_DATA_DIR")
+            .unwrap_or_else(|_| "/var/cache/caution".to_string());
+
         Ok(Config {
             database_url,
             api_service_url,
@@ -79,6 +83,7 @@ impl Config {
             ssh_port,
             ssh_host_key_path,
             session_timeout_hours,
+            data_dir,
         })
     }
 }
