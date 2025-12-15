@@ -107,16 +107,8 @@ export default {
           })
 
           if (response.ok) {
-            const data = await response.json()
             authenticated.value = true
-
-            // Redirect based on onboarding status
-            if (!data.email_verified || !data.payment_method_added) {
-              window.location.href = `/onboarding?session=${props.session}`
-            } else {
-              // User is fully onboarded, redirect to dashboard
-              window.location.href = `/dashboard?session=${props.session}`
-            }
+            window.location.href = `/dashboard?session=${props.session}`
           } else {
             error.value = 'Invalid session. Please authenticate using the CLI.'
           }
@@ -198,9 +190,9 @@ export default {
         authenticated.value = true
         status.value = 'Registration successful!'
 
-        // Redirect to onboarding
+        // Redirect to dashboard
         setTimeout(() => {
-          window.location.href = `/onboarding?session=${result.session_id}`
+          window.location.href = `/dashboard?session=${result.session_id}`
         }, 1000)
 
       } catch (err) {
@@ -322,22 +314,9 @@ export default {
         authenticated.value = true
         status.value = 'Login successful!'
 
-        // Check onboarding status and redirect
-        setTimeout(async () => {
-          const statusResponse = await fetch('/api/user/status', {
-            headers: { 'X-Session-ID': result.session_id }
-          })
-
-          if (statusResponse.ok) {
-            const userData = await statusResponse.json()
-            if (!userData.email_verified || !userData.payment_method_added) {
-              window.location.href = `/onboarding?session=${result.session_id}`
-            } else {
-              window.location.href = `/dashboard?session=${result.session_id}`
-            }
-          } else {
-            window.location.href = `/onboarding?session=${result.session_id}`
-          }
+        // Redirect to dashboard
+        setTimeout(() => {
+          window.location.href = `/dashboard?session=${result.session_id}`
         }, 1000)
 
       } catch (err) {
