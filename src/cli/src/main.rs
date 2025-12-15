@@ -170,14 +170,19 @@ enum AppCommands {
 #[derive(Subcommand, Debug)]
 enum SshKeyCommands {
     Add {
-        #[arg(long)]
-        title: String,
-        #[arg(long, conflicts_with = "key")]
+        #[arg(conflicts_with_all = ["from_agent", "key"], help = "Path to public key file")]
         key_file: Option<PathBuf>,
-        #[arg(long, conflicts_with = "key_file")]
+        #[arg(long, conflicts_with_all = ["key_file", "key"], help = "Add keys from ssh-agent")]
+        from_agent: bool,
+        #[arg(long, conflicts_with_all = ["key_file", "from_agent"], help = "Public key string")]
         key: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
     },
     List,
+    Remove {
+        fingerprint: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -287,6 +292,8 @@ struct DeploymentInfo {
 struct Config {
     session_id: String,
     expires_at: String,
+    #[serde(default)]
+    server_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -348,6 +355,7 @@ impl ApiClient {
         let config = Config {
             session_id,
             expires_at,
+            server_url: Some(self.base_url.clone()),
         };
 
         let json = serde_json::to_string_pretty(&config)?;
@@ -360,6 +368,39 @@ impl ApiClient {
             .context("Not logged in. Run 'login' command first")?;
         let config: Config = serde_json::from_str(&content)?;
         Ok(config)
+    }
+
+    fn is_session_expired(&self, config: &Config) -> bool {
+        use chrono::{DateTime, Utc, NaiveDateTime};
+
+        if let Ok(expires) = DateTime::parse_from_rfc3339(&config.expires_at) {
+            return Utc::now() >= expires.with_timezone(&Utc);
+        }
+
+        if let Ok(naive) = NaiveDateTime::parse_from_str(&config.expires_at, "%Y-%m-%dT%H:%M:%S%.f") {
+            return Utc::now() >= naive.and_utc();
+        }
+
+        let timestamp_part = config.expires_at.split(" +").next().unwrap_or(&config.expires_at);
+        if let Ok(naive) = NaiveDateTime::parse_from_str(timestamp_part, "%Y-%m-%d %H:%M:%S%.f") {
+            return Utc::now() >= naive.and_utc();
+        }
+
+        true
+    }
+
+    async fn ensure_authenticated(&self) -> Result<Config> {
+        match self.load_config() {
+            Ok(config) if !self.is_session_expired(&config) && self.is_same_server(&config) => Ok(config),
+            _ => {
+                self.login().await?;
+                self.load_config()
+            }
+        }
+    }
+
+    fn is_same_server(&self, config: &Config) -> bool {
+        config.server_url.as_ref().map_or(true, |url| url == &self.base_url)
     }
 
     fn save_deployment(&self, resource_name: &str) -> Result<()> {
@@ -1253,7 +1294,7 @@ build: docker build -t app .
         println!("Procfile found");
         println!("Build command: {}", cmd);
 
-        let config = self.load_config()?;
+        let config = self.ensure_authenticated().await?;
 
         log_verbose(self.verbose, "Creating app on server...");
         let body = serde_json::json!({
@@ -1313,7 +1354,7 @@ build: docker build -t app .
     }
 
     async fn list_apps(&self) -> Result<()> {
-        let config = self.load_config()?;
+        let config = self.ensure_authenticated().await?;
 
         let response = self.client
             .get(format!("{}/api/resources", self.base_url))
@@ -1340,7 +1381,7 @@ build: docker build -t app .
     }
 
     async fn fetch_app(&self, id: i64) -> Result<App> {
-        let config = self.load_config()?;
+        let config = self.ensure_authenticated().await?;
 
         let response = self.client
             .get(format!("{}/api/resources/{}", self.base_url, id))
@@ -1357,7 +1398,7 @@ build: docker build -t app .
     }
 
     async fn fetch_app_by_name(&self, resource_name: &str) -> Result<App> {
-        let config = self.load_config()?;
+        let config = self.ensure_authenticated().await?;
 
         let response = self.client
             .get(format!("{}/api/resources", self.base_url))
@@ -1398,7 +1439,7 @@ build: docker build -t app .
     }
 
     async fn destroy_app(&self, id: i64) -> Result<()> {
-        let config = self.load_config()?;
+        let config = self.ensure_authenticated().await?;
 
         let mut loader = Loader::new(&format!("Destroying app {}", id), LoaderStyle::Processing);
 
@@ -1434,7 +1475,7 @@ build: docker build -t app .
         println!("Procfile found");
         println!("Build command: {}", cmd);
 
-        let config = self.load_config()?;
+        let config = self.ensure_authenticated().await?;
 
         log_verbose(self.verbose, "Creating app on server...");
         let body = serde_json::json!({
@@ -2246,63 +2287,119 @@ build: docker build -t app .
         Ok(extract_dir)
     }
 
-    async fn add_ssh_key(&self, title: String, key_file: Option<PathBuf>, key: Option<String>) -> Result<()> {
-        println!("Adding SSH key...");
+    async fn add_ssh_key(&self, key_file: Option<PathBuf>, from_agent: bool, key: Option<String>, name: Option<String>) -> Result<()> {
+        let config = self.ensure_authenticated().await?;
 
-        let key_content = if let Some(key_str) = key {
-            log_verbose(self.verbose, "Using provided key string");
-            key_str.trim().to_string()
+        if from_agent {
+            let keys = self.get_ssh_agent_keys();
+            if keys.is_empty() {
+                bail!("No keys found in ssh-agent. Run 'ssh-add' first.");
+            }
+
+            let mut added = 0;
+            for (k, comment) in keys {
+                let key_name = name.clone().unwrap_or(comment);
+                match self.add_single_key(&config.session_id, &key_name, &k).await {
+                    Ok(()) => {
+                        println!("Added: {}", key_name);
+                        added += 1;
+                    }
+                    Err(e) => println!("Skipped {}: {}", key_name, e),
+                }
+            }
+            println!("{} key(s) added.", added);
+        } else if let Some(key_str) = key {
+            let key_content = key_str.trim();
+            if !key_content.starts_with("ssh-") {
+                bail!("Invalid SSH key format");
+            }
+            let key_name = name.unwrap_or_else(|| "key".to_string());
+            self.add_single_key(&config.session_id, &key_name, key_content).await?;
+            println!("Added: {}", key_name);
         } else if let Some(path) = key_file {
-            log_verbose(self.verbose, &format!("Reading key file: {:?}", path));
-            fs::read_to_string(&path)
+            let key_content = fs::read_to_string(&path)
                 .context("Failed to read SSH key file")?
                 .trim()
-                .to_string()
+                .to_string();
+
+            if !key_content.starts_with("ssh-") {
+                bail!("Invalid SSH key format");
+            }
+
+            let key_name = name.unwrap_or_else(|| {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("key")
+                    .to_string()
+            });
+
+            self.add_single_key(&config.session_id, &key_name, &key_content).await?;
+            println!("Added: {}", key_name);
         } else {
-            bail!("Must provide either --key or --key-file");
-        };
-
-        if !key_content.starts_with("ssh-") {
-            bail!("Invalid SSH key format. Key should start with 'ssh-rsa', 'ssh-ed25519', etc.");
+            bail!("Provide a key file, --key, or --from-agent");
         }
-
-        log_verbose(self.verbose, "Key validated");
-
-        let config = self.load_config()?;
-
-        log_verbose(self.verbose, "Adding key to server...");
-        let body = serde_json::json!({
-            "name": title,
-            "public_key": key_content
-        });
-
-        let mut loader = Loader::new("Adding SSH key", LoaderStyle::Processing);
-
-        let response = self.client
-            .post(format!("{}/ssh-keys", self.base_url))
-            .header("X-Session-ID", config.session_id)
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to send add SSH key request")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error = response.text().await?;
-            loader.stop();
-            bail!("Failed to add SSH key (status {}): {}", status, error);
-        }
-
-        loader.stop();
-
-        println!("SSH key added!");
-        println!("Title: {}", title);
 
         Ok(())
     }
 
+    async fn add_single_key(&self, session_id: &str, name: &str, key: &str) -> Result<()> {
+        let body = serde_json::json!({ "name": name, "public_key": key });
+
+        let response = self.client
+            .post(format!("{}/ssh-keys", self.base_url))
+            .header("X-Session-ID", session_id)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error = response.text().await?;
+            if error.contains("insert SSH key") || error.contains("duplicate") || error.contains("23505") {
+                bail!("Key already exists");
+            }
+            bail!("{}", error);
+        }
+        Ok(())
+    }
+
+    async fn remove_ssh_key(&self, fingerprint: &str) -> Result<()> {
+        let config = self.ensure_authenticated().await?;
+
+        let response = self.client
+            .delete(format!("{}/ssh-keys/{}", self.base_url, fingerprint))
+            .header("X-Session-ID", config.session_id)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error = response.text().await?;
+            bail!("Failed to remove key: {}", error);
+        }
+
+        println!("Key removed.");
+        Ok(())
+    }
+
+    fn get_ssh_agent_keys(&self) -> Vec<(String, String)> {
+        let output = Command::new("ssh-add").arg("-L").output();
+        match output {
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .filter(|line| line.starts_with("ssh-"))
+                    .map(|line| {
+                        let parts: Vec<&str> = line.splitn(3, ' ').collect();
+                        let comment = parts.get(2).unwrap_or(&"unnamed").to_string();
+                        (line.to_string(), comment)
+                    })
+                    .collect()
+            }
+            _ => Vec::new()
+        }
+    }
+
     async fn list_ssh_keys(&self) -> Result<()> {
-        let config = self.load_config()?;
+        let config = self.ensure_authenticated().await?;
 
         let response = self.client
             .get(format!("{}/ssh-keys", self.base_url))
@@ -2416,11 +2513,14 @@ async fn run() -> Result<()> {
         }
         Commands::SshKeys { command } => {
             match command {
-                SshKeyCommands::Add { title, key_file, key } => {
-                    client.add_ssh_key(title, key_file, key).await?;
+                SshKeyCommands::Add { key_file, from_agent, key, name } => {
+                    client.add_ssh_key(key_file, from_agent, key, name).await?;
                 }
                 SshKeyCommands::List => {
                     client.list_ssh_keys().await?;
+                }
+                SshKeyCommands::Remove { fingerprint } => {
+                    client.remove_ssh_key(&fingerprint).await?;
                 }
             }
         }

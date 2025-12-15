@@ -9,7 +9,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use webauthn_rs::prelude::*;
-use time::Duration;
+use time::{Duration, format_description::well_known::Rfc3339};
 use serde::{Serialize, Deserialize};
 
 use crate::db;
@@ -175,7 +175,7 @@ pub async fn finish_register_handler(
         status: "success".to_string(),
         credential_id: credential_id_hex,
         session_id: session_id.clone(),
-        expires_at: expires_at.to_string(),
+        expires_at: expires_at.format(&Rfc3339).unwrap_or_else(|_| expires_at.to_string()),
     }))
 }
 
@@ -324,7 +324,7 @@ pub async fn finish_login_handler(
 
     Ok(Json(LoginFinishResponse {
         session_id: session_id.clone(),
-        expires_at: expires_at.to_string(),
+        expires_at: expires_at.format(&Rfc3339).unwrap_or_else(|_| expires_at.to_string()),
         credential_id: credential_id_hex,
     }))
 }

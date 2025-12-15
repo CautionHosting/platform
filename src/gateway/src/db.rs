@@ -312,7 +312,7 @@ pub async fn add_ssh_key(
     name: Option<&str>,
 ) -> Result<i64> {
     let fingerprint = generate_ssh_fingerprint(public_key);
-    
+
     let key_id: i64 = sqlx::query_scalar(
         "INSERT INTO ssh_keys (user_id, public_key, fingerprint, key_type, name)
          VALUES ($1, $2, $3, $4, $5)
@@ -326,7 +326,7 @@ pub async fn add_ssh_key(
     .fetch_one(pool)
     .await
     .context("Failed to insert SSH key")?;
-    
+
     Ok(key_id)
 }
 
