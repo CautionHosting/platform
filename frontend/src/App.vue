@@ -35,11 +35,23 @@ export default {
       if (path === '/' || path === '/login') {
         return 'Login'
       } else if (path === '/onboarding') {
+        // Protected route - redirect to login if no session
+        if (!session.value) {
+          window.location.href = '/login'
+          return 'Login'
+        }
         return 'Onboarding'
       } else if (path === '/dashboard') {
+        // Protected route - redirect to login if no session
+        if (!session.value) {
+          window.location.href = '/login'
+          return 'Login'
+        }
         return 'Dashboard'
       }
 
+      // Unknown path - redirect to login
+      window.location.href = '/login'
       return 'Login'
     })
 
