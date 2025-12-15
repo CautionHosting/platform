@@ -717,15 +717,11 @@ async fn build_image_from_repo(
     };
 
     let work_dir_path = std::path::PathBuf::from(&work_dir);
-    let image_name_owned = image_name.to_string();
 
-    // Run synchronous build in blocking task
-    tokio::task::spawn_blocking(move || {
-        build_user_image(&work_dir_path, &image_name_owned, &docker_config)
-    })
-    .await
-    .map_err(|e| format!("Build task panicked: {}", e))?
-    .map_err(|e| format!("Build failed: {}", e))?;
+    // Build the Docker image (now async)
+    build_user_image(&work_dir_path, image_name, &docker_config)
+        .await
+        .map_err(|e| format!("Build failed: {}", e))?;
 
     tracing::info!("Image built and tagged as {}", image_name);
 

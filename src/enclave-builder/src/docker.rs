@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
-use std::process::Command;
+use tokio::process::Command;
 
 /// Configuration for building a Docker image from Procfile fields
 #[derive(Debug, Clone, Default)]
@@ -25,7 +25,7 @@ pub struct BuildConfig {
 /// 4. Optionally loads OCI tarball for containerd-style builds
 ///
 /// Returns the image tag that was built.
-pub fn build_user_image(
+pub async fn build_user_image(
     work_dir: &Path,
     image_tag: &str,
     config: &BuildConfig,
@@ -77,6 +77,7 @@ pub fn build_user_image(
         .arg(&build_command_with_tag)
         .current_dir(work_dir)
         .output()
+        .await
         .context("Failed to run build command")?;
 
     if !output.status.success() {
@@ -98,6 +99,7 @@ pub fn build_user_image(
         let load_output = Command::new("docker")
             .args(["load", "-i", &tarball_path.to_string_lossy()])
             .output()
+            .await
             .context("Failed to load OCI tarball")?;
 
         if !load_output.status.success() {
@@ -128,6 +130,7 @@ pub fn build_user_image(
         let tag_output = Command::new("docker")
             .args(["tag", loaded_image, image_tag])
             .output()
+            .await
             .context("Failed to tag loaded image")?;
 
         if !tag_output.status.success() {

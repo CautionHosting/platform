@@ -1494,9 +1494,9 @@ build: docker build -t app .
         println!("\nYou can now push to 'caution' remote:");
         println!("  git push caution main");
         println!("\nAfter pushing, check your app status:");
-        println!("  caution describe");
+        println!("  caution apps list");
         println!("\nVerify attestation:");
-        println!("  caution verify");
+        println!("  caution verify --reproduce");
 
         Ok(())
     }
@@ -1518,7 +1518,7 @@ build: docker build -t app .
                 println!("\nAttestation:");
                 println!("  http://{}:5000/attestation", ip);
                 println!("\nTo verify attestation:");
-                println!("  caution verify");
+                println!("  caution verify --reproduce");
                 println!();
                 Ok(())
             }
@@ -1565,7 +1565,7 @@ build: docker build -t app .
             .unwrap_or(false);
 
         println!("Step 1: Building Docker image...");
-        let image_ref = self.build_local_docker_image(no_cache)?;
+        let image_ref = self.build_local_docker_image(no_cache).await?;
         println!("✓ Docker image built: {}\n", image_ref);
 
         println!("Step 2: Building enclave image...");
@@ -1619,7 +1619,6 @@ build: docker build -t app .
 
         println!("✓ Enclave built successfully!\n");
 
-        // Show where to inspect the build
         let stage_dir = work_dir.join("eif-stage");
         println!("=== Build Artifacts ===");
         println!("EIF file: {}", deployment.eif.path.display());
@@ -1645,7 +1644,7 @@ build: docker build -t app .
         println!("  docker build -f Containerfile.eif --target=output --output=type=local,dest=./output .\n");
 
         println!("To verify your deployed enclave matches this build:");
-        println!("  caution verify\n");
+        println!("  caution verify --reproduce\n");
 
         if !keep_staging {
             println!("Cleaning up staging directory...");
@@ -1708,7 +1707,6 @@ build: docker build -t app .
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
         };
 
-        // Create builder to check cache BEFORE building Docker image
         let builder = enclave_builder::EnclaveBuilder::new_with_cache(
             "unused-template",
             "local",
@@ -1721,17 +1719,15 @@ build: docker build -t app .
             no_cache,
         )?;
 
-        // Check if we have a cached EIF - if so, skip Docker build entirely
         if let Some(cached) = builder.get_cached_eif() {
             println!("Using cached reproduction build");
             println!("Cache key: {}", cache_key);
             return Ok(cached.pcrs);
         }
 
-        // No cache hit - need to build Docker image and EIF
         log_verbose(self.verbose, "Building Docker image locally...");
-        println!("Building Docker image...");
 
+        let mut loader = Loader::new("Reproducing enclave image", LoaderStyle::Processing);
         let image_ref = if let Some(ref manifest) = external_manifest {
             let app_source = manifest.app_source.as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Manifest does not contain app_source - cannot reproduce without source URL"))?;
@@ -1751,18 +1747,13 @@ build: docker build -t app .
                 }
             };
 
-            println!("Downloading app source from manifest: {}", archive_url);
             let app_dir = self.download_and_extract_app_source(&archive_url).await?;
-            self.build_docker_image_from_dir(&app_dir, no_cache)?
+            self.build_docker_image_from_dir(&app_dir, no_cache).await?
         } else {
-            self.build_local_docker_image(no_cache)?
+            self.build_local_docker_image(no_cache).await?
         };
 
-        println!("Docker image built: {}", image_ref);
-
         log_verbose(self.verbose, "Building EIF locally to calculate expected PCRs...");
-        println!("Building enclave image (this may take a few minutes)...");
-        println!("Using enclave source from remote manifest");
 
         let user_image = enclave_builder::UserImage {
             reference: image_ref.clone(),
@@ -1771,18 +1762,10 @@ build: docker build -t app .
         let (specific_files, run_command, app_source_url) = if let Some(ref manifest) = external_manifest {
             let binary = manifest.binary.clone();
             let run_cmd = manifest.run_command.clone();
-            let source_url = None; // Not needed for reproduction - already using manifest
+            let source_url = None;
 
-            if let Some(ref b) = binary {
-                println!("Using binary from manifest: {}", b);
-            } else {
-                println!("Manifest has no binary field - using full filesystem extraction");
-            }
-            if let Some(ref cmd) = run_cmd {
-                println!("Using run command from manifest: {}", cmd);
-            } else {
-                println!("Manifest has no run command - using auto-detection");
-            }
+            log_verbose(self.verbose, &format!("Binary from manifest: {:?}", binary));
+            log_verbose(self.verbose, &format!("Run command from manifest: {:?}", run_cmd));
 
             (binary.map(|b| vec![b]), run_cmd, source_url)
         } else {
@@ -1790,26 +1773,19 @@ build: docker build -t app .
             let run_cmd = self.read_procfile_field("run");
             let source_url = self.read_procfile_field("source");
 
-            if let Some(ref b) = binary {
-                println!("Extracting specific files from container: {:?}", vec![b.clone()]);
-            }
-            if let Some(ref cmd) = run_cmd {
-                println!("Using run command from Procfile: {}", cmd);
-            }
-            if let Some(ref url) = source_url {
-                println!("App source URL: {}", url);
-            }
+            log_verbose(self.verbose, &format!("Binary from Procfile: {:?}", binary));
+            log_verbose(self.verbose, &format!("Run command from Procfile: {:?}", run_cmd));
+            log_verbose(self.verbose, &format!("Source URL from Procfile: {:?}", source_url));
 
             (binary.map(|b| vec![b]), run_cmd, source_url)
         };
 
         let ports = self.read_procfile_ports();
-        println!("Using ports: {:?}", ports);
+        log_verbose(self.verbose, &format!("Ports: {:?}", ports));
 
         let deployment = builder.build_enclave(&user_image, specific_files, run_command, app_source_url, None, None, None, external_manifest, &ports).await
             .context("Failed to build enclave locally")?;
-
-        println!("Enclave built successfully!");
+        loader.stop();
 
         if let Some(work_dir) = deployment.eif.path.parent() {
             let stage_dir = work_dir.join("eif-stage");
@@ -2015,8 +1991,6 @@ build: docker build -t app .
                     println!();
                     bail!("Cannot reproduce private code deployment");
                 }
-                println!("\nReproducing build from current directory...");
-                println!("Using manifest from remote deployment for reproducible build");
                 self.build_and_get_pcrs(manifest.clone(), no_cache).await?
             } else {
                 println!("\n⚠️  Remote attestation does not include a manifest");
@@ -2104,20 +2078,20 @@ build: docker build -t app .
         }
     }
 
-    fn build_local_docker_image(&self, no_cache: bool) -> Result<String> {
+    async fn build_local_docker_image(&self, no_cache: bool) -> Result<String> {
         let work_dir = std::env::current_dir()
             .context("Failed to get current directory")?;
-        self.build_docker_image_from_dir(&work_dir, no_cache)
+        self.build_docker_image_from_dir(&work_dir, no_cache).await
     }
 
-    fn build_docker_image_from_dir(&self, work_dir: &std::path::Path, no_cache: bool) -> Result<String> {
-        use std::process::Command;
+    async fn build_docker_image_from_dir(&self, work_dir: &std::path::Path, no_cache: bool) -> Result<String> {
+        use tokio::process::Command;
 
-        // Try to get commit SHA from the directory (if it's a git repo)
         let commit_sha = Command::new("git")
             .args(&["rev-parse", "HEAD"])
             .current_dir(work_dir)
             .output()
+            .await
             .ok()
             .and_then(|o| if o.status.success() {
                 Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -2132,21 +2106,19 @@ build: docker build -t app .
             let inspect = Command::new("docker")
                 .args(&["inspect", "--type=image", &tag])
                 .output()
+                .await
                 .context("Failed to inspect docker image")?;
 
             if inspect.status.success() {
-                println!("✓ Using cached Docker image for commit {}", &commit_sha[..12.min(commit_sha.len())]);
-                log_verbose(self.verbose, &format!("Image already exists: {}", tag));
+                log_verbose(self.verbose, &format!("Using cached Docker image: {}", tag));
                 return Ok(tag);
             }
         } else {
-            println!("--no-cache specified, rebuilding Docker image...");
+            log_verbose(self.verbose, "--no-cache specified, rebuilding Docker image...");
         }
 
-        println!("Building Docker image for commit {}...", &commit_sha[..12.min(commit_sha.len())]);
         log_verbose(self.verbose, &format!("Building Docker image with tag: {}", tag));
 
-        // Read Procfile from the work directory
         let procfile_path = work_dir.join("Procfile");
         let config = if procfile_path.exists() {
             let content = std::fs::read_to_string(&procfile_path)
@@ -2185,10 +2157,10 @@ build: docker build -t app .
             }
         };
 
-        println!("DEBUG: work_dir = {:?}", work_dir);
-        println!("DEBUG: BuildConfig = {:?}", config);
+        log_verbose(self.verbose, &format!("work_dir = {:?}", work_dir));
+        log_verbose(self.verbose, &format!("BuildConfig = {:?}", config));
 
-        build_user_image(work_dir, &tag, &config)?;
+        build_user_image(work_dir, &tag, &config).await?;
 
         log_verbose(self.verbose, &format!("Docker image built successfully: {}", tag));
         Ok(tag)
@@ -2197,8 +2169,6 @@ build: docker build -t app .
     async fn download_and_extract_app_source(&self, url: &str) -> Result<PathBuf> {
         use flate2::read::GzDecoder;
         use tar::Archive;
-
-        println!("Downloading app source from manifest: {}", url);
 
         let cache_dir = dirs::home_dir()
             .context("Failed to determine home directory")?
@@ -2210,8 +2180,28 @@ build: docker build -t app .
         let url_hash = sha2::Sha256::digest(url.as_bytes());
         let extract_dir = cache_dir.join(hex::encode(&url_hash[..8]));
 
-        // Download the archive
-        let response = reqwest::get(url)
+        // Check if already cached
+        if extract_dir.exists() && extract_dir.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false) {
+            log_verbose(self.verbose, &format!("Using cached app source: {}", extract_dir.display()));
+            return Ok(extract_dir);
+        }
+
+        log_verbose(self.verbose, &format!("Downloading app source: {}", url));
+
+        // Clean up any partial extraction
+        if extract_dir.exists() {
+            std::fs::remove_dir_all(&extract_dir)
+                .context("Failed to clean up partial extraction")?;
+        }
+
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(300))  // 5 minutes for full download
+            .build()
+            .context("Failed to create HTTP client")?;
+
+        let response = client.get(url)
+            .send()
             .await
             .context("Failed to download app source")?;
 
@@ -2223,7 +2213,7 @@ build: docker build -t app .
             .await
             .context("Failed to read archive bytes")?;
 
-        println!("Downloaded {} bytes, extracting...", archive_bytes.len());
+        log_verbose(self.verbose, &format!("Downloaded {} bytes, extracting...", archive_bytes.len()));
 
         // Extract tar.gz archive with strip_components=1
         let decoder = GzDecoder::new(&archive_bytes[..]);
@@ -2251,7 +2241,7 @@ build: docker build -t app .
                 .with_context(|| format!("Failed to extract: {}", stripped_path.display()))?;
         }
 
-        println!("App source extracted to: {}", extract_dir.display());
+        log_verbose(self.verbose, &format!("App source extracted to: {}", extract_dir.display()));
 
         Ok(extract_dir)
     }
