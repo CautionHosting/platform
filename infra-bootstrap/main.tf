@@ -22,7 +22,7 @@ resource "aws_s3_bucket" "terraform_state" {
   tags = {
     Name        = "Terraform State Storage"
     Purpose     = "terraform-state"
-    ManagedBy   = "terraform-bootstrap"
+    ManagedBy   = "infra-bootstrap"
   }
 }
 
@@ -66,7 +66,7 @@ resource "aws_dynamodb_table" "terraform_state_lock" {
   tags = {
     Name      = "Terraform State Lock"
     Purpose   = "terraform-state-lock"
-    ManagedBy = "terraform-bootstrap"
+    ManagedBy = "infra-bootstrap"
   }
 }
 
@@ -75,7 +75,7 @@ resource "aws_iam_user" "terraform_service" {
   
   tags = {
     Purpose   = "terraform-automation"
-    ManagedBy = "terraform-bootstrap"
+    ManagedBy = "infra-bootstrap"
   }
 }
 

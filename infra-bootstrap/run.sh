@@ -4,10 +4,10 @@
 
 set -e
 
-IMAGE_NAME="terraform-bootstrap"
+IMAGE_NAME="infra-bootstrap"
 
-echo "🐳 Terraform Bootstrap Container Runner"
-echo "========================================"
+echo "🐳 Infrastructure Bootstrap Container Runner"
+echo "============================================="
 echo ""
 
 if ! docker images | grep -q "^${IMAGE_NAME} "; then
