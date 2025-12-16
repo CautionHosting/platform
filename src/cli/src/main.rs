@@ -218,6 +218,13 @@ struct LoginBeginResponse {
 }
 
 #[derive(Deserialize)]
+struct Fido2SignResponse {
+    #[serde(rename = "publicKey")]
+    public_key: PublicKeyCredentialRequestOptions,
+    challenge_id: String,
+}
+
+#[derive(Deserialize)]
 struct PublicKeyCredentialRequestOptions {
     challenge: String,
     #[serde(rename = "rpId")]
@@ -1065,6 +1072,62 @@ build: docker build -t app .
             log_verbose(self.verbose, &format!("Server error response (status {}): {}", status, error));
             bail!("Login failed: {}", error)
         }
+    }
+
+    async fn signed_post<T: serde::Serialize>(
+        &self,
+        session_id: &str,
+        path: &str,
+        body: &T,
+    ) -> Result<reqwest::Response> {
+        let body_json = serde_json::to_vec(body)?;
+        let body_hash = hex::encode(Sha256::digest(&body_json));
+
+        log_verbose(self.verbose, &format!("Requesting FIDO2 sign challenge for POST {}", path));
+
+        let sign_req = serde_json::json!({
+            "method": "POST",
+            "path": path,
+            "body_hash": body_hash,
+        });
+
+        let response = self.client
+            .post(format!("{}/auth/sign-request", self.base_url))
+            .header("X-Session-ID", session_id)
+            .json(&sign_req)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error = response.text().await?;
+            bail!("Failed to get sign challenge: {}", error);
+        }
+
+        let sign_resp: Fido2SignResponse = response.json().await?;
+        log_verbose(self.verbose, "Got FIDO2 sign challenge");
+
+        let login_resp = LoginBeginResponse {
+            public_key: sign_resp.public_key,
+            session: sign_resp.challenge_id.clone(),
+        };
+
+        println!("Tap your security key to sign the request...");
+        let assertion = self.get_assertion(&login_resp, &self.base_url)?;
+
+        let fido_response_b64 = general_purpose::URL_SAFE_NO_PAD.encode(&assertion.response_json);
+
+        log_verbose(self.verbose, "Sending FIDO2-signed request");
+
+        let response = self.client
+            .post(format!("{}{}", self.base_url, path))
+            .header("X-Fido2-Challenge-Id", &sign_resp.challenge_id)
+            .header("X-Fido2-Response", &fido_response_b64)
+            .header("Content-Type", "application/json")
+            .body(body_json)
+            .send()
+            .await?;
+
+        Ok(response)
     }
 
     fn get_assertion(&self, options: &LoginBeginResponse, base_url: &str) -> Result<AssertionResult> {
@@ -2345,12 +2408,7 @@ build: docker build -t app .
     async fn add_single_key(&self, session_id: &str, name: &str, key: &str) -> Result<()> {
         let body = serde_json::json!({ "name": name, "public_key": key });
 
-        let response = self.client
-            .post(format!("{}/ssh-keys", self.base_url))
-            .header("X-Session-ID", session_id)
-            .json(&body)
-            .send()
-            .await?;
+        let response = self.signed_post(session_id, "/ssh-keys", &body).await?;
 
         if !response.status().is_success() {
             let error = response.text().await?;

@@ -417,3 +417,46 @@ pub async fn delete_ssh_key_handler(
         Err(anyhow::anyhow!("SSH key not found").into())
     }
 }
+
+pub async fn begin_sign_request_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<crate::types::SignChallengeRequest>,
+) -> Result<Json<crate::types::SignChallengeResponse>, AppError> {
+    let session_id = headers
+        .get("X-Session-ID")
+        .and_then(|h| h.to_str().ok())
+        .ok_or_else(|| anyhow::anyhow!("Missing session ID"))?;
+
+    let credential_id = db::validate_auth_session(&state.db, session_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Invalid or expired session"))?;
+
+    let user_id = db::get_user_id_by_credential(&state.db, &credential_id).await?;
+
+    let cred_bytes = db::get_credential_public_key(&state.db, &credential_id).await?;
+    let security_key: SecurityKey = serde_json::from_slice(&cred_bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to deserialize credential: {}", e))?;
+
+    let (rcr, auth_state) = state
+        .webauthn
+        .start_securitykey_authentication(&[security_key])
+        .map_err(|e| anyhow::anyhow!("Failed to start signing challenge: {}", e))?;
+
+    let challenge_id = uuid::Uuid::new_v4().to_string();
+    let pending = crate::types::PendingSignChallenge {
+        auth_state,
+        user_id,
+        method: req.method,
+        path: req.path,
+        body_hash: req.body_hash,
+        expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(5),
+    };
+
+    state.sign_challenges.write().await.insert(challenge_id.clone(), pending);
+
+    Ok(Json(crate::types::SignChallengeResponse {
+        challenge: rcr,
+        challenge_id,
+    }))
+}

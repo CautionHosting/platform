@@ -90,6 +90,7 @@ async fn main() -> Result<()> {
         api_service_url: config.api_service_url.clone(),
         reg_states: Arc::new(RwLock::new(HashMap::new())),
         auth_states: Arc::new(RwLock::new(HashMap::new())),
+        sign_challenges: Arc::new(RwLock::new(HashMap::new())),
         session_timeout_hours: config.session_timeout_hours,
     };
 
@@ -120,6 +121,8 @@ async fn main() -> Result<()> {
             "Content-Type".parse().unwrap(),
             "X-Session-ID".parse().unwrap(),
             "Authorization".parse().unwrap(),
+            "X-Fido2-Challenge-Id".parse().unwrap(),
+            "X-Fido2-Response".parse().unwrap(),
         ]);
 
     let auth_routes = Router::new()
@@ -127,6 +130,7 @@ async fn main() -> Result<()> {
         .route("/auth/register/finish", post(handlers::finish_register_handler))
         .route("/auth/login/begin", post(handlers::begin_login_handler))
         .route("/auth/login/finish", post(handlers::finish_login_handler))
+        .route("/auth/sign-request", post(handlers::begin_sign_request_handler))
         .layer(middleware::from_fn_with_state(
             rate_limiter.clone(),
             rate_limit::rate_limit_middleware,
@@ -144,6 +148,7 @@ async fn main() -> Result<()> {
         .route("/ssh-keys", get(handlers::list_ssh_keys_handler))
         .route("/ssh-keys/{fingerprint}", delete(handlers::delete_ssh_key_handler))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware::fido2_auth_middleware))
+        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware::fido2_sign_middleware))
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
         .with_state(state.clone())
         .layer(cors.clone());

@@ -181,6 +181,33 @@ caution verify --reproduce
 <script>
 import { ref, onMounted } from 'vue'
 
+async function sha256Hex(message) {
+  const msgBuffer = new TextEncoder().encode(message)
+  const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer)
+  const hashArray = Array.from(new Uint8Array(hashBuffer))
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+function arrayBufferToBase64Url(buffer) {
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i])
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+}
+
+function base64UrlToArrayBuffer(base64url) {
+  const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/')
+  const padded = base64 + '='.repeat((4 - base64.length % 4) % 4)
+  const binary = atob(padded)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i)
+  }
+  return bytes.buffer
+}
+
 export default {
   name: 'Dashboard',
   props: {
@@ -302,16 +329,67 @@ export default {
       success.value = null
 
       try {
-        const response = await fetch('/ssh-keys', {
+        const body = JSON.stringify({
+          public_key: newPublicKey.value.trim(),
+          name: newKeyName.value.trim() || null
+        })
+        const bodyHash = await sha256Hex(body)
+
+        const challengeRes = await fetch('/auth/sign-request', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'X-Session-ID': props.session
           },
           body: JSON.stringify({
-            public_key: newPublicKey.value.trim(),
-            name: newKeyName.value.trim() || null
+            method: 'POST',
+            path: '/ssh-keys',
+            body_hash: bodyHash
           })
+        })
+
+        if (!challengeRes.ok) {
+          const data = await challengeRes.json().catch(() => ({}))
+          throw new Error(data.error || 'Failed to get signing challenge')
+        }
+
+        const { publicKey, challenge_id } = await challengeRes.json()
+
+        publicKey.challenge = base64UrlToArrayBuffer(publicKey.challenge)
+        if (publicKey.allowCredentials) {
+          publicKey.allowCredentials = publicKey.allowCredentials.map(cred => ({
+            ...cred,
+            id: base64UrlToArrayBuffer(cred.id)
+          }))
+        }
+
+        const credential = await navigator.credentials.get({ publicKey })
+
+        const credentialResponse = {
+          id: credential.id,
+          rawId: arrayBufferToBase64Url(credential.rawId),
+          type: credential.type,
+          response: {
+            authenticatorData: arrayBufferToBase64Url(credential.response.authenticatorData),
+            clientDataJSON: arrayBufferToBase64Url(credential.response.clientDataJSON),
+            signature: arrayBufferToBase64Url(credential.response.signature),
+            userHandle: credential.response.userHandle
+              ? arrayBufferToBase64Url(credential.response.userHandle)
+              : null
+          }
+        }
+
+        const fido2Response = btoa(JSON.stringify(credentialResponse))
+          .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+
+        const response = await fetch('/ssh-keys', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Fido2-Challenge-Id': challenge_id,
+            'X-Fido2-Response': fido2Response
+          },
+          body: body
         })
 
         if (response.ok) {
@@ -325,7 +403,11 @@ export default {
           error.value = data.error || 'Failed to add SSH key'
         }
       } catch (err) {
-        error.value = 'Failed to connect to server'
+        if (err.name === 'NotAllowedError') {
+          error.value = 'Security key authentication was cancelled or timed out'
+        } else {
+          error.value = err.message || 'Failed to add SSH key'
+        }
       } finally {
         addingKey.value = false
       }

@@ -21,6 +21,7 @@ pub struct AppState {
     pub api_service_url: String,
     pub reg_states: Arc<RwLock<HashMap<String, PendingRegistration>>>,
     pub auth_states: Arc<RwLock<HashMap<String, SecurityKeyAuthentication>>>,
+    pub sign_challenges: Arc<RwLock<HashMap<String, PendingSignChallenge>>>,
     pub session_timeout_hours: i64,
 }
 
@@ -118,4 +119,28 @@ pub struct RegisterBeginRequest {
 pub struct SessionData {
     pub passkey_authentication: PasskeyAuthentication,
     pub user_id: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingSignChallenge {
+    pub auth_state: SecurityKeyAuthentication,
+    pub user_id: i64,
+    pub method: String,
+    pub path: String,
+    pub body_hash: String,
+    pub expires_at: time::OffsetDateTime,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignChallengeRequest {
+    pub method: String,
+    pub path: String,
+    pub body_hash: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SignChallengeResponse {
+    #[serde(flatten)]
+    pub challenge: RequestChallengeResponse,
+    pub challenge_id: String,
 }
