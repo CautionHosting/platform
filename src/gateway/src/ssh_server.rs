@@ -331,10 +331,10 @@ async fn handle_git_push(
 
     match existing {
         Some((resource_id, state)) => {
-            if state != "terminated" {
+            if state == "running" || state == "stopped" {
                 bail!("App '{}' already exists in state '{}'. Use 'caution apps destroy {}' to destroy it first.", app_name, state, resource_id);
             }
-            tracing::info!("App '{}' was previously destroyed (resource_id: {}), allowing recreation", app_name, resource_id);
+            tracing::info!("App '{}' exists in state '{}' (resource_id: {}), allowing push", app_name, state, resource_id);
         }
         None => {
             tracing::info!("Creating new app '{}'", app_name);
