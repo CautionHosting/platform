@@ -50,6 +50,7 @@
               <div class="code-block">
                 <pre>
 git clone https://codeberg.org/caution/platform
+cd platform
 make build-cli
 ./utils/install.sh
                 </pre>
@@ -64,6 +65,8 @@ git clone https://codeberg.org/caution/hello-world-enclave
 cd hello-world-enclave
 caution login
 # Tap your smart card
+caution ssh-keys add --from-agent 
+# You can also pass a file such as ~/.ssh/id_ed25519.pub
 caution init
 git push caution main
 caution verify --reproduce
