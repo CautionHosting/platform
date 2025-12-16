@@ -522,6 +522,18 @@ impl ApiClient {
         }
     }
 
+    fn read_procfile_sources(&self) -> Vec<String> {
+        self.read_procfile_field("source")
+            .or_else(|| self.read_procfile_field("sources"))
+            .map(|s| {
+                s.split(',')
+                    .map(|url| url.trim().to_string())
+                    .filter(|url| !url.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn set_git_remote(&self, git_url: &str) -> Result<()> {
         let check_output = Command::new("git")
             .args(&["remote", "get-url", "caution"])
@@ -1708,16 +1720,17 @@ build: docker build -t app .
             println!("Using run command from Procfile: {}", cmd);
         }
 
-        let app_source_url = self.read_procfile_field("source");
-        if let Some(ref url) = app_source_url {
-            println!("Using app source URL from Procfile: {}", url);
+        let app_source_urls = self.read_procfile_sources();
+        let app_source_urls_opt = if app_source_urls.is_empty() { None } else { Some(app_source_urls.clone()) };
+        if !app_source_urls.is_empty() {
+            println!("Using {} app source URL(s) from Procfile", app_source_urls.len());
         }
 
         let ports = self.read_procfile_ports();
         println!("Using ports: {:?}", ports);
 
         let deployment = builder
-            .build_enclave_auto(&user_image, &binary_path, run_command, app_source_url, None, None, None, None, &ports)
+            .build_enclave_auto(&user_image, &binary_path, run_command, app_source_urls_opt, None, None, None, None, &ports)
             .await
             .context("Failed to build enclave")?;
 
@@ -1762,8 +1775,8 @@ build: docker build -t app .
     async fn build_and_get_pcrs(&self, external_manifest: Option<enclave_builder::EnclaveManifest>, no_cache: bool) -> Result<enclave_builder::PcrValues> {
         let (enclave_source, enclave_version) = if let Some(ref manifest) = external_manifest {
             match &manifest.enclave_source {
-                enclave_builder::EnclaveSource::GitArchive { url, .. } => {
-                    (url.clone(), "unused".to_string())
+                enclave_builder::EnclaveSource::GitArchive { urls, .. } => {
+                    (urls.first().cloned().unwrap_or_default(), "unused".to_string())
                 }
                 enclave_builder::EnclaveSource::GitRepository { url, branch, .. } => {
                     (url.clone(), branch.clone())
@@ -1779,8 +1792,9 @@ build: docker build -t app .
         let cache_key = if let Some(ref manifest) = external_manifest {
             if let Some(ref app_src) = manifest.app_source {
                 match app_src {
-                    enclave_builder::AppSource::GitArchive { url } => {
+                    enclave_builder::AppSource::GitArchive { urls } => {
                         use sha2::Digest;
+                        let url = urls.first().cloned().unwrap_or_default();
                         let hash = sha2::Sha256::digest(url.as_bytes());
                         hex::encode(&hash[..8])
                     }
@@ -1836,12 +1850,12 @@ build: docker build -t app .
             let app_source = manifest.app_source.as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Manifest does not contain app_source - cannot reproduce without source URL"))?;
 
-            let archive_url = match app_source {
-                enclave_builder::AppSource::GitArchive { url } => {
-                    url.clone()
+            let archive_urls: Vec<String> = match app_source {
+                enclave_builder::AppSource::GitArchive { urls } => {
+                    urls.clone()
                 }
                 enclave_builder::AppSource::GitRepository { url, branch, .. } => {
-                    self.git_url_to_archive_url(url, branch.as_deref().unwrap_or("main"))?
+                    vec![self.git_url_to_archive_url(url, branch.as_deref().unwrap_or("main"))?]
                 }
                 enclave_builder::AppSource::DockerImage { reference } => {
                     bail!("Cannot reproduce from Docker image reference: {} - need source URL", reference);
@@ -1851,7 +1865,7 @@ build: docker build -t app .
                 }
             };
 
-            let app_dir = self.download_and_extract_app_source(&archive_url).await?;
+            let app_dir = self.download_and_extract_app_source_with_fallbacks(&archive_urls).await?;
             self.build_docker_image_from_dir(&app_dir, no_cache).await?
         } else {
             self.build_local_docker_image(no_cache).await?
@@ -1863,31 +1877,32 @@ build: docker build -t app .
             reference: image_ref.clone(),
         };
 
-        let (specific_files, run_command, app_source_url) = if let Some(ref manifest) = external_manifest {
+        let (specific_files, run_command, app_source_urls) = if let Some(ref manifest) = external_manifest {
             let binary = manifest.binary.clone();
             let run_cmd = manifest.run_command.clone();
-            let source_url = None;
+            let source_urls: Option<Vec<String>> = None;
 
             log_verbose(self.verbose, &format!("Binary from manifest: {:?}", binary));
             log_verbose(self.verbose, &format!("Run command from manifest: {:?}", run_cmd));
 
-            (binary.map(|b| vec![b]), run_cmd, source_url)
+            (binary.map(|b| vec![b]), run_cmd, source_urls)
         } else {
             let binary = self.read_procfile_field("binary");
             let run_cmd = self.read_procfile_field("run");
-            let source_url = self.read_procfile_field("source");
+            let source_urls = self.read_procfile_sources();
+            let source_urls_opt = if source_urls.is_empty() { None } else { Some(source_urls) };
 
             log_verbose(self.verbose, &format!("Binary from Procfile: {:?}", binary));
             log_verbose(self.verbose, &format!("Run command from Procfile: {:?}", run_cmd));
-            log_verbose(self.verbose, &format!("Source URL from Procfile: {:?}", source_url));
+            log_verbose(self.verbose, &format!("Source URLs from Procfile: {:?}", source_urls_opt));
 
-            (binary.map(|b| vec![b]), run_cmd, source_url)
+            (binary.map(|b| vec![b]), run_cmd, source_urls_opt)
         };
 
         let ports = self.read_procfile_ports();
         log_verbose(self.verbose, &format!("Ports: {:?}", ports));
 
-        let deployment = builder.build_enclave(&user_image, specific_files, run_command, app_source_url, None, None, None, external_manifest, &ports).await
+        let deployment = builder.build_enclave(&user_image, specific_files, run_command, app_source_urls, None, None, None, external_manifest, &ports).await
             .context("Failed to build enclave locally")?;
         loader.stop();
 
@@ -2024,8 +2039,15 @@ build: docker build -t app .
             println!("\nManifest information:");
             if let Some(ref app_src) = m.app_source {
                 match app_src {
-                    enclave_builder::AppSource::GitArchive { url } => {
-                        println!("  App source: {} (git archive)", url);
+                    enclave_builder::AppSource::GitArchive { urls } => {
+                        if urls.len() == 1 {
+                            println!("  App source: {} (git archive)", urls[0]);
+                        } else {
+                            println!("  App source: (git archive, {} URLs)", urls.len());
+                            for (i, url) in urls.iter().enumerate() {
+                                println!("    [{}] {}", i + 1, url);
+                            }
+                        }
                     }
                     enclave_builder::AppSource::GitRepository { url, branch, commit } => {
                         print!("  App source: {} (git", url);
@@ -2049,12 +2071,21 @@ build: docker build -t app .
             }
 
             match &m.enclave_source {
-                enclave_builder::EnclaveSource::GitArchive { url, commit } => {
-                    print!("  Enclave source: {} (git archive", url);
+                enclave_builder::EnclaveSource::GitArchive { urls, commit } => {
+                    if urls.len() == 1 {
+                        print!("  Enclave source: {} (git archive", urls[0]);
+                    } else {
+                        print!("  Enclave source: ({} URLs) (git archive", urls.len());
+                    }
                     if let Some(c) = commit {
                         print!(" commit: {}", c);
                     }
                     println!(")");
+                    if urls.len() > 1 {
+                        for (i, url) in urls.iter().enumerate() {
+                            println!("    [{}] {}", i + 1, url);
+                        }
+                    }
                 }
                 enclave_builder::EnclaveSource::GitRepository { url, branch, commit } => {
                     print!("  Enclave source: {} (git branch: {}", url, branch);
@@ -2348,6 +2379,33 @@ build: docker build -t app .
         log_verbose(self.verbose, &format!("App source extracted to: {}", extract_dir.display()));
 
         Ok(extract_dir)
+    }
+
+    async fn download_and_extract_app_source_with_fallbacks(&self, urls: &[String]) -> Result<PathBuf> {
+        if urls.is_empty() {
+            bail!("No source URLs provided");
+        }
+
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for (i, url) in urls.iter().enumerate() {
+            if i > 0 {
+                log_verbose(self.verbose, &format!("Trying fallback URL ({}/{}): {}", i + 1, urls.len(), url));
+            }
+
+            match self.download_and_extract_app_source(url).await {
+                Ok(path) => return Ok(path),
+                Err(e) => {
+                    if i < urls.len() - 1 {
+                        eprintln!("Failed to download from {}: {}", url, e);
+                        eprintln!("Trying next URL...");
+                    }
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("All source URLs failed")))
     }
 
     async fn add_ssh_key(&self, key_file: Option<PathBuf>, from_agent: bool, key: Option<String>, name: Option<String>) -> Result<()> {

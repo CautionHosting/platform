@@ -33,7 +33,7 @@ pub enum AppSource {
         branch: Option<String>,
     },
     GitArchive {
-        url: String,
+        urls: Vec<String>,
     },
     DockerImage {
         reference: String,
@@ -47,7 +47,7 @@ pub enum AppSource {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EnclaveSource {
     GitArchive {
-        url: String,
+        urls: Vec<String>,
         commit: Option<String>,
     },
     GitRepository {

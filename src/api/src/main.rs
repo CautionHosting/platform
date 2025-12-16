@@ -1631,12 +1631,26 @@ async fn deploy_handler(
             tracing::info!("No run command specified, using auto-detection");
         }
 
-        let app_source_url = build_config.source.clone().map(|url| {
-            url.replace("${COMMIT}", &commit_sha)
-        });
-        if let Some(ref url) = app_source_url {
-            tracing::info!("Using app source URL: {}", url);
-        }
+        let app_source_urls: Option<Vec<String>> = {
+            let mut urls: Vec<String> = Vec::new();
+
+            if let Ok(default_url) = std::env::var("APP_SOURCE_URL") {
+                let url = default_url.replace("${COMMIT}", &commit_sha);
+                tracing::info!("Using default app source URL from env: {}", url);
+                urls.push(url);
+            }
+
+            for url in &build_config.sources {
+                urls.push(url.replace("${COMMIT}", &commit_sha));
+            }
+
+            if urls.is_empty() {
+                None
+            } else {
+                tracing::info!("Using {} app source URL(s): {:?}", urls.len(), urls);
+                Some(urls)
+            }
+        };
 
         let deployment = if let Some(ref binary_path) = build_config.binary {
             tracing::info!("Using static binary extraction mode: {}", binary_path);
@@ -1645,7 +1659,7 @@ async fn deploy_handler(
                     &user_image,
                     binary_path,
                     run_command,
-                    app_source_url,
+                    app_source_urls,
                     Some(req.branch.clone()),
                     Some(commit_sha.clone()),
                     build_config.metadata.clone(),
@@ -1664,7 +1678,7 @@ async fn deploy_handler(
                     &user_image,
                     None,  // No specific files = full filesystem extraction
                     run_command,
-                    app_source_url,
+                    app_source_urls,
                     Some(req.branch.clone()),
                     Some(commit_sha.clone()),
                     build_config.metadata.clone(),

@@ -296,7 +296,7 @@ impl EnclaveBuilder {
         pcrs::is_debug_mode(pcrs)
     }
 
-    pub async fn build_enclave(&self, user_image: &UserImage, specific_files: Option<Vec<String>>, run_command: Option<String>, app_source_url: Option<String>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>, ports: &[u16]) -> Result<Deployment> {
+    pub async fn build_enclave(&self, user_image: &UserImage, specific_files: Option<Vec<String>>, run_command: Option<String>, app_source_urls: Option<Vec<String>>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>, ports: &[u16]) -> Result<Deployment> {
         if let Some(cached) = self.get_cached_eif() {
             tracing::info!("Using cached EIF from: {}", cached.eif.path.display());
             return Ok(cached);
@@ -327,7 +327,7 @@ impl EnclaveBuilder {
         } else {
             let enclave_src = if self.enclave_source.ends_with(".tar.gz") {
                 EnclaveSource::GitArchive {
-                    url: self.enclave_source.clone(),
+                    urls: vec![self.enclave_source.clone()],
                     commit: None,
                 }
             } else if self.enclave_source.starts_with("http") || self.enclave_source.starts_with("git@") {
@@ -342,19 +342,23 @@ impl EnclaveBuilder {
                 }
             };
 
-            let app_src = app_source_url.map(|url| {
-                if url.ends_with(".tar.gz") || url.ends_with(".zip") {
-                    AppSource::GitArchive { url }
-                } else if url.starts_with("http") || url.starts_with("git@") {
-                    AppSource::GitRepository {
-                        url,
+            let app_src = app_source_urls.and_then(|urls| {
+                if urls.is_empty() {
+                    return None;
+                }
+                let first_url = &urls[0];
+                if first_url.ends_with(".tar.gz") || first_url.ends_with(".zip") {
+                    Some(AppSource::GitArchive { urls })
+                } else if first_url.starts_with("http") || first_url.starts_with("git@") {
+                    Some(AppSource::GitRepository {
+                        url: first_url.clone(),
                         commit: app_commit.clone(),
                         branch: app_branch.clone(),
-                    }
+                    })
                 } else {
-                    AppSource::DockerImage {
+                    Some(AppSource::DockerImage {
                         reference: user_image.reference.clone(),
-                    }
+                    })
                 }
             });
 
@@ -395,7 +399,7 @@ impl EnclaveBuilder {
         })
     }
 
-    pub async fn build_enclave_from_filesystem(&self, user_fs_path: PathBuf, run_command: Option<String>, app_source_url: Option<String>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>, ports: &[u16]) -> Result<Deployment> {
+    pub async fn build_enclave_from_filesystem(&self, user_fs_path: PathBuf, run_command: Option<String>, app_source_urls: Option<Vec<String>>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>, ports: &[u16]) -> Result<Deployment> {
         if let Some(cached) = self.get_cached_eif() {
             tracing::info!("Using cached EIF from: {}", cached.eif.path.display());
             return Ok(cached);
@@ -415,7 +419,7 @@ impl EnclaveBuilder {
         } else {
             let enclave_src = if self.enclave_source.ends_with(".tar.gz") {
                 EnclaveSource::GitArchive {
-                    url: self.enclave_source.clone(),
+                    urls: vec![self.enclave_source.clone()],
                     commit: None,
                 }
             } else if self.enclave_source.starts_with("http") || self.enclave_source.starts_with("git@") {
@@ -430,19 +434,23 @@ impl EnclaveBuilder {
                 }
             };
 
-            let app_src = app_source_url.map(|url| {
-                if url.ends_with(".tar.gz") || url.ends_with(".zip") {
-                    AppSource::GitArchive { url }
-                } else if url.starts_with("http") || url.starts_with("git@") {
-                    AppSource::GitRepository {
-                        url,
+            let app_src = app_source_urls.and_then(|urls| {
+                if urls.is_empty() {
+                    return None;
+                }
+                let first_url = &urls[0];
+                if first_url.ends_with(".tar.gz") || first_url.ends_with(".zip") {
+                    Some(AppSource::GitArchive { urls })
+                } else if first_url.starts_with("http") || first_url.starts_with("git@") {
+                    Some(AppSource::GitRepository {
+                        url: first_url.clone(),
                         commit: app_commit.clone(),
                         branch: app_branch.clone(),
-                    }
+                    })
                 } else {
-                    AppSource::Filesystem {
+                    Some(AppSource::Filesystem {
                         path: user_fs_path.to_string_lossy().to_string(),
-                    }
+                    })
                 }
             });
 
@@ -484,7 +492,7 @@ impl EnclaveBuilder {
         })
     }
 
-    pub async fn build_enclave_auto(&self, user_image: &UserImage, binary_path: &str, run_command: Option<String>, app_source_url: Option<String>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>, ports: &[u16]) -> Result<Deployment> {
+    pub async fn build_enclave_auto(&self, user_image: &UserImage, binary_path: &str, run_command: Option<String>, app_source_urls: Option<Vec<String>>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>, ports: &[u16]) -> Result<Deployment> {
         let binary_basename = std::path::Path::new(binary_path)
             .file_name()
             .and_then(|n| n.to_str())
@@ -514,10 +522,10 @@ impl EnclaveBuilder {
 
             tracing::info!("Copied binary to staging: {}", dest_path.display());
 
-            self.build_enclave_from_filesystem(user_service_dir, run_command, app_source_url, app_branch.clone(), app_commit.clone(), metadata, external_manifest, ports).await
+            self.build_enclave_from_filesystem(user_service_dir, run_command, app_source_urls, app_branch.clone(), app_commit.clone(), metadata, external_manifest, ports).await
         } else {
             tracing::info!("Binary not found on filesystem, using Docker extraction");
-            self.build_enclave(user_image, Some(vec![binary_path.to_string()]), run_command, app_source_url, app_branch, app_commit, metadata, external_manifest, ports).await
+            self.build_enclave(user_image, Some(vec![binary_path.to_string()]), run_command, app_source_urls, app_branch, app_commit, metadata, external_manifest, ports).await
         }
     }
 }
