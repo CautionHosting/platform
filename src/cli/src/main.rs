@@ -163,7 +163,7 @@ enum Commands {
 enum AppCommands {
     Create,
     List,
-    Get { id: i64 },
+    Get { id: Option<i64> },
     Destroy { id: i64 },
 }
 
@@ -1497,8 +1497,11 @@ build: docker build -t app .
         self.fetch_app_by_name(&deployment.resource_name).await
     }
 
-    async fn get_app(&self, id: i64) -> Result<()> {
-        let app = self.fetch_app(id).await?;
+    async fn get_app(&self, id: Option<i64>) -> Result<()> {
+        let app = match id {
+            Some(id) => self.fetch_app(id).await?,
+            None => self.get_current_app().await?,
+        };
         let name = app.resource_name.as_deref().unwrap_or("unnamed");
 
         println!("App Details:");
