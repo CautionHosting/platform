@@ -108,7 +108,7 @@ async fn check_gateway_connectivity(url: &str, verbose: bool) -> Result<()> {
 #[derive(Parser)]
 #[command(name = "caution")]
 #[command(version = "0.1.0")]
-#[command(about = "CLI for deploying and verifying reproducible enclaves")]
+#[command(about = "Caution.co CLI for deploying and verifying reproducible enclaves")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -122,7 +122,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    #[command(about = "Register a new account with a beta code")]
+    #[command(about = "Register a new account")]
     Register {
         #[arg(long)]
         beta_code: String,
@@ -158,6 +158,11 @@ enum Commands {
     Cache {
         #[command(subcommand)]
         command: CacheCommands,
+    },
+    #[command(about = "Manage cloud provider credentials for managed on-premises deployments")]
+    Credentials {
+        #[command(subcommand)]
+        command: CredentialCommands,
     },
 }
 
@@ -221,6 +226,64 @@ enum CacheCommands {
         #[arg(short, long, help = "Skip confirmation prompt")]
         force: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum CredentialCommands {
+    #[command(about = "Add cloud provider credentials")]
+    Add {
+        #[arg(value_enum, help = "Cloud platform")]
+        platform: CredentialPlatform,
+        #[arg(help = "Name for this credential")]
+        name: String,
+        #[arg(long, help = "Set as default for this platform")]
+        default: bool,
+        #[arg(long, help = "Default region")]
+        region: Option<String>,
+    },
+    #[command(about = "List all credentials")]
+    List,
+    #[command(about = "Remove a credential")]
+    Remove {
+        #[arg(help = "Credential ID or name")]
+        id: String,
+        #[arg(short, long, help = "Skip confirmation prompt")]
+        force: bool,
+    },
+    #[command(about = "Set a credential as the default for its platform")]
+    SetDefault {
+        #[arg(help = "Credential ID or name")]
+        id: String,
+    },
+}
+
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum CredentialPlatform {
+    Aws,
+    Gcp,
+    Azure,
+    Digitalocean,
+    Hetzner,
+    Linode,
+    Vultr,
+    Ovh,
+    Baremetal,
+}
+
+impl std::fmt::Display for CredentialPlatform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Aws => write!(f, "aws"),
+            Self::Gcp => write!(f, "gcp"),
+            Self::Azure => write!(f, "azure"),
+            Self::Digitalocean => write!(f, "digitalocean"),
+            Self::Hetzner => write!(f, "hetzner"),
+            Self::Linode => write!(f, "linode"),
+            Self::Vultr => write!(f, "vultr"),
+            Self::Ovh => write!(f, "ovh"),
+            Self::Baremetal => write!(f, "baremetal"),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -2727,6 +2790,308 @@ build: docker build -t app .
             format!("{} bytes", bytes)
         }
     }
+
+    async fn add_credential(&self, platform: CredentialPlatform, name: String, is_default: bool, region: Option<String>) -> Result<()> {
+        let config = self.ensure_authenticated().await?;
+
+        let request_body = match platform {
+            CredentialPlatform::Aws => {
+                println!("Adding AWS credentials for '{}'", name);
+                print!("AWS Access Key ID: ");
+                std::io::stdout().flush()?;
+                let mut access_key_id = String::new();
+                std::io::stdin().read_line(&mut access_key_id)?;
+                let access_key_id = access_key_id.trim().to_string();
+
+                print!("AWS Secret Access Key: ");
+                std::io::stdout().flush()?;
+                let secret_access_key = rpassword::read_password()
+                    .context("Failed to read secret access key")?;
+
+                serde_json::json!({
+                    "platform": "aws",
+                    "name": name,
+                    "access_key_id": access_key_id,
+                    "secret_access_key": secret_access_key,
+                    "default_region": region,
+                    "is_default": is_default
+                })
+            }
+            CredentialPlatform::Digitalocean | CredentialPlatform::Hetzner |
+            CredentialPlatform::Linode | CredentialPlatform::Vultr | CredentialPlatform::Ovh => {
+                println!("Adding {} credentials for '{}'", platform, name);
+                print!("API Token: ");
+                std::io::stdout().flush()?;
+                let api_token = rpassword::read_password()
+                    .context("Failed to read API token")?;
+
+                serde_json::json!({
+                    "platform": platform.to_string(),
+                    "name": name,
+                    "api_token": api_token,
+                    "default_region": region,
+                    "is_default": is_default
+                })
+            }
+            CredentialPlatform::Gcp => {
+                println!("Adding GCP credentials for '{}'", name);
+                print!("Service Account Email: ");
+                std::io::stdout().flush()?;
+                let mut email = String::new();
+                std::io::stdin().read_line(&mut email)?;
+                let email = email.trim().to_string();
+
+                print!("Path to service account JSON key file: ");
+                std::io::stdout().flush()?;
+                let mut key_path = String::new();
+                std::io::stdin().read_line(&mut key_path)?;
+                let key_path = key_path.trim();
+
+                let key_content = fs::read_to_string(key_path)
+                    .context("Failed to read service account key file")?;
+                let key_json: serde_json::Value = serde_json::from_str(&key_content)
+                    .context("Invalid JSON in service account key file")?;
+
+                serde_json::json!({
+                    "platform": "gcp",
+                    "name": name,
+                    "service_account_email": email,
+                    "service_account_key": key_json,
+                    "default_region": region,
+                    "is_default": is_default
+                })
+            }
+            CredentialPlatform::Azure => {
+                println!("Adding Azure credentials for '{}'", name);
+                print!("Tenant ID: ");
+                std::io::stdout().flush()?;
+                let mut tenant_id = String::new();
+                std::io::stdin().read_line(&mut tenant_id)?;
+                let tenant_id = tenant_id.trim().to_string();
+
+                print!("Client ID: ");
+                std::io::stdout().flush()?;
+                let mut client_id = String::new();
+                std::io::stdin().read_line(&mut client_id)?;
+                let client_id = client_id.trim().to_string();
+
+                print!("Client Secret: ");
+                std::io::stdout().flush()?;
+                let client_secret = rpassword::read_password()
+                    .context("Failed to read client secret")?;
+
+                print!("Subscription ID: ");
+                std::io::stdout().flush()?;
+                let mut subscription_id = String::new();
+                std::io::stdin().read_line(&mut subscription_id)?;
+                let subscription_id = subscription_id.trim().to_string();
+
+                serde_json::json!({
+                    "platform": "azure",
+                    "name": name,
+                    "tenant_id": tenant_id,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "subscription_id": subscription_id,
+                    "default_region": region,
+                    "is_default": is_default
+                })
+            }
+            CredentialPlatform::Baremetal => {
+                println!("Adding bare metal credentials for '{}'", name);
+                print!("Host address: ");
+                std::io::stdout().flush()?;
+                let mut host = String::new();
+                std::io::stdin().read_line(&mut host)?;
+                let host = host.trim().to_string();
+
+                print!("SSH Port [22]: ");
+                std::io::stdout().flush()?;
+                let mut port_str = String::new();
+                std::io::stdin().read_line(&mut port_str)?;
+                let port: u16 = port_str.trim().parse().unwrap_or(22);
+
+                print!("Username: ");
+                std::io::stdout().flush()?;
+                let mut username = String::new();
+                std::io::stdin().read_line(&mut username)?;
+                let username = username.trim().to_string();
+
+                print!("Use SSH key (k) or password (p)? [k]: ");
+                std::io::stdout().flush()?;
+                let mut auth_type = String::new();
+                std::io::stdin().read_line(&mut auth_type)?;
+                let auth_type = auth_type.trim().to_lowercase();
+
+                let (ssh_private_key, ssh_password) = if auth_type == "p" {
+                    print!("SSH Password: ");
+                    std::io::stdout().flush()?;
+                    let password = rpassword::read_password()
+                        .context("Failed to read password")?;
+                    (None, Some(password))
+                } else {
+                    print!("Path to SSH private key [~/.ssh/id_ed25519]: ");
+                    std::io::stdout().flush()?;
+                    let mut key_path = String::new();
+                    std::io::stdin().read_line(&mut key_path)?;
+                    let key_path = key_path.trim();
+                    let key_path = if key_path.is_empty() {
+                        dirs::home_dir()
+                            .map(|h| h.join(".ssh/id_ed25519"))
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "~/.ssh/id_ed25519".to_string())
+                    } else {
+                        key_path.to_string()
+                    };
+
+                    let key_content = fs::read_to_string(&key_path)
+                        .context(format!("Failed to read SSH key from {}", key_path))?;
+                    (Some(key_content), None)
+                };
+
+                serde_json::json!({
+                    "platform": "baremetal",
+                    "name": name,
+                    "host": host,
+                    "port": port,
+                    "username": username,
+                    "ssh_private_key": ssh_private_key,
+                    "ssh_password": ssh_password,
+                    "is_default": is_default
+                })
+            }
+        };
+
+        let response = self.client
+            .post(format!("{}/credentials", self.base_url))
+            .header("X-Session-ID", &config.session_id)
+            .json(&request_body)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            let cred: serde_json::Value = response.json().await?;
+            println!("Credential '{}' added successfully (ID: {})", name, cred["id"]);
+            if is_default {
+                println!("Set as default for {}", platform);
+            }
+            Ok(())
+        } else {
+            let error_text = response.text().await.unwrap_or_default();
+            bail!("Failed to add credential: {}", error_text)
+        }
+    }
+
+    async fn list_credentials(&self) -> Result<()> {
+        let config = self.ensure_authenticated().await?;
+
+        let response = self.client
+            .get(format!("{}/credentials", self.base_url))
+            .header("X-Session-ID", &config.session_id)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            let credentials: Vec<serde_json::Value> = response.json().await?;
+
+            if credentials.is_empty() {
+                println!("No cloud credentials found. Add one with 'caution credentials add <platform> <name>'");
+            } else {
+                println!("Cloud Credentials:");
+                println!();
+                for cred in credentials {
+                    let id = cred["id"].as_i64().unwrap_or(0);
+                    let name = cred["name"].as_str().unwrap_or("untitled");
+                    let platform = cred["platform"].as_str().unwrap_or("unknown");
+                    let identifier = cred["identifier"].as_str().unwrap_or("");
+                    let is_default = cred["is_default"].as_bool().unwrap_or(false);
+                    let region = cred["default_region"].as_str();
+
+                    let default_marker = if is_default { " (default)" } else { "" };
+                    let region_str = region.map(|r| format!(" [{}]", r)).unwrap_or_default();
+
+                    println!("  [{}] {} - {}{}{}", id, name, platform, default_marker, region_str);
+                    println!("       Identifier: {}", identifier);
+                }
+            }
+            Ok(())
+        } else {
+            bail!("Failed to list credentials: {}", response.status())
+        }
+    }
+
+    async fn remove_credential(&self, id: &str, force: bool) -> Result<()> {
+        let config = self.ensure_authenticated().await?;
+
+        let credential_id: i64 = id.parse()
+            .context("Invalid credential ID - must be a number")?;
+
+        let response = self.client
+            .get(format!("{}/credentials/{}", self.base_url, credential_id))
+            .header("X-Session-ID", &config.session_id)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            bail!("Credential '{}' not found", id);
+        }
+
+        let cred: serde_json::Value = response.json().await?;
+        let name = cred["name"].as_str().unwrap_or("unknown");
+        let platform = cred["platform"].as_str().unwrap_or("unknown");
+
+        if !force {
+            println!("About to delete credential:");
+            println!("  Name: {}", name);
+            println!("  Platform: {}", platform);
+            println!();
+            print!("Are you sure? [y/N] ");
+            std::io::stdout().flush()?;
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+
+            if !input.trim().eq_ignore_ascii_case("y") {
+                println!("Aborted.");
+                return Ok(());
+            }
+        }
+
+        let response = self.client
+            .delete(format!("{}/credentials/{}", self.base_url, credential_id))
+            .header("X-Session-ID", &config.session_id)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            println!("Credential '{}' removed", name);
+            Ok(())
+        } else {
+            bail!("Failed to remove credential: {}", response.status())
+        }
+    }
+
+    async fn set_default_credential(&self, id: &str) -> Result<()> {
+        let config = self.ensure_authenticated().await?;
+
+        let credential_id: i64 = id.parse()
+            .context("Invalid credential ID - must be a number")?;
+
+        let response = self.client
+            .post(format!("{}/credentials/{}/default", self.base_url, credential_id))
+            .header("X-Session-ID", &config.session_id)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            println!("Credential set as default");
+            Ok(())
+        } else if response.status() == reqwest::StatusCode::NOT_FOUND {
+            bail!("Credential '{}' not found", id)
+        } else {
+            bail!("Failed to set default: {}", response.status())
+        }
+    }
 }
 
 struct AssertionResult {
@@ -2818,6 +3183,22 @@ pub async fn run() -> Result<()> {
                 }
                 CacheCommands::Destroy { force } => {
                     client.cache_destroy(force)?;
+                }
+            }
+        }
+        Commands::Credentials { command } => {
+            match command {
+                CredentialCommands::Add { platform, name, default, region } => {
+                    client.add_credential(platform, name, default, region).await?;
+                }
+                CredentialCommands::List => {
+                    client.list_credentials().await?;
+                }
+                CredentialCommands::Remove { id, force } => {
+                    client.remove_credential(&id, force).await?;
+                }
+                CredentialCommands::SetDefault { id } => {
+                    client.set_default_credential(&id).await?;
                 }
             }
         }

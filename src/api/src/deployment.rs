@@ -9,6 +9,13 @@ use tempfile::TempDir;
 use tokio::fs;
 use uuid::Uuid;
 
+#[derive(Debug, Clone)]
+pub struct AwsCredentials {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub region: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentRequest {
     pub org_id: Uuid,
@@ -54,6 +61,8 @@ pub struct NitroDeploymentRequest {
     pub cpu_count: u32,
     pub debug_mode: bool,
     pub ports: Vec<u16>,
+    #[serde(skip)]
+    pub credentials: Option<AwsCredentials>,
 }
 
 pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<DeploymentResult> {
@@ -66,12 +75,15 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
     let eif_s3_path = upload_eif_to_s3(&request.eif_path, &request.org_id, &request.resource_name).await
         .context("Failed to upload EIF to S3")?;
 
+    let aws_region = request.credentials.as_ref()
+        .map(|c| c.region.clone())
+        .unwrap_or_else(|| std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()));
+
     let config = TerraformConfig {
         module_path: PathBuf::from("terraform/modules/aws/nitro-enclave"),
         s3_bucket: std::env::var("TERRAFORM_STATE_BUCKET")
             .unwrap_or_else(|_| "caution-terraform-state".to_string()),
-        aws_region: std::env::var("AWS_REGION")
-            .unwrap_or_else(|_| "us-west-2".to_string()),
+        aws_region,
     };
 
     provision_nitro_enclave(&request, &eif_s3_path, &config).await
@@ -128,17 +140,17 @@ async fn provision_ec2_app(
 
     copy_module_directory(&config.module_path, work_dir).await
         .context("Failed to copy module directory")?;
-    
+
     generate_backend_config(work_dir, request.org_id, request.resource_id, &config.s3_bucket).await
         .context("Failed to generate backend config")?;
-    
+
     generate_deployment_main_tf(work_dir, request).await
         .context("Failed to generate root.tf")?;
-    
-    run_tofu_init(work_dir)
+
+    run_tofu_init(work_dir, None)
         .context("Failed to run tofu init")?;
-    
-    run_tofu_apply(work_dir, &request.resource_name)
+
+    run_tofu_apply(work_dir, &request.resource_name, None)
         .context("Failed to run tofu apply")?;
     
     let result = get_tofu_outputs(work_dir)
@@ -190,15 +202,15 @@ provider "aws" {{
     
     fs::write(work_dir.join("main.tf"), minimal_tf).await
         .context("Failed to write main.tf")?;
-    
-    run_tofu_init(work_dir)
+
+    run_tofu_init(work_dir, None)
         .context("Failed to run tofu init")?;
-    
-    run_tofu_destroy(work_dir, resource_name)
+
+    run_tofu_destroy(work_dir, resource_name, None)
         .context("Failed to run tofu destroy")?;
-    
+
     tracing::info!("Successfully destroyed EC2 for resource {}", resource_name);
-    
+
     Ok(())
 }
 
@@ -352,13 +364,20 @@ output "url" {{
     Ok(())
 }
 
-fn run_tofu_init(work_dir: &Path) -> Result<()> {
+fn run_tofu_init(work_dir: &Path, credentials: Option<&AwsCredentials>) -> Result<()> {
     tracing::info!("Running tofu init...");
 
-    let output = Command::new("tofu")
-        .args(&["init", "-no-color", "-upgrade=false", "-reconfigure"])
-        .current_dir(work_dir)
-        .output()
+    let mut cmd = Command::new("tofu");
+    cmd.args(&["init", "-no-color", "-upgrade=false", "-reconfigure"])
+        .current_dir(work_dir);
+
+    if let Some(creds) = credentials {
+        cmd.env("AWS_ACCESS_KEY_ID", &creds.access_key_id)
+            .env("AWS_SECRET_ACCESS_KEY", &creds.secret_access_key)
+            .env("AWS_REGION", &creds.region);
+    }
+
+    let output = cmd.output()
         .context("Failed to execute tofu init")?;
 
     if !output.status.success() {
@@ -373,11 +392,11 @@ fn run_tofu_init(work_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_tofu_apply(work_dir: &Path, resource_name: &str) -> Result<()> {
-    run_tofu_apply_with_vars(work_dir, resource_name, &[])
+fn run_tofu_apply(work_dir: &Path, resource_name: &str, credentials: Option<&AwsCredentials>) -> Result<()> {
+    run_tofu_apply_with_vars(work_dir, resource_name, &[], credentials)
 }
 
-fn run_tofu_apply_with_vars(work_dir: &Path, resource_name: &str, ports: &[u16]) -> Result<()> {
+fn run_tofu_apply_with_vars(work_dir: &Path, resource_name: &str, ports: &[u16], credentials: Option<&AwsCredentials>) -> Result<()> {
     tracing::info!("Running tofu apply for {}...", resource_name);
 
     let mut args = vec!["apply", "-auto-approve", "-no-color"];
@@ -392,11 +411,18 @@ fn run_tofu_apply_with_vars(work_dir: &Path, resource_name: &str, ports: &[u16])
     args.push("-var");
     let ports_var_ref: &str = &ports_var;
 
-    let output = Command::new("tofu")
-        .args(&args)
+    let mut cmd = Command::new("tofu");
+    cmd.args(&args)
         .arg(ports_var_ref)
-        .current_dir(work_dir)
-        .output()
+        .current_dir(work_dir);
+
+    if let Some(creds) = credentials {
+        cmd.env("AWS_ACCESS_KEY_ID", &creds.access_key_id)
+            .env("AWS_SECRET_ACCESS_KEY", &creds.secret_access_key)
+            .env("AWS_REGION", &creds.region);
+    }
+
+    let output = cmd.output()
         .context("Failed to execute tofu apply")?;
 
     if !output.status.success() {
@@ -451,21 +477,28 @@ fn get_tofu_outputs(work_dir: &Path) -> Result<DeploymentResult> {
     })
 }
 
-fn run_tofu_destroy(work_dir: &Path, resource_name: &str) -> Result<()> {
+fn run_tofu_destroy(work_dir: &Path, resource_name: &str, credentials: Option<&AwsCredentials>) -> Result<()> {
     tracing::info!("Running tofu destroy for {}...", resource_name);
-    
-    let output = Command::new("tofu")
-        .args(&["destroy", "-auto-approve", "-no-color"])
-        .current_dir(work_dir)
-        .output()
+
+    let mut cmd = Command::new("tofu");
+    cmd.args(&["destroy", "-auto-approve", "-no-color"])
+        .current_dir(work_dir);
+
+    if let Some(creds) = credentials {
+        cmd.env("AWS_ACCESS_KEY_ID", &creds.access_key_id)
+            .env("AWS_SECRET_ACCESS_KEY", &creds.secret_access_key)
+            .env("AWS_REGION", &creds.region);
+    }
+
+    let output = cmd.output()
         .context("Failed to execute tofu destroy")?;
-    
+
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::error!("Tofu destroy failed: {}", stderr);
         bail!("Tofu destroy failed: {}", stderr);
     }
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     tracing::debug!("Tofu destroy output: {}", stdout);
 
@@ -526,10 +559,10 @@ async fn provision_nitro_enclave(
     std::fs::write(work_dir.join("user-data.sh"), user_data_template)
         .context("Failed to write user-data.sh")?;
 
-    run_tofu_init(work_dir)
+    run_tofu_init(work_dir, request.credentials.as_ref())
         .context("Failed to run tofu init")?;
 
-    run_tofu_apply_with_vars(work_dir, &request.resource_name, &request.ports)
+    run_tofu_apply_with_vars(work_dir, &request.resource_name, &request.ports, request.credentials.as_ref())
         .context("Failed to run tofu apply")?;
 
     let result = get_tofu_outputs(work_dir)
@@ -565,7 +598,9 @@ async fn generate_nitro_deployment_main_tf(
     request: &NitroDeploymentRequest,
     eif_s3_path: &str,
 ) -> Result<()> {
-    let aws_region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string());
+    let aws_region = request.credentials.as_ref()
+        .map(|c| c.region.clone())
+        .unwrap_or_else(|| std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()));
     let ssh_key_name = std::env::var("SSH_KEY_NAME").ok();
 
     let cpu_count_rounded = if request.cpu_count % 2 == 0 {

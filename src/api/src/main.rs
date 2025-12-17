@@ -25,6 +25,8 @@ mod validated_types;
 mod onboarding;
 mod types;
 mod errors;
+mod encryption;
+mod cloud_credentials;
 
 #[derive(Clone)]
 struct AppState {
@@ -32,6 +34,7 @@ struct AppState {
     git_hostname: String,
     git_ssh_port: Option<u16>,
     data_dir: String,
+    encryptor: Option<Arc<encryption::Encryptor>>,
 }
 
 #[derive(Clone)]
@@ -1193,8 +1196,88 @@ async fn delete_resource(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     
     tracing::info!("Resource {} soft deleted by user {}", resource_id, auth.user_id);
-    
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_cloud_credentials(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<Vec<cloud_credentials::CloudCredential>>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let credentials = cloud_credentials::list_credentials(&state.db, org_id).await?;
+    Ok(Json(credentials))
+}
+
+async fn create_cloud_credential(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<cloud_credentials::CreateCredentialRequest>,
+) -> Result<Json<cloud_credentials::CloudCredential>, (StatusCode, String)> {
+    let encryptor = state.encryptor.as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "Cloud credentials feature not configured. Set CAUTION_ENCRYPTION_KEY.".to_string()))?;
+
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let credential = cloud_credentials::create_credential(&state.db, encryptor, org_id, auth.user_id, req).await?;
+    Ok(Json(credential))
+}
+
+async fn get_cloud_credential(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(credential_id): Path<i64>,
+) -> Result<Json<cloud_credentials::CloudCredential>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let credential = cloud_credentials::get_credential(&state.db, org_id, credential_id)
+        .await?
+        .ok_or((StatusCode::NOT_FOUND, "Credential not found".to_string()))?;
+
+    Ok(Json(credential))
+}
+
+async fn delete_cloud_credential(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(credential_id): Path<i64>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let deleted = cloud_credentials::delete_credential(&state.db, org_id, credential_id).await?;
+
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, "Credential not found".to_string()))
+    }
+}
+
+async fn set_default_cloud_credential(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(credential_id): Path<i64>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let updated = cloud_credentials::set_default_credential(&state.db, org_id, credential_id).await?;
+
+    if updated {
+        Ok(StatusCode::OK)
+    } else {
+        Err((StatusCode::NOT_FOUND, "Credential not found".to_string()))
+    }
 }
 
 async fn deploy_handler(
@@ -1729,6 +1812,62 @@ async fn deploy_handler(
     tracing::info!("Deploying Nitro Enclave for resource {} with memory_mb={}, cpu_count={}, debug={}",
                    resource_id, enclave_config.memory_mb, enclave_config.cpus, enclave_config.debug);
 
+    let credentials = if let Some(ref managed_config) = build_config.managed_on_prem {
+        match managed_config {
+            types::ManagedOnPremConfig::Aws(aws_config) => {
+                tracing::info!("Managed on-prem deployment detected, fetching AWS credentials for region {}", aws_config.region);
+
+                let encryptor = state.encryptor.as_ref().ok_or_else(|| {
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Encryptor not configured".to_string())
+                })?;
+
+                let cred = cloud_credentials::get_default_credential_for_platform(
+                    &state.db,
+                    req.org_id,
+                    cloud_credentials::CloudPlatform::Aws,
+                ).await?;
+
+                match cred {
+                    Some(credential) => {
+                        let secrets = cloud_credentials::get_credential_secrets(
+                            &state.db,
+                            encryptor,
+                            req.org_id,
+                            credential.id,
+                        ).await?;
+
+                        match secrets {
+                            Some(secrets_json) => {
+                                let secret_access_key = secrets_json["secret_access_key"]
+                                    .as_str()
+                                    .ok_or_else(|| {
+                                        (StatusCode::INTERNAL_SERVER_ERROR, "Missing secret_access_key in credentials".to_string())
+                                    })?;
+
+                                Some(deployment::AwsCredentials {
+                                    access_key_id: credential.identifier.clone(),
+                                    secret_access_key: secret_access_key.to_string(),
+                                    region: aws_config.region.clone(),
+                                })
+                            }
+                            None => {
+                                return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to decrypt credentials".to_string()));
+                            }
+                        }
+                    }
+                    None => {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            "managed_on_prem requires a default AWS credential to be configured".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    } else {
+        None
+    };
+
     let nitro_request = deployment::NitroDeploymentRequest {
         org_id: req.org_id,
         resource_id,
@@ -1740,6 +1879,7 @@ async fn deploy_handler(
         cpu_count: enclave_config.cpus,
         debug_mode: enclave_config.debug,
         ports: enclave_config.ports.clone(),
+        credentials,
     };
 
     let deployment_result = match deployment::deploy_nitro_enclave(nitro_request).await {
@@ -1824,11 +1964,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Connected to database");
 
+    let encryptor = match encryption::Encryptor::from_env() {
+        Ok(e) => {
+            info!("Encryption enabled for cloud credentials");
+            Some(Arc::new(e))
+        }
+        Err(e) => {
+            tracing::warn!("Encryption not configured: {}. Cloud credentials feature disabled.", e);
+            None
+        }
+    };
+
     let state = Arc::new(AppState {
         db: pool,
         git_hostname,
         git_ssh_port,
         data_dir,
+        encryptor,
     });
 
     let onboarding_routes = Router::new()
@@ -1854,6 +2006,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/resources/{id}", get(get_resource))
         .route("/resources/{id}", delete(delete_resource))
         .route("/deploy", post(deploy_handler))
+        .route("/credentials", get(list_cloud_credentials))
+        .route("/credentials", post(create_cloud_credential))
+        .route("/credentials/{id}", get(get_cloud_credential))
+        .route("/credentials/{id}", delete(delete_cloud_credential))
+        .route("/credentials/{id}/default", post(set_default_cloud_credential))
         .layer(middleware::from_fn_with_state(state.clone(), onboarding_middleware))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 

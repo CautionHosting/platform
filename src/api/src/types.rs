@@ -72,34 +72,18 @@ impl ResourceState {
 pub enum CloudProvider {
     #[serde(rename = "aws")]
     AWS,
-    #[serde(rename = "gcp")]
-    GCP,
-    #[serde(rename = "azure")]
-    Azure,
-    #[serde(rename = "digitalocean")]
-    DigitalOcean,
-    #[serde(rename = "hetzner")]
-    Hetzner,
 }
 
 impl CloudProvider {
     pub fn as_str(&self) -> &'static str {
         match self {
             CloudProvider::AWS => "aws",
-            CloudProvider::GCP => "gcp",
-            CloudProvider::Azure => "azure",
-            CloudProvider::DigitalOcean => "digitalocean",
-            CloudProvider::Hetzner => "hetzner",
         }
     }
 
     pub fn provider_id(&self) -> i64 {
         match self {
             CloudProvider::AWS => 1,
-            CloudProvider::GCP => 2,
-            CloudProvider::Azure => 3,
-            CloudProvider::DigitalOcean => 4,
-            CloudProvider::Hetzner => 5,
         }
     }
 }
@@ -186,6 +170,21 @@ pub struct EIFBuildResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AwsDeploymentConfig {
+    pub region: String,
+    pub instance_type: Option<String>,
+    pub vpc_id: Option<String>,
+    pub subnet_id: Option<String>,
+    pub security_group_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "platform", rename_all = "lowercase")]
+pub enum ManagedOnPremConfig {
+    Aws(AwsDeploymentConfig),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildConfig {
     pub containerfile: Option<String>,
 
@@ -215,6 +214,8 @@ pub struct BuildConfig {
 
     #[serde(default)]
     pub ports: Vec<u16>,
+
+    pub managed_on_prem: Option<ManagedOnPremConfig>,
 }
 
 impl Default for BuildConfig {
@@ -233,6 +234,7 @@ impl Default for BuildConfig {
             debug: false,
             no_cache: false,
             ports: Vec::new(),
+            managed_on_prem: None,
         }
     }
 }
@@ -252,6 +254,14 @@ impl BuildConfig {
         let mut debug = None;
         let mut no_cache = None;
         let mut ports: Vec<u16> = Vec::new();
+
+        let mut managed_on_prem = false;
+        let mut platform: Option<String> = None;
+        let mut aws_region: Option<String> = None;
+        let mut aws_instance_type: Option<String> = None;
+        let mut aws_vpc_id: Option<String> = None;
+        let mut aws_subnet_id: Option<String> = None;
+        let mut aws_security_group_id: Option<String> = None;
 
         for line in content.lines() {
             let line = line.trim();
@@ -372,12 +382,67 @@ impl BuildConfig {
                             tracing::info!("Parsed ports from Procfile: {:?}", ports);
                         }
                     }
+                    "managed_on_prem" => {
+                        managed_on_prem = value.to_lowercase() == "true";
+                    }
+                    "platform" => {
+                        if !value.is_empty() {
+                            platform = Some(value.to_lowercase());
+                        }
+                    }
+                    "aws_region" => {
+                        if !value.is_empty() {
+                            aws_region = Some(value);
+                        }
+                    }
+                    "aws_instance_type" => {
+                        if !value.is_empty() {
+                            aws_instance_type = Some(value);
+                        }
+                    }
+                    "aws_vpc_id" => {
+                        if !value.is_empty() {
+                            aws_vpc_id = Some(value);
+                        }
+                    }
+                    "aws_subnet_id" => {
+                        if !value.is_empty() {
+                            aws_subnet_id = Some(value);
+                        }
+                    }
+                    "aws_security_group_id" => {
+                        if !value.is_empty() {
+                            aws_security_group_id = Some(value);
+                        }
+                    }
                     _ => {}
                 }
             }
         }
 
         let run_command = run.or_else(|| binary.clone());
+
+        let managed_on_prem_config = if managed_on_prem {
+            let platform = platform.ok_or("managed_on_prem requires 'platform' to be specified")?;
+
+            match platform.as_str() {
+                "aws" => {
+                    let region = aws_region.ok_or("managed_on_prem with platform 'aws' requires 'aws_region'")?;
+                    Some(ManagedOnPremConfig::Aws(AwsDeploymentConfig {
+                        region,
+                        instance_type: aws_instance_type,
+                        vpc_id: aws_vpc_id,
+                        subnet_id: aws_subnet_id,
+                        security_group_id: aws_security_group_id,
+                    }))
+                }
+                other => {
+                    return Err(format!("Unsupported platform '{}'. Currently only 'aws' is supported.", other));
+                }
+            }
+        } else {
+            None
+        };
 
         Ok(Self {
             containerfile,
@@ -393,6 +458,7 @@ impl BuildConfig {
             debug: debug.unwrap_or(false),
             no_cache: no_cache.unwrap_or(false),
             ports,
+            managed_on_prem: managed_on_prem_config,
         })
     }
 }

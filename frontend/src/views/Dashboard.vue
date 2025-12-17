@@ -31,6 +31,12 @@
         >
           SSH Keys
         </button>
+        <button
+          :class="['tab', { active: activeTab === 'credentials' }]"
+          @click="activeTab = 'credentials'"
+        >
+          Cloud Credentials
+        </button>
       </div>
 
       <div v-if="activeTab === 'apps'" class="tab-content">
@@ -114,6 +120,100 @@ caution verify --reproduce
         </section>
       </div>
 
+      <div v-if="activeTab === 'credentials'" class="tab-content">
+        <section class="section">
+          <h2>AWS Credentials</h2>
+          <p class="section-description">
+            Add AWS credentials to deploy applications to your own infrastructure.
+          </p>
+
+          <div class="add-key-form">
+            <div class="form-group">
+              <label for="credName">Name</label>
+              <input
+                id="credName"
+                v-model="newCredName"
+                type="text"
+                placeholder="e.g., Production AWS"
+                :disabled="addingCred"
+              />
+            </div>
+            <div class="form-group">
+              <label for="awsAccessKeyId">Access Key ID</label>
+              <input
+                id="awsAccessKeyId"
+                v-model="newCredAwsKeyId"
+                type="text"
+                placeholder="AKIA..."
+                :disabled="addingCred"
+              />
+            </div>
+            <div class="form-group">
+              <label for="awsSecretKey">Secret Access Key</label>
+              <input
+                id="awsSecretKey"
+                v-model="newCredAwsSecret"
+                type="password"
+                placeholder="Enter secret access key"
+                :disabled="addingCred"
+              />
+            </div>
+            <div class="form-group checkbox-group">
+              <label>
+                <input
+                  type="checkbox"
+                  v-model="newCredIsDefault"
+                  :disabled="addingCred"
+                />
+                Set as default
+              </label>
+            </div>
+            <button
+              @click="addCredential"
+              class="btn-primary"
+              :disabled="addingCred || !newCredName.trim() || !newCredAwsKeyId.trim() || !newCredAwsSecret.trim()"
+            >
+              {{ addingCred ? 'Adding...' : 'Add Credential' }}
+            </button>
+          </div>
+
+          <div class="keys-list">
+            <div v-if="loadingCreds" class="loading">Loading credentials...</div>
+            <div v-else-if="credentials.length === 0" class="empty-state">
+              No AWS credentials added yet.
+            </div>
+            <div v-else>
+              <div v-for="cred in credentials" :key="cred.id" class="cred-item">
+                <div class="cred-info">
+                  <div class="cred-header">
+                    <span class="cred-name">{{ cred.name }}</span>
+                    <span v-if="cred.is_default" class="cred-default">Default</span>
+                  </div>
+                  <code class="cred-identifier">{{ cred.identifier }}</code>
+                </div>
+                <div class="cred-actions">
+                  <button
+                    v-if="!cred.is_default"
+                    @click="setDefaultCredential(cred.id)"
+                    class="btn-secondary"
+                    :disabled="settingDefault === cred.id"
+                  >
+                    {{ settingDefault === cred.id ? '...' : 'Set Default' }}
+                  </button>
+                  <button
+                    @click="deleteCredential(cred.id, cred.name)"
+                    class="btn-danger"
+                    :disabled="deletingCred === cred.id"
+                  >
+                    {{ deletingCred === cred.id ? 'Deleting...' : 'Delete' }}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
       <div v-if="activeTab === 'ssh'" class="tab-content">
         <section class="section">
           <h2>SSH Keys</h2>
@@ -121,7 +221,6 @@ caution verify --reproduce
             Add SSH keys to push code to your applications via Git.
           </p>
 
-          <!-- Add Key Form -->
           <div class="add-key-form">
             <div class="form-group">
               <label for="keyName">Key Name (optional)</label>
@@ -234,13 +333,24 @@ export default {
     const newKeyName = ref('')
     const newPublicKey = ref('')
 
+    // Credentials state
+    const credentials = ref([])
+    const loadingCreds = ref(true)
+    const addingCred = ref(false)
+    const deletingCred = ref(null)
+    const settingDefault = ref(null)
+    const newCredName = ref('')
+    const newCredAwsKeyId = ref('')
+    const newCredAwsSecret = ref('')
+    const newCredIsDefault = ref(false)
+
     onMounted(async () => {
       if (!props.session) {
         window.location.href = '/login'
         return
       }
 
-      await Promise.all([loadApps(), loadKeys()])
+      await Promise.all([loadApps(), loadKeys(), loadCredentials()])
     })
 
     const loadApps = async () => {
@@ -445,6 +555,130 @@ export default {
       }
     }
 
+    const loadCredentials = async () => {
+      loadingCreds.value = true
+
+      try {
+        const response = await fetch('/api/credentials', {
+          headers: {
+            'X-Session-ID': props.session
+          }
+        })
+
+        if (response.ok) {
+          credentials.value = await response.json()
+        } else if (response.status === 401) {
+          window.location.href = '/login'
+        } else {
+          const data = await response.json().catch(() => ({}))
+          error.value = data.error || 'Failed to load credentials'
+        }
+      } catch (err) {
+        error.value = 'Failed to connect to server'
+      } finally {
+        loadingCreds.value = false
+      }
+    }
+
+    const addCredential = async () => {
+      if (!newCredName.value.trim() || !newCredAwsKeyId.value.trim() || !newCredAwsSecret.value.trim()) return
+
+      addingCred.value = true
+      error.value = null
+      success.value = null
+
+      try {
+        const body = {
+          platform: 'aws',
+          name: newCredName.value.trim(),
+          access_key_id: newCredAwsKeyId.value.trim(),
+          secret_access_key: newCredAwsSecret.value.trim(),
+          is_default: newCredIsDefault.value
+        }
+
+        const response = await fetch('/api/credentials', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Session-ID': props.session
+          },
+          body: JSON.stringify(body)
+        })
+
+        if (response.ok) {
+          success.value = 'AWS credential added'
+          newCredName.value = ''
+          newCredAwsKeyId.value = ''
+          newCredAwsSecret.value = ''
+          newCredIsDefault.value = false
+          await loadCredentials()
+        } else {
+          const data = await response.json().catch(() => ({}))
+          error.value = data.error || 'Failed to add credential'
+        }
+      } catch (err) {
+        error.value = 'Failed to connect to server'
+      } finally {
+        addingCred.value = false
+      }
+    }
+
+    const deleteCredential = async (id, name) => {
+      if (!confirm(`Are you sure you want to delete "${name}"?`)) return
+
+      deletingCred.value = id
+      error.value = null
+      success.value = null
+
+      try {
+        const response = await fetch(`/api/credentials/${id}`, {
+          method: 'DELETE',
+          headers: {
+            'X-Session-ID': props.session
+          }
+        })
+
+        if (response.ok || response.status === 204) {
+          success.value = 'Credential deleted'
+          await loadCredentials()
+        } else {
+          const data = await response.json().catch(() => ({}))
+          error.value = data.error || 'Failed to delete credential'
+        }
+      } catch (err) {
+        error.value = 'Failed to connect to server'
+      } finally {
+        deletingCred.value = null
+      }
+    }
+
+    const setDefaultCredential = async (id) => {
+      settingDefault.value = id
+      error.value = null
+      success.value = null
+
+      try {
+        const response = await fetch(`/api/credentials/${id}/default`, {
+          method: 'POST',
+          headers: {
+            'X-Session-ID': props.session
+          }
+        })
+
+        if (response.ok) {
+          success.value = 'Default credential updated'
+          await loadCredentials()
+        } else {
+          const data = await response.json().catch(() => ({}))
+          error.value = data.error || 'Failed to set default credential'
+        }
+      } catch (err) {
+        error.value = 'Failed to connect to server'
+      } finally {
+        settingDefault.value = null
+      }
+    }
+
     const logout = () => {
       window.location.href = '/login'
     }
@@ -453,12 +687,10 @@ export default {
       error,
       success,
       activeTab,
-      // Apps
       apps,
       loadingApps,
       destroyingApp,
       destroyApp,
-      // SSH Keys
       sshKeys,
       loadingKeys,
       addingKey,
@@ -467,6 +699,18 @@ export default {
       newPublicKey,
       addKey,
       deleteKey,
+      credentials,
+      loadingCreds,
+      addingCred,
+      deletingCred,
+      settingDefault,
+      newCredName,
+      newCredAwsKeyId,
+      newCredAwsSecret,
+      newCredIsDefault,
+      addCredential,
+      deleteCredential,
+      setDefaultCredential,
       logout
     }
   }
@@ -890,5 +1134,113 @@ h2 {
   color: #2e7d32;
   margin-bottom: 20px;
   font-size: 14px;
+}
+
+.checkbox-group label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.checkbox-group input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+}
+
+.form-group select {
+  width: 100%;
+  padding: 12px 16px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-size: 14px;
+  font-family: inherit;
+  background: white;
+  cursor: pointer;
+}
+
+.form-group select:focus {
+  outline: none;
+  border-color: #667eea;
+}
+
+.cred-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px;
+  border-bottom: 1px solid #eee;
+}
+
+.cred-item:last-child {
+  border-bottom: none;
+}
+
+.cred-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cred-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cred-name {
+  font-weight: 500;
+  color: #333;
+}
+
+.cred-platform {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #e3f2fd;
+  color: #1565c0;
+  text-transform: uppercase;
+}
+
+.cred-default {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.cred-identifier {
+  font-size: 12px;
+  color: #666;
+  background: #f5f5f5;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.cred-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-secondary {
+  padding: 6px 12px;
+  background: #f5f5f5;
+  color: #666;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: #eee;
+  color: #333;
+}
+
+.btn-secondary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 </style>

@@ -35,6 +35,10 @@ url = { workspace = true }
 sha2 = { workspace = true }
 enclave-builder = { path = "../enclave-builder" }
 
+# Encryption for credentials
+aes-gcm = { workspace = true }
+rand = { workspace = true }
+
 # AWS SDK for S3 uploads
 aws-config = { version = "1.1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1.15"
