@@ -135,7 +135,7 @@ run-gateway: network
 		--env-file .env \
 		-e DATABASE_URL=$(DATABASE_URL) \
 		-e SSH_PORT=$(SSH_PORT) \
-		-e SSH_HOST_KEY_PATH=/tmp/ssh_host_ed25519_key \
+		-e SSH_HOST_KEY_PATH=$(CONTAINER_DATA_DIR)/ssh_host_ed25519_key \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		caution-gateway
