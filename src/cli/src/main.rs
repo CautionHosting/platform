@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_cbor;
 use base64::{Engine as _, engine::general_purpose};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::time::Duration;
@@ -164,7 +165,11 @@ enum AppCommands {
     Create,
     List,
     Get { id: Option<i64> },
-    Destroy { id: i64 },
+    Destroy {
+        id: Option<i64>,
+        #[arg(short, long, help = "Skip confirmation prompt")]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1515,20 +1520,48 @@ build: docker build -t app .
         Ok(())
     }
 
-    async fn destroy_app(&self, id: i64) -> Result<()> {
+    async fn destroy_app(&self, id: Option<i64>, force: bool) -> Result<()> {
+        let app = match id {
+            Some(id) => self.fetch_app(id).await?,
+            None => self.get_current_app().await?,
+        };
+
+        let name = app.resource_name.as_deref().unwrap_or("unnamed");
+
+        if !force {
+            println!("About to destroy app:");
+            println!("  ID: {}", app.id);
+            println!("  Name: {}", name);
+            println!("  State: {}", app.state);
+            if let Some(ip) = &app.public_ip {
+                println!("  Public IP: {}", ip);
+            }
+            println!();
+            print!("Are you sure you want to destroy this app? [y/N] ");
+            std::io::stdout().flush()?;
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+
+            if !input.trim().eq_ignore_ascii_case("y") {
+                println!("Aborted.");
+                return Ok(());
+            }
+        }
+
         let config = self.ensure_authenticated().await?;
 
-        let mut loader = Loader::new(&format!("Destroying app {}", id), LoaderStyle::Processing);
+        let mut loader = Loader::new(&format!("Destroying app {} ({})", name, app.id), LoaderStyle::Processing);
 
         let response = self.client
-            .delete(format!("{}/api/resources/{}", self.base_url, id))
+            .delete(format!("{}/api/resources/{}", self.base_url, app.id))
             .header("X-Session-ID", config.session_id)
             .send()
             .await?;
 
         if response.status().is_success() {
             loader.stop();
-            println!("App {} destroyed", id);
+            println!("App {} ({}) destroyed", name, app.id);
             Ok(())
         } else {
             let status = response.status();
@@ -2664,8 +2697,8 @@ async fn run() -> Result<()> {
                 AppCommands::Get { id } => {
                     client.get_app(id).await?;
                 }
-                AppCommands::Destroy { id } => {
-                    client.destroy_app(id).await?;
+                AppCommands::Destroy { id, force } => {
+                    client.destroy_app(id, force).await?;
                 }
             }
         }
