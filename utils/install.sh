@@ -5,7 +5,7 @@
 set -e
 
 BINARY_NAME="caution"
-SOURCE="out/cli"
+SOURCE="out/caution"
 INSTALL_DIR="${HOME}/.local/bin"
 
 # Check if source binary exists
