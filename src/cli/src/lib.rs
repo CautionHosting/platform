@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use anyhow::{Context, Result, bail};
-use clap::{ArgGroup, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_cbor;
@@ -113,7 +113,7 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    #[arg(short, long, default_value = "https://alpha.caution.co", help = "Caution API server URL")]
+    #[arg(short, long, default_value = "https://alpha.caution.co", env = "CAUTION_BACKEND_URL", help = "Caution API server URL")]
     url: String,
 
     #[arg(short, long, help = "Enable verbose output")]
@@ -130,7 +130,10 @@ enum Commands {
     #[command(about = "Login to your Caution account")]
     Login,
     #[command(about = "Initialize a new deployment in the current directory")]
-    Init,
+    Init {
+        #[arg(long, help = "Generate Procfile with managed on-premises deployment fields for AWS")]
+        managed_on_prem: bool,
+    },
     #[command(about = "Verify enclave attestation. By default, fetches manifest from the remote enclave and reproduces the build.")]
     Verify {
         #[arg(long, help = "Attestation endpoint URL (default: inferred from .caution/deployment)")]
@@ -659,7 +662,7 @@ impl ApiClient {
         Ok(())
     }
 
-    fn create_procfile_if_needed(&self) -> Result<()> {
+    fn create_procfile_if_needed(&self, managed_on_prem: bool) -> Result<()> {
         use std::fs;
         use std::path::Path;
 
@@ -674,16 +677,34 @@ impl ApiClient {
             .map(|url| format!("app_sources: {}", url))
             .unwrap_or_else(|| "# app_sources: git@codeberg.org:user/repo.git".to_string());
 
+        let managed_on_prem_section = if managed_on_prem {
+            r#"
+# Managed on-premises deployment configuration
+managed_on_prem: true
+platform: aws
+aws_region: us-east-1
+# aws_instance_type: m5.xlarge
+# aws_vpc_id: vpc-xxxxxxxxx
+# aws_subnet_id: subnet-xxxxxxxxx
+# aws_security_group_id: sg-xxxxxxxxx
+"#
+        } else {
+            ""
+        };
+
         let procfile_content = format!(r#"binary: /app/myapp
 build: docker build -t app .
 {source_line}
-"#);
+{managed_on_prem_section}"#);
 
         fs::write(procfile_path, procfile_content)
             .context("Failed to create Procfile")?;
 
         println!("\nCreated Procfile in current directory");
         println!("Edit the required 'binary' field to match your application");
+        if managed_on_prem {
+            println!("Configure AWS deployment settings in the managed_on_prem section");
+        }
         println!("To learn more visit https://git.distrust.co/public/caution");
 
         Ok(())
@@ -1519,7 +1540,7 @@ build: docker build -t app .
         log_verbose(self.verbose, "Setting git remote...");
         self.set_git_remote(&create_response.git_url)?;
 
-        self.create_procfile_if_needed()?;
+        self.create_procfile_if_needed(false)?;
 
         println!("\nYou can now push to 'caution' remote:");
         println!("  git push caution main");
@@ -1667,14 +1688,14 @@ build: docker build -t app .
         }
     }
 
-    async fn init(&self) -> Result<()> {
+    async fn init(&self, managed_on_prem: bool) -> Result<()> {
         println!("Initializing new deployment...");
 
         log_verbose(self.verbose, "Checking git repository...");
         self.check_git_repo()?;
         println!("Git repository found");
 
-        self.create_procfile_if_needed()?;
+        self.create_procfile_if_needed(managed_on_prem)?;
 
         log_verbose(self.verbose, "Reading Procfile...");
         let cmd = self.read_procfile()?;
@@ -1736,7 +1757,7 @@ build: docker build -t app .
         log_verbose(self.verbose, "Setting git remote...");
         self.set_git_remote(&create_response.git_url)?;
 
-        self.create_procfile_if_needed()?;
+        self.create_procfile_if_needed(false)?;
 
         println!("\nYou can now push to 'caution' remote:");
         println!("  git push caution main");
@@ -3132,8 +3153,8 @@ pub async fn run() -> Result<()> {
         Commands::Login => {
             client.login().await?;
         }
-        Commands::Init => {
-            client.init().await?;
+        Commands::Init { managed_on_prem } => {
+            client.init(managed_on_prem).await?;
         }
         Commands::Verify { attestation_url, from_local, app_source_url, pcrs, no_cache } => {
             client.verify(attestation_url, from_local, app_source_url, pcrs, no_cache).await?;
