@@ -106,51 +106,55 @@ async fn check_gateway_connectivity(url: &str, verbose: bool) -> Result<()> {
 }
 
 #[derive(Parser)]
-#[command(name = "api-cli")]
+#[command(name = "caution")]
 #[command(version = "0.1.0")]
-#[command(about = "CLI for Caution.co")]
+#[command(about = "CLI for deploying and verifying reproducible enclaves")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    #[arg(short, long, default_value = "https://alpha.caution.co")]
+    #[arg(short, long, default_value = "https://alpha.caution.co", help = "Caution API server URL")]
     url: String,
 
-    #[arg(short, long)]
+    #[arg(short, long, help = "Enable verbose output")]
     verbose: bool,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    #[command(about = "Register a new account with a beta code")]
     Register {
         #[arg(long)]
         beta_code: String,
     },
+    #[command(about = "Login to your Caution account")]
     Login,
+    #[command(about = "Initialize a new deployment in the current directory")]
     Init,
-    #[command(group(
-        ArgGroup::new("verification-method")
-            .required(true)
-            .args(["reproduce", "pcrs"])
-    ))]
+    #[command(about = "Verify enclave attestation. By default, fetches manifest from the remote enclave and reproduces the build.")]
     Verify {
-        #[arg(long)]
-        url: Option<String>,
-        #[arg(long)]
-        reproduce: bool,
-        #[arg(long)]
+        #[arg(long, help = "Attestation endpoint URL (default: inferred from .caution/deployment)")]
+        attestation_url: Option<String>,
+        #[arg(long, help = "Build from current directory instead of remote manifest")]
+        from_local: bool,
+        #[arg(long, help = "Git URL to fetch application source")]
+        app_source_url: Option<String>,
+        #[arg(long, help = "Compare against PCRs from file instead of building")]
         pcrs: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Force rebuild, ignore cache")]
         no_cache: bool,
     },
+    #[command(about = "Manage deployed applications")]
     Apps {
         #[command(subcommand)]
         command: AppCommands,
     },
+    #[command(about = "Manage SSH keys for git access")]
     SshKeys {
         #[command(subcommand)]
         command: SshKeyCommands,
     },
+    #[command(about = "Manage local cache")]
     Cache {
         #[command(subcommand)]
         command: CacheCommands,
@@ -159,22 +163,32 @@ enum Commands {
 
 #[derive(Subcommand, Debug)]
 enum AppCommands {
+    #[command(about = "Create a new application")]
     Create,
+    #[command(about = "List all applications")]
     List,
-    Get { id: Option<i64> },
+    #[command(about = "Get details of an application")]
+    Get {
+        #[arg(help = "App ID (default: from .caution/deployment)")]
+        id: Option<i64>,
+    },
+    #[command(about = "Destroy an application")]
     Destroy {
+        #[arg(help = "App ID (default: from .caution/deployment)")]
         id: Option<i64>,
         #[arg(short, long, help = "Skip confirmation prompt")]
         force: bool,
     },
+    #[command(about = "Build enclave image locally for inspection")]
     Build {
-        #[arg(long)]
+        #[arg(long, help = "Force rebuild, ignore cache")]
         no_cache: bool,
     },
 }
 
 #[derive(Subcommand, Debug)]
 enum SshKeyCommands {
+    #[command(about = "Add an SSH public key")]
     Add {
         #[arg(conflicts_with_all = ["from_agent", "key"], help = "Path to public key file")]
         key_file: Option<PathBuf>,
@@ -182,20 +196,27 @@ enum SshKeyCommands {
         from_agent: bool,
         #[arg(long, conflicts_with_all = ["key_file", "from_agent"], help = "Public key string")]
         key: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Name for the key")]
         name: Option<String>,
     },
+    #[command(about = "List all SSH keys")]
     List,
+    #[command(about = "Remove an SSH key")]
     Remove {
+        #[arg(help = "Key fingerprint")]
         fingerprint: String,
     },
 }
 
 #[derive(Subcommand, Debug)]
 enum CacheCommands {
+    #[command(about = "Show cache directory path")]
     Path,
+    #[command(about = "Show total cache size")]
     Size,
+    #[command(about = "List cached items")]
     List,
+    #[command(about = "Clear the cache")]
     Destroy {
         #[arg(short, long, help = "Skip confirmation prompt")]
         force: bool,
@@ -1502,7 +1523,7 @@ build: docker build -t app .
 
             apps.into_iter()
                 .find(|app| app.resource_name.as_deref() == Some(resource_name))
-                .ok_or_else(|| anyhow::anyhow!("App '{}' not found. It may have been deleted.", resource_name))
+                .ok_or_else(|| anyhow::anyhow!("App '{}' not found. It may have been deleted.\nTo redeploy, run: git push caution <branch>\nTo re-initialize, run: caution init", resource_name))
         } else {
             bail!("Failed to list apps: {}", response.status())
         }
@@ -1932,10 +1953,10 @@ build: docker build -t app .
         }
     }
 
-    async fn verify(&self, url: Option<String>, reproduce: bool, pcrs_file: Option<String>, no_cache: bool) -> Result<()> {
+    async fn verify(&self, attestation_url_opt: Option<String>, from_local: bool, app_source_url: Option<String>, pcrs_file: Option<String>, no_cache: bool) -> Result<()> {
         println!("Verifying enclave attestation...");
 
-        let attestation_url = if let Some(u) = url {
+        let attestation_url = if let Some(u) = attestation_url_opt {
             u
         } else {
             self.get_attestation_url().await?
@@ -2068,59 +2089,60 @@ build: docker build -t app .
         let expected_pcrs = if let Some(pcrs_path) = pcrs_file {
             println!("\nReading expected PCRs from file: {}", pcrs_path);
             self.read_pcrs_from_file(&pcrs_path)?
-        } else if reproduce {
+        } else if from_local {
+            println!("\nBuilding from local directory...");
+            self.build_and_get_pcrs(None, no_cache).await?
+        } else if let Some(ref source_url) = app_source_url {
+            println!("\nBuilding from provided source URL: {}", source_url);
+            if let Some(ref m) = manifest {
+                let mut modified_manifest = m.clone();
+                let commit = m.app_source.as_ref()
+                    .map(|s| s.commit.clone())
+                    .unwrap_or_else(|| "HEAD".to_string());
+                modified_manifest.app_source = Some(enclave_builder::AppSource {
+                    urls: vec![source_url.clone()],
+                    commit,
+                    branch: None,
+                });
+                self.build_and_get_pcrs(Some(modified_manifest), no_cache).await?
+            } else {
+                println!("\n⚠️  Remote attestation does not include a manifest");
+                println!("Cannot determine commit hash without manifest.");
+                println!();
+                println!("Options:");
+                println!("  1. Build from local directory: caution verify --from-local");
+                println!("  2. Use a PCRs file: caution verify --pcrs pcrs.txt");
+                println!();
+                bail!("Manifest required when using --app-source-url");
+            }
+        } else {
             if let Some(ref m) = manifest {
                 if m.app_source.is_none() {
                     println!("\n⚠️  Cannot reproduce build - no application source code available");
                     println!();
                     println!("The remote manifest indicates this deployment uses private code.");
-                    println!("You cannot reproduce this build from local sources.");
+                    println!("You cannot reproduce this build from remote manifest.");
                     println!();
-                    println!("To verify this deployment, obtain a pcrs.txt file from the application host");
-                    println!("and run:");
-                    println!();
-                    println!("  caution verify --pcrs pcrs.txt {}", attestation_url);
+                    println!("Options:");
+                    println!("  1. Provide the source URL: caution verify --app-source-url git@codeberg.org:org/repo.git");
+                    println!("  2. Build from local directory: caution verify --from-local");
+                    println!("  3. Use a PCRs file: caution verify --pcrs pcrs.txt");
                     println!();
                     bail!("Cannot reproduce private code deployment");
                 }
+                println!("\nReproducing build from remote manifest...");
                 self.build_and_get_pcrs(manifest.clone(), no_cache).await?
             } else {
                 println!("\n⚠️  Remote attestation does not include a manifest");
                 println!();
                 println!("The remote deployment was built without manifest support.");
-                println!("To enable reproducible verification:");
                 println!();
-                println!("1. Redeploy your application (git push)");
-                println!("2. The new deployment will include a manifest with build provenance");
-                println!("3. Run verify again with the new deployment");
+                println!("Options:");
+                println!("  1. Build from local directory: caution verify --from-local");
+                println!("  2. Use a PCRs file: caution verify --pcrs pcrs.txt");
+                println!("  3. Redeploy your app to enable manifest support");
                 println!();
-                println!("For now, you can verify using --pcrs if you have the expected PCRs file.");
-                println!();
-                bail!("Manifest not available from remote - redeploy to enable reproducible verification");
-            }
-        } else {
-            if let Some(m) = manifest {
-                if m.app_source.is_none() {
-                    println!("\n⚠️  Cannot reproduce build - no application source code available");
-                    println!();
-                    println!("This deployment uses private/proprietary code that is not publicly available.");
-                    println!("To verify this deployment, you need a pcrs.txt file from the application host.");
-                    println!();
-                    println!("The pcrs.txt file contains the expected PCR values for a known-safe state.");
-                    println!("Contact the application host to obtain this file, then run:");
-                    println!();
-                    println!("  caution verify --pcrs pcrs.txt {}", attestation_url);
-                    println!();
-                    bail!("Reproducible build verification requires public source code");
-                }
-
-                println!("\n⚠️  Manifest-based verification not yet implemented");
-                println!("Use --reproduce to build from current directory or --pcrs <file> to verify against a PCRs file");
-                bail!("Manifest-based verification coming soon");
-            } else {
-                println!("\n⚠️  No manifest available from remote enclave");
-                println!("Use --reproduce to build from current directory or --pcrs <file> to verify against a PCRs file");
-                bail!("No manifest available");
+                bail!("Manifest not available from remote");
             }
         };
 
@@ -2749,8 +2771,8 @@ pub async fn run() -> Result<()> {
         Commands::Init => {
             client.init().await?;
         }
-        Commands::Verify { url, reproduce, pcrs, no_cache } => {
-            client.verify(url, reproduce, pcrs, no_cache).await?;
+        Commands::Verify { attestation_url, from_local, app_source_url, pcrs, no_cache } => {
+            client.verify(attestation_url, from_local, app_source_url, pcrs, no_cache).await?;
         }
         Commands::Apps { command } => {
             match command {
