@@ -128,13 +128,6 @@ enum Commands {
     },
     Login,
     Init,
-    Describe,
-    Reproduce {
-        #[arg(long, default_value = "true")]
-        keep_staging: bool,
-        #[arg(long)]
-        output_dir: Option<String>,
-    },
     #[command(group(
         ArgGroup::new("verification-method")
             .required(true)
@@ -173,6 +166,10 @@ enum AppCommands {
         id: Option<i64>,
         #[arg(short, long, help = "Skip confirmation prompt")]
         force: bool,
+    },
+    Build {
+        #[arg(long)]
+        no_cache: bool,
     },
 }
 
@@ -1530,6 +1527,7 @@ build: docker build -t app .
         println!("  Provider Resource ID: {}", app.provider_resource_id);
         if let Some(ip) = app.public_ip {
             println!("  Public IP: {}", ip);
+            println!("  Attestation Endpoint: http://{}:5000/attestation", ip);
         }
 
         Ok(())
@@ -1667,37 +1665,6 @@ build: docker build -t app .
         Ok(())
     }
 
-    async fn describe(&self) -> Result<()> {
-        let app = self.get_current_app().await?;
-
-        println!("\n=== App Info ===");
-        println!("Name: {}", app.resource_name.as_deref().unwrap_or("unnamed"));
-        println!("ID: {}", app.id);
-        println!("State: {}", app.state);
-
-        match app.public_ip {
-            Some(ref ip) if !ip.is_empty() => {
-                println!("Public IP: {}", ip);
-                println!("\n=== Endpoints ===");
-                println!("Application:");
-                println!("  http://{}:8080", ip);
-                println!("\nAttestation:");
-                println!("  http://{}:5000/attestation", ip);
-                println!("\nTo verify attestation:");
-                println!("  caution verify --reproduce");
-                println!();
-                Ok(())
-            }
-            _ => {
-                println!("Public IP: Not available");
-                println!("\nDeployment may still be in progress.");
-                println!("Run 'caution describe' again in a few moments.");
-                println!();
-                Ok(())
-            }
-        }
-    }
-
     async fn get_attestation_url(&self) -> Result<String> {
         let app = self.get_current_app().await
             .context("No deployment found. Either run 'caution init' first or provide --url")?;
@@ -1712,7 +1679,7 @@ build: docker build -t app .
         }
     }
 
-    async fn build_local(&self, keep_staging: bool, output_dir: Option<String>) -> Result<()> {
+    async fn build_local(&self, no_cache: bool) -> Result<()> {
         println!("Building EIF locally for inspection...\n");
 
         let commit_sha = Command::new("git")
@@ -1726,17 +1693,15 @@ build: docker build -t app .
             })
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        let no_cache = self.read_procfile_field("no_cache")
+        let procfile_no_cache = self.read_procfile_field("no_cache")
             .map(|v| v.to_lowercase() == "true")
             .unwrap_or(false);
+        let no_cache = no_cache || procfile_no_cache;
 
-        println!("Step 1: Building Docker image...");
+        let mut loader = Loader::new("Building application image", LoaderStyle::Processing);
         let image_ref = self.build_local_docker_image(no_cache).await?;
-        println!("✓ Docker image built: {}\n", image_ref);
-
-        println!("Step 2: Building enclave image...");
-        println!("Enclave source: {}", enclave_builder::ENCLAVE_SOURCE);
-        println!("This may take a few minutes...\n");
+        loader.stop();
+        println!("✓ Application image built: {}\n", image_ref);
 
         let builder = enclave_builder::EnclaveBuilder::new_with_cache(
             "unused-template",
@@ -1750,13 +1715,7 @@ build: docker build -t app .
             no_cache,
         )?;
 
-        let (builder, work_dir) = if let Some(dir) = output_dir {
-            let custom_dir = PathBuf::from(dir);
-            (builder.with_work_dir(custom_dir.clone()), custom_dir)
-        } else {
-            let dir = builder.work_dir.clone();
-            (builder, dir)
-        };
+        let work_dir = builder.work_dir.clone();
 
         let user_image = enclave_builder::UserImage {
             reference: image_ref.clone(),
@@ -1766,23 +1725,16 @@ build: docker build -t app .
             .context("Procfile must specify 'binary' field")?;
 
         let run_command = self.read_procfile_field("run");
-        if let Some(ref cmd) = run_command {
-            println!("Using run command from Procfile: {}", cmd);
-        }
-
         let app_source_urls = self.read_procfile_sources();
         let app_source_urls_opt = if app_source_urls.is_empty() { None } else { Some(app_source_urls.clone()) };
-        if !app_source_urls.is_empty() {
-            println!("Using {} app source URL(s) from Procfile", app_source_urls.len());
-        }
-
         let ports = self.read_procfile_ports();
-        println!("Using ports: {:?}", ports);
 
+        let mut loader = Loader::new("Building enclave image", LoaderStyle::Processing);
         let deployment = builder
             .build_enclave_auto(&user_image, &binary_path, run_command, app_source_urls_opt, None, None, None, None, &ports)
             .await
             .context("Failed to build enclave")?;
+        loader.stop();
 
         println!("✓ Enclave built successfully!\n");
 
@@ -1797,27 +1749,17 @@ build: docker build -t app .
         println!("PCR1 (Kernel/boot): {}", deployment.pcrs.pcr1);
         println!("PCR2 (Application): {}\n", deployment.pcrs.pcr2);
 
-        println!("=== Staging Directory ===");
+        println!("=== Build Directory ===");
         println!("Location: {}\n", stage_dir.display());
         println!("You can inspect the exact build process:");
-        println!("  • Containerfile.eif - Shows exactly how the EIF is built");
-        println!("  • app/ - Your application files");
-        println!("  • enclave/ - Enclave source code (src/attestation-service, src/init, rootfs/)");
-        println!("  • kernel/ - Kernel files (bzImage, linux.config, nsm.ko)");
-        println!("  • output/ - Final EIF and PCRs files\n");
-
-        println!("To rebuild with the exact same process:");
-        println!("  cd {}", stage_dir.display());
-        println!("  docker build -f Containerfile.eif --target=output --output=type=local,dest=./output .\n");
+        println!("  Containerfile.eif - Shows exactly how the EIF is built");
+        println!("  app/ - Your application files");
+        println!("  enclave/ - Enclave source code");
+        println!("  kernel/ - Kernel files");
+        println!("  output/ - Final EIF and PCRs files\n");
 
         println!("To verify your deployed enclave matches this build:");
         println!("  caution verify --reproduce\n");
-
-        if !keep_staging {
-            println!("Cleaning up staging directory...");
-            std::fs::remove_dir_all(&work_dir)
-                .context("Failed to remove staging directory")?;
-        }
 
         Ok(())
     }
@@ -2807,12 +2749,6 @@ pub async fn run() -> Result<()> {
         Commands::Init => {
             client.init().await?;
         }
-        Commands::Describe => {
-            client.describe().await?;
-        }
-        Commands::Reproduce { keep_staging, output_dir } => {
-            client.build_local(keep_staging, output_dir).await?;
-        }
         Commands::Verify { url, reproduce, pcrs, no_cache } => {
             client.verify(url, reproduce, pcrs, no_cache).await?;
         }
@@ -2829,6 +2765,9 @@ pub async fn run() -> Result<()> {
                 }
                 AppCommands::Destroy { id, force } => {
                     client.destroy_app(id, force).await?;
+                }
+                AppCommands::Build { no_cache } => {
+                    client.build_local(no_cache).await?;
                 }
             }
         }
