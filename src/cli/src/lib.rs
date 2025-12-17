@@ -158,6 +158,10 @@ enum Commands {
         #[command(subcommand)]
         command: SshKeyCommands,
     },
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommands,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -187,6 +191,17 @@ enum SshKeyCommands {
     List,
     Remove {
         fingerprint: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CacheCommands {
+    Path,
+    Size,
+    List,
+    Destroy {
+        #[arg(short, long, help = "Skip confirmation prompt")]
+        force: bool,
     },
 }
 
@@ -2619,6 +2634,136 @@ build: docker build -t app .
             bail!("Failed to list SSH keys: {}", response.status())
         }
     }
+
+    fn get_cache_dir(&self) -> Result<PathBuf> {
+        let cache_dir = dirs::home_dir()
+            .context("Failed to determine home directory")?
+            .join(".cache/caution");
+        Ok(cache_dir)
+    }
+
+    fn cache_path(&self) -> Result<()> {
+        let cache_dir = self.get_cache_dir()?;
+        println!("{}", cache_dir.display());
+        Ok(())
+    }
+
+    fn cache_size(&self) -> Result<()> {
+        let cache_dir = self.get_cache_dir()?;
+
+        if !cache_dir.exists() {
+            println!("Cache is empty (0 bytes)");
+            return Ok(());
+        }
+
+        let total_size = self.dir_size(&cache_dir)?;
+        println!("{}", self.format_size(total_size));
+
+        Ok(())
+    }
+
+    fn cache_list(&self) -> Result<()> {
+        let cache_dir = self.get_cache_dir()?;
+
+        if !cache_dir.exists() {
+            println!("Cache is empty");
+            return Ok(());
+        }
+
+        let downloads_dir = cache_dir.join("downloads");
+        if downloads_dir.exists() {
+            println!("Downloads:");
+            if let Ok(entries) = fs::read_dir(&downloads_dir) {
+                let mut items: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+                if items.is_empty() {
+                    println!("  (empty)");
+                } else {
+                    items.sort_by_key(|e| e.path());
+                    for entry in items {
+                        let path = entry.path();
+                        let size = self.dir_size(&path).unwrap_or(0);
+                        let name = path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        println!("  {} ({})", name, self.format_size(size));
+                    }
+                }
+            }
+        } else {
+            println!("Cache is empty");
+        }
+
+        Ok(())
+    }
+
+    fn cache_destroy(&self, force: bool) -> Result<()> {
+        let cache_dir = self.get_cache_dir()?;
+
+        if !cache_dir.exists() {
+            println!("Cache is already empty");
+            return Ok(());
+        }
+
+        let total_size = self.dir_size(&cache_dir)?;
+
+        if !force {
+            println!("About to delete cache:");
+            println!("  Path: {}", cache_dir.display());
+            println!("  Size: {}", self.format_size(total_size));
+            println!();
+            print!("Are you sure you want to delete the cache? [y/N] ");
+            std::io::stdout().flush()?;
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+
+            if !input.trim().eq_ignore_ascii_case("y") {
+                println!("Aborted.");
+                return Ok(());
+            }
+        }
+
+        fs::remove_dir_all(&cache_dir)
+            .context("Failed to remove cache directory")?;
+
+        println!("Cache cleared ({} freed)", self.format_size(total_size));
+        Ok(())
+    }
+
+    fn dir_size(&self, path: &PathBuf) -> Result<u64> {
+        let mut total = 0;
+        if path.is_file() {
+            return Ok(fs::metadata(path)?.len());
+        }
+        if path.is_dir() {
+            for entry in fs::read_dir(path)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_file() {
+                    total += fs::metadata(&path)?.len();
+                } else if path.is_dir() {
+                    total += self.dir_size(&path)?;
+                }
+            }
+        }
+        Ok(total)
+    }
+
+    fn format_size(&self, bytes: u64) -> String {
+        const KB: u64 = 1024;
+        const MB: u64 = KB * 1024;
+        const GB: u64 = MB * 1024;
+
+        if bytes >= GB {
+            format!("{:.2} GB", bytes as f64 / GB as f64)
+        } else if bytes >= MB {
+            format!("{:.2} MB", bytes as f64 / MB as f64)
+        } else if bytes >= KB {
+            format!("{:.2} KB", bytes as f64 / KB as f64)
+        } else {
+            format!("{} bytes", bytes)
+        }
+    }
 }
 
 struct AssertionResult {
@@ -2697,6 +2842,22 @@ pub async fn run() -> Result<()> {
                 }
                 SshKeyCommands::Remove { fingerprint } => {
                     client.remove_ssh_key(&fingerprint).await?;
+                }
+            }
+        }
+        Commands::Cache { command } => {
+            match command {
+                CacheCommands::Path => {
+                    client.cache_path()?;
+                }
+                CacheCommands::Size => {
+                    client.cache_size()?;
+                }
+                CacheCommands::List => {
+                    client.cache_list()?;
+                }
+                CacheCommands::Destroy { force } => {
+                    client.cache_destroy(force)?;
                 }
             }
         }
