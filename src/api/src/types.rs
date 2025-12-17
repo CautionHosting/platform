@@ -198,7 +198,7 @@ pub struct BuildConfig {
     pub run: Option<String>,
 
     #[serde(default)]
-    pub sources: Vec<String>,
+    pub app_sources: Vec<String>,
 
     #[serde(default)]
     pub enclave_sources: Vec<String>,
@@ -225,7 +225,7 @@ impl Default for BuildConfig {
             oci_tarball: None,
             binary: None,
             run: None,
-            sources: Vec::new(),
+            app_sources: Vec::new(),
             enclave_sources: Vec::new(),
             metadata: None,
             memory_mb: 512,
@@ -244,7 +244,7 @@ impl BuildConfig {
         let mut oci_tarball = None;
         let mut binary = None;
         let mut run = None;
-        let mut sources: Vec<String> = Vec::new();
+        let mut app_sources: Vec<String> = Vec::new();
         let mut enclave_sources: Vec<String> = Vec::new();
         let mut metadata = None;
         let mut memory_mb = None;
@@ -293,15 +293,15 @@ impl BuildConfig {
                             run = Some(value);
                         }
                     }
-                    "source" | "sources" => {
+                    "app_sources" => {
                         if !value.is_empty() {
-                            sources = value
+                            app_sources = value
                                 .split(',')
                                 .map(|s| s.trim().to_string())
                                 .filter(|s| !s.is_empty())
                                 .collect();
-                            if !sources.is_empty() {
-                                tracing::info!("Parsed {} source URL(s) from Procfile", sources.len());
+                            if !app_sources.is_empty() {
+                                tracing::info!("Parsed {} app source URL(s) from Procfile", app_sources.len());
                             }
                         }
                     }
@@ -385,7 +385,7 @@ impl BuildConfig {
             oci_tarball,
             binary,
             run: run_command,
-            sources,
+            app_sources,
             enclave_sources,
             metadata,
             memory_mb: memory_mb.unwrap_or(512),

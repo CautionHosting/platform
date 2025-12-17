@@ -561,8 +561,7 @@ impl ApiClient {
     }
 
     fn read_procfile_sources(&self) -> Vec<String> {
-        self.read_procfile_field("source")
-            .or_else(|| self.read_procfile_field("sources"))
+        self.read_procfile_field("app_sources")
             .map(|s| {
                 s.split(',')
                     .map(|url| url.trim().to_string())
@@ -609,8 +608,8 @@ impl ApiClient {
         }
 
         let source_line = self.detect_source_url()
-            .map(|url| format!("source: {}", url))
-            .unwrap_or_else(|| "# source: https://github.com/user/repo/archive/${COMMIT}.tar.gz".to_string());
+            .map(|url| format!("app_sources: {}", url))
+            .unwrap_or_else(|| "# app_sources: git@codeberg.org:user/repo.git".to_string());
 
         let procfile_content = format!(r#"binary: /app/myapp
 build: docker build -t app .

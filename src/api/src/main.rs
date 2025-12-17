@@ -1636,7 +1636,7 @@ async fn deploy_handler(
             tracing::info!("No run command specified, using auto-detection");
         }
 
-        let app_source_urls: Vec<String> = build_config.sources.clone();
+        let app_source_urls: Vec<String> = build_config.app_sources.clone();
         tracing::info!("Using {} app source URL(s): {:?}", app_source_urls.len(), app_source_urls);
 
         let deployment = if let Some(ref binary_path) = build_config.binary {
@@ -1665,7 +1665,7 @@ async fn deploy_handler(
                     &user_image,
                     None,
                     run_command,
-                    Some(build_config.sources.clone()),
+                    Some(build_config.app_sources.clone()),
                     Some(req.branch.clone()),
                     Some(commit_sha.clone()),
                     build_config.metadata.clone(),
