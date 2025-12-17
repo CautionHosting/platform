@@ -638,7 +638,7 @@ build: docker build -t app .
         }
     }
 
-    fn git_url_to_archive_url(&self, git_url: &str, branch: &str) -> Result<String> {
+    fn git_url_to_archive_url(&self, git_url: &str, commit: &str) -> Result<String> {
         let (host, path) = if git_url.starts_with("git@") {
             let without_prefix = git_url.strip_prefix("git@")
                 .ok_or_else(|| anyhow::anyhow!("Invalid git URL format"))?;
@@ -657,16 +657,15 @@ build: docker build -t app .
             bail!("Unsupported git URL format: {}", git_url);
         };
 
-        // Construct archive URL based on the host type
         let archive_url = if host.contains("github.com") {
-            format!("https://{}/{}/archive/refs/heads/{}.tar.gz", host, path, branch)
+            format!("https://{}/{}/archive/{}.tar.gz", host, path, commit)
         } else if host.contains("gitlab") {
             let repo_name = path.rsplit('/').next().unwrap_or("repo");
-            format!("https://{}/{}/-/archive/{}/{}-{}.tar.gz", host, path, branch, repo_name, branch)
+            format!("https://{}/{}/-/archive/{}/{}-{}.tar.gz", host, path, commit, repo_name, commit)
         } else if host.contains("bitbucket") {
-            format!("https://{}/{}/get/{}.tar.gz", host, path, branch)
+            format!("https://{}/{}/get/{}.tar.gz", host, path, commit)
         } else {
-            format!("https://{}/{}/archive/{}.tar.gz", host, path, branch)
+            format!("https://{}/{}/archive/{}.tar.gz", host, path, commit)
         };
 
         Ok(archive_url)
@@ -1794,24 +1793,7 @@ build: docker build -t app .
 
         let cache_key = if let Some(ref manifest) = external_manifest {
             if let Some(ref app_src) = manifest.app_source {
-                match app_src {
-                    enclave_builder::AppSource::GitArchive { urls } => {
-                        use sha2::Digest;
-                        let url = urls.first().cloned().unwrap_or_default();
-                        let hash = sha2::Sha256::digest(url.as_bytes());
-                        hex::encode(&hash[..8])
-                    }
-                    enclave_builder::AppSource::GitRepository { commit, url, .. } => {
-                        if let Some(c) = commit {
-                            c.clone()
-                        } else {
-                            use sha2::Digest;
-                            let hash = sha2::Sha256::digest(url.as_bytes());
-                            hex::encode(&hash[..8])
-                        }
-                    }
-                    _ => uuid::Uuid::new_v4().to_string()
-                }
+                app_src.commit.clone()
             } else {
                 uuid::Uuid::new_v4().to_string()
             }
@@ -1853,22 +1835,17 @@ build: docker build -t app .
             let app_source = manifest.app_source.as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Manifest does not contain app_source - cannot reproduce without source URL"))?;
 
-            let archive_urls: Vec<String> = match app_source {
-                enclave_builder::AppSource::GitArchive { urls } => {
-                    urls.clone()
-                }
-                enclave_builder::AppSource::GitRepository { url, branch, .. } => {
-                    vec![self.git_url_to_archive_url(url, branch.as_deref().unwrap_or("main"))?]
-                }
-                enclave_builder::AppSource::DockerImage { reference } => {
-                    bail!("Cannot reproduce from Docker image reference: {} - need source URL", reference);
-                }
-                enclave_builder::AppSource::Filesystem { path } => {
-                    bail!("Cannot reproduce from filesystem path: {} - need source URL", path);
-                }
-            };
+            let archive_urls: Vec<String> = app_source.urls.iter()
+                .filter_map(|url| self.git_url_to_archive_url(url, &app_source.commit).ok())
+                .collect();
 
-            let app_dir = self.download_and_extract_app_source_with_fallbacks(&archive_urls).await?;
+            let git_fallback = app_source.urls.first()
+                .map(|url| (url.clone(), app_source.commit.clone()));
+
+            let app_dir = self.download_and_extract_app_source_with_git_fallback(
+                &archive_urls,
+                git_fallback.as_ref().map(|(u, c)| (u.as_str(), c.as_str())),
+            ).await?;
             self.build_docker_image_from_dir(&app_dir, no_cache).await?
         } else {
             self.build_local_docker_image(no_cache).await?
@@ -2041,32 +2018,19 @@ build: docker build -t app .
         if let Some(ref m) = manifest {
             println!("\nManifest information:");
             if let Some(ref app_src) = m.app_source {
-                match app_src {
-                    enclave_builder::AppSource::GitArchive { urls } => {
-                        if urls.len() == 1 {
-                            println!("  App source: {} (git archive)", urls[0]);
-                        } else {
-                            println!("  App source: (git archive, {} URLs)", urls.len());
-                            for (i, url) in urls.iter().enumerate() {
-                                println!("    [{}] {}", i + 1, url);
-                            }
-                        }
-                    }
-                    enclave_builder::AppSource::GitRepository { url, branch, commit } => {
-                        print!("  App source: {} (git", url);
-                        if let Some(b) = branch {
-                            print!(" branch: {}", b);
-                        }
-                        if let Some(c) = commit {
-                            print!(" commit: {}", c);
-                        }
-                        println!(")");
-                    }
-                    enclave_builder::AppSource::DockerImage { reference } => {
-                        println!("  App source: {} (docker image)", reference);
-                    }
-                    enclave_builder::AppSource::Filesystem { path } => {
-                        println!("  App source: {} (filesystem)", path);
+                if app_src.urls.len() == 1 {
+                    print!("  App source: {}", app_src.urls[0]);
+                } else {
+                    print!("  App source: ({} URLs)", app_src.urls.len());
+                }
+                print!(" commit: {}", app_src.commit);
+                if let Some(ref b) = app_src.branch {
+                    print!(" branch: {}", b);
+                }
+                println!();
+                if app_src.urls.len() > 1 {
+                    for (i, url) in app_src.urls.iter().enumerate() {
+                        println!("    [{}] {}", i + 1, url);
                     }
                 }
             } else {
@@ -2409,6 +2373,81 @@ build: docker build -t app .
         }
 
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("All source URLs failed")))
+    }
+
+    async fn download_and_extract_app_source_with_git_fallback(
+        &self,
+        archive_urls: &[String],
+        git_fallback: Option<(&str, &str)>,
+    ) -> Result<PathBuf> {
+        if !archive_urls.is_empty() {
+            match self.download_and_extract_app_source_with_fallbacks(archive_urls).await {
+                Ok(path) => return Ok(path),
+                Err(e) => {
+                    log_verbose(self.verbose, &format!("Archive download failed: {}", e));
+                }
+            }
+        }
+
+        if let Some((git_url, commit)) = git_fallback {
+            println!("Archive download failed. Trying git clone (may require SSH access)...");
+
+            let temp_dir = tempfile::TempDir::new()
+                .context("Failed to create temp directory")?;
+            let clone_path = temp_dir.path().join("repo");
+
+            std::fs::create_dir_all(&clone_path)?;
+
+            let init_output = Command::new("git")
+                .args(&["init"])
+                .current_dir(&clone_path)
+                .output()
+                .context("Failed to run git init")?;
+
+            if !init_output.status.success() {
+                let stderr = String::from_utf8_lossy(&init_output.stderr);
+                bail!("Git init failed: {}", stderr);
+            }
+
+            let remote_output = Command::new("git")
+                .args(&["remote", "add", "origin", git_url])
+                .current_dir(&clone_path)
+                .output()
+                .context("Failed to add git remote")?;
+
+            if !remote_output.status.success() {
+                let stderr = String::from_utf8_lossy(&remote_output.stderr);
+                bail!("Git remote add failed: {}", stderr);
+            }
+
+            let fetch_output = Command::new("git")
+                .args(&["fetch", "--depth", "1", "origin", commit])
+                .current_dir(&clone_path)
+                .output()
+                .context("Failed to fetch commit")?;
+
+            if !fetch_output.status.success() {
+                let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+                bail!("Git fetch failed: {}", stderr);
+            }
+
+            let checkout_output = Command::new("git")
+                .args(&["checkout", "FETCH_HEAD"])
+                .current_dir(&clone_path)
+                .output()
+                .context("Failed to checkout commit")?;
+
+            if !checkout_output.status.success() {
+                let stderr = String::from_utf8_lossy(&checkout_output.stderr);
+                bail!("Git checkout failed: {}", stderr);
+            }
+
+            let extract_dir = temp_dir.into_path().join("repo");
+            log_verbose(self.verbose, &format!("Git clone successful: {}", extract_dir.display()));
+            return Ok(extract_dir);
+        }
+
+        bail!("No source URLs available and no git fallback configured")
     }
 
     async fn add_ssh_key(&self, key_file: Option<PathBuf>, from_agent: bool, key: Option<String>, name: Option<String>) -> Result<()> {

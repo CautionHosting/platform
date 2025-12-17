@@ -342,25 +342,16 @@ impl EnclaveBuilder {
                 }
             };
 
-            let app_src = app_source_urls.and_then(|urls| {
-                if urls.is_empty() {
-                    return None;
-                }
-                let first_url = &urls[0];
-                if first_url.ends_with(".tar.gz") || first_url.ends_with(".zip") {
-                    Some(AppSource::GitArchive { urls })
-                } else if first_url.starts_with("http") || first_url.starts_with("git@") {
-                    Some(AppSource::GitRepository {
-                        url: first_url.clone(),
-                        commit: app_commit.clone(),
+            let app_src = match (app_source_urls, app_commit.clone()) {
+                (Some(urls), Some(commit)) if !urls.is_empty() => {
+                    Some(AppSource {
+                        urls,
+                        commit,
                         branch: app_branch.clone(),
                     })
-                } else {
-                    Some(AppSource::DockerImage {
-                        reference: user_image.reference.clone(),
-                    })
                 }
-            });
+                _ => None,
+            };
 
             let framework_src = FrameworkSource::GitArchive {
                 url: self.framework_source.clone(),
@@ -434,25 +425,16 @@ impl EnclaveBuilder {
                 }
             };
 
-            let app_src = app_source_urls.and_then(|urls| {
-                if urls.is_empty() {
-                    return None;
-                }
-                let first_url = &urls[0];
-                if first_url.ends_with(".tar.gz") || first_url.ends_with(".zip") {
-                    Some(AppSource::GitArchive { urls })
-                } else if first_url.starts_with("http") || first_url.starts_with("git@") {
-                    Some(AppSource::GitRepository {
-                        url: first_url.clone(),
-                        commit: app_commit.clone(),
+            let app_src = match (app_source_urls, app_commit.clone()) {
+                (Some(urls), Some(commit)) if !urls.is_empty() => {
+                    Some(AppSource {
+                        urls,
+                        commit,
                         branch: app_branch.clone(),
                     })
-                } else {
-                    Some(AppSource::Filesystem {
-                        path: user_fs_path.to_string_lossy().to_string(),
-                    })
                 }
-            });
+                _ => None,
+            };
 
             let framework_src = FrameworkSource::GitArchive {
                 url: self.framework_source.clone(),

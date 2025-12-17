@@ -1343,6 +1343,14 @@ async fn deploy_handler(
         ));
     };
 
+    if build_config.sources.is_empty() {
+        tracing::error!("Procfile missing required 'sources' field");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Procfile must include 'sources' field with git repository URL(s) for reproducible builds. Example: sources: https://github.com/yourorg/yourapp.git".to_string(),
+        ));
+    }
+
     // Create or get existing resource - only after validation passes
     let (resource_id, build_command) = if let Some((id, config_opt)) = existing_resource {
         let config = config_opt.unwrap_or_else(|| serde_json::json!({}));
@@ -1631,26 +1639,8 @@ async fn deploy_handler(
             tracing::info!("No run command specified, using auto-detection");
         }
 
-        let app_source_urls: Option<Vec<String>> = {
-            let mut urls: Vec<String> = Vec::new();
-
-            if let Ok(default_url) = std::env::var("APP_SOURCE_URL") {
-                let url = default_url.replace("${COMMIT}", &commit_sha);
-                tracing::info!("Using default app source URL from env: {}", url);
-                urls.push(url);
-            }
-
-            for url in &build_config.sources {
-                urls.push(url.replace("${COMMIT}", &commit_sha));
-            }
-
-            if urls.is_empty() {
-                None
-            } else {
-                tracing::info!("Using {} app source URL(s): {:?}", urls.len(), urls);
-                Some(urls)
-            }
-        };
+        let app_source_urls: Vec<String> = build_config.sources.clone();
+        tracing::info!("Using {} app source URL(s): {:?}", app_source_urls.len(), app_source_urls);
 
         let deployment = if let Some(ref binary_path) = build_config.binary {
             tracing::info!("Using static binary extraction mode: {}", binary_path);
@@ -1659,7 +1649,7 @@ async fn deploy_handler(
                     &user_image,
                     binary_path,
                     run_command,
-                    app_source_urls,
+                    Some(app_source_urls),
                     Some(req.branch.clone()),
                     Some(commit_sha.clone()),
                     build_config.metadata.clone(),
@@ -1676,9 +1666,9 @@ async fn deploy_handler(
             builder
                 .build_enclave(
                     &user_image,
-                    None,  // No specific files = full filesystem extraction
+                    None,
                     run_command,
-                    app_source_urls,
+                    Some(build_config.sources.clone()),
                     Some(req.branch.clone()),
                     Some(commit_sha.clone()),
                     build_config.metadata.clone(),

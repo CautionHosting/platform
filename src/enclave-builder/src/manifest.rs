@@ -23,24 +23,11 @@ pub struct EnclaveManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum AppSource {
-    GitRepository {
-        url: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        commit: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        branch: Option<String>,
-    },
-    GitArchive {
-        urls: Vec<String>,
-    },
-    DockerImage {
-        reference: String,
-    },
-    Filesystem {
-        path: String,
-    },
+pub struct AppSource {
+    pub urls: Vec<String>,
+    pub commit: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
