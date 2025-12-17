@@ -1343,14 +1343,6 @@ async fn deploy_handler(
         ));
     };
 
-    if build_config.sources.is_empty() {
-        tracing::error!("Procfile missing required 'sources' field");
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Procfile must include 'sources' field with git repository URL(s) for reproducible builds. Example: sources: https://github.com/yourorg/yourapp.git".to_string(),
-        ));
-    }
-
     // Create or get existing resource - only after validation passes
     let (resource_id, build_command) = if let Some((id, config_opt)) = existing_resource {
         let config = config_opt.unwrap_or_else(|| serde_json::json!({}));
