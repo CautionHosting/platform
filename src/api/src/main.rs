@@ -1612,12 +1612,17 @@ async fn deploy_handler(
     } else {
         tracing::info!("Building EIF using enclave-builder from Docker image: caution-{}:latest", req.app_name);
 
-        tracing::info!("Using enclave source: {}", enclave_builder::ENCLAVE_SOURCE);
+        let enclave_source = if !build_config.enclave_sources.is_empty() {
+            build_config.enclave_sources[0].clone()
+        } else {
+            enclave_builder::ENCLAVE_SOURCE.to_string()
+        };
+        tracing::info!("Using enclave source: {}", enclave_source);
 
         let builder = enclave_builder::EnclaveBuilder::new(
             "unused-template",
             "local",
-            enclave_builder::ENCLAVE_SOURCE,
+            &enclave_source,
             "unused",
             enclave_builder::FRAMEWORK_SOURCE,
         )
