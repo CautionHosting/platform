@@ -52,23 +52,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     --network=none \
     cargo build --release --frozen \
+      --bin caution \
       --target ${TARGET_ARCH} \
-      -p cli
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build/target \
-    --network=none \
-    cargo build --release --frozen \
-      --bin cli \
-      --target ${TARGET_ARCH} \
-      && install -D -m 0755 /build/target/${TARGET_ARCH}/release/cli /usr/local/bin/cli
+      && install -D -m 0755 /build/target/${TARGET_ARCH}/release/caution /usr/local/bin/caution
 
 FROM scratch AS export
 
-COPY --from=builder /usr/local/bin/cli /cli
+COPY --from=builder /usr/local/bin/caution /caution
 
-CMD ["/cli"]
+CMD ["/caution"]
 
 FROM user-runtime AS runtime
 
@@ -80,8 +72,8 @@ COPY --from=ca-certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=openssl /usr/lib/libssl.so.3 /usr/lib/
 COPY --from=openssl /usr/lib/libcrypto.so.3 /usr/lib/
 COPY --from=eudev /lib/libudev.so.1 /lib/
-COPY --from=builder /usr/local/bin/cli /usr/local/bin/cli
+COPY --from=builder /usr/local/bin/caution /usr/local/bin/caution
 
 WORKDIR /app
 
-ENTRYPOINT ["cli"]
+ENTRYPOINT ["caution"]

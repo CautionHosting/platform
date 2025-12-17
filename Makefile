@@ -25,9 +25,9 @@ build-cli:
 	@docker build -t caution-cli -f ./containerfiles/Containerfile.cli --target export .
 	@docker rm -f cli-extract 2>/dev/null || true
 	docker create --name cli-extract caution-cli
-	docker cp cli-extract:/cli $(OUT_DIR)/cli
+	docker cp cli-extract:/caution $(OUT_DIR)/caution
 	docker rm cli-extract
-	@echo "CLI binary available at $(OUT_DIR)/cli"
+	@echo "CLI binary available at $(OUT_DIR)/caution"
 
 build-gateway:
 	@echo "Building Gateway binary..."
