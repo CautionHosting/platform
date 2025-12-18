@@ -308,7 +308,7 @@ impl BuildConfig {
                             run = Some(value);
                         }
                     }
-                    "app_sources" => {
+                    "app_source" | "app_sources" => {
                         if !value.is_empty() {
                             app_sources = value
                                 .split(',')
@@ -434,8 +434,6 @@ impl BuildConfig {
             }
         }
 
-        let run_command = run.or_else(|| binary.clone());
-
         let managed_on_prem_config = if managed_on_prem {
             let platform = platform.ok_or("managed_on_prem requires 'platform' to be specified")?;
 
@@ -463,7 +461,7 @@ impl BuildConfig {
             build,
             oci_tarball,
             binary,
-            run: run_command,
+            run,
             app_sources,
             enclave_sources,
             metadata,

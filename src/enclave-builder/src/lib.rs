@@ -305,6 +305,7 @@ impl EnclaveBuilder {
         tracing::info!("Starting enclave build for user image: {}", user_image.reference);
 
         let binary_path = specific_files.as_ref().and_then(|files| files.first().cloned());
+        let run_command = run_command.or_else(|| binary_path.clone());
 
         tracing::info!("Extracting user image filesystem...");
         let user_fs = if let Some(ref bin_path) = binary_path {
@@ -479,6 +480,8 @@ impl EnclaveBuilder {
             .file_name()
             .and_then(|n| n.to_str())
             .context("Invalid binary path")?;
+
+        let run_command = run_command.or_else(|| Some(binary_path.to_string()));
 
         let filesystem_binary = self.work_dir.join("build").join(binary_basename);
 

@@ -628,6 +628,19 @@ impl ApiClient {
 
     fn read_procfile_sources(&self) -> Vec<String> {
         self.read_procfile_field("app_sources")
+            .or_else(|| self.read_procfile_field("app_source"))
+            .map(|s| {
+                s.split(',')
+                    .map(|url| url.trim().to_string())
+                    .filter(|url| !url.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn read_procfile_enclave_sources(&self) -> Vec<String> {
+        self.read_procfile_field("enclave_sources")
+            .or_else(|| self.read_procfile_field("enclave_source"))
             .map(|s| {
                 s.split(',')
                     .map(|url| url.trim().to_string())
@@ -1561,7 +1574,7 @@ build: docker build -t app .
             let apps: Vec<App> = response.json().await?;
 
             if apps.is_empty() {
-                println!("No apps found. Create one with 'caution init'");
+                println!("No deployed apps found.");
             } else {
                 println!("Apps:");
                 for app in apps {
@@ -1882,7 +1895,14 @@ build: docker build -t app .
                 }
             }
         } else {
-            (enclave_builder::ENCLAVE_SOURCE.to_string(), "unused".to_string())
+            let enclave_sources = self.read_procfile_enclave_sources();
+            if !enclave_sources.is_empty() {
+                log_verbose(self.verbose, &format!("Using enclave source from Procfile: {}", enclave_sources[0]));
+                (enclave_sources[0].clone(), "unused".to_string())
+            } else {
+                log_verbose(self.verbose, &format!("Using default enclave source: {}", enclave_builder::ENCLAVE_SOURCE));
+                (enclave_builder::ENCLAVE_SOURCE.to_string(), "unused".to_string())
+            }
         };
 
         let cache_key = if let Some(ref manifest) = external_manifest {
@@ -1951,33 +1971,87 @@ build: docker build -t app .
             reference: image_ref.clone(),
         };
 
-        let (specific_files, run_command, app_source_urls) = if let Some(ref manifest) = external_manifest {
+        let (binary_path, run_command, app_source_urls, app_branch, app_commit, metadata) = if let Some(ref manifest) = external_manifest {
             let binary = manifest.binary.clone();
             let run_cmd = manifest.run_command.clone();
-            let source_urls: Option<Vec<String>> = None;
+            let source_urls: Option<Vec<String>> = manifest.app_source.as_ref().map(|s| s.urls.clone());
+            let branch = manifest.app_source.as_ref().and_then(|s| s.branch.clone());
+            let commit = manifest.app_source.as_ref().map(|s| s.commit.clone());
 
             log_verbose(self.verbose, &format!("Binary from manifest: {:?}", binary));
             log_verbose(self.verbose, &format!("Run command from manifest: {:?}", run_cmd));
+            log_verbose(self.verbose, &format!("App source URLs from manifest: {:?}", source_urls));
+            log_verbose(self.verbose, &format!("Branch from manifest: {:?}", branch));
+            log_verbose(self.verbose, &format!("Commit from manifest: {:?}", commit));
 
-            (binary.map(|b| vec![b]), run_cmd, source_urls)
+            (binary, run_cmd, source_urls, branch, commit, manifest.metadata.clone())
         } else {
             let binary = self.read_procfile_field("binary");
             let run_cmd = self.read_procfile_field("run");
             let source_urls = self.read_procfile_sources();
             let source_urls_opt = if source_urls.is_empty() { None } else { Some(source_urls) };
+            let metadata = self.read_procfile_field("metadata");
+
+            let commit = Command::new("git")
+                .args(&["rev-parse", "HEAD"])
+                .output()
+                .ok()
+                .and_then(|o| if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                });
+
+            let branch = Command::new("git")
+                .args(&["rev-parse", "--abbrev-ref", "HEAD"])
+                .output()
+                .ok()
+                .and_then(|o| if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                });
 
             log_verbose(self.verbose, &format!("Binary from Procfile: {:?}", binary));
             log_verbose(self.verbose, &format!("Run command from Procfile: {:?}", run_cmd));
             log_verbose(self.verbose, &format!("Source URLs from Procfile: {:?}", source_urls_opt));
+            log_verbose(self.verbose, &format!("Git branch: {:?}", branch));
+            log_verbose(self.verbose, &format!("Git commit: {:?}", commit));
+            log_verbose(self.verbose, &format!("Metadata: {:?}", metadata));
 
-            (binary.map(|b| vec![b]), run_cmd, source_urls_opt)
+            (binary, run_cmd, source_urls_opt, branch, commit, metadata)
         };
 
         let ports = self.read_procfile_ports();
         log_verbose(self.verbose, &format!("Ports: {:?}", ports));
 
-        let deployment = builder.build_enclave(&user_image, specific_files, run_command, app_source_urls, None, None, None, external_manifest, &ports).await
-            .context("Failed to build enclave locally")?;
+        let deployment = if let Some(ref bin_path) = binary_path {
+            log_verbose(self.verbose, &format!("Using build_enclave_auto with binary: {}", bin_path));
+            builder.build_enclave_auto(
+                &user_image,
+                bin_path,
+                run_command,
+                app_source_urls,
+                app_branch,
+                app_commit,
+                metadata,
+                external_manifest,
+                &ports,
+            ).await
+        } else {
+            log_verbose(self.verbose, "Using build_enclave (no binary specified)");
+            builder.build_enclave(
+                &user_image,
+                None,
+                run_command,
+                app_source_urls,
+                app_branch,
+                app_commit,
+                metadata,
+                external_manifest,
+                &ports,
+            ).await
+        }.context("Failed to build enclave locally")?;
         loader.stop();
 
         if let Some(work_dir) = deployment.eif.path.parent() {
