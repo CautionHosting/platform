@@ -348,6 +348,53 @@ async fn health_check() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
+async fn wait_for_attestation_health(public_ip: &str, timeout_secs: u64) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let url = format!("http://{}:5000/attestation", public_ip);
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    let mut attempt = 0u32;
+
+    loop {
+        attempt += 1;
+        tracing::info!("Polling attestation endpoint (attempt {}): {}", attempt, url);
+
+        let nonce: [u8; 32] = [0; 32];
+        let result = client
+            .post(&url)
+            .json(&serde_json::json!({"nonce": nonce}))
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!("Attestation endpoint is healthy after {} attempts", attempt);
+                return Ok(());
+            }
+            Ok(resp) => {
+                tracing::debug!("Attestation endpoint returned {}, retrying...", resp.status());
+            }
+            Err(e) => {
+                tracing::debug!("Attestation endpoint not ready: {}", e);
+            }
+        }
+
+        if start.elapsed() >= timeout {
+            return Err(format!(
+                "Attestation endpoint did not become healthy within {} seconds",
+                timeout_secs
+            ));
+        }
+
+        let delay = std::cmp::min(2u64.pow(attempt.min(4)), 30);
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+    }
+}
+
 async fn get_current_user(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1924,6 +1971,12 @@ async fn deploy_handler(
 
     let app_url = format!("http://{}:8080", deployment_result.public_ip);
     let attestation_url = format!("http://{}:5000/attestation", deployment_result.public_ip);
+
+    tracing::info!("Waiting for attestation endpoint to become healthy...");
+    if let Err(e) = wait_for_attestation_health(&deployment_result.public_ip, 300).await {
+        tracing::error!("Attestation health check failed: {}", e);
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Enclave failed to become healthy: {}", e)));
+    }
 
     tracing::info!(
         "Deployment URLs - App: {}, Attestation: {}",
