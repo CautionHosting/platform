@@ -457,7 +457,7 @@ async fn handle_git_push(
             }
         };
 
-        let deploy_msg = "remote: \nremote: ";
+        let deploy_msg = "\n";
         let _ = session_handle.extended_data(channel, 1, deploy_msg.as_bytes().to_vec().into()).await;
 
         let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -510,7 +510,7 @@ async fn handle_git_push(
         {
             Ok(resp) => {
                 let _ = stop_tx.send(());
-                let _ = session_handle.extended_data(channel, 1, b"\nremote: \n".to_vec().into()).await;
+                let _ = session_handle.extended_data(channel, 1, b"\n".to_vec().into()).await;
                 resp
             }
             Err(e) => {
@@ -557,7 +557,7 @@ async fn handle_git_push(
 
         let attestation_url = deploy_result.url.replace(":8080", ":5000/attestation");
         let success_msg = format!(
-            "remote: \nremote: Deployment successful!\nremote: Application: {}\nremote: Attestation: {}\nremote: \n",
+            "\nDeployment successful!\nApplication: {}\nAttestation: {}\n\nRun 'caution verify' to verify the application attestation.\n\n",
             deploy_result.url,
             attestation_url
         );
