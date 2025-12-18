@@ -772,7 +772,7 @@ build: docker build -t app .
         }
     }
 
-    fn git_url_to_archive_url(&self, git_url: &str, commit: &str) -> Result<String> {
+    fn git_url_to_archive_urls(&self, git_url: &str, commit: &str) -> Result<Vec<String>> {
         let (host, path) = if git_url.starts_with("git@") {
             let without_prefix = git_url.strip_prefix("git@")
                 .ok_or_else(|| anyhow::anyhow!("Invalid git URL format"))?;
@@ -791,18 +791,23 @@ build: docker build -t app .
             bail!("Unsupported git URL format: {}", git_url);
         };
 
-        let archive_url = if host.contains("github.com") {
-            format!("https://{}/{}/archive/{}.tar.gz", host, path, commit)
-        } else if host.contains("gitlab") {
-            let repo_name = path.rsplit('/').next().unwrap_or("repo");
-            format!("https://{}/{}/-/archive/{}/{}-{}.tar.gz", host, path, commit, repo_name, commit)
-        } else if host.contains("bitbucket") {
-            format!("https://{}/{}/get/{}.tar.gz", host, path, commit)
-        } else {
-            format!("https://{}/{}/archive/{}.tar.gz", host, path, commit)
-        };
+        let repo_name = path.rsplit('/').next().unwrap_or("repo");
 
-        Ok(archive_url)
+        Ok(vec![
+            format!("http://{}/{}/archive/{}.tar.gz", host, path, commit),
+            format!("https://{}/{}/archive/{}.tar.gz", host, path, commit),
+            format!("http://{}/{}/-/archive/{}/{}-{}.tar.gz", host, path, commit, repo_name, commit),
+            format!("https://{}/{}/-/archive/{}/{}-{}.tar.gz", host, path, commit, repo_name, commit),
+            format!("http://{}/{}/get/{}.tar.gz", host, path, commit),
+            format!("https://{}/{}/get/{}.tar.gz", host, path, commit),
+        ])
+    }
+
+    fn git_url_to_archive_url(&self, git_url: &str, commit: &str) -> Result<String> {
+        self.git_url_to_archive_urls(git_url, commit)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No archive URLs generated"))
     }
 
     async fn register(&self, beta_code: &str) -> Result<()> {
@@ -1950,7 +1955,8 @@ build: docker build -t app .
                 .ok_or_else(|| anyhow::anyhow!("Manifest does not contain app_source - cannot reproduce without source URL"))?;
 
             let archive_urls: Vec<String> = app_source.urls.iter()
-                .filter_map(|url| self.git_url_to_archive_url(url, &app_source.commit).ok())
+                .filter_map(|url| self.git_url_to_archive_urls(url, &app_source.commit).ok())
+                .flatten()
                 .collect();
 
             let git_fallback = app_source.urls.first()
