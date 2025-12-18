@@ -1856,6 +1856,25 @@ async fn deploy_handler(
         "run_command": build_config.run,
     });
 
+    let memory_bytes = (enclave_config.memory_mb as u64) * 1024 * 1024;
+    if eif_result.eif_size_bytes > memory_bytes {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "EIF size ({} MB) exceeds allocated enclave memory ({} MB). Increase memory_mb in Procfile.",
+                eif_result.eif_size_bytes / (1024 * 1024),
+                enclave_config.memory_mb
+            ),
+        ));
+    }
+    if eif_result.eif_size_bytes > memory_bytes * 80 / 100 {
+        tracing::warn!(
+            "EIF size ({} MB) is more than 80% of allocated memory ({} MB). Consider increasing memory_mb.",
+            eif_result.eif_size_bytes / (1024 * 1024),
+            enclave_config.memory_mb
+        );
+    }
+
     tracing::info!("Deploying Nitro Enclave for resource {} with memory_mb={}, cpu_count={}, debug={}",
                    resource_id, enclave_config.memory_mb, enclave_config.cpus, enclave_config.debug);
 
