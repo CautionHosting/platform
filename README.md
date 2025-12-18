@@ -90,7 +90,7 @@ You can verify an enclave's attestation in two ways:
 Fetches the attestation from the endpoint, rebuilds the enclave locally, and verifies the PCR hashes match. The attestation endpoint is available at `http://<app-url>:5000/attestation`.
 
 ```bash
-caution verify --reproduce <attestation-url>
+caution verify --attestation-url <attestation-url>
 ```
 
 **Option B: Verify against known PCR hashes**
@@ -104,7 +104,7 @@ PCR0: 3c07ec536432532f86b8c735b740f0d67a8b115e4a5e20cc8ecbb4e6a8335fe016bf42693b
 PCR1: 3c07ec536432532f86b8c735b740f0d67a8b115e4a5e20cc8ecbb4e6a8335fe016bf42693b18e8560e299636afa8dc84
 PCR2: 21b9efbc184807662e966d34f390821309eeac6802309798826296bf3e8bec7c10edb30948c90ba67310f7b964fc500a
 
-caution verify --pcrs pcrs.txt <attestation-url>
+caution verify --pcrs pcrs.txt
 ```
 
 ## Reference
