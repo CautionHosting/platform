@@ -215,6 +215,9 @@ pub struct BuildConfig {
     #[serde(default)]
     pub ports: Vec<u16>,
 
+    #[serde(default)]
+    pub ssh_keys: Vec<String>,
+
     pub managed_on_prem: Option<ManagedOnPremConfig>,
 }
 
@@ -234,6 +237,7 @@ impl Default for BuildConfig {
             debug: false,
             no_cache: false,
             ports: Vec::new(),
+            ssh_keys: Vec::new(),
             managed_on_prem: None,
         }
     }
@@ -254,6 +258,7 @@ impl BuildConfig {
         let mut debug = None;
         let mut no_cache = None;
         let mut ports: Vec<u16> = Vec::new();
+        let mut ssh_keys: Vec<String> = Vec::new();
 
         let mut managed_on_prem = false;
         let mut platform: Option<String> = None;
@@ -382,6 +387,15 @@ impl BuildConfig {
                             tracing::info!("Parsed ports from Procfile: {:?}", ports);
                         }
                     }
+                    "ssh_keys" | "ssh_key" => {
+                        if !value.is_empty() {
+                            let unquoted = value.trim_matches('"').trim_matches('\'').trim();
+                            if !unquoted.is_empty() && (unquoted.starts_with("ssh-") || unquoted.starts_with("ecdsa-") || unquoted.starts_with("sk-")) {
+                                ssh_keys.push(unquoted.to_string());
+                                tracing::info!("Parsed SSH key from Procfile");
+                            }
+                        }
+                    }
                     "managed_on_prem" => {
                         managed_on_prem = value.to_lowercase() == "true";
                     }
@@ -458,6 +472,7 @@ impl BuildConfig {
             debug: debug.unwrap_or(false),
             no_cache: no_cache.unwrap_or(false),
             ports,
+            ssh_keys,
             managed_on_prem: managed_on_prem_config,
         })
     }

@@ -14,6 +14,18 @@ echo "Installing required packages..."
 dnf update -y
 dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel docker socat dnsmasq iptables iproute
 
+%{ if length(ssh_keys) > 0 ~}
+echo "Adding SSH keys to authorized_keys..."
+mkdir -p /home/ec2-user/.ssh
+chmod 700 /home/ec2-user/.ssh
+%{ for key in ssh_keys ~}
+echo "${key}" >> /home/ec2-user/.ssh/authorized_keys
+%{ endfor ~}
+chmod 600 /home/ec2-user/.ssh/authorized_keys
+chown -R ec2-user:ec2-user /home/ec2-user/.ssh
+echo "Added ${length(ssh_keys)} SSH key(s)"
+%{ endif ~}
+
 systemctl start docker
 systemctl enable docker
 

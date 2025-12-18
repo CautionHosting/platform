@@ -61,6 +61,7 @@ pub struct NitroDeploymentRequest {
     pub cpu_count: u32,
     pub debug_mode: bool,
     pub ports: Vec<u16>,
+    pub ssh_keys: Vec<String>,
     #[serde(skip)]
     pub credentials: Option<AwsCredentials>,
 }
@@ -894,6 +895,7 @@ resource "aws_instance" "enclave" {{
     cpu_count   = {cpu_count}
     debug_mode  = "{debug_mode}"
     ports       = var.ports
+    ssh_keys    = {ssh_keys_json}
   }}))
 
   tags = {{
@@ -943,6 +945,7 @@ output "url" {{
         memory_mb = request.memory_mb,
         cpu_count = cpu_count_rounded,
         debug_mode = if request.debug_mode { "true" } else { "false" },
+        ssh_keys_json = serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string()),
     );
 
     fs::write(work_dir.join("main.tf"), main_tf_content).await

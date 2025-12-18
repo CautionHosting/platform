@@ -1879,6 +1879,7 @@ async fn deploy_handler(
         cpu_count: enclave_config.cpus,
         debug_mode: enclave_config.debug,
         ports: enclave_config.ports.clone(),
+        ssh_keys: build_config.ssh_keys.clone(),
         credentials,
     };
 
