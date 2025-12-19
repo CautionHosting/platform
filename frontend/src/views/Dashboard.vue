@@ -100,9 +100,9 @@ caution verify --reproduce
                     <a :href="'http://' + app.public_ip + ':8080'" target="_blank" class="app-link">
                       Open App
                     </a>
-                    <a :href="'http://' + app.public_ip + ':5000/attestation'" target="_blank" class="app-link">
+                    <button @click="attestationApp = app" class="app-link-btn">
                       Attestation
-                    </a>
+                    </button>
                   </div>
                 </div>
                 <div class="app-actions">
@@ -277,11 +277,19 @@ caution verify --reproduce
         </section>
       </div>
     </div>
+
+    <AttestationModal
+      v-if="attestationApp"
+      :public-ip="attestationApp.public_ip"
+      :app-name="attestationApp.resource_name || 'App'"
+      @close="attestationApp = null"
+    />
   </div>
 </template>
 
 <script>
 import { ref, onMounted } from 'vue'
+import AttestationModal from '../components/AttestationModal.vue'
 
 async function sha256Hex(message) {
   const msgBuffer = new TextEncoder().encode(message)
@@ -312,6 +320,9 @@ function base64UrlToArrayBuffer(base64url) {
 
 export default {
   name: 'Dashboard',
+  components: {
+    AttestationModal
+  },
   props: {
     session: String
   },
@@ -324,6 +335,7 @@ export default {
     const apps = ref([])
     const loadingApps = ref(true)
     const destroyingApp = ref(null)
+    const attestationApp = ref(null)
 
     // SSH Keys state
     const sshKeys = ref([])
@@ -690,6 +702,7 @@ export default {
       apps,
       loadingApps,
       destroyingApp,
+      attestationApp,
       destroyApp,
       sshKeys,
       loadingKeys,
@@ -911,6 +924,20 @@ h2 {
 }
 
 .app-link:hover {
+  text-decoration: underline;
+}
+
+.app-link-btn {
+  font-size: 13px;
+  color: #667eea;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.app-link-btn:hover {
   text-decoration: underline;
 }
 

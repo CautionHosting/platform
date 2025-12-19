@@ -186,6 +186,8 @@ enum AppCommands {
         id: Option<i64>,
         #[arg(short, long, help = "Skip confirmation prompt")]
         force: bool,
+        #[arg(long, help = "Force delete from database even if cloud resource cleanup fails")]
+        force_delete: bool,
     },
     #[command(about = "Build enclave image locally for inspection")]
     Build {
@@ -1655,7 +1657,7 @@ build: docker build -t app .
         Ok(())
     }
 
-    async fn destroy_app(&self, id: Option<i64>, force: bool) -> Result<()> {
+    async fn destroy_app(&self, id: Option<i64>, force: bool, force_delete: bool) -> Result<()> {
         let app = match id {
             Some(id) => self.fetch_app(id).await?,
             None => self.get_current_app().await?,
@@ -1670,6 +1672,10 @@ build: docker build -t app .
             println!("  State: {}", app.state);
             if let Some(ip) = &app.public_ip {
                 println!("  Public IP: {}", ip);
+            }
+            if force_delete {
+                println!();
+                println!("  WARNING: --force-delete will remove from database even if cloud cleanup fails!");
             }
             println!();
             print!("Are you sure you want to destroy this app? [y/N] ");
@@ -1688,8 +1694,14 @@ build: docker build -t app .
 
         let mut loader = Loader::new(&format!("Destroying app {} ({})", name, app.id), LoaderStyle::Processing);
 
+        let url = if force_delete {
+            format!("{}/api/resources/{}?force=true", self.base_url, app.id)
+        } else {
+            format!("{}/api/resources/{}", self.base_url, app.id)
+        };
+
         let response = self.client
-            .delete(format!("{}/api/resources/{}", self.base_url, app.id))
+            .delete(&url)
             .header("X-Session-ID", config.session_id)
             .send()
             .await?;
@@ -3250,8 +3262,8 @@ pub async fn run() -> Result<()> {
                 AppCommands::Get { id } => {
                     client.get_app(id).await?;
                 }
-                AppCommands::Destroy { id, force } => {
-                    client.destroy_app(id, force).await?;
+                AppCommands::Destroy { id, force, force_delete } => {
+                    client.destroy_app(id, force, force_delete).await?;
                 }
                 AppCommands::Build { no_cache } => {
                     client.build_local(no_cache).await?;

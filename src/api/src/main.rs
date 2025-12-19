@@ -1193,12 +1193,19 @@ async fn get_resource(
     Ok(Json(resource))
 }
 
+#[derive(Debug, Deserialize)]
+struct DeleteResourceQuery {
+    #[serde(default)]
+    force: bool,
+}
+
 async fn delete_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(resource_id): Path<i64>,
+    query: axum::extract::Query<DeleteResourceQuery>,
 ) -> Result<StatusCode, StatusCode> {
-    tracing::info!("delete_resource called: resource_id={}, user_id={}", resource_id, auth.user_id);
+    tracing::info!("delete_resource called: resource_id={}, user_id={}, force={}", resource_id, auth.user_id, query.force);
 
     tracing::debug!("Querying resource access for user {} on resource {}", auth.user_id, resource_id);
     let resource: Option<(i64, Uuid, String, Option<String>)> = sqlx::query_as(
@@ -1217,19 +1224,22 @@ async fn delete_resource(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let Some((_, org_id, resource_name, role_arn_opt)) = resource else {
+    let Some((_, org_id, resource_name, _role_arn_opt)) = resource else {
         tracing::warn!("Resource {} not found or user {} has no access", resource_id, auth.user_id);
         return Err(StatusCode::NOT_FOUND);
     };
 
     tracing::info!("Destroying resource {} (id: {})", resource_name, resource_id);
 
-    deployment::destroy_app(org_id, resource_id, resource_name.clone())
-        .await
-        .map_err(|e| {
-            tracing::error!("Terraform destroy failed for resource {}: {}", resource_id, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let terraform_result = deployment::destroy_app(org_id, resource_id, resource_name.clone()).await;
+
+    if let Err(ref e) = terraform_result {
+        tracing::error!("Terraform destroy failed for resource {}: {}", resource_id, e);
+        if !query.force {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        tracing::warn!("Force flag set - marking resource as destroyed despite Terraform failure. AWS resources may still exist!");
+    }
 
     sqlx::query(
         "UPDATE compute_resources
@@ -1241,7 +1251,7 @@ async fn delete_resource(
     .execute(&state.db)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    
+
     tracing::info!("Resource {} soft deleted by user {}", resource_id, auth.user_id);
 
     Ok(StatusCode::NO_CONTENT)

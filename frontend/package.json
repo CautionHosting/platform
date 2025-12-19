@@ -9,10 +9,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "vue": "^3.4.0"
+    "tee-attestation-js": "git+https://git.distrust.co/public/tee-attestation-js.git#03420e7a9a5d967075f81c999b68598fa15a9ee2",
+    "vue": "3.4.0"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^5.0.0",
-    "vite": "^5.0.0"
+    "@vitejs/plugin-vue": "5.0.0",
+    "vite": "5.0.0"
   }
 }

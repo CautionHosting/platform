@@ -9,7 +9,7 @@ const proxyTarget = process.env.VITE_PROXY_TARGET || 'http://localhost:8000';
 export default defineConfig({
   plugins: [vue()],
   server: {
-    host: '0.0.0.0', // Allow connections from outside container
+    host: '0.0.0.0',
     port: 3000,
     proxy: {
       '/api': {
