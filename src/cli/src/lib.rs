@@ -1651,7 +1651,7 @@ build: docker build -t app .
         println!("  Provider Resource ID: {}", app.provider_resource_id);
         if let Some(ip) = app.public_ip {
             println!("  Public IP: {}", ip);
-            println!("  Attestation Endpoint: http://{}:5000/attestation", ip);
+            println!("  Attestation Endpoint: http://{}/attestation", ip);
         }
 
         Ok(())
@@ -1805,7 +1805,7 @@ build: docker build -t app .
 
         match app.public_ip {
             Some(ref ip) if !ip.is_empty() => {
-                Ok(format!("http://{}:5000/attestation", ip))
+                Ok(format!("http://{}/attestation", ip))
             }
             _ => {
                 bail!("No public IP available. Run 'caution describe' to check deployment status, or provide --url explicitly.")

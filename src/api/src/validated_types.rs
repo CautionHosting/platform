@@ -211,6 +211,8 @@ pub struct DeployResponse {
     pub url: String,
     pub attestation_url: String,
     pub resource_id: i64,
+    pub public_ip: String,
+    pub domain: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

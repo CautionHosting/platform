@@ -62,6 +62,7 @@ pub struct NitroDeploymentRequest {
     pub debug_mode: bool,
     pub ports: Vec<u16>,
     pub ssh_keys: Vec<String>,
+    pub domain: Option<String>,
     #[serde(skip)]
     pub credentials: Option<AwsCredentials>,
 }
@@ -801,10 +802,8 @@ resource "aws_route_table_association" "enclave" {{
   route_table_id = aws_route_table.enclave.id
 }}
 
-# Local variable for ports (attestation + user ports)
-locals {{
-  all_ports = concat([5000], var.ports)
-}}
+# User ports variable
+# Note: Attestation is served via Caddy on port 443 at /attestation path
 
 variable "ports" {{
   type    = list(number)
@@ -817,15 +816,6 @@ resource "aws_security_group" "enclave" {{
   description = "Security group for {resource_name} Nitro Enclave"
   vpc_id      = aws_vpc.enclave.id
 
-  # Attestation port (always open)
-  ingress {{
-    from_port   = 5000
-    to_port     = 5000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow attestation port"
-  }}
-
   # SSH for debugging
   ingress {{
     from_port   = 22
@@ -833,6 +823,22 @@ resource "aws_security_group" "enclave" {{
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
     description = "Allow SSH for debugging"
+  }}
+
+  ingress {{
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow HTTP"
+  }}
+
+  ingress {{
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow HTTPS"
   }}
 
   # Dynamic user ports
@@ -896,6 +902,7 @@ resource "aws_instance" "enclave" {{
     debug_mode  = "{debug_mode}"
     ports       = var.ports
     ssh_keys    = {ssh_keys_json}
+    domain      = "{domain}"
   }}))
 
   tags = {{
@@ -930,7 +937,7 @@ output "public_ip" {{
 }}
 
 output "url" {{
-  value = "http://${{aws_eip.enclave.public_ip}}:8080"
+  value = "{url_output}"
 }}
 "#,
         region = aws_region,
@@ -946,6 +953,12 @@ output "url" {{
         cpu_count = cpu_count_rounded,
         debug_mode = if request.debug_mode { "true" } else { "false" },
         ssh_keys_json = serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string()),
+        domain = request.domain.as_deref().unwrap_or(""),
+        url_output = if let Some(ref domain) = request.domain {
+            format!("https://{}", domain)
+        } else {
+            "https://${aws_eip.enclave.public_ip}".to_string()
+        },
     );
 
     fs::write(work_dir.join("main.tf"), main_tf_content).await

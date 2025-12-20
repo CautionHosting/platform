@@ -87,7 +87,7 @@ You can verify an enclave's attestation in two ways:
 
 **Option A: Reproduce and verify (recommended)**
 
-Fetches the attestation from the endpoint, rebuilds the enclave locally, and verifies the PCR hashes match. The attestation endpoint is available at `http://<app-url>:5000/attestation`.
+Fetches the attestation from the endpoint, rebuilds the enclave locally, and verifies the PCR hashes match. The attestation endpoint is available at `https://<app-url>/attestation`.
 
 ```bash
 caution verify --attestation-url <attestation-url>

@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-pub const ENCLAVE_SOURCE: &str = "http://git.distrust.co/public/enclaveos/archive/c086ca199fbfd6d178bbe16be875a7cef4d63e91.tar.gz";
-pub const FRAMEWORK_SOURCE: &str = "https://codeberg.org/caution/platform/archive/6d2c93ee339573397d3e4f2f58957c9c1ee99641.tar.gz";
+pub const ENCLAVE_SOURCE: &str = "https://git.distrust.co/public/enclaveos/archive/master.tar.gz";
+pub const FRAMEWORK_SOURCE: &str = "https://codeberg.org/caution/platform/archive/main.tar.gz";
 
 pub mod extract;
 pub mod merge;

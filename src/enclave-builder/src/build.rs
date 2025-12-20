@@ -115,14 +115,14 @@ fi
 
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
-echo "Starting Attestation Service on port 5000..."
+echo "Starting Attestation Service on port 8082..."
 /attestation-service &
 
 echo "Starting VSOCK-to-TCP proxies..."
-# Attestation service proxy (always on port 5000)
-/bin/socat VSOCK-LISTEN:5000,reuseaddr,fork TCP:localhost:5000 &
-# User application proxies
-{socat_proxies}
+# Hardcoded proxies for ports 8080, 8081, 8082
+/bin/socat VSOCK-LISTEN:8080,reuseaddr,fork TCP:localhost:8080 &
+/bin/socat VSOCK-LISTEN:8081,reuseaddr,fork TCP:localhost:8081 &
+/bin/socat VSOCK-LISTEN:8082,reuseaddr,fork TCP:localhost:8082 &
 
 /bin/busybox sleep 2
 

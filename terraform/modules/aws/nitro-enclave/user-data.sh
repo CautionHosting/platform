@@ -134,59 +134,160 @@ TimeoutStartSec=300
 WantedBy=multi-user.target
 EOF
 
-# Attestation port (always 5000)
-cat > /etc/systemd/system/vsock-proxy-5000.service <<'EOF'
+for port in 8080 8081 8082; do
+cat > /etc/systemd/system/vsock-proxy-$port.service <<EOF
 [Unit]
-Description=VSock Proxy for Attestation Port 5000
+Description=VSock Proxy for Port $port
 After=nitro-enclave.service
 Requires=nitro-enclave.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/socat TCP-LISTEN:5000,reuseaddr,fork VSOCK-CONNECT:16:5000
+ExecStart=/usr/bin/socat TCP-LISTEN:$port,reuseaddr,fork VSOCK-CONNECT:16:$port
 Restart=always
 RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
-# Dynamic user ports
-%{ for port in ports ~}
-cat > /etc/systemd/system/vsock-proxy-${port}.service <<EOF
-[Unit]
-Description=VSock Proxy for Port ${port}
-After=nitro-enclave.service
-Requires=nitro-enclave.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/socat TCP-LISTEN:${port},reuseaddr,fork VSOCK-CONNECT:16:${port}
-Restart=always
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-EOF
-%{ endfor ~}
+done
 
 systemctl daemon-reload
 systemctl enable nitro-enclave.service
-systemctl enable vsock-proxy-5000.service
-%{ for port in ports ~}
-systemctl enable vsock-proxy-${port}.service
-%{ endfor ~}
+systemctl enable vsock-proxy-8080.service
+systemctl enable vsock-proxy-8081.service
+systemctl enable vsock-proxy-8082.service
 
 systemctl start nitro-enclave.service
 
-# Wait for enclave to boot and start internal services before starting host-side proxies
 echo "Waiting for enclave to boot before starting host-side proxies..."
 sleep 15
 
-systemctl start vsock-proxy-5000.service
-%{ for port in ports ~}
-systemctl start vsock-proxy-${port}.service
-%{ endfor ~}
+systemctl start vsock-proxy-8080.service
+systemctl start vsock-proxy-8081.service
+systemctl start vsock-proxy-8082.service
+
+# Install and configure Caddy for TLS termination
+echo "Installing Caddy for HTTPS support..."
+curl -L -o /tmp/caddy.tar.gz "https://github.com/caddyserver/caddy/releases/download/v2.8.4/caddy_2.8.4_linux_amd64.tar.gz"
+tar -xzf /tmp/caddy.tar.gz -C /usr/local/bin caddy
+chmod +x /usr/local/bin/caddy
+rm /tmp/caddy.tar.gz
+
+# Create caddy user and directories
+useradd --system --home /var/lib/caddy --shell /usr/sbin/nologin caddy || true
+mkdir -p /etc/caddy /var/lib/caddy /var/log/caddy
+chown caddy:caddy /var/lib/caddy /var/log/caddy
+
+%{ if domain != "" ~}
+echo "Configuring Caddy with Let's Encrypt for ${domain}"
+cat > /etc/caddy/Caddyfile <<EOF
+https://${domain} {
+    tls {
+        on_demand
+    }
+
+    handle /steve* {
+        reverse_proxy localhost:8081
+    }
+    handle /attestation* {
+        reverse_proxy localhost:8082
+    }
+
+    handle {
+        reverse_proxy localhost:8080
+    }
+}
+
+# HTTP fallback on port 80
+:80 {
+    handle /steve* {
+        reverse_proxy localhost:8081
+    }
+    handle /attestation* {
+        reverse_proxy localhost:8082
+    }
+
+    handle {
+        reverse_proxy localhost:8080
+    }
+}
+EOF
+%{ else ~}
+TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" -s)
+PUBLIC_IP=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 -s)
+echo "Configuring Caddy with self-signed cert for $PUBLIC_IP and HTTP fallback"
+
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/caddy/server.key \
+  -out /etc/caddy/server.crt \
+  -subj "/CN=$PUBLIC_IP" \
+  -addext "subjectAltName=IP:$PUBLIC_IP"
+
+chown caddy:caddy /etc/caddy/server.key /etc/caddy/server.crt
+chmod 644 /etc/caddy/server.crt
+chmod 600 /etc/caddy/server.key
+
+cat > /etc/caddy/Caddyfile <<EOF
+:443 {
+    tls /etc/caddy/server.crt /etc/caddy/server.key
+
+    handle /steve* {
+        reverse_proxy localhost:8081
+    }
+    handle /attestation* {
+        reverse_proxy localhost:8082
+    }
+
+    handle {
+        reverse_proxy localhost:8080
+    }
+}
+
+# HTTP fallback on port 80
+:80 {
+    handle /steve* {
+        reverse_proxy localhost:8081
+    }
+    handle /attestation* {
+        reverse_proxy localhost:8082
+    }
+
+    handle {
+        reverse_proxy localhost:8080
+    }
+}
+EOF
+%{ endif ~}
+
+# Create systemd service for Caddy
+cat > /etc/systemd/system/caddy.service <<'CADDY_SERVICE'
+[Unit]
+Description=Caddy web server
+After=network.target
+
+[Service]
+User=caddy
+Group=caddy
+ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+CADDY_SERVICE
+
+systemctl daemon-reload
+systemctl enable caddy
+systemctl start caddy
+%{ if domain != "" ~}
+echo "Caddy started with Let's Encrypt TLS for ${domain}"
+%{ else ~}
+echo "Caddy started with self-signed TLS on port 443"
+%{ endif ~}
 
 echo "=== Nitro Enclave Setup Complete ==="
 echo "Finished at $(date)"

@@ -354,7 +354,7 @@ async fn wait_for_attestation_health(public_ip: &str, timeout_secs: u64) -> Resu
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-    let url = format!("http://{}:5000/attestation", public_ip);
+    let url = format!("http://{}/attestation", public_ip);
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(timeout_secs);
     let mut attempt = 0u32;
@@ -1956,6 +1956,7 @@ async fn deploy_handler(
         debug_mode: enclave_config.debug,
         ports: enclave_config.ports.clone(),
         ssh_keys: build_config.ssh_keys.clone(),
+        domain: build_config.domain.clone(),
         credentials,
     };
 
@@ -1998,11 +1999,15 @@ async fn deploy_handler(
         deployment_result.public_ip
     );
 
-    let app_url = format!("http://{}:8080", deployment_result.public_ip);
-    let attestation_url = format!("http://{}:5000/attestation", deployment_result.public_ip);
+    let app_url = if let Some(ref domain) = build_config.domain {
+        format!("https://{}", domain)
+    } else {
+        format!("http://{}", deployment_result.public_ip)
+    };
+    let attestation_url = format!("{}/attestation", app_url);
 
     tracing::info!("Waiting for attestation endpoint to become healthy...");
-    if let Err(e) = wait_for_attestation_health(&deployment_result.public_ip, 300).await {
+    if let Err(e) = wait_for_attestation_health(&deployment_result.public_ip, 600).await {
         tracing::error!("Attestation health check failed: {}", e);
         return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Enclave failed to become healthy: {}", e)));
     }
@@ -2017,6 +2022,8 @@ async fn deploy_handler(
         url: app_url,
         attestation_url,
         resource_id,
+        public_ip: deployment_result.public_ip.clone(),
+        domain: build_config.domain.clone(),
     }))
 }
 

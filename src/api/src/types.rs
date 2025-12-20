@@ -218,6 +218,8 @@ pub struct BuildConfig {
     #[serde(default)]
     pub ssh_keys: Vec<String>,
 
+    pub domain: Option<String>,
+
     pub managed_on_prem: Option<ManagedOnPremConfig>,
 }
 
@@ -238,6 +240,7 @@ impl Default for BuildConfig {
             no_cache: false,
             ports: Vec::new(),
             ssh_keys: Vec::new(),
+            domain: None,
             managed_on_prem: None,
         }
     }
@@ -259,6 +262,7 @@ impl BuildConfig {
         let mut no_cache = None;
         let mut ports: Vec<u16> = Vec::new();
         let mut ssh_keys: Vec<String> = Vec::new();
+        let mut domain: Option<String> = None;
 
         let mut managed_on_prem = false;
         let mut platform: Option<String> = None;
@@ -363,8 +367,8 @@ impl BuildConfig {
                                 }
                                 match trimmed.parse::<u16>() {
                                     Ok(port) if port > 0 => {
-                                        if port == 5000 {
-                                            tracing::warn!("Port 5000 is reserved for attestation service, ignoring");
+                                        if port == 8082 {
+                                            tracing::warn!("Port 8082 is reserved for attestation service, ignoring");
                                             None
                                         } else {
                                             Some(port)
@@ -394,6 +398,12 @@ impl BuildConfig {
                                 ssh_keys.push(unquoted.to_string());
                                 tracing::info!("Parsed SSH key from Procfile");
                             }
+                        }
+                    }
+                    "domain" => {
+                        if !value.is_empty() {
+                            domain = Some(value);
+                            tracing::info!("Parsed domain from Procfile: {}", domain.as_ref().unwrap());
                         }
                     }
                     "managed_on_prem" => {
@@ -471,6 +481,7 @@ impl BuildConfig {
             no_cache: no_cache.unwrap_or(false),
             ports,
             ssh_keys,
+            domain,
             managed_on_prem: managed_on_prem_config,
         })
     }

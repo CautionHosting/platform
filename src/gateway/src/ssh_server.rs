@@ -539,6 +539,8 @@ async fn handle_git_push(
         struct DeployResponse {
             url: String,
             resource_id: i64,
+            public_ip: String,
+            domain: Option<String>,
         }
 
         let deploy_result: DeployResponse = match response.json().await {
@@ -555,11 +557,19 @@ async fn handle_git_push(
 
         tracing::info!("Deployment successful: {} (resource_id: {})", deploy_result.url, deploy_result.resource_id);
 
-        let attestation_url = deploy_result.url.replace(":8080", ":5000/attestation");
+        let attestation_url = format!("{}/attestation", deploy_result.url);
+
+        let dns_note = if let Some(ref domain) = deploy_result.domain {
+            format!("\nNOTE: Add a DNS A record for '{}' pointing to {}\n", domain, deploy_result.public_ip)
+        } else {
+            String::new()
+        };
+
         let success_msg = format!(
-            "\nDeployment successful!\nApplication: {}\nAttestation: {}\n\nRun 'caution verify' to verify the application attestation.\n\n",
+            "\nDeployment successful!\nApplication: {}\nAttestation: {}{}\n\nRun 'caution verify' to verify the application attestation.\n\n",
             deploy_result.url,
-            attestation_url
+            attestation_url,
+            dns_note
         );
         let _ = session_handle.extended_data(channel, 1, success_msg.into_bytes().into()).await;
         let _ = session_handle.exit_status_request(channel, 0).await;
