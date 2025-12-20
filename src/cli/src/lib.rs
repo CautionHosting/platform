@@ -2108,15 +2108,12 @@ build: docker build -t app .
                 continue;
             }
 
-            let parts = line.split_once('=').or_else(|| line.split_once(':'));
-            if let Some((key, value)) = parts {
-                let key = key.trim().to_lowercase();
-                let value = value.trim().to_string();
-
-                match key.as_str() {
-                    "pcr0" => pcr0 = Some(value),
-                    "pcr1" => pcr1 = Some(value),
-                    "pcr2" => pcr2 = Some(value),
+            // eif_build is weird... it is <digest> <pcr>
+            if let Some((pcr_digest, pcr_name)) = line.split_once(' ') {
+                match pcr_name.trim().to_lowercase().as_str() {
+                    "pcr0" => pcr0 = Some(pcr_digest.trim().to_owned()),
+                    "pcr1" => pcr1 = Some(pcr_digest.trim().to_owned()),
+                    "pcr2" => pcr2 = Some(pcr_digest.trim().to_owned()),
                     _ => {}
                 }
             }
