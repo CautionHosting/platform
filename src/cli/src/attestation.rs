@@ -31,7 +31,7 @@ pub struct AttestationPcrs {
     pub nonce: Vec<u8>,
 }
 
-pub fn verify_attestation(attestation_b64: &str, expected_nonce: &[u8]) -> Result<AttestationPcrs> {
+pub fn verify_attestation(attestation_b64: &str, expected_nonce: &[u8]) -> Result<(AttestationPcrs, serde_cbor::Value)> {
     let attestation_bytes = base64::engine::general_purpose::STANDARD
         .decode(attestation_b64)
         .context("Failed to decode attestation document base64")?;
@@ -65,8 +65,9 @@ pub fn verify_attestation(attestation_b64: &str, expected_nonce: &[u8]) -> Resul
         .context("Failed to extract PCRs from payload")?;
 
     pcrs.nonce = nonce;
+    let parsed_attestation: serde_cbor::Value = serde_cbor::from_slice(payload)?;
 
-    Ok(pcrs)
+    Ok((pcrs, parsed_attestation))
 }
 
 fn is_debug() -> bool {

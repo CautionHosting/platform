@@ -2175,7 +2175,7 @@ build: docker build -t app .
         log_verbose(self.verbose, &format!("Received attestation: {} bytes", attestation_b64.len()));
 
         println!("\nVerifying attestation...");
-        let remote_pcrs = verify_attestation(&attestation_b64, &nonce)
+        let (remote_pcrs, document) = verify_attestation(&attestation_b64, &nonce)
             .context("Attestation verification failed")?;
 
         println!("✓ Challenge nonce (received): {}", hex::encode(&remote_pcrs.nonce));
@@ -2342,6 +2342,19 @@ build: docker build -t app .
             && expected_pcrs.pcr2 == remote_pcrs.pcr2;
 
         if pcrs_match {
+            if let serde_cbor::Value::Map(map) = &document &&
+                let Some(serde_cbor::Value::Bytes(user_data)) = map.get(&"user_data".to_string().into()) {
+                    println!();
+                    match str::from_utf8(user_data) {
+                        Ok(user_data) => {
+                            println!("User data: {user_data}");
+                        },
+                        Err(_) => {
+                            println!("User data: {user_data:?}");
+                        },
+                    }
+            }
+
             println!("\n✓ Attestation verification PASSED");
             println!("The deployed enclave matches the expected PCRs.");
             println!("This means the code running in the enclave is exactly what you expect.");
