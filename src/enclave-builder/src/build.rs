@@ -118,6 +118,9 @@ export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 echo "Starting Attestation Service on port 8082..."
 /attestation-service &
 
+echo "Starting STEVE (Secure Transport Encryption Via Enclave)..."
+/steve &
+
 echo "Starting VSOCK-to-TCP proxies..."
 # Hardcoded proxies for ports 8080, 8081, 8082
 /bin/socat VSOCK-LISTEN:8080,reuseaddr,fork TCP:localhost:8080 &
@@ -159,6 +162,35 @@ FROM stagex/user-socat@sha256:4d1b7a403eba65087a3f69200d2644d01b63f0ea81ef171ced
 FROM stagex/user-eif_build@sha256:935032172a23772ea1a35c6334aa98aa7b0c46f9e34a040347c7b2a73496ef8a AS eif-build
 FROM stagex/user-linux-nitro@sha256:aa1006d91a7265b33b86160031daad2fdf54ec2663ed5ccbd312567cc9beff2c AS linux-nitro
 FROM stagex/user-nit@sha256:60b6eef4534ea6ea78d9f29e4c7feb27407b615424f20ad8943d807191688be7 AS nit
+FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769ff3b37239f3d0 AS git
+FROM stagex/core-curl@sha256:bc8bab43d96a9167fbb85022ea773644a45ef335e7a9b747f203078973fa988e AS curl
+
+FROM pallet-rust AS steve-builder
+
+COPY --from=git . /
+COPY --from=ca-certificates . /
+COPY --from=curl . /
+
+ENV SOURCE_DATE_EPOCH=1
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
+ENV TARGET_ARCH="x86_64-unknown-linux-musl"
+
+WORKDIR /build-steve
+RUN git init && \
+    git remote add origin https://git.distrust.co/public/steve.git && \
+    git fetch --depth 1 origin a538733c78d800b51a255c96062a79aa7b4fa6fb && \
+    git checkout FETCH_HEAD
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo fetch --locked --target $TARGET_ARCH
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build-steve/target \
+    cargo build --release --locked --target ${TARGET_ARCH} -p steve \
+      && install -D -m 0755 /build-steve/target/${TARGET_ARCH}/release/steve /binaries/steve
 
 FROM pallet-rust AS enclave-builder
 
@@ -204,6 +236,7 @@ COPY --from=nit . /
 WORKDIR /build
 
 COPY --from=enclave-builder /binaries/ /build/binaries/
+COPY --from=steve-builder /binaries/steve /build/binaries/steve
 
 COPY --from=linux-nitro /bzImage /build/kernel/bzImage
 COPY --from=linux-nitro /linux.config /build/kernel/linux.config
@@ -231,6 +264,9 @@ RUN cp /build/udhcpc-script.sh /build/initramfs/bin/udhcpc-script && \
 
 RUN cp /build/binaries/attestation-service /build/initramfs/attestation-service && \
     chmod +x /build/initramfs/attestation-service
+
+RUN cp /build/binaries/steve /build/initramfs/steve && \
+    chmod +x /build/initramfs/steve
 
 RUN if [ -f /build/manifest.json ]; then \
         cp /build/manifest.json /build/initramfs/manifest.json; \
