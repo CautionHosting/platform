@@ -1252,6 +1252,13 @@ async fn delete_resource(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let git_repo_path = format!("{}/git-repos/{}.git", state.data_dir, resource_name);
+    if let Err(e) = tokio::fs::remove_dir_all(&git_repo_path).await {
+        tracing::warn!("Failed to remove git repo at {}: {} (may not exist)", git_repo_path, e);
+    } else {
+        tracing::info!("Removed git repo at {}", git_repo_path);
+    }
+
     tracing::info!("Resource {} soft deleted by user {}", resource_id, auth.user_id);
 
     Ok(StatusCode::NO_CONTENT)
