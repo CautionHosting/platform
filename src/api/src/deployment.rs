@@ -545,6 +545,8 @@ async fn provision_nitro_enclave(
     config: &TerraformConfig,
 ) -> Result<DeploymentResult> {
     tracing::info!("Starting Terraform Nitro Enclave provisioning for resource: {}", request.resource_name);
+    tracing::info!("Deployment config - domain: {:?}, memory: {}MB, cpus: {}, debug: {}, ports: {:?}",
+        request.domain, request.memory_mb, request.cpu_count, request.debug_mode, request.ports);
 
     let temp_dir = TempDir::new()
         .context("Failed to create temporary directory")?;
@@ -895,6 +897,7 @@ resource "aws_instance" "enclave" {{
     encrypted             = true
   }}
 
+  user_data_replace_on_change = true
   user_data = base64encode(templatefile("./user-data.sh", {{
     eif_s3_path = "{eif_s3_path}"
     memory_mb   = {memory_mb}
@@ -911,6 +914,7 @@ resource "aws_instance" "enclave" {{
     ResourceName = "{resource_name}"
     OrgId        = "{org_id}"
     ManagedBy    = "terraform"
+    ConfigDomain = "{domain}"
   }}
 }}
 
