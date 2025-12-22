@@ -190,7 +190,7 @@ https://${domain} {
     handle /steve* {
         reverse_proxy localhost:8081
     }
-    handle /attestation* {
+    handle /attestation {
         reverse_proxy localhost:8082
     }
 
@@ -204,7 +204,7 @@ https://${domain} {
     handle /steve* {
         reverse_proxy localhost:8081
     }
-    handle /attestation* {
+    handle /attestation {
         reverse_proxy localhost:8082
     }
 
@@ -235,7 +235,7 @@ cat > /etc/caddy/Caddyfile <<EOF
     handle /steve* {
         reverse_proxy localhost:8081
     }
-    handle /attestation* {
+    handle /attestation {
         reverse_proxy localhost:8082
     }
 
@@ -249,7 +249,7 @@ cat > /etc/caddy/Caddyfile <<EOF
     handle /steve* {
         reverse_proxy localhost:8081
     }
-    handle /attestation* {
+    handle /attestation {
         reverse_proxy localhost:8082
     }
 
