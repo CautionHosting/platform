@@ -177,10 +177,7 @@ ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,
 ENV TARGET_ARCH="x86_64-unknown-linux-musl"
 
 WORKDIR /build-steve
-RUN git init && \
-    git remote add origin https://git.distrust.co/public/steve.git && \
-    git fetch --depth 1 origin a538733c78d800b51a255c96062a79aa7b4fa6fb && \
-    git checkout FETCH_HEAD
+RUN git clone --depth 1 https://git.distrust.co/public/steve.git .
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -343,6 +340,7 @@ pub async fn build_eif_from_filesystems(
     run_command: Option<String>,
     manifest: Option<EnclaveManifest>,
     ports: &[u16],
+    no_cache: bool,
 ) -> Result<EifFile> {
     tracing::info!("Building EIF using transparent Containerfile approach");
 
@@ -363,15 +361,22 @@ pub async fn build_eif_from_filesystems(
     tracing::info!("Output directory (absolute): {}", output_dir_absolute.display());
     eprintln!("Output directory: {}", output_dir_absolute.display());
 
+    // Build docker args, conditionally adding --no-cache
+    let mut docker_args = vec![
+        "build".to_string(),
+        "--progress=plain".to_string(),
+        "--target".to_string(), "output".to_string(),
+        "--output".to_string(), format!("type=local,rewrite-timestamp=true,dest={}", output_dir_absolute.to_str().unwrap()),
+        "-f".to_string(), "Containerfile.eif".to_string(),
+    ];
+    if no_cache {
+        docker_args.insert(1, "--no-cache".to_string());
+        tracing::info!("EIF build: no_cache=true, adding --no-cache flag");
+    }
+    docker_args.push(".".to_string());
+
     let output = Command::new("docker")
-        .args([
-            "build",
-            "--progress=plain",
-            "--target", "output",
-            "--output", &format!("type=local,rewrite-timestamp=true,dest={}", output_dir_absolute.to_str().unwrap()),
-            "-f", "Containerfile.eif",
-            ".",
-        ])
+        .args(&docker_args)
         .env("DOCKER_BUILDKIT", "1")
         .env("SOURCE_DATE_EPOCH", "1")
         .current_dir(&stage_dir)

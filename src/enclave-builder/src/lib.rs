@@ -35,6 +35,8 @@ pub struct EnclaveBuilder {
     pub framework_source: String,
     /// Working directory for builds
     pub work_dir: PathBuf,
+    /// Whether to skip Docker cache for EIF builds
+    pub no_cache: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +129,7 @@ impl EnclaveBuilder {
             enclave_version: enclave_version.into(),
             framework_source: framework_source.into(),
             work_dir,
+            no_cache,
         })
     }
 
@@ -153,11 +156,17 @@ impl EnclaveBuilder {
             enclave_version: enclave_version.into(),
             framework_source: framework_source.into(),
             work_dir,
+            no_cache: false,
         })
     }
 
     pub fn with_work_dir(mut self, work_dir: PathBuf) -> Self {
         self.work_dir = work_dir;
+        self
+    }
+
+    pub fn with_no_cache(mut self, no_cache: bool) -> Self {
+        self.no_cache = no_cache;
         self
     }
 
@@ -274,6 +283,7 @@ impl EnclaveBuilder {
             run_command,
             manifest,
             ports,
+            self.no_cache,
         )
         .await
     }

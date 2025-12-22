@@ -764,6 +764,7 @@ async fn build_image_from_repo(
         build_command: build_config.build.clone(),
         containerfile: build_config.containerfile.clone(),
         oci_tarball: build_config.oci_tarball.clone(),
+        no_cache: build_config.no_cache,
     };
 
     let work_dir_path = std::path::PathBuf::from(&work_dir);
@@ -1683,6 +1684,11 @@ async fn deploy_handler(
     };
 
     let work_dir = format!("{}/build/work-{}-{}", state.data_dir, req.app_name, commit_sha);
+    if build_config.no_cache {
+        if let Err(e) = tokio::fs::remove_dir_all(&work_dir).await {
+            tracing::debug!("Could not remove work_dir (may not exist): {}", e);
+        }
+    }
     tokio::fs::create_dir_all(&work_dir).await.map_err(|e| {
         tracing::error!("Failed to create work directory: {}", e);
         (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create work directory: {}", e))
@@ -1769,7 +1775,8 @@ async fn deploy_handler(
                 tracing::error!("Failed to create enclave builder: {:?}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to initialize enclave builder: {}", e))
             })?
-            .with_work_dir(std::path::PathBuf::from(&work_dir));
+            .with_work_dir(std::path::PathBuf::from(&work_dir))
+            .with_no_cache(build_config.no_cache);
 
         let user_image = enclave_builder::UserImage {
             reference: format!("caution-{}:{}", req.app_name, &commit_sha[..12]),

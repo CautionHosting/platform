@@ -14,6 +14,8 @@ pub struct BuildConfig {
     pub containerfile: Option<String>,
     /// The `oci_tarball:` field for containerd builds that output tarballs
     pub oci_tarball: Option<String>,
+    /// Whether to skip Docker build cache (from `nocache:` field in Procfile)
+    pub no_cache: bool,
 }
 
 /// Build a Docker image from a Procfile configuration.
@@ -52,17 +54,28 @@ pub async fn build_user_image(
         }
     };
 
-    // Add -t <tag> and --no-cache if it's a docker build command
+    // Add -t <tag> and optionally --no-cache if it's a docker build command
     let build_command_with_tag = if build_command.starts_with("docker build") {
-        let with_no_cache = if build_command.contains("--no-cache") {
-            build_command.clone()
+        let mut cmd = build_command.clone();
+
+        // Add --no-cache --pull and CACHEBUST if no_cache is enabled
+        if config.no_cache {
+            if !cmd.contains("--no-cache") {
+                cmd = cmd.replacen("docker build", "docker build --no-cache --pull", 1);
+            }
+            // Add cache-busting build arg with timestamp to invalidate BuildKit layer cache
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            cmd = format!("{} --build-arg CACHEBUST={}", cmd, timestamp);
+        }
+
+        // Add image tag
+        if cmd.ends_with(" .") {
+            cmd.replace(" .", &format!(" -t {} .", image_tag))
         } else {
-            build_command.replacen("docker build", "docker build --no-cache", 1)
-        };
-        if with_no_cache.ends_with(" .") {
-            with_no_cache.replace(" .", &format!(" -t {} .", image_tag))
-        } else {
-            format!("{} -t {}", with_no_cache, image_tag)
+            format!("{} -t {}", cmd, image_tag)
         }
     } else {
         // Non-docker build command, use as-is
