@@ -335,9 +335,7 @@ export default {
     const destroyingApp = ref(null)
 
     const showAttestation = (app) => {
-      const url = app.domain
-        ? `http://${app.domain}/attestation`
-        : `http://${app.public_ip}/attestation`
+      const url = `http://${app.public_ip}/attestation`
       showAttestationModal({ attestationUrl: url })
     }
 
