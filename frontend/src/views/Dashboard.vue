@@ -96,16 +96,20 @@ caution verify --reproduce
                     <span class="detail-label">IP:</span>
                     <span class="detail-value">{{ app.public_ip }}</span>
                   </div>
-                  <div v-if="app.public_ip || app.domain" class="app-links">
-                    <a v-if="app.public_ip" :href="'https://' + app.public_ip" target="_blank" class="app-link">
-                      {{ app.public_ip }}
-                    </a>
-                    <a v-if="app.domain" :href="'https://' + app.domain" target="_blank" class="app-link">
-                      {{ app.domain }}
-                    </a>
-                    <button @click="attestationApp = app" class="app-link-btn">
+                  <div v-if="app.public_ip || app.domain" class="app-detail">
+                    <button @click="showAttestation(app)" class="app-link-btn">
                       Attestation
                     </button>
+                  </div>
+                  <div v-if="app.public_ip" class="app-detail app-detail-full">
+                    <a :href="'http://' + app.public_ip" target="_blank" class="app-link">
+                      http://{{ app.public_ip }}
+                    </a>
+                  </div>
+                  <div v-if="app.domain" class="app-detail app-detail-full">
+                    <a :href="'https://' + app.domain" target="_blank" class="app-link">
+                      https://{{ app.domain }}
+                    </a>
                   </div>
                 </div>
                 <div class="app-actions">
@@ -281,18 +285,12 @@ caution verify --reproduce
       </div>
     </div>
 
-    <AttestationModal
-      v-if="attestationApp"
-      :public-ip="attestationApp.public_ip"
-      :app-name="attestationApp.resource_name || 'App'"
-      @close="attestationApp = null"
-    />
   </div>
 </template>
 
 <script>
 import { ref, onMounted } from 'vue'
-import AttestationModal from '../components/AttestationModal.vue'
+import { showModal as showAttestationModal } from 'attestation-widget'
 
 async function sha256Hex(message) {
   const msgBuffer = new TextEncoder().encode(message)
@@ -323,9 +321,6 @@ function base64UrlToArrayBuffer(base64url) {
 
 export default {
   name: 'Dashboard',
-  components: {
-    AttestationModal
-  },
   props: {
     session: String
   },
@@ -338,7 +333,13 @@ export default {
     const apps = ref([])
     const loadingApps = ref(true)
     const destroyingApp = ref(null)
-    const attestationApp = ref(null)
+
+    const showAttestation = (app) => {
+      const url = app.domain
+        ? `http://${app.domain}/attestation`
+        : `http://${app.public_ip}/attestation`
+      showAttestationModal({ attestationUrl: url })
+    }
 
     // SSH Keys state
     const sshKeys = ref([])
@@ -705,7 +706,7 @@ export default {
       apps,
       loadingApps,
       destroyingApp,
-      attestationApp,
+      showAttestation,
       destroyApp,
       sshKeys,
       loadingKeys,
@@ -903,6 +904,10 @@ h2 {
 
 .app-detail {
   font-size: 13px;
+}
+
+.app-detail-full {
+  width: 100%;
 }
 
 .detail-label {

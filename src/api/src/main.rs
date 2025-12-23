@@ -89,6 +89,7 @@ struct ComputeResource {
     state: String,
     region: Option<String>,
     public_ip: Option<String>,
+    domain: Option<String>,
     billing_tag: Option<String>,
     created_at: chrono::NaiveDateTime,
     updated_at: chrono::NaiveDateTime,
@@ -1155,7 +1156,8 @@ async fn list_resources(
     let resources = sqlx::query_as::<_, ComputeResource>(
         "SELECT id, organization_id, provider_account_id, resource_type_id,
                 provider_resource_id, resource_name, state::text as state,
-                region, public_ip, billing_tag, created_at, updated_at
+                region, public_ip, configuration->>'domain' as domain,
+                billing_tag, created_at, updated_at
          FROM compute_resources
          WHERE organization_id = $1 AND destroyed_at IS NULL"
     )
@@ -1180,7 +1182,8 @@ async fn get_resource(
     let resource = sqlx::query_as::<_, ComputeResource>(
         "SELECT cr.id, cr.organization_id, cr.provider_account_id, cr.resource_type_id,
                 cr.provider_resource_id, cr.resource_name, cr.state::text as state,
-                cr.region, cr.public_ip, cr.billing_tag, cr.created_at, cr.updated_at
+                cr.region, cr.public_ip, cr.configuration->>'domain' as domain,
+                cr.billing_tag, cr.created_at, cr.updated_at
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
          WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL"
@@ -1878,6 +1881,7 @@ async fn deploy_handler(
         "commit_sha": commit_sha,
         "enclave_config": enclave_config,
         "run_command": build_config.run,
+        "domain": build_config.domain,
     });
 
     let memory_bytes = (enclave_config.memory_mb as u64) * 1024 * 1024;

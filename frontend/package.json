@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "attestation-widget": "git+https://git.distrust.co/public/attestation-widget.git",
     "tee-attestation-js": "git+https://git.distrust.co/public/tee-attestation-js.git#03420e7a9a5d967075f81c999b68598fa15a9ee2",
     "vue": "3.4.0"
   },
