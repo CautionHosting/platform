@@ -1972,11 +1972,11 @@ build: docker build -t app .
                 .collect();
 
             let git_fallback = app_source.urls.first()
-                .map(|url| (url.clone(), app_source.commit.clone()));
+                .map(|url| (url.clone(), app_source.commit.clone(), app_source.branch.clone()));
 
             let app_dir = self.download_and_extract_app_source_with_git_fallback(
                 &archive_urls,
-                git_fallback.as_ref().map(|(u, c)| (u.as_str(), c.as_str())),
+                git_fallback.as_ref().map(|(u, c, b)| (u.as_str(), c.as_str(), b.as_deref())),
             ).await?;
             self.build_docker_image_from_dir(&app_dir, no_cache).await?
         } else {
@@ -2223,14 +2223,14 @@ build: docker build -t app .
             match &m.enclave_source {
                 enclave_builder::EnclaveSource::GitArchive { urls, commit } => {
                     if urls.len() == 1 {
-                        print!("  Enclave source: {} (git archive", urls[0]);
+                        print!("  Enclave source: {}", urls[0]);
                     } else {
-                        print!("  Enclave source: ({} URLs) (git archive", urls.len());
+                        print!("  Enclave source: ({} URLs)", urls.len());
                     }
                     if let Some(c) = commit {
                         print!(" commit: {}", c);
                     }
-                    println!(")");
+                    println!();
                     if urls.len() > 1 {
                         for (i, url) in urls.iter().enumerate() {
                             println!("    [{}] {}", i + 1, url);
@@ -2238,19 +2238,23 @@ build: docker build -t app .
                     }
                 }
                 enclave_builder::EnclaveSource::GitRepository { url, branch, commit } => {
-                    print!("  Enclave source: {} (git branch: {}", url, branch);
+                    print!("  Enclave source: {}", url);
                     if let Some(c) = commit {
                         print!(" commit: {}", c);
                     }
-                    println!(")");
+                    println!(" branch: {}", branch);
                 }
                 enclave_builder::EnclaveSource::Local { path } => {
                     println!("  Enclave source: {} (local)", path);
                 }
             }
             match &m.framework_source {
-                enclave_builder::FrameworkSource::GitArchive { url } => {
-                    println!("  Framework source: {} (git archive)", url);
+                enclave_builder::FrameworkSource::GitArchive { url, commit } => {
+                    print!("  Framework source: {}", url);
+                    if let Some(c) = commit {
+                        print!(" commit: {}", c);
+                    }
+                    println!();
                 }
             }
             if let Some(ref metadata) = m.metadata {
@@ -2577,7 +2581,7 @@ build: docker build -t app .
     async fn download_and_extract_app_source_with_git_fallback(
         &self,
         archive_urls: &[String],
-        git_fallback: Option<(&str, &str)>,
+        git_fallback: Option<(&str, &str, Option<&str>)>,
     ) -> Result<PathBuf> {
         if !archive_urls.is_empty() {
             match self.download_and_extract_app_source_with_fallbacks(archive_urls).await {
@@ -2588,13 +2592,65 @@ build: docker build -t app .
             }
         }
 
-        if let Some((git_url, commit)) = git_fallback {
+        if let Some((git_url, commit, branch)) = git_fallback {
             println!("Archive download failed. Trying git clone (may require SSH access)...");
 
             let temp_dir = tempfile::TempDir::new()
                 .context("Failed to create temp directory")?;
             let clone_path = temp_dir.path().join("repo");
 
+            // If we have a branch, clone by branch first (works with Forgejo/Codeberg)
+            // then checkout the specific commit
+            if let Some(branch_name) = branch {
+                log_verbose(self.verbose, &format!("Cloning branch '{}' then checking out commit '{}'", branch_name, commit));
+
+                let clone_output = Command::new("git")
+                    .args(&["clone", "--depth", "100", "--single-branch", "--branch", branch_name, git_url, clone_path.to_str().unwrap()])
+                    .output()
+                    .context("Failed to clone repository")?;
+
+                if !clone_output.status.success() {
+                    let stderr = String::from_utf8_lossy(&clone_output.stderr);
+                    log_verbose(self.verbose, &format!("Branch clone failed: {}", stderr));
+                    // Fall through to try commit-based fetch
+                } else {
+                    // Checkout the specific commit
+                    let checkout_output = Command::new("git")
+                        .args(&["checkout", commit])
+                        .current_dir(&clone_path)
+                        .output()
+                        .context("Failed to checkout commit")?;
+
+                    if checkout_output.status.success() {
+                        let extract_dir = temp_dir.into_path().join("repo");
+                        log_verbose(self.verbose, &format!("Git clone successful: {}", extract_dir.display()));
+                        return Ok(extract_dir);
+                    } else {
+                        let stderr = String::from_utf8_lossy(&checkout_output.stderr);
+                        log_verbose(self.verbose, &format!("Commit checkout failed: {}, will try deeper clone", stderr));
+
+                        // Try fetching more history to find the commit
+                        let _ = Command::new("git")
+                            .args(&["fetch", "--unshallow"])
+                            .current_dir(&clone_path)
+                            .output();
+
+                        let checkout_retry = Command::new("git")
+                            .args(&["checkout", commit])
+                            .current_dir(&clone_path)
+                            .output()
+                            .context("Failed to checkout commit after unshallow")?;
+
+                        if checkout_retry.status.success() {
+                            let extract_dir = temp_dir.into_path().join("repo");
+                            log_verbose(self.verbose, &format!("Git clone successful after unshallow: {}", extract_dir.display()));
+                            return Ok(extract_dir);
+                        }
+                    }
+                }
+            }
+
+            // Fallback: try direct fetch by commit (works with GitHub)
             std::fs::create_dir_all(&clone_path)?;
 
             let init_output = Command::new("git")

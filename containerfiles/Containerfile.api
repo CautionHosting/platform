@@ -97,6 +97,7 @@ COPY --from=libunwind . /
 COPY --from=ca-certificates . /
 COPY --from=openssl . /
 COPY --from=zlib . /
+COPY --from=curl . /
 COPY --from=git . /
 COPY --from=tofu . /
 COPY --from=docker . /

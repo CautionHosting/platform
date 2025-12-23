@@ -116,14 +116,147 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     })
 }
 
+/// Result of fetching enclave source, including path and commit info
+#[derive(Debug, Clone)]
+pub struct EnclaveSourceResult {
+    pub path: PathBuf,
+    pub commit: Option<String>,
+}
+
+/// Convert archive URL to git repo URL for ls-remote
+fn archive_url_to_git_url(archive_url: &str) -> Option<String> {
+    if let Some(archive_pos) = archive_url.find("/archive/") {
+        let base = &archive_url[..archive_pos];
+        let git_url = format!("{}.git", base);
+        tracing::debug!("archive_url_to_git_url: {} -> {}", archive_url, git_url);
+        Some(git_url)
+    } else {
+        tracing::debug!("archive_url_to_git_url: {} -> None (no /archive/ found)", archive_url);
+        None
+    }
+}
+
+/// Extract ref name from archive URL
+fn extract_ref_from_archive_url(url: &str) -> Option<String> {
+    if let Some(archive_pos) = url.find("/archive/") {
+        let after_archive = &url[archive_pos + 9..];
+        let ref_part = if after_archive.starts_with("refs/heads/") {
+            &after_archive[11..]
+        } else if after_archive.starts_with("refs/tags/") {
+            &after_archive[10..]
+        } else {
+            after_archive
+        };
+        let clean_ref = ref_part.trim_end_matches(".tar.gz").trim_end_matches(".tar");
+        if !clean_ref.is_empty() {
+            tracing::debug!("extract_ref_from_archive_url: {} -> {}", url, clean_ref);
+            return Some(clean_ref.to_string());
+        }
+    }
+    tracing::debug!("extract_ref_from_archive_url: {} -> None", url);
+    None
+}
+
+/// Resolve a branch/tag name to a commit SHA using git ls-remote
+pub async fn resolve_ref_to_commit(git_url: &str, ref_name: &str) -> Option<String> {
+    tracing::info!("resolve_ref_to_commit: git_url={}, ref_name={}", git_url, ref_name);
+
+    // If ref_name already looks like a commit SHA (40 hex chars), use it directly
+    if ref_name.len() == 40 && ref_name.chars().all(|c| c.is_ascii_hexdigit()) {
+        tracing::debug!("ref_name is already a SHA, returning as-is");
+        return Some(ref_name.to_string());
+    }
+
+    // Try as branch first (refs/heads/)
+    let branch_ref = format!("refs/heads/{}", ref_name);
+    tracing::info!("Trying git ls-remote {} {}", git_url, branch_ref);
+    match Command::new("git")
+        .args(["ls-remote", git_url, &branch_ref])
+        .output()
+        .await
+    {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::info!("git ls-remote (branch) status={}, stdout='{}', stderr='{}'",
+                output.status, stdout.trim(), stderr.trim());
+
+            if output.status.success() {
+                if let Some(sha) = stdout.split_whitespace().next() {
+                    if !sha.is_empty() {
+                        tracing::info!("Resolved {} to commit {} (branch)", ref_name, sha);
+                        return Some(sha.to_string());
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("git ls-remote failed: {}", e);
+        }
+    }
+
+    // Try as tag (refs/tags/)
+    let tag_ref = format!("refs/tags/{}", ref_name);
+    tracing::info!("Trying git ls-remote {} {}", git_url, tag_ref);
+    match Command::new("git")
+        .args(["ls-remote", git_url, &tag_ref])
+        .output()
+        .await
+    {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::info!("git ls-remote (tag) status={}, stdout='{}', stderr='{}'",
+                output.status, stdout.trim(), stderr.trim());
+
+            if output.status.success() {
+                if let Some(sha) = stdout.split_whitespace().next() {
+                    if !sha.is_empty() {
+                        tracing::info!("Resolved {} to commit {} (tag)", ref_name, sha);
+                        return Some(sha.to_string());
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("git ls-remote failed: {}", e);
+        }
+    }
+
+    tracing::warn!("Could not resolve ref '{}' from '{}'", ref_name, git_url);
+    None
+}
+
 pub async fn get_or_clone_enclave_source(
     enclave_source: &str,
     enclave_version: &str,
     work_dir: &Path,
-) -> Result<PathBuf> {
+) -> Result<EnclaveSourceResult> {
     // Check if it's an archive URL (tar.gz)
     if enclave_source.ends_with(".tar.gz") || enclave_source.ends_with(".tar") {
         tracing::info!("Downloading enclave source archive from: {}", enclave_source);
+
+        // Try to resolve the commit SHA before downloading
+        let git_url = archive_url_to_git_url(enclave_source);
+        let ref_name = extract_ref_from_archive_url(enclave_source);
+        tracing::info!("Enclave source URL parsing: git_url={:?}, ref_name={:?}", git_url, ref_name);
+
+        let commit = if let (Some(git_url), Some(ref_name)) = (git_url, ref_name) {
+            tracing::info!("Resolving enclave ref '{}' from '{}' to commit SHA", ref_name, git_url);
+            match resolve_ref_to_commit(&git_url, &ref_name).await {
+                Some(sha) => {
+                    tracing::info!("Resolved enclave '{}' to commit {}", ref_name, sha);
+                    Some(sha)
+                }
+                None => {
+                    tracing::warn!("Could not resolve enclave ref '{}' from '{}' (may be private or git not available)", ref_name, git_url);
+                    None
+                }
+            }
+        } else {
+            tracing::warn!("Could not extract git URL or ref from enclave source: {}", enclave_source);
+            None
+        };
 
         let download_dir = work_dir.join("enclave-source");
 
@@ -180,7 +313,10 @@ pub async fn get_or_clone_enclave_source(
         }
 
         tracing::info!("Enclave source extracted to: {}", download_dir.display());
-        Ok(download_dir)
+        Ok(EnclaveSourceResult {
+            path: download_dir,
+            commit,
+        })
     } else if enclave_source.starts_with("http://") || enclave_source.starts_with("https://") || enclave_source.starts_with("git@") {
         tracing::info!("Cloning enclave source from: {} (version: {})", enclave_source, enclave_version);
 
@@ -211,9 +347,44 @@ pub async fn get_or_clone_enclave_source(
             anyhow::bail!("Git clone failed: {}", stderr);
         }
 
-        Ok(clone_dir)
+        // Get the commit SHA from the cloned repo
+        let commit = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&clone_dir)
+            .output()
+            .await
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+        if let Some(ref c) = commit {
+            tracing::info!("Cloned enclave source at commit: {}", c);
+        }
+
+        Ok(EnclaveSourceResult {
+            path: clone_dir,
+            commit,
+        })
     } else {
         tracing::info!("Using local enclave source: {}", enclave_source);
-        Ok(PathBuf::from(enclave_source))
+
+        // Try to get commit from local git repo
+        let commit = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(enclave_source)
+            .output()
+            .await
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+        if let Some(ref c) = commit {
+            tracing::info!("Local enclave source at commit: {}", c);
+        }
+
+        Ok(EnclaveSourceResult {
+            path: PathBuf::from(enclave_source),
+            commit,
+        })
     }
 }

@@ -96,9 +96,12 @@ caution verify --reproduce
                     <span class="detail-label">IP:</span>
                     <span class="detail-value">{{ app.public_ip }}</span>
                   </div>
-                  <div v-if="app.public_ip" class="app-links">
-                    <a :href="'http://' + app.public_ip + ':8080'" target="_blank" class="app-link">
-                      Open App
+                  <div v-if="app.public_ip || app.domain" class="app-links">
+                    <a v-if="app.public_ip" :href="'https://' + app.public_ip" target="_blank" class="app-link">
+                      {{ app.public_ip }}
+                    </a>
+                    <a v-if="app.domain" :href="'https://' + app.domain" target="_blank" class="app-link">
+                      {{ app.domain }}
                     </a>
                     <button @click="attestationApp = app" class="app-link-btn">
                       Attestation

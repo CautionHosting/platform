@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 pub use manifest::{EnclaveManifest, AppSource, EnclaveSource, FrameworkSource};
 pub use docker::{BuildConfig, build_user_image};
+pub use compile::{EnclaveSourceResult, resolve_ref_to_commit};
 
 pub use CacheType as BuildCacheType;
 
@@ -306,6 +307,37 @@ impl EnclaveBuilder {
         pcrs::is_debug_mode(pcrs)
     }
 
+    /// Resolve framework_source archive URL to a commit SHA
+    async fn resolve_framework_commit(framework_source: &str) -> Option<String> {
+        tracing::info!("resolve_framework_commit: framework_source={}", framework_source);
+
+        // Extract git URL and ref from archive URL like:
+        // https://codeberg.org/caution/platform/archive/main.tar.gz
+        if let Some(archive_pos) = framework_source.find("/archive/") {
+            let base_url = &framework_source[..archive_pos];
+            let git_url = format!("{}.git", base_url);
+
+            let after_archive = &framework_source[archive_pos + 9..];
+            let ref_name = after_archive
+                .trim_end_matches(".tar.gz")
+                .trim_end_matches(".tar");
+
+            tracing::info!("Extracted git_url={}, ref_name={}", git_url, ref_name);
+
+            if !ref_name.is_empty() {
+                tracing::info!("Resolving framework ref '{}' to commit SHA", ref_name);
+                if let Some(sha) = compile::resolve_ref_to_commit(&git_url, ref_name).await {
+                    tracing::info!("Resolved framework '{}' to commit {}", ref_name, sha);
+                    return Some(sha);
+                }
+                tracing::warn!("Could not resolve framework ref '{}' from '{}'", ref_name, git_url);
+            }
+        } else {
+            tracing::info!("No /archive/ found in framework_source, skipping commit resolution");
+        }
+        None
+    }
+
     pub async fn build_enclave(&self, user_image: &UserImage, specific_files: Option<Vec<String>>, run_command: Option<String>, app_source_urls: Option<Vec<String>>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>, ports: &[u16]) -> Result<Deployment> {
         if let Some(cached) = self.get_cached_eif() {
             tracing::info!("Using cached EIF from: {}", cached.eif.path.display());
@@ -326,11 +358,15 @@ impl EnclaveBuilder {
             self.extract_user_image(user_image, None).await?
         };
 
-        let enclave_source_path = compile::get_or_clone_enclave_source(
+        let enclave_source_result = compile::get_or_clone_enclave_source(
             &self.enclave_source,
             &self.enclave_version,
             &self.work_dir,
         ).await?;
+        let enclave_source_path = enclave_source_result.path.clone();
+
+        // Resolve framework_source commit
+        let framework_commit = Self::resolve_framework_commit(&self.framework_source).await;
 
         let manifest = if let Some(ext_manifest) = external_manifest {
             tracing::info!("Using external manifest for reproducible build");
@@ -339,13 +375,13 @@ impl EnclaveBuilder {
             let enclave_src = if self.enclave_source.ends_with(".tar.gz") {
                 EnclaveSource::GitArchive {
                     urls: vec![self.enclave_source.clone()],
-                    commit: None,
+                    commit: enclave_source_result.commit.clone(),
                 }
             } else if self.enclave_source.starts_with("http") || self.enclave_source.starts_with("git@") {
                 EnclaveSource::GitRepository {
                     url: self.enclave_source.clone(),
                     branch: self.enclave_version.clone(),
-                    commit: None,
+                    commit: enclave_source_result.commit.clone(),
                 }
             } else {
                 EnclaveSource::Local {
@@ -366,7 +402,13 @@ impl EnclaveBuilder {
 
             let framework_src = FrameworkSource::GitArchive {
                 url: self.framework_source.clone(),
+                commit: framework_commit.clone(),
             };
+
+            tracing::info!("Manifest source commits - enclave: {:?}, framework: {:?}, app: {:?}",
+                enclave_source_result.commit,
+                framework_commit,
+                app_commit);
 
             EnclaveManifest::new(app_src, enclave_src, framework_src, binary_path.clone(), run_command.clone(), metadata)
         };
@@ -409,11 +451,15 @@ impl EnclaveBuilder {
 
         tracing::info!("Starting enclave build from filesystem: {}", user_fs_path.display());
 
-        let enclave_source_path = compile::get_or_clone_enclave_source(
+        let enclave_source_result = compile::get_or_clone_enclave_source(
             &self.enclave_source,
             &self.enclave_version,
             &self.work_dir,
         ).await?;
+        let enclave_source_path = enclave_source_result.path.clone();
+
+        // Resolve framework_source commit
+        let framework_commit = Self::resolve_framework_commit(&self.framework_source).await;
 
         let manifest = if let Some(ext_manifest) = external_manifest {
             tracing::info!("Using external manifest for reproducible build");
@@ -422,13 +468,13 @@ impl EnclaveBuilder {
             let enclave_src = if self.enclave_source.ends_with(".tar.gz") {
                 EnclaveSource::GitArchive {
                     urls: vec![self.enclave_source.clone()],
-                    commit: None,
+                    commit: enclave_source_result.commit.clone(),
                 }
             } else if self.enclave_source.starts_with("http") || self.enclave_source.starts_with("git@") {
                 EnclaveSource::GitRepository {
                     url: self.enclave_source.clone(),
                     branch: self.enclave_version.clone(),
-                    commit: None,
+                    commit: enclave_source_result.commit.clone(),
                 }
             } else {
                 EnclaveSource::Local {
@@ -449,7 +495,13 @@ impl EnclaveBuilder {
 
             let framework_src = FrameworkSource::GitArchive {
                 url: self.framework_source.clone(),
+                commit: framework_commit.clone(),
             };
+
+            tracing::info!("Manifest source commits - enclave: {:?}, framework: {:?}, app: {:?}",
+                enclave_source_result.commit,
+                framework_commit,
+                app_commit);
 
             EnclaveManifest::new(app_src, enclave_src, framework_src, None, run_command.clone(), metadata)
         };
