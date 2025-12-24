@@ -43,7 +43,7 @@ CREATE TABLE cloud_credentials (
     last_validated_at TIMESTAMP,
     validation_error TEXT,
 
-    created_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+    created_by UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
 
