@@ -391,6 +391,8 @@ pub struct App {
     pub state: String,
     pub provider_resource_id: String,
     pub public_ip: Option<String>,
+    pub domain: Option<String>,
+    pub configuration: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -1593,7 +1595,24 @@ build: docker build -t app .
                 println!("Apps:");
                 for app in apps {
                     let name = app.resource_name.as_deref().unwrap_or("unnamed");
-                    println!("  {} - {} ({})", app.id, name, app.state);
+                    let mut details = vec![app.state.clone()];
+
+                    if let Some(config) = &app.configuration {
+                        if let Some(enclave_config) = config.get("enclave_config") {
+                            if let (Some(mem), Some(cpus)) = (
+                                enclave_config.get("memory_mb").and_then(|v| v.as_u64()),
+                                enclave_config.get("cpus").and_then(|v| v.as_u64()),
+                            ) {
+                                details.push(format!("{}MB/{}cpu", mem, cpus));
+                            }
+                        }
+                    }
+
+                    if let Some(ip) = &app.public_ip {
+                        details.push(ip.clone());
+                    }
+
+                    println!("  {} - {} ({})", app.id, name, details.join(", "));
                 }
             }
             Ok(())
@@ -1655,10 +1674,39 @@ build: docker build -t app .
         println!("  ID: {}", app.id);
         println!("  Name: {}", name);
         println!("  State: {}", app.state);
-        println!("  Provider Resource ID: {}", app.provider_resource_id);
-        if let Some(ip) = app.public_ip {
+
+        if let Some(domain) = &app.domain {
+            println!("  Domain: {}", domain);
+        }
+
+        if let Some(config) = &app.configuration {
+            if let Some(enclave_config) = config.get("enclave_config") {
+                if let Some(memory) = enclave_config.get("memory_mb").and_then(|v| v.as_u64()) {
+                    println!("  Memory: {} MB", memory);
+                }
+                if let Some(cpus) = enclave_config.get("cpus").and_then(|v| v.as_u64()) {
+                    println!("  CPUs: {}", cpus);
+                }
+                if let Some(debug) = enclave_config.get("debug").and_then(|v| v.as_bool()) {
+                    if debug {
+                        println!("  Debug Mode: enabled");
+                    }
+                }
+                if let Some(ports) = enclave_config.get("ports").and_then(|v| v.as_array()) {
+                    if !ports.is_empty() {
+                        let ports_str: Vec<String> = ports.iter()
+                            .filter_map(|p| p.as_u64().map(|n| n.to_string()))
+                            .collect();
+                        println!("  Ports: {}", ports_str.join(", "));
+                    }
+                }
+            }
+        }
+
+        if let Some(ip) = &app.public_ip {
             println!("  Public IP: {}", ip);
-            println!("  Attestation Endpoint: http://{}/attestation", ip);
+            println!("  URL: http://{}", app.domain.as_deref().unwrap_or(ip));
+            println!("  Attestation: http://{}/attestation", ip);
         }
 
         Ok(())

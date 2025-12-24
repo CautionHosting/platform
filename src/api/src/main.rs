@@ -92,6 +92,7 @@ struct ComputeResource {
     public_ip: Option<String>,
     domain: Option<String>,
     billing_tag: Option<String>,
+    configuration: Option<serde_json::Value>,
     created_at: chrono::NaiveDateTime,
     updated_at: chrono::NaiveDateTime,
 }
@@ -1170,7 +1171,7 @@ async fn list_resources(
         "SELECT id, organization_id, provider_account_id, resource_type_id,
                 provider_resource_id, resource_name, state::text as state,
                 region, public_ip, configuration->>'domain' as domain,
-                billing_tag, created_at, updated_at
+                billing_tag, configuration, created_at, updated_at
          FROM compute_resources
          WHERE organization_id = $1 AND destroyed_at IS NULL"
     )
@@ -1196,7 +1197,7 @@ async fn get_resource(
         "SELECT cr.id, cr.organization_id, cr.provider_account_id, cr.resource_type_id,
                 cr.provider_resource_id, cr.resource_name, cr.state::text as state,
                 cr.region, cr.public_ip, cr.configuration->>'domain' as domain,
-                cr.billing_tag, cr.created_at, cr.updated_at
+                cr.billing_tag, cr.configuration, cr.created_at, cr.updated_at
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
          WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL"
@@ -1273,7 +1274,7 @@ async fn rename_resource(
          RETURNING id, organization_id, provider_account_id, resource_type_id,
                    provider_resource_id, resource_name, state::text as state,
                    region, public_ip, configuration->>'domain' as domain,
-                   billing_tag, created_at, updated_at"
+                   billing_tag, configuration, created_at, updated_at"
     )
     .bind(&payload.name)
     .bind(resource_id)

@@ -87,39 +87,42 @@ caution verify --reproduce
                     {{ app.state }}
                   </span>
                 </div>
-                <div class="app-details">
-                  <div class="app-detail">
-                    <span class="detail-label">ID:</span>
-                    <span class="detail-value">{{ app.id }}</span>
+                <div class="app-body">
+                  <div class="app-details">
+                    <div v-if="getEnclaveConfig(app)" class="app-specs">
+                      <span class="spec-badge">{{ getEnclaveConfig(app).memory_mb }} MB</span>
+                      <span class="spec-badge">{{ getEnclaveConfig(app).cpus }} CPU</span>
+                      <span v-if="getEnclaveConfig(app).debug" class="spec-badge spec-debug">Debug</span>
+                    </div>
+                    <div v-if="app.public_ip" class="app-detail">
+                      <span class="detail-label">IP:</span>
+                      <span class="detail-value">{{ app.public_ip }}</span>
+                    </div>
+                    <div v-if="app.public_ip || app.domain" class="app-detail">
+                      <button @click="showAttestation(app)" class="app-link-btn">
+                        Attestation
+                      </button>
+                    </div>
+                    <div v-if="app.domain" class="app-detail app-detail-full">
+                      <a :href="'https://' + app.domain" target="_blank" class="app-link">
+                        https://{{ app.domain }}
+                      </a>
+                    </div>
+                    <div v-else-if="app.public_ip" class="app-detail app-detail-full">
+                      <a :href="'http://' + app.public_ip" target="_blank" class="app-link">
+                        http://{{ app.public_ip }}
+                      </a>
+                    </div>
                   </div>
-                  <div v-if="app.public_ip" class="app-detail">
-                    <span class="detail-label">IP:</span>
-                    <span class="detail-value">{{ app.public_ip }}</span>
-                  </div>
-                  <div v-if="app.public_ip || app.domain" class="app-detail">
-                    <button @click="showAttestation(app)" class="app-link-btn">
-                      Attestation
+                  <div class="app-actions">
+                    <button
+                      @click="destroyApp(app.id, app.resource_name)"
+                      class="btn-danger"
+                      :disabled="destroyingApp === app.id"
+                    >
+                      {{ destroyingApp === app.id ? 'Destroying...' : 'Destroy' }}
                     </button>
                   </div>
-                  <div v-if="app.public_ip" class="app-detail app-detail-full">
-                    <a :href="'http://' + app.public_ip" target="_blank" class="app-link">
-                      http://{{ app.public_ip }}
-                    </a>
-                  </div>
-                  <div v-if="app.domain" class="app-detail app-detail-full">
-                    <a :href="'https://' + app.domain" target="_blank" class="app-link">
-                      https://{{ app.domain }}
-                    </a>
-                  </div>
-                </div>
-                <div class="app-actions">
-                  <button
-                    @click="destroyApp(app.id, app.resource_name)"
-                    class="btn-danger"
-                    :disabled="destroyingApp === app.id"
-                  >
-                    {{ destroyingApp === app.id ? 'Destroying...' : 'Destroy' }}
-                  </button>
                 </div>
               </div>
             </div>
@@ -337,6 +340,10 @@ export default {
     const showAttestation = (app) => {
       const url = `http://${app.public_ip}/attestation`
       showAttestationModal({ attestationUrl: url })
+    }
+
+    const getEnclaveConfig = (app) => {
+      return app.configuration?.enclave_config || null
     }
 
     // SSH Keys state
@@ -705,6 +712,7 @@ export default {
       loadingApps,
       destroyingApp,
       showAttestation,
+      getEnclaveConfig,
       destroyApp,
       sshKeys,
       loadingKeys,
@@ -893,11 +901,40 @@ h2 {
   color: #1565c0;
 }
 
+.app-body {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+}
+
 .app-details {
   display: flex;
   flex-wrap: wrap;
   gap: 16px;
-  margin-bottom: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.app-specs {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  margin-bottom: 4px;
+}
+
+.spec-badge {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: #f0f0f0;
+  color: #666;
+  font-weight: 500;
+}
+
+.spec-debug {
+  background: #fff3e0;
+  color: #e65100;
 }
 
 .app-detail {
@@ -948,10 +985,7 @@ h2 {
 }
 
 .app-actions {
-  display: flex;
-  justify-content: flex-end;
-  padding-top: 12px;
-  border-top: 1px solid #f5f5f5;
+  flex-shrink: 0;
 }
 
 .empty-hint {
