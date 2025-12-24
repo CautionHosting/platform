@@ -19,14 +19,16 @@ pub struct SshServer {
     pub pool: PgPool,
     pub api_service_url: String,
     pub data_dir: String,
+    pub internal_service_secret: Option<String>,
 }
 
 impl SshServer {
-    pub fn new(pool: PgPool, api_service_url: String, data_dir: String) -> Self {
+    pub fn new(pool: PgPool, api_service_url: String, data_dir: String, internal_service_secret: Option<String>) -> Self {
         Self {
             pool,
             api_service_url,
             data_dir,
+            internal_service_secret,
         }
     }
 }
@@ -35,6 +37,7 @@ pub struct SshSession {
     pool: PgPool,
     api_service_url: String,
     data_dir: String,
+    internal_service_secret: Option<String>,
     user_id: Option<Uuid>,
     org_id: Option<Uuid>,
     git_processes: Arc<Mutex<HashMap<ChannelId, Child>>>,
@@ -49,6 +52,7 @@ impl russh::server::Server for SshServer {
             pool: self.pool.clone(),
             api_service_url: self.api_service_url.clone(),
             data_dir: self.data_dir.clone(),
+            internal_service_secret: self.internal_service_secret.clone(),
             user_id: None,
             org_id: None,
             git_processes: Arc::new(Mutex::new(HashMap::new())),
@@ -143,6 +147,7 @@ impl russh::server::Handler for SshSession {
                 &self.pool,
                 &self.api_service_url,
                 &self.data_dir,
+                self.internal_service_secret.clone(),
                 user_id,
                 org_id,
                 &app_name,
@@ -312,6 +317,7 @@ async fn handle_git_push(
     pool: &PgPool,
     api_service_url: &str,
     data_dir: &str,
+    internal_service_secret: Option<String>,
     user_id: Uuid,
     org_id: Uuid,
     app_name: &str,
@@ -496,9 +502,15 @@ async fn handle_git_push(
         let client = reqwest::Client::new();
         let deploy_url = format!("{}/deploy", api_service_url);
 
-        let response = match client
+        let mut request = client
             .post(&deploy_url)
-            .header("X-Authenticated-User-ID", user_id.to_string())
+            .header("X-Authenticated-User-ID", user_id.to_string());
+
+        if let Some(ref secret) = internal_service_secret {
+            request = request.header("X-Internal-Service-Secret", secret.clone());
+        }
+
+        let response = match request
             .json(&DeployRequest {
                 org_id,
                 app_name: app_name.clone(),
@@ -583,6 +595,7 @@ pub async fn run_ssh_server(
     pool: PgPool,
     api_service_url: String,
     data_dir: String,
+    internal_service_secret: Option<String>,
     host_key: KeyPair,
     bind_addr: &str,
 ) -> Result<()> {
@@ -594,7 +607,7 @@ pub async fn run_ssh_server(
         ..Default::default()
     });
 
-    let mut server = SshServer::new(pool, api_service_url, data_dir);
+    let mut server = SshServer::new(pool, api_service_url, data_dir, internal_service_secret);
     
     tracing::info!("Starting SSH server on {}", bind_addr);
     

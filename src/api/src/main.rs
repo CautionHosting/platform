@@ -35,6 +35,7 @@ struct AppState {
     git_ssh_port: Option<u16>,
     data_dir: String,
     encryptor: Option<Arc<encryption::Encryptor>>,
+    internal_service_secret: Option<String>,
 }
 
 #[derive(Clone)]
@@ -104,11 +105,24 @@ async fn auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, (StatusCode, String)> {
+    // Internal service authentication requires BOTH the user ID AND a valid secret
+    // This prevents external callers from bypassing authentication by providing the header
     if let Some(user_id_str) = headers.get("x-authenticated-user-id").and_then(|h| h.to_str().ok()) {
-        if let Ok(user_id) = Uuid::parse_str(user_id_str) {
-            tracing::debug!("Auth middleware: internal service auth for user_id={}", user_id);
-            request.extensions_mut().insert(AuthContext { user_id });
-            return Ok(next.run(request).await);
+        let provided_secret = headers.get("x-internal-service-secret").and_then(|h| h.to_str().ok());
+
+        // Only accept internal service auth if a secret is configured AND it matches
+        if let Some(ref configured_secret) = state.internal_service_secret {
+            if provided_secret == Some(configured_secret.as_str()) {
+                if let Ok(user_id) = Uuid::parse_str(user_id_str) {
+                    tracing::debug!("Auth middleware: internal service auth for user_id={}", user_id);
+                    request.extensions_mut().insert(AuthContext { user_id });
+                    return Ok(next.run(request).await);
+                }
+            } else {
+                tracing::warn!("Auth middleware: internal service auth attempted with invalid or missing secret");
+            }
+        } else {
+            tracing::warn!("Auth middleware: internal service auth attempted but no secret configured");
         }
     }
 
@@ -2082,12 +2096,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let internal_service_secret = std::env::var("INTERNAL_SERVICE_SECRET").ok();
+    if internal_service_secret.is_some() {
+        info!("Internal service authentication enabled");
+    } else {
+        tracing::warn!("INTERNAL_SERVICE_SECRET not set - internal service authentication disabled");
+    }
+
     let state = Arc::new(AppState {
         db: pool,
         git_hostname,
         git_ssh_port,
         data_dir,
         encryptor,
+        internal_service_secret,
     });
 
     let onboarding_routes = Router::new()

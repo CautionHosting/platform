@@ -200,8 +200,14 @@ async fn main() -> Result<()> {
     let ssh_api_url = config.api_service_url.clone();
     let ssh_data_dir = config.data_dir.clone();
     let ssh_bind_addr = format!("0.0.0.0:{}", config.ssh_port);
+    let internal_service_secret = std::env::var("INTERNAL_SERVICE_SECRET").ok();
+    if internal_service_secret.is_some() {
+        tracing::info!("Internal service authentication enabled");
+    } else {
+        tracing::warn!("INTERNAL_SERVICE_SECRET not set - internal service authentication disabled");
+    }
     tokio::spawn(async move {
-        if let Err(e) = ssh_server::run_ssh_server(ssh_pool, ssh_api_url, ssh_data_dir, host_key, &ssh_bind_addr).await {
+        if let Err(e) = ssh_server::run_ssh_server(ssh_pool, ssh_api_url, ssh_data_dir, internal_service_secret, host_key, &ssh_bind_addr).await {
             tracing::error!("SSH server error: {:?}", e);
         }
     });
