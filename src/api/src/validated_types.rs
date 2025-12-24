@@ -126,16 +126,12 @@ impl Validate for UpdateOrganizationRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct AddMemberRequest {
-    pub user_id: i64,
+    pub user_id: Uuid,
     pub role: String,
 }
 
 impl Validate for AddMemberRequest {
     fn validate(&self) -> Result<(), String> {
-        if self.user_id <= 0 {
-            return Err("Invalid user_id".to_string());
-        }
-
         validation::validate_role(&self.role)
             .map_err(|e| e.to_string())?;
 
@@ -199,7 +195,7 @@ impl Validate for DeployRequest {
 
 #[derive(Debug, Serialize)]
 pub struct CreateResourceResponse {
-    pub id: i64,
+    pub id: Uuid,
     pub resource_name: String,
     pub git_url: String,
     pub state: String,
@@ -210,7 +206,7 @@ pub struct CreateResourceResponse {
 pub struct DeployResponse {
     pub url: String,
     pub attestation_url: String,
-    pub resource_id: i64,
+    pub resource_id: Uuid,
     pub public_ip: String,
     pub domain: Option<String>,
 }

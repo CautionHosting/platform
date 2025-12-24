@@ -15,6 +15,7 @@ use lettre::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use uuid::Uuid;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 
@@ -53,7 +54,7 @@ struct AppState {
 struct SendVerificationRequest {
     email: String,
     token: String,
-    user_id: i64,
+    user_id: Uuid,
 }
 
 #[derive(Debug, Serialize)]

@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use uuid::Uuid;
 use crate::types;
 
-pub async fn initialize_user_account(pool: &PgPool, user_id: i64) -> Result<Uuid> {
+pub async fn initialize_user_account(pool: &PgPool, user_id: Uuid) -> Result<Uuid> {
     tracing::info!("Initializing account for user_id: {}", user_id);
 
     let mut tx = pool.begin().await
@@ -83,10 +83,10 @@ async fn create_provider_account(
     sqlx::query(
         "INSERT INTO provider_accounts
          (organization_id, provider_id, external_account_id, account_name, description, role_arn, is_active)
-         VALUES ($1, $2, $3, $4, $5, $6, true)"
+         SELECT $1, id, $2, $3, $4, $5, true
+         FROM providers WHERE provider_type = 'aws'"
     )
     .bind(org_id)
-    .bind(types::CloudProvider::AWS.provider_id())
     .bind(aws_account_id)
     .bind(format!("Org {} AWS Account", org_id))
     .bind(description)

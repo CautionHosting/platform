@@ -337,7 +337,7 @@ pub struct AddSshKeyRequest {
 
 #[derive(Debug, Serialize)]
 pub struct AddSshKeyResponse {
-    pub id: i64,
+    pub id: uuid::Uuid,
     pub fingerprint: String,
 }
 
@@ -351,10 +351,10 @@ pub async fn add_ssh_key_handler(
     user_id_header: axum::http::HeaderMap,
     Json(req): Json<AddSshKeyRequest>,
 ) -> Result<Json<AddSshKeyResponse>, AppError> {
-    let user_id: i64 = user_id_header
+    let user_id = user_id_header
         .get("X-Authenticated-User-ID")
         .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
         .ok_or_else(|| anyhow::anyhow!("Missing or invalid user ID"))?;
 
     crate::validation::validate_ssh_public_key(&req.public_key)
@@ -386,12 +386,12 @@ pub async fn list_ssh_keys_handler(
     State(state): State<AppState>,
     user_id_header: axum::http::HeaderMap,
 ) -> Result<Json<ListSshKeysResponse>, AppError> {
-    let user_id: i64 = user_id_header
+    let user_id = user_id_header
         .get("X-Authenticated-User-ID")
         .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
         .ok_or_else(|| anyhow::anyhow!("Missing or invalid user ID"))?;
-    
+
     let keys = crate::db::list_ssh_keys(&state.db, user_id).await?;
     
     Ok(Json(ListSshKeysResponse { keys }))
@@ -402,10 +402,10 @@ pub async fn delete_ssh_key_handler(
     user_id_header: axum::http::HeaderMap,
     Path(fingerprint): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let user_id: i64 = user_id_header
+    let user_id = user_id_header
         .get("X-Authenticated-User-ID")
         .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.parse().ok())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
         .ok_or_else(|| anyhow::anyhow!("Missing or invalid user ID"))?;
 
     let deleted = crate::db::delete_ssh_key(&state.db, user_id, &fingerprint).await?;

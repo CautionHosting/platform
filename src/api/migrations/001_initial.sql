@@ -33,7 +33,7 @@ $$ LANGUAGE plpgsql;
 
 -- Function to check if user is fully onboarded (email verified + payment added)
 -- Beta users (with beta_code_id) skip email verification AND payment
-CREATE OR REPLACE FUNCTION user_is_onboarded(user_id_param BIGINT)
+CREATE OR REPLACE FUNCTION user_is_onboarded(user_id_param UUID)
 RETURNS BOOLEAN AS $$
 DECLARE
     verified BOOLEAN;
@@ -55,7 +55,7 @@ $$ LANGUAGE plpgsql;
 -- ============================================
 
 CREATE TABLE beta_codes (
-    id BIGSERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     code VARCHAR(64) NOT NULL UNIQUE,
     created_by VARCHAR(255),
     expires_at TIMESTAMP,
@@ -73,14 +73,14 @@ CREATE INDEX idx_beta_codes_code ON beta_codes(code);
 -- ============================================
 
 CREATE TABLE users (
-    id BIGSERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     username VARCHAR(255) NOT NULL UNIQUE,
     email VARCHAR(255) UNIQUE,
     fido2_user_handle BYTEA UNIQUE,  -- WebAuthn user.id (32 bytes)
     is_active BOOLEAN NOT NULL DEFAULT true,
 
     -- Beta code used during registration (skips email verification)
-    beta_code_id BIGINT REFERENCES beta_codes(id),
+    beta_code_id UUID REFERENCES beta_codes(id),
 
     -- Email verification
     email_verified_at TIMESTAMP,
@@ -133,11 +133,11 @@ CREATE TRIGGER organizations_updated_at BEFORE UPDATE ON organizations
 CREATE TYPE user_role AS ENUM ('owner', 'admin', 'member', 'viewer');
 
 CREATE TABLE organization_members (
-    id BIGSERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     role user_role NOT NULL DEFAULT 'member',
-    invited_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+    invited_by UUID REFERENCES users(id) ON DELETE SET NULL,
     accepted_at TIMESTAMP NOT NULL DEFAULT NOW(),
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -159,7 +159,7 @@ CREATE TRIGGER organization_members_updated_at BEFORE UPDATE ON organization_mem
 CREATE TYPE cloud_provider AS ENUM ('aws', 'gcp', 'azure', 'digitalocean', 'hetzner');
 
 CREATE TABLE providers (
-    id BIGSERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     provider_type cloud_provider NOT NULL UNIQUE,
     display_name VARCHAR(100) NOT NULL,
     is_enabled BOOLEAN NOT NULL DEFAULT true,
@@ -182,9 +182,9 @@ CREATE TRIGGER providers_updated_at BEFORE UPDATE ON providers
 -- ============================================
 
 CREATE TABLE provider_accounts (
-    id BIGSERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    provider_id BIGINT NOT NULL REFERENCES providers(id),
+    provider_id UUID NOT NULL REFERENCES providers(id),
     external_account_id VARCHAR(255) NOT NULL,
     account_name VARCHAR(255) NOT NULL,
     description TEXT,
@@ -208,8 +208,8 @@ CREATE TRIGGER provider_accounts_updated_at BEFORE UPDATE ON provider_accounts
 -- ============================================
 
 CREATE TABLE resource_types (
-    id BIGSERIAL PRIMARY KEY,
-    provider_id BIGINT NOT NULL REFERENCES providers(id),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    provider_id UUID NOT NULL REFERENCES providers(id),
     type_code VARCHAR(100) NOT NULL,
     display_name VARCHAR(255) NOT NULL,
     category VARCHAR(100),
@@ -222,10 +222,12 @@ CREATE TABLE resource_types (
 
 CREATE INDEX idx_resource_types_provider ON resource_types(provider_id);
 
-INSERT INTO resource_types (provider_id, type_code, display_name, category) VALUES
-    (1, 'ec2-instance', 'EC2 Instance', 'compute'),
-    (1, 'rds-instance', 'RDS Database', 'database'),
-    (1, 's3-bucket', 'S3 Bucket', 'storage');
+INSERT INTO resource_types (provider_id, type_code, display_name, category)
+SELECT id, 'ec2-instance', 'EC2 Instance', 'compute' FROM providers WHERE provider_type = 'aws'
+UNION ALL
+SELECT id, 'rds-instance', 'RDS Database', 'database' FROM providers WHERE provider_type = 'aws'
+UNION ALL
+SELECT id, 's3-bucket', 'S3 Bucket', 'storage' FROM providers WHERE provider_type = 'aws';
 
 CREATE TRIGGER resource_types_updated_at BEFORE UPDATE ON resource_types
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
@@ -237,10 +239,10 @@ CREATE TRIGGER resource_types_updated_at BEFORE UPDATE ON resource_types
 CREATE TYPE resource_state AS ENUM ('pending', 'running', 'stopped', 'terminated', 'failed');
 
 CREATE TABLE compute_resources (
-    id BIGSERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-    provider_account_id BIGINT NOT NULL REFERENCES provider_accounts(id),
-    resource_type_id BIGINT NOT NULL REFERENCES resource_types(id),
+    provider_account_id UUID NOT NULL REFERENCES provider_accounts(id),
+    resource_type_id UUID NOT NULL REFERENCES resource_types(id),
     provider_resource_id VARCHAR(512) NOT NULL,
     resource_name VARCHAR(255),
     state resource_state NOT NULL DEFAULT 'pending',
@@ -253,8 +255,8 @@ CREATE TABLE compute_resources (
     tags JSONB,
     deployed_at TIMESTAMP,
     destroyed_at TIMESTAMP,
-    created_by BIGINT REFERENCES users(id),
-    destroyed_by BIGINT REFERENCES users(id),
+    created_by UUID REFERENCES users(id),
+    destroyed_by UUID REFERENCES users(id),
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
 
@@ -281,8 +283,8 @@ CREATE TRIGGER compute_resources_updated_at BEFORE UPDATE ON compute_resources
 -- ============================================
 
 CREATE TABLE fido2_credentials (
-    id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     credential_id BYTEA NOT NULL UNIQUE,
     public_key BYTEA NOT NULL,
     attestation_type VARCHAR(50),
@@ -327,8 +329,8 @@ COMMENT ON TABLE auth_sessions IS 'Active authentication sessions - no updated_a
 -- ============================================
 
 CREATE TABLE ssh_keys (
-    id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     public_key TEXT NOT NULL,
     fingerprint VARCHAR(255) NOT NULL UNIQUE,
     key_type VARCHAR(50) NOT NULL,  -- 'ssh-rsa', 'ssh-ed25519', etc.
@@ -371,7 +373,7 @@ WHERE cr.destroyed_at IS NULL;
 
 -- Stores AMI IDs by commit SHA to avoid rebuilding identical images
 CREATE TABLE ami_cache (
-    id BIGSERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     app_name VARCHAR(255) NOT NULL,
     commit_sha VARCHAR(64) NOT NULL,
     ami_id VARCHAR(64) NOT NULL,

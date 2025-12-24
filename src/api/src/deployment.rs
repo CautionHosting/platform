@@ -19,7 +19,7 @@ pub struct AwsCredentials {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentRequest {
     pub org_id: Uuid,
-    pub resource_id: i64,
+    pub resource_id: Uuid,
     pub resource_name: String,
     pub aws_account_id: String,
     pub role_arn: Option<String>,
@@ -52,7 +52,7 @@ pub async fn deploy_app(request: DeploymentRequest) -> Result<DeploymentResult> 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NitroDeploymentRequest {
     pub org_id: Uuid,
-    pub resource_id: i64,
+    pub resource_id: Uuid,
     pub resource_name: String,
     pub aws_account_id: String,
     pub role_arn: Option<String>,
@@ -93,7 +93,7 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
 
 pub async fn destroy_app(
     org_id: Uuid,
-    resource_id: i64,
+    resource_id: Uuid,
     resource_name: String,
 ) -> Result<()> {
     tracing::info!(
@@ -169,7 +169,7 @@ async fn provision_ec2_app(
 
 async fn destroy_ec2_app(
     org_id: Uuid,
-    resource_id: i64,
+    resource_id: Uuid,
     resource_name: &str,
     config: &TerraformConfig,
 ) -> Result<()> {
@@ -253,7 +253,7 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 async fn generate_backend_config(
     work_dir: &Path,
     org_id: Uuid,
-    resource_id: i64,
+    resource_id: Uuid,
     s3_bucket: &str,
 ) -> Result<()> {
     let backend_content = format!(

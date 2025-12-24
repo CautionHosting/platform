@@ -11,7 +11,7 @@ ALTER TYPE cloud_provider ADD VALUE IF NOT EXISTS 'ovh';
 ALTER TYPE cloud_provider ADD VALUE IF NOT EXISTS 'baremetal';
 
 CREATE TABLE cloud_credentials (
-    id BIGSERIAL PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     platform cloud_provider NOT NULL,
     name VARCHAR(255) NOT NULL,

@@ -39,12 +39,12 @@ struct AppState {
 
 #[derive(Clone)]
 struct AuthContext {
-    user_id: i64,
+    user_id: Uuid,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 struct User {
-    id: i64,
+    id: Uuid,
     username: String,
     email: Option<String>,
     is_active: bool,
@@ -67,9 +67,9 @@ use validated_types::{CreateOrganizationRequest, UpdateOrganizationRequest};
 
 #[derive(Debug, Serialize, FromRow)]
 struct OrganizationMember {
-    id: i64,
+    id: Uuid,
     organization_id: Uuid,
-    user_id: i64,
+    user_id: Uuid,
     role: String,
     joined_at: DateTime<Utc>,
     created_at: DateTime<Utc>,
@@ -80,10 +80,10 @@ use validated_types::{AddMemberRequest, UpdateMemberRequest};
 
 #[derive(Debug, Serialize, FromRow)]
 struct ComputeResource {
-    id: i64,
+    id: Uuid,
     organization_id: Uuid,
-    provider_account_id: i64,
-    resource_type_id: i64,
+    provider_account_id: Uuid,
+    resource_type_id: Uuid,
     provider_resource_id: String,
     resource_name: Option<String>,
     state: String,
@@ -105,7 +105,7 @@ async fn auth_middleware(
     next: Next,
 ) -> Result<Response, (StatusCode, String)> {
     if let Some(user_id_str) = headers.get("x-authenticated-user-id").and_then(|h| h.to_str().ok()) {
-        if let Ok(user_id) = user_id_str.parse::<i64>() {
+        if let Ok(user_id) = Uuid::parse_str(user_id_str) {
             tracing::debug!("Auth middleware: internal service auth for user_id={}", user_id);
             request.extensions_mut().insert(AuthContext { user_id });
             return Ok(next.run(request).await);
@@ -143,8 +143,8 @@ async fn onboarding_middleware(
     Ok(next.run(request).await)
 }
 
-async fn validate_session(db: &PgPool, session_id: &str) -> Result<i64, StatusCode> {
-    let result: Option<(i64,)> = sqlx::query_as(
+async fn validate_session(db: &PgPool, session_id: &str) -> Result<Uuid, StatusCode> {
+    let result: Option<(Uuid,)> = sqlx::query_as(
         "SELECT u.id
          FROM auth_sessions s
          INNER JOIN fido2_credentials c ON s.credential_id = c.credential_id
@@ -165,7 +165,7 @@ async fn validate_session(db: &PgPool, session_id: &str) -> Result<i64, StatusCo
     })
 }
 
-async fn ensure_user_has_org(db: &PgPool, user_id: i64) -> Result<(), StatusCode> {
+async fn ensure_user_has_org(db: &PgPool, user_id: Uuid) -> Result<(), StatusCode> {
     tracing::debug!("ensure_user_has_org: checking user {}", user_id);
 
     let is_onboarded = onboarding::check_onboarding_status(db, user_id).await?;
@@ -206,7 +206,7 @@ async fn ensure_user_has_org(db: &PgPool, user_id: i64) -> Result<(), StatusCode
 
 async fn check_org_access(
     db: &PgPool,
-    user_id: i64,
+    user_id: Uuid,
     org_id: Uuid,
 ) -> Result<types::UserRole, StatusCode> {
     let member: Option<(types::UserRole,)> = sqlx::query_as(
@@ -230,7 +230,7 @@ fn is_owner(role: &types::UserRole) -> bool {
     role.is_owner()
 }
 
-async fn get_user_primary_org(db: &PgPool, user_id: i64) -> Result<Uuid, StatusCode> {
+async fn get_user_primary_org(db: &PgPool, user_id: Uuid) -> Result<Uuid, StatusCode> {
     let org_id: Option<(Uuid,)> = sqlx::query_as(
         "SELECT organization_id FROM organization_members
          WHERE user_id = $1
@@ -248,20 +248,20 @@ async fn get_user_primary_org(db: &PgPool, user_id: i64) -> Result<Uuid, StatusC
 async fn get_or_create_provider_account(
     db: &PgPool,
     org_id: Uuid,
-) -> Result<i64, StatusCode> {
+) -> Result<Uuid, StatusCode> {
     let aws_account_id = std::env::var("AWS_ACCOUNT_ID")
         .map_err(|_| {
             tracing::error!("AWS_ACCOUNT_ID environment variable not set");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    let existing: Option<(i64, Option<String>, Option<bool>)> = sqlx::query_as(
-        "SELECT id, role_arn, is_active FROM provider_accounts
-         WHERE organization_id = $1 AND provider_id = $2
+    let existing: Option<(Uuid, Option<String>, Option<bool>)> = sqlx::query_as(
+        "SELECT pa.id, pa.role_arn, pa.is_active FROM provider_accounts pa
+         JOIN providers p ON pa.provider_id = p.id
+         WHERE pa.organization_id = $1 AND p.provider_type = 'aws'
          LIMIT 1"
     )
     .bind(org_id)
-    .bind(types::CloudProvider::AWS.provider_id())
     .fetch_optional(db)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -292,10 +292,10 @@ async fn get_or_create_provider_account(
 
     let role_arn = format!("arn:aws:iam::{}:role/OrganizationAccountAccessRole", aws_account_id);
 
-    let account_id: (i64,) = sqlx::query_as(
+    let account_id: (Uuid,) = sqlx::query_as(
         "INSERT INTO provider_accounts
          (organization_id, provider_id, external_account_id, account_name, role_arn, is_active)
-         VALUES ($1, 1, $2, $3, $4, true)
+         VALUES ($1, (SELECT id FROM providers WHERE provider_type = 'aws'), $2, $3, $4, true)
          RETURNING id"
     )
     .bind(org_id)
@@ -314,13 +314,13 @@ async fn get_or_create_provider_account(
     Ok(account_id.0)
 }
 
-async fn get_or_create_resource_type(db: &PgPool) -> Result<i64, StatusCode> {
-    let existing: Option<(i64,)> = sqlx::query_as(
-        "SELECT id FROM resource_types
-         WHERE provider_id = $1 AND type_code = $2
+async fn get_or_create_resource_type(db: &PgPool) -> Result<Uuid, StatusCode> {
+    let existing: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT rt.id FROM resource_types rt
+         JOIN providers p ON rt.provider_id = p.id
+         WHERE p.provider_type = 'aws' AND rt.type_code = $1
          LIMIT 1"
     )
-    .bind(types::CloudProvider::AWS.provider_id())
     .bind(types::AWSResourceType::EC2Instance.as_str())
     .fetch_optional(db)
     .await
@@ -330,13 +330,12 @@ async fn get_or_create_resource_type(db: &PgPool) -> Result<i64, StatusCode> {
         return Ok(id);
     }
 
-    let type_id: (i64,) = sqlx::query_as(
+    let type_id: (Uuid,) = sqlx::query_as(
         "INSERT INTO resource_types
          (provider_id, type_code, display_name, category)
-         VALUES ($1, $2, 'EC2 Instance', 'compute')
+         VALUES ((SELECT id FROM providers WHERE provider_type = 'aws'), $1, 'EC2 Instance', 'compute')
          RETURNING id"
     )
-    .bind(types::CloudProvider::AWS.provider_id())
     .bind(types::AWSResourceType::EC2Instance.as_str())
     .fetch_one(db)
     .await
@@ -641,7 +640,7 @@ async fn add_member(
 async fn update_member(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-    Path((org_id, member_user_id)): Path<(Uuid, i64)>,
+    Path((org_id, member_user_id)): Path<(Uuid, Uuid)>,
     validated_types::Validated(payload): validated_types::Validated<UpdateMemberRequest>,
 ) -> Result<Json<OrganizationMember>, StatusCode> {
     let role = check_org_access(&state.db, auth.user_id, org_id).await?;
@@ -669,7 +668,7 @@ async fn update_member(
 async fn remove_member(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-    Path((org_id, member_user_id)): Path<(Uuid, i64)>,
+    Path((org_id, member_user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, StatusCode> {
     let role = check_org_access(&state.db, auth.user_id, org_id).await?;
     
@@ -1103,7 +1102,7 @@ async fn create_resource(
 
     tracing::debug!("Creating resource with slug: {}", resource_slug);
 
-    let resource: (i64, types::ResourceState, NaiveDateTime) = match sqlx::query_as(
+    let resource: (Uuid, types::ResourceState, NaiveDateTime) = match sqlx::query_as(
         "INSERT INTO compute_resources
          (organization_id, provider_account_id, resource_type_id, provider_resource_id,
           resource_name, state, configuration, created_by)
@@ -1177,7 +1176,7 @@ async fn list_resources(
 async fn get_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-    Path(resource_id): Path<i64>,
+    Path(resource_id): Path<Uuid>,
 ) -> Result<Json<ComputeResource>, StatusCode> {
     let resource = sqlx::query_as::<_, ComputeResource>(
         "SELECT cr.id, cr.organization_id, cr.provider_account_id, cr.resource_type_id,
@@ -1206,13 +1205,13 @@ struct DeleteResourceQuery {
 async fn delete_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-    Path(resource_id): Path<i64>,
+    Path(resource_id): Path<Uuid>,
     query: axum::extract::Query<DeleteResourceQuery>,
 ) -> Result<StatusCode, StatusCode> {
     tracing::info!("delete_resource called: resource_id={}, user_id={}, force={}", resource_id, auth.user_id, query.force);
 
     tracing::debug!("Querying resource access for user {} on resource {}", auth.user_id, resource_id);
-    let resource: Option<(i64, Uuid, String, Option<String>)> = sqlx::query_as(
+    let resource: Option<(Uuid, Uuid, String, Option<String>)> = sqlx::query_as(
         "SELECT cr.id, cr.organization_id, cr.resource_name, pa.role_arn
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
@@ -1299,7 +1298,7 @@ async fn create_cloud_credential(
 async fn get_cloud_credential(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-    Path(credential_id): Path<i64>,
+    Path(credential_id): Path<Uuid>,
 ) -> Result<Json<cloud_credentials::CloudCredential>, (StatusCode, String)> {
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
@@ -1315,7 +1314,7 @@ async fn get_cloud_credential(
 async fn delete_cloud_credential(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-    Path(credential_id): Path<i64>,
+    Path(credential_id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
@@ -1333,7 +1332,7 @@ async fn delete_cloud_credential(
 async fn set_default_cloud_credential(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-    Path(credential_id): Path<i64>,
+    Path(credential_id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
@@ -1382,7 +1381,7 @@ async fn deploy_handler(
     }
 
     tracing::info!("Fetching provider account for org {}", req.org_id);
-    let provider_account: Option<(i64, Option<String>, Option<String>)> = sqlx::query_as(
+    let provider_account: Option<(Uuid, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT id, external_account_id, role_arn
          FROM provider_accounts
          WHERE organization_id = $1 AND is_active = true
@@ -1414,7 +1413,7 @@ async fn deploy_handler(
     }
 
     tracing::info!("Fetching resource type for EC2Instance");
-    let resource_type_id: i64 = sqlx::query_scalar(
+    let resource_type_id: Uuid = sqlx::query_scalar(
         "SELECT id FROM resource_types WHERE type_code = $1 LIMIT 1"
     )
     .bind(types::AWSResourceType::EC2Instance.as_str())
@@ -1433,7 +1432,7 @@ async fn deploy_handler(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
     tracing::info!("Checking for existing resource: org={}, name={}", req.org_id, req.app_name);
-    let existing_resource: Option<(i64, Option<serde_json::Value>)> = sqlx::query_as(
+    let existing_resource: Option<(Uuid, Option<serde_json::Value>)> = sqlx::query_as(
         "SELECT id, configuration FROM compute_resources
          WHERE organization_id = $1 AND resource_name = $2 AND destroyed_at IS NULL"
     )
@@ -1505,7 +1504,7 @@ async fn deploy_handler(
         (id, build_cmd)
     } else {
         let provider_resource_id = Uuid::new_v4().to_string();
-        let id: i64 = sqlx::query_scalar(
+        let id: Uuid = sqlx::query_scalar(
             "INSERT INTO compute_resources
              (organization_id, provider_account_id, resource_type_id, provider_resource_id,
               resource_name, state, region, created_by, deployed_at)

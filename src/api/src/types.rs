@@ -80,12 +80,6 @@ impl CloudProvider {
             CloudProvider::AWS => "aws",
         }
     }
-
-    pub fn provider_id(&self) -> i64 {
-        match self {
-            CloudProvider::AWS => 1,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

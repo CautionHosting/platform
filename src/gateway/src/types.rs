@@ -6,12 +6,13 @@ use webauthn_rs::prelude::*;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// Registration state that includes the beta code ID for closed beta
 #[derive(Clone)]
 pub struct PendingRegistration {
     pub reg_state: SecurityKeyRegistration,
-    pub beta_code_id: i64,
+    pub beta_code_id: Uuid,
 }
 
 #[derive(Clone)]
@@ -27,7 +28,7 @@ pub struct AppState {
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DbUser {
-    pub id: i64,
+    pub id: Uuid,
     pub username: String,
     pub email: Option<String>,
     pub fido2_user_handle: Option<Vec<u8>>,
@@ -35,8 +36,8 @@ pub struct DbUser {
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DbCredential {
-    pub id: i64,
-    pub user_id: i64,
+    pub id: Uuid,
+    pub user_id: Uuid,
     pub credential_id: Vec<u8>,
     pub public_key: Vec<u8>,
     pub attestation_type: Option<String>,
@@ -118,13 +119,13 @@ pub struct RegisterBeginRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionData {
     pub passkey_authentication: PasskeyAuthentication,
-    pub user_id: i64,
+    pub user_id: Uuid,
 }
 
 #[derive(Debug, Clone)]
 pub struct PendingSignChallenge {
     pub auth_state: SecurityKeyAuthentication,
-    pub user_id: i64,
+    pub user_id: Uuid,
     pub method: String,
     pub path: String,
     pub body_hash: String,

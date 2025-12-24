@@ -48,7 +48,7 @@ pub async fn get_user_status(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<UserStatus>, StatusCode> {
-    let result: Option<(Option<NaiveDateTime>, Option<NaiveDateTime>, Option<i64>)> = sqlx::query_as(
+    let result: Option<(Option<NaiveDateTime>, Option<NaiveDateTime>, Option<uuid::Uuid>)> = sqlx::query_as(
         "SELECT email_verified_at, payment_method_added_at, beta_code_id
          FROM users
          WHERE id = $1"
@@ -161,7 +161,7 @@ pub async fn verify_email(
     State(state): State<Arc<AppState>>,
     Query(params): Query<VerifyEmailQuery>,
 ) -> Result<Response, StatusCode> {
-    let result: Option<(i64, NaiveDateTime)> = sqlx::query_as(
+    let result: Option<(uuid::Uuid, NaiveDateTime)> = sqlx::query_as(
         "SELECT id, email_verification_token_expires_at
          FROM users
          WHERE email_verification_token = $1
@@ -290,7 +290,7 @@ pub async fn verify_email(
         .into_response())
 }
 
-pub async fn check_onboarding_status(db: &PgPool, user_id: i64) -> Result<bool, StatusCode> {
+pub async fn check_onboarding_status(db: &PgPool, user_id: uuid::Uuid) -> Result<bool, StatusCode> {
     let skip_payment = std::env::var("SKIP_PAYMENT_REQUIREMENT")
         .unwrap_or_else(|_| "false".to_string())
         .parse::<bool>()

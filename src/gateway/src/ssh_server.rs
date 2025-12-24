@@ -35,7 +35,7 @@ pub struct SshSession {
     pool: PgPool,
     api_service_url: String,
     data_dir: String,
-    user_id: Option<i64>,
+    user_id: Option<Uuid>,
     org_id: Option<Uuid>,
     git_processes: Arc<Mutex<HashMap<ChannelId, Child>>>,
 }
@@ -296,7 +296,7 @@ fn update_repo_head(repo_path: &str) -> Result<String> {
     Ok(target_branch)
 }
 
-async fn get_user_org(pool: &PgPool, user_id: i64) -> Result<Option<Uuid>> {
+async fn get_user_org(pool: &PgPool, user_id: Uuid) -> Result<Option<Uuid>> {
     let org_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT organization_id FROM organization_members WHERE user_id = $1 LIMIT 1"
     )
@@ -312,14 +312,14 @@ async fn handle_git_push(
     pool: &PgPool,
     api_service_url: &str,
     data_dir: &str,
-    user_id: i64,
+    user_id: Uuid,
     org_id: Uuid,
     app_name: &str,
     channel: ChannelId,
     session: &mut Session,
     git_processes: Arc<Mutex<HashMap<ChannelId, Child>>>,
 ) -> Result<()> {
-    let existing: Option<(i64, String)> = sqlx::query_as(
+    let existing: Option<(Uuid, String)> = sqlx::query_as(
         "SELECT id, state::text FROM compute_resources
          WHERE organization_id = $1 AND resource_name = $2"
     )
@@ -538,7 +538,7 @@ async fn handle_git_push(
         #[derive(serde::Deserialize)]
         struct DeployResponse {
             url: String,
-            resource_id: i64,
+            resource_id: String,
             public_ip: String,
             domain: Option<String>,
         }

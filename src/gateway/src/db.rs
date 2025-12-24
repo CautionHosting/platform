@@ -6,13 +6,14 @@ use sqlx::PgPool;
 use rand::Rng;
 use time::{OffsetDateTime, PrimitiveDateTime};
 use base64::Engine;
+use uuid::Uuid;
 
 use crate::types::DbSession;
 
-pub async fn create_user(pool: &PgPool, fido2_user_handle: &[u8], beta_code_id: i64) -> Result<i64> {
+pub async fn create_user(pool: &PgPool, fido2_user_handle: &[u8], beta_code_id: Uuid) -> Result<Uuid> {
     let username = generate_user_identifier();
 
-    let user_id: i64 = sqlx::query_scalar(
+    let user_id: Uuid = sqlx::query_scalar(
         "INSERT INTO users (fido2_user_handle, username, email, beta_code_id)
          VALUES ($1, $2, NULL, $3)
          RETURNING id"
@@ -32,8 +33,8 @@ pub async fn create_user(pool: &PgPool, fido2_user_handle: &[u8], beta_code_id: 
     Ok(user_id)
 }
 
-pub async fn validate_beta_code(pool: &PgPool, code: &str) -> Result<Option<i64>> {
-    let code_id: Option<i64> = sqlx::query_scalar(
+pub async fn validate_beta_code(pool: &PgPool, code: &str) -> Result<Option<Uuid>> {
+    let code_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM beta_codes
          WHERE code = $1
            AND used_at IS NULL
@@ -47,7 +48,7 @@ pub async fn validate_beta_code(pool: &PgPool, code: &str) -> Result<Option<i64>
     Ok(code_id)
 }
 
-pub async fn redeem_beta_code(pool: &PgPool, code_id: i64) -> Result<bool> {
+pub async fn redeem_beta_code(pool: &PgPool, code_id: Uuid) -> Result<bool> {
     let result = sqlx::query(
         "UPDATE beta_codes
          SET used_at = NOW()
@@ -62,8 +63,8 @@ pub async fn redeem_beta_code(pool: &PgPool, code_id: i64) -> Result<bool> {
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn get_user_id_by_fido2_handle(pool: &PgPool, fido2_user_handle: &[u8]) -> Result<i64> {
-    let user_id: Option<i64> = sqlx::query_scalar(
+pub async fn get_user_id_by_fido2_handle(pool: &PgPool, fido2_user_handle: &[u8]) -> Result<Uuid> {
+    let user_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM users WHERE fido2_user_handle = $1"
     )
     .bind(fido2_user_handle)
@@ -83,7 +84,7 @@ fn generate_user_identifier() -> String {
 pub async fn save_fido2_credential(
     pool: &PgPool,
     credential_id: &[u8],
-    user_id: i64,
+    user_id: Uuid,
     public_key: &[u8],
     attestation_type: Option<&str>,
     aaguid: Option<&[u8]>,
@@ -144,8 +145,8 @@ pub async fn get_credential_public_key(pool: &PgPool, credential_id: &[u8]) -> R
     public_key.ok_or_else(|| anyhow::anyhow!("Credential not found"))
 }
 
-pub async fn get_user_id_by_credential(pool: &PgPool, credential_id: &[u8]) -> Result<i64> {
-    let user_id: Option<i64> = sqlx::query_scalar(
+pub async fn get_user_id_by_credential(pool: &PgPool, credential_id: &[u8]) -> Result<Uuid> {
+    let user_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT user_id FROM fido2_credentials WHERE credential_id = $1"
     )
     .bind(credential_id)
@@ -178,7 +179,7 @@ pub async fn get_all_passkeys(pool: &PgPool) -> Result<Vec<Vec<u8>>> {
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
-pub async fn get_credential_ids_by_user_id(pool: &PgPool, user_id: i64) -> Result<Vec<Vec<u8>>> {
+pub async fn get_credential_ids_by_user_id(pool: &PgPool, user_id: Uuid) -> Result<Vec<Vec<u8>>> {
     let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
         "SELECT credential_id FROM fido2_credentials WHERE user_id = $1 ORDER BY created_at DESC"
     )
@@ -306,14 +307,14 @@ use sha2::{Sha256, Digest};
 
 pub async fn add_ssh_key(
     pool: &PgPool,
-    user_id: i64,
+    user_id: Uuid,
     public_key: &str,
     key_type: &str,
     name: Option<&str>,
-) -> Result<i64> {
+) -> Result<Uuid> {
     let fingerprint = generate_ssh_fingerprint(public_key);
 
-    let key_id: i64 = sqlx::query_scalar(
+    let key_id: Uuid = sqlx::query_scalar(
         "INSERT INTO ssh_keys (user_id, public_key, fingerprint, key_type, name)
          VALUES ($1, $2, $3, $4, $5)
          RETURNING id"
@@ -330,10 +331,10 @@ pub async fn add_ssh_key(
     Ok(key_id)
 }
 
-pub async fn get_user_by_ssh_key(pool: &PgPool, public_key: &str) -> Result<Option<i64>> {
+pub async fn get_user_by_ssh_key(pool: &PgPool, public_key: &str) -> Result<Option<Uuid>> {
     let fingerprint = generate_ssh_fingerprint(public_key);
-    
-    let user_id: Option<i64> = sqlx::query_scalar(
+
+    let user_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT user_id FROM ssh_keys WHERE fingerprint = $1"
     )
     .bind(&fingerprint)
@@ -344,7 +345,7 @@ pub async fn get_user_by_ssh_key(pool: &PgPool, public_key: &str) -> Result<Opti
     Ok(user_id)
 }
 
-pub async fn list_ssh_keys(pool: &PgPool, user_id: i64) -> Result<Vec<SshKeyInfo>> {
+pub async fn list_ssh_keys(pool: &PgPool, user_id: Uuid) -> Result<Vec<SshKeyInfo>> {
     let keys: Vec<SshKeyInfo> = sqlx::query_as(
         "SELECT id, fingerprint, key_type, name, created_at 
          FROM ssh_keys 
@@ -359,7 +360,7 @@ pub async fn list_ssh_keys(pool: &PgPool, user_id: i64) -> Result<Vec<SshKeyInfo
     Ok(keys)
 }
 
-pub async fn delete_ssh_key(pool: &PgPool, user_id: i64, fingerprint: &str) -> Result<bool> {
+pub async fn delete_ssh_key(pool: &PgPool, user_id: Uuid, fingerprint: &str) -> Result<bool> {
     let result = sqlx::query(
         "DELETE FROM ssh_keys WHERE user_id = $1 AND fingerprint = $2"
     )
@@ -388,7 +389,7 @@ pub fn generate_ssh_fingerprint(public_key: &str) -> String {
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct SshKeyInfo {
-    pub id: i64,
+    pub id: Uuid,
     pub fingerprint: String,
     pub key_type: String,
     pub name: Option<String>,

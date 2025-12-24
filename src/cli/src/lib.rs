@@ -178,12 +178,12 @@ enum AppCommands {
     #[command(about = "Get details of an application")]
     Get {
         #[arg(help = "App ID (default: from .caution/deployment)")]
-        id: Option<i64>,
+        id: Option<String>,
     },
     #[command(about = "Destroy an application")]
     Destroy {
         #[arg(help = "App ID (default: from .caution/deployment)")]
-        id: Option<i64>,
+        id: Option<String>,
         #[arg(short, long, help = "Skip confirmation prompt")]
         force: bool,
         #[arg(long, help = "Force delete from database even if cloud resource cleanup fails")]
@@ -379,7 +379,7 @@ struct LoginFinishResponse {
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct App {
-    pub id: i64,
+    pub id: String,
     pub resource_name: Option<String>,
     pub state: String,
     pub provider_resource_id: String,
@@ -388,7 +388,7 @@ pub struct App {
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct CreateAppResponse {
-    pub id: i64,
+    pub id: String,
     pub resource_name: String,
     pub git_url: String,
     pub state: String,
@@ -1595,7 +1595,7 @@ build: docker build -t app .
         }
     }
 
-    async fn fetch_app(&self, id: i64) -> Result<App> {
+    async fn fetch_app(&self, id: &str) -> Result<App> {
         let config = self.ensure_authenticated().await?;
 
         let response = self.client
@@ -1637,9 +1637,9 @@ build: docker build -t app .
         self.fetch_app_by_name(&deployment.resource_name).await
     }
 
-    async fn get_app(&self, id: Option<i64>) -> Result<()> {
+    async fn get_app(&self, id: Option<String>) -> Result<()> {
         let app = match id {
-            Some(id) => self.fetch_app(id).await?,
+            Some(id) => self.fetch_app(&id).await?,
             None => self.get_current_app().await?,
         };
         let name = app.resource_name.as_deref().unwrap_or("unnamed");
@@ -1657,9 +1657,9 @@ build: docker build -t app .
         Ok(())
     }
 
-    async fn destroy_app(&self, id: Option<i64>, force: bool, force_delete: bool) -> Result<()> {
+    async fn destroy_app(&self, id: Option<String>, force: bool, force_delete: bool) -> Result<()> {
         let app = match id {
-            Some(id) => self.fetch_app(id).await?,
+            Some(id) => self.fetch_app(&id).await?,
             None => self.get_current_app().await?,
         };
 
@@ -2830,7 +2830,7 @@ build: docker build -t app .
             } else {
                 println!("SSH Keys:");
                 for key in keys {
-                    let id = key["id"].as_i64().unwrap_or(0);
+                    let id = key["id"].as_str().unwrap_or("unknown");
                     let name = key["name"].as_str().unwrap_or("untitled");
                     let fingerprint = key["fingerprint"].as_str().unwrap_or("unknown");
                     println!("  [{}] {} - {}", id, name, fingerprint);
@@ -3181,7 +3181,7 @@ build: docker build -t app .
                 println!("Cloud Credentials:");
                 println!();
                 for cred in credentials {
-                    let id = cred["id"].as_i64().unwrap_or(0);
+                    let id = cred["id"].as_str().unwrap_or("unknown");
                     let name = cred["name"].as_str().unwrap_or("untitled");
                     let platform = cred["platform"].as_str().unwrap_or("unknown");
                     let identifier = cred["identifier"].as_str().unwrap_or("");
@@ -3204,8 +3204,8 @@ build: docker build -t app .
     async fn remove_credential(&self, id: &str, force: bool) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
-        let credential_id: i64 = id.parse()
-            .context("Invalid credential ID - must be a number")?;
+        let credential_id = uuid::Uuid::parse_str(id)
+            .context("Invalid credential ID - must be a valid UUID")?;
 
         let response = self.client
             .get(format!("{}/credentials/{}", self.base_url, credential_id))
@@ -3255,8 +3255,8 @@ build: docker build -t app .
     async fn set_default_credential(&self, id: &str) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
-        let credential_id: i64 = id.parse()
-            .context("Invalid credential ID - must be a number")?;
+        let credential_id = uuid::Uuid::parse_str(id)
+            .context("Invalid credential ID - must be a valid UUID")?;
 
         let response = self.client
             .post(format!("{}/credentials/{}/default", self.base_url, credential_id))

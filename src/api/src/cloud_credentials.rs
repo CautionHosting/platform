@@ -25,7 +25,7 @@ impl std::fmt::Display for CloudPlatform {
 
 #[derive(Debug, Serialize, FromRow)]
 pub struct CloudCredential {
-    pub id: i64,
+    pub id: Uuid,
     pub organization_id: Uuid,
     pub platform: CloudPlatform,
     pub name: String,
@@ -97,7 +97,7 @@ pub async fn create_credential(
     pool: &PgPool,
     encryptor: &Encryptor,
     org_id: Uuid,
-    user_id: i64,
+    user_id: Uuid,
     req: CreateCredentialRequest,
 ) -> Result<CloudCredential, (StatusCode, String)> {
     let secrets_encrypted = encryptor
@@ -168,7 +168,7 @@ pub async fn list_credentials(
 pub async fn get_credential(
     pool: &PgPool,
     org_id: Uuid,
-    credential_id: i64,
+    credential_id: Uuid,
 ) -> Result<Option<CloudCredential>, (StatusCode, String)> {
     let row = sqlx::query_as::<_, CloudCredential>(
         "SELECT id, organization_id, platform, name, identifier,
@@ -190,7 +190,7 @@ pub async fn get_credential_secrets(
     pool: &PgPool,
     encryptor: &Encryptor,
     org_id: Uuid,
-    credential_id: i64,
+    credential_id: Uuid,
 ) -> Result<Option<serde_json::Value>, (StatusCode, String)> {
     let row: Option<(Vec<u8>,)> = sqlx::query_as(
         "SELECT secrets_encrypted FROM cloud_credentials
@@ -216,7 +216,7 @@ pub async fn get_credential_secrets(
 pub async fn delete_credential(
     pool: &PgPool,
     org_id: Uuid,
-    credential_id: i64,
+    credential_id: Uuid,
 ) -> Result<bool, (StatusCode, String)> {
     let result = sqlx::query(
         "DELETE FROM cloud_credentials WHERE organization_id = $1 AND id = $2"
@@ -233,7 +233,7 @@ pub async fn delete_credential(
 pub async fn set_default_credential(
     pool: &PgPool,
     org_id: Uuid,
-    credential_id: i64,
+    credential_id: Uuid,
 ) -> Result<bool, (StatusCode, String)> {
     let cred = get_credential(pool, org_id, credential_id).await?;
     let cred = match cred {

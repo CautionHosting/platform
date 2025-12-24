@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use anyhow::{Context, Result};
 use uuid::Uuid;
 
-pub async fn is_user_initialized(pool: &PgPool, user_id: i64) -> Result<bool> {
+pub async fn is_user_initialized(pool: &PgPool, user_id: Uuid) -> Result<bool> {
     let org_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM organization_members WHERE user_id = $1"
     )
@@ -17,7 +17,7 @@ pub async fn is_user_initialized(pool: &PgPool, user_id: i64) -> Result<bool> {
     Ok(org_count > 0)
 }
 
-pub async fn initialize_user_account(pool: &PgPool, user_id: i64) -> Result<Uuid> {
+pub async fn initialize_user_account(pool: &PgPool, user_id: Uuid) -> Result<Uuid> {
     tracing::info!("Initializing account for user_id: {}", user_id);
 
     let mut tx = pool.begin().await
@@ -51,7 +51,8 @@ pub async fn initialize_user_account(pool: &PgPool, user_id: i64) -> Result<Uuid
     sqlx::query(
         "INSERT INTO provider_accounts
          (organization_id, provider_id, external_account_id, account_name, description, role_arn, is_active)
-         VALUES ($1, 1, $2, $3, $4, $5, $6)"
+         SELECT $1, id, $2, $3, $4, $5, $6
+         FROM providers WHERE provider_type = 'aws'"
     )
     .bind(org_id)
     .bind(&aws_account_id)
