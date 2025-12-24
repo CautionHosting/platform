@@ -211,6 +211,20 @@ pub struct DeployResponse {
     pub domain: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RenameResourceRequest {
+    pub name: String,
+}
+
+impl Validate for RenameResourceRequest {
+    fn validate(&self) -> Result<(), String> {
+        validation::validate_app_name(&self.name)
+            .map_err(|e| e.to_string())?;
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub error: String,

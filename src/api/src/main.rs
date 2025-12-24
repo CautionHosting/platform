@@ -96,7 +96,7 @@ struct ComputeResource {
     updated_at: chrono::NaiveDateTime,
 }
 
-use validated_types::{CreateResourceRequest, CreateResourceResponse};
+use validated_types::{CreateResourceRequest, CreateResourceResponse, RenameResourceRequest};
 use validated_types::{DeployRequest, DeployResponse};
 
 async fn auth_middleware(
@@ -1108,7 +1108,7 @@ async fn create_resource(
 
     let provider_resource_id = Uuid::new_v4().to_string();
 
-    let resource_slug = format!("resource-{}", &provider_resource_id[..8]);
+    let resource_slug = format!("app-{}", &provider_resource_id[..8]);
 
     let configuration = serde_json::json!({
         "cmd": payload.cmd
@@ -1208,6 +1208,103 @@ async fn get_resource(
     .map_err(|_| StatusCode::NOT_FOUND)?;
 
     Ok(Json(resource))
+}
+
+async fn rename_resource(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(resource_id): Path<Uuid>,
+    validated_types::Validated(payload): validated_types::Validated<RenameResourceRequest>,
+) -> Result<Json<ComputeResource>, (StatusCode, String)> {
+    tracing::info!(
+        "rename_resource: resource_id={}, user_id={}, new_name={}",
+        resource_id, auth.user_id, payload.name
+    );
+
+    // Verify user has access to this resource via organization membership
+    let resource: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT cr.organization_id, cr.resource_name
+         FROM compute_resources cr
+         INNER JOIN organization_members om ON cr.organization_id = om.organization_id
+         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL"
+    )
+    .bind(resource_id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Database error in rename_resource: {:?}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
+    })?;
+
+    let Some((org_id, old_name)) = resource else {
+        return Err((StatusCode::NOT_FOUND, "Resource not found".to_string()));
+    };
+
+    // Check if the new name is already taken within this organization (for active resources)
+    let name_exists: Option<bool> = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM compute_resources
+            WHERE organization_id = $1 AND resource_name = $2 AND destroyed_at IS NULL AND id != $3
+        )"
+    )
+    .bind(org_id)
+    .bind(&payload.name)
+    .bind(resource_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Database error checking name uniqueness: {:?}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
+    })?;
+
+    if name_exists == Some(true) {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("An app with the name '{}' already exists in this organization", payload.name),
+        ));
+    }
+
+    // Update the resource name
+    let updated_resource = sqlx::query_as::<_, ComputeResource>(
+        "UPDATE compute_resources
+         SET resource_name = $1
+         WHERE id = $2
+         RETURNING id, organization_id, provider_account_id, resource_type_id,
+                   provider_resource_id, resource_name, state::text as state,
+                   region, public_ip, configuration->>'domain' as domain,
+                   billing_tag, created_at, updated_at"
+    )
+    .bind(&payload.name)
+    .bind(resource_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to update resource name: {:?}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to rename resource".to_string())
+    })?;
+
+    // Rename the git repository if it exists
+    let old_repo_path = format!("{}/git-repos/{}.git", state.data_dir, old_name);
+    let new_repo_path = format!("{}/git-repos/{}.git", state.data_dir, payload.name);
+
+    if tokio::fs::metadata(&old_repo_path).await.is_ok() {
+        if let Err(e) = tokio::fs::rename(&old_repo_path, &new_repo_path).await {
+            tracing::warn!(
+                "Failed to rename git repo from {} to {}: {} (resource renamed in DB)",
+                old_repo_path, new_repo_path, e
+            );
+        } else {
+            tracing::info!("Renamed git repo from {} to {}", old_repo_path, new_repo_path);
+        }
+    }
+
+    tracing::info!(
+        "Resource {} renamed from '{}' to '{}' by user {}",
+        resource_id, old_name, payload.name, auth.user_id
+    );
+
+    Ok(Json(updated_resource))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2133,6 +2230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/resources", post(create_resource))
         .route("/resources", get(list_resources))
         .route("/resources/{id}", get(get_resource))
+        .route("/resources/{id}", patch(rename_resource))
         .route("/resources/{id}", delete(delete_resource))
         .route("/deploy", post(deploy_handler))
         .route("/credentials", get(list_cloud_credentials))

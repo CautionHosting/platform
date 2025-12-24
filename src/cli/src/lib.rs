@@ -194,6 +194,13 @@ enum AppCommands {
         #[arg(long, help = "Force rebuild, ignore cache")]
         no_cache: bool,
     },
+    #[command(about = "Rename an application")]
+    Rename {
+        #[arg(help = "New name for the app")]
+        name: String,
+        #[arg(help = "App ID (default: from .caution/deployment)")]
+        id: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1715,6 +1722,56 @@ build: docker build -t app .
             let error = response.text().await?;
             loader.stop();
             bail!("Failed to destroy app (status {}): {}", status, error)
+        }
+    }
+
+    async fn rename_app(&self, id: Option<String>, new_name: String) -> Result<()> {
+        let app = match id {
+            Some(id) => self.fetch_app(&id).await?,
+            None => self.get_current_app().await?,
+        };
+
+        let old_name = app.resource_name.as_deref().unwrap_or("unnamed");
+
+        println!("Renaming app '{}' to '{}'...", old_name, new_name);
+
+        let config = self.ensure_authenticated().await?;
+
+        let body = serde_json::json!({
+            "name": new_name
+        });
+
+        let response = self.client
+            .patch(format!("{}/api/resources/{}", self.base_url, app.id))
+            .header("X-Session-ID", config.session_id)
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to send rename request")?;
+
+        if response.status().is_success() {
+            let updated_app: App = response.json().await?;
+            let updated_name = updated_app.resource_name.as_deref().unwrap_or("unnamed");
+            println!("App renamed successfully: {} -> {}", old_name, updated_name);
+
+            // Update local deployment file if it exists and matches this app
+            if let Ok(content) = std::fs::read_to_string(&self.deployment_path) {
+                if let Ok(mut deployment) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if deployment.get("resource_name").and_then(|v| v.as_str()) == Some(old_name) {
+                        deployment["resource_name"] = serde_json::json!(updated_name);
+                        if let Ok(updated_content) = serde_json::to_string_pretty(&deployment) {
+                            let _ = std::fs::write(&self.deployment_path, updated_content);
+                            log_verbose(self.verbose, "Updated local deployment file");
+                        }
+                    }
+                }
+            }
+
+            Ok(())
+        } else {
+            let status = response.status();
+            let error = response.text().await?;
+            bail!("Failed to rename app (status {}): {}", status, error)
         }
     }
 
@@ -3335,6 +3392,9 @@ pub async fn run() -> Result<()> {
                 }
                 AppCommands::Build { no_cache } => {
                     client.build_local(no_cache).await?;
+                }
+                AppCommands::Rename { name, id } => {
+                    client.rename_app(id, name).await?;
                 }
             }
         }

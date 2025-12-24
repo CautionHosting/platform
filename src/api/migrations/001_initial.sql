@@ -273,7 +273,7 @@ CREATE INDEX idx_resources_tags ON compute_resources USING GIN (tags);
 CREATE INDEX idx_resources_created_by ON compute_resources(created_by) WHERE created_by IS NOT NULL;
 CREATE INDEX idx_resources_destroyed_by ON compute_resources(destroyed_by) WHERE destroyed_by IS NOT NULL;
 CREATE INDEX idx_resources_active ON compute_resources(organization_id, state) WHERE destroyed_at IS NULL;
-CREATE INDEX idx_resources_name ON compute_resources(organization_id, resource_name) WHERE resource_name IS NOT NULL;
+CREATE UNIQUE INDEX idx_resources_name ON compute_resources(organization_id, resource_name) WHERE resource_name IS NOT NULL AND destroyed_at IS NULL;
 
 CREATE TRIGGER compute_resources_updated_at BEFORE UPDATE ON compute_resources
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
