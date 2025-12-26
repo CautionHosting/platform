@@ -27,6 +27,7 @@ use authenticator::{
 };
 use sha2::{Sha256, Digest};
 use enclave_builder::{BuildConfig, build_user_image};
+use bootproof_sdk::{VerifiableSignedAttestationFormat, format::nitro::{Nitro, NitroPcrs}};
 
 mod loader;
 use loader::{Loader, LoaderStyle};
@@ -2278,6 +2279,8 @@ build: docker build -t app .
 
         let attestation_b64 = &attest_resp.attestation_document;
         log_verbose(self.verbose, &format!("Received attestation: {} bytes", attestation_b64.len()));
+        let attestation_bytes = base64::engine::general_purpose::STANDARD.decode(attestation_b64)
+            .context("Failed to decode inner attestation")?;
 
         println!("\nVerifying attestation...");
         let (remote_pcrs, document) = verify_attestation(&attestation_b64, &nonce)
@@ -2444,6 +2447,26 @@ build: docker build -t app .
             println!("For production, the enclave must run in production mode.");
             bail!("Cannot verify attestation: enclave is in debug mode");
         }
+
+        println!("\nDoing a bootproof-sdk verification");
+        let pcrs: Result<NitroPcrs, hex::FromHexError> = [
+            (0, &remote_pcrs.pcr0),
+            (1, &remote_pcrs.pcr1),
+            (2, &remote_pcrs.pcr2),
+        ]
+        .into_iter()
+        .map(|(i, pcr)| hex::decode(pcr).map(|pcr| (i, pcr)))
+        .collect();
+        let nitro = Nitro::new(
+            attestation_bytes,
+            pcrs.context("bad pcr hex")?
+        ).context("could not build bootproof nitro attestation")?;
+        let duration_since_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .context("could not get time since epoch")?;
+        nitro
+            .verify(duration_since_epoch, &nonce)
+            .context("could not verify Nitro attestation using bootproof-sdk")?;
 
         println!("\nComparing PCR values...");
         let pcrs_match = expected_pcrs.pcr0 == remote_pcrs.pcr0
