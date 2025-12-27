@@ -1833,7 +1833,6 @@ build: docker build -t app .
         if let Ok(deployment) = self.load_deployment() {
             log_verbose(self.verbose, &format!("Found existing deployment with ID: {}", deployment.resource_id));
 
-            // Check if the resource still exists on the server
             if let Ok(app) = self.fetch_app(&deployment.resource_id).await {
                 let name = app.resource_name.as_deref().unwrap_or("unnamed");
                 println!("App already exists!");
@@ -1842,7 +1841,8 @@ build: docker build -t app .
                 println!("State: {}", app.state);
                 println!("Git URL: {}", app.git_url);
 
-                // Update the git remote in case it changed
+                self.save_deployment(&app.id)?;
+
                 log_verbose(self.verbose, "Updating git remote...");
                 self.set_git_remote(&app.git_url)?;
 
