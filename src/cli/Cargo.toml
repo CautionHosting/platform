@@ -30,6 +30,7 @@ rand = "0.8"
 url = "2.5"  # URL parsing for git remote detection
 
 # Attestation verification
+bootproof-sdk = { git = "https://git.distrust.co/public/bootproof.git" }
 coset = "0.3"  # COSE (CBOR Object Signing and Encryption)
 x509-parser = "0.16"  # X.509 certificate parsing
 ring = "0.17"  # Cryptographic operations
