@@ -156,6 +156,7 @@ impl Validate for UpdateMemberRequest {
 #[derive(Debug, Deserialize)]
 pub struct CreateResourceRequest {
     pub cmd: String,
+    pub name: Option<String>,
 }
 
 impl Validate for CreateResourceRequest {
@@ -168,6 +169,11 @@ impl Validate for CreateResourceRequest {
             return Err("Command is too long (max 1000 characters)".to_string());
         }
 
+        if let Some(name) = &self.name {
+            validation::validate_app_name(name)
+                .map_err(|e| format!("Invalid name: {}", e))?;
+        }
+
         Ok(())
     }
 }
@@ -175,7 +181,7 @@ impl Validate for CreateResourceRequest {
 #[derive(Debug, Deserialize)]
 pub struct DeployRequest {
     pub org_id: Uuid,
-    pub app_name: String,
+    pub app_id: Uuid,
     #[serde(default = "default_branch")]
     pub branch: String,
 }
@@ -186,9 +192,6 @@ fn default_branch() -> String {
 
 impl Validate for DeployRequest {
     fn validate(&self) -> Result<(), String> {
-        validation::validate_app_name(&self.app_name)
-            .map_err(|e| e.to_string())?;
-
         Ok(())
     }
 }

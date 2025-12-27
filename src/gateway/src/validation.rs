@@ -24,6 +24,12 @@ fn get_app_name_regex() -> &'static Regex {
     APP_NAME_REGEX.get_or_init(|| Regex::new(APP_NAME_PATTERN).unwrap())
 }
 
+pub fn validate_app_id(id: &str) -> Result<()> {
+    uuid::Uuid::parse_str(id)
+        .map_err(|_| anyhow::anyhow!("Invalid app ID format, expected UUID"))?;
+    Ok(())
+}
+
 pub fn validate_app_name(name: &str) -> Result<()> {
     if name.len() < APP_NAME_MIN_LEN {
         bail!("App name must be at least {} characters", APP_NAME_MIN_LEN);

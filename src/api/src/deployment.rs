@@ -32,6 +32,7 @@ pub struct DeploymentResult {
     pub instance_id: String,
     pub public_ip: String,
     pub url: String,
+    pub instance_type: Option<String>,
 }
 
 pub async fn deploy_app(request: DeploymentRequest) -> Result<DeploymentResult> {
@@ -472,10 +473,15 @@ fn get_tofu_outputs(work_dir: &Path) -> Result<DeploymentResult> {
         .context("Missing url in tofu output")?
         .to_string();
     
+    let instance_type = outputs["instance_type"]["value"]
+        .as_str()
+        .map(|s| s.to_string());
+
     Ok(DeploymentResult {
         instance_id,
         public_ip,
         url,
+        instance_type,
     })
 }
 
@@ -942,6 +948,10 @@ output "public_ip" {{
 
 output "url" {{
   value = "{url_output}"
+}}
+
+output "instance_type" {{
+  value = "{instance_type}"
 }}
 "#,
         region = aws_region,

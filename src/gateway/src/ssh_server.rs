@@ -140,8 +140,8 @@ impl russh::server::Handler for SshSession {
         let user_id = self.user_id.ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
         let org_id = self.org_id.ok_or_else(|| anyhow::anyhow!("No organization"))?;
 
-        if let Some(app_name) = parse_git_receive_pack(&command) {
-            tracing::info!("Git push for app: {}", app_name);
+        if let Some(app_id) = parse_git_receive_pack(&command) {
+            tracing::info!("Git push for app: {}", app_id);
 
             match handle_git_push(
                 &self.pool,
@@ -150,7 +150,7 @@ impl russh::server::Handler for SshSession {
                 self.internal_service_secret.clone(),
                 user_id,
                 org_id,
-                &app_name,
+                &app_id,
                 channel,
                 session,
                 self.git_processes.clone()
@@ -215,16 +215,16 @@ fn parse_git_receive_pack(command: &str) -> Option<String> {
     }
 
     let repo_path = parts[1].trim_matches('\'').trim_matches('"');
-    let app_name = repo_path
+    let app_id = repo_path
         .trim_start_matches('/')
         .trim_end_matches(".git");
 
-    if let Err(e) = crate::validation::validate_app_name(app_name) {
-        tracing::warn!("Invalid app name '{}' in git push: {}", app_name, e);
+    if let Err(e) = crate::validation::validate_app_id(app_id) {
+        tracing::warn!("Invalid app ID '{}' in git push: {}", app_id, e);
         return None;
     }
 
-    Some(app_name.to_string())
+    Some(app_id.to_string())
 }
 
 fn ensure_git_repo_exists(repo_path: &str) -> Result<()> {
@@ -320,34 +320,36 @@ async fn handle_git_push(
     internal_service_secret: Option<String>,
     user_id: Uuid,
     org_id: Uuid,
-    app_name: &str,
+    app_id: &str,
     channel: ChannelId,
     session: &mut Session,
     git_processes: Arc<Mutex<HashMap<ChannelId, Child>>>,
 ) -> Result<()> {
-    let existing: Option<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, state::text FROM compute_resources
-         WHERE organization_id = $1 AND resource_name = $2"
+    let app_uuid = Uuid::parse_str(app_id).context("Invalid app ID format")?;
+
+    let existing: Option<(String,)> = sqlx::query_as(
+        "SELECT state::text FROM compute_resources
+         WHERE id = $1 AND organization_id = $2"
     )
+    .bind(app_uuid)
     .bind(org_id)
-    .bind(app_name)
     .fetch_optional(pool)
     .await
     .context("Failed to check existing resource")?;
 
     match existing {
-        Some((resource_id, state)) => {
+        Some((state,)) => {
             if state == "running" || state == "stopped" {
-                bail!("App '{}' already exists in state '{}'. Use 'caution apps destroy {}' to destroy it first.", app_name, state, resource_id);
+                bail!("App '{}' already exists in state '{}'. Use 'caution apps destroy {}' to destroy it first.", app_id, state, app_id);
             }
-            tracing::info!("App '{}' exists in state '{}' (resource_id: {}), allowing push", app_name, state, resource_id);
+            tracing::info!("App '{}' exists in state '{}', allowing push", app_id, state);
         }
         None => {
-            tracing::info!("Creating new app '{}'", app_name);
+            bail!("App '{}' not found. Run 'caution init' first.", app_id);
         }
     }
 
-    let repo_path = format!("{}/git-repos/{}.git", data_dir, app_name);
+    let repo_path = format!("{}/git-repos/{}.git", data_dir, app_id);
     ensure_git_repo_exists(&repo_path)?;
 
     tracing::info!("Spawning git receive-pack for {}", repo_path);
@@ -372,7 +374,7 @@ async fn handle_git_push(
     let session_handle = session.handle();
 
     let api_service_url = api_service_url.to_string();
-    let app_name = app_name.to_string();
+    let app_id = app_id.to_string();
     let channel_id = channel;
 
     tokio::spawn(async move {
@@ -493,11 +495,12 @@ async fn handle_git_push(
         #[derive(serde::Serialize)]
         struct DeployRequest {
             org_id: Uuid,
-            app_name: String,
+            app_id: Uuid,
             branch: String,
         }
 
-        tracing::info!("Triggering deployment for {} (branch: {})", app_name, branch);
+        let app_uuid = Uuid::parse_str(&app_id).expect("Already validated app_id");
+        tracing::info!("Triggering deployment for {} (branch: {})", app_id, branch);
 
         let client = reqwest::Client::new();
         let deploy_url = format!("{}/deploy", api_service_url);
@@ -513,7 +516,7 @@ async fn handle_git_push(
         let response = match request
             .json(&DeployRequest {
                 org_id,
-                app_name: app_name.clone(),
+                app_id: app_uuid,
                 branch: branch.clone(),
             })
             .timeout(std::time::Duration::from_secs(7200))

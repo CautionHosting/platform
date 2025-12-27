@@ -1109,7 +1109,7 @@ async fn create_resource(
 
     let provider_resource_id = Uuid::new_v4().to_string();
 
-    let resource_slug = format!("app-{}", &provider_resource_id[..8]);
+    let resource_slug = payload.name.unwrap_or_else(|| format!("app-{}", &provider_resource_id[..8]));
 
     let configuration = serde_json::json!({
         "cmd": payload.cmd
@@ -1144,11 +1144,11 @@ async fn create_resource(
     let (resource_id, resource_state, created_at) = resource;
 
     let git_url = match state.git_ssh_port {
-        Some(port) => format!("ssh://git@{}:{}/{}.git", state.git_hostname, port, resource_slug),
-        None => format!("git@{}:{}.git", state.git_hostname, resource_slug),
+        Some(port) => format!("ssh://git@{}:{}/{}.git", state.git_hostname, port, resource_id),
+        None => format!("git@{}:{}.git", state.git_hostname, resource_id),
     };
 
-    tracing::info!("Resource created successfully: id={}, slug={}", resource_id, resource_slug);
+    tracing::info!("Resource created successfully: id={}, name={}", resource_id, resource_slug);
 
     Ok(Json(CreateResourceResponse {
         id: resource_id,
@@ -1162,7 +1162,7 @@ async fn create_resource(
 async fn list_resources(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-) -> Result<Json<Vec<ComputeResource>>, StatusCode> {
+) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
     let org_id = get_user_primary_org(&state.db, auth.user_id).await?;
 
     tracing::info!("Listing resources for user {} in org {}", auth.user_id, org_id);
@@ -1185,14 +1185,29 @@ async fn list_resources(
 
     tracing::info!("Found {} resources", resources.len());
 
-    Ok(Json(resources))
+    let resources_with_git_url: Vec<serde_json::Value> = resources
+        .into_iter()
+        .map(|resource| {
+            let git_url = match state.git_ssh_port {
+                Some(port) => format!("ssh://git@{}:{}/{}.git", state.git_hostname, port, resource.id),
+                None => format!("git@{}:{}.git", state.git_hostname, resource.id),
+            };
+            let mut value = serde_json::to_value(&resource).unwrap_or_default();
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("git_url".to_string(), serde_json::json!(git_url));
+            }
+            value
+        })
+        .collect();
+
+    Ok(Json(resources_with_git_url))
 }
 
 async fn get_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(resource_id): Path<Uuid>,
-) -> Result<Json<ComputeResource>, StatusCode> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
     let resource = sqlx::query_as::<_, ComputeResource>(
         "SELECT cr.id, cr.organization_id, cr.provider_account_id, cr.resource_type_id,
                 cr.provider_resource_id, cr.resource_name, cr.state::text as state,
@@ -1208,7 +1223,17 @@ async fn get_resource(
     .await
     .map_err(|_| StatusCode::NOT_FOUND)?;
 
-    Ok(Json(resource))
+    let git_url = match state.git_ssh_port {
+        Some(port) => format!("ssh://git@{}:{}/{}.git", state.git_hostname, port, resource_id),
+        None => format!("git@{}:{}.git", state.git_hostname, resource_id),
+    };
+
+    let mut response = serde_json::to_value(&resource).unwrap_or_default();
+    if let Some(obj) = response.as_object_mut() {
+        obj.insert("git_url".to_string(), serde_json::json!(git_url));
+    }
+
+    Ok(Json(response))
 }
 
 async fn rename_resource(
@@ -1367,14 +1392,7 @@ async fn delete_resource(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let git_repo_path = format!("{}/git-repos/{}.git", state.data_dir, resource_name);
-    if let Err(e) = tokio::fs::remove_dir_all(&git_repo_path).await {
-        tracing::warn!("Failed to remove git repo at {}: {} (may not exist)", git_repo_path, e);
-    } else {
-        tracing::info!("Removed git repo at {}", git_repo_path);
-    }
-
-    tracing::info!("Resource {} soft deleted by user {}", resource_id, auth.user_id);
+    tracing::info!("Resource {} terminated by user {} (git repo preserved for redeployment)", resource_id, auth.user_id);
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1467,11 +1485,13 @@ async fn deploy_handler(
     use tokio::process::Command;
 
     tracing::info!(
-        "Deployment request: user_id={}, org_id={}, app_name={}",
+        "Deployment request: user_id={}, org_id={}, app_id={}",
         auth.user_id,
         req.org_id,
-        req.app_name
+        req.app_id
     );
+
+    let app_id_str = req.app_id.to_string();
 
     let user_in_org: Option<bool> = sqlx::query_scalar(
         "SELECT EXISTS(
@@ -1533,23 +1553,13 @@ async fn deploy_handler(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get resource type: {}", e)))?;
 
-    sqlx::query(
-        "DELETE FROM compute_resources
-         WHERE organization_id = $1 AND resource_name = $2 AND destroyed_at IS NOT NULL"
+    tracing::info!("Looking up resource by id={}", req.app_id);
+    let existing_resource: Option<(Uuid, Option<String>, Option<serde_json::Value>, Option<chrono::NaiveDateTime>)> = sqlx::query_as(
+        "SELECT id, resource_name, configuration, destroyed_at FROM compute_resources
+         WHERE id = $1 AND organization_id = $2"
     )
+    .bind(req.app_id)
     .bind(req.org_id)
-    .bind(&req.app_name)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-
-    tracing::info!("Checking for existing resource: org={}, name={}", req.org_id, req.app_name);
-    let existing_resource: Option<(Uuid, Option<serde_json::Value>)> = sqlx::query_as(
-        "SELECT id, configuration FROM compute_resources
-         WHERE organization_id = $1 AND resource_name = $2 AND destroyed_at IS NULL"
-    )
-    .bind(req.org_id)
-    .bind(&req.app_name)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| {
@@ -1557,10 +1567,29 @@ async fn deploy_handler(
         (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error checking existing resource: {}", e))
     })?;
 
-    tracing::info!("Existing resource query result: {:?}", existing_resource.as_ref().map(|(id, _)| id));
+    let (resource_id, app_name, configuration, was_destroyed) = match &existing_resource {
+        Some((id, name_opt, config_opt, destroyed_at)) => {
+            let name = name_opt.clone().unwrap_or_else(|| "unnamed".to_string());
+            let config = config_opt.clone().unwrap_or_else(|| serde_json::json!({}));
+            (*id, name, config, destroyed_at.is_some())
+        }
+        None => return Err((StatusCode::NOT_FOUND, format!("App with id {} not found", req.app_id))),
+    };
+
+    if was_destroyed {
+        tracing::info!("Reactivating previously destroyed resource {}", resource_id);
+        sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1 WHERE id = $2")
+            .bind(types::ResourceState::Pending)
+            .bind(resource_id)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to reactivate resource: {}", e)))?;
+    }
+
+    tracing::info!("Found resource: id={}, name={}", resource_id, app_name);
     tracing::info!("Deploying branch: {}", req.branch);
 
-    let commit_sha = match get_commit_sha(&req.app_name, &req.branch, &state.data_dir).await {
+    let commit_sha = match get_commit_sha(&app_id_str, &req.branch, &state.data_dir).await {
         Ok(sha) => {
             tracing::info!("Latest commit on branch '{}': {}", req.branch, sha);
             sha
@@ -1571,7 +1600,7 @@ async fn deploy_handler(
         }
     };
 
-    let git_dir = format!("{}/git-repos/{}.git", state.data_dir, req.app_name);
+    let git_dir = format!("{}/git-repos/{}.git", state.data_dir, app_id_str);
     let procfile_output = Command::new("git")
         .args(&["--git-dir", &git_dir, "show", &format!("{}:Procfile", commit_sha)])
         .output()
@@ -1605,38 +1634,14 @@ async fn deploy_handler(
         ));
     };
 
-    // Create or get existing resource - only after validation passes
-    let (resource_id, build_command) = if let Some((id, config_opt)) = existing_resource {
-        let config = config_opt.unwrap_or_else(|| serde_json::json!({}));
-        let build_cmd = config.get("cmd")
-            .and_then(|v| v.as_str())
-            .unwrap_or("docker build -t app .")
-            .to_string();
-        tracing::info!("Using existing resource {} with build command: {}", id, build_cmd);
-        (id, build_cmd)
-    } else {
-        let provider_resource_id = Uuid::new_v4().to_string();
-        let id: Uuid = sqlx::query_scalar(
-            "INSERT INTO compute_resources
-             (organization_id, provider_account_id, resource_type_id, provider_resource_id,
-              resource_name, state, region, created_by, deployed_at)
-             VALUES ($1, $2, $3, $4, $5, $6, 'us-west-2', $7, NOW())
-             RETURNING id"
-        )
-        .bind(req.org_id)
-        .bind(provider_account_id)
-        .bind(resource_type_id)
-        .bind(&provider_resource_id)
-        .bind(&req.app_name)
-        .bind(types::ResourceState::Pending)
-        .bind(auth.user_id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create resource: {}", e)))?;
-        (id, "docker build -t app .".to_string())
-    };
+    // Get build command from the resource configuration
+    let build_command = configuration.get("cmd")
+        .and_then(|v| v.as_str())
+        .unwrap_or("docker build -t app .")
+        .to_string();
+    tracing::info!("Using resource {} with build command: {}", resource_id, build_command);
 
-    tracing::info!("Build command for {}: {}", req.app_name, build_command);
+    tracing::info!("Build command for {}: {}", app_name, build_command);
 
     let cache_dir = format!("{}/build/{}", state.data_dir, req.org_id);
     let cache_dir_str = cache_dir.clone();
@@ -1645,10 +1650,10 @@ async fn deploy_handler(
         (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create cache directory: {}", e))
     })?;
 
-    let image_tarball = format!("{}/{}-{}.tar", cache_dir_str, req.app_name, commit_sha);
+    let image_tarball = format!("{}/{}-{}.tar", cache_dir_str, app_id_str, commit_sha);
     let tarball_exists = tokio::fs::metadata(&image_tarball).await.is_ok() && !build_config.no_cache;
 
-    let image_name = format!("caution-{}:{}", req.app_name, &commit_sha[..12]);
+    let image_name = format!("caution-{}:{}", app_id_str, &commit_sha[..12]);
 
     if build_config.no_cache {
         tracing::info!("Cache disabled (no_cache=true), forcing rebuild");
@@ -1730,7 +1735,7 @@ async fn deploy_handler(
     } else {
         tracing::info!("Cache MISS: Building Docker image for commit {}", commit_sha);
 
-        let build_commit_sha = match build_image_from_repo(&req.app_name, &build_config, &image_name, &req.branch, &state.data_dir).await {
+        let build_commit_sha = match build_image_from_repo(&app_id_str, &build_config, &image_name, &req.branch, &state.data_dir).await {
             Ok(sha) => {
                 tracing::info!("Successfully built image: {} (commit: {})", image_name, sha);
                 sha
@@ -1797,7 +1802,7 @@ async fn deploy_handler(
         "Dockerfile".to_string()
     };
 
-    let work_dir = format!("{}/build/work-{}-{}", state.data_dir, req.app_name, commit_sha);
+    let work_dir = format!("{}/build/work-{}-{}", state.data_dir, app_id_str, commit_sha);
     if build_config.no_cache {
         if let Err(e) = tokio::fs::remove_dir_all(&work_dir).await {
             tracing::debug!("Could not remove work_dir (may not exist): {}", e);
@@ -1841,8 +1846,8 @@ async fn deploy_handler(
     let prebuilt_eif_path = format!("{}/nitro.eif", work_dir);
     let prebuilt_pcrs_path = format!("{}/nitro.pcrs", work_dir);
 
-    let cached_eif_path = format!("{}/{}-{}.eif", cache_dir_str, req.app_name, commit_sha);
-    let cached_pcrs_path = format!("{}/{}-{}.pcrs", cache_dir_str, req.app_name, commit_sha);
+    let cached_eif_path = format!("{}/{}-{}.eif", cache_dir_str, app_id_str, commit_sha);
+    let cached_pcrs_path = format!("{}/{}-{}.pcrs", cache_dir_str, app_id_str, commit_sha);
     let eif_cache_exists = tokio::fs::metadata(&cached_eif_path).await.is_ok() && !build_config.no_cache;
 
     let eif_result = if eif_cache_exists {
@@ -1869,7 +1874,7 @@ async fn deploy_handler(
             eif_size_bytes,
         }
     } else {
-        tracing::info!("Building EIF using enclave-builder from Docker image: caution-{}:latest", req.app_name);
+        tracing::info!("Building EIF using enclave-builder from Docker image: caution-{}:latest", app_id_str);
 
         let enclave_source = if !build_config.enclave_sources.is_empty() {
             build_config.enclave_sources[0].clone()
@@ -1893,7 +1898,7 @@ async fn deploy_handler(
             .with_no_cache(build_config.no_cache);
 
         let user_image = enclave_builder::UserImage {
-            reference: format!("caution-{}:{}", req.app_name, &commit_sha[..12]),
+            reference: format!("caution-{}:{}", app_id_str, &commit_sha[..12]),
         };
         tracing::info!("Using Docker image for enclave build: {}", user_image.reference);
 
@@ -2076,7 +2081,7 @@ async fn deploy_handler(
     let nitro_request = deployment::NitroDeploymentRequest {
         org_id: req.org_id,
         resource_id,
-        resource_name: req.app_name.clone(),
+        resource_name: app_name.clone(),
         aws_account_id: aws_account_id.clone(),
         role_arn: role_arn_opt.clone(),
         eif_path: eif_path.clone(),
@@ -2107,6 +2112,11 @@ async fn deploy_handler(
         }
     };
 
+    let mut final_config = eif_config.clone();
+    if let Some(instance_type) = &deployment_result.instance_type {
+        final_config["instance_type"] = serde_json::json!(instance_type);
+    }
+
     sqlx::query(
         "UPDATE compute_resources
          SET provider_resource_id = $1, state = $2, public_ip = $3, configuration = configuration || $4::jsonb
@@ -2115,17 +2125,18 @@ async fn deploy_handler(
     .bind(&deployment_result.instance_id)
     .bind(types::ResourceState::Running)
     .bind(&deployment_result.public_ip)
-    .bind(&eif_config)
+    .bind(&final_config)
     .bind(resource_id)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update resource: {}", e)))?;
 
     tracing::info!(
-        "EIF deployment complete: resource_id={}, instance_id={}, public_ip={}",
+        "EIF deployment complete: resource_id={}, instance_id={}, public_ip={}, instance_type={:?}",
         resource_id,
         deployment_result.instance_id,
-        deployment_result.public_ip
+        deployment_result.public_ip,
+        deployment_result.instance_type
     );
 
     let app_url = if let Some(ref domain) = build_config.domain {

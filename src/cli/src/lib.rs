@@ -393,6 +393,8 @@ pub struct App {
     pub public_ip: Option<String>,
     pub domain: Option<String>,
     pub configuration: Option<serde_json::Value>,
+    #[serde(default)]
+    pub git_url: String,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -404,10 +406,10 @@ pub struct CreateAppResponse {
 }
 
 /// Minimal deployment info stored locally in .caution file
-/// Contains only the resource name - all other data is fetched fresh from API
+/// Contains only the resource ID - all other data is fetched fresh from API
 #[derive(Serialize, Deserialize, Debug)]
 struct DeploymentInfo {
-    resource_name: String,
+    resource_id: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -525,9 +527,9 @@ impl ApiClient {
         config.server_url.as_ref().map_or(true, |url| url == &self.base_url)
     }
 
-    fn save_deployment(&self, resource_name: &str) -> Result<()> {
+    fn save_deployment(&self, resource_id: &str) -> Result<()> {
         let deployment_info = DeploymentInfo {
-            resource_name: resource_name.to_string(),
+            resource_id: resource_id.to_string(),
         };
         let json = serde_json::to_string_pretty(&deployment_info)?;
         fs::write(&self.deployment_path, json)?;
@@ -1660,7 +1662,7 @@ build: docker build -t app .
 
     async fn get_current_app(&self) -> Result<App> {
         let deployment = self.load_deployment()?;
-        self.fetch_app_by_name(&deployment.resource_name).await
+        self.fetch_app(&deployment.resource_id).await
     }
 
     async fn get_app(&self, id: Option<String>) -> Result<()> {
@@ -1802,19 +1804,6 @@ build: docker build -t app .
             let updated_name = updated_app.resource_name.as_deref().unwrap_or("unnamed");
             println!("App renamed successfully: {} -> {}", old_name, updated_name);
 
-            // Update local deployment file if it exists and matches this app
-            if let Ok(content) = std::fs::read_to_string(&self.deployment_path) {
-                if let Ok(mut deployment) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if deployment.get("resource_name").and_then(|v| v.as_str()) == Some(old_name) {
-                        deployment["resource_name"] = serde_json::json!(updated_name);
-                        if let Ok(updated_content) = serde_json::to_string_pretty(&deployment) {
-                            let _ = std::fs::write(&self.deployment_path, updated_content);
-                            log_verbose(self.verbose, "Updated local deployment file");
-                        }
-                    }
-                }
-            }
-
             Ok(())
         } else {
             let status = response.status();
@@ -1838,6 +1827,31 @@ build: docker build -t app .
         println!("Build command: {}", cmd);
 
         let config = self.ensure_authenticated().await?;
+
+        // Check if there's an existing deployment with a resource ID
+        if let Ok(deployment) = self.load_deployment() {
+            log_verbose(self.verbose, &format!("Found existing deployment with ID: {}", deployment.resource_id));
+
+            // Check if the resource still exists on the server
+            if let Ok(app) = self.fetch_app(&deployment.resource_id).await {
+                let name = app.resource_name.as_deref().unwrap_or("unnamed");
+                println!("App already exists!");
+                println!("ID: {}", app.id);
+                println!("Name: {}", name);
+                println!("State: {}", app.state);
+                println!("Git URL: {}", app.git_url);
+
+                // Update the git remote in case it changed
+                log_verbose(self.verbose, "Updating git remote...");
+                self.set_git_remote(&app.git_url)?;
+
+                println!("\nYou can now push to 'caution' remote:");
+                println!("  git push caution main");
+                return Ok(());
+            } else {
+                log_verbose(self.verbose, "Previous resource no longer exists, creating new one...");
+            }
+        }
 
         log_verbose(self.verbose, "Creating app on server...");
         let body = serde_json::json!({
@@ -1886,7 +1900,7 @@ build: docker build -t app .
         println!("Git URL: {}", create_response.git_url);
 
         log_verbose(self.verbose, "Saving deployment info...");
-        self.save_deployment(&create_response.resource_name)?;
+        self.save_deployment(&create_response.id)?;
         log_verbose(self.verbose, "Saved deployment info");
 
         log_verbose(self.verbose, "Setting git remote...");

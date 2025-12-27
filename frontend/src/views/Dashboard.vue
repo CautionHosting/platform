@@ -89,9 +89,10 @@ caution verify --reproduce
                 </div>
                 <div class="app-body">
                   <div class="app-details">
-                    <div v-if="getEnclaveConfig(app)" class="app-specs">
+                    <div class="app-specs">
                       <span class="spec-badge">{{ getEnclaveConfig(app).memory_mb }} MB</span>
                       <span class="spec-badge">{{ getEnclaveConfig(app).cpus }} CPU</span>
+                      <span v-if="getInstanceType(app)" class="spec-badge">{{ getInstanceType(app) }}</span>
                       <span v-if="getEnclaveConfig(app).debug" class="spec-badge spec-debug">Debug</span>
                     </div>
                     <div v-if="app.public_ip" class="app-detail">
@@ -343,7 +344,11 @@ export default {
     }
 
     const getEnclaveConfig = (app) => {
-      return app.configuration?.enclave_config || null
+      return app.configuration?.enclave_config || { memory_mb: 512, cpus: 2, debug: false }
+    }
+
+    const getInstanceType = (app) => {
+      return app.configuration?.instance_type || null
     }
 
     // SSH Keys state
@@ -713,6 +718,7 @@ export default {
       destroyingApp,
       showAttestation,
       getEnclaveConfig,
+      getInstanceType,
       destroyApp,
       sshKeys,
       loadingKeys,
