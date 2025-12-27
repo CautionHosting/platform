@@ -82,7 +82,10 @@ caution verify --reproduce
             <div v-else class="apps-grid">
               <div v-for="app in apps" :key="app.id" class="app-card">
                 <div class="app-header">
-                  <span class="app-name">{{ app.resource_name || 'Unnamed App' }}</span>
+                  <div class="app-header-left">
+                    <span class="app-name">{{ app.resource_name || 'Unnamed App' }}</span>
+                    <span class="app-id">{{ app.id }}</span>
+                  </div>
                   <span :class="['app-status', `status-${app.state.toLowerCase()}`]">
                     {{ app.state }}
                   </span>
@@ -869,14 +872,26 @@ h2 {
 .app-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   margin-bottom: 12px;
+}
+
+.app-header-left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .app-name {
   font-weight: 600;
   font-size: 16px;
   color: #333;
+}
+
+.app-id {
+  font-family: monospace;
+  font-size: 11px;
+  color: #888;
 }
 
 .app-status {
