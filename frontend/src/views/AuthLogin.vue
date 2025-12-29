@@ -11,37 +11,11 @@
     ></div>
 
     <!-- Main Content -->
-    <div class="login-split" :class="{ 'mobile-menu-open': mobileMenuOpen }">
+    <div class="login-split">
       <!-- Left Panel - Dark -->
       <div class="left-panel">
         <div class="left-content">
-          <p class="status-line">Closed alpha</p>
-          <p class="status-line">Not production ready</p>
-          <p class="platform-line">
-            AWS Nitro supported today
-            <span
-              class="tooltip-trigger"
-              @click="toggleTooltip"
-              @mouseenter="showTooltip"
-              @mouseleave="hideTooltip"
-            >
-              <svg class="info-icon" xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
-              <span class="tooltip" :class="{ visible: tooltipVisible }">
-                <strong>Planned support</strong><br /><br />
-                Intel TDX<br />
-                AMD SEV-SNP<br />
-                TPM 2.0 attestations<br /><br />
-                Coming in 2026
-              </span>
-            </span>
-          </p>
-          <p class="contact-line">
-            If you do not have an alpha code, contact
-            <a
-              href="mailto:info@caution.co?subject=Caution%20Early%20Access%20Inquiry&body=Hi%20Caution%20Team%2C%0A%0AI%20am%20interested%20in%20getting%20early%20access%20to%20Caution's%20managed%20services..."
-              >info@caution.co</a
-            >.
-          </p>
+          <h1 class="tagline">Get started with verified enclave deployments</h1>
         </div>
       </div>
 
@@ -57,29 +31,22 @@
           </div>
 
           <div v-if="!authenticated" class="form-container">
-            <h2 class="form-title">Enter your alpha code</h2>
+            <p class="eyebrow">EARLY ACCESS</p>
+            <h2 class="form-title">Use your smart card to log in</h2>
 
-            <div class="input-group">
-              <input
-                v-model="betaCode"
-                type="text"
-                placeholder="Enter alpha code"
-                class="alpha-input"
-                :disabled="loading"
-                @keyup.enter="handleRegister"
-              />
-              <button
-                @click="handleRegister"
-                :disabled="loading || !betaCode.trim()"
-                class="btn"
-              >
-                {{ loading ? "Working..." : "Continue" }}
-              </button>
-            </div>
+            <button
+              @click="handleLogin"
+              :disabled="loading"
+              class="btn login-cta"
+            >
+              {{ loading ? "Authenticating..." : "Log in" }}
+            </button>
 
-            <p class="login-prompt">
-              Already have an account?
-              <a href="/login" class="link-btn">Log in</a>
+            <p class="register-prompt">
+              Need an account?
+              <a href="/" class="link-btn">
+                Get started
+              </a>
             </p>
           </div>
 
@@ -117,7 +84,7 @@ function uint8ArrayToBase64url(array) {
 }
 
 export default {
-  name: "Register",
+  name: "AuthLogin",
   props: {
     session: String,
   },
@@ -126,24 +93,10 @@ export default {
     const loading = ref(false);
     const error = ref(null);
     const status = ref(null);
-    const betaCode = ref("");
     const mobileMenuOpen = ref(false);
-    const tooltipVisible = ref(false);
 
     const closeMobileMenu = () => {
       mobileMenuOpen.value = false;
-    };
-
-    const showTooltip = () => {
-      tooltipVisible.value = true;
-    };
-
-    const hideTooltip = () => {
-      tooltipVisible.value = false;
-    };
-
-    const toggleTooltip = () => {
-      tooltipVisible.value = !tooltipVisible.value;
     };
 
     onMounted(async () => {
@@ -175,62 +128,91 @@ export default {
       }
     });
 
-    async function handleRegister() {
+    async function handleLogin(e) {
+      // Prevent default redirect behavior from header component
+      if (e && e.preventDefault) {
+        e.preventDefault();
+      }
+
       error.value = null;
       status.value = null;
       loading.value = true;
 
       try {
-        // Step 1: Begin registration with beta code
-        status.value = "Validating alpha code...";
-        const beginResponse = await fetch("/auth/register/begin", {
+        // Step 1: Begin login
+        status.value = "Starting login...";
+        const beginResponse = await fetch("/auth/login/begin", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
           credentials: "include",
-          body: JSON.stringify({ beta_code: betaCode.value.trim() }),
         });
 
         if (!beginResponse.ok) {
           const errorText = await beginResponse.text();
-          throw new Error(errorText || "Failed to begin registration");
+          throw new Error(errorText || "Failed to begin login");
         }
 
         const beginData = await beginResponse.json();
 
-        // Step 2: Create credential with security key
+        // Step 2: Get assertion from security key
         status.value = "Please tap your security key...";
 
         const publicKey = beginData.publicKey;
         publicKey.challenge = base64urlToUint8Array(publicKey.challenge);
-        publicKey.user.id = base64urlToUint8Array(publicKey.user.id);
 
-        const credential = await navigator.credentials.create({ publicKey });
-
-        if (!credential) {
-          throw new Error("No credential created");
+        if (publicKey.allowCredentials) {
+          publicKey.allowCredentials = publicKey.allowCredentials.map(
+            (cred) => ({
+              type: cred.type,
+              id: base64urlToUint8Array(cred.id),
+              ...(cred.transports && cred.transports.length > 0
+                ? { transports: cred.transports }
+                : {}),
+            })
+          );
         }
 
-        // Step 3: Finish registration
-        status.value = "Completing registration...";
+        delete publicKey.hints;
 
-        const attestationObject = new Uint8Array(
-          credential.response.attestationObject
+        let assertion;
+        try {
+          assertion = await navigator.credentials.get({ publicKey });
+        } catch (credError) {
+          console.error("WebAuthn error:", credError);
+          throw credError;
+        }
+
+        if (!assertion) {
+          throw new Error("No assertion received");
+        }
+
+        // Step 3: Finish login
+        status.value = "Completing login...";
+
+        const authenticatorData = new Uint8Array(
+          assertion.response.authenticatorData
         );
         const clientDataJSON = new Uint8Array(
-          credential.response.clientDataJSON
+          assertion.response.clientDataJSON
         );
+        const signature = new Uint8Array(assertion.response.signature);
 
-        const finishResponse = await fetch("/auth/register/finish", {
+        const finishResponse = await fetch("/auth/login/finish", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
           body: JSON.stringify({
-            id: credential.id,
-            rawId: uint8ArrayToBase64url(new Uint8Array(credential.rawId)),
-            type: credential.type,
+            id: assertion.id,
+            rawId: uint8ArrayToBase64url(new Uint8Array(assertion.rawId)),
+            type: assertion.type,
             response: {
-              attestationObject: uint8ArrayToBase64url(attestationObject),
+              authenticatorData: uint8ArrayToBase64url(authenticatorData),
               clientDataJSON: uint8ArrayToBase64url(clientDataJSON),
+              signature: uint8ArrayToBase64url(signature),
+              userHandle: assertion.response.userHandle
+                ? uint8ArrayToBase64url(
+                    new Uint8Array(assertion.response.userHandle)
+                  )
+                : null,
             },
             session: beginData.session,
           }),
@@ -238,19 +220,19 @@ export default {
 
         if (!finishResponse.ok) {
           const errorText = await finishResponse.text();
-          throw new Error(errorText || "Failed to complete registration");
+          throw new Error(errorText || "Failed to complete login");
         }
 
         const result = await finishResponse.json();
         authenticated.value = true;
-        status.value = "Registration successful!";
+        status.value = "Login successful!";
 
         // Redirect to dashboard
         setTimeout(() => {
           window.location.href = `/dashboard?session=${result.session_id}`;
         }, 1000);
       } catch (err) {
-        error.value = err.message || "Registration failed. Please try again.";
+        error.value = err.message || "Login failed. Please try again.";
         status.value = null;
       } finally {
         loading.value = false;
@@ -262,21 +244,16 @@ export default {
       loading,
       error,
       status,
-      betaCode,
       mobileMenuOpen,
-      tooltipVisible,
       closeMobileMenu,
-      showTooltip,
-      hideTooltip,
-      toggleTooltip,
-      handleRegister,
+      handleLogin,
     };
   },
 };
 </script>
 
 <style scoped>
-/* Register Page Container */
+/* Login Page Container */
 .login-page {
   width: 100%;
   min-height: 100vh;
@@ -339,98 +316,11 @@ export default {
   padding: 60px 40px 60px 0;
 }
 
-.status-line {
-  font-size: clamp(1.75rem, 4vw, 2.15rem);
-  font-weight: 200;
-  color: rgba(255, 255, 255, 0.3);
-  line-height: 1.3;
-  margin-bottom: 12px;
-}
-
-.platform-line {
-  font-size: clamp(1.75rem, 4vw, 2.15rem);
-  font-weight: 200;
-  color: rgba(255, 255, 255, 0.3);
-  line-height: 1.3;
-  margin-bottom: 12px;
-  display: inline-flex;
-  align-items: end;
-  gap: 8px;
-}
-
-.tooltip-trigger {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  cursor: pointer;
-}
-
-.info-icon {
-  width: 32px;
-  height: 32px;
-  color: rgba(255, 255, 255, 0.3);
-  margin-bottom: 4px;
-  transition: color 0.2s ease;
-}
-
-.tooltip-trigger:hover .info-icon {
-  color: rgba(255, 255, 255, 0.5);
-}
-
-.tooltip {
-  position: absolute;
-  bottom: calc(100% + 12px);
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(30, 30, 30, 0.95);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 8px;
-  padding: 16px 20px;
-  font-size: 14px;
-  color: rgba(255, 255, 255, 0.85);
-  line-height: 1.5;
-  white-space: nowrap;
-  opacity: 0;
-  visibility: hidden;
-  transition: opacity 0.2s ease, visibility 0.2s ease;
-  z-index: 100;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-}
-
-.tooltip::after {
-  content: "";
-  position: absolute;
-  top: 100%;
-  left: 50%;
-  transform: translateX(-50%);
-  border: 6px solid transparent;
-  border-top-color: rgba(30, 30, 30, 0.95);
-}
-
-.tooltip.visible {
-  opacity: 1;
-  visibility: visible;
-}
-
-.tooltip strong {
+.tagline {
+  font-size: clamp(2.3rem, 4vw, 3.7rem);
+  font-weight: 550;
   color: white;
-  font-weight: 600;
-}
-
-.contact-line {
-  font-size: clamp(0.85rem, 1.5vw, 0.95rem);
-  color: rgba(255, 255, 255, 0.3);
-  line-height: 1.5;
-}
-
-.contact-line a {
-  color: rgba(255, 255, 255, 0.3);
-  text-decoration: underline;
-  transition: color 0.3s ease;
-}
-
-.contact-line a:hover {
-  color: var(--color-pink);
+  line-height: 1.15;
 }
 
 /* Right Panel - Light */
@@ -467,7 +357,7 @@ export default {
   width: 100%;
 }
 
-.login-prompt {
+.register-prompt {
   margin-top: 40px;
   font-size: clamp(0.85rem, 2vw, 1rem);
   color: #666;
@@ -490,38 +380,7 @@ export default {
   margin-bottom: 32px;
 }
 
-/* Input Group */
-.input-group {
-  display: flex;
-  align-items: center;
-  background: white;
-  border-radius: 60px;
-  padding: 5px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-  border: 1px solid #e0e0e0;
-  max-width: 350px;
-  margin: 0 auto;
-}
-
-.alpha-input {
-  flex: 1;
-  border: none;
-  background: transparent;
-  padding: 12px 20px 8px 20px;
-  font-size: 15px;
-  outline: none;
-  min-width: 0;
-}
-
-.alpha-input::placeholder {
-  color: #999;
-}
-
-.alpha-input:disabled {
-  opacity: 0.6;
-}
-
-/* Form CTA Button - styled like nav CTA */
+/* Login CTA Button - styled like nav CTA */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -537,7 +396,7 @@ export default {
   font-family: inherit;
   color: white;
   letter-spacing: 0.02em;
-  padding: 8px 20px;
+  padding: 12px 32px;
   border-radius: 60px;
   background: linear-gradient(
     180deg,
@@ -586,6 +445,11 @@ export default {
     rgba(255, 255, 255, 0.04) 50%,
     transparent 70%
   );
+}
+
+.btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
 }
 
 .link-btn {

@@ -4,6 +4,7 @@ RUN apk add --no-cache git
 
 WORKDIR /app
 
+# Copy frontend package files
 COPY frontend/package.json frontend/package-lock.json* ./
 
 RUN npm install
