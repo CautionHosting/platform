@@ -63,7 +63,7 @@ pub async fn begin_register_handler(
 
     let beta_code_id = db::validate_beta_code(&state.db, &req.beta_code)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Invalid or expired beta code"))?;
+        .ok_or_else(|| anyhow::anyhow!("This alpha code is invalid or has already been used."))?;
 
     tracing::debug!("Beta code validated: id={}", beta_code_id);
 

@@ -10,14 +10,16 @@
 <script>
 import { ref, computed, onMounted } from 'vue'
 import Onboarding from './views/Onboarding.vue'
-import Login from './views/Login.vue'
+import Register from './views/Login.vue'
+import AuthLogin from './views/AuthLogin.vue'
 import Dashboard from './views/Dashboard.vue'
 
 export default {
   name: 'App',
   components: {
     Onboarding,
-    Login,
+    Register,
+    AuthLogin,
     Dashboard
   },
   setup() {
@@ -28,31 +30,68 @@ export default {
 
     const currentRoute = ref(window.location.pathname)
 
+    // Page metadata by route
+    const pageMeta = {
+      '/': {
+        title: 'Alpha access • Caution',
+        description: 'Enter your alpha code to access Caution. Closed alpha with support for verified enclave deployments on AWS Nitro.'
+      },
+      '/login': {
+        title: 'Log in to Caution',
+        description: 'Log in to your Caution account to manage applications and verified enclave deployments.'
+      },
+      '/onboarding': {
+        title: 'Onboarding • Caution',
+        description: 'Complete your Caution account setup.'
+      },
+      '/dashboard': {
+        title: 'Dashboard • Caution',
+        description: 'Manage your applications and verified enclave deployments.'
+      }
+    }
+
+    // Update page title and meta description
+    const updatePageMeta = (path) => {
+      const meta = pageMeta[path] || pageMeta['/']
+      document.title = meta.title
+      const metaDesc = document.querySelector('meta[name="description"]')
+      if (metaDesc) {
+        metaDesc.setAttribute('content', meta.description)
+      }
+    }
+
     // Simple client-side routing
     const currentView = computed(() => {
       const path = currentRoute.value || window.location.pathname
 
-      if (path === '/' || path === '/login') {
-        return 'Login'
+      // Update page metadata
+      updatePageMeta(path)
+
+      if (path === '/') {
+        // Register page (alpha code entry)
+        return 'Register'
+      } else if (path === '/login') {
+        // Login page (WebAuthn authentication)
+        return 'AuthLogin'
       } else if (path === '/onboarding') {
-        // Protected route - redirect to login if no session
+        // Protected route - redirect to home if no session
         if (!session.value) {
-          window.location.href = '/login'
-          return 'Login'
+          window.location.href = '/'
+          return 'Register'
         }
         return 'Onboarding'
       } else if (path === '/dashboard') {
-        // Protected route - redirect to login if no session
+        // Protected route - redirect to home if no session
         if (!session.value) {
-          window.location.href = '/login'
-          return 'Login'
+          window.location.href = '/'
+          return 'Register'
         }
         return 'Dashboard'
       }
 
-      // Unknown path - redirect to login
-      window.location.href = '/login'
-      return 'Login'
+      // Unknown path - redirect to home
+      window.location.href = '/'
+      return 'Register'
     })
 
     const handleSessionUpdate = (newSession) => {
@@ -136,8 +175,40 @@ export default {
 /* IBM Plex Sans */
 @font-face {
   font-family: 'IBM Plex Sans';
+  src: url('./assets/fonts/IBMPlexSans-Light.woff2') format('woff2');
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'IBM Plex Sans';
+  src: url('./assets/fonts/IBMPlexSans-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'IBM Plex Sans';
+  src: url('./assets/fonts/IBMPlexSans-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'IBM Plex Sans';
   src: url('./assets/fonts/IBMPlexSans-SemiBold.woff2') format('woff2');
   font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'IBM Plex Sans';
+  src: url('./assets/fonts/IBMPlexSans-Bold.woff2') format('woff2');
+  font-weight: 700;
   font-style: normal;
   font-display: swap;
 }
@@ -258,9 +329,5 @@ body {
 
 #app {
   min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
 }
 </style>
