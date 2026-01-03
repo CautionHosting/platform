@@ -26,7 +26,15 @@ export default {
     // Extract session from URL params immediately in setup (before child components mount)
     const params = new URLSearchParams(window.location.search)
     const sessionParam = params.get('session')
-    const session = ref(sessionParam || null)
+
+    // TODO(production): Remove dev mode bypass before production deployment
+    // Dev mode: use ?dev=1 to bypass session checks for UI development
+    // Example: /dashboard?dev=1 or /onboarding?dev=1
+    const devMode = params.get('dev') === '1'
+    const devSession = devMode ? 'dev-session' : null
+    const session = ref(sessionParam || devSession)
+    console.log('[App.vue] Dev mode:', devMode, 'Session param:', sessionParam, 'Final session:', session.value)
+    // END TODO(production)
 
     const currentRoute = ref(window.location.pathname)
 

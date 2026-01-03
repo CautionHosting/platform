@@ -87,21 +87,19 @@ export function useWebAuthn() {
       const beginData = await beginResponse.json();
 
       // Step 2: Get assertion from security key
-      status.value = "Tap your smart card";
+      status.value = "Tap your security key";
 
       const publicKey = beginData.publicKey;
       publicKey.challenge = base64urlToUint8Array(publicKey.challenge);
 
       if (publicKey.allowCredentials) {
-        publicKey.allowCredentials = publicKey.allowCredentials.map(
-          (cred) => ({
-            type: cred.type,
-            id: base64urlToUint8Array(cred.id),
-            ...(cred.transports && cred.transports.length > 0
-              ? { transports: cred.transports }
-              : {}),
-          })
-        );
+        publicKey.allowCredentials = publicKey.allowCredentials.map((cred) => ({
+          type: cred.type,
+          id: base64urlToUint8Array(cred.id),
+          ...(cred.transports && cred.transports.length > 0
+            ? { transports: cred.transports }
+            : {}),
+        }));
       }
 
       delete publicKey.hints;
@@ -129,9 +127,7 @@ export function useWebAuthn() {
       const authenticatorData = new Uint8Array(
         assertion.response.authenticatorData
       );
-      const clientDataJSON = new Uint8Array(
-        assertion.response.clientDataJSON
-      );
+      const clientDataJSON = new Uint8Array(assertion.response.clientDataJSON);
       const signature = new Uint8Array(assertion.response.signature);
 
       const finishResponse = await fetch("/auth/login/finish", {
@@ -205,7 +201,7 @@ export function useWebAuthn() {
       const beginData = await beginResponse.json();
 
       // Step 2: Create credential with security key
-      status.value = "Tap your smart card";
+      status.value = "Tap your security  key";
 
       const publicKey = beginData.publicKey;
       publicKey.challenge = base64urlToUint8Array(publicKey.challenge);
@@ -223,9 +219,7 @@ export function useWebAuthn() {
       const attestationObject = new Uint8Array(
         credential.response.attestationObject
       );
-      const clientDataJSON = new Uint8Array(
-        credential.response.clientDataJSON
-      );
+      const clientDataJSON = new Uint8Array(credential.response.clientDataJSON);
 
       const finishResponse = await fetch("/auth/register/finish", {
         method: "POST",
