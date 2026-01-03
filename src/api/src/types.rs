@@ -335,12 +335,12 @@ impl BuildConfig {
                             metadata = Some(value);
                         }
                     }
-                    "memory_mb" => {
+                    "memory" | "memory_mb" => {
                         if let Ok(val) = value.parse::<u32>() {
                             memory_mb = Some(val);
                         }
                     }
-                    "cpus" => {
+                    "cpu" | "cpus" => {
                         if let Ok(val) = value.parse::<u32>() {
                             cpus = Some(val);
                         }

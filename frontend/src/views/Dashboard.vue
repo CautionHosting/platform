@@ -342,12 +342,19 @@ export default {
     const destroyingApp = ref(null)
 
     const showAttestation = (app) => {
-      const url = `http://${app.public_ip}/attestation`
+      const url = app.domain
+        ? `https://${app.domain}/attestation`
+        : `http://${app.public_ip}/attestation`
       showAttestationModal({ attestationUrl: url })
     }
 
     const getEnclaveConfig = (app) => {
-      return app.configuration?.enclave_config || { memory_mb: 512, cpus: 2, debug: false }
+      const config = app.configuration || {}
+      return {
+        memory_mb: config.memory_mb ?? 512,
+        cpus: config.cpus ?? 2,
+        debug: config.debug ?? false,
+      }
     }
 
     const getInstanceType = (app) => {

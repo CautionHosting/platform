@@ -1995,9 +1995,12 @@ async fn deploy_handler(
         "pcrs_path": eif_result.pcrs_path,
         "eif_size_bytes": eif_result.eif_size_bytes,
         "commit_sha": commit_sha,
-        "enclave_config": enclave_config,
         "run_command": build_config.run,
         "domain": build_config.domain,
+        "memory_mb": enclave_config.memory_mb,
+        "cpus": enclave_config.cpus,
+        "debug": enclave_config.debug,
+        "ports": enclave_config.ports,
     });
 
     let memory_bytes = (enclave_config.memory_mb as u64) * 1024 * 1024;
@@ -2119,7 +2122,7 @@ async fn deploy_handler(
 
     sqlx::query(
         "UPDATE compute_resources
-         SET provider_resource_id = $1, state = $2, public_ip = $3, configuration = configuration || $4::jsonb
+         SET provider_resource_id = $1, state = $2, public_ip = $3, configuration = COALESCE(configuration, '{}'::jsonb) || $4::jsonb
          WHERE id = $5"
     )
     .bind(&deployment_result.instance_id)
