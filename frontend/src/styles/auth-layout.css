@@ -147,7 +147,7 @@
   white-space: nowrap;
   position: relative;
   font-size: clamp(1.05rem, 2vw, 1.075rem);
-  font-weight: 450;
+  font-weight: 400;
   font-family: inherit;
   color: white;
   letter-spacing: 0.02em;
@@ -557,7 +557,7 @@ p.info a:hover {
 
 .form-title,
 .login-title {
-  font-weight: 550;
+  font-weight: 600;
   color: var(--color-dark);
 }
 
@@ -599,7 +599,7 @@ p.info a:hover {
 
 .link-btn {
   color: #0f0f0f;
-  font-weight: 450;
+  font-weight: 400;
   text-decoration: underline dotted;
   margin-left: 4px;
   transition: color 0.3s ease;
@@ -648,7 +648,7 @@ p.info a:hover {
 .status-message {
   font-size: clamp(1.25rem, 2vw, 1.45rem);
   background: #0f0f0f;
-  font-weight: 450;
+  font-weight: 400;
   color: white;
   text-align: center;
 }

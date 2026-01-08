@@ -3,18 +3,38 @@
 
 <template>
   <div class="dashboard-page">
-    <!-- Alpha Banner -->
-    <div class="alpha-banner">
-      The software is currently in early alpha and is not production ready. You
-      may encounter breaking changes and evolving features.
+    <!-- Alpha Banner (dismissible) -->
+    <div v-if="showAlphaBanner" class="alpha-banner">
+      <span class="alpha-banner-text">
+        The software is currently in early alpha and is not production ready. You
+        may encounter breaking changes and evolving features.
+      </span>
+      <button class="alpha-banner-close" @click="dismissBanner" aria-label="Close banner">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 6 6 18"/>
+          <path d="m6 6 12 12"/>
+        </svg>
+      </button>
     </div>
 
     <!-- Top Header Row -->
     <div class="dashboard-header">
-      <a href="/" class="sidebar-logo">
+      <button class="sidebar-logo" @click="$emit('tab-change', 'apps')">
         <img src="/assets/caution-logo-black.svg" alt="Caution" />
-      </a>
-      <h1 class="page-title">{{ title }}</h1>
+      </button>
+      <h2 v-if="showTitle" class="page-title">{{ title }}</h2>
+      <div class="header-nav">
+        <span class="alpha-label">SOFTWARE IN ALPHA</span>
+        <span class="alpha-label alpha-label-warning">NOT PRODUCTION READY</span>
+      </div>
+    </div>
+
+    <!-- Desktop Required Message (mobile/tablet only) -->
+    <div class="desktop-required-message">
+      <div class="desktop-required-content">
+        <h2 class="desktop-required-title">Desktop recommended</h2>
+        <p class="desktop-required-text">Caution is currently optimized for desktop. Mobile and tablet support is coming soon.</p>
+      </div>
     </div>
 
     <div class="dashboard-layout">
@@ -25,18 +45,11 @@
             :class="['nav-item', { active: activeTab === 'apps' }]"
             @click="$emit('tab-change', 'apps')"
           >
-            <svg
+            <img
+              src="/assets/icons/apps.svg"
+              alt=""
               class="nav-icon"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <rect x="3" y="3" width="7" height="7" rx="1" />
-              <rect x="14" y="3" width="7" height="7" rx="1" />
-              <rect x="3" y="14" width="7" height="7" rx="1" />
-              <rect x="14" y="14" width="7" height="7" rx="1" />
-            </svg>
+            />
             <span>Applications</span>
           </button>
 
@@ -44,65 +57,44 @@
             :class="['nav-item', { active: activeTab === 'ssh' }]"
             @click="$emit('tab-change', 'ssh')"
           >
-            <svg
+            <img
+              src="/assets/icons/key_.svg"
+              alt=""
               class="nav-icon"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path
-                d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"
-              />
-            </svg>
-            <span>SSH Keys</span>
+            />
+            <span>SSH keys</span>
           </button>
 
           <button
             :class="['nav-item', { active: activeTab === 'credentials' }]"
             @click="$emit('tab-change', 'credentials')"
           >
-            <svg
+            <img
+              src="/assets/icons/cloud_.svg"
+              alt=""
               class="nav-icon"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path
-                d="M19 11H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2Z"
-              />
-              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-            </svg>
-            <span>Cloud Credentials</span>
+            />
+            <span>Cloud credentials</span>
           </button>
 
-          <button class="nav-item" @click="openAlphaNotes">
-            <svg
+          <button
+            :class="['nav-item', { active: activeTab === 'guide' }]"
+            @click="$emit('tab-change', 'guide')"
+          >
+            <img
+              src="/assets/icons/rocket.svg"
+              alt=""
               class="nav-icon"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path d="m22 2-7 20-4-9-9-4 20-7Z" />
-              <path d="M22 2 11 13" />
-            </svg>
-            <span>Alpha notes</span>
+            />
+            <span>Quick start guide</span>
           </button>
 
           <button class="nav-item nav-item--logout" @click="$emit('logout')">
-            <svg
+            <img
+              src="/assets/icons/logout_.svg"
+              alt=""
               class="nav-icon"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-              <polyline points="16,17 21,12 16,7" />
-              <line x1="21" y1="12" x2="9" y2="12" />
-            </svg>
+            />
             <span>Log out</span>
           </button>
         </nav>
@@ -110,7 +102,12 @@
 
       <!-- Main Content -->
       <main class="main-content">
-        <slot></slot>
+        <div class="main-content-primary">
+          <slot></slot>
+        </div>
+        <aside class="main-content-aside">
+          <slot name="aside"></slot>
+        </aside>
       </main>
     </div>
 
@@ -121,21 +118,13 @@
       </div>
       <div class="footer-right">
         <a
-          href="https://codeberg.org/caution/platform"
+          href="https://codeberg.org/caution"
           target="_blank"
           rel="noopener noreferrer"
           >Source code</a
         >
         <a
-          href="https://caution.co/blog.html"
-          target="_blank"
-          rel="noopener noreferrer"
-          >Blog</a
-        >
-        <a
-          href="https://caution.co/contact.html"
-          target="_blank"
-          rel="noopener noreferrer"
+          href="mailto:info@caution.co?subject=Caution%20Platform%20Inquiry&body=Hello%20Caution%20team%2C%0A%0AI%20am%20reaching%20out%20regarding%20the%20Caution%20platform.%0A%0A"
           >Contact</a
         >
       </div>
@@ -144,6 +133,8 @@
 </template>
 
 <script>
+import { ref } from "vue";
+
 export default {
   name: "DashboardLayout",
   props: {
@@ -155,14 +146,26 @@ export default {
       type: String,
       default: "apps",
     },
+    showTitle: {
+      type: Boolean,
+      default: false,
+    },
   },
   emits: ["tab-change", "logout"],
   setup() {
+    const showAlphaBanner = ref(true);
+
+    const dismissBanner = () => {
+      showAlphaBanner.value = false;
+    };
+
     const openAlphaNotes = () => {
       window.open("https://caution.co/alpha-notes.html", "_blank");
     };
 
     return {
+      showAlphaBanner,
+      dismissBanner,
       openAlphaNotes,
     };
   },
