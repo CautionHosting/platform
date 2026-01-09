@@ -6,7 +6,7 @@ use axum::{
     http::{StatusCode, HeaderMap},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post, patch, delete},
+    routing::{get, post, put, patch, delete},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,7 @@ mod types;
 mod errors;
 mod encryption;
 mod cloud_credentials;
+mod gpg;
 
 #[derive(Clone)]
 struct AppState {
@@ -1371,7 +1372,35 @@ async fn delete_resource(
 
     tracing::info!("Destroying resource {} (id: {})", resource_name, resource_id);
 
-    let terraform_result = deployment::destroy_app(org_id, resource_id, resource_name.clone()).await;
+    let (aws_credentials, asg_name) = if let Some(encryptor) = state.encryptor.as_ref() {
+        if let Ok(Some(credential)) = cloud_credentials::get_credential_by_resource(&state.db, org_id, resource_id).await {
+            if credential.managed_on_prem {
+                if let Ok(Some(secrets)) = cloud_credentials::get_credential_secrets(&state.db, encryptor, org_id, credential.id).await {
+                    let region = credential.config["aws_region"].as_str()
+                        .map(|s| s.to_string())
+                        .or_else(|| std::env::var("AWS_REGION").ok())
+                        .unwrap_or_else(|| "us-west-2".to_string());
+                    let asg = credential.config["asg_name"].as_str()
+                        .map(|s| s.to_string());
+                    (Some(deployment::AwsCredentials {
+                        access_key_id: secrets["aws_access_key_id"].as_str().unwrap_or("").to_string(),
+                        secret_access_key: secrets["aws_secret_access_key"].as_str().unwrap_or("").to_string(),
+                        region,
+                    }), asg)
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
+    let terraform_result = deployment::destroy_app_with_credentials(org_id, resource_id, resource_name.clone(), aws_credentials, asg_name).await;
 
     if let Err(ref e) = terraform_result {
         tracing::error!("Terraform destroy failed for resource {}: {}", resource_id, e);
@@ -1474,6 +1503,186 @@ async fn set_default_cloud_credential(
         Ok(StatusCode::OK)
     } else {
         Err((StatusCode::NOT_FOUND, "Credential not found".to_string()))
+    }
+}
+
+/// Create or update a managed on-prem resource.
+/// Accepts either plain JSON or GPG-encrypted config from the setup script.
+/// If resource_id is provided, updates the existing resource; otherwise creates a new one.
+async fn create_managed_onprem_resource(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    body: String,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let json_content = if gpg::is_gpg_encrypted(&body) {
+        tracing::info!("Received GPG-encrypted managed on-prem config, decrypting...");
+        let decrypted = gpg::decrypt_gpg_message(&body)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("GPG decryption failed: {}", e)))?;
+        tracing::info!("GPG decryption successful");
+        decrypted
+    } else {
+        body
+    };
+
+    let mut req: cloud_credentials::CreateCredentialRequest = serde_json::from_str(&json_content)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
+
+    if !req.managed_on_prem {
+        return Err((StatusCode::BAD_REQUEST, "This endpoint requires managed_on_prem: true".to_string()));
+    }
+
+    let deployment_id = req.deployment_id.clone()
+        .ok_or((StatusCode::BAD_REQUEST, "deployment_id is required".to_string()))?;
+
+    let encryptor = state.encryptor.as_ref()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "Encryption not configured. Set CAUTION_ENCRYPTION_KEY.".to_string()))?;
+
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let managed_onprem_config = serde_json::json!({
+        "deployment_id": req.deployment_id,
+        "asg_name": req.asg_name,
+        "launch_template_name": req.launch_template_name,
+        "launch_template_id": req.launch_template_id,
+        "vpc_id": req.vpc_id,
+        "subnet_ids": req.subnet_ids,
+        "eif_bucket": req.eif_bucket,
+        "instance_profile_name": req.instance_profile_name,
+        "aws_region": req.aws_region,
+        "aws_account_id": req.aws_account_id,
+    });
+
+    let configuration = serde_json::json!({
+        "managed_onprem": managed_onprem_config,
+    });
+
+    if let Some(existing_resource_id) = req.resource_id {
+        tracing::info!(
+            "Updating managed on-prem resource {}: deployment_id={}",
+            existing_resource_id, deployment_id
+        );
+
+        let existing: Option<(String, types::ResourceState)> = sqlx::query_as(
+            "SELECT resource_name, state FROM compute_resources
+             WHERE id = $1 AND organization_id = $2"
+        )
+        .bind(existing_resource_id)
+        .bind(org_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+        let (resource_name, resource_state) = existing
+            .ok_or((StatusCode::NOT_FOUND, format!("Resource {} not found", existing_resource_id)))?;
+
+        sqlx::query(
+            "UPDATE compute_resources SET configuration = $1, updated_at = NOW()
+             WHERE id = $2"
+        )
+        .bind(&configuration)
+        .bind(existing_resource_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update resource: {}", e)))?;
+
+        sqlx::query("DELETE FROM cloud_credentials WHERE resource_id = $1")
+            .bind(existing_resource_id)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete old credential: {}", e)))?;
+
+        let credential = cloud_credentials::create_credential(
+            &state.db, encryptor, org_id, auth.user_id, req
+        ).await?;
+
+        let git_url = match state.git_ssh_port {
+            Some(port) => format!("ssh://git@{}:{}/{}.git", state.git_hostname, port, existing_resource_id),
+            None => format!("git@{}:{}.git", state.git_hostname, existing_resource_id),
+        };
+
+        tracing::info!(
+            "Updated managed on-prem resource {}: credential_id={}, deployment_id={}",
+            existing_resource_id, credential.id, deployment_id
+        );
+
+        Ok(Json(serde_json::json!({
+            "id": existing_resource_id,
+            "resource_name": resource_name,
+            "git_url": git_url,
+            "state": resource_state.as_str(),
+            "credential_id": credential.id,
+            "managed_onprem": managed_onprem_config,
+            "updated": true,
+        })))
+    } else {
+        tracing::info!(
+            "Creating managed on-prem resource: deployment_id={}",
+            deployment_id
+        );
+
+        let provider_account_id = get_or_create_provider_account(&state.db, org_id)
+            .await
+            .map_err(|e| (e, "Failed to get provider account".to_string()))?;
+
+        let resource_type_id = get_or_create_resource_type(&state.db)
+            .await
+            .map_err(|e| (e, "Failed to get resource type".to_string()))?;
+
+        let provider_resource_id = Uuid::new_v4().to_string();
+        let resource_slug = format!("app-{}", &provider_resource_id[..8]);
+
+        // Create the resource first (so we have a resource_id for the credential)
+        let resource: (Uuid, types::ResourceState, NaiveDateTime) = sqlx::query_as(
+            "INSERT INTO compute_resources
+             (organization_id, provider_account_id, resource_type_id, provider_resource_id,
+              resource_name, state, configuration, created_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING id, state, created_at"
+        )
+        .bind(org_id)
+        .bind(provider_account_id)
+        .bind(resource_type_id)
+        .bind(&provider_resource_id)
+        .bind(&resource_slug)
+        .bind(types::ResourceState::Pending)
+        .bind(&configuration)
+        .bind(auth.user_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error creating resource: {:?}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create resource: {}", e))
+        })?;
+
+        let (resource_id, resource_state, created_at) = resource;
+
+        req.resource_id = Some(resource_id);
+
+        let credential = cloud_credentials::create_credential(
+            &state.db, encryptor, org_id, auth.user_id, req
+        ).await?;
+
+        let git_url = match state.git_ssh_port {
+            Some(port) => format!("ssh://git@{}:{}/{}.git", state.git_hostname, port, resource_id),
+            None => format!("git@{}:{}.git", state.git_hostname, resource_id),
+        };
+
+        tracing::info!(
+            "Created managed on-prem resource {}: credential_id={}, deployment_id={}",
+            resource_id, credential.id, deployment_id
+        );
+
+        Ok(Json(serde_json::json!({
+            "id": resource_id,
+            "resource_name": resource_slug,
+            "git_url": git_url,
+            "state": resource_state.as_str(),
+            "created_at": created_at,
+            "credential_id": credential.id,
+            "managed_onprem": managed_onprem_config,
+        })))
     }
 }
 
@@ -1925,6 +2134,7 @@ async fn deploy_handler(
                     build_config.metadata.clone(),
                     None,
                     &enclave_config.ports,
+                    build_config.e2e,
                 )
                 .await
                 .map_err(|e| {
@@ -1944,6 +2154,7 @@ async fn deploy_handler(
                     build_config.metadata.clone(),
                     None,
                     &enclave_config.ports,
+                    build_config.e2e,
                 )
                 .await
                 .map_err(|e| {
@@ -2025,60 +2236,87 @@ async fn deploy_handler(
     tracing::info!("Deploying Nitro Enclave for resource {} with memory_mb={}, cpu_count={}, debug={}",
                    resource_id, enclave_config.memory_mb, enclave_config.cpus, enclave_config.debug);
 
-    let credentials = if let Some(ref managed_config) = build_config.managed_on_prem {
-        match managed_config {
-            types::ManagedOnPremConfig::Aws(aws_config) => {
-                tracing::info!("Managed on-prem deployment detected, fetching AWS credentials for region {}", aws_config.region);
+    // Check if there's a managed-on-prem credential linked to this resource
+    // This takes precedence over the Procfile - if init was called with --config,
+    // the credential is already linked to the resource
+    let (credentials, managed_onprem_config) = {
+        let cred = cloud_credentials::get_credential_by_resource(
+            &state.db,
+            req.org_id,
+            resource_id,
+        ).await?;
+
+        if let Some(credential) = cred {
+            if credential.managed_on_prem {
+                tracing::info!("Managed on-prem credential found for resource {}, using linked credential", resource_id);
 
                 let encryptor = state.encryptor.as_ref().ok_or_else(|| {
                     (StatusCode::INTERNAL_SERVER_ERROR, "Encryptor not configured".to_string())
                 })?;
 
-                let cred = cloud_credentials::get_default_credential_for_platform(
+                let secrets = cloud_credentials::get_credential_secrets(
                     &state.db,
+                    encryptor,
                     req.org_id,
-                    cloud_credentials::CloudPlatform::Aws,
+                    credential.id,
                 ).await?;
 
-                match cred {
-                    Some(credential) => {
-                        let secrets = cloud_credentials::get_credential_secrets(
-                            &state.db,
-                            encryptor,
-                            req.org_id,
-                            credential.id,
-                        ).await?;
+                match secrets {
+                    Some(secrets_json) => {
+                        let aws_access_key_id = secrets_json["aws_access_key_id"]
+                            .as_str()
+                            .ok_or_else(|| {
+                                (StatusCode::INTERNAL_SERVER_ERROR, "Missing aws_access_key_id in managed on-prem credentials".to_string())
+                            })?;
+                        let aws_secret_access_key = secrets_json["aws_secret_access_key"]
+                            .as_str()
+                            .ok_or_else(|| {
+                                (StatusCode::INTERNAL_SERVER_ERROR, "Missing aws_secret_access_key in managed on-prem credentials".to_string())
+                            })?;
 
-                        match secrets {
-                            Some(secrets_json) => {
-                                let secret_access_key = secrets_json["secret_access_key"]
-                                    .as_str()
-                                    .ok_or_else(|| {
-                                        (StatusCode::INTERNAL_SERVER_ERROR, "Missing secret_access_key in credentials".to_string())
-                                    })?;
+                        // Extract infrastructure config from credential
+                        let config = &credential.config;
+                        let region = config["aws_region"].as_str().unwrap_or("us-west-2").to_string();
 
-                                Some(deployment::AwsCredentials {
-                                    access_key_id: credential.identifier.clone(),
-                                    secret_access_key: secret_access_key.to_string(),
-                                    region: aws_config.region.clone(),
-                                })
-                            }
-                            None => {
-                                return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to decrypt credentials".to_string()));
-                            }
-                        }
+                        let onprem_config = deployment::ManagedOnPremConfig {
+                            deployment_id: config["deployment_id"].as_str().unwrap_or("").to_string(),
+                            asg_name: config["asg_name"].as_str().unwrap_or("").to_string(),
+                            launch_template_name: config["launch_template_name"].as_str().unwrap_or("").to_string(),
+                            launch_template_id: config["launch_template_id"].as_str().unwrap_or("").to_string(),
+                            vpc_id: config["vpc_id"].as_str().unwrap_or("").to_string(),
+                            subnet_ids: config["subnet_ids"]
+                                .as_array()
+                                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                                .unwrap_or_default(),
+                            eif_bucket: config["eif_bucket"].as_str().unwrap_or("").to_string(),
+                            instance_profile_name: config["instance_profile_name"].as_str().unwrap_or("").to_string(),
+                        };
+
+                        tracing::info!("Using managed on-prem config: deployment_id={}, region={}", onprem_config.deployment_id, region);
+
+                        (
+                            Some(deployment::AwsCredentials {
+                                access_key_id: aws_access_key_id.to_string(),
+                                secret_access_key: aws_secret_access_key.to_string(),
+                                region,
+                            }),
+                            Some(onprem_config),
+                        )
                     }
                     None => {
-                        return Err((
-                            StatusCode::BAD_REQUEST,
-                            "managed_on_prem requires a default AWS credential to be configured".to_string(),
-                        ));
+                        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to decrypt managed on-prem credentials".to_string()));
                     }
                 }
+            } else {
+                // Credential linked but not managed on-prem - fully managed deployment
+                tracing::info!("Non-managed-on-prem credential found, using fully managed deployment");
+                (None, None)
             }
+        } else {
+            // No credential linked - fully managed deployment
+            tracing::info!("No credential linked to resource {}, using fully managed deployment", resource_id);
+            (None, None)
         }
-    } else {
-        None
     };
 
     let nitro_request = deployment::NitroDeploymentRequest {
@@ -2095,6 +2333,7 @@ async fn deploy_handler(
         ssh_keys: build_config.ssh_keys.clone(),
         domain: build_config.domain.clone(),
         credentials,
+        managed_onprem: managed_onprem_config,
     };
 
     let deployment_result = match deployment::deploy_nitro_enclave(nitro_request).await {
@@ -2247,6 +2486,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/resources/{id}", get(get_resource))
         .route("/resources/{id}", patch(rename_resource))
         .route("/resources/{id}", delete(delete_resource))
+        .route("/resources/managed-onprem", post(create_managed_onprem_resource))
         .route("/deploy", post(deploy_handler))
         .route("/credentials", get(list_cloud_credentials))
         .route("/credentials", post(create_cloud_credential))

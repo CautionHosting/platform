@@ -134,6 +134,7 @@ TimeoutStartSec=300
 WantedBy=multi-user.target
 EOF
 
+# Create vsock proxy services for standard ports
 for port in 8080 8081 8082; do
 cat > /etc/systemd/system/vsock-proxy-$port.service <<EOF
 [Unit]
@@ -152,11 +153,33 @@ WantedBy=multi-user.target
 EOF
 done
 
+# Create vsock proxy services for custom user ports
+%{ for port in ports ~}
+cat > /etc/systemd/system/vsock-proxy-${port}.service <<EOF
+[Unit]
+Description=VSock Proxy for Custom Port ${port}
+After=nitro-enclave.service
+Requires=nitro-enclave.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat TCP-LISTEN:${port},reuseaddr,fork VSOCK-CONNECT:16:${port}
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+%{ endfor ~}
+
 systemctl daemon-reload
 systemctl enable nitro-enclave.service
 systemctl enable vsock-proxy-8080.service
 systemctl enable vsock-proxy-8081.service
 systemctl enable vsock-proxy-8082.service
+%{ for port in ports ~}
+systemctl enable vsock-proxy-${port}.service
+%{ endfor ~}
 
 systemctl start nitro-enclave.service
 
@@ -166,6 +189,9 @@ sleep 15
 systemctl start vsock-proxy-8080.service
 systemctl start vsock-proxy-8081.service
 systemctl start vsock-proxy-8082.service
+%{ for port in ports ~}
+systemctl start vsock-proxy-${port}.service
+%{ endfor ~}
 
 # Install and configure Caddy for TLS termination
 echo "Installing Caddy for HTTPS support..."

@@ -134,6 +134,8 @@ enum Commands {
     Init {
         #[arg(long, help = "Generate Procfile with managed on-premises deployment fields for AWS")]
         managed_on_prem: bool,
+        #[arg(long, help = "Path to JSON config file from managed on-prem setup script")]
+        config: Option<PathBuf>,
     },
     #[command(about = "Verify enclave attestation. By default, fetches manifest from the remote enclave and reproduces the build.")]
     Verify {
@@ -1813,12 +1815,16 @@ build: docker build -t app .
         }
     }
 
-    async fn init(&self, managed_on_prem: bool) -> Result<()> {
+    async fn init(&self, managed_on_prem: bool, config_path: Option<PathBuf>) -> Result<()> {
         println!("Initializing new deployment...");
 
         log_verbose(self.verbose, "Checking git repository...");
         self.check_git_repo()?;
         println!("Git repository found");
+
+        if let Some(ref path) = config_path {
+            return self.init_managed_onprem(path).await;
+        }
 
         self.create_procfile_if_needed(managed_on_prem)?;
 
@@ -1919,6 +1925,138 @@ build: docker build -t app .
         Ok(())
     }
 
+    async fn init_managed_onprem(&self, config_path: &PathBuf) -> Result<()> {
+        println!("Initializing managed on-premises deployment...");
+
+        log_verbose(self.verbose, &format!("Reading config from {:?}", config_path));
+        let config_content = fs::read_to_string(config_path)
+            .context("Failed to read config file")?;
+
+        let has_gpg_extension = config_path.extension()
+            .map(|ext| ext == "gpg" || ext == "asc")
+            .unwrap_or(false);
+        let has_gpg_header = config_content.trim().starts_with("-----BEGIN PGP MESSAGE-----");
+        let is_gpg_encrypted = has_gpg_extension || has_gpg_header;
+
+        let request_body = if is_gpg_encrypted {
+            log_verbose(self.verbose, "Config file is GPG-encrypted (will be decrypted server-side)");
+            println!("Detected GPG-encrypted config file");
+
+            let existing_resource_id = self.load_deployment().ok().map(|d| d.resource_id);
+            if let Some(ref id) = existing_resource_id {
+                println!("Found existing deployment: {}", id);
+                println!("Note: For updates with encrypted config, ensure resource_id is in the decrypted JSON");
+            }
+
+            config_content
+        } else {
+            let mut config_json: serde_json::Value = serde_json::from_str(&config_content)
+                .context("Failed to parse config file as JSON")?;
+
+            let existing_resource_id = self.load_deployment().ok().map(|d| d.resource_id);
+            if let Some(ref id) = existing_resource_id {
+                println!("Found existing deployment: {}", id);
+                println!("Updating existing resource with new configuration...");
+                config_json["resource_id"] = serde_json::json!(id);
+            }
+
+            let platform = config_json.get("platform").and_then(|v| v.as_str());
+            if platform != Some("aws") {
+                bail!("Config file must have platform: \"aws\" (got: {:?})", platform);
+            }
+
+            let managed_on_prem = config_json.get("managed_on_prem").and_then(|v| v.as_bool());
+            if managed_on_prem != Some(true) {
+                bail!("Config file must have managed_on_prem: true");
+            }
+
+            let required_fields = [
+                "aws_region", "aws_access_key_id", "aws_secret_access_key",
+                "deployment_id", "asg_name", "eif_bucket", "launch_template_name",
+                "launch_template_id", "vpc_id", "subnet_ids", "instance_profile_name",
+                "iam_user", "aws_account_id", "scope_tag"
+            ];
+            for field in required_fields {
+                if config_json.get(field).is_none() {
+                    bail!("Config file missing required field: {}", field);
+                }
+            }
+
+            log_verbose(self.verbose, "Config file validated");
+            serde_json::to_string(&config_json)?
+        };
+
+        let auth_config = self.ensure_authenticated().await?;
+
+        self.create_procfile_if_needed(true)?;
+
+        log_verbose(self.verbose, "Reading Procfile...");
+        let _cmd = self.read_procfile()?;
+        println!("Procfile found");
+
+        let existing_resource_id = self.load_deployment().ok().map(|d| d.resource_id);
+        let is_update = existing_resource_id.is_some();
+        let loader_msg = if is_update {
+            "Updating managed on-premises resource"
+        } else {
+            "Creating managed on-premises resource"
+        };
+        let mut loader = Loader::new(loader_msg, LoaderStyle::Processing);
+
+        let response = self.client
+            .post(format!("{}/api/resources/managed-onprem", self.base_url))
+            .header("X-Session-ID", &auth_config.session_id)
+            .header("Content-Type", "text/plain")
+            .body(request_body)
+            .send()
+            .await
+            .context("Failed to send managed on-prem request")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error = response.text().await?;
+            loader.stop();
+            let action = if is_update { "update" } else { "create" };
+            bail!("Failed to {} managed on-prem resource (status {}): {}", action, status, error);
+        }
+
+        let create_response: serde_json::Value = response.json().await
+            .context("Failed to parse response")?;
+
+        loader.stop();
+
+        let id = create_response["id"].as_str().unwrap_or("unknown");
+        let resource_name = create_response["resource_name"].as_str().unwrap_or("unnamed");
+        let git_url = create_response["git_url"].as_str().unwrap_or("");
+        let state = create_response["state"].as_str().unwrap_or("unknown");
+
+        if is_update {
+            println!("Managed on-premises resource updated!");
+        } else {
+            println!("Managed on-premises resource created!");
+        }
+        println!("ID: {}", id);
+        println!("Name: {}", resource_name);
+        println!("State: {}", state);
+        println!("Git URL: {}", git_url);
+
+        log_verbose(self.verbose, "Saving deployment info...");
+        self.save_deployment(id)?;
+        log_verbose(self.verbose, "Saved deployment info");
+
+        if !git_url.is_empty() {
+            log_verbose(self.verbose, "Setting git remote...");
+            self.set_git_remote(git_url)?;
+        }
+
+        println!("\nYou can now push to 'caution' remote to deploy:");
+        println!("  git push caution main");
+        println!("\nAfter pushing, check your app status:");
+        println!("  caution apps list");
+
+        Ok(())
+    }
+
     async fn get_attestation_url(&self) -> Result<String> {
         let app = self.get_current_app().await
             .context("No deployment found. Either run 'caution init' first or provide --url")?;
@@ -1985,7 +2123,7 @@ build: docker build -t app .
 
         let mut loader = Loader::new("Building enclave image", LoaderStyle::Processing);
         let deployment = builder
-            .build_enclave_auto(&user_image, &binary_path, run_command, app_source_urls_opt, None, None, None, None, &ports)
+            .build_enclave_auto(&user_image, &binary_path, run_command, app_source_urls_opt, None, None, None, None, &ports, false)
             .await
             .context("Failed to build enclave")?;
         loader.stop();
@@ -2175,6 +2313,7 @@ build: docker build -t app .
                 metadata,
                 external_manifest,
                 &ports,
+                false,
             ).await
         } else {
             log_verbose(self.verbose, "Using build_enclave (no binary specified)");
@@ -2188,6 +2327,7 @@ build: docker build -t app .
                 metadata,
                 external_manifest,
                 &ports,
+                false,
             ).await
         }.context("Failed to build enclave locally")?;
         loader.stop();
@@ -3455,8 +3595,8 @@ pub async fn run() -> Result<()> {
         Commands::Login => {
             client.login().await?;
         }
-        Commands::Init { managed_on_prem } => {
-            client.init(managed_on_prem).await?;
+        Commands::Init { managed_on_prem, config } => {
+            client.init(managed_on_prem, config).await?;
         }
         Commands::Verify { attestation_url, from_local, app_source_url, pcrs, no_cache } => {
             client.verify(attestation_url, from_local, app_source_url, pcrs, no_cache).await?;

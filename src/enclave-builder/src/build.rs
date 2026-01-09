@@ -17,6 +17,7 @@ pub async fn stage_eif_components(
     run_command: Option<String>,
     manifest: Option<EnclaveManifest>,
     ports: &[u16],
+    e2e: bool,
 ) -> Result<PathBuf> {
     let stage_dir = work_dir.join("eif-stage");
     fs::create_dir_all(&stage_dir).await?;
@@ -44,15 +45,15 @@ pub async fn stage_eif_components(
         tracing::info!("Wrote manifest to: {}", manifest_path.display());
     }
 
-    generate_run_sh(&stage_dir, run_command, ports).await?;
+    generate_run_sh(&stage_dir, run_command, ports, e2e).await?;
 
-    generate_containerfile_eif(&stage_dir).await?;
+    generate_containerfile_eif(&stage_dir, e2e).await?;
 
     tracing::info!("EIF components staged successfully in: {}", stage_dir.display());
     Ok(stage_dir)
 }
 
-async fn generate_run_sh(stage_dir: &Path, run_command: Option<String>, ports: &[u16]) -> Result<()> {
+async fn generate_run_sh(stage_dir: &Path, run_command: Option<String>, ports: &[u16], e2e: bool) -> Result<()> {
     let user_cmd = if let Some(cmd) = run_command {
         let escaped_cmd = cmd.replace("'", "'\\''");
         format!("exec sh -c '{}'", escaped_cmd)
@@ -61,11 +62,29 @@ async fn generate_run_sh(stage_dir: &Path, run_command: Option<String>, ports: &
 exit 1"#.to_string()
     };
 
-    let socat_proxies: String = ports
+    // Generate proxies for custom user ports (in addition to the hardcoded 8080/8081/8082)
+    let custom_port_proxies: String = ports
         .iter()
+        .filter(|&&port| port != 8080 && port != 8081 && port != 8082) // Skip already-hardcoded ports
         .map(|port| format!("/bin/socat VSOCK-LISTEN:{},reuseaddr,fork TCP:localhost:{} &", port, port))
         .collect::<Vec<_>>()
         .join("\n");
+
+    let custom_port_section = if custom_port_proxies.is_empty() {
+        String::new()
+    } else {
+        format!("\necho \"Starting custom port proxies...\"\n{}\n", custom_port_proxies)
+    };
+
+    // Conditionally include STEVE (end-to-end encryption proxy)
+    let steve_section = if e2e {
+        r#"echo "Starting STEVE (Secure Transport Encryption Via Enclave)..."
+/steve &
+"#
+    } else {
+        r#"echo "E2E encryption disabled, skipping STEVE"
+"#
+    };
 
     let run_sh_content = format!(r#"#!/bin/sh
 set -e
@@ -118,15 +137,13 @@ export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 echo "Starting Attestation Service on port 8082..."
 /attestation-service &
 
-echo "Starting STEVE (Secure Transport Encryption Via Enclave)..."
-/steve &
-
+{steve_section}
 echo "Starting VSOCK-to-TCP proxies..."
 # Hardcoded proxies for ports 8080, 8081, 8082
 /bin/socat VSOCK-LISTEN:8080,reuseaddr,fork TCP:localhost:8080 &
 /bin/socat VSOCK-LISTEN:8081,reuseaddr,fork TCP:localhost:8081 &
 /bin/socat VSOCK-LISTEN:8082,reuseaddr,fork TCP:localhost:8082 &
-
+{custom_port_section}
 /bin/busybox sleep 2
 
 echo "Starting user application..."
@@ -146,25 +163,10 @@ echo "=== Running user application ==="
     Ok(())
 }
 
-async fn generate_containerfile_eif(stage_dir: &Path) -> Result<()> {
-    let containerfile_content = r#"
-FROM stagex/pallet-rust@sha256:9c38bf1066dd9ad1b6a6b584974dd798c2bf798985bf82e58024fbe0515592ca AS pallet-rust
-FROM stagex/core-busybox@sha256:637b1e0d9866807fac94c22d6dc4b2e1f45c8a5ca1113c88172e0324a30c7283 AS busybox
-FROM stagex/core-musl@sha256:d9af23284cca2e1002cd53159ada469dfe6d6791814e72d6163c7de18d4ae701 AS musl
-FROM stagex/core-gcc@sha256:964ffd3793c5a38ca581e9faefd19918c259f1611c4cbf5dc8be612e3a8b72f5 AS gcc
-FROM stagex/core-libunwind@sha256:eb66122d8fc543f5e2f335bb1616f8c3a471604383e2c0a9df4a8e278505d3bc AS libunwind
-FROM stagex/core-openssl@sha256:d6487f0cb15f4ee02b420c717cb9abd85d73043c0bb3a2c6ce07688b23c1df07 AS openssl
-FROM stagex/core-zlib@sha256:06f5168e20d85d1eb1d19836cdf96addc069769b40f8f0f4a7a70b2f49fc18f8 AS zlib
-FROM stagex/core-ca-certificates@sha256:d135f1189e9b232eb7316626bf7858534c5540b2fc53dced80a4c9a95f26493e AS ca-certificates
-FROM stagex/core-libzstd@sha256:5382c221194b6d0690eb65ccca01c720a6bd39f92e610dbc0e99ba43f38f3094 AS libzstd
-FROM stagex/user-cpio@sha256:9c8bf39001eca8a71d5617b46f8c9b4f7426db41a052f198d73400de6f8a16df AS cpio
-FROM stagex/user-socat@sha256:4d1b7a403eba65087a3f69200d2644d01b63f0ea81ef171cedc17de490c8c9a0 AS socat
-FROM stagex/user-eif_build@sha256:935032172a23772ea1a35c6334aa98aa7b0c46f9e34a040347c7b2a73496ef8a AS eif-build
-FROM stagex/user-linux-nitro@sha256:aa1006d91a7265b33b86160031daad2fdf54ec2663ed5ccbd312567cc9beff2c AS linux-nitro
-FROM stagex/user-nit@sha256:60b6eef4534ea6ea78d9f29e4c7feb27407b615424f20ad8943d807191688be7 AS nit
-FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769ff3b37239f3d0 AS git
-FROM stagex/core-curl@sha256:bc8bab43d96a9167fbb85022ea773644a45ef335e7a9b747f203078973fa988e AS curl
-
+async fn generate_containerfile_eif(stage_dir: &Path, e2e: bool) -> Result<()> {
+    // Conditionally include STEVE builder stage
+    let steve_builder_stage = if e2e {
+        r#"
 FROM pallet-rust AS steve-builder
 
 COPY --from=git . /
@@ -186,9 +188,44 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build-steve/target \
-    cargo build --release --locked --target ${TARGET_ARCH} -p steve \
-      && install -D -m 0755 /build-steve/target/${TARGET_ARCH}/release/steve /binaries/steve
+    cargo build --release --locked --target ${{TARGET_ARCH}} -p steve \
+      && install -D -m 0755 /build-steve/target/${{TARGET_ARCH}}/release/steve /binaries/steve
+"#
+    } else {
+        ""
+    };
 
+    let steve_copy = if e2e {
+        "COPY --from=steve-builder /binaries/steve /build/binaries/steve"
+    } else {
+        ""
+    };
+
+    let steve_install = if e2e {
+        r#"RUN cp /build/binaries/steve /build/initramfs/steve && \
+    chmod +x /build/initramfs/steve"#
+    } else {
+        ""
+    };
+
+    let containerfile_content = format!(r#"
+FROM stagex/pallet-rust@sha256:9c38bf1066dd9ad1b6a6b584974dd798c2bf798985bf82e58024fbe0515592ca AS pallet-rust
+FROM stagex/core-busybox@sha256:637b1e0d9866807fac94c22d6dc4b2e1f45c8a5ca1113c88172e0324a30c7283 AS busybox
+FROM stagex/core-musl@sha256:d9af23284cca2e1002cd53159ada469dfe6d6791814e72d6163c7de18d4ae701 AS musl
+FROM stagex/core-gcc@sha256:964ffd3793c5a38ca581e9faefd19918c259f1611c4cbf5dc8be612e3a8b72f5 AS gcc
+FROM stagex/core-libunwind@sha256:eb66122d8fc543f5e2f335bb1616f8c3a471604383e2c0a9df4a8e278505d3bc AS libunwind
+FROM stagex/core-openssl@sha256:d6487f0cb15f4ee02b420c717cb9abd85d73043c0bb3a2c6ce07688b23c1df07 AS openssl
+FROM stagex/core-zlib@sha256:06f5168e20d85d1eb1d19836cdf96addc069769b40f8f0f4a7a70b2f49fc18f8 AS zlib
+FROM stagex/core-ca-certificates@sha256:d135f1189e9b232eb7316626bf7858534c5540b2fc53dced80a4c9a95f26493e AS ca-certificates
+FROM stagex/core-libzstd@sha256:5382c221194b6d0690eb65ccca01c720a6bd39f92e610dbc0e99ba43f38f3094 AS libzstd
+FROM stagex/user-cpio@sha256:9c8bf39001eca8a71d5617b46f8c9b4f7426db41a052f198d73400de6f8a16df AS cpio
+FROM stagex/user-socat@sha256:4d1b7a403eba65087a3f69200d2644d01b63f0ea81ef171cedc17de490c8c9a0 AS socat
+FROM stagex/user-eif_build@sha256:935032172a23772ea1a35c6334aa98aa7b0c46f9e34a040347c7b2a73496ef8a AS eif-build
+FROM stagex/user-linux-nitro@sha256:aa1006d91a7265b33b86160031daad2fdf54ec2663ed5ccbd312567cc9beff2c AS linux-nitro
+FROM stagex/user-nit@sha256:60b6eef4534ea6ea78d9f29e4c7feb27407b615424f20ad8943d807191688be7 AS nit
+FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769ff3b37239f3d0 AS git
+FROM stagex/core-curl@sha256:bc8bab43d96a9167fbb85022ea773644a45ef335e7a9b747f203078973fa988e AS curl
+{steve_builder_stage}
 FROM pallet-rust AS enclave-builder
 
 ENV SOURCE_DATE_EPOCH=1
@@ -207,14 +244,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build-enclave/target \
-    cargo build --release --locked --target ${TARGET_ARCH} -p attestation-service \
-      && install -D -m 0755 /build-enclave/target/${TARGET_ARCH}/release/attestation-service /binaries/attestation-service
+    cargo build --release --locked --target ${{TARGET_ARCH}} -p attestation-service \
+      && install -D -m 0755 /build-enclave/target/${{TARGET_ARCH}}/release/attestation-service /binaries/attestation-service
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build-enclave/target \
-    cargo build --release --locked --target ${TARGET_ARCH} -p init \
-      && install -D -m 0755 /build-enclave/target/${TARGET_ARCH}/release/init /binaries/init
+    cargo build --release --locked --target ${{TARGET_ARCH}} -p init \
+      && install -D -m 0755 /build-enclave/target/${{TARGET_ARCH}}/release/init /binaries/init
 
 FROM busybox AS eif-builder
 
@@ -233,7 +270,7 @@ COPY --from=nit . /
 WORKDIR /build
 
 COPY --from=enclave-builder /binaries/ /build/binaries/
-COPY --from=steve-builder /binaries/steve /build/binaries/steve
+{steve_copy}
 
 COPY --from=linux-nitro /bzImage /build/kernel/bzImage
 COPY --from=linux-nitro /linux.config /build/kernel/linux.config
@@ -262,8 +299,7 @@ RUN cp /build/udhcpc-script.sh /build/initramfs/bin/udhcpc-script && \
 RUN cp /build/binaries/attestation-service /build/initramfs/attestation-service && \
     chmod +x /build/initramfs/attestation-service
 
-RUN cp /build/binaries/steve /build/initramfs/steve && \
-    chmod +x /build/initramfs/steve
+{steve_install}
 
 RUN if [ -f /build/manifest.json ]; then \
         cp /build/manifest.json /build/initramfs/manifest.json; \
@@ -304,7 +340,7 @@ RUN if [ -f /etc/ssl/certs/ca-certificates.crt ]; then \
 # Copy user app files to initramfs root to preserve original paths
 RUN cp -r /build/app/* /build/initramfs/ 2>/dev/null || true
 
-RUN find /build/initramfs -exec touch -hcd "@0" "{}" +
+RUN find /build/initramfs -exec touch -hcd "@0" "{{}}" +
 
 RUN cd /build/initramfs && \
     find . -print0 | sort -z | cpio --null --create --format=newc --reproducible | gzip --best > /build/rootfs.cpio.gz
@@ -321,7 +357,7 @@ FROM scratch AS output
 COPY --from=eif-builder /build/enclave.eif /enclave.eif
 COPY --from=eif-builder /build/enclave.pcrs /enclave.pcrs
 COPY --from=eif-builder /build/rootfs.cpio.gz /rootfs.cpio.gz
-"#;
+"#, steve_builder_stage = steve_builder_stage, steve_copy = steve_copy, steve_install = steve_install);
 
     let containerfile_path = stage_dir.join("Containerfile.eif");
     fs::write(&containerfile_path, containerfile_content).await?;
@@ -341,6 +377,7 @@ pub async fn build_eif_from_filesystems(
     manifest: Option<EnclaveManifest>,
     ports: &[u16],
     no_cache: bool,
+    e2e: bool,
 ) -> Result<EifFile> {
     tracing::info!("Building EIF using transparent Containerfile approach");
 
@@ -348,7 +385,7 @@ pub async fn build_eif_from_filesystems(
         fs::create_dir_all(parent).await?;
     }
 
-    let stage_dir = stage_eif_components(user_fs_path, enclave_source_path, work_dir, run_command, manifest, ports).await?;
+    let stage_dir = stage_eif_components(user_fs_path, enclave_source_path, work_dir, run_command, manifest, ports, e2e).await?;
 
     tracing::info!("Building EIF using Docker and Containerfile.eif");
     let output_dir = stage_dir.join("output");

@@ -215,6 +215,10 @@ pub struct BuildConfig {
     pub domain: Option<String>,
 
     pub managed_on_prem: Option<ManagedOnPremConfig>,
+
+    /// Enable end-to-end encryption via STEVE proxy (default: false)
+    #[serde(default)]
+    pub e2e: bool,
 }
 
 impl Default for BuildConfig {
@@ -236,6 +240,7 @@ impl Default for BuildConfig {
             ssh_keys: Vec::new(),
             domain: None,
             managed_on_prem: None,
+            e2e: false,
         }
     }
 }
@@ -254,6 +259,7 @@ impl BuildConfig {
         let mut cpus = None;
         let mut debug = None;
         let mut no_cache = None;
+        let mut e2e = None;
         let mut ports: Vec<u16> = Vec::new();
         let mut ssh_keys: Vec<String> = Vec::new();
         let mut domain: Option<String> = None;
@@ -351,36 +357,51 @@ impl BuildConfig {
                     "no_cache" | "nocache" => {
                         no_cache = Some(value.to_lowercase() == "true");
                     }
+                    "e2e" => {
+                        e2e = Some(value.to_lowercase() == "true");
+                    }
                     "ports" => {
-                        ports = value
-                            .split(',')
-                            .filter_map(|s| {
-                                let trimmed = s.trim();
-                                if trimmed.is_empty() {
-                                    return None;
+                        let mut parsed_ports: Vec<u16> = Vec::new();
+                        for s in value.split(',') {
+                            let trimmed = s.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            match trimmed.parse::<u16>() {
+                                Ok(port) if port > 0 => {
+                                    // Port 8080 is reserved for STEVE (encryption proxy)
+                                    if port == 8080 {
+                                        return Err(format!(
+                                            "Port 8080 is reserved for STEVE (the encryption proxy). \
+                                            Your application should listen on port 8083 instead, \
+                                            which STEVE will forward decrypted requests to."
+                                        ));
+                                    }
+                                    // Port 8081 is reserved for STEVE alternate/passthrough
+                                    if port == 8081 {
+                                        return Err(format!(
+                                            "Port 8081 is reserved for internal enclave services. \
+                                            Your application should listen on port 8083."
+                                        ));
+                                    }
+                                    // Port 8082 is reserved for attestation service
+                                    if port == 8082 {
+                                        tracing::warn!("Port 8082 is reserved for attestation service, ignoring");
+                                        continue;
+                                    }
+                                    parsed_ports.push(port);
                                 }
-                                match trimmed.parse::<u16>() {
-                                    Ok(port) if port > 0 => {
-                                        if port == 8082 {
-                                            tracing::warn!("Port 8082 is reserved for attestation service, ignoring");
-                                            None
-                                        } else {
-                                            Some(port)
-                                        }
-                                    }
-                                    Ok(_) => {
-                                        tracing::warn!("Invalid port 0 in Procfile, ignoring");
-                                        None
-                                    }
-                                    Err(_) => {
-                                        tracing::warn!("Invalid port '{}' in Procfile, ignoring", trimmed);
-                                        None
-                                    }
+                                Ok(_) => {
+                                    tracing::warn!("Invalid port 0 in Procfile, ignoring");
                                 }
-                            })
-                            .collect();
-                        ports.sort();
-                        ports.dedup();
+                                Err(_) => {
+                                    tracing::warn!("Invalid port '{}' in Procfile, ignoring", trimmed);
+                                }
+                            }
+                        }
+                        parsed_ports.sort();
+                        parsed_ports.dedup();
+                        ports = parsed_ports;
                         if !ports.is_empty() {
                             tracing::info!("Parsed ports from Procfile: {:?}", ports);
                         }
@@ -477,6 +498,7 @@ impl BuildConfig {
             ssh_keys,
             domain,
             managed_on_prem: managed_on_prem_config,
+            e2e: e2e.unwrap_or(false),
         })
     }
 }

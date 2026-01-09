@@ -273,6 +273,7 @@ impl EnclaveBuilder {
         run_command: Option<String>,
         manifest: Option<EnclaveManifest>,
         ports: &[u16],
+        e2e: bool,
     ) -> Result<EifFile> {
         build::build_eif_from_filesystems(
             user_fs_path,
@@ -285,6 +286,7 @@ impl EnclaveBuilder {
             manifest,
             ports,
             self.no_cache,
+            e2e,
         )
         .await
     }
@@ -338,7 +340,7 @@ impl EnclaveBuilder {
         None
     }
 
-    pub async fn build_enclave(&self, user_image: &UserImage, specific_files: Option<Vec<String>>, run_command: Option<String>, app_source_urls: Option<Vec<String>>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>, ports: &[u16]) -> Result<Deployment> {
+    pub async fn build_enclave(&self, user_image: &UserImage, specific_files: Option<Vec<String>>, run_command: Option<String>, app_source_urls: Option<Vec<String>>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>, ports: &[u16], e2e: bool) -> Result<Deployment> {
         if let Some(cached) = self.get_cached_eif() {
             tracing::info!("Using cached EIF from: {}", cached.eif.path.display());
             return Ok(cached);
@@ -425,6 +427,7 @@ impl EnclaveBuilder {
             run_command,
             Some(manifest),
             ports,
+            e2e,
         ).await?;
 
         tracing::info!("Extracting PCR values...");
@@ -443,7 +446,7 @@ impl EnclaveBuilder {
         })
     }
 
-    pub async fn build_enclave_from_filesystem(&self, user_fs_path: PathBuf, run_command: Option<String>, app_source_urls: Option<Vec<String>>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>, ports: &[u16]) -> Result<Deployment> {
+    pub async fn build_enclave_from_filesystem(&self, user_fs_path: PathBuf, run_command: Option<String>, app_source_urls: Option<Vec<String>>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>, ports: &[u16], e2e: bool) -> Result<Deployment> {
         if let Some(cached) = self.get_cached_eif() {
             tracing::info!("Using cached EIF from: {}", cached.eif.path.display());
             return Ok(cached);
@@ -519,6 +522,7 @@ impl EnclaveBuilder {
             run_command,
             Some(manifest),
             ports,
+            e2e,
         ).await?;
 
         tracing::info!("Extracting PCR values...");
@@ -537,7 +541,7 @@ impl EnclaveBuilder {
         })
     }
 
-    pub async fn build_enclave_auto(&self, user_image: &UserImage, binary_path: &str, run_command: Option<String>, app_source_urls: Option<Vec<String>>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>, ports: &[u16]) -> Result<Deployment> {
+    pub async fn build_enclave_auto(&self, user_image: &UserImage, binary_path: &str, run_command: Option<String>, app_source_urls: Option<Vec<String>>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>, ports: &[u16], e2e: bool) -> Result<Deployment> {
         let binary_basename = std::path::Path::new(binary_path)
             .file_name()
             .and_then(|n| n.to_str())
@@ -569,10 +573,10 @@ impl EnclaveBuilder {
 
             tracing::info!("Copied binary to staging: {}", dest_path.display());
 
-            self.build_enclave_from_filesystem(user_service_dir, run_command, app_source_urls, app_branch.clone(), app_commit.clone(), metadata, external_manifest, ports).await
+            self.build_enclave_from_filesystem(user_service_dir, run_command, app_source_urls, app_branch.clone(), app_commit.clone(), metadata, external_manifest, ports, e2e).await
         } else {
             tracing::info!("Binary not found on filesystem, using Docker extraction");
-            self.build_enclave(user_image, Some(vec![binary_path.to_string()]), run_command, app_source_urls, app_branch, app_commit, metadata, external_manifest, ports).await
+            self.build_enclave(user_image, Some(vec![binary_path.to_string()]), run_command, app_source_urls, app_branch, app_commit, metadata, external_manifest, ports, e2e).await
         }
     }
 }
