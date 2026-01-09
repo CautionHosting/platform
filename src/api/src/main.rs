@@ -107,44 +107,55 @@ async fn auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, (StatusCode, String)> {
-    // Internal service authentication requires BOTH the user ID AND a valid secret
-    // This prevents external callers from bypassing authentication by providing the header
-    if let Some(user_id_str) = headers.get("x-authenticated-user-id").and_then(|h| h.to_str().ok()) {
-        let provided_secret = headers.get("x-internal-service-secret").and_then(|h| h.to_str().ok());
+    // Check which auth method is being used
+    let internal_secret = headers.get("x-internal-service-secret").and_then(|h| h.to_str().ok());
+    let session_id = headers.get("x-session-id").and_then(|h| h.to_str().ok());
 
-        // Only accept internal service auth if a secret is configured AND it matches
-        if let Some(ref configured_secret) = state.internal_service_secret {
-            if provided_secret == Some(configured_secret.as_str()) {
-                if let Ok(user_id) = Uuid::parse_str(user_id_str) {
-                    tracing::debug!("Auth middleware: internal service auth for user_id={}", user_id);
-                    request.extensions_mut().insert(AuthContext { user_id });
-                    return Ok(next.run(request).await);
-                }
-            } else {
-                tracing::warn!("Auth middleware: internal service auth attempted with invalid or missing secret");
-            }
-        } else {
-            tracing::warn!("Auth middleware: internal service auth attempted but no secret configured");
+    // Internal service authentication (takes precedence if secret header is present)
+    if let Some(provided_secret) = internal_secret {
+        let Some(ref configured_secret) = state.internal_service_secret else {
+            tracing::warn!("Auth middleware: internal service auth rejected - no secret configured on server");
+            return Err((StatusCode::UNAUTHORIZED, "Internal service authentication not configured".to_string()));
+        };
+
+        if provided_secret != configured_secret.as_str() {
+            tracing::warn!("Auth middleware: internal service auth rejected - invalid secret");
+            return Err((StatusCode::UNAUTHORIZED, "Invalid internal service secret".to_string()));
         }
+
+        let Some(user_id_str) = headers.get("x-authenticated-user-id").and_then(|h| h.to_str().ok()) else {
+            tracing::warn!("Auth middleware: internal service auth rejected - missing user ID");
+            return Err((StatusCode::UNAUTHORIZED, "Missing user ID for internal service auth".to_string()));
+        };
+
+        let Ok(user_id) = Uuid::parse_str(user_id_str) else {
+            tracing::warn!("Auth middleware: internal service auth rejected - invalid user ID format");
+            return Err((StatusCode::UNAUTHORIZED, "Invalid user ID format".to_string()));
+        };
+
+        tracing::debug!("Auth middleware: internal service auth for user_id={}", user_id);
+        request.extensions_mut().insert(AuthContext { user_id });
+        return Ok(next.run(request).await);
     }
 
-    let Some(session_id) = headers.get("x-session-id").and_then(|h| h.to_str().ok()) else {
-        tracing::debug!("Auth middleware: no authentication header provided");
-        return Err((StatusCode::UNAUTHORIZED, "No authentication provided".to_string()));
-    };
+    // Session-based authentication
+    if let Some(session_id) = session_id {
+        tracing::debug!("Auth middleware: validating session {}", session_id);
+        let user_id = validate_session(&state.db, session_id).await.map_err(|status| {
+            let msg = match status {
+                StatusCode::UNAUTHORIZED => "Invalid or expired session".to_string(),
+                _ => "Authentication failed".to_string(),
+            };
+            (status, msg)
+        })?;
+        tracing::debug!("Session validated: user_id={}", user_id);
+        request.extensions_mut().insert(AuthContext { user_id });
+        return Ok(next.run(request).await);
+    }
 
-    tracing::debug!("Auth middleware: validating session {}", session_id);
-    let user_id = validate_session(&state.db, session_id).await.map_err(|status| {
-        let msg = match status {
-            StatusCode::UNAUTHORIZED => "Invalid or expired session".to_string(),
-            _ => "Authentication failed".to_string(),
-        };
-        (status, msg)
-    })?;
-    tracing::debug!("Session validated: user_id={}", user_id);
-
-    request.extensions_mut().insert(AuthContext { user_id });
-    Ok(next.run(request).await)
+    // No valid authentication method provided
+    tracing::debug!("Auth middleware: no authentication provided");
+    Err((StatusCode::UNAUTHORIZED, "No authentication provided".to_string()))
 }
 
 async fn onboarding_middleware(
