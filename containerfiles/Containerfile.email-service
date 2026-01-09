@@ -15,14 +15,12 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/api/Cargo.toml ./src/api/
 COPY src/gateway/Cargo.toml ./src/gateway/
-COPY src/cli/Cargo.toml ./src/cli/
 COPY src/email-service/Cargo.toml ./src/email-service/
 COPY src/enclave-builder/Cargo.toml ./src/enclave-builder/
 
-RUN mkdir -p src/api/src src/gateway/src src/cli/src src/enclave-builder/src && \
+RUN mkdir -p src/api/src src/gateway/src src/enclave-builder/src && \
     echo "fn main() {}" > src/api/src/main.rs && \
     echo "fn main() {}" > src/gateway/src/main.rs && \
-    echo "fn main() {}" > src/cli/src/main.rs && \
     echo "pub fn dummy() {}" > src/enclave-builder/src/lib.rs
 
 COPY src/email-service/src ./src/email-service/src
