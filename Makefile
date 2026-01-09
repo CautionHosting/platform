@@ -19,16 +19,6 @@ SSH_PORT ?= 2222
 CAUTION_DATA_DIR ?= $(PWD)/caution-cache
 CONTAINER_DATA_DIR := /var/cache/caution
 
-build-cli:
-	@echo "Building CLI binary..."
-	@mkdir -p $(OUT_DIR)
-	@docker build -t caution-cli -f ./containerfiles/Containerfile.cli --target export .
-	@docker rm -f cli-extract 2>/dev/null || true
-	docker create --name cli-extract caution-cli
-	docker cp cli-extract:/caution $(OUT_DIR)/caution
-	docker rm cli-extract
-	@echo "CLI binary available at $(OUT_DIR)/caution"
-
 build-gateway:
 	@echo "Building Gateway binary..."
 	@mkdir -p $(OUT_DIR)
@@ -51,7 +41,7 @@ build-frontend:
 	@docker build -t caution-frontend -f ./containerfiles/Containerfile.frontend .
 	@echo "Frontend image built: caution-frontend"
 
-build-all: build-cli build-gateway build-api build-email build-frontend
+build-all: build-gateway build-api build-email build-frontend
 
 network:
 	@docker network inspect $(NETWORK) >/dev/null 2>&1 || \
