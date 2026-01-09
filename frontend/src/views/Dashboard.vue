@@ -2,742 +2,1273 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial -->
 
 <template>
-  <div class="dashboard-container">
-    <img src="../assets/caution-logo-black.svg" alt="Caution" class="logo" />
-    <div class="dashboard-card">
-      <div class="header">
-        <h1>Dashboard</h1>
-        <button @click="logout" class="btn-logout">Logout</button>
+  <DashboardLayout
+    :title="pageTitle"
+    :active-tab="activeTab"
+    :show-title="false"
+    @tab-change="handleTabChange"
+    @logout="logout"
+  >
+    <!-- Messages (exclude SSH key form errors as they appear in-form) -->
+    <div v-if="error && !showAddKeyForm" class="message message--error">
+      {{ error }}
+    </div>
+    <div v-if="success" class="message message--success">
+      {{ success }}
+    </div>
+
+    <!-- Notes sidebar (only show for Cloud credentials) -->
+    <template #aside>
+      <div v-if="activeTab === 'credentials'" class="notes-card">
+        <h3>Cloud credentials</h3>
+        <p>Add your AWS credentials to deploy applications to your own infrastructure.</p>
+        <p>Your credentials are encrypted and stored securely.</p>
+      </div>
+    </template>
+
+    <!-- Applications Tab -->
+    <template v-if="activeTab === 'apps'">
+      <!-- Loading state -->
+      <div v-if="loadingApps" class="content-card">
+        <div class="loading">Loading applications...</div>
       </div>
 
-      <div v-if="error" class="error-message">
-        {{ error }}
-      </div>
-
-      <div v-if="success" class="success-message">
-        {{ success }}
-      </div>
-
-      <div class="tabs">
-        <button
-          :class="['tab', { active: activeTab === 'apps' }]"
-          @click="activeTab = 'apps'"
-        >
-          Apps
-        </button>
-        <button
-          :class="['tab', { active: activeTab === 'ssh' }]"
-          @click="activeTab = 'ssh'"
-        >
-          SSH Keys
-        </button>
-        <button
-          :class="['tab', { active: activeTab === 'credentials' }]"
-          @click="activeTab = 'credentials'"
-        >
-          Cloud Credentials
-        </button>
-      </div>
-
-      <div v-if="activeTab === 'apps'" class="tab-content">
-        <section class="section">
-          <h2>Applications</h2>
-          <p class="section-description">
-            Your deployed applications and their status.
-          </p>
-
-          <div class="apps-list">
-            <div v-if="loadingApps" class="loading">Loading apps...</div>
-            <div v-else-if="apps.length === 0" class="quick-start">
-              <h3>Quick Start</h3>
-              <p class="section-description">
-                Download, and install the Caution CLI.
-              </p>
-              <div class="code-block">
-                <pre>
-git clone https://codeberg.org/caution/platform
-cd platform
-make build-cli
-./utils/install.sh
-                </pre>
+      <!-- Apps list (when user has apps) -->
+      <div v-else-if="apps.length > 0" class="content-card">
+        <div class="items-list">
+          <div v-for="app in apps" :key="app.id" class="app-card">
+            <div class="app-header">
+              <span class="app-name">{{
+                app.resource_name || "Unnamed App"
+              }}</span>
+              <span :class="['app-status', `status-${app.state.toLowerCase()}`]">
+                {{ app.state }}
+              </span>
+            </div>
+            <div class="app-details">
+              <div class="app-detail">
+                <span class="detail-label">ID:</span>
+                <span class="detail-value">{{ app.id }}</span>
               </div>
-              <br/>
-              <p class="section-description">
-                Use the CLI to create and deploy applications.
-              </p>
-              <div class="code-block">
-                <pre>
-git clone https://codeberg.org/caution/hello-world-enclave
-cd hello-world-enclave
-caution login
-# Tap your smart card
-caution ssh-keys add --from-agent 
-# You can also pass a file such as ~/.ssh/id_ed25519.pub
-caution init
-git push caution main
-caution verify --reproduce
-                </pre>
+              <div v-if="app.public_ip" class="app-detail">
+                <span class="detail-label">IP:</span>
+                <span class="detail-value">{{ app.public_ip }}</span>
               </div>
-            </div>
-            <div v-else class="apps-grid">
-              <div v-for="app in apps" :key="app.id" class="app-card">
-                <div class="app-header">
-                  <div class="app-header-left">
-                    <span class="app-name">{{ app.resource_name || 'Unnamed App' }}</span>
-                    <span class="app-id">{{ app.id }}</span>
-                  </div>
-                  <span :class="['app-status', `status-${app.state.toLowerCase()}`]">
-                    {{ app.state }}
-                  </span>
-                </div>
-                <div class="app-body">
-                  <div class="app-details">
-                    <div class="app-specs">
-                      <span class="spec-badge">{{ getEnclaveConfig(app).memory_mb }} MB</span>
-                      <span class="spec-badge">{{ getEnclaveConfig(app).cpus }} CPU</span>
-                      <span v-if="getInstanceType(app)" class="spec-badge">{{ getInstanceType(app) }}</span>
-                      <span v-if="getEnclaveConfig(app).debug" class="spec-badge spec-debug">Debug</span>
-                    </div>
-                    <div v-if="app.public_ip" class="app-detail">
-                      <span class="detail-label">IP:</span>
-                      <span class="detail-value">{{ app.public_ip }}</span>
-                    </div>
-                    <div v-if="app.public_ip || app.domain" class="app-detail">
-                      <button @click="showAttestation(app)" class="app-link-btn">
-                        Attestation
-                      </button>
-                    </div>
-                    <div v-if="app.domain" class="app-detail app-detail-full">
-                      <a :href="'https://' + app.domain" target="_blank" class="app-link">
-                        https://{{ app.domain }}
-                      </a>
-                    </div>
-                    <div v-else-if="app.public_ip" class="app-detail app-detail-full">
-                      <a :href="'http://' + app.public_ip" target="_blank" class="app-link">
-                        http://{{ app.public_ip }}
-                      </a>
-                    </div>
-                  </div>
-                  <div class="app-actions">
-                    <button
-                      @click="destroyApp(app.id, app.resource_name)"
-                      class="btn-danger"
-                      :disabled="destroyingApp === app.id"
-                    >
-                      {{ destroyingApp === app.id ? 'Destroying...' : 'Destroy' }}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-      </div>
-
-      <div v-if="activeTab === 'credentials'" class="tab-content">
-        <section class="section">
-          <h2>AWS Credentials</h2>
-          <p class="section-description">
-            Add AWS credentials to deploy applications to your own infrastructure.
-          </p>
-
-          <div class="add-key-form">
-            <div class="form-group">
-              <label for="credName">Name</label>
-              <input
-                id="credName"
-                v-model="newCredName"
-                type="text"
-                placeholder="e.g., Production AWS"
-                :disabled="addingCred"
-              />
-            </div>
-            <div class="form-group">
-              <label for="awsAccessKeyId">Access Key ID</label>
-              <input
-                id="awsAccessKeyId"
-                v-model="newCredAwsKeyId"
-                type="text"
-                placeholder="AKIA..."
-                :disabled="addingCred"
-              />
-            </div>
-            <div class="form-group">
-              <label for="awsSecretKey">Secret Access Key</label>
-              <input
-                id="awsSecretKey"
-                v-model="newCredAwsSecret"
-                type="password"
-                placeholder="Enter secret access key"
-                :disabled="addingCred"
-              />
-            </div>
-            <div class="form-group checkbox-group">
-              <label>
-                <input
-                  type="checkbox"
-                  v-model="newCredIsDefault"
-                  :disabled="addingCred"
-                />
-                Set as default
-              </label>
-            </div>
-            <button
-              @click="addCredential"
-              class="btn-primary"
-              :disabled="addingCred || !newCredName.trim() || !newCredAwsKeyId.trim() || !newCredAwsSecret.trim()"
-            >
-              {{ addingCred ? 'Adding...' : 'Add Credential' }}
-            </button>
-          </div>
-
-          <div class="keys-list">
-            <div v-if="loadingCreds" class="loading">Loading credentials...</div>
-            <div v-else-if="credentials.length === 0" class="empty-state">
-              No AWS credentials added yet.
-            </div>
-            <div v-else>
-              <div v-for="cred in credentials" :key="cred.id" class="cred-item">
-                <div class="cred-info">
-                  <div class="cred-header">
-                    <span class="cred-name">{{ cred.name }}</span>
-                    <span v-if="cred.is_default" class="cred-default">Default</span>
-                  </div>
-                  <code class="cred-identifier">{{ cred.identifier }}</code>
-                </div>
-                <div class="cred-actions">
-                  <button
-                    v-if="!cred.is_default"
-                    @click="setDefaultCredential(cred.id)"
-                    class="btn-secondary"
-                    :disabled="settingDefault === cred.id"
-                  >
-                    {{ settingDefault === cred.id ? '...' : 'Set Default' }}
-                  </button>
-                  <button
-                    @click="deleteCredential(cred.id, cred.name)"
-                    class="btn-danger"
-                    :disabled="deletingCred === cred.id"
-                  >
-                    {{ deletingCred === cred.id ? 'Deleting...' : 'Delete' }}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-      </div>
-
-      <div v-if="activeTab === 'ssh'" class="tab-content">
-        <section class="section">
-          <h2>SSH Keys</h2>
-          <p class="section-description">
-            Add SSH keys to push code to your applications via Git.
-          </p>
-
-          <div class="add-key-form">
-            <div class="form-group">
-              <label for="keyName">Key Name (optional)</label>
-              <input
-                id="keyName"
-                v-model="newKeyName"
-                type="text"
-                placeholder="e.g., Work Laptop"
-                :disabled="addingKey"
-              />
-            </div>
-            <div class="form-group">
-              <label for="publicKey">Public Key</label>
-              <textarea
-                id="publicKey"
-                v-model="newPublicKey"
-                placeholder="ssh-ed25519 AAAA... or ssh-rsa AAAA..."
-                rows="3"
-                :disabled="addingKey"
-              ></textarea>
-            </div>
-            <button
-              @click="addKey"
-              class="btn-primary"
-              :disabled="addingKey || !newPublicKey.trim()"
-            >
-              {{ addingKey ? 'Adding...' : 'Add SSH Key' }}
-            </button>
-          </div>
-
-          <!-- Keys List -->
-          <div class="keys-list">
-            <div v-if="loadingKeys" class="loading">Loading keys...</div>
-            <div v-else-if="sshKeys.length === 0" class="empty-state">
-              No SSH keys added yet.
-            </div>
-            <div v-else>
-              <div v-for="key in sshKeys" :key="key.fingerprint" class="key-item">
-                <div class="key-info">
-                  <span class="key-name">{{ key.name || 'Unnamed Key' }}</span>
-                  <code class="key-fingerprint">{{ key.fingerprint }}</code>
-                  <span class="key-type">{{ key.key_type }}</span>
-                </div>
-                <button
-                  @click="deleteKey(key.fingerprint)"
-                  class="btn-danger"
-                  :disabled="deletingKey === key.fingerprint"
+              <div v-if="app.public_ip" class="app-links">
+                <a
+                  :href="'http://' + app.public_ip + ':8080'"
+                  target="_blank"
+                  class="app-link"
                 >
-                  {{ deletingKey === key.fingerprint ? 'Deleting...' : 'Delete' }}
+                  Open App
+                </a>
+                <button @click="attestationApp = app" class="app-link-btn">
+                  Attestation
                 </button>
               </div>
             </div>
+            <div class="app-actions">
+              <button
+                @click="destroyApp(app.id, app.resource_name)"
+                class="btn-danger"
+                :disabled="destroyingApp === app.id"
+              >
+                {{ destroyingApp === app.id ? "Destroying..." : "Destroy" }}
+              </button>
+            </div>
           </div>
-        </section>
+        </div>
+      </div>
+
+      <!-- Starter Screen (default home screen when no apps) -->
+      <template v-else-if="apps.length === 0">
+        <div class="content-card guide-intro">
+          <div class="guide-intro-content">
+            <div class="guide-intro-eyebrow">QUICK START GUIDE</div>
+            <h2 class="guide-intro-title">Deploy your first application</h2>
+            <p class="guide-intro-description">
+              Learn how to use the Caution CLI to deploy your application in a secure enclave and verify exactly what code is running.
+            </p>
+
+            <button class="btn-guide" @click="startGuide">
+              Get started
+            </button>
+          </div>
+        </div>
+      </template>
+    </template>
+
+    <!-- Quick Start Guide Tab -->
+    <template v-if="activeTab === 'guide'">
+      <!-- Guide Intro Screen -->
+      <template v-if="setupStep === 0">
+        <div class="content-card guide-intro">
+          <div class="guide-intro-content">
+            <div class="guide-intro-eyebrow">QUICK START GUIDE</div>
+            <h2 class="guide-intro-title">{{ apps.length === 0 ? 'Deploy your first application' : 'How to deploy an application' }}</h2>
+            <p class="guide-intro-description">
+              Learn how to use the Caution CLI to deploy your application in a secure enclave and verify exactly what code is running.
+            </p>
+
+            <button class="btn-guide" @click="setupStep = 1">
+              Get started
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <!-- Step 1: Install CLI -->
+      <template v-else-if="setupStep === 1">
+        <div class="content-card quick-start-inline">
+          <div class="step-header">
+            <h2 class="step-title">Step 1. Install the Caution CLI</h2>
+          </div>
+
+          <div class="guide-layout guide-layout-step2">
+            <div class="guide-content">
+              <p class="quick-start-description">
+                Install the Caution CLI to deploy and manage enclave applications from your terminal.
+              </p>
+              <p class="quick-start-description">
+                You only need to do this once per environment.
+              </p>
+            </div>
+            <div class="guide-code">
+              <div class="code-block">
+                <button
+                  class="copy-btn"
+                  :class="{ copied: copiedBlock === 'install' }"
+                  @click="copyCode('install')"
+                  :title="copiedBlock === 'install' ? 'Copied' : 'Copy to clipboard'"
+                >
+                  <img src="/assets/copy.svg" alt="Copy" class="copy-icon" />
+                  <span class="copy-btn-text">Copied</span>
+                </button>
+                <pre ref="codeInstall">
+git clone https://codeberg.org/caution/platform
+cd platform
+make build-cli
+./utils/install.sh</pre
+                >
+              </div>
+            </div>
+          </div>
+
+          <div class="guide-navigation">
+            <button class="btn-continue" @click="setupStep = 0">
+              <img
+                src="/assets/chevron-left.svg"
+                alt=""
+                style="width: 20px; height: 20px; margin-right: 8px;"
+              />
+              <span class="btn-text">Back</span>
+            </button>
+            <div class="progress-dots">
+              <button class="progress-dot active" @click="setupStep = 1"></button>
+              <button class="progress-dot" @click="setupStep = 2"></button>
+              <button class="progress-dot" @click="setupStep = 3"></button>
+              <button class="progress-dot" @click="setupStep = 4"></button>
+              <button class="progress-dot" @click="setupStep = 5"></button>
+            </div>
+            <button class="btn-continue" @click="setupStep = 2">
+              <span class="btn-text">Next</span>
+              <img
+                src="/assets/chevron-right.svg"
+                alt=""
+                style="width: 20px; height: 20px; margin-left: 8px;"
+              />
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <!-- Step 2: Clone & Authenticate -->
+      <template v-else-if="setupStep === 2">
+        <div class="content-card quick-start-inline">
+          <div class="step-header">
+            <h2 class="step-title">Step 2. Clone an application</h2>
+          </div>
+
+          <div class="guide-layout guide-layout-step2">
+            <div class="guide-content">
+              <p class="quick-start-description">
+                Clone the application you want to deploy.</p>
+                <p class="quick-start-description">You can use <a href="https://codeberg.org/caution" target="_blank" rel="noopener noreferrer" class="guide-link">one of our demos</a> or your own repository.
+              </p>
+              <p class="quick-start-description">
+                Authenticate with your security key and register your SSH key.
+              </p>
+            </div>
+            <div class="guide-code">
+              <div class="code-block">
+                <button
+                  class="copy-btn"
+                  :class="{ copied: copiedBlock === 'clone' }"
+                  @click="copyCode('clone')"
+                  :title="copiedBlock === 'clone' ? 'Copied' : 'Copy to clipboard'"
+                >
+                  <img src="/assets/copy.svg" alt="Copy" class="copy-icon" />
+                  <span class="copy-btn-text">Copied</span>
+                </button>
+                <pre ref="codeClone"><span class="code-command">git clone https://codeberg.org/caution/hello-world-enclave</span>
+<span class="code-command">cd hello-world-enclave</span>
+
+<span class="code-command">caution login</span>
+<span class="code-comment"># Tap your security key when prompted</span>
+
+<span class="code-command">caution ssh-keys add --from-agent</span>
+<span class="code-comment"># Or provide a key file such as ~/.ssh/id_ed25519.pub</span></pre
+                >
+              </div>
+            </div>
+          </div>
+
+          <div class="guide-navigation">
+            <button class="btn-continue" @click="setupStep = 1">
+              <img
+                src="/assets/chevron-left.svg"
+                alt=""
+                style="width: 20px; height: 20px; margin-right: 8px;"
+              />
+              <span class="btn-text">Back</span>
+            </button>
+            <div class="progress-dots">
+              <button class="progress-dot" @click="setupStep = 1"></button>
+              <button class="progress-dot active" @click="setupStep = 2"></button>
+              <button class="progress-dot" @click="setupStep = 3"></button>
+              <button class="progress-dot" @click="setupStep = 4"></button>
+              <button class="progress-dot" @click="setupStep = 5"></button>
+            </div>
+            <button class="btn-continue" @click="setupStep = 3">
+              <span class="btn-text">Next</span>
+              <img
+                src="/assets/chevron-right.svg"
+                alt=""
+                style="width: 20px; height: 20px; margin-left: 8px;"
+              />
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <!-- Step 3: Initialize -->
+      <template v-else-if="setupStep === 3">
+        <div class="content-card quick-start-inline">
+          <div class="step-header">
+            <h2 class="step-title">Step 3. Initialize project</h2>
+          </div>
+
+          <div class="guide-layout guide-layout-balanced">
+            <div class="guide-content">
+              <p class="quick-start-description">
+                Run <code>caution init</code> to capture and lock the build environment for reproducible enclave builds.
+              </p>
+              <p class="quick-start-description">
+                This creates a lockfile that records your system's build environment, ensuring that your enclave can be reproduced bit-for-bit by anyone.
+              </p>
+            </div>
+            <div class="guide-code">
+              <div class="code-block code-block-short">
+                <button
+                  class="copy-btn"
+                  :class="{ copied: copiedBlock === 'init' }"
+                  @click="copyCode('init')"
+                  :title="copiedBlock === 'init' ? 'Copied' : 'Copy to clipboard'"
+                >
+                  <img src="/assets/copy.svg" alt="Copy" class="copy-icon" />
+                  <span class="copy-btn-text">Copied</span>
+                </button>
+                <pre ref="codeInit">caution init</pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="guide-navigation">
+            <button class="btn-continue" @click="setupStep = 2">
+              <img
+                src="/assets/chevron-left.svg"
+                alt=""
+                style="width: 20px; height: 20px; margin-right: 8px;"
+              />
+              <span class="btn-text">Back</span>
+            </button>
+            <div class="progress-dots">
+              <button class="progress-dot" @click="setupStep = 1"></button>
+              <button class="progress-dot" @click="setupStep = 2"></button>
+              <button class="progress-dot active" @click="setupStep = 3"></button>
+              <button class="progress-dot" @click="setupStep = 4"></button>
+              <button class="progress-dot" @click="setupStep = 5"></button>
+            </div>
+            <button class="btn-continue" @click="setupStep = 4">
+              <span class="btn-text">Next</span>
+              <img
+                src="/assets/chevron-right.svg"
+                alt=""
+                style="width: 20px; height: 20px; margin-left: 8px;"
+              />
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <!-- Step 4: Deploy -->
+      <template v-else-if="setupStep === 4">
+        <div class="content-card quick-start-inline">
+          <div class="step-header">
+            <h2 class="step-title">Step 4. Deploy to enclave</h2>
+          </div>
+
+          <div class="guide-layout guide-layout-balanced">
+            <div class="guide-content">
+              <p class="quick-start-description">
+                Push your application with <code>git push caution main</code> to deploy it.
+              </p>
+              <p class="quick-start-description">
+                Caution builds a reproducible enclave image and provisions the TEE.
+              </p>
+            </div>
+            <div class="guide-code">
+              <div class="code-block code-block-short">
+                <button
+                  class="copy-btn"
+                  :class="{ copied: copiedBlock === 'deploy' }"
+                  @click="copyCode('deploy')"
+                  :title="copiedBlock === 'deploy' ? 'Copied' : 'Copy to clipboard'"
+                >
+                  <img src="/assets/copy.svg" alt="Copy" class="copy-icon" />
+                  <span class="copy-btn-text">Copied</span>
+                </button>
+                <pre ref="codeDeploy">git push caution main</pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="guide-navigation">
+            <button class="btn-continue" @click="setupStep = 3">
+              <img
+                src="/assets/chevron-left.svg"
+                alt=""
+                style="width: 20px; height: 20px; margin-right: 8px;"
+              />
+              <span class="btn-text">Back</span>
+            </button>
+            <div class="progress-dots">
+              <button class="progress-dot" @click="setupStep = 1"></button>
+              <button class="progress-dot" @click="setupStep = 2"></button>
+              <button class="progress-dot" @click="setupStep = 3"></button>
+              <button class="progress-dot active" @click="setupStep = 4"></button>
+              <button class="progress-dot" @click="setupStep = 5"></button>
+            </div>
+            <button class="btn-continue" @click="setupStep = 5">
+              <span class="btn-text">Next</span>
+              <img
+                src="/assets/chevron-right.svg"
+                alt=""
+                style="width: 20px; height: 20px; margin-left: 8px;"
+              />
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <!-- Step 5: Verify -->
+      <template v-else-if="setupStep === 5">
+        <div class="content-card quick-start-inline">
+          <div class="step-header">
+            <h2 class="step-title">Step 5. Verify what runs in the enclave</h2>
+          </div>
+
+          <div class="guide-layout guide-layout-balanced">
+            <div class="guide-content">
+              <p class="quick-start-description">
+                Run <code>caution verify --reproduce</code> to rebuild the image, compare hashes, and confirm exactly what code is running inside the enclave.
+              </p>
+              <p class="quick-start-description">
+                Independent verification confirms the deployed enclave matches your source code.
+              </p>
+            </div>
+            <div class="guide-code">
+              <div class="code-block code-block-short">
+                <button
+                  class="copy-btn"
+                  :class="{ copied: copiedBlock === 'verify' }"
+                  @click="copyCode('verify')"
+                  :title="copiedBlock === 'verify' ? 'Copied' : 'Copy to clipboard'"
+                >
+                  <img src="/assets/copy.svg" alt="Copy" class="copy-icon" />
+                  <span class="copy-btn-text">Copied</span>
+                </button>
+                <pre ref="codeVerify">caution verify --reproduce</pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="guide-navigation">
+            <button class="btn-continue" @click="setupStep = 4">
+              <img
+                src="/assets/chevron-left.svg"
+                alt=""
+                style="width: 20px; height: 20px; margin-right: 8px;"
+              />
+              <span class="btn-text">Back</span>
+            </button>
+            <div class="progress-dots">
+              <button class="progress-dot" @click="setupStep = 1"></button>
+              <button class="progress-dot" @click="setupStep = 2"></button>
+              <button class="progress-dot" @click="setupStep = 3"></button>
+              <button class="progress-dot" @click="setupStep = 4"></button>
+              <button class="progress-dot active" @click="setupStep = 5"></button>
+            </div>
+            <button class="btn-continue" @click="setupStep = 6">
+              <span class="btn-text">Done</span>
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <!-- Completion Screen -->
+      <template v-else-if="setupStep === 6">
+        <div class="content-card guide-intro">
+          <div class="guide-intro-content">
+            <h2 class="guide-completion-title">You're ready to deploy with Caution</h2>
+            <p class="guide-completion-description">
+              You've completed the quick start guide.
+              Use these steps to deploy and verify applications using the Caution CLI.
+            </p>
+
+            <button class="btn-guide" @click="handleTabChange('apps')">
+              Go to applications
+            </button>
+          </div>
+        </div>
+      </template>
+    </template>
+
+    <!-- SSH Keys Tab -->
+    <div v-if="activeTab === 'ssh'" class="content-card">
+      <!-- Show form when adding a key -->
+      <template v-if="showAddKeyForm">
+        <h3 class="form-section-title">Add new SSH key</h3>
+        <p class="form-section-description">
+          Add SSH keys to push code to your applications via git.
+        </p>
+        <div class="form-group">
+          <label class="form-label" for="keyName">Key name</label>
+          <input
+            id="keyName"
+            v-model="newKeyName"
+            type="text"
+            class="form-input"
+            :disabled="addingKey"
+          />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="publicKey">Public key</label>
+          <div class="form-input-wrapper">
+            <textarea
+              id="publicKey"
+              v-model="newPublicKey"
+              class="form-textarea"
+              placeholder="Begins with 'ssh-rsa', 'ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521', 'ssh-ed25519', 'sk-ecdsa-sha2-nistp256@openssh.com', or 'sk-ssh-ed25519@openssh.com'"
+              rows="3"
+              :disabled="addingKey"
+            ></textarea>
+            <div class="form-message-container">
+              <div v-if="error && showAddKeyForm" class="message message--error">
+                {{ error }}
+              </div>
+              <div v-if="success && showAddKeyForm" class="message message--success">
+                {{ success }}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button
+            @click="addKey"
+            class="btn-primary"
+            :disabled="addingKey || !newPublicKey.trim()"
+          >
+            {{ addingKey ? "Adding..." : "Add SSH key" }}
+          </button>
+          <button
+            @click="showAddKeyForm = false; newKeyName = ''; newPublicKey = ''; error = null; success = null"
+            class="btn-secondary"
+            :disabled="addingKey"
+          >
+            Cancel
+          </button>
+        </div>
+      </template>
+
+      <!-- Show list when not adding a key -->
+      <template v-else>
+        <!-- Header with title and Add button -->
+        <div class="content-header">
+          <div class="content-header-text">
+            <h2 class="content-header-title">Your SSH keys</h2>
+            <p class="content-header-description">
+              This is a list of SSH keys associated with your account. Remove any keys that you do not recognize.
+            </p>
+          </div>
+          <button
+            class="btn-primary"
+            @click="showAddKeyForm = true"
+          >
+            Add SSH key
+          </button>
+        </div>
+
+        <!-- SSH Keys List -->
+        <div class="items-list">
+          <div v-if="loadingKeys" class="list-item-empty">Loading SSH keys...</div>
+          <div v-else-if="sshKeys.length === 0" class="list-item-empty">
+            No SSH keys added yet
+          </div>
+          <div v-else>
+            <div v-for="key in sshKeys" :key="key.fingerprint" class="ssh-key-item">
+              <div class="ssh-key-icon">
+                <img src="/assets/icons/key_.svg" alt="" />
+              </div>
+              <div class="ssh-key-info">
+                <div class="ssh-key-title">{{ key.name || "Unnamed Key" }}</div>
+                <div class="ssh-key-fingerprint">{{ key.fingerprint }}</div>
+                <div class="ssh-key-meta">
+                  <span class="ssh-key-date">Added on {{ formatDate(key.created_at) }}</span>
+                </div>
+                <div class="ssh-key-meta">
+                  <span class="ssh-key-usage">Last used within the last 5 weeks</span>
+                  <span class="ssh-key-separator">|</span>
+                  <span class="ssh-key-access">Read/write</span>
+                </div>
+              </div>
+              <button
+                @click="deleteKey(key.fingerprint)"
+                class="ssh-key-delete"
+                :disabled="deletingKey === key.fingerprint"
+              >
+                {{ deletingKey === key.fingerprint ? "Deleting..." : "Delete" }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- Delete Confirmation Modal -->
+    <div v-if="showDeleteModal" class="modal-overlay" @click="cancelDelete">
+      <div class="modal-content" @click.stop>
+        <h3 class="modal-title">Delete SSH key</h3>
+        <p class="modal-message">Are you sure you want to delete this SSH key? This action cannot be undone.</p>
+        <div class="modal-actions">
+          <button @click="cancelDelete" class="btn-secondary">Cancel</button>
+          <button @click="confirmDelete" class="btn-danger">Delete</button>
+        </div>
       </div>
     </div>
 
-  </div>
+    <!-- Cloud Credentials Tab -->
+    <div v-if="activeTab === 'credentials'" class="content-card">
+      <h2 class="content-card-title">Cloud credentials</h2>
+      <div class="form-section">
+        <h3 class="form-section-title">Add AWS Credentials</h3>
+        <p class="quick-start-description">
+          Add AWS credentials to deploy applications to your own infrastructure.
+        </p>
+        <div class="form-group">
+          <label class="form-label" for="credName">Name</label>
+          <input
+            id="credName"
+            v-model="newCredName"
+            type="text"
+            class="form-input"
+            placeholder="e.g., Production AWS"
+            :disabled="addingCred"
+          />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="awsAccessKeyId">Access Key ID</label>
+          <input
+            id="awsAccessKeyId"
+            v-model="newCredAwsKeyId"
+            type="text"
+            class="form-input"
+            placeholder="AKIA..."
+            :disabled="addingCred"
+          />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="awsSecretKey">Secret Access Key</label>
+          <input
+            id="awsSecretKey"
+            v-model="newCredAwsSecret"
+            type="password"
+            class="form-input"
+            placeholder="Enter secret access key"
+            :disabled="addingCred"
+          />
+        </div>
+        <div class="form-group">
+          <label
+            style="
+              display: flex;
+              align-items: center;
+              gap: 8px;
+              cursor: pointer;
+            "
+          >
+            <input
+              type="checkbox"
+              v-model="newCredIsDefault"
+              :disabled="addingCred"
+            />
+            Set as default
+          </label>
+        </div>
+        <button
+          @click="addCredential"
+          class="btn-primary"
+          :disabled="
+            addingCred ||
+            !newCredName.trim() ||
+            !newCredAwsKeyId.trim() ||
+            !newCredAwsSecret.trim()
+          "
+        >
+          {{ addingCred ? "Adding..." : "Add Credential" }}
+        </button>
+      </div>
+
+      <div class="items-list">
+        <div v-if="loadingCreds" class="loading">Loading credentials...</div>
+        <div v-else-if="credentials.length === 0" class="empty-state">
+          No AWS credentials added yet
+        </div>
+        <div v-else>
+          <div v-for="cred in credentials" :key="cred.id" class="list-item">
+            <div class="item-info">
+              <div style="display: flex; align-items: center; gap: 8px">
+                <span class="item-name">{{ cred.name }}</span>
+                <span
+                  v-if="cred.is_default"
+                  class="item-badge item-badge--default"
+                  >Default</span
+                >
+              </div>
+              <code class="item-meta">{{ cred.identifier }}</code>
+            </div>
+            <div class="item-actions">
+              <button
+                v-if="!cred.is_default"
+                @click="setDefaultCredential(cred.id)"
+                class="btn-secondary"
+                :disabled="settingDefault === cred.id"
+              >
+                {{ settingDefault === cred.id ? "..." : "Set Default" }}
+              </button>
+              <button
+                @click="deleteCredential(cred.id, cred.name)"
+                class="btn-danger"
+                :disabled="deletingCred === cred.id"
+              >
+                {{ deletingCred === cred.id ? "Deleting..." : "Delete" }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <AttestationModal
+      v-if="attestationApp"
+      :public-ip="attestationApp.public_ip"
+      :app-name="attestationApp.resource_name || 'App'"
+      @close="attestationApp = null"
+    />
+  </DashboardLayout>
 </template>
 
 <script>
-import { ref, onMounted } from 'vue'
-import { showModal as showAttestationModal } from 'attestation-widget'
+import { ref, computed, onMounted, onUnmounted } from "vue";
+import DashboardLayout from "../components/DashboardLayout.vue";
+import AttestationModal from "../components/AttestationModal.vue";
 
 async function sha256Hex(message) {
-  const msgBuffer = new TextEncoder().encode(message)
-  const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer)
-  const hashArray = Array.from(new Uint8Array(hashBuffer))
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
+  const msgBuffer = new TextEncoder().encode(message);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", msgBuffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function arrayBufferToBase64Url(buffer) {
-  const bytes = new Uint8Array(buffer)
-  let binary = ''
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
   for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i])
+    binary += String.fromCharCode(bytes[i]);
   }
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
 
 function base64UrlToArrayBuffer(base64url) {
-  const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/')
-  const padded = base64 + '='.repeat((4 - base64.length % 4) % 4)
-  const binary = atob(padded)
-  const bytes = new Uint8Array(binary.length)
+  const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i)
+    bytes[i] = binary.charCodeAt(i);
   }
-  return bytes.buffer
+  return bytes.buffer;
 }
 
 export default {
-  name: 'Dashboard',
+  name: "Dashboard",
+  components: {
+    DashboardLayout,
+    AttestationModal,
+  },
   props: {
-    session: String
+    session: String,
   },
   setup(props) {
-    const error = ref(null)
-    const success = ref(null)
-    const activeTab = ref('apps')
+    const error = ref(null);
+    const success = ref(null);
+    const activeTab = ref("apps");
+    const setupStep = ref(0);
 
-    // Apps state
-    const apps = ref([])
-    const loadingApps = ref(true)
-    const destroyingApp = ref(null)
+    // Code block refs and copy state
+    const codeInstall = ref(null);
+    const codeClone = ref(null);
+    const codeInit = ref(null);
+    const codeDeploy = ref(null);
+    const codeVerify = ref(null);
+    const copiedBlock = ref(null);
 
-    const showAttestation = (app) => {
-      const url = app.domain
-        ? `https://${app.domain}/attestation`
-        : `http://${app.public_ip}/attestation`
-      showAttestationModal({ attestationUrl: url })
-    }
-
-    const getEnclaveConfig = (app) => {
-      const config = app.configuration || {}
-      return {
-        memory_mb: config.memory_mb ?? 512,
-        cpus: config.cpus ?? 2,
-        debug: config.debug ?? false,
-      }
-    }
-
-    const getInstanceType = (app) => {
-      return app.configuration?.instance_type || null
-    }
-
-    // SSH Keys state
-    const sshKeys = ref([])
-    const loadingKeys = ref(true)
-    const addingKey = ref(false)
-    const deletingKey = ref(null)
-    const newKeyName = ref('')
-    const newPublicKey = ref('')
-
-    // Credentials state
-    const credentials = ref([])
-    const loadingCreds = ref(true)
-    const addingCred = ref(false)
-    const deletingCred = ref(null)
-    const settingDefault = ref(null)
-    const newCredName = ref('')
-    const newCredAwsKeyId = ref('')
-    const newCredAwsSecret = ref('')
-    const newCredIsDefault = ref(false)
-
-    onMounted(async () => {
-      if (!props.session) {
-        window.location.href = '/login'
-        return
-      }
-
-      await Promise.all([loadApps(), loadKeys(), loadCredentials()])
-    })
-
-    const loadApps = async () => {
-      loadingApps.value = true
+    const copyCode = async (blockName) => {
+      const codeRefs = {
+        install: codeInstall,
+        clone: codeClone,
+        init: codeInit,
+        deploy: codeDeploy,
+        verify: codeVerify,
+      };
+      const codeRef = codeRefs[blockName];
+      if (!codeRef?.value) return;
 
       try {
-        const response = await fetch('/api/resources', {
+        await navigator.clipboard.writeText(codeRef.value.textContent);
+        copiedBlock.value = blockName;
+        setTimeout(() => {
+          copiedBlock.value = null;
+        }, 1200);
+      } catch (err) {
+        console.error("Failed to copy:", err);
+      }
+    };
+
+    // Apps state
+    const apps = ref([]);
+    const loadingApps = ref(true);
+    const destroyingApp = ref(null);
+    const attestationApp = ref(null);
+
+    // SSH Keys state
+    const sshKeys = ref([]);
+    const loadingKeys = ref(true);
+    const addingKey = ref(false);
+    const deletingKey = ref(null);
+    const showAddKeyForm = ref(false);
+    const newKeyName = ref("");
+    const newPublicKey = ref("");
+    const showDeleteModal = ref(false);
+    const keyToDelete = ref(null);
+
+    // Credentials state
+    const credentials = ref([]);
+    const loadingCreds = ref(true);
+    const addingCred = ref(false);
+    const deletingCred = ref(null);
+    const settingDefault = ref(null);
+    const newCredName = ref("");
+    const newCredAwsKeyId = ref("");
+    const newCredAwsSecret = ref("");
+    const newCredIsDefault = ref(false);
+
+    const pageTitle = computed(() => {
+      return "";
+    });
+
+    const loadApps = async () => {
+      loadingApps.value = true;
+
+      try {
+        const response = await fetch("/api/resources", {
           headers: {
-            'X-Session-ID': props.session
-          }
-        })
+            "X-Session-ID": props.session,
+          },
+        });
 
         if (response.ok) {
-          apps.value = await response.json()
+          apps.value = await response.json();
         } else if (response.status === 401) {
-          window.location.href = '/login'
+          window.location.href = "/login";
         } else {
-          const data = await response.json().catch(() => ({}))
-          error.value = data.error || 'Failed to load apps'
+          const data = await response.json().catch(() => ({}));
+          error.value = data.error || "Failed to load apps";
         }
       } catch (err) {
-        error.value = 'Failed to connect to server'
+        error.value = "Failed to connect to server";
       } finally {
-        loadingApps.value = false
+        loadingApps.value = false;
       }
-    }
+    };
 
     const destroyApp = async (id, name) => {
-      const displayName = name || `App #${id}`
-      if (!confirm(`Are you sure you want to destroy "${displayName}"? This cannot be undone.`)) return
+      const displayName = name || `App #${id}`;
+      if (
+        !confirm(
+          `Are you sure you want to destroy "${displayName}"? This cannot be undone.`
+        )
+      )
+        return;
 
-      destroyingApp.value = id
-      error.value = null
-      success.value = null
+      destroyingApp.value = id;
+      error.value = null;
+      success.value = null;
 
       try {
         const response = await fetch(`/api/resources/${id}`, {
-          method: 'DELETE',
+          method: "DELETE",
           headers: {
-            'X-Session-ID': props.session
-          }
-        })
+            "X-Session-ID": props.session,
+          },
+        });
 
         if (response.ok || response.status === 204) {
-          success.value = `App "${displayName}" destroyed`
-          await loadApps()
+          success.value = `App "${displayName}" destroyed`;
+          await loadApps();
         } else {
-          const data = await response.json().catch(() => ({}))
-          error.value = data.error || 'Failed to destroy app'
+          const data = await response.json().catch(() => ({}));
+          error.value = data.error || "Failed to destroy app";
         }
       } catch (err) {
-        error.value = 'Failed to connect to server'
+        error.value = "Failed to connect to server";
       } finally {
-        destroyingApp.value = null
+        destroyingApp.value = null;
       }
-    }
+    };
 
     const loadKeys = async () => {
-      loadingKeys.value = true
+      loadingKeys.value = true;
 
       try {
-        const response = await fetch('/ssh-keys', {
+        const response = await fetch("/ssh-keys", {
           headers: {
-            'X-Session-ID': props.session
-          }
-        })
+            "X-Session-ID": props.session,
+          },
+        });
 
         if (response.ok) {
-          const data = await response.json()
-          sshKeys.value = data.keys || []
+          const data = await response.json();
+          sshKeys.value = data.keys || [];
         } else if (response.status === 401) {
-          window.location.href = '/login'
+          window.location.href = "/login";
         } else {
-          const data = await response.json().catch(() => ({}))
-          error.value = data.error || 'Failed to load SSH keys'
+          sshKeys.value = [];
+          const data = await response.json().catch(() => ({}));
+          error.value = data.error || "Failed to load SSH keys";
         }
       } catch (err) {
-        error.value = 'Failed to connect to server'
+        sshKeys.value = [];
+        error.value = "Failed to connect to server";
       } finally {
-        loadingKeys.value = false
+        loadingKeys.value = false;
       }
-    }
+    };
 
     const addKey = async () => {
-      if (!newPublicKey.value.trim()) return
+      if (!newPublicKey.value.trim()) return;
 
-      addingKey.value = true
-      error.value = null
-      success.value = null
+      addingKey.value = true;
+      error.value = null;
+      success.value = null;
 
       try {
         const body = JSON.stringify({
           public_key: newPublicKey.value.trim(),
-          name: newKeyName.value.trim() || null
-        })
-        const bodyHash = await sha256Hex(body)
+          name: newKeyName.value.trim() || null,
+        });
+        const bodyHash = await sha256Hex(body);
 
-        const challengeRes = await fetch('/auth/sign-request', {
-          method: 'POST',
+        const challengeRes = await fetch("/auth/sign-request", {
+          method: "POST",
           headers: {
-            'Content-Type': 'application/json',
-            'X-Session-ID': props.session
+            "Content-Type": "application/json",
+            "X-Session-ID": props.session,
           },
           body: JSON.stringify({
-            method: 'POST',
-            path: '/ssh-keys',
-            body_hash: bodyHash
-          })
-        })
+            method: "POST",
+            path: "/ssh-keys",
+            body_hash: bodyHash,
+          }),
+        });
 
         if (!challengeRes.ok) {
-          const data = await challengeRes.json().catch(() => ({}))
-          throw new Error(data.error || 'Failed to get signing challenge')
+          const data = await challengeRes.json().catch(() => ({}));
+          throw new Error(
+            data.error ||
+            "Failed to authenticate request. Please try again."
+          );
         }
 
-        const { publicKey, challenge_id } = await challengeRes.json()
+        const { publicKey, challenge_id } = await challengeRes.json();
 
-        publicKey.challenge = base64UrlToArrayBuffer(publicKey.challenge)
+        publicKey.challenge = base64UrlToArrayBuffer(publicKey.challenge);
         if (publicKey.allowCredentials) {
-          publicKey.allowCredentials = publicKey.allowCredentials.map(cred => ({
-            ...cred,
-            id: base64UrlToArrayBuffer(cred.id)
-          }))
+          publicKey.allowCredentials = publicKey.allowCredentials.map(
+            (cred) => ({
+              ...cred,
+              id: base64UrlToArrayBuffer(cred.id),
+            })
+          );
         }
 
-        const credential = await navigator.credentials.get({ publicKey })
+        const credential = await navigator.credentials.get({ publicKey });
 
         const credentialResponse = {
           id: credential.id,
           rawId: arrayBufferToBase64Url(credential.rawId),
           type: credential.type,
           response: {
-            authenticatorData: arrayBufferToBase64Url(credential.response.authenticatorData),
-            clientDataJSON: arrayBufferToBase64Url(credential.response.clientDataJSON),
+            authenticatorData: arrayBufferToBase64Url(
+              credential.response.authenticatorData
+            ),
+            clientDataJSON: arrayBufferToBase64Url(
+              credential.response.clientDataJSON
+            ),
             signature: arrayBufferToBase64Url(credential.response.signature),
             userHandle: credential.response.userHandle
               ? arrayBufferToBase64Url(credential.response.userHandle)
-              : null
-          }
-        }
+              : null,
+          },
+        };
 
         const fido2Response = btoa(JSON.stringify(credentialResponse))
-          .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+          .replace(/\+/g, "-")
+          .replace(/\//g, "_")
+          .replace(/=/g, "");
 
-        const response = await fetch('/ssh-keys', {
-          method: 'POST',
+        const response = await fetch("/ssh-keys", {
+          method: "POST",
           headers: {
-            'Content-Type': 'application/json',
-            'X-Fido2-Challenge-Id': challenge_id,
-            'X-Fido2-Response': fido2Response
+            "Content-Type": "application/json",
+            "X-Fido2-Challenge-Id": challenge_id,
+            "X-Fido2-Response": fido2Response,
           },
-          body: body
-        })
+          body: body,
+        });
 
         if (response.ok) {
-          const data = await response.json()
-          success.value = `SSH key added (${data.fingerprint})`
-          newKeyName.value = ''
-          newPublicKey.value = ''
-          await loadKeys()
+          const data = await response.json();
+          success.value = `SSH key added (${data.fingerprint})`;
+          newKeyName.value = "";
+          newPublicKey.value = "";
+          showAddKeyForm.value = false;
+          await loadKeys();
         } else {
-          const data = await response.json().catch(() => ({}))
-          error.value = data.error || 'Failed to add SSH key'
+          const data = await response.json().catch(() => ({}));
+          error.value = data.error || "Failed to add SSH key";
         }
       } catch (err) {
-        if (err.name === 'NotAllowedError') {
-          error.value = 'Security key authentication was cancelled or timed out'
+        if (err.name === "NotAllowedError") {
+          error.value =
+            "Security key authentication was cancelled or timed out";
         } else {
-          error.value = err.message || 'Failed to add SSH key'
+          error.value = err.message || "Failed to add SSH key";
         }
       } finally {
-        addingKey.value = false
+        addingKey.value = false;
       }
-    }
+    };
 
-    const deleteKey = async (fingerprint) => {
-      if (!confirm('Are you sure you want to delete this SSH key?')) return
+    const deleteKey = (fingerprint) => {
+      keyToDelete.value = fingerprint;
+      showDeleteModal.value = true;
+    };
 
-      deletingKey.value = fingerprint
-      error.value = null
-      success.value = null
+    const confirmDelete = async () => {
+      if (!keyToDelete.value) return;
+
+      deletingKey.value = keyToDelete.value;
+      showDeleteModal.value = false;
+      error.value = null;
+      success.value = null;
 
       try {
-        const response = await fetch(`/ssh-keys/${encodeURIComponent(fingerprint)}`, {
-          method: 'DELETE',
-          headers: {
-            'X-Session-ID': props.session
+        const response = await fetch(
+          `/ssh-keys/${encodeURIComponent(keyToDelete.value)}`,
+          {
+            method: "DELETE",
+            headers: {
+              "X-Session-ID": props.session,
+            },
           }
-        })
+        );
 
         if (response.ok || response.status === 204) {
-          success.value = 'SSH key deleted'
-          await loadKeys()
+          success.value = "SSH key deleted";
+          await loadKeys();
         } else {
-          const data = await response.json().catch(() => ({}))
-          error.value = data.error || 'Failed to delete SSH key'
+          const data = await response.json().catch(() => ({}));
+          error.value = data.error || "Failed to delete SSH key";
         }
       } catch (err) {
-        error.value = 'Failed to connect to server'
+        error.value = "Failed to connect to server";
       } finally {
-        deletingKey.value = null
+        deletingKey.value = null;
+        keyToDelete.value = null;
       }
-    }
+    };
+
+    const cancelDelete = () => {
+      showDeleteModal.value = false;
+      keyToDelete.value = null;
+    };
 
     const loadCredentials = async () => {
-      loadingCreds.value = true
+      loadingCreds.value = true;
 
       try {
-        const response = await fetch('/api/credentials', {
+        const response = await fetch("/api/credentials", {
           headers: {
-            'X-Session-ID': props.session
-          }
-        })
+            "X-Session-ID": props.session,
+          },
+        });
 
         if (response.ok) {
-          credentials.value = await response.json()
+          credentials.value = await response.json();
         } else if (response.status === 401) {
-          window.location.href = '/login'
+          window.location.href = "/login";
         } else {
-          const data = await response.json().catch(() => ({}))
-          error.value = data.error || 'Failed to load credentials'
+          const data = await response.json().catch(() => ({}));
+          error.value = data.error || "Failed to load credentials";
         }
       } catch (err) {
-        error.value = 'Failed to connect to server'
+        error.value = "Failed to connect to server";
       } finally {
-        loadingCreds.value = false
+        loadingCreds.value = false;
       }
-    }
+    };
 
     const addCredential = async () => {
-      if (!newCredName.value.trim() || !newCredAwsKeyId.value.trim() || !newCredAwsSecret.value.trim()) return
+      if (
+        !newCredName.value.trim() ||
+        !newCredAwsKeyId.value.trim() ||
+        !newCredAwsSecret.value.trim()
+      )
+        return;
 
-      addingCred.value = true
-      error.value = null
-      success.value = null
+      addingCred.value = true;
+      error.value = null;
+      success.value = null;
 
       try {
         const body = {
-          platform: 'aws',
+          platform: "aws",
           name: newCredName.value.trim(),
           access_key_id: newCredAwsKeyId.value.trim(),
           secret_access_key: newCredAwsSecret.value.trim(),
-          is_default: newCredIsDefault.value
-        }
+          is_default: newCredIsDefault.value,
+        };
 
-        const response = await fetch('/api/credentials', {
-          method: 'POST',
+        const response = await fetch("/api/credentials", {
+          method: "POST",
           headers: {
-            'Content-Type': 'application/json',
-            'X-Session-ID': props.session
+            "Content-Type": "application/json",
+            "X-Session-ID": props.session,
           },
-          body: JSON.stringify(body)
-        })
+          body: JSON.stringify(body),
+        });
 
         if (response.ok) {
-          success.value = 'AWS credential added'
-          newCredName.value = ''
-          newCredAwsKeyId.value = ''
-          newCredAwsSecret.value = ''
-          newCredIsDefault.value = false
-          await loadCredentials()
+          success.value = "AWS credential added";
+          newCredName.value = "";
+          newCredAwsKeyId.value = "";
+          newCredAwsSecret.value = "";
+          newCredIsDefault.value = false;
+          await loadCredentials();
         } else {
-          const data = await response.json().catch(() => ({}))
-          error.value = data.error || 'Failed to add credential'
+          const data = await response.json().catch(() => ({}));
+          error.value = data.error || "Failed to add credential";
         }
       } catch (err) {
-        error.value = 'Failed to connect to server'
+        error.value = "Failed to connect to server";
       } finally {
-        addingCred.value = false
+        addingCred.value = false;
       }
-    }
+    };
 
     const deleteCredential = async (id, name) => {
-      if (!confirm(`Are you sure you want to delete "${name}"?`)) return
+      if (!confirm(`Are you sure you want to delete "${name}"?`)) return;
 
-      deletingCred.value = id
-      error.value = null
-      success.value = null
+      deletingCred.value = id;
+      error.value = null;
+      success.value = null;
 
       try {
         const response = await fetch(`/api/credentials/${id}`, {
-          method: 'DELETE',
+          method: "DELETE",
           headers: {
-            'X-Session-ID': props.session
-          }
-        })
+            "X-Session-ID": props.session,
+          },
+        });
 
         if (response.ok || response.status === 204) {
-          success.value = 'Credential deleted'
-          await loadCredentials()
+          success.value = "Credential deleted";
+          await loadCredentials();
         } else {
-          const data = await response.json().catch(() => ({}))
-          error.value = data.error || 'Failed to delete credential'
+          const data = await response.json().catch(() => ({}));
+          error.value = data.error || "Failed to delete credential";
         }
       } catch (err) {
-        error.value = 'Failed to connect to server'
+        error.value = "Failed to connect to server";
       } finally {
-        deletingCred.value = null
+        deletingCred.value = null;
       }
-    }
+    };
 
     const setDefaultCredential = async (id) => {
-      settingDefault.value = id
-      error.value = null
-      success.value = null
+      settingDefault.value = id;
+      error.value = null;
+      success.value = null;
 
       try {
         const response = await fetch(`/api/credentials/${id}/default`, {
-          method: 'POST',
+          method: "POST",
           headers: {
-            'X-Session-ID': props.session
-          }
-        })
+            "X-Session-ID": props.session,
+          },
+        });
 
         if (response.ok) {
-          success.value = 'Default credential updated'
-          await loadCredentials()
+          success.value = "Default credential updated";
+          await loadCredentials();
         } else {
-          const data = await response.json().catch(() => ({}))
-          error.value = data.error || 'Failed to set default credential'
+          const data = await response.json().catch(() => ({}));
+          error.value = data.error || "Failed to set default credential";
         }
       } catch (err) {
-        error.value = 'Failed to connect to server'
+        error.value = "Failed to connect to server";
       } finally {
-        settingDefault.value = null
+        settingDefault.value = null;
       }
-    }
+    };
 
     const logout = () => {
-      window.location.href = '/login'
-    }
+      window.location.href = "/login";
+    };
+
+    const handleTabChange = (newTab) => {
+      activeTab.value = newTab;
+      if (newTab === "apps") {
+        setupStep.value = 0;
+      } else if (newTab === "guide") {
+        setupStep.value = 0;
+      } else if (newTab === "ssh") {
+        showAddKeyForm.value = false;
+        newKeyName.value = "";
+        newPublicKey.value = "";
+        error.value = null;
+        success.value = null;
+      }
+    };
+
+    const formatDate = (dateString) => {
+      const date = new Date(dateString);
+      const options = { year: 'numeric', month: 'short', day: 'numeric' };
+      return date.toLocaleDateString('en-US', options);
+    };
+
+    const startGuide = () => {
+      activeTab.value = "guide";
+      setupStep.value = 1;
+    };
+
+    // Keyboard shortcuts for guide navigation
+    const handleKeyDown = (event) => {
+      // Only handle keyboard shortcuts when in guide tab (starter screen 0 or steps 1-6)
+      if (activeTab.value !== "guide" || setupStep.value < 0 || setupStep.value > 6) {
+        return;
+      }
+
+      // Don't trigger shortcuts if user is typing in an input field
+      if (event.target.tagName === "INPUT" || event.target.tagName === "TEXTAREA") {
+        return;
+      }
+
+      // Arrow Left or 'b' key - go back
+      if ((event.key === "ArrowLeft" || event.key === "b") && setupStep.value > 1) {
+        event.preventDefault();
+        setupStep.value = setupStep.value - 1;
+      }
+      // Arrow Right or 'n' key - go next (or begin guide from starter screen)
+      else if (event.key === "ArrowRight" || event.key === "n") {
+        event.preventDefault();
+        if (setupStep.value === 0) {
+          setupStep.value = 1; // Begin guide from starter screen
+        } else if (setupStep.value < 6) {
+          setupStep.value = setupStep.value + 1;
+        }
+      }
+    };
+
+    onMounted(async () => {
+      if (!props.session) {
+        window.location.href = "/login";
+        return;
+      }
+
+      // Add keyboard event listener
+      window.addEventListener("keydown", handleKeyDown);
+
+      await Promise.all([loadApps(), loadKeys(), loadCredentials()]);
+    });
+
+    onUnmounted(() => {
+      // Clean up keyboard event listener
+      window.removeEventListener("keydown", handleKeyDown);
+    });
 
     return {
       error,
       success,
       activeTab,
+      pageTitle,
+      setupStep,
+      codeInstall,
+      codeClone,
+      codeInit,
+      codeDeploy,
+      codeVerify,
+      copiedBlock,
+      copyCode,
       apps,
       loadingApps,
       destroyingApp,
-      showAttestation,
-      getEnclaveConfig,
-      getInstanceType,
+      attestationApp,
       destroyApp,
       sshKeys,
       loadingKeys,
       addingKey,
       deletingKey,
+      showAddKeyForm,
       newKeyName,
       newPublicKey,
+      showDeleteModal,
+      keyToDelete,
       addKey,
       deleteKey,
+      confirmDelete,
+      cancelDelete,
       credentials,
       loadingCreds,
       addingCred,
@@ -750,592 +1281,365 @@ export default {
       addCredential,
       deleteCredential,
       setDefaultCredential,
-      logout
-    }
-  }
-}
+      logout,
+      handleTabChange,
+      formatDate,
+      startGuide,
+    };
+  },
+};
 </script>
 
 <style scoped>
-.dashboard-container {
-  width: 100%;
-  max-width: 900px;
-  margin: 0 auto;
-}
-
-.dashboard-card {
-  background: white;
-  border-radius: 16px;
-  padding: 40px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
-}
-
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 24px;
-}
-
-.logo {
-  display: block;
-  width: 150px;
-  height: auto;
-  margin: 0 auto 24px;
-}
-
-h1 {
-  font-size: 32px;
-  font-weight: 700;
-  color: #333;
-  margin: 0;
-}
-
-h2 {
-  font-size: 20px;
-  font-weight: 600;
-  color: #333;
-  margin-bottom: 8px;
-}
-
-/* Tabs */
-.tabs {
-  display: flex;
-  gap: 4px;
-  border-bottom: 2px solid #eee;
-  margin-bottom: 24px;
-}
-
-.tab {
-  padding: 12px 24px;
-  background: none;
-  border: none;
-  font-size: 15px;
-  font-weight: 500;
-  color: #666;
-  cursor: pointer;
-  position: relative;
-  transition: color 0.2s ease;
-}
-
-.tab:hover {
-  color: #333;
-}
-
-.tab.active {
-  color: #667eea;
-}
-
-.tab.active::after {
-  content: '';
-  position: absolute;
-  bottom: -2px;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-}
-
-.tab-content {
-  animation: fadeIn 0.2s ease;
-}
-
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-.section {
-  margin-bottom: 40px;
-}
-
-.section-description {
-  color: #666;
-  margin-bottom: 20px;
-  font-size: 14px;
-}
-
-/* Apps List */
-.apps-list {
-  border: 1px solid #eee;
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.apps-grid {
+/* Guide intro/starter screen */
+.guide-intro {
+  height: 500px;
   display: flex;
   flex-direction: column;
 }
 
-.app-card {
-  padding: 20px;
-  border-bottom: 1px solid #eee;
-}
-
-.app-card:last-child {
-  border-bottom: none;
-}
-
-.app-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 12px;
-}
-
-.app-header-left {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.app-name {
-  font-weight: 600;
-  font-size: 16px;
-  color: #333;
-}
-
-.app-id {
-  font-family: monospace;
-  font-size: 11px;
-  color: #888;
-}
-
-.app-status {
-  padding: 4px 10px;
-  border-radius: 12px;
-  font-size: 12px;
-  font-weight: 500;
-  text-transform: uppercase;
-}
-
-.status-running {
-  background: #e8f5e9;
-  color: #2e7d32;
-}
-
-.status-pending, .status-provisioning {
-  background: #fff3e0;
-  color: #e65100;
-}
-
-.status-stopped, .status-terminated {
-  background: #fce4ec;
-  color: #c62828;
-}
-
-.status-starting {
-  background: #e3f2fd;
-  color: #1565c0;
-}
-
-.app-body {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-end;
-  gap: 16px;
-}
-
-.app-details {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
+.guide-intro-content {
+  text-align: center;
   flex: 1;
-  min-width: 0;
-}
-
-.app-specs {
   display: flex;
-  gap: 8px;
-  width: 100%;
-  margin-bottom: 4px;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
 }
 
-.spec-badge {
-  font-size: 11px;
-  padding: 3px 8px;
-  border-radius: 4px;
-  background: #f0f0f0;
+.guide-intro-eyebrow {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
   color: #666;
-  font-weight: 500;
-}
-
-.spec-debug {
-  background: #fff3e0;
-  color: #e65100;
-}
-
-.app-detail {
-  font-size: 13px;
-}
-
-.app-detail-full {
-  width: 100%;
-}
-
-.detail-label {
-  color: #999;
-  margin-right: 4px;
-}
-
-.detail-value {
-  color: #333;
-  font-family: 'Monaco', 'Courier New', monospace;
-}
-
-.app-links {
-  display: flex;
-  gap: 12px;
-}
-
-.app-link {
-  font-size: 13px;
-  color: #667eea;
-  text-decoration: none;
-}
-
-.app-link:hover {
-  text-decoration: underline;
-}
-
-.app-link-btn {
-  font-size: 13px;
-  color: #667eea;
-  background: none;
-  border: none;
-  padding: 0;
-  cursor: pointer;
-  font-family: inherit;
-}
-
-.app-link-btn:hover {
-  text-decoration: underline;
-}
-
-.app-actions {
-  flex-shrink: 0;
-}
-
-.empty-hint {
-  font-size: 13px;
-  color: #999;
-  margin-top: 8px;
-}
-
-.code-block-inline {
-  display: inline-block;
-  margin-top: 8px;
-  padding: 8px 12px;
-}
-
-.code-block-inline code {
-  color: #f8f8f2;
-  font-family: 'Monaco', 'Courier New', monospace;
-  font-size: 13px;
-}
-
-/* SSH Keys */
-.add-key-form {
-  background: #f8f9fa;
-  border-radius: 8px;
-  padding: 20px;
-  margin-bottom: 20px;
-}
-
-.form-group {
   margin-bottom: 16px;
 }
 
-.form-group label {
-  display: block;
-  font-size: 14px;
-  font-weight: 500;
-  color: #333;
-  margin-bottom: 8px;
-}
-
-.form-group input,
-.form-group textarea {
-  width: 100%;
-  padding: 12px 16px;
-  border: 1px solid #ddd;
-  border-radius: 8px;
-  font-size: 14px;
-  font-family: inherit;
-  transition: border-color 0.2s ease;
-  box-sizing: border-box;
-}
-
-.form-group input:focus,
-.form-group textarea:focus {
-  outline: none;
-  border-color: #667eea;
-}
-
-.form-group textarea {
-  font-family: 'Monaco', 'Courier New', monospace;
-  resize: vertical;
-}
-
-.btn-primary {
-  padding: 12px 24px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  color: white;
-  border: none;
-  border-radius: 8px;
-  font-size: 14px;
+.guide-intro-title {
+  font-size: clamp(1.5rem, 3vw, 2.25rem);
   font-weight: 600;
-  cursor: pointer;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  color: #0f0f0f;
+  line-height: 1.2;
 }
 
-.btn-primary:hover:not(:disabled) {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-}
-
-.btn-primary:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.btn-logout {
-  padding: 8px 16px;
-  background: #f5f5f5;
-  color: #666;
-  border: 1px solid #ddd;
-  border-radius: 8px;
-  font-size: 14px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.btn-logout:hover {
-  background: #eee;
-  color: #333;
-}
-
-.btn-danger {
-  padding: 6px 12px;
-  background: #fee;
-  color: #c33;
-  border: 1px solid #fcc;
-  border-radius: 6px;
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.btn-danger:hover:not(:disabled) {
-  background: #fdd;
-}
-
-.btn-danger:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.keys-list {
-  border: 1px solid #eee;
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.loading,
-.empty-state {
-  padding: 24px;
-  text-align: center;
-  color: #666;
-  font-size: 14px;
-}
-
-.quick-start {
-  padding: 24px;
-}
-
-.quick-start h3 {
-  font-size: 18px;
-  font-weight: 600;
-  color: #333;
-  margin: 0 0 12px 0;
-}
-
-.key-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 16px;
-  border-bottom: 1px solid #eee;
-}
-
-.key-item:last-child {
-  border-bottom: none;
-}
-
-.key-info {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.key-name {
-  font-weight: 500;
-  color: #333;
-}
-
-.key-fingerprint {
-  font-size: 12px;
-  color: #666;
-  background: #f5f5f5;
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-
-.key-type {
-  font-size: 12px;
-  color: #999;
-}
-
-.code-block {
-  background: #2d2d2d;
-  border-radius: 8px;
-  padding: 16px 20px;
-  overflow-x: auto;
-}
-
-.code-block pre {
-  margin: 0;
-  color: #f8f8f2;
-  font-family: 'Monaco', 'Courier New', monospace;
-  font-size: 13px;
+.guide-intro-description {
+  font-size: clamp(1.05rem, 2vw, 1.095rem);
+  color: rgba(15, 15, 15, 0.875);
+  margin: 0 auto;
   line-height: 1.6;
+  max-width: 550px;
+  margin: 32px auto;
 }
 
-.error-message {
-  background: #fee;
-  border: 1px solid #fcc;
-  border-radius: 8px;
-  padding: 12px 16px;
-  color: #c33;
-  margin-bottom: 20px;
-  font-size: 14px;
+.guide-completion-title {
+  font-size: clamp(1.5rem, 3vw, 2.25rem);
+  font-weight: 600;
+  color: #0f0f0f;
+  line-height: 1.3;
+  margin: 0;
 }
 
-.success-message {
-  background: #efe;
-  border: 1px solid #cfc;
-  border-radius: 8px;
-  padding: 12px 16px;
-  color: #2e7d32;
-  margin-bottom: 20px;
-  font-size: 14px;
+.guide-completion-description {
+  font-size: 1.1rem;
+  color: rgba(15, 15, 15, 0.75);
+  margin: 24px auto 36px auto;
+  line-height: 1.6;
+  max-width: 500px;
 }
 
-.checkbox-group label {
+.guide-intro-meta {
+  display: flex;
+  justify-content: center;
+  gap: 56px;
+  padding: 12px;
+  flex-wrap: wrap;
+}
+
+.intro-meta-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  cursor: pointer;
+  font-size: 0.95rem;
+  color: #666;
 }
 
-.checkbox-group input[type="checkbox"] {
-  width: auto;
-  padding: 0;
+.intro-meta-icon {
+  font-size: 1.125rem;
 }
 
-.form-group select {
-  width: 100%;
-  padding: 12px 16px;
-  border: 1px solid #ddd;
-  border-radius: 8px;
-  font-size: 14px;
-  font-family: inherit;
-  background: white;
-  cursor: pointer;
+.intro-meta-icon-svg {
+  width: 18px;
+  height: 18px;
+  stroke: #666;
+  flex-shrink: 0;
 }
 
-.form-group select:focus {
-  outline: none;
-  border-color: #667eea;
-}
-
-.cred-item {
+.guide-intro-actions {
   display: flex;
-  justify-content: space-between;
+  justify-content: center;
+  gap: 16px;
   align-items: center;
-  padding: 16px;
-  border-bottom: 1px solid #eee;
 }
 
-.cred-item:last-child {
-  border-bottom: none;
-}
-
-.cred-info {
+/* Quick start inline cards with fixed height */
+.quick-start-inline {
+  min-height: 500px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  position: relative;
 }
 
-.cred-header {
+/* Step header */
+.step-header {
+  margin-bottom: 56px;
+  flex-shrink: 0;
+}
+
+.step-title {
+  font-size: clamp(1.35rem, 3vw, 2rem);
+  font-weight: 600;
+  color: #0f0f0f;
+  margin: 0;
+  line-height: 1.2;
+  text-align: left;
+}
+
+.step-metadata {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  gap: 16px;
+  flex-wrap: wrap;
 }
 
-.cred-name {
+.step-time,
+.step-prereq {
+  font-size: 0.875rem;
+  color: #666;
+}
+
+.step-time::before {
+  content: "⏱ ";
+  opacity: 0.7;
+}
+
+.step-prereq::before {
+  content: "📋 ";
+  opacity: 0.7;
+}
+
+/* Guide link styling */
+.guide-link {
+  color: #0f0f0f;
   font-weight: 500;
-  color: #333;
+  text-decoration: underline dotted;
+  transition: all 0.2s ease;
 }
 
-.cred-platform {
-  font-size: 11px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: #e3f2fd;
-  color: #1565c0;
+.guide-link:hover,
+.guide-link:active {
+  color: #f048b5;
+}
+
+/* Tooltip styling */
+.tooltip-wrapper {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: help;
+}
+
+.tooltip-icon {
+  font-size: clamp(1.05rem, 2vw, 1.175rem);
+  opacity: 0.75;
+  transition: opacity 0.2s ease;
+}
+
+.tooltip-wrapper:hover .tooltip-icon {
+  opacity: 1;
+}
+
+.tooltip-content {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: #0f0f0f;
+  background-color: rgb(15, 15, 15);
+  color: white;
+  padding: 12px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 1.025rem;
+  font-weight: 400;
+  line-height: 1.5;
+  width: 330px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.9), 0 2px 8px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s ease, visibility 0.2s ease, transform 0.2s ease;
+  z-index: 100;
+  pointer-events: none;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.tooltip-content::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: #0f0f0f;
+}
+
+.tooltip-wrapper:hover .tooltip-content {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) scale(1.02);
+}
+
+.tooltip-title {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: #f048b5;
+  font-size: 0.85em;
+  letter-spacing: 0.5px;
   text-transform: uppercase;
 }
 
-.cred-default {
-  font-size: 11px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: #e8f5e9;
-  color: #2e7d32;
+/* Two-column guide layout */
+.guide-layout {
+  display: grid;
+  grid-template-columns: 0.8fr 1fr;
+  gap: 48px;
+  align-items: start;
+  flex: 1;
+  min-height: 0;
 }
 
-.cred-identifier {
-  font-size: 12px;
-  color: #666;
-  background: #f5f5f5;
-  padding: 2px 6px;
-  border-radius: 4px;
+.guide-layout-step2 {
+  grid-template-columns: 0.65fr 1.35fr;
 }
 
-.cred-actions {
+.guide-layout-balanced {
+  grid-template-columns: 0.8fr 1fr;
+}
+
+.guide-content {
+  width: 100%;
+  min-width: 0;
+}
+
+.guide-code {
+  width: 100%;
+  min-width: 0;
+}
+
+/* Guide navigation */
+.guide-navigation {
   display: flex;
-  gap: 8px;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: auto;
+  padding-top: 24px;
+  flex-shrink: 0;
 }
 
-.btn-secondary {
-  padding: 6px 12px;
-  background: #f5f5f5;
-  color: #666;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-
-.btn-secondary:hover:not(:disabled) {
-  background: #eee;
-  color: #333;
-}
-
-.btn-secondary:disabled {
+.btn-exit {
   opacity: 0.6;
-  cursor: not-allowed;
+}
+
+.btn-exit:hover {
+  opacity: 1;
+}
+
+.keyboard-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 8px;
+  padding: 2px 6px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #666;
+  background: rgba(0, 0, 0, 0.05);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 4px;
+  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
+  min-width: 24px;
+  line-height: 1;
+}
+
+.btn-continue .keyboard-hint {
+  margin-left: 8px;
+}
+
+/* Code syntax highlighting */
+.code-command {
+  color: #e0e0e0;
+}
+
+.code-comment {
+  color: #7c7c7c;
+  font-style: italic;
+}
+
+/* Responsive layout for mobile/tablet */
+@media (max-width: 968px) {
+  .guide-layout {
+    grid-template-columns: 1fr;
+    gap: 32px;
+  }
+
+  .step-header {
+    margin-bottom: 32px;
+  }
+}
+
+/* Modal styles */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background: white;
+  border-radius: 16px;
+  padding: 32px;
+  max-width: 600px;
+  width: 90%;
+  max-height: 80vh;
+  overflow-y: auto;
+  position: relative;
+}
+
+.modal-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  background: none;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+  color: #666;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.modal-close:hover {
+  background: #f5f5f5;
+  color: #333;
 }
 </style>
