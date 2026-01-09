@@ -39,16 +39,24 @@ cp env.example .env
 # Edit .env with your AWS credentials and bucket names from bootstrapping
 ```
 
-Build the CLI and start services:
+Install the CLI:
+
+**Option A: Install script**
+```bash
+curl -fsSL https://codeberg.org/caution/cli/raw/branch/main/install.sh | sh
+```
+
+**Option B: Build from source**
+```bash
+git clone https://codeberg.org/caution/cli
+cd cli
+make build
+make install
+```
+
+Start the platform services:
 
 ```bash
-# Build CLI
-make build-cli
-
-# Install CLI
-./install.sh
-
-# Run services and db
 make up
 ```
 
