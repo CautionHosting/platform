@@ -153,7 +153,7 @@ pub async fn fido2_sign_middleware(
 
     state
         .webauthn
-        .finish_securitykey_authentication(&auth_response, &pending.auth_state)
+        .finish_passkey_authentication(&auth_response, &pending.auth_state)
         .map_err(|e| {
             tracing::error!("FIDO signature verification failed: {:?}", e);
             (StatusCode::UNAUTHORIZED, "Invalid signature").into_response()

@@ -72,12 +72,10 @@ pub async fn begin_register_handler(
 
     let (ccr, reg_state) = state
         .webauthn
-        .start_securitykey_registration(
+        .start_passkey_registration(
             user_unique_id,
             &user_name,
             &user_name,
-            None,
-            None,
             None,
         )
         .map_err(|e| anyhow::anyhow!("Failed to start registration: {}", e))?;
@@ -120,7 +118,7 @@ pub async fn finish_register_handler(
 
     let passkey = state
         .webauthn
-        .finish_securitykey_registration(&reg_response, &pending.reg_state)
+        .finish_passkey_registration(&reg_response, &pending.reg_state)
         .map_err(|e| anyhow::anyhow!("Failed to finish registration: {}", e))?;
 
     let credential_id = passkey.cred_id().clone();
@@ -213,7 +211,7 @@ pub async fn begin_login_handler(
             .unwrap_or_else(|_| serde_json::json!({"error": "failed to parse"}));
         tracing::info!("Credential {} raw JSON: {}", i, serde_json::to_string_pretty(&raw_json).unwrap_or_default());
 
-        let security_key: SecurityKey = serde_json::from_slice(&cred_bytes)
+        let passkey: Passkey = serde_json::from_slice(&cred_bytes)
             .map_err(|e| {
                 tracing::error!("Failed to deserialize credential {}: {:?}", i, e);
                 tracing::error!("Raw credential data: {}", String::from_utf8_lossy(&cred_bytes));
@@ -221,16 +219,16 @@ pub async fn begin_login_handler(
             })?;
 
         tracing::info!("Credential {} loaded successfully", i);
-        tracing::info!("  Cred ID (base64url): {}", URL_SAFE_NO_PAD.encode(security_key.cred_id()));
+        tracing::info!("  Cred ID (base64url): {}", URL_SAFE_NO_PAD.encode(passkey.cred_id()));
 
-        allow_credentials.push(security_key);
+        allow_credentials.push(passkey);
     }
 
     tracing::info!("Starting authentication challenge with {} credentials", allow_credentials.len());
 
     let (rcr, auth_state) = state
         .webauthn
-        .start_securitykey_authentication(&allow_credentials)
+        .start_passkey_authentication(&allow_credentials)
         .map_err(|e| {
             tracing::error!("Failed to start authentication: {:?}", e);
             anyhow::anyhow!("Failed to start authentication: {}", e)
@@ -283,11 +281,11 @@ pub async fn finish_login_handler(
     let mut passkey: Passkey = serde_json::from_slice(&passkey_bytes)
         .map_err(|e| anyhow::anyhow!("Failed to deserialize passkey: {}", e))?;
 
-    tracing::debug!("Credential fetched, performing security key authentication");
+    tracing::debug!("Credential fetched, performing passkey authentication");
 
     let auth_result = state
         .webauthn
-        .finish_securitykey_authentication(&auth_response, &auth_state)
+        .finish_passkey_authentication(&auth_response, &auth_state)
         .map_err(|e| {
             tracing::error!("Authentication failed: {:?}", e);
             anyhow::anyhow!("Failed to finish authentication: {}", e)
@@ -435,12 +433,12 @@ pub async fn begin_sign_request_handler(
     let user_id = db::get_user_id_by_credential(&state.db, &credential_id).await?;
 
     let cred_bytes = db::get_credential_public_key(&state.db, &credential_id).await?;
-    let security_key: SecurityKey = serde_json::from_slice(&cred_bytes)
+    let passkey: Passkey = serde_json::from_slice(&cred_bytes)
         .map_err(|e| anyhow::anyhow!("Failed to deserialize credential: {}", e))?;
 
     let (rcr, auth_state) = state
         .webauthn
-        .start_securitykey_authentication(&[security_key])
+        .start_passkey_authentication(&[passkey])
         .map_err(|e| anyhow::anyhow!("Failed to start signing challenge: {}", e))?;
 
     let challenge_id = uuid::Uuid::new_v4().to_string();

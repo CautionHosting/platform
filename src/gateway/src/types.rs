@@ -11,7 +11,7 @@ use uuid::Uuid;
 /// Registration state that includes the beta code ID for closed beta
 #[derive(Clone)]
 pub struct PendingRegistration {
-    pub reg_state: SecurityKeyRegistration,
+    pub reg_state: PasskeyRegistration,
     pub beta_code_id: Uuid,
 }
 
@@ -21,7 +21,7 @@ pub struct AppState {
     pub webauthn: Webauthn,
     pub api_service_url: String,
     pub reg_states: Arc<RwLock<HashMap<String, PendingRegistration>>>,
-    pub auth_states: Arc<RwLock<HashMap<String, SecurityKeyAuthentication>>>,
+    pub auth_states: Arc<RwLock<HashMap<String, PasskeyAuthentication>>>,
     pub sign_challenges: Arc<RwLock<HashMap<String, PendingSignChallenge>>>,
     pub session_timeout_hours: i64,
 }
@@ -124,7 +124,7 @@ pub struct SessionData {
 
 #[derive(Debug, Clone)]
 pub struct PendingSignChallenge {
-    pub auth_state: SecurityKeyAuthentication,
+    pub auth_state: PasskeyAuthentication,
     pub user_id: Uuid,
     pub method: String,
     pub path: String,
