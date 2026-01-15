@@ -369,26 +369,6 @@ impl BuildConfig {
                             }
                             match trimmed.parse::<u16>() {
                                 Ok(port) if port > 0 => {
-                                    // Port 8080 is reserved for STEVE (encryption proxy)
-                                    if port == 8080 {
-                                        return Err(format!(
-                                            "Port 8080 is reserved for STEVE (the encryption proxy). \
-                                            Your application should listen on port 8083 instead, \
-                                            which STEVE will forward decrypted requests to."
-                                        ));
-                                    }
-                                    // Port 8081 is reserved for STEVE alternate/passthrough
-                                    if port == 8081 {
-                                        return Err(format!(
-                                            "Port 8081 is reserved for internal enclave services. \
-                                            Your application should listen on port 8083."
-                                        ));
-                                    }
-                                    // Port 8082 is reserved for attestation service
-                                    if port == 8082 {
-                                        tracing::warn!("Port 8082 is reserved for attestation service, ignoring");
-                                        continue;
-                                    }
                                     parsed_ports.push(port);
                                 }
                                 Ok(_) => {
@@ -456,6 +436,30 @@ impl BuildConfig {
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // Port 8082 is always reserved for the attestation service
+        if ports.contains(&8082) {
+            return Err(format!(
+                "Port 8082 is reserved for the attestation service."
+            ));
+        }
+
+        // Ports 8080 and 8081 are reserved for STEVE only when e2e encryption is enabled
+        if e2e.unwrap_or(false) {
+            if ports.contains(&8080) {
+                return Err(format!(
+                    "Port 8080 is reserved for STEVE (the encryption proxy). \
+                    Your application should listen on port 8083 instead, \
+                    which STEVE will forward decrypted requests to."
+                ));
+            }
+            if ports.contains(&8081) {
+                return Err(format!(
+                    "Port 8081 is reserved for internal enclave services. \
+                    Your application should listen on port 8083."
+                ));
             }
         }
 
