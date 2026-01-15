@@ -8,11 +8,11 @@ use tokio::sync::RwLock;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-/// Registration state that includes the beta code ID for closed beta
+/// Registration state that includes the alpha code ID for closed alpha
 #[derive(Clone)]
 pub struct PendingRegistration {
     pub reg_state: PasskeyRegistration,
-    pub beta_code_id: Uuid,
+    pub alpha_code_id: Uuid,
 }
 
 #[derive(Clone)]
@@ -113,7 +113,7 @@ pub struct LoginFinishResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterBeginRequest {
-    pub beta_code: String,
+    pub alpha_code: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

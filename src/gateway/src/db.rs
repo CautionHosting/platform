@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::types::DbSession;
 
-pub async fn create_user(pool: &PgPool, fido2_user_handle: &[u8], beta_code_id: Uuid) -> Result<Uuid> {
+pub async fn create_user(pool: &PgPool, fido2_user_handle: &[u8], alpha_code_id: Uuid) -> Result<Uuid> {
     let username = generate_user_identifier();
 
     let user_id: Uuid = sqlx::query_scalar(
@@ -20,7 +20,7 @@ pub async fn create_user(pool: &PgPool, fido2_user_handle: &[u8], beta_code_id: 
     )
     .bind(fido2_user_handle)
     .bind(&username)
-    .bind(beta_code_id)
+    .bind(alpha_code_id)
     .fetch_one(pool)
     .await
     .map_err(|e| {
@@ -33,7 +33,7 @@ pub async fn create_user(pool: &PgPool, fido2_user_handle: &[u8], beta_code_id: 
     Ok(user_id)
 }
 
-pub async fn validate_beta_code(pool: &PgPool, code: &str) -> Result<Option<Uuid>> {
+pub async fn validate_alpha_code(pool: &PgPool, code: &str) -> Result<Option<Uuid>> {
     let code_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM beta_codes
          WHERE code = $1
@@ -43,12 +43,12 @@ pub async fn validate_beta_code(pool: &PgPool, code: &str) -> Result<Option<Uuid
     .bind(code)
     .fetch_optional(pool)
     .await
-    .context("Failed to validate beta code")?;
+    .context("Failed to validate alpha code")?;
 
     Ok(code_id)
 }
 
-pub async fn redeem_beta_code(pool: &PgPool, code_id: Uuid) -> Result<bool> {
+pub async fn redeem_alpha_code(pool: &PgPool, code_id: Uuid) -> Result<bool> {
     let result = sqlx::query(
         "UPDATE beta_codes
          SET used_at = NOW()
@@ -58,7 +58,7 @@ pub async fn redeem_beta_code(pool: &PgPool, code_id: Uuid) -> Result<bool> {
     .bind(code_id)
     .execute(pool)
     .await
-    .context("Failed to redeem beta code")?;
+    .context("Failed to redeem alpha code")?;
 
     Ok(result.rows_affected() > 0)
 }

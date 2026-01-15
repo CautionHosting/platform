@@ -174,8 +174,8 @@ export function useWebAuthn() {
     }
   }
 
-  async function handleRegister(betaCode) {
-    if (!betaCode || !betaCode.trim()) {
+  async function handleRegister(alphaCode) {
+    if (!alphaCode || !alphaCode.trim()) {
       return { success: false, validationError: true };
     }
 
@@ -184,13 +184,13 @@ export function useWebAuthn() {
     loading.value = true;
 
     try {
-      // Step 1: Begin registration with beta code
+      // Step 1: Begin registration with alpha code
       status.value = "Validating alpha code...";
       const beginResponse = await fetch("/auth/register/begin", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ beta_code: betaCode.trim() }),
+        body: JSON.stringify({ alpha_code: alphaCode.trim() }),
       });
 
       if (!beginResponse.ok) {

@@ -61,19 +61,19 @@ pub async fn get_user_status(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let (email_verified_at, payment_method_added_at, beta_code_id) = result
+    let (email_verified_at, payment_method_added_at, alpha_code_id) = result
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Beta users skip email verification AND payment
-    let is_beta_user = beta_code_id.is_some();
-    let email_verified = is_beta_user || email_verified_at.is_some();
+    // Alpha users skip email verification AND payment
+    let is_alpha_user = alpha_code_id.is_some();
+    let email_verified = is_alpha_user || email_verified_at.is_some();
 
     let skip_payment = std::env::var("SKIP_PAYMENT_REQUIREMENT")
         .unwrap_or_else(|_| "false".to_string())
         .parse::<bool>()
         .unwrap_or(false);
 
-    let payment_method_added = is_beta_user || skip_payment || payment_method_added_at.is_some();
+    let payment_method_added = is_alpha_user || skip_payment || payment_method_added_at.is_some();
     let onboarding_complete = email_verified && payment_method_added;
 
     Ok(Json(UserStatus {

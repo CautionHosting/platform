@@ -59,13 +59,13 @@ pub async fn begin_register_handler(
     State(state): State<AppState>,
     Json(req): Json<crate::types::RegisterBeginRequest>,
 ) -> Result<Json<RegisterBeginResponse>, AppError> {
-    tracing::debug!("Registration started with beta code");
+    tracing::debug!("Registration started with alpha code");
 
-    let beta_code_id = db::validate_beta_code(&state.db, &req.beta_code)
+    let alpha_code_id = db::validate_alpha_code(&state.db, &req.alpha_code)
         .await?
         .ok_or_else(|| anyhow::anyhow!("This alpha code is invalid or has already been used."))?;
 
-    tracing::debug!("Beta code validated: id={}", beta_code_id);
+    tracing::debug!("Alpha code validated: id={}", alpha_code_id);
 
     let user_unique_id = uuid::Uuid::new_v4();
     let user_name = format!("user_{}", user_unique_id);
@@ -89,7 +89,7 @@ pub async fn begin_register_handler(
     let state_key = user_unique_id.to_string();
     let pending = crate::types::PendingRegistration {
         reg_state,
-        beta_code_id,
+        alpha_code_id,
     };
     state.reg_states.write().await.insert(state_key.clone(), pending);
 
@@ -134,15 +134,15 @@ pub async fn finish_register_handler(
     let user_unique_id = uuid::Uuid::parse_str(&session_key)
         .map_err(|e| anyhow::anyhow!("Failed to parse user ID: {}", e))?;
 
-    let user_id = db::create_user(&state.db, &user_unique_id.as_bytes()[..], pending.beta_code_id)
+    let user_id = db::create_user(&state.db, &user_unique_id.as_bytes()[..], pending.alpha_code_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create user: {}", e))?;
 
-    db::redeem_beta_code(&state.db, pending.beta_code_id)
+    db::redeem_alpha_code(&state.db, pending.alpha_code_id)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to redeem beta code: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to redeem alpha code: {}", e))?;
 
-    tracing::debug!("User registered and beta code redeemed");
+    tracing::debug!("User registered and alpha code redeemed");
 
     let passkey_json = serde_json::to_vec(&passkey)
         .map_err(|e| anyhow::anyhow!("Failed to serialize passkey: {}", e))?;

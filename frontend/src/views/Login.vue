@@ -33,7 +33,7 @@
           }"
         >
           <input
-            v-model="betaCode"
+            v-model="alphaCode"
             type="text"
             placeholder="Enter alpha code"
             class="alpha-input"
@@ -95,7 +95,7 @@ export default {
     session: String,
   },
   setup(props) {
-    const betaCode = ref("");
+    const alphaCode = ref("");
     const validationError = ref(false);
 
     const {
@@ -118,7 +118,7 @@ export default {
     });
 
     async function onRegister() {
-      const result = await handleRegister(betaCode.value);
+      const result = await handleRegister(alphaCode.value);
       if (result.validationError) {
         validationError.value = true;
       } else {
@@ -132,7 +132,7 @@ export default {
       loginLoading,
       error,
       status,
-      betaCode,
+      alphaCode,
       validationError,
       handleLogin,
       onRegister,

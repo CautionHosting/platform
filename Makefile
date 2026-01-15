@@ -4,6 +4,8 @@
 -include .env
 export
 
+export DOCKER_BUILDKIT=1
+
 .PHONY: build-all build-enclave network postgres migrate run-api run-gateway run-frontend up down down-clean logs clean clean-enclave
 
 OUT_DIR := out

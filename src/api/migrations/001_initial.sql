@@ -32,14 +32,14 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Function to check if user is fully onboarded (email verified + payment added)
--- Beta users (with beta_code_id) skip email verification AND payment
+-- Alpha users (with beta_code_id) skip email verification AND payment
 CREATE OR REPLACE FUNCTION user_is_onboarded(user_id_param UUID)
 RETURNS BOOLEAN AS $$
 DECLARE
     verified BOOLEAN;
 BEGIN
     SELECT
-        -- Beta users are fully onboarded immediately
+        -- Alpha users are fully onboarded immediately
         beta_code_id IS NOT NULL
         OR (email_verified_at IS NOT NULL AND payment_method_added_at IS NOT NULL)
     INTO verified
@@ -51,7 +51,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- ============================================
--- BETA CODES (for closed beta registration)
+-- ALPHA CODES (for closed alpha registration)
 -- ============================================
 
 CREATE TABLE beta_codes (
@@ -65,8 +65,8 @@ CREATE TABLE beta_codes (
 
 CREATE INDEX idx_beta_codes_code ON beta_codes(code);
 
--- Generate and insert a random beta code:
--- code=$(openssl rand -hex 16) && psql -c "INSERT INTO beta_codes (code) VALUES ('$code')" && echo "Beta code: $code"
+-- Generate and insert a random alpha code:
+-- code=$(openssl rand -hex 16) && psql -c "INSERT INTO beta_codes (code) VALUES ('$code')" && echo "Alpha code: $code"
 
 -- ============================================
 -- CORE ENTITIES
@@ -79,7 +79,7 @@ CREATE TABLE users (
     fido2_user_handle BYTEA UNIQUE,  -- WebAuthn user.id (32 bytes)
     is_active BOOLEAN NOT NULL DEFAULT true,
 
-    -- Beta code used during registration (skips email verification)
+    -- Alpha code used during registration (skips email verification)
     beta_code_id UUID REFERENCES beta_codes(id),
 
     -- Email verification
