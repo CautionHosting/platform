@@ -347,9 +347,9 @@ pub async fn get_user_by_ssh_key(pool: &PgPool, public_key: &str) -> Result<Opti
 
 pub async fn list_ssh_keys(pool: &PgPool, user_id: Uuid) -> Result<Vec<SshKeyInfo>> {
     let keys: Vec<SshKeyInfo> = sqlx::query_as(
-        "SELECT id, fingerprint, key_type, name, created_at 
-         FROM ssh_keys 
-         WHERE user_id = $1 
+        "SELECT id, fingerprint, key_type, name, public_key, created_at
+         FROM ssh_keys
+         WHERE user_id = $1
          ORDER BY created_at DESC"
     )
     .bind(user_id)
@@ -384,7 +384,7 @@ pub fn generate_ssh_fingerprint(public_key: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(key_data.as_bytes());
     let result = hasher.finalize();
-    format!("SHA256:{}", base64::engine::general_purpose::STANDARD_NO_PAD.encode(result))
+    base64::engine::general_purpose::STANDARD_NO_PAD.encode(result)
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
@@ -393,6 +393,7 @@ pub struct SshKeyInfo {
     pub fingerprint: String,
     pub key_type: String,
     pub name: Option<String>,
+    pub public_key: String,
     pub created_at: time::PrimitiveDateTime,
 }
 
