@@ -15,7 +15,7 @@ tower-http = { workspace = true, features = ["cors", "limit", "fs"] }
 sqlx = { workspace = true, features = ["macros", "time"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
 anyhow = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
@@ -36,3 +36,4 @@ webauthn-rs-proto = "0.5"
 russh = "0.44"
 russh-keys = "0.44"
 thiserror = { workspace = true }
+futures = "0.3"

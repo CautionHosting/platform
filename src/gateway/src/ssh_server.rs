@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 use tokio::process::Child;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
+use futures::StreamExt;
 
 #[derive(Clone)]
 pub struct SshServer {
@@ -465,32 +466,7 @@ async fn handle_git_push(
             }
         };
 
-        let deploy_msg = "\n";
-        let _ = session_handle.extended_data(channel, 1, deploy_msg.as_bytes().to_vec().into()).await;
-
-        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
-
-        let session_handle_clone = session_handle.clone();
-        tokio::spawn(async move {
-            let frames = ["⣼", "⣹", "⢻", "⠿", "⡟", "⣏", "⣧", "⣶"];
-            let message = "Building and deploying your application";
-            let mut frame_idx = 0;
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(120));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-            loop {
-                tokio::select! {
-                    _ = &mut stop_rx => {
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        let frame_msg = format!("\r{} {}", frames[frame_idx], message);
-                        let _ = session_handle_clone.extended_data(channel, 1, frame_msg.as_bytes().to_vec().into()).await;
-                        frame_idx = (frame_idx + 1) % frames.len();
-                    }
-                }
-            }
-        });
+        let _ = session_handle.extended_data(channel, 1, b"\n".to_vec().into()).await;
 
         #[derive(serde::Serialize)]
         struct DeployRequest {
@@ -523,14 +499,8 @@ async fn handle_git_push(
             .send()
             .await
         {
-            Ok(resp) => {
-                let _ = stop_tx.send(());
-                let _ = session_handle.extended_data(channel, 1, b"\n".to_vec().into()).await;
-                resp
-            }
+            Ok(resp) => resp,
             Err(e) => {
-                let _ = stop_tx.send(());
-                let _ = session_handle.extended_data(channel, 1, b"\n".to_vec().into()).await;
                 tracing::error!("Failed to send deployment request: {}", e);
                 let error_msg = format!("remote: error: Failed to trigger deployment: {}\n", e);
                 let _ = session_handle.extended_data(channel, 1, error_msg.into_bytes().into()).await;
@@ -558,10 +528,121 @@ async fn handle_git_push(
             domain: Option<String>,
         }
 
-        let deploy_result: DeployResponse = match response.json().await {
+        // Stream the response to the SSH client with spinner animation for milestones
+        let mut stream = response.bytes_stream();
+        let mut last_line = String::new();
+        let mut buffer = String::new();
+        let mut current_milestone: Option<String> = None;
+        let mut spinner_stop_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
+
+        let spinner_frames = ["⣼", "⣹", "⢻", "⠿", "⡟", "⣏", "⣧", "⣶"];
+
+        while let Some(chunk_result) = stream.next().await {
+            match chunk_result {
+                Ok(bytes) => {
+                    let chunk_str = String::from_utf8_lossy(&bytes);
+                    buffer.push_str(&chunk_str);
+
+                    // Process complete lines
+                    while let Some(newline_pos) = buffer.find('\n') {
+                        let line = buffer[..newline_pos].to_string();
+                        buffer = buffer[newline_pos + 1..].to_string();
+
+                        // Check if this line is JSON (the final result)
+                        if line.starts_with('{') {
+                            // Stop any running spinner and mark previous milestone done
+                            if let Some(tx) = spinner_stop_tx.take() {
+                                let _ = tx.send(());
+                            }
+                            if let Some(milestone) = current_milestone.take() {
+                                let done_msg = format!("\rremote: [x] {}\n", milestone);
+                                let _ = session_handle.extended_data(channel, 1, done_msg.into_bytes().into()).await;
+                            }
+                            last_line = line;
+                        } else if let Some(step_msg) = line.strip_prefix("STEP:") {
+                            // New milestone starting - complete previous one first
+                            if let Some(tx) = spinner_stop_tx.take() {
+                                let _ = tx.send(());
+                            }
+                            if let Some(prev_milestone) = current_milestone.take() {
+                                let done_msg = format!("\rremote: [x] {}\n", prev_milestone);
+                                let _ = session_handle.extended_data(channel, 1, done_msg.into_bytes().into()).await;
+                            }
+
+                            // Extract milestone text and start spinner
+                            let milestone_text = step_msg.to_string();
+                            current_milestone = Some(milestone_text.clone());
+
+                            // Start spinner for this milestone
+                            let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+                            spinner_stop_tx = Some(stop_tx);
+
+                            let session_handle_clone = session_handle.clone();
+                            let milestone_for_spinner = milestone_text.clone();
+                            tokio::spawn(async move {
+                                let mut frame_idx = 0;
+                                let mut interval = tokio::time::interval(std::time::Duration::from_millis(120));
+                                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+                                loop {
+                                    tokio::select! {
+                                        _ = &mut stop_rx => break,
+                                        _ = interval.tick() => {
+                                            let frame_msg = format!("\rremote: {} {}", spinner_frames[frame_idx], milestone_for_spinner);
+                                            let _ = session_handle_clone.extended_data(channel, 1, frame_msg.as_bytes().to_vec().into()).await;
+                                            frame_idx = (frame_idx + 1) % spinner_frames.len();
+                                        }
+                                    }
+                                }
+                            });
+
+                            // Show initial state
+                            let initial_msg = format!("remote: {} {}", spinner_frames[0], milestone_text);
+                            let _ = session_handle.extended_data(channel, 1, initial_msg.into_bytes().into()).await;
+                        } else if !line.is_empty() {
+                            // Plain message or error - stop spinner and show
+                            if let Some(tx) = spinner_stop_tx.take() {
+                                let _ = tx.send(());
+                            }
+                            if let Some(milestone) = current_milestone.take() {
+                                let done_msg = format!("\rremote: [x] {}\n", milestone);
+                                let _ = session_handle.extended_data(channel, 1, done_msg.into_bytes().into()).await;
+                            }
+                            let msg = format!("remote: {}\n", line);
+                            let _ = session_handle.extended_data(channel, 1, msg.into_bytes().into()).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    if let Some(tx) = spinner_stop_tx.take() {
+                        let _ = tx.send(());
+                    }
+                    tracing::error!("Error reading deployment stream: {}", e);
+                    let error_msg = format!("remote: error: Stream error: {}\n", e);
+                    let _ = session_handle.extended_data(channel, 1, error_msg.into_bytes().into()).await;
+                    let _ = session_handle.exit_status_request(channel, 1).await;
+                    let _ = session_handle.close(channel).await;
+                    return;
+                }
+            }
+        }
+
+        // Handle any remaining content in buffer
+        if let Some(tx) = spinner_stop_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(milestone) = current_milestone.take() {
+            let done_msg = format!("\rremote: [x] {}\n", milestone);
+            let _ = session_handle.extended_data(channel, 1, done_msg.into_bytes().into()).await;
+        }
+        if !buffer.is_empty() && buffer.starts_with('{') {
+            last_line = buffer;
+        }
+
+        let deploy_result: DeployResponse = match serde_json::from_str(&last_line) {
             Ok(result) => result,
             Err(e) => {
-                tracing::error!("Failed to parse deployment response: {}", e);
+                tracing::error!("Failed to parse deployment response: {} (line: {})", e, last_line);
                 let error_msg = format!("remote: error: Invalid deployment response\n");
                 let _ = session_handle.extended_data(channel, 1, error_msg.into_bytes().into()).await;
                 let _ = session_handle.exit_status_request(channel, 1).await;
@@ -581,7 +662,7 @@ async fn handle_git_push(
         };
 
         let success_msg = format!(
-            "\nDeployment successful!\nApplication: {}\nAttestation: {}{}\n\nRun 'caution verify' to verify the application attestation.\n\n",
+            "\nApplication: {}\nAttestation: {}{}\n\nRun 'caution verify' to verify the application attestation.\n\n",
             deploy_result.url,
             attestation_url,
             dns_note

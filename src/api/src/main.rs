@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
+    body::Body,
     extract::{Extension, Path, State, Request},
     http::{StatusCode, HeaderMap},
     middleware::{self, Next},
@@ -9,6 +10,8 @@ use axum::{
     routing::{get, post, put, patch, delete},
     Json, Router,
 };
+use futures::stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgPoolOptions, PgPool, FromRow};
 use std::sync::Arc;
@@ -1697,11 +1700,62 @@ async fn create_managed_onprem_resource(
     }
 }
 
+fn milestone(msg: &str) -> bytes::Bytes {
+    bytes::Bytes::from(format!("STEP:{}\n", msg))
+}
+
+fn milestone_done(msg: &str) -> bytes::Bytes {
+    bytes::Bytes::from(format!("{}\n", msg))
+}
+
+fn milestone_error(msg: &str) -> bytes::Bytes {
+    bytes::Bytes::from(format!("error: {}\n", msg))
+}
+
 async fn deploy_handler(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     validated_types::Validated(req): validated_types::Validated<DeployRequest>,
-) -> Result<Json<DeployResponse>, (StatusCode, String)> {
+) -> Response {
+    use tokio::process::Command;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+
+    // Spawn the deploy logic in a separate task
+    tokio::spawn(async move {
+        let result = deploy_logic(state, auth, req, tx.clone()).await;
+
+        // Send final result as JSON
+        match result {
+            Ok(response) => {
+                let json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
+                let _ = tx.send(Ok(bytes::Bytes::from(format!("{}\n", json)))).await;
+            }
+            Err((status, msg)) => {
+                let _ = tx.send(Ok(milestone_error(&msg))).await;
+                let error_json = serde_json::json!({"error": msg, "status": status.as_u16()});
+                let _ = tx.send(Ok(bytes::Bytes::from(format!("{}\n", error_json)))).await;
+            }
+        }
+    });
+
+    let stream = ReceiverStream::new(rx);
+    let body = Body::from_stream(stream);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .header("X-Content-Type-Options", "nosniff")
+        .body(body)
+        .unwrap()
+}
+
+async fn deploy_logic(
+    state: Arc<AppState>,
+    auth: AuthContext,
+    req: DeployRequest,
+    tx: tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
+) -> Result<DeployResponse, (StatusCode, String)> {
     use tokio::process::Command;
 
     tracing::info!(
@@ -1731,6 +1785,8 @@ async fn deploy_handler(
             "User does not belong to this organization".to_string(),
         ));
     }
+
+    let _ = tx.send(Ok(milestone("Preparing deployment..."))).await;
 
     tracing::info!("Fetching provider account for org {}", req.org_id);
     let provider_account: Option<(Uuid, Option<String>, Option<String>)> = sqlx::query_as(
@@ -1879,6 +1935,8 @@ async fn deploy_handler(
         tracing::info!("Cache disabled (no_cache=true), forcing rebuild");
     }
 
+    let _ = tx.send(Ok(milestone("Building Docker image..."))).await;
+
     if tarball_exists {
         tracing::info!("Cache HIT: Using cached tarball for commit {}", commit_sha);
 
@@ -1981,6 +2039,8 @@ async fn deploy_handler(
             }
         }
     }
+
+    let _ = tx.send(Ok(milestone("Building enclave image..."))).await;
 
     tracing::info!("Building Nitro Enclave EIF for commit {}", commit_sha);
 
@@ -2347,6 +2407,8 @@ async fn deploy_handler(
         managed_onprem: managed_onprem_config,
     };
 
+    let _ = tx.send(Ok(milestone("Uploading and launching..."))).await;
+
     let deployment_result = match deployment::deploy_nitro_enclave(nitro_request).await {
         Ok(result) => {
             tracing::info!(
@@ -2399,6 +2461,8 @@ async fn deploy_handler(
     };
     let attestation_url = format!("{}/attestation", app_url);
 
+    let _ = tx.send(Ok(milestone("Waiting for health check..."))).await;
+
     tracing::info!("Waiting for attestation endpoint to become healthy...");
     if let Err(e) = wait_for_attestation_health(&deployment_result.public_ip, 600).await {
         tracing::error!("Attestation health check failed: {}", e);
@@ -2411,13 +2475,15 @@ async fn deploy_handler(
         attestation_url
     );
 
-    Ok(Json(DeployResponse {
+    let _ = tx.send(Ok(milestone_done("Deployment successful!"))).await;
+
+    Ok(DeployResponse {
         url: app_url,
         attestation_url,
         resource_id,
         public_ip: deployment_result.public_ip.clone(),
         domain: build_config.domain.clone(),
-    }))
+    })
 }
 
 #[tokio::main]
