@@ -18,7 +18,7 @@
 
       <nav class="nav-desktop">
         <div class="nav-container">
-          <a href="https://caution.co/about.html" class="nav-link">About</a>
+          <a href="https://docs.caution.co/" target="_blank" rel="noopener noreferrer" class="nav-link">Docs</a>
           <a href="https://caution.co/blog.html" class="nav-link">Blog</a>
           <a href="/login" @click.prevent="$emit('login')" class="nav-link"
             >Log in</a
@@ -44,9 +44,7 @@
     <!-- Mobile menu -->
     <div class="mobile-menu" :class="{ active: mobileMenuOpen }">
       <div class="mobile-menu-content">
-        <a href="https://caution.co/about.html" class="mobile-menu-link"
-          >About</a
-        >
+        <a href="https://docs.caution.co/" target="_blank" rel="noopener noreferrer" class="mobile-menu-link">Docs</a>
         <a href="https://caution.co/blog.html" class="mobile-menu-link">Blog</a>
         <a href="https://caution.co/contact.html" class="mobile-menu-link"
           >Contact</a

@@ -1124,7 +1124,37 @@ async fn create_resource(
 
     let provider_resource_id = Uuid::new_v4().to_string();
 
-    let resource_slug = payload.name.unwrap_or_else(|| format!("app-{}", &provider_resource_id[..8]));
+    // Use provided name (typically from directory name) or generate one
+    let resource_slug = if let Some(ref name) = payload.name {
+        // Validate the app name
+        if let Err(e) = validation::validate_app_name(name) {
+            tracing::warn!("Invalid app name '{}': {}, falling back to auto-generated", name, e);
+            format!("app-{}", &provider_resource_id[..8])
+        } else {
+            // Check if name is already taken in this organization
+            let existing: Option<(Uuid,)> = sqlx::query_as(
+                "SELECT id FROM compute_resources
+                 WHERE organization_id = $1 AND resource_name = $2 AND destroyed_at IS NULL"
+            )
+            .bind(org_id)
+            .bind(name)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to check for existing resource name: {:?}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+            if existing.is_some() {
+                tracing::warn!("App name '{}' already exists, falling back to auto-generated", name);
+                format!("app-{}", &provider_resource_id[..8])
+            } else {
+                name.clone()
+            }
+        }
+    } else {
+        format!("app-{}", &provider_resource_id[..8])
+    };
 
     let configuration = serde_json::json!({
         "cmd": payload.cmd
@@ -2390,6 +2420,12 @@ async fn deploy_logic(
         }
     };
 
+    // Extract region from credentials before moving into nitro_request
+    let deployed_region = credentials
+        .as_ref()
+        .map(|c| c.region.clone())
+        .unwrap_or_else(|| "us-west-2".to_string());
+
     let nitro_request = deployment::NitroDeploymentRequest {
         org_id: req.org_id,
         resource_id,
@@ -2434,12 +2470,13 @@ async fn deploy_logic(
 
     sqlx::query(
         "UPDATE compute_resources
-         SET provider_resource_id = $1, state = $2, public_ip = $3, configuration = COALESCE(configuration, '{}'::jsonb) || $4::jsonb
-         WHERE id = $5"
+         SET provider_resource_id = $1, state = $2, public_ip = $3, region = $4, configuration = COALESCE(configuration, '{}'::jsonb) || $5::jsonb
+         WHERE id = $6"
     )
     .bind(&deployment_result.instance_id)
     .bind(types::ResourceState::Running)
     .bind(&deployment_result.public_ip)
+    .bind(&deployed_region)
     .bind(&final_config)
     .bind(resource_id)
     .execute(&state.db)

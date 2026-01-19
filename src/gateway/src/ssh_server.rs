@@ -94,6 +94,11 @@ impl russh::server::Handler for SshSession {
                 tracing::info!("SSH auth successful for user_id: {}", user_id);
                 self.user_id = Some(user_id);
 
+                // Update last_used_at for this SSH key
+                if let Err(e) = crate::db::update_ssh_key_last_used(&self.pool, &calculated_fingerprint).await {
+                    tracing::warn!("Failed to update SSH key last_used_at: {:?}", e);
+                }
+
                 match get_user_org(&self.pool, user_id).await {
                     Ok(Some(org_id)) => {
                         self.org_id = Some(org_id);

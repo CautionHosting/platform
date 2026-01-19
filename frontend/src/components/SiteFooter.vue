@@ -36,11 +36,11 @@
             <div class="footer-column">
               <h3 class="footer-column-title">Resources</h3>
               <a
-                href="https://codeberg.org/Caution/"
+                href="https://docs.caution.co/"
                 target="_blank"
                 rel="noopener noreferrer"
                 class="footer-link"
-                >Source code</a
+                >Documentation</a
               >
               <a href="https://caution.co/blog.html" class="footer-link"
                 >Blog</a
