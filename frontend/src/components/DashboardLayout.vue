@@ -46,7 +46,7 @@
             @click="$emit('tab-change', 'apps')"
           >
             <img
-              src="/assets/icons/apps.svg"
+              :src="activeTab === 'apps' ? '/assets/icons/apps--act.svg' : '/assets/icons/apps--inact.svg'"
               alt=""
               class="nav-icon"
             />
@@ -58,40 +58,30 @@
             @click="$emit('tab-change', 'ssh')"
           >
             <img
-              src="/assets/icons/key_.svg"
+              :src="activeTab === 'ssh' ? '/assets/icons/ssh--act.svg' : '/assets/icons/ssh--inact.svg'"
               alt=""
               class="nav-icon"
             />
             <span>SSH keys</span>
           </button>
 
-          <button
-            :class="['nav-item', { active: activeTab === 'credentials' }]"
-            @click="$emit('tab-change', 'credentials')"
-          >
-            <img
-              src="/assets/icons/cloud_.svg"
-              alt=""
-              class="nav-icon"
-            />
-            <span>Cloud credentials</span>
-          </button>
-
+          <!-- Hidden for now - docs site covers this
           <button
             :class="['nav-item', { active: activeTab === 'guide' }]"
             @click="$emit('tab-change', 'guide')"
           >
             <img
-              src="/assets/icons/rocket.svg"
+              :src="activeTab === 'guide' ? '/assets/icons/guide--act.svg' : '/assets/icons/guide--inact.svg'"
               alt=""
               class="nav-icon"
             />
             <span>Quick start guide</span>
           </button>
+          -->
 
           <button class="nav-item nav-item--logout" @click="$emit('logout')">
             <img
-              src="/assets/icons/logout_.svg"
+              src="/assets/icons/log_out--inact.svg"
               alt=""
               class="nav-icon"
             />
@@ -117,6 +107,12 @@
         &copy; 2025 Caution SEZC. All rights reserved.
       </div>
       <div class="footer-right">
+        <a
+          href="https://docs.caution.co/"
+          target="_blank"
+          rel="noopener noreferrer"
+          >Docs</a
+        >
         <a
           href="https://codeberg.org/caution"
           target="_blank"

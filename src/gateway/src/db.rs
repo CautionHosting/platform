@@ -347,16 +347,16 @@ pub async fn get_user_by_ssh_key(pool: &PgPool, public_key: &str) -> Result<Opti
 
 pub async fn list_ssh_keys(pool: &PgPool, user_id: Uuid) -> Result<Vec<SshKeyInfo>> {
     let keys: Vec<SshKeyInfo> = sqlx::query_as(
-        "SELECT id, fingerprint, key_type, name, created_at 
-         FROM ssh_keys 
-         WHERE user_id = $1 
+        "SELECT id, fingerprint, key_type, name, created_at, last_used_at
+         FROM ssh_keys
+         WHERE user_id = $1
          ORDER BY created_at DESC"
     )
     .bind(user_id)
     .fetch_all(pool)
     .await
     .context("Failed to list SSH keys")?;
-    
+
     Ok(keys)
 }
 
@@ -369,8 +369,20 @@ pub async fn delete_ssh_key(pool: &PgPool, user_id: Uuid, fingerprint: &str) -> 
     .execute(pool)
     .await
     .context("Failed to delete SSH key")?;
-    
+
     Ok(result.rows_affected() > 0)
+}
+
+pub async fn update_ssh_key_last_used(pool: &PgPool, fingerprint: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE ssh_keys SET last_used_at = NOW() WHERE fingerprint = $1"
+    )
+    .bind(fingerprint)
+    .execute(pool)
+    .await
+    .context("Failed to update SSH key last_used_at")?;
+
+    Ok(())
 }
 
 pub fn generate_ssh_fingerprint(public_key: &str) -> String {
@@ -394,5 +406,6 @@ pub struct SshKeyInfo {
     pub key_type: String,
     pub name: Option<String>,
     pub created_at: time::PrimitiveDateTime,
+    pub last_used_at: Option<time::PrimitiveDateTime>,
 }
 
