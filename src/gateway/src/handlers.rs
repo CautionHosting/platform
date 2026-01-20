@@ -67,6 +67,16 @@ pub async fn begin_register_handler(
 
     tracing::debug!("Alpha code validated: id={}", alpha_code_id);
 
+    // Fetch ALL existing credential IDs to pass as excludeCredentials
+    // This prevents the same authenticator from registering multiple accounts
+    let existing_cred_ids = db::get_all_credential_ids(&state.db).await?;
+    let exclude_credentials: Vec<CredentialID> = existing_cred_ids
+        .into_iter()
+        .map(CredentialID::from)
+        .collect();
+
+    tracing::info!("Excluding {} existing credentials from registration", exclude_credentials.len());
+
     let user_unique_id = uuid::Uuid::new_v4();
     let user_name = format!("user_{}", user_unique_id);
 
@@ -76,7 +86,7 @@ pub async fn begin_register_handler(
             user_unique_id,
             &user_name,
             &user_name,
-            None,
+            Some(exclude_credentials).filter(|v| !v.is_empty()),
         )
         .map_err(|e| anyhow::anyhow!("Failed to start registration: {}", e))?;
 

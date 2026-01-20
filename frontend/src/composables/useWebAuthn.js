@@ -207,6 +207,17 @@ export function useWebAuthn() {
       publicKey.challenge = base64urlToUint8Array(publicKey.challenge);
       publicKey.user.id = base64urlToUint8Array(publicKey.user.id);
 
+      // Convert excludeCredentials IDs from base64url to ArrayBuffer
+      if (publicKey.excludeCredentials) {
+        publicKey.excludeCredentials = publicKey.excludeCredentials.map((cred) => ({
+          type: cred.type,
+          id: base64urlToUint8Array(cred.id),
+          ...(cred.transports && cred.transports.length > 0
+            ? { transports: cred.transports }
+            : {}),
+        }));
+      }
+
       const credential = await navigator.credentials.create({ publicKey });
 
       if (!credential) {
