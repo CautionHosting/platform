@@ -65,6 +65,18 @@
             <span>SSH keys</span>
           </button>
 
+          <button
+            :class="['nav-item', { active: activeTab === 'billing' }]"
+            @click="$emit('tab-change', 'billing')"
+          >
+            <img
+              :src="activeTab === 'billing' ? '/assets/icons/billing--act.svg' : '/assets/icons/billing--inact.svg'"
+              alt=""
+              class="nav-icon"
+            />
+            <span>Billing</span>
+          </button>
+
           <!-- Hidden for now - docs site covers this
           <button
             :class="['nav-item', { active: activeTab === 'guide' }]"

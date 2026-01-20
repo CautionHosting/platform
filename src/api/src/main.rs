@@ -40,6 +40,9 @@ struct AppState {
     data_dir: String,
     encryptor: Option<Arc<encryption::Encryptor>>,
     internal_service_secret: Option<String>,
+    paypal_client_id: Option<String>,
+    paypal_client_secret: Option<String>,
+    paypal_api_base: String,
 }
 
 #[derive(Clone)]
@@ -1550,6 +1553,351 @@ async fn set_default_cloud_credential(
     }
 }
 
+/// Get billing usage for the current billing period
+async fn get_billing_usage(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    // Get all running resources for the org
+    let resources: Vec<ComputeResource> = sqlx::query_as(
+        "SELECT * FROM compute_resources
+         WHERE organization_id = $1 AND state = 'running'
+         ORDER BY created_at DESC"
+    )
+    .bind(org_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    // Verifiable compute margin (55% markup)
+    let margin_percent = 55.0;
+
+    // Base AWS rates by instance type (from metering/calculator.rs)
+    let get_base_rate = |instance_type: &str| -> f64 {
+        match instance_type {
+            "m5.xlarge" => 0.192,
+            "m5.2xlarge" => 0.384,
+            "c5.xlarge" => 0.17,
+            "c6i.xlarge" => 0.17,
+            "c6a.xlarge" => 0.153,
+            _ => 0.20, // default rate
+        }
+    };
+
+    let mut total_cost = 0.0;
+    let mut items = Vec::new();
+
+    for resource in resources {
+        // Calculate hours since creation (using chrono)
+        let now = chrono::Utc::now().naive_utc();
+        let duration = now.signed_duration_since(resource.created_at);
+        let hours_running = (duration.num_hours() as f64).max(0.0);
+
+        // Get instance type from config
+        let instance_type = resource.configuration
+            .as_ref()
+            .and_then(|c| c.get("instance_type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let base_rate = get_base_rate(instance_type);
+        let hourly_rate = base_rate * (1.0 + margin_percent / 100.0);
+        let cost = hours_running * hourly_rate;
+        total_cost += cost;
+
+        items.push(serde_json::json!({
+            "id": resource.id,
+            "resource_id": resource.provider_resource_id,
+            "resource_name": resource.resource_name.clone().unwrap_or_else(|| "Unnamed".to_string()),
+            "resource_type": "compute",
+            "instance_type": instance_type,
+            "quantity": hours_running,
+            "unit": "hours",
+            "base_rate": format!("{:.3}", base_rate),
+            "rate": format!("{:.2}", hourly_rate),
+            "cost": cost,
+        }));
+    }
+
+    Ok(Json(serde_json::json!({
+        "total_cost": total_cost,
+        "currency": "USD",
+        "items": items,
+    })))
+}
+
+/// Get billing invoices
+async fn get_billing_invoices(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    // Query invoices from database
+    let invoices: Vec<(Uuid, String, i64, String, Option<String>, chrono::NaiveDateTime)> = sqlx::query_as(
+        "SELECT id, invoice_number, amount_cents, status, pdf_url, created_at
+         FROM invoices
+         WHERE organization_id = $1
+         ORDER BY created_at DESC
+         LIMIT 50"
+    )
+    .bind(org_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let invoice_list: Vec<serde_json::Value> = invoices.iter().map(|(id, number, amount, status, pdf_url, date)| {
+        serde_json::json!({
+            "id": id,
+            "number": number,
+            "amount_cents": amount,
+            "status": status,
+            "pdf_url": pdf_url,
+            "date": date.to_string(),
+        })
+    }).collect();
+
+    Ok(Json(serde_json::json!({
+        "invoices": invoice_list,
+    })))
+}
+
+/// Get saved payment method
+async fn get_payment_method(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    // Query payment method from database
+    let payment_method: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT payment_type, last4, email
+         FROM payment_methods
+         WHERE organization_id = $1 AND is_active = true
+         LIMIT 1"
+    )
+    .bind(org_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    match payment_method {
+        Some((payment_type, last4, email)) => {
+            Ok(Json(serde_json::json!({
+                "payment_method": {
+                    "type": payment_type,
+                    "last4": last4,
+                    "email": email,
+                }
+            })))
+        }
+        None => {
+            Ok(Json(serde_json::json!({
+                "payment_method": null
+            })))
+        }
+    }
+}
+
+/// Delete payment method
+async fn delete_payment_method(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    sqlx::query(
+        "UPDATE payment_methods SET is_active = false WHERE organization_id = $1"
+    )
+    .bind(org_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Create PayPal vault setup token
+async fn create_paypal_setup_token(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (client_id, client_secret) = match (&state.paypal_client_id, &state.paypal_client_secret) {
+        (Some(id), Some(secret)) => (id, secret),
+        _ => return Err((StatusCode::SERVICE_UNAVAILABLE, "PayPal is not configured".to_string())),
+    };
+
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    // Get PayPal access token
+    let http_client = reqwest::Client::new();
+    let token_response = http_client
+        .post(format!("{}/v1/oauth2/token", state.paypal_api_base))
+        .basic_auth(client_id, Some(client_secret))
+        .form(&[("grant_type", "client_credentials")])
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PayPal request failed: {}", e)))?;
+
+    if !token_response.status().is_success() {
+        let error_text = token_response.text().await.unwrap_or_default();
+        return Err((StatusCode::BAD_GATEWAY, format!("PayPal auth failed: {}", error_text)));
+    }
+
+    let token_data: serde_json::Value = token_response.json().await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PayPal response parse error: {}", e)))?;
+
+    let access_token = token_data["access_token"].as_str()
+        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No access token in PayPal response".to_string()))?;
+
+    // Create vault setup token for card
+    let setup_response = http_client
+        .post(format!("{}/v3/vault/setup-tokens", state.paypal_api_base))
+        .bearer_auth(access_token)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "payment_source": {
+                "card": {}
+            }
+        }))
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PayPal setup token request failed: {}", e)))?;
+
+    if !setup_response.status().is_success() {
+        let error_text = setup_response.text().await.unwrap_or_default();
+        tracing::error!("PayPal setup token error: {}", error_text);
+        return Err((StatusCode::BAD_GATEWAY, format!("PayPal setup token failed: {}", error_text)));
+    }
+
+    let setup_data: serde_json::Value = setup_response.json().await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PayPal response parse error: {}", e)))?;
+
+    let setup_token = setup_data["id"].as_str()
+        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No setup token in PayPal response".to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "setup_token": setup_token
+    })))
+}
+
+#[derive(Deserialize)]
+struct SavePaymentMethodRequest {
+    vault_setup_token: String,
+}
+
+/// Save PayPal payment method after customer approval
+async fn save_paypal_payment_method(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<SavePaymentMethodRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (client_id, client_secret) = match (&state.paypal_client_id, &state.paypal_client_secret) {
+        (Some(id), Some(secret)) => (id, secret),
+        _ => return Err((StatusCode::SERVICE_UNAVAILABLE, "PayPal is not configured".to_string())),
+    };
+
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    // Get PayPal access token
+    let http_client = reqwest::Client::new();
+    let token_response = http_client
+        .post(format!("{}/v1/oauth2/token", state.paypal_api_base))
+        .basic_auth(client_id, Some(client_secret))
+        .form(&[("grant_type", "client_credentials")])
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PayPal request failed: {}", e)))?;
+
+    if !token_response.status().is_success() {
+        let error_text = token_response.text().await.unwrap_or_default();
+        return Err((StatusCode::BAD_GATEWAY, format!("PayPal auth failed: {}", error_text)));
+    }
+
+    let token_data: serde_json::Value = token_response.json().await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PayPal response parse error: {}", e)))?;
+
+    let access_token = token_data["access_token"].as_str()
+        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No access token in PayPal response".to_string()))?;
+
+    // Exchange setup token for payment token
+    let payment_token_response = http_client
+        .post(format!("{}/v3/vault/payment-tokens", state.paypal_api_base))
+        .bearer_auth(access_token)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "payment_source": {
+                "token": {
+                    "id": req.vault_setup_token,
+                    "type": "SETUP_TOKEN"
+                }
+            }
+        }))
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PayPal payment token request failed: {}", e)))?;
+
+    if !payment_token_response.status().is_success() {
+        let error_text = payment_token_response.text().await.unwrap_or_default();
+        tracing::error!("PayPal payment token error: {}", error_text);
+        return Err((StatusCode::BAD_GATEWAY, format!("PayPal payment token failed: {}", error_text)));
+    }
+
+    let payment_data: serde_json::Value = payment_token_response.json().await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PayPal response parse error: {}", e)))?;
+
+    let payment_token = payment_data["id"].as_str()
+        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No payment token in PayPal response".to_string()))?;
+
+    // Extract card details from PayPal response
+    let card_data = &payment_data["payment_source"]["card"];
+    let last4 = card_data["last_digits"].as_str();
+    let brand = card_data["brand"].as_str().unwrap_or("card");
+
+    // Deactivate existing payment methods
+    sqlx::query("UPDATE payment_methods SET is_active = false WHERE organization_id = $1")
+        .bind(org_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    // Save the new payment method
+    sqlx::query(
+        "INSERT INTO payment_methods (id, organization_id, payment_type, provider_token, last4, is_active, created_at)
+         VALUES ($1, $2, 'card', $3, $4, true, NOW())"
+    )
+    .bind(Uuid::new_v4())
+    .bind(org_id)
+    .bind(payment_token)
+    .bind(last4)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "payment_method": {
+            "type": "card",
+            "brand": brand,
+            "last4": last4,
+        }
+    })))
+}
+
 /// Create or update a managed on-prem resource.
 /// Accepts either plain JSON or GPG-encrypted config from the setup script.
 /// If resource_id is provided, updates the existing resource; otherwise creates a new one.
@@ -2568,6 +2916,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("INTERNAL_SERVICE_SECRET not set - internal service authentication disabled");
     }
 
+    // PayPal configuration
+    let paypal_client_id = std::env::var("PAYPAL_CLIENT_ID").ok();
+    let paypal_client_secret = std::env::var("PAYPAL_CLIENT_SECRET").ok();
+    let paypal_api_base = std::env::var("PAYPAL_API_BASE")
+        .unwrap_or_else(|_| "https://api-m.sandbox.paypal.com".to_string());
+    if paypal_client_id.is_some() && paypal_client_secret.is_some() {
+        info!("PayPal integration enabled ({})", paypal_api_base);
+    }
+
     let state = Arc::new(AppState {
         db: pool,
         git_hostname,
@@ -2575,6 +2932,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         data_dir,
         encryptor,
         internal_service_secret,
+        paypal_client_id,
+        paypal_client_secret,
+        paypal_api_base,
     });
 
     let onboarding_routes = Router::new()
@@ -2607,6 +2967,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/credentials/{id}", get(get_cloud_credential))
         .route("/credentials/{id}", delete(delete_cloud_credential))
         .route("/credentials/{id}/default", post(set_default_cloud_credential))
+        .route("/billing/usage", get(get_billing_usage))
+        .route("/billing/invoices", get(get_billing_invoices))
+        .route("/billing/payment-method", get(get_payment_method))
+        .route("/billing/payment-method", delete(delete_payment_method))
+        .route("/billing/paypal/setup-token", post(create_paypal_setup_token))
+        .route("/billing/paypal/save-payment-method", post(save_paypal_payment_method))
         .layer(middleware::from_fn_with_state(state.clone(), onboarding_middleware))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 

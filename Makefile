@@ -7,6 +7,7 @@ export
 export DOCKER_BUILDKIT=1
 
 .PHONY: build-all build-enclave network postgres migrate run-api run-gateway run-frontend up down down-clean logs clean clean-enclave
+.PHONY: lago-build lago-redis lago-db lago-migrate lago-run lago-up lago-down lago-logs
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -38,12 +39,17 @@ build-email:
 	@docker build -t caution-email -f ./containerfiles/Containerfile.email-service .
 	@echo "Email service image built: caution-email"
 
+build-metering:
+	@echo "Building Metering service..."
+	@docker build -t caution-metering -f ./containerfiles/Containerfile.metering .
+	@echo "Metering service image built: caution-metering"
+
 build-frontend:
 	@echo "Building Frontend..."
 	@docker build -t caution-frontend -f ./containerfiles/Containerfile.frontend .
 	@echo "Frontend image built: caution-frontend"
 
-build-all: build-gateway build-api build-email build-frontend
+build-all: build-gateway build-api build-email build-metering build-frontend
 
 network:
 	@docker network inspect $(NETWORK) >/dev/null 2>&1 || \
@@ -140,8 +146,21 @@ run-email: network
 		--network $(NETWORK) \
 		--env-file .env \
 		-e FRONTEND_URL=http://localhost:3000 \
+		-p 8082:8082 \
 		caution-email
-	@echo "Email service started (internal port 8082)"
+	@echo "Email service started on http://localhost:8082"
+
+run-metering: network postgres
+	@docker rm -f metering 2>/dev/null || true
+	@docker run -d \
+		--name metering \
+		--network $(NETWORK) \
+		--env-file .env \
+		-e DATABASE_URL=$(DATABASE_URL) \
+		-e LAGO_URL=http://lago-api:3000 \
+		-e METERING_INTERVAL_SECS=300 \
+		caution-metering
+	@echo "Metering service started (internal port 8083)"
 
 run-frontend: network
 	@docker rm -f frontend 2>/dev/null || true
@@ -153,7 +172,103 @@ run-frontend: network
 		caution-frontend
 	@echo "Frontend started on port 3000"
 
-up: build-api build-gateway build-email build-frontend migrate run-email run-api run-frontend
+# =============================================================================
+# Billing / Lago
+# =============================================================================
+
+lago-build:
+	@echo "Building Lago API from source..."
+	@docker build -t caution-lago -f ./containerfiles/Containerfile.lago .
+	@echo "Lago image built: caution-lago"
+
+lago-redis: network
+	@if docker ps -a --format '{{.Names}}' | grep -q '^lago-redis$$'; then \
+		if docker ps --format '{{.Names}}' | grep -q '^lago-redis$$'; then \
+			echo "Lago Redis already running"; \
+		else \
+			echo "Starting existing lago-redis container..."; \
+			docker start lago-redis; \
+			echo "Lago Redis started"; \
+		fi \
+	else \
+		docker run -d \
+			--name lago-redis \
+			--network $(NETWORK) \
+			redis:7-alpine && \
+		echo "Lago Redis started"; \
+	fi
+
+lago-db: postgres
+	@echo "Creating Lago database..."
+	@docker exec postgres psql -U $(DB_USER) -tc "SELECT 1 FROM pg_database WHERE datname = 'lago'" | grep -q 1 || \
+		docker exec postgres psql -U $(DB_USER) -c "CREATE DATABASE lago"
+	@echo "Lago database ready"
+
+lago-migrate: lago-build lago-db lago-redis
+	@echo "Running Lago database migrations..."
+	@docker run --rm \
+		--network $(NETWORK) \
+		-e DATABASE_URL=postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):5432/lago \
+		-e REDIS_URL=redis://lago-redis:6379 \
+		-e SECRET_KEY_BASE=$${LAGO_SECRET_KEY_BASE:-$$(openssl rand -hex 64)} \
+		-e LAGO_RSA_PRIVATE_KEY="$${LAGO_RSA_PRIVATE_KEY}" \
+		-e RAILS_ENV=production \
+		caution-lago \
+		bundle exec rails db:migrate 2>/dev/null || echo "Lago migrations completed (or already up to date)"
+
+lago-run: lago-migrate
+	@docker rm -f lago-api lago-worker 2>/dev/null || true
+	@echo "Starting Lago API..."
+	@docker run -d \
+		--name lago-api \
+		--network $(NETWORK) \
+		-e DATABASE_URL=postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):5432/lago \
+		-e REDIS_URL=redis://lago-redis:6379 \
+		-e SECRET_KEY_BASE=$${LAGO_SECRET_KEY_BASE:-$$(openssl rand -hex 64)} \
+		-e LAGO_RSA_PRIVATE_KEY="$${LAGO_RSA_PRIVATE_KEY}" \
+		-e LAGO_API_URL=http://lago-api:3000 \
+		-e LAGO_FRONT_URL=http://localhost:3001 \
+		-e LAGO_DISABLE_SIGNUP=true \
+		-e LAGO_WEBHOOK_URL=http://metering:8083/webhooks/lago \
+		-e RAILS_ENV=production \
+		-e RAILS_LOG_TO_STDOUT=true \
+		caution-lago
+	@echo "Starting Lago Worker..."
+	@docker run -d \
+		--name lago-worker \
+		--network $(NETWORK) \
+		-e DATABASE_URL=postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):5432/lago \
+		-e REDIS_URL=redis://lago-redis:6379 \
+		-e SECRET_KEY_BASE=$${LAGO_SECRET_KEY_BASE:-$$(openssl rand -hex 64)} \
+		-e LAGO_RSA_PRIVATE_KEY="$${LAGO_RSA_PRIVATE_KEY}" \
+		-e RAILS_ENV=production \
+		-e RAILS_LOG_TO_STDOUT=true \
+		--entrypoint "" \
+		caution-lago \
+		bundle exec sidekiq -C config/sidekiq.yml
+	@echo "Lago services started (API on internal port 3000)"
+
+lago-up: lago-run
+	@echo "Lago billing system is running"
+
+lago-down:
+	@docker rm -f lago-api lago-worker 2>/dev/null || true
+	@docker stop lago-redis 2>/dev/null || true
+	@echo "Lago services stopped"
+
+lago-logs:
+	@echo "=== Lago API Logs ==="
+	@docker logs lago-api 2>&1 | tail -n 30 || true
+	@echo "\n=== Lago Worker Logs ==="
+	@docker logs lago-worker 2>&1 | tail -n 30 || true
+	@echo "\n=== Lago Redis Logs ==="
+	@docker logs lago-redis 2>&1 | tail -n 10 || true
+
+# =============================================================================
+# Main targets
+# =============================================================================
+
+up: build-api build-gateway build-email build-metering build-frontend migrate lago-up run-email run-metering run-api run-frontend
 	@echo "Waiting for API to be ready..."
 	@sleep 2
 	@$(MAKE) run-gateway
@@ -162,19 +277,22 @@ up: build-api build-gateway build-email build-frontend migrate run-email run-api
 	@echo "  Gateway: http://localhost:8000"
 	@echo "  SSH: localhost:2222"
 	@echo "  API: internal only (http://api:8080)"
+	@echo "  Metering: internal only (http://metering:8083)"
+	@echo "  Lago: internal only (http://lago-api:3000)"
 	@echo "  Postgres: localhost:5432"
 	@echo ""
 	@echo "Database is persistent - safe to run 'make down' without losing data"
 
 down:
-	@docker rm -f gateway api email frontend 2>/dev/null || true
+	@docker rm -f gateway api email metering frontend 2>/dev/null || true
+	@$(MAKE) lago-down
 	@docker stop postgres 2>/dev/null || true
 	@echo "Services stopped (postgres data preserved)"
 	@echo "Run 'make up' to restart"
 	@echo "Run 'make down-clean' to remove all data"
 
 down-clean:
-	@docker rm -f gateway api email frontend postgres 2>/dev/null || true
+	@docker rm -f gateway api email metering frontend lago-api lago-worker lago-redis postgres 2>/dev/null || true
 	@docker volume rm $(DB_VOLUME) 2>/dev/null || true
 	@docker network rm $(NETWORK) 2>/dev/null || true
 	@echo "All services and data removed"
@@ -186,15 +304,18 @@ logs:
 	@docker logs api 2>&1 | tail -n 20 || true
 	@echo "\n=== Email Service Logs ==="
 	@docker logs email 2>&1 | tail -n 20 || true
+	@echo "\n=== Metering Service Logs ==="
+	@docker logs metering 2>&1 | tail -n 20 || true
 	@echo "\n=== Frontend Logs ==="
 	@docker logs frontend 2>&1 | tail -n 20 || true
 	@echo "\n=== Postgres Logs ==="
 	@docker logs postgres 2>&1 | tail -n 20 || true
+	@echo "\n(Run 'make lago-logs' for Lago billing logs)"
 
 clean:
 	@echo "Cleaning build artifacts..."
 	@rm -rf $(OUT_DIR)
-	@docker rmi -f caution-cli caution-gateway caution-api caution-email caution-frontend 2>/dev/null || true
+	@docker rmi -f caution-cli caution-gateway caution-api caution-email caution-metering caution-frontend caution-lago 2>/dev/null || true
 	@echo "Clean complete"
 
 clean-enclave:
@@ -211,7 +332,7 @@ db-reset: down-clean
 
 status:
 	@echo "=== Container Status ==="
-	@docker ps -a --filter "name=gateway" --filter "name=api" --filter "name=email" --filter "name=frontend" --filter "name=postgres" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+	@docker ps -a --filter "name=gateway" --filter "name=api" --filter "name=email" --filter "name=metering" --filter "name=frontend" --filter "name=postgres" --filter "name=lago-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 	@echo "\n=== Volume Status ==="
 	@docker volume ls --filter "name=$(DB_VOLUME)"
 	@echo "\n=== Network Status ==="

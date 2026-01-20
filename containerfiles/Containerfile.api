@@ -50,10 +50,12 @@ COPY src/api/Cargo.toml ./src/api/
 COPY src/gateway/Cargo.toml ./src/gateway/
 COPY src/email-service/Cargo.toml ./src/email-service/
 COPY src/enclave-builder/Cargo.toml ./src/enclave-builder/
+COPY src/metering/Cargo.toml ./src/metering/
 
-RUN mkdir -p src/gateway/src src/email-service/src src/enclave-builder/src && \
+RUN mkdir -p src/gateway/src src/email-service/src src/enclave-builder/src src/metering/src && \
     echo "fn main() {}" > src/gateway/src/main.rs && \
     echo "fn main() {}" > src/email-service/src/main.rs && \
+    echo "fn main() {}" > src/metering/src/main.rs && \
     echo "pub fn dummy() {}" > src/enclave-builder/src/lib.rs
 
 COPY src/api/src ./src/api/src

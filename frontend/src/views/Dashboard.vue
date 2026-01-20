@@ -189,6 +189,10 @@
                 <span class="app-detail-value">{{ selectedApp.configuration?.memory_mb ? formatMemory(selectedApp.configuration.memory_mb) : '-' }}</span>
               </div>
             </div>
+            <div v-if="selectedApp.state === 'running' && calculateAppMonthlyCost(selectedApp)" class="sidebar-cost">
+              <span class="app-detail-label">Est. monthly cost</span>
+              <span class="app-detail-value app-detail-value--cost">${{ calculateAppMonthlyCost(selectedApp) }}</span>
+            </div>
           </aside>
         </div>
 
@@ -909,6 +913,144 @@ make build-cli
       </div>
     </div>
 
+    <!-- Billing Tab -->
+    <div v-if="activeTab === 'billing'" class="content-card">
+      <div class="content-header">
+        <div class="content-header-text">
+          <h2 class="content-header-title">Billing</h2>
+          <p class="content-header-description">
+            View your usage and costs for the current billing period.
+          </p>
+        </div>
+      </div>
+
+      <!-- Current Period Summary -->
+      <div class="billing-summary">
+        <div class="billing-period">
+          <span class="billing-period-label">Current period</span>
+          <span class="billing-period-dates">{{ currentBillingPeriod }}</span>
+        </div>
+        <div class="billing-total">
+          <span class="billing-total-label">Estimated total</span>
+          <span class="billing-total-amount">${{ billingData.totalCost?.toFixed(2) || '0.00' }}</span>
+        </div>
+      </div>
+
+      <!-- Usage Breakdown -->
+      <div class="billing-section">
+        <h3 class="billing-section-title">Usage breakdown</h3>
+        <div v-if="loadingBilling" class="list-item-empty">Loading billing data...</div>
+        <div v-else-if="billingData.items?.length === 0" class="list-item-empty">
+          No usage this billing period.
+        </div>
+        <div v-else class="billing-table">
+          <div class="billing-table-header">
+            <span class="billing-col-resource">Resource</span>
+            <span class="billing-col-usage">Usage</span>
+            <span class="billing-col-rate">Rate</span>
+            <span class="billing-col-cost">Cost</span>
+          </div>
+          <div v-for="item in billingData.items" :key="item.id" class="billing-table-row">
+            <span class="billing-col-resource">
+              <span class="billing-resource-name">{{ item.resourceName }}</span>
+              <span class="billing-resource-type">{{ item.resourceType }}</span>
+            </span>
+            <span class="billing-col-usage">{{ item.usage }} {{ item.unit }}</span>
+            <span class="billing-col-rate">${{ item.rate }}/{{ item.unit }}</span>
+            <span class="billing-col-cost">${{ item.cost.toFixed(2) }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Payment Method -->
+      <div class="billing-section">
+        <h3 class="billing-section-title">Payment method</h3>
+        <div v-if="paymentMethod" class="payment-method-card">
+          <div class="payment-method-info">
+            <span class="payment-method-type">{{ paymentMethod.type }}</span>
+            <span class="payment-method-details">{{ paymentMethod.last4 ? `•••• ${paymentMethod.last4}` : paymentMethod.email }}</span>
+          </div>
+          <button @click="removePaymentMethod" class="btn-secondary btn-small">Remove</button>
+        </div>
+        <div v-else class="payment-method-empty">
+          <p>No payment method on file.</p>
+          <button @click="showAddPaymentModal = true" class="btn-primary">Add payment method</button>
+        </div>
+      </div>
+
+      <!-- Invoices -->
+      <div class="billing-section">
+        <h3 class="billing-section-title">Invoices</h3>
+        <div v-if="loadingInvoices" class="list-item-empty">Loading invoices...</div>
+        <div v-else-if="invoices.length === 0" class="list-item-empty">
+          No invoices yet.
+        </div>
+        <div v-else class="invoices-list">
+          <div v-for="invoice in invoices" :key="invoice.id" class="invoice-item">
+            <div class="invoice-info">
+              <span class="invoice-number">{{ invoice.number }}</span>
+              <span class="invoice-date">{{ formatDate(invoice.date) }}</span>
+            </div>
+            <div class="invoice-amount">
+              <span :class="['invoice-status', `status-${invoice.status}`]">{{ invoice.status }}</span>
+              <span class="invoice-total">${{ (invoice.amount_cents / 100).toFixed(2) }}</span>
+            </div>
+            <a v-if="invoice.pdf_url" :href="invoice.pdf_url" target="_blank" class="btn-secondary btn-small">
+              Download PDF
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add Payment Method Modal -->
+    <div v-if="showAddPaymentModal" class="modal-overlay" @click="showAddPaymentModal = false">
+      <div class="modal-content modal-content--wide" @click.stop>
+        <h3 class="modal-title">Add payment method</h3>
+
+        <!-- Card Form -->
+        <div class="card-form">
+          <div class="card-form-row">
+            <label class="card-form-label">Card number</label>
+            <div id="card-number" class="card-field"></div>
+          </div>
+          <div class="card-form-row card-form-row--split">
+            <div class="card-form-col">
+              <label class="card-form-label">Expiry</label>
+              <div id="card-expiry" class="card-field"></div>
+            </div>
+            <div class="card-form-col">
+              <label class="card-form-label">CVV</label>
+              <div id="card-cvv" class="card-field"></div>
+            </div>
+          </div>
+          <div class="card-form-row">
+            <label class="card-form-label">Name on card</label>
+            <input
+              v-model="cardHolderName"
+              type="text"
+              class="form-input"
+              placeholder="John Smith"
+            />
+          </div>
+        </div>
+
+        <div v-if="cardError" class="card-error">{{ cardError }}</div>
+
+        <div class="modal-actions">
+          <button @click="showAddPaymentModal = false" class="btn-secondary">Cancel</button>
+          <button @click="submitCard" class="btn-primary" :disabled="savingCard">
+            {{ savingCard ? 'Saving...' : 'Save card' }}
+          </button>
+        </div>
+
+        <p class="card-privacy-notice">
+          By saving your card, you acknowledge that your data will be processed by PayPal subject to the
+          <a href="https://www.paypal.com/privacy" target="_blank" rel="noopener">PayPal Privacy Statement</a>.
+        </p>
+      </div>
+    </div>
+
     <!-- Cloud Credentials Tab -->
     <div v-if="activeTab === 'credentials'" class="content-card">
       <h2 class="content-card-title">Cloud credentials</h2>
@@ -1047,7 +1189,7 @@ make build-cli
 </template>
 
 <script>
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import DashboardLayout from "../components/DashboardLayout.vue";
 import AttestationModal from "../components/AttestationModal.vue";
 
@@ -1237,6 +1379,26 @@ export default {
     const newCredAwsSecret = ref("");
     const newCredIsDefault = ref(false);
 
+    // Billing state
+    const billingData = ref({ totalCost: 0, items: [] });
+    const loadingBilling = ref(false);
+    const invoices = ref([]);
+    const loadingInvoices = ref(false);
+    const paymentMethod = ref(null);
+    const showAddPaymentModal = ref(false);
+    const cardHolderName = ref('');
+    const cardError = ref('');
+    const savingCard = ref(false);
+    const cardFieldsInstance = ref(null);
+
+    const currentBillingPeriod = computed(() => {
+      const now = new Date();
+      const start = new Date(now.getFullYear(), now.getMonth(), 1);
+      const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+      const formatter = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' });
+      return `${formatter.format(start)} - ${formatter.format(end)}, ${now.getFullYear()}`;
+    });
+
     const pageTitle = computed(() => {
       return "";
     });
@@ -1334,6 +1496,306 @@ export default {
         showToast("Failed to connect to server", 'error');
       } finally {
         loadingKeys.value = false;
+      }
+    };
+
+    const loadBilling = async () => {
+      loadingBilling.value = true;
+
+      try {
+        const response = await fetch("/api/billing/usage", {
+          headers: {
+            "X-Session-ID": props.session,
+          },
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          billingData.value = {
+            totalCost: data.total_cost || 0,
+            items: (data.items || []).map(item => ({
+              id: item.id || item.resource_id,
+              resourceName: item.resource_name || item.resource_id,
+              resourceType: item.resource_type || 'compute',
+              usage: item.quantity || 0,
+              unit: item.unit || 'hours',
+              rate: item.rate || '0.05',
+              cost: item.cost || 0,
+            })),
+          };
+        } else if (response.status === 401) {
+          window.location.href = "/login";
+        } else {
+          // API might not exist yet, use placeholder data from apps
+          billingData.value = calculateBillingFromApps();
+        }
+      } catch (err) {
+        // Fallback: calculate billing from running apps
+        billingData.value = calculateBillingFromApps();
+      } finally {
+        loadingBilling.value = false;
+      }
+    };
+
+    const calculateBillingFromApps = () => {
+      // Base AWS rates (from metering/calculator.rs)
+      const baseRates = {
+        'm5.xlarge': 0.192,
+        'm5.2xlarge': 0.384,
+        'c5.xlarge': 0.17,
+        'c6i.xlarge': 0.17,
+        'c6a.xlarge': 0.153,
+        'default': 0.20,
+      };
+
+      // Margin for verifiable compute (55% markup)
+      const marginPercent = 55;
+
+      const runningApps = apps.value.filter(app => app.state === 'running');
+      const items = runningApps.map(app => {
+        const hoursRunning = app.created_at
+          ? Math.ceil((Date.now() - new Date(app.created_at).getTime()) / (1000 * 60 * 60))
+          : 0;
+
+        const instanceType = app.configuration?.instance_type || 'default';
+        const baseRate = baseRates[instanceType] || baseRates['default'];
+        const hourlyRate = baseRate * (1 + marginPercent / 100);
+        const cost = hoursRunning * hourlyRate;
+
+        return {
+          id: app.id,
+          resourceName: app.resource_name || 'Unnamed App',
+          resourceType: 'Compute',
+          usage: hoursRunning,
+          unit: 'hours',
+          rate: hourlyRate.toFixed(2),
+          cost: cost,
+        };
+      });
+      return {
+        totalCost: items.reduce((sum, item) => sum + item.cost, 0),
+        items,
+      };
+    };
+
+    const getAppEstimatedMonthlyCost = (app) => {
+      // Get the hourly rate from billing data if available
+      const billingItem = billingData.value.items?.find(item => item.id === app.id);
+      if (billingItem && billingItem.rate) {
+        const hourlyRate = parseFloat(billingItem.rate);
+        const hoursPerMonth = 730;
+        return (hourlyRate * hoursPerMonth).toFixed(2);
+      }
+
+      // Fallback: show estimated_monthly_cost from resource if available
+      if (app.estimated_monthly_cost) {
+        return app.estimated_monthly_cost.toFixed(2);
+      }
+
+      return null;
+    };
+
+    // Alias for template
+    const calculateAppMonthlyCost = getAppEstimatedMonthlyCost;
+
+    const loadInvoices = async () => {
+      loadingInvoices.value = true;
+      try {
+        const response = await fetch("/api/billing/invoices", {
+          headers: {
+            "X-Session-ID": props.session,
+          },
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          invoices.value = data.invoices || [];
+        } else if (response.status === 401) {
+          window.location.href = "/login";
+        } else {
+          invoices.value = [];
+        }
+      } catch (err) {
+        invoices.value = [];
+      } finally {
+        loadingInvoices.value = false;
+      }
+    };
+
+    const loadPaymentMethod = async () => {
+      try {
+        const response = await fetch("/api/billing/payment-method", {
+          headers: {
+            "X-Session-ID": props.session,
+          },
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          paymentMethod.value = data.payment_method || null;
+        } else {
+          paymentMethod.value = null;
+        }
+      } catch (err) {
+        paymentMethod.value = null;
+      }
+    };
+
+    const initPayPalCardFields = async () => {
+      const clientId = import.meta.env.VITE_PAYPAL_CLIENT_ID || 'sb';
+
+      // Load PayPal SDK with card-fields component if not already loaded
+      if (!window.paypal?.CardFields) {
+        const script = document.createElement('script');
+        script.src = `https://www.paypal.com/sdk/js?client-id=${clientId}&components=card-fields&vault=true`;
+        script.onload = () => renderCardFields();
+        script.onerror = () => {
+          cardError.value = 'Failed to load payment form. Please refresh and try again.';
+        };
+        document.body.appendChild(script);
+      } else {
+        renderCardFields();
+      }
+    };
+
+    const renderCardFields = async () => {
+      if (!window.paypal?.CardFields) {
+        cardError.value = 'Payment form not available.';
+        return;
+      }
+
+      // First get a setup token from our backend
+      try {
+        const setupResponse = await fetch('/api/billing/paypal/setup-token', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Session-ID': props.session,
+          },
+          body: JSON.stringify({ payment_source: 'card' }),
+        });
+
+        if (!setupResponse.ok) {
+          throw new Error('Failed to initialize payment form');
+        }
+
+        const { setup_token } = await setupResponse.json();
+
+        // Initialize card fields with the setup token
+        const cardFields = window.paypal.CardFields({
+          createVaultSetupToken: async () => setup_token,
+          style: {
+            input: {
+              'font-size': '14px',
+              'font-family': '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+              color: '#1f2937',
+            },
+            '.invalid': {
+              color: '#dc2626',
+            },
+          },
+          onApprove: async (data) => {
+            await saveCardPaymentMethod(data.vaultSetupToken);
+          },
+          onError: (err) => {
+            console.error('Card field error:', err);
+            cardError.value = 'An error occurred. Please try again.';
+          },
+        });
+
+        // Check if card fields are eligible
+        if (cardFields.isEligible()) {
+          // Render the individual card fields
+          cardFields.NumberField().render('#card-number');
+          cardFields.ExpiryField().render('#card-expiry');
+          cardFields.CVVField().render('#card-cvv');
+          cardFieldsInstance.value = cardFields;
+        } else {
+          cardError.value = 'Card payments are not available. Please contact support.';
+        }
+      } catch (err) {
+        console.error('Failed to initialize card fields:', err);
+        cardError.value = 'Failed to initialize payment form. Please try again.';
+      }
+    };
+
+    const submitCard = async () => {
+      if (!cardFieldsInstance.value) {
+        cardError.value = 'Payment form not ready. Please wait and try again.';
+        return;
+      }
+
+      if (!cardHolderName.value.trim()) {
+        cardError.value = 'Please enter the name on card.';
+        return;
+      }
+
+      cardError.value = '';
+      savingCard.value = true;
+
+      try {
+        // Submit the card fields - this triggers onApprove callback
+        await cardFieldsInstance.value.submit({
+          cardholderName: cardHolderName.value.trim(),
+        });
+      } catch (err) {
+        console.error('Card submission error:', err);
+        cardError.value = err.message || 'Failed to save card. Please check your details and try again.';
+        savingCard.value = false;
+      }
+    };
+
+    const saveCardPaymentMethod = async (vaultSetupToken) => {
+      try {
+        const response = await fetch('/api/billing/paypal/save-payment-method', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Session-ID': props.session,
+          },
+          body: JSON.stringify({
+            vault_setup_token: vaultSetupToken,
+            cardholder_name: cardHolderName.value.trim(),
+          }),
+        });
+
+        if (response.ok) {
+          showToast('Card saved successfully');
+          showAddPaymentModal.value = false;
+          cardHolderName.value = '';
+          cardFieldsInstance.value = null;
+          await loadPaymentMethod();
+        } else {
+          const err = await response.json().catch(() => ({}));
+          cardError.value = err.error || 'Failed to save card. Please try again.';
+        }
+      } catch (err) {
+        console.error('Save payment method error:', err);
+        cardError.value = 'Failed to save card. Please try again.';
+      } finally {
+        savingCard.value = false;
+      }
+    };
+
+    const removePaymentMethod = async () => {
+      if (!confirm('Are you sure you want to remove your payment method?')) return;
+
+      try {
+        const response = await fetch('/api/billing/payment-method', {
+          method: 'DELETE',
+          headers: {
+            'X-Session-ID': props.session,
+          },
+        });
+
+        if (response.ok || response.status === 204) {
+          paymentMethod.value = null;
+          showToast('Payment method removed');
+        } else {
+          showToast('Failed to remove payment method', 'error');
+        }
+      } catch (err) {
+        showToast('Failed to remove payment method', 'error');
       }
     };
 
@@ -1623,6 +2085,10 @@ export default {
         newKeyName.value = "";
         newPublicKey.value = "";
         error.value = null;
+      } else if (newTab === "billing") {
+        loadBilling();
+        loadInvoices();
+        loadPaymentMethod();
       }
     };
 
@@ -1891,6 +2357,19 @@ export default {
       window.removeEventListener("keydown", handleKeyDown);
     });
 
+    // Initialize card fields when payment modal opens
+    watch(showAddPaymentModal, (isOpen) => {
+      if (isOpen) {
+        cardError.value = '';
+        cardHolderName.value = '';
+        // Wait for DOM to update then initialize card fields
+        setTimeout(() => initPayPalCardFields(), 100);
+      } else {
+        // Clean up when modal closes
+        cardFieldsInstance.value = null;
+      }
+    });
+
     return {
       error,
       activeTab,
@@ -1948,6 +2427,21 @@ export default {
       addCredential,
       deleteCredential,
       setDefaultCredential,
+      billingData,
+      loadingBilling,
+      currentBillingPeriod,
+      loadBilling,
+      invoices,
+      loadingInvoices,
+      loadInvoices,
+      paymentMethod,
+      showAddPaymentModal,
+      cardHolderName,
+      cardError,
+      savingCard,
+      submitCard,
+      removePaymentMethod,
+      calculateAppMonthlyCost,
       logout,
       handleTabChange,
       formatKeyType,
@@ -2683,6 +3177,21 @@ export default {
   gap: 4px;
 }
 
+.sidebar-cost {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 12px;
+  margin-top: 12px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.app-detail-value--cost {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #059669;
+}
+
 .sidebar-section {
   padding-bottom: 20px;
   margin-bottom: 20px;
@@ -3332,6 +3841,388 @@ export default {
 
 @media (max-width: 600px) {
   .app-detail-sidebar {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Billing Styles */
+.billing-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1.5rem;
+  background: #f8f9fa;
+  border-radius: 8px;
+  margin-bottom: 2rem;
+}
+
+.billing-period {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.billing-period-label {
+  font-size: 0.75rem;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.billing-period-dates {
+  font-size: 1rem;
+  font-weight: 500;
+  color: #1f2937;
+}
+
+.billing-total {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.25rem;
+}
+
+.billing-total-label {
+  font-size: 0.75rem;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.billing-total-amount {
+  font-size: 1.75rem;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.billing-section {
+  margin-bottom: 2rem;
+}
+
+.billing-section-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #1f2937;
+  margin-bottom: 1rem;
+}
+
+.billing-table {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.billing-table-header {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr;
+  padding: 0.75rem 1rem;
+  background: #f9fafb;
+  border-bottom: 1px solid #e5e7eb;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.billing-table-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr;
+  padding: 1rem;
+  border-bottom: 1px solid #e5e7eb;
+  align-items: center;
+}
+
+.billing-table-row:last-child {
+  border-bottom: none;
+}
+
+.billing-col-resource {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.billing-resource-name {
+  font-weight: 500;
+  color: #1f2937;
+}
+
+.billing-resource-type {
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+.billing-col-usage,
+.billing-col-rate,
+.billing-col-cost {
+  font-size: 0.875rem;
+  color: #374151;
+}
+
+.billing-col-cost {
+  font-weight: 500;
+}
+
+.billing-info {
+  padding: 1.5rem;
+  background: #f8f9fa;
+  border-radius: 8px;
+}
+
+.billing-pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1rem;
+}
+
+.billing-pricing-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.75rem;
+  background: white;
+  border-radius: 6px;
+  border: 1px solid #e5e7eb;
+}
+
+.billing-pricing-resource {
+  font-size: 0.875rem;
+  color: #374151;
+}
+
+.billing-pricing-rate {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #1f2937;
+}
+
+.billing-pricing-note {
+  font-size: 0.875rem;
+  color: #6b7280;
+  margin-bottom: 1rem;
+}
+
+/* Payment method styles */
+.payment-method-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.payment-method-info {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.payment-method-type {
+  font-weight: 500;
+  color: #1f2937;
+  text-transform: capitalize;
+}
+
+.payment-method-details {
+  font-size: 0.875rem;
+  color: #6b7280;
+}
+
+.payment-method-empty {
+  padding: 1.5rem;
+  background: #f9fafb;
+  border: 1px dashed #d1d5db;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.payment-method-empty p {
+  color: #6b7280;
+  margin-bottom: 1rem;
+}
+
+/* Invoice styles */
+.invoices-list {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.invoice-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem;
+  border-bottom: 1px solid #e5e7eb;
+  background: white;
+}
+
+.invoice-item:last-child {
+  border-bottom: none;
+}
+
+.invoice-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.invoice-number {
+  font-weight: 500;
+  color: #1f2937;
+}
+
+.invoice-date {
+  font-size: 0.875rem;
+  color: #6b7280;
+}
+
+.invoice-amount {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.invoice-status {
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  text-transform: capitalize;
+}
+
+.invoice-status.status-paid {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.invoice-status.status-pending {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.invoice-status.status-overdue {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.invoice-total {
+  font-weight: 500;
+  color: #1f2937;
+}
+
+/* Card form styles */
+.card-form {
+  margin-bottom: 1rem;
+}
+
+.card-form-row {
+  margin-bottom: 1rem;
+}
+
+.card-form-row--split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.card-form-col {
+  min-width: 0;
+}
+
+.card-form-label {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #374151;
+  margin-bottom: 0.5rem;
+}
+
+.card-field {
+  height: 42px;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: white;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.card-field:focus-within {
+  border-color: #0f0f0f;
+  box-shadow: 0 0 0 3px rgba(15, 15, 15, 0.1);
+}
+
+.card-error {
+  padding: 0.75rem;
+  margin-bottom: 1rem;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  color: #dc2626;
+  font-size: 0.875rem;
+}
+
+.card-privacy-notice {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #e5e7eb;
+  font-size: 0.75rem;
+  color: #6b7280;
+  text-align: center;
+}
+
+.card-privacy-notice a {
+  color: #4b5563;
+  text-decoration: underline;
+}
+
+.btn-small {
+  padding: 0.375rem 0.75rem;
+  font-size: 0.8125rem;
+}
+
+/* Estimated cost in app detail */
+.app-estimated-cost {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  background: #fef3c7;
+  border-radius: 6px;
+  margin-top: 1rem;
+}
+
+.app-estimated-cost-label {
+  font-size: 0.875rem;
+  color: #92400e;
+}
+
+.app-estimated-cost-value {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #92400e;
+}
+
+@media (max-width: 768px) {
+  .billing-summary {
+    flex-direction: column;
+    gap: 1rem;
+    align-items: flex-start;
+  }
+
+  .billing-total {
+    align-items: flex-start;
+  }
+
+  .billing-table-header,
+  .billing-table-row {
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+  }
+
+  .billing-pricing-grid {
     grid-template-columns: 1fr;
   }
 }

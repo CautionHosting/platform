@@ -1,17 +1,9 @@
 FROM stagex/pallet-rust@sha256:9c38bf1066dd9ad1b6a6b584974dd798c2bf798985bf82e58024fbe0515592ca AS pallet-rust
-FROM stagex/pallet-gcc-gnu-busybox@sha256:9f5f67721dacece876a5312d63fe727bbf176461cca73b77a531b3f1b96f8f66 AS gcc
+FROM stagex/core-gcc@sha256:964ffd3793c5a38ca581e9faefd19918c259f1611c4cbf5dc8be612e3a8b72f5 AS gcc
 FROM stagex/core-musl@sha256:d9af23284cca2e1002cd53159ada469dfe6d6791814e72d6163c7de18d4ae701 AS musl
 FROM stagex/core-libunwind@sha256:eb66122d8fc543f5e2f335bb1616f8c3a471604383e2c0a9df4a8e278505d3bc AS libunwind
 FROM stagex/core-ca-certificates@sha256:d135f1189e9b232eb7316626bf7858534c5540b2fc53dced80a4c9a95f26493e AS ca-certificates
-FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769ff3b37239f3d0 AS git
-FROM stagex/core-zlib@sha256:06f5168e20d85d1eb1d19836cdf96addc069769b40f8f0f4a7a70b2f49fc18f8 AS zlib
 FROM stagex/core-user-runtime@sha256:055ae534e1e01259449fb4e0226f035a7474674c7371a136298e8bdac65d90bb AS user-runtime
-FROM stagex/user-docker-cli-buildx@sha256:e417fa8cc1665e51f4bf1c9f688e8b3b55097afdb1017f96642fd4ca73290519 AS docker-cli
-
-FROM gcc AS gitconfig-builder
-RUN mkdir -p /root && \
-    echo '[safe]' > /root/.gitconfig && \
-    echo '    directory = /git-repos/*' >> /root/.gitconfig
 
 FROM pallet-rust AS builder
 
@@ -27,13 +19,13 @@ COPY src/email-service/Cargo.toml ./src/email-service/
 COPY src/enclave-builder/Cargo.toml ./src/enclave-builder/
 COPY src/metering/Cargo.toml ./src/metering/
 
-RUN mkdir -p src/api/src src/email-service/src src/enclave-builder/src src/metering/src && \
+RUN mkdir -p src/api/src src/gateway/src src/email-service/src src/enclave-builder/src && \
     echo "fn main() {}" > src/api/src/main.rs && \
+    echo "fn main() {}" > src/gateway/src/main.rs && \
     echo "fn main() {}" > src/email-service/src/main.rs && \
-    echo "fn main() {}" > src/metering/src/main.rs && \
     echo "pub fn dummy() {}" > src/enclave-builder/src/lib.rs
 
-COPY src/gateway/src ./src/gateway/src
+COPY src/metering/src ./src/metering/src
 COPY src/enclave-builder/src ./src/enclave-builder/src
 
 ENV RUST_BACKTRACE=1
@@ -49,36 +41,34 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,id=gateway-target,target=/build/target \
+    --mount=type=cache,id=metering-target,target=/build/target \
     --network=none \
     cargo build --release --frozen \
       --target ${TARGET_ARCH} \
-      -p gateway
+      -p metering
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,id=gateway-target,target=/build/target \
+    --mount=type=cache,id=metering-target,target=/build/target \
     --network=none \
     cargo build --release --frozen \
-      --bin gateway \
+      --bin metering \
       --target ${TARGET_ARCH} \
-      && install -D -m 0755 /build/target/${TARGET_ARCH}/release/gateway /usr/local/bin/gateway
+      && install -D -m 0755 /build/target/${TARGET_ARCH}/release/metering /usr/local/bin/metering
 
-FROM scratch AS runtime
-COPY --from=user-runtime . /
-COPY --from=git . /
-COPY --from=gcc . /
-COPY --from=musl . /
-COPY --from=libunwind . /
-COPY --from=zlib . /
-COPY --from=ca-certificates . /
-COPY --from=builder /usr/local/bin/gateway /usr/local/bin/gateway
-COPY --from=stagex/docker . /
-COPY --from=docker-cli . /
-COPY --from=gitconfig-builder /root/.gitconfig /root/.gitconfig
+FROM user-runtime AS runtime
+
+COPY --from=gcc /usr/lib/libgcc_s.so.1 /usr/lib/
+COPY --from=gcc /usr/lib/libstdc++.so.6 /usr/lib/
+COPY --from=musl /lib/ld-musl-x86_64.so.1 /lib/
+COPY --from=libunwind /lib/libunwind.so.8 /lib/
+COPY --from=ca-certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /usr/local/bin/metering /usr/local/bin/metering
 
 WORKDIR /app
 
-EXPOSE 8000
+ENV RUST_LOG=info
 
-ENTRYPOINT ["gateway"]
+EXPOSE 8083
+
+ENTRYPOINT ["metering"]
