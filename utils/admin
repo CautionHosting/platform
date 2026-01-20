@@ -1,0 +1,321 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: 2025 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR/../.env" ]]; then
+    source "$SCRIPT_DIR/../.env"
+fi
+
+DB_HOST="${DB_HOST:-localhost}"
+DB_PORT="${DB_PORT:-5432}"
+DB_NAME="${DB_NAME:-caution}"
+DB_USER="${DB_USER:-postgres}"
+DB_PASSWORD="${DB_PASSWORD:-postgres}"
+
+export PGPASSWORD="$DB_PASSWORD"
+
+UUID_REGEX='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+
+validate_uuid() {
+    local id="$1"
+    if ! [[ "$id" =~ $UUID_REGEX ]]; then
+        echo "Error: Invalid UUID format: $id"
+        exit 1
+    fi
+}
+
+psql_cmd() {
+    psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A "$@"
+}
+
+psql_pretty() {
+    psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" "$@"
+}
+
+cmd_help() {
+    cat <<EOF
+Caution Admin CLI
+
+Usage: ./utils/admin <command> [args]
+
+Commands:
+  list-orgs              List all organizations
+  show-org <id>          Show organization details with members and apps
+  list-users             List all users
+  show-user <id>         Show user details
+  list-apps              List all apps/compute resources
+  show-app <id>          Show app details
+  user-by-code <code>    Show user who registered with alpha code
+  apps-by-user <id>      List apps for a specific user
+  list-credentials       List all cloud credentials
+  list-alpha-codes       List alpha/beta codes
+
+Examples:
+  ./utils/admin list-orgs
+  ./utils/admin show-org 123e4567-e89b-12d3-a456-426614174000
+  ./utils/admin list-apps
+  ./utils/admin apps-by-code abc123def456
+EOF
+}
+
+cmd_list_orgs() {
+    echo "=== Organizations ==="
+    psql_pretty -c "
+        SELECT
+            o.id,
+            o.name,
+            o.is_active,
+            (SELECT COUNT(*) FROM organization_members WHERE organization_id = o.id) as members,
+            (SELECT COUNT(*) FROM compute_resources WHERE organization_id = o.id) as apps,
+            o.created_at::date as created
+        FROM organizations o
+        ORDER BY o.created_at DESC;
+    "
+}
+
+cmd_show_org() {
+    local org_id="$1"
+    validate_uuid "$org_id"
+
+    echo "=== Organization ==="
+    psql_pretty -c "
+        SELECT id, name, is_active, created_at, updated_at
+        FROM organizations WHERE id = '$org_id';
+    "
+
+    echo ""
+    echo "=== Members ==="
+    psql_pretty -c "
+        SELECT u.id, u.username, u.email, om.role, om.created_at as joined
+        FROM organization_members om
+        JOIN users u ON u.id = om.user_id
+        WHERE om.organization_id = '$org_id'
+        ORDER BY om.role, u.username;
+    "
+
+    echo ""
+    echo "=== Apps/Resources ==="
+    psql_pretty -c "
+        SELECT id, resource_name, state, region, public_ip, created_at
+        FROM compute_resources
+        WHERE organization_id = '$org_id'
+        ORDER BY created_at DESC;
+    "
+}
+
+cmd_list_users() {
+    echo "=== Users ==="
+    psql_pretty -c "
+        SELECT
+            u.id,
+            u.username,
+            u.email,
+            (SELECT COUNT(*) FROM organization_members WHERE user_id = u.id) as orgs,
+            (SELECT COUNT(*) FROM ssh_keys WHERE user_id = u.id) as ssh_keys,
+            u.created_at::date as created
+        FROM users u
+        ORDER BY u.created_at DESC;
+    "
+}
+
+cmd_show_user() {
+    local user_id="$1"
+    validate_uuid "$user_id"
+
+    echo "=== User ==="
+    psql_pretty -c "
+        SELECT id, username, email, is_active, created_at, updated_at
+        FROM users WHERE id = '$user_id';
+    "
+
+    echo ""
+    echo "=== Organizations ==="
+    psql_pretty -c "
+        SELECT o.id, o.name, om.role, om.created_at as joined
+        FROM organization_members om
+        JOIN organizations o ON o.id = om.organization_id
+        WHERE om.user_id = '$user_id'
+        ORDER BY om.created_at;
+    "
+
+    echo ""
+    echo "=== SSH Keys ==="
+    psql_pretty -c "
+        SELECT fingerprint, key_type, name, created_at
+        FROM ssh_keys
+        WHERE user_id = '$user_id'
+        ORDER BY created_at;
+    "
+
+    echo ""
+    echo "=== FIDO2 Credentials ==="
+    psql_pretty -c "
+        SELECT id, encode(credential_id, 'hex') as credential_id, sign_count, created_at
+        FROM fido2_credentials
+        WHERE user_id = '$user_id'
+        ORDER BY created_at;
+    "
+}
+
+cmd_list_apps() {
+    echo "=== Apps/Compute Resources ==="
+    psql_pretty -c "
+        SELECT
+            cr.id,
+            cr.resource_name,
+            cr.state,
+            cr.region,
+            cr.public_ip,
+            o.name as org,
+            cr.created_at::date as created
+        FROM compute_resources cr
+        JOIN organizations o ON o.id = cr.organization_id
+        ORDER BY cr.created_at DESC
+        LIMIT 50;
+    "
+}
+
+cmd_show_app() {
+    local app_id="$1"
+    validate_uuid "$app_id"
+
+    echo "=== App/Compute Resource ==="
+    psql_pretty -c "
+        SELECT
+            cr.id,
+            cr.resource_name,
+            cr.state,
+            cr.region,
+            cr.public_ip,
+            cr.provider_resource_id as instance_id,
+            cr.estimated_monthly_cost,
+            o.name as organization,
+            cr.configuration,
+            cr.created_at,
+            cr.updated_at,
+            cr.deployed_at
+        FROM compute_resources cr
+        JOIN organizations o ON o.id = cr.organization_id
+        WHERE cr.id = '$app_id';
+    "
+}
+
+cmd_list_credentials() {
+    echo "=== Cloud Credentials ==="
+    psql_pretty -c "
+        SELECT
+            cc.id,
+            cc.name,
+            cc.platform,
+            cc.is_default,
+            o.name as org,
+            cc.created_at::date as created
+        FROM cloud_credentials cc
+        JOIN organizations o ON o.id = cc.organization_id
+        ORDER BY cc.created_at DESC;
+    "
+}
+
+cmd_list_alpha_codes() {
+    echo "=== Alpha/Beta Codes ==="
+    psql_pretty -c "
+        SELECT
+            id,
+            code,
+            created_by,
+            CASE WHEN used_at IS NOT NULL THEN 'used' ELSE 'available' END as status,
+            used_at,
+            expires_at,
+            created_at::date as created
+        FROM beta_codes
+        ORDER BY created_at DESC;
+    "
+}
+
+cmd_user_by_code() {
+    local code="$1"
+
+    echo "=== User by Alpha Code ==="
+    psql_pretty -c "
+        SELECT
+            u.id,
+            u.username,
+            u.email,
+            u.created_at,
+            bc.code as alpha_code,
+            bc.created_by as code_issued_by
+        FROM users u
+        JOIN beta_codes bc ON u.beta_code_id = bc.id
+        WHERE bc.code = '$code';
+    "
+}
+
+cmd_apps_by_user() {
+    local user_id="$1"
+    validate_uuid "$user_id"
+
+    echo "=== Apps for User ==="
+    psql_pretty -c "
+        SELECT
+            cr.id,
+            cr.resource_name,
+            cr.state,
+            cr.region,
+            cr.public_ip,
+            o.name as org,
+            cr.created_at
+        FROM compute_resources cr
+        JOIN organizations o ON o.id = cr.organization_id
+        JOIN organization_members om ON om.organization_id = o.id
+        WHERE om.user_id = '$user_id'
+        ORDER BY cr.created_at DESC;
+    "
+}
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        help|--help|-h)
+            cmd_help
+            ;;
+        list-orgs)
+            cmd_list_orgs
+            ;;
+        show-org)
+            [[ $# -lt 1 ]] && { echo "Error: Missing org ID"; exit 1; }
+            cmd_show_org "$1"
+            ;;
+        list-users)
+            cmd_list_users
+            ;;
+        show-user)
+            [[ $# -lt 1 ]] && { echo "Error: Missing user ID"; exit 1; }
+            cmd_show_user "$1"
+            ;;
+        list-apps)
+            cmd_list_apps
+            ;;
+        show-app)
+            [[ $# -lt 1 ]] && { echo "Error: Missing app ID"; exit 1; }
+            cmd_show_app "$1"
+            ;;
+        list-credentials)
+            cmd_list_credentials
+            ;;
+        list-alpha-codes)
+            cmd_list_alpha_codes
+            ;;
+        *)
+            echo "Unknown command: $cmd"
+            echo "Run './utils/admin help' for usage"
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
