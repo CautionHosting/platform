@@ -392,11 +392,24 @@ pub fn generate_ssh_fingerprint(public_key: &str) -> String {
     } else {
         public_key.trim()
     };
-    
-    let mut hasher = Sha256::new();
-    hasher.update(key_data.as_bytes());
-    let result = hasher.finalize();
-    base64::engine::general_purpose::STANDARD_NO_PAD.encode(result)
+
+    // Decode the base64 key data first, then hash the decoded bytes
+    // This matches OpenSSH's fingerprint format: SHA256:<base64_of_sha256_of_decoded_key>
+    match base64::engine::general_purpose::STANDARD.decode(key_data) {
+        Ok(decoded) => {
+            let mut hasher = Sha256::new();
+            hasher.update(&decoded);
+            let result = hasher.finalize();
+            base64::engine::general_purpose::STANDARD_NO_PAD.encode(result)
+        }
+        Err(_) => {
+            // Fallback: hash the raw string if base64 decode fails
+            let mut hasher = Sha256::new();
+            hasher.update(key_data.as_bytes());
+            let result = hasher.finalize();
+            base64::engine::general_purpose::STANDARD_NO_PAD.encode(result)
+        }
+    }
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
