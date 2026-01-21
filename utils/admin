@@ -310,6 +310,14 @@ main() {
         list-alpha-codes)
             cmd_list_alpha_codes
             ;;
+        user-by-code)
+            [[ $# -lt 1 ]] && { echo "Error: Missing alpha code"; exit 1; }
+            cmd_user_by_code "$1"
+            ;;
+        apps-by-user)
+            [[ $# -lt 1 ]] && { echo "Error: Missing user ID"; exit 1; }
+            cmd_apps_by_user "$1"
+            ;;
         *)
             echo "Unknown command: $cmd"
             echo "Run './utils/admin help' for usage"
