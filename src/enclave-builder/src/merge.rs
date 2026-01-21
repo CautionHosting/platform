@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::process::Command;
 
+#[deprecated = "unused"]
 pub async fn build_combined_image(
     template_source: &str,
     template_version: &str,

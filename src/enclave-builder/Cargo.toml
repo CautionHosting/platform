@@ -9,7 +9,7 @@ edition = "2021"
 [dependencies]
 # Error handling
 anyhow = { workspace = true }
-thiserror = { workspace = true }
+thiserror.workspace = true
 
 # Serialization
 serde = { workspace = true }
@@ -48,3 +48,4 @@ reqwest = { workspace = true }
 # CBOR for attestation parsing
 serde_cbor = "0.11"
 base64 = { workspace = true }
+bon = "3.8.2"

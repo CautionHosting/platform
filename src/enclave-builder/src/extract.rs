@@ -3,57 +3,145 @@
 
 use anyhow::{Context, Result};
 use bollard::Docker;
-use bollard::container::{CreateContainerOptions, Config, DownloadFromContainerOptions};
+use bollard::container::{Config, CreateContainerOptions, DownloadFromContainerOptions};
 use futures_util::stream::StreamExt;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tracing::{debug, error, info};
 
-pub async fn extract_image_filesystem(image_ref: &str, work_dir: &Path) -> Result<PathBuf> {
-    tracing::info!("Extracting filesystem from image: {}", image_ref);
+#[derive(Debug)]
+pub enum ImageFilesystemExtractErrorKind {
+    DockerConnect,
+    ImageDoesNotExist,
+    ContainerCreate,
+    ExportDirCreate,
+    ContainerFilesystemExport,
+    ContainerRemove,
+}
 
-    let docker = Docker::connect_with_local_defaults()
-        .context("Failed to connect to Docker daemon")?;
+#[derive(Debug, thiserror::Error, bon::Builder)]
+#[error("could not extract fs from image (ref: {image_ref}, work_dir: {work_dir:?}): {kind:?}")]
+pub struct ImageFilesystemExtractError {
+    #[builder(into)]
+    image_ref: String,
+    #[builder(into)]
+    work_dir: PathBuf,
+    kind: ImageFilesystemExtractErrorKind,
 
-    verify_image_exists_locally(&docker, image_ref).await?;
+    #[source]
+    #[builder(into)]
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
 
-    let container_id = create_container(&docker, image_ref).await?;
+#[tracing::instrument]
+pub async fn extract_image_filesystem(
+    image_ref: &str,
+    work_dir: &Path,
+) -> Result<PathBuf, ImageFilesystemExtractError> {
+    debug!("Extracting filesystem from image");
+    let error_template = ImageFilesystemExtractError::builder()
+        .image_ref(image_ref)
+        .work_dir(work_dir);
+
+    let docker = match Docker::connect_with_local_defaults() {
+        Ok(o) => o,
+        Err(e) => {
+            return Err(error_template
+                .kind(ImageFilesystemExtractErrorKind::DockerConnect)
+                .source(e)
+                .build());
+        }
+    };
+
+    if let Err(e) = verify_image_exists_locally(&docker, image_ref).await {
+        return Err(error_template
+            .kind(ImageFilesystemExtractErrorKind::ImageDoesNotExist)
+            .source(e)
+            .build());
+    }
+
+    let container_id = match create_container(&docker, image_ref).await {
+        Ok(o) => o,
+        Err(e) => {
+            return Err(error_template
+                .kind(ImageFilesystemExtractErrorKind::ContainerCreate)
+                .source(e)
+                .build());
+        }
+    };
 
     let export_dir = work_dir.join("user-service");
-    fs::create_dir_all(&export_dir).await?;
+    if let Err(e) = fs::create_dir_all(&export_dir).await {
+        return Err(error_template
+            .kind(ImageFilesystemExtractErrorKind::ExportDirCreate)
+            .source(e)
+            .build());
+    }
 
-    export_container_filesystem(&docker, &container_id, &export_dir).await?;
+    if let Err(e) = export_container_filesystem(&docker, &container_id, &export_dir).await {
+        return Err(error_template
+            .kind(ImageFilesystemExtractErrorKind::ContainerFilesystemExport)
+            .source(e)
+            .build());
+    }
 
     docker
         .remove_container(&container_id, None)
         .await
-        .context("Failed to remove temporary container")?;
+        .map_err(|source| {
+            error_template
+                .kind(ImageFilesystemExtractErrorKind::ContainerRemove)
+                .source(source)
+                .build()
+        })?;
 
-    tracing::info!("Extracted user filesystem to: {}", export_dir.display());
+    info!(?export_dir, "Extracted user filesystem");
     Ok(export_dir)
 }
 
-async fn verify_image_exists_locally(docker: &Docker, image_ref: &str) -> Result<()> {
-    tracing::info!("Checking if image exists locally: {}", image_ref);
+#[derive(Debug, thiserror::Error)]
+#[error("could not inspect image {image_ref}")]
+pub struct ImageInspectError {
+    image_ref: String,
+
+    #[source]
+    source: bollard::errors::Error,
+}
+
+async fn verify_image_exists_locally(
+    docker: &Docker,
+    image_ref: &str,
+) -> Result<(), ImageInspectError> {
+    debug!(?image_ref, "Checking if image exists locally");
 
     match docker.inspect_image(image_ref).await {
         Ok(_) => {
-            tracing::info!("✓ Image exists locally: {}", image_ref);
+            info!(?image_ref, "Image exists locally");
             Ok(())
         }
-        Err(e) => {
-            tracing::error!("✗ Image not found locally: {}", image_ref);
-            Err(anyhow::anyhow!(
-                "Image '{}' not found locally. This image should have been built earlier in the deployment process. Error: {}",
-                image_ref,
-                e
-            ))
+        Err(source) => {
+            error!(?image_ref, "Image not found locally");
+            Err(ImageInspectError {
+                image_ref: image_ref.into(),
+                source,
+            })
         }
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("could not create a container from image {image_ref}")]
+pub struct ContainerCreateError {
+    image_ref: String,
+
+    #[source]
+    source: bollard::errors::Error,
+}
+
+#[tracing::instrument(skip(docker))]
 async fn create_container(docker: &Docker, image_ref: &str) -> Result<String> {
-    tracing::info!("Creating temporary container from image");
+    info!("Creating temporary container from image");
 
     let config = Config {
         image: Some(image_ref.to_string()),
@@ -69,73 +157,211 @@ async fn create_container(docker: &Docker, image_ref: &str) -> Result<String> {
     let response = docker
         .create_container(Some(options), config)
         .await
-        .context("Failed to create container")?;
+        .map_err(|source| ContainerCreateError {
+            image_ref: image_ref.into(),
+            source,
+        })?;
 
-    tracing::info!("Created container: {}", response.id);
+    info!(container_id = ?response.id, "Created container");
     Ok(response.id)
 }
 
+#[derive(Debug)]
+pub enum ContainerFilesystemExportErrorKind {
+    TarFileCreate { path: PathBuf },
+    TarFileOpen { path: PathBuf },
+    TarFileCleanup { path: PathBuf },
+    ChunkRead,
+    ChunkWrite,
+    Flush,
+    TarUnpack,
+}
+
+#[derive(Debug, thiserror::Error, bon::Builder)]
+#[error("could not export filesystem for container {container_id} to {output_dir:?} ({kind:?})")]
+pub struct ContainerFilesystemExportError {
+    #[builder(into)]
+    container_id: String,
+    #[builder(into)]
+    output_dir: PathBuf,
+    kind: ContainerFilesystemExportErrorKind,
+
+    #[source]
+    #[builder(into)]
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+#[tracing::instrument(skip(docker))]
 async fn export_container_filesystem(
     docker: &Docker,
     container_id: &str,
     output_dir: &Path,
-) -> Result<()> {
-    tracing::info!("Exporting container filesystem");
+) -> Result<(), ContainerFilesystemExportError> {
+    info!("Exporting container filesystem");
+    let error_template = ContainerFilesystemExportError::builder()
+        .container_id(container_id)
+        .output_dir(output_dir);
 
     let mut stream = docker.export_container(container_id);
 
+    // TODO: share code with extract_specific_files
+    // link: REUSE-CODE-01
     let tar_path = output_dir.parent().unwrap().join("container-export.tar");
-    let mut tar_file = fs::File::create(&tar_path)
-        .await
-        .context("Failed to create tar file")?;
+    let mut tar_file = match fs::File::create(&tar_path).await {
+        Ok(o) => o,
+        Err(source) => {
+            return Err(error_template
+                .kind(ContainerFilesystemExportErrorKind::TarFileCreate { path: tar_path })
+                .source(source)
+                .build());
+        }
+    };
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("Failed to read export stream")?;
-        tar_file
-            .write_all(&chunk)
-            .await
-            .context("Failed to write tar data")?;
+        let chunk = match chunk {
+            Ok(o) => o,
+            Err(source) => {
+                return Err(error_template
+                    .kind(ContainerFilesystemExportErrorKind::ChunkRead)
+                    .source(source)
+                    .build());
+            }
+        };
+        if let Err(source) = tar_file.write_all(&chunk).await {
+            return Err(error_template
+                .kind(ContainerFilesystemExportErrorKind::ChunkWrite)
+                .source(source)
+                .build());
+        }
     }
 
-    tar_file.flush().await?;
+    // manual flush because no AsyncDrop
+    if let Err(source) = tar_file.flush().await {
+        return Err(error_template
+            .kind(ContainerFilesystemExportErrorKind::Flush)
+            .source(source)
+            .build());
+    }
     drop(tar_file);
 
-    tracing::info!("Extracting tar archive to: {}", output_dir.display());
+    info!("Extracting tar archive");
 
-    let tar_file = std::fs::File::open(&tar_path).context("Failed to open tar file")?;
+    let tar_file = match std::fs::File::open(&tar_path) {
+        Ok(o) => o,
+        Err(source) => {
+            return Err(error_template
+                .kind(ContainerFilesystemExportErrorKind::TarFileOpen { path: tar_path })
+                .source(source)
+                .build());
+        }
+    };
+
+    // TODO: move to astral-sh/tokio-tar
+    // should allow for reading chunks from stream and writing to tar parser
+    // maybe ref sans-io post from amos about unzipping files
+
     let mut archive = tar::Archive::new(tar_file);
 
     archive.set_preserve_permissions(true);
     archive.set_preserve_mtime(true);
     archive.set_unpack_xattrs(true);
 
-    archive
-        .unpack(output_dir)
-        .context("Failed to extract tar archive")?;
+    if let Err(source) = archive.unpack(output_dir) {
+        return Err(error_template
+            .kind(ContainerFilesystemExportErrorKind::TarUnpack)
+            .source(source)
+            .build());
+    }
 
-    fs::remove_file(&tar_path).await.ok();
+    if let Err(source) = fs::remove_file(&tar_path).await {
+        return Err(error_template
+            .kind(ContainerFilesystemExportErrorKind::TarFileCleanup { path: tar_path })
+            .source(source)
+            .build());
+    }
 
-    tracing::info!("Filesystem extracted successfully");
+    info!("Filesystem extracted successfully");
     Ok(())
 }
 
+#[derive(Debug)]
+pub enum FileExtractErrorKind {
+    DockerConnect,
+    ContainerRemove,
+    ImageFind,
+    ContainerCreate,
+    OutputDirCreate,
+    TarFileCreate { path: PathBuf },
+    TarFileOpen { path: PathBuf },
+    TarFileCleanup { path: PathBuf },
+    ChunkRead,
+    ChunkWrite,
+    Flush,
+    TarUnpack,
+}
+
+#[derive(Debug, thiserror::Error, bon::Builder)]
+#[error("could not extract files from image {image_ref} to path {work_dir:?} ({kind:?})")]
+pub struct FileExtractError {
+    #[builder(into)]
+    image_ref: String,
+    #[builder(into)]
+    work_dir: PathBuf,
+    kind: FileExtractErrorKind,
+
+    #[source]
+    #[builder(into)]
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+#[tracing::instrument(skip(files))]
 pub async fn extract_specific_files(
     image_ref: &str,
     files: &[String],
     work_dir: &Path,
-) -> Result<PathBuf> {
-    tracing::info!("Extracting {} specific files from image: {}", files.len(), image_ref);
+) -> Result<PathBuf, FileExtractError> {
+    info!(?files, "Extracting files from image");
+    let error_template = FileExtractError::builder()
+        .image_ref(image_ref)
+        .work_dir(work_dir);
 
-    let docker = Docker::connect_with_local_defaults()
-        .context("Failed to connect to Docker daemon")?;
+    let docker = match Docker::connect_with_local_defaults() {
+        Ok(o) => o,
+        Err(source) => {
+            return Err(error_template
+                .kind(FileExtractErrorKind::DockerConnect)
+                .source(source)
+                .build());
+        }
+    };
 
-    verify_image_exists_locally(&docker, image_ref).await?;
+    if let Err(source) = verify_image_exists_locally(&docker, image_ref).await {
+        return Err(error_template
+            .kind(FileExtractErrorKind::ImageFind)
+            .source(source)
+            .build());
+    };
 
-    let container_id = create_container(&docker, image_ref).await?;
+    let container_id = match create_container(&docker, image_ref).await {
+        Ok(o) => o,
+        Err(source) => {
+            return Err(error_template
+                .kind(FileExtractErrorKind::ContainerCreate)
+                .source(source)
+                .build());
+        }
+    };
 
     let output_dir = work_dir.join("user-service");
-    fs::create_dir_all(&output_dir).await?;
+    if let Err(source) = fs::create_dir_all(&output_dir).await {
+        return Err(error_template
+            .kind(FileExtractErrorKind::OutputDirCreate)
+            .source(source)
+            .build());
+    }
 
+    // TODO: reuse code from export_container_filesystem
+    // link: REUSE-CODE-01
     for file_path in files {
         tracing::info!("Attempting to extract file: {}", file_path);
 
@@ -147,66 +373,100 @@ pub async fn extract_specific_files(
         let mut stream = docker.download_from_container(&container_id, Some(options));
 
         let tar_path = output_dir.parent().unwrap().join("file-extract.tar");
-        let mut tar_file = fs::File::create(&tar_path)
-            .await
-            .context("Failed to create tar file")?;
+        let mut tar_file = match fs::File::create(&tar_path).await {
+            Ok(o) => o,
+            Err(source) => {
+                return Err(error_template
+                    .kind(FileExtractErrorKind::TarFileCreate { path: tar_path })
+                    .source(source)
+                    .build());
+            }
+        };
 
         while let Some(chunk_result) = stream.next().await {
             match chunk_result {
                 Ok(bytes) => {
-                    tar_file
-                        .write_all(&bytes)
-                        .await
-                        .context("Failed to write tar data")?;
+                    if let Err(source) = tar_file.write_all(&bytes).await {
+                        return Err(error_template
+                            .kind(FileExtractErrorKind::ChunkWrite)
+                            .source(source)
+                            .build());
+                    }
                 }
-                Err(e) => {
+                Err(source) => {
                     docker.remove_container(&container_id, None).await.ok();
-                    return Err(anyhow::anyhow!(
-                        "Failed to download file '{}' from container: {}",
-                        file_path,
-                        e
-                    ));
+                    return Err(error_template
+                        .kind(FileExtractErrorKind::ChunkRead)
+                        .source(source)
+                        .build());
                 }
             }
         }
 
-        tar_file.flush().await?;
+        // manual flush because no AsyncDrop
+        if let Err(source) = tar_file.flush().await {
+            return Err(error_template
+                .kind(FileExtractErrorKind::Flush)
+                .source(source)
+                .build());
+        }
         drop(tar_file);
 
-        let tar_file = std::fs::File::open(&tar_path).context("Failed to open tar file")?;
+        let tar_file = match std::fs::File::open(&tar_path) {
+            Ok(o) => o,
+            Err(source) => {
+                return Err(error_template
+                    .kind(FileExtractErrorKind::TarFileOpen { path: tar_path })
+                    .source(source)
+                    .build());
+            }
+        };
         let mut archive = tar::Archive::new(tar_file);
 
         archive.set_preserve_permissions(true);
         archive.set_preserve_mtime(true);
         archive.set_unpack_xattrs(true);
 
-        archive
-            .unpack(&output_dir)
-            .context("Failed to extract tar archive")?;
+        if let Err(source) = archive.unpack(&output_dir) {
+            return Err(error_template
+                .kind(FileExtractErrorKind::TarUnpack)
+                .source(source)
+                .build());
+        }
 
-        fs::remove_file(&tar_path).await.ok();
+        if let Err(source) = fs::remove_file(&tar_path).await {
+            return Err(error_template
+                .kind(FileExtractErrorKind::TarFileCleanup { path: tar_path })
+                .source(source)
+                .build());
+        }
 
-        tracing::info!("Successfully extracted: {}", file_path);
+        debug!(?tar_path, "Extracted all files from tar");
     }
 
-    docker
-        .remove_container(&container_id, None)
-        .await
-        .context("Failed to remove temporary container")?;
+    if let Err(source) = docker.remove_container(&container_id, None).await {
+        return Err(error_template
+            .kind(FileExtractErrorKind::ContainerRemove)
+            .source(source)
+            .build());
+    }
 
-    tracing::info!("All files extracted to: {}", output_dir.display());
+    info!(?output_dir, "Successfully extracted all files");
+
     Ok(output_dir)
 }
 
+// TODO: Ryan's being lazy and not fixing this up yet 'cause he wants to just delete the code
+#[tracing::instrument]
 pub async fn extract_static_binary(
     image_ref: &str,
     binary_path: &str,
     work_dir: &Path,
 ) -> Result<PathBuf> {
-    tracing::info!("Extracting static binary from image: {} (binary: {})", image_ref, binary_path);
+    info!("Extracting static binary from image");
 
-    let docker = Docker::connect_with_local_defaults()
-        .context("Failed to connect to Docker daemon")?;
+    let docker =
+        Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon")?;
 
     verify_image_exists_locally(&docker, image_ref).await?;
 
@@ -252,8 +512,7 @@ pub async fn extract_static_binary(
     let parent_dir = file_path_obj.parent().unwrap_or(std::path::Path::new("/"));
     let target_dir = output_dir.join(parent_dir.strip_prefix("/").unwrap_or(parent_dir));
 
-    std::fs::create_dir_all(&target_dir)
-        .context("Failed to create target directory")?;
+    std::fs::create_dir_all(&target_dir).context("Failed to create target directory")?;
 
     let tar_file = std::fs::File::open(&tar_path).context("Failed to open tar file")?;
     let mut archive = tar::Archive::new(tar_file);
@@ -317,11 +576,16 @@ pub async fn extract_static_binary(
     Ok(output_dir)
 }
 
+// TODO: what's the difference between this and a container export? which is used? a last-layer
+// isn't that useful compared to all layers, what if something has multiple build steps?
+//
+// This code doesn't appear to be used. Nuke?
+#[deprecated = "unused"]
 pub async fn extract_last_layer_only(image_ref: &str, work_dir: &Path) -> Result<PathBuf> {
     tracing::info!("Extracting last layer from image: {}", image_ref);
 
-    let docker = Docker::connect_with_local_defaults()
-        .context("Failed to connect to Docker daemon")?;
+    let docker =
+        Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon")?;
 
     verify_image_exists_locally(&docker, image_ref).await?;
 

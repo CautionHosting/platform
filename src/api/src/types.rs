@@ -160,7 +160,7 @@ pub struct EIFBuildResult {
 
     pub eif_hash: String,
 
-    pub eif_size_bytes: u64,
+    pub eif_size_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

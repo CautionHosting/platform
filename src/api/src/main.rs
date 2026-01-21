@@ -2168,7 +2168,7 @@ async fn deploy_logic(
             (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read cached EIF: {}", e))
         })?;
 
-        let eif_size_bytes = eif_data.len() as u64;
+        let eif_size_bytes = eif_data.len();
 
         use sha2::{Sha256, Digest};
         let mut hasher = Sha256::new();
@@ -2199,13 +2199,13 @@ async fn deploy_logic(
             &enclave_source,
             "unused",
             enclave_builder::FRAMEWORK_SOURCE,
+            &work_dir,
+            true,
         )
             .map_err(|e| {
                 tracing::error!("Failed to create enclave builder: {:?}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to initialize enclave builder: {}", e))
-            })?
-            .with_work_dir(std::path::PathBuf::from(&work_dir))
-            .with_no_cache(build_config.no_cache);
+            })?;
 
         let user_image = enclave_builder::UserImage {
             reference: format!("caution-{}:{}", app_id_str, &commit_sha[..12]),
@@ -2315,7 +2315,7 @@ async fn deploy_logic(
         "ports": enclave_config.ports,
     });
 
-    let memory_bytes = (enclave_config.memory_mb as u64) * 1024 * 1024;
+    let memory_bytes = (enclave_config.memory_mb as usize) * 1024 * 1024;
     if eif_result.eif_size_bytes > memory_bytes {
         return Err((
             StatusCode::BAD_REQUEST,

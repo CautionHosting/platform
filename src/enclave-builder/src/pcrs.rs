@@ -1,27 +1,56 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result};
-
 use crate::{EifFile, PcrValues};
+use anyhow::{Context, Result};
+use std::path::PathBuf;
 
-pub fn extract_pcrs_from_eif(eif: &EifFile) -> Result<PcrValues> {
-    let pcrs_path = eif.path.with_extension("pcrs");
-
-    if !pcrs_path.exists() {
-        anyhow::bail!(
-            "PCR file not found: {}. Make sure nitro-cli build-enclave was run successfully.",
-            pcrs_path.display()
-        );
-    }
-
-    let pcrs_content = std::fs::read_to_string(&pcrs_path)
-        .context("Failed to read PCR file")?;
-
-    parse_pcrs_file(&pcrs_content)
+#[derive(Debug)]
+pub enum PcrExtractErrorKind {
+    FileRead,
+    FileParse,
 }
 
-pub fn parse_pcrs_file(content: &str) -> Result<PcrValues> {
+#[derive(Debug, thiserror::Error, bon::Builder)]
+#[error("could not extract pcrs for {path:?} ({kind:?})")]
+pub struct PcrExtractError {
+    #[builder(into)]
+    path: PathBuf,
+    kind: PcrExtractErrorKind,
+
+    #[source]
+    #[builder(into)]
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+pub fn extract_pcrs_from_eif(eif: &EifFile) -> Result<PcrValues, PcrExtractError> {
+    let pcrs_path = eif.path.with_extension("pcrs");
+    let stub = PcrExtractError::builder().path(&pcrs_path);
+
+    let pcrs_content = match std::fs::read_to_string(&pcrs_path) {
+        Ok(o) => o,
+        Err(source) => {
+            return Err(stub
+                .kind(PcrExtractErrorKind::FileRead)
+                .source(source)
+                .build());
+        }
+    };
+
+    parse_pcrs_file(&pcrs_content).map_err(|source| {
+        stub.kind(PcrExtractErrorKind::FileParse)
+            .source(source)
+            .build()
+    })
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("missing PCR: {pcr}")]
+pub struct MissingPcrError {
+    pcr: usize,
+}
+
+pub fn parse_pcrs_file(content: &str) -> Result<PcrValues, MissingPcrError> {
     let mut pcr0 = None;
     let mut pcr1 = None;
     let mut pcr2 = None;
@@ -53,9 +82,9 @@ pub fn parse_pcrs_file(content: &str) -> Result<PcrValues> {
     }
 
     Ok(PcrValues {
-        pcr0: pcr0.context("PCR0 not found in file")?,
-        pcr1: pcr1.context("PCR1 not found in file")?,
-        pcr2: pcr2.context("PCR2 not found in file")?,
+        pcr0: pcr0.ok_or(MissingPcrError { pcr: 0 })?,
+        pcr1: pcr1.ok_or(MissingPcrError { pcr: 1 })?,
+        pcr2: pcr2.ok_or(MissingPcrError { pcr: 2 })?,
         pcr3,
         pcr4,
     })
@@ -85,8 +114,8 @@ pub fn parse_attestation_document(attestation_b64: &str) -> Result<PcrValues> {
         _ => anyhow::bail!("Payload is not bytes"),
     };
 
-    let attestation: serde_cbor::Value = serde_cbor::from_slice(payload_bytes)
-        .context("Failed to parse attestation payload")?;
+    let attestation: serde_cbor::Value =
+        serde_cbor::from_slice(payload_bytes).context("Failed to parse attestation payload")?;
 
     let attestation_map = match attestation {
         serde_cbor::Value::Map(ref map) => map,
@@ -138,9 +167,7 @@ pub fn parse_attestation_document(attestation_b64: &str) -> Result<PcrValues> {
 }
 
 pub fn is_debug_mode(pcrs: &PcrValues) -> bool {
-    let is_zero = |s: &str| {
-        s.chars().all(|c| c == '0')
-    };
+    let is_zero = |s: &str| s.chars().all(|c| c == '0');
 
     is_zero(&pcrs.pcr0) || is_zero(&pcrs.pcr1) || is_zero(&pcrs.pcr2)
 }

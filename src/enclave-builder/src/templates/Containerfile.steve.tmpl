@@ -1,0 +1,23 @@
+FROM pallet-rust AS steve-builder
+
+COPY --from=git . /
+COPY --from=ca-certificates . /
+COPY --from=curl . /
+
+ENV SOURCE_DATE_EPOCH=1
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
+ENV TARGET_ARCH="x86_64-unknown-linux-musl"
+
+WORKDIR /build-steve
+RUN git clone --depth 1 https://git.distrust.co/public/steve.git .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo fetch --locked --target $TARGET_ARCH
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build-steve/target \
+    cargo build --release --locked --target ${{TARGET_ARCH}} -p steve \
+      && install -D -m 0755 /build-steve/target/${{TARGET_ARCH}}/release/steve /binaries/steve

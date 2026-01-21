@@ -1,0 +1,69 @@
+#!/bin/sh
+set -e
+
+echo "=== Caution Enclave Startup ==="
+
+echo "Setting up network loopback..."
+/bin/busybox ip addr add 127.0.0.1/8 dev lo
+/bin/busybox ip link set dev lo up
+/bin/busybox ip link show lo
+
+echo "127.0.0.1   localhost" > /etc/hosts
+
+echo "Network loopback configured"
+
+echo "Setting up vsock network tunnel to parent..."
+/bin/socat TUN,tun-type=tap,iff-no-pi,iff-up,tun-name=eth0 VSOCK-CONNECT:3:3 &
+SOCAT_PID=$!
+echo "VSock tunnel started (PID: $SOCAT_PID)"
+
+/bin/busybox sleep 2
+
+if /bin/busybox ip link show eth0 2>/dev/null; then
+    echo "eth0 interface created successfully"
+
+    echo "Requesting IP via DHCP..."
+    /bin/busybox udhcpc -i eth0 -n -q -s /bin/udhcpc-script 2>&1 | /bin/busybox grep -E "Lease|obtained" || true
+
+    echo "Network configuration:"
+    /bin/busybox ip addr show eth0
+    /bin/busybox ip route show
+
+    echo "nameserver 10.0.100.1" > /etc/resolv.conf
+
+    echo "Network tunnel established successfully"
+else
+    echo "WARNING: Failed to create eth0 interface, running without internet access"
+    echo "nameserver 127.0.0.1" > /etc/resolv.conf
+fi
+
+echo "Loading NSM kernel module..."
+if [ -f /nsm.ko ]; then
+    insmod /nsm.ko && echo "NSM module loaded successfully" || echo "Failed to load NSM module"
+else
+    echo "WARNING: NSM module not found at /nsm.ko"
+fi
+
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+echo "Starting Attestation Service on port 8082..."
+/attestation-service &
+
+{steve_section}
+
+echo "Starting VSOCK-to-TCP proxies..."
+# Hardcoded proxies for ports 8080, 8081, 8082
+/bin/socat VSOCK-LISTEN:8080,reuseaddr,fork TCP:localhost:8080 &
+/bin/socat VSOCK-LISTEN:8081,reuseaddr,fork TCP:localhost:8081 &
+/bin/socat VSOCK-LISTEN:8082,reuseaddr,fork TCP:localhost:8082 &
+{custom_port_section}
+/bin/busybox sleep 2
+
+echo "Starting user application..."
+cd /
+
+echo "=== Filesystem structure ==="
+/bin/busybox find / -type f 2>/dev/null | /bin/busybox grep -v "^/proc\|^/sys\|^/dev" | /bin/busybox head -20
+echo "=== Running user application ==="
+
+{user_cmd}

@@ -4,21 +4,22 @@
 pub const ENCLAVE_SOURCE: &str = "https://git.distrust.co/public/enclaveos/archive/master.tar.gz";
 pub const FRAMEWORK_SOURCE: &str = "https://codeberg.org/caution/platform/archive/main.tar.gz";
 
-pub mod extract;
-pub mod merge;
 pub mod build;
-pub mod pcrs;
 pub mod compile;
-pub mod manifest;
 pub mod docker;
+pub mod extract;
+pub mod manifest;
+pub mod merge;
+pub mod pcrs;
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use tracing::{debug, info, warn};
 
-pub use manifest::{EnclaveManifest, AppSource, EnclaveSource, FrameworkSource};
-pub use docker::{BuildConfig, build_user_image};
 pub use compile::{EnclaveSourceResult, resolve_ref_to_commit};
+pub use docker::{BuildConfig, build_user_image};
+pub use manifest::{AppSource, EnclaveManifest, EnclaveSource, FrameworkSource};
 
 pub use CacheType as BuildCacheType;
 
@@ -48,7 +49,7 @@ pub struct UserImage {
 #[derive(Debug, Clone)]
 pub struct EifFile {
     pub path: PathBuf,
-    pub size: u64,
+    pub size: usize,
     pub sha256: String,
 }
 
@@ -75,7 +76,7 @@ pub enum CacheType {
 }
 
 impl CacheType {
-    fn dir_name(&self) -> &'static str {
+    fn dir_name(self) -> &'static str {
         match self {
             CacheType::Build => "build",
             CacheType::Reproduction => "reproductions",
@@ -83,176 +84,298 @@ impl CacheType {
     }
 }
 
-impl EnclaveBuilder {
-    pub fn new_with_cache(
-        template_source: impl Into<String>,
-        template_version: impl Into<String>,
-        enclave_source: impl Into<String>,
-        enclave_version: impl Into<String>,
-        framework_source: impl Into<String>,
-        org_id: &str,
-        cache_key: &str,
-        cache_type: CacheType,
-        no_cache: bool,
-    ) -> Result<Self> {
-        let base_cache_dir = dirs::home_dir()
-            .context("Failed to determine home directory")?
-            .join(".cache/caution")
-            .join(cache_type.dir_name());
+#[derive(Debug, thiserror::Error)]
+pub enum EnclaveBuilderCreationError {
+    #[error("cache directory not found")]
+    CacheDirNotFound,
 
-        let safe_org_id = org_id
+    #[error("could not remove existing working directory {path:?}")]
+    CouldNotRemoveWorkDir {
+        path: std::path::PathBuf,
+
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("could not create working directory")]
+    CouldNotCreateWorkDir {
+        path: std::path::PathBuf,
+
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug)]
+pub enum CachedEifErrorKind {
+    FileRead,
+    HashRead,
+    JsonParse,
+    Metadata,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("error finding cached EIF: {kind:?} (path: {path:?})")]
+pub struct CachedEifError {
+    kind: CachedEifErrorKind,
+    path: PathBuf,
+
+    #[source]
+    source: Box<dyn std::error::Error>,
+}
+
+#[derive(Debug)]
+pub enum PcrSaveErrorKind {
+    Serialize,
+    Write { path: PathBuf },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("could not save PCRs to cache: {kind:?}")]
+pub struct PcrSaveError {
+    kind: PcrSaveErrorKind,
+
+    #[source]
+    source: Box<dyn std::error::Error>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("could not extract user image")]
+pub enum UserImageExtractError {
+    SpecificFiles(#[from] extract::FileExtractError),
+    WholeFilesystem(#[from] extract::ImageFilesystemExtractError),
+}
+
+// TODO: move to API
+fn is_safe_cache_key_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '-' || ch == '_'
+}
+
+fn to_safe_cache_key(input: &str, key_type: &'static str) -> String {
+    if input.chars().all(is_safe_cache_key_char) {
+        input.to_owned()
+    } else {
+        warn!(?input, key_type, "unsafe cache key");
+        input
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-            .collect::<String>();
-
-        let safe_cache_key = cache_key
-            .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-            .collect::<String>();
-
-        let work_dir = base_cache_dir.join(&safe_org_id).join(&safe_cache_key);
-
-        if no_cache && work_dir.exists() {
-            tracing::info!("no_cache=true, removing cached {:?} at: {}", cache_type, work_dir.display());
-            std::fs::remove_dir_all(&work_dir)
-                .context("Failed to remove cached build directory")?;
-        }
-
-        std::fs::create_dir_all(&work_dir)
-            .context("Failed to create work directory")?;
-
-        tracing::info!("{:?} cache directory: {}", cache_type, work_dir.display());
-
-        Ok(Self {
-            template_source: template_source.into(),
-            template_version: template_version.into(),
-            enclave_source: enclave_source.into(),
-            enclave_version: enclave_version.into(),
-            framework_source: framework_source.into(),
-            work_dir,
-            no_cache,
-        })
+            .map(|c| if is_safe_cache_key_char(c) { c } else { '_' })
+            .collect()
     }
+}
 
-    #[allow(deprecated)]
+macro_rules! to_safe_cache_key {
+    ($input:ident) => {{ to_safe_cache_key($input, stringify!($input)) }};
+}
+
+impl EnclaveBuilder {
+    /// Create a new [`EnclaveBuilder`] with a persistent cache directory.
+    ///
+    /// # Errors
+    ///
+    /// The function may return an error if:
+    ///
+    /// * A directory to store cache files could not be found
+    /// * An existing working directory could not be removed
+    /// * A new working directory could not be created
+    #[tracing::instrument(skip(
+        template_source,
+        template_version,
+        enclave_source,
+        enclave_version,
+        framework_source,
+        no_cache,
+        /* work_dir: if only we could skip_all */
+    ))]
     pub fn new(
         template_source: impl Into<String>,
         template_version: impl Into<String>,
         enclave_source: impl Into<String>,
         enclave_version: impl Into<String>,
         framework_source: impl Into<String>,
-    ) -> Result<Self> {
-        let cache_dir = dirs::home_dir()
-            .context("Failed to determine home directory")?
-            .join(".cache/caution/build");
-        std::fs::create_dir_all(&cache_dir)
-            .context("Failed to create cache directory")?;
+        work_dir: impl AsRef<std::path::Path> + std::fmt::Debug,
+        no_cache: bool,
+    ) -> Result<Self, EnclaveBuilderCreationError> {
+        let template_source = template_source.into();
+        let template_version = template_version.into();
+        let enclave_source = enclave_source.into();
+        let enclave_version = enclave_version.into();
+        let framework_source = framework_source.into();
+        let work_dir = work_dir.as_ref();
 
-        let work_dir = tempfile::tempdir_in(&cache_dir)?.into_path();
+        if no_cache && work_dir.exists() {
+            info!(no_cache, "removing existing working directory");
+            std::fs::remove_dir_all(work_dir).map_err(|source| {
+                EnclaveBuilderCreationError::CouldNotRemoveWorkDir {
+                    path: work_dir.to_owned(),
+                    source,
+                }
+            })?;
+        }
+
+        debug!("creating working directory");
+        std::fs::create_dir_all(work_dir).map_err(|source| {
+            EnclaveBuilderCreationError::CouldNotCreateWorkDir {
+                path: work_dir.to_owned(),
+                source,
+            }
+        })?;
+
+        info!(
+            ?template_source,
+            ?template_version,
+            ?enclave_source,
+            ?enclave_version,
+            ?framework_source,
+            ?no_cache,
+            "created EnclaveBuilder"
+        );
 
         Ok(Self {
-            template_source: template_source.into(),
-            template_version: template_version.into(),
-            enclave_source: enclave_source.into(),
-            enclave_version: enclave_version.into(),
-            framework_source: framework_source.into(),
-            work_dir,
+            template_source,
+            template_version,
+            enclave_source,
+            enclave_version,
+            framework_source,
+            work_dir: work_dir.to_owned(),
             no_cache: false,
         })
     }
 
-    pub fn with_work_dir(mut self, work_dir: PathBuf) -> Self {
-        self.work_dir = work_dir;
-        self
-    }
-
-    pub fn with_no_cache(mut self, no_cache: bool) -> Self {
-        self.no_cache = no_cache;
-        self
-    }
-
-    pub fn get_cached_eif(&self) -> Option<Deployment> {
+    /// Get the metadata of a cached EIF.
+    ///
+    /// The method may return None if any cached EIF file does not exist.
+    ///
+    /// # Errors
+    ///
+    /// The method may return an error if:
+    ///
+    /// * The PCRs could not be read from a file
+    /// * The PCRs could not be parsed
+    /// * The EIF file could not have its metadata read
+    /// * The EIF hash could not be read from a file
+    #[tracing::instrument]
+    pub fn get_cached_eif(&self) -> Result<Option<Deployment>, CachedEifError> {
         let eif_path = self.work_dir.join("enclave.eif");
+        let eif_hash_path = self.work_dir.join("enclave.eif.sha256");
         let pcrs_path = self.work_dir.join("enclave.eif.pcrs");
 
-        if !eif_path.exists() || !pcrs_path.exists() {
-            tracing::info!("No cached EIF found at: {}", eif_path.display());
-            return None;
+        if !eif_path.exists() || !eif_hash_path.exists() || !pcrs_path.exists() {
+            info!(?eif_path, ?eif_hash_path, ?pcrs_path, "One or more cached files didn't exist");
+            return Ok(None);
         }
 
-        let pcrs_content = match std::fs::read_to_string(&pcrs_path) {
-            Ok(content) => content,
-            Err(e) => {
-                tracing::warn!("Failed to read cached PCRs: {}", e);
-                return None;
-            }
-        };
+        let pcrs_content =
+            std::fs::read_to_string(&pcrs_path).map_err(|source| CachedEifError {
+                kind: CachedEifErrorKind::FileRead,
+                path: pcrs_path.clone(),
+                source: source.into(),
+            })?;
 
-        let pcrs: PcrValues = match serde_json::from_str(&pcrs_content) {
-            Ok(pcrs) => pcrs,
-            Err(e) => {
-                tracing::warn!("Failed to parse cached PCRs: {}", e);
-                return None;
-            }
-        };
+        let pcrs: PcrValues =
+            serde_json::from_str(&pcrs_content).map_err(|source| CachedEifError {
+                kind: CachedEifErrorKind::JsonParse,
+                path: pcrs_path.clone(),
+                source: source.into(),
+            })?;
 
-        let metadata = match std::fs::metadata(&eif_path) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!("Failed to get EIF metadata: {}", e);
-                return None;
-            }
-        };
+        let metadata = std::fs::metadata(&eif_path).map_err(|source| CachedEifError {
+            kind: CachedEifErrorKind::Metadata,
+            path: eif_path.clone(),
+            source: source.into(),
+        })?;
 
-        let sha256_path = self.work_dir.join("enclave.eif.sha256");
-        let sha256 = std::fs::read_to_string(&sha256_path)
-            .unwrap_or_else(|_| "unknown".to_string())
+        let sha256 = std::fs::read_to_string(&eif_hash_path)
+            .map_err(|source| CachedEifError {
+                kind: CachedEifErrorKind::HashRead,
+                path: eif_hash_path.clone(),
+                source: source.into(),
+            })?
             .trim()
             .to_string();
 
-        tracing::info!("Found cached EIF: {} ({} bytes)", eif_path.display(), metadata.len());
+        info!(?eif_path, "Found cached EIF ({} bytes)", metadata.len());
 
-        Some(Deployment {
+        Ok(Some(Deployment {
             eif: EifFile {
                 path: eif_path,
-                size: metadata.len(),
+                size: metadata.len().try_into().expect("u64 to usize"),
                 sha256,
             },
             pcrs,
             image_ref: "cached".to_string(),
-        })
+        }))
     }
 
-    fn save_pcrs_to_cache(&self, pcrs: &PcrValues) -> Result<()> {
+    /// Save the PCRs to a cache
+    ///
+    /// # Errors
+    ///
+    /// The method may return an error if:
+    ///
+    /// * The PCRs could not be serialized
+    /// * The serialized PCRs could not be written to a file
+    #[tracing::instrument(skip(pcrs))]
+    fn save_pcrs_to_cache(&self, pcrs: &PcrValues) -> Result<(), PcrSaveError> {
         let pcrs_path = self.work_dir.join("enclave.eif.pcrs");
-        let pcrs_json = serde_json::to_string_pretty(pcrs)
-            .context("Failed to serialize PCRs")?;
-        std::fs::write(&pcrs_path, pcrs_json)
-            .context("Failed to write PCRs cache file")?;
-        tracing::info!("Saved PCRs to cache: {}", pcrs_path.display());
+        let pcrs_json = serde_json::to_string_pretty(pcrs).map_err(|source| PcrSaveError {
+            kind: PcrSaveErrorKind::Serialize,
+            source: source.into(),
+        })?;
+        std::fs::write(&pcrs_path, pcrs_json).map_err(|source| PcrSaveError {
+            kind: PcrSaveErrorKind::Write {
+                path: pcrs_path.clone(),
+            },
+            source: source.into(),
+        })?;
+
+        info!(?pcrs_path, ?pcrs, "Saved PCRs to cache");
         Ok(())
     }
 
-    pub async fn extract_user_image(&self, image: &UserImage, specific_files: Option<Vec<String>>) -> Result<PathBuf> {
+    /// Extract an image into a directory.
+    ///
+    /// # Errors
+    ///
+    /// The method may return an error if:
+    ///
+    /// * An error was encountered when creating and exporting a container
+    /// * An error was encountered when managing the exported tarball
+    #[tracing::instrument(skip_all)]
+    pub async fn extract_user_image(
+        &self,
+        image: &UserImage,
+        specific_files: Option<Vec<String>>,
+    ) -> Result<PathBuf, UserImageExtractError> {
         if let Some(files) = specific_files {
-            tracing::info!("Extracting specific files: {:?}", files);
-            extract::extract_specific_files(&image.reference, &files, &self.work_dir).await
+            info!(?files, "Extracting specific files");
+            extract::extract_specific_files(&image.reference, &files, &self.work_dir)
+                .await
+                .map_err(Into::into)
         } else {
-            tracing::info!("Extracting full filesystem");
-            extract::extract_image_filesystem(&image.reference, &self.work_dir).await
+            info!("Extracting full filesystem");
+            extract::extract_image_filesystem(&image.reference, &self.work_dir)
+                .await
+                .map_err(Into::into)
         }
     }
 
-    pub async fn extract_static_binary(&self, image: &UserImage, binary_path: &str) -> Result<PathBuf> {
+    // TODO: don't support static binary usecase, extract from a single file Docker image
+    // remove this code
+    #[allow(clippy::missing_errors_doc)]
+    async fn extract_static_binary(&self, image: &UserImage, binary_path: &str) -> Result<PathBuf> {
         tracing::info!("Extracting static binary: {}", binary_path);
         extract::extract_static_binary(&image.reference, binary_path, &self.work_dir).await
     }
 
-    pub async fn build_combined_image(
+    // TODO: where is this used? eliminate dead code
+    #[allow(clippy::missing_errors_doc, dead_code)]
+    #[deprecated = "unused"]
+    async fn build_combined_image(
         &self,
         user_fs_path: PathBuf,
         output_image_tag: &str,
     ) -> Result<String> {
+        #[allow(deprecated)]
         merge::build_combined_image(
             &self.template_source,
             &self.template_version,
@@ -263,6 +386,8 @@ impl EnclaveBuilder {
         .await
     }
 
+    /// Build an enclave from a local filesystem export
+    #[tracing::instrument(skip_all)]
     pub async fn build_eif_native(
         &self,
         user_fs_path: &std::path::Path,
@@ -274,7 +399,19 @@ impl EnclaveBuilder {
         manifest: Option<EnclaveManifest>,
         ports: &[u16],
         e2e: bool,
-    ) -> Result<EifFile> {
+    ) -> Result<EifFile, build::EifBuildError> {
+        debug!(
+            ?user_fs_path,
+            ?attestation_service_path,
+            ?init_path,
+            ?enclave_source_path,
+            ?output_path,
+            ?run_command,
+            ?manifest,
+            ?ports,
+            ?e2e,
+            "Building EIF from filesystem"
+        );
         build::build_eif_from_filesystems(
             user_fs_path,
             attestation_service_path,
@@ -291,7 +428,7 @@ impl EnclaveBuilder {
         .await
     }
 
-    pub fn extract_pcrs(&self, eif: &EifFile) -> Result<PcrValues> {
+    pub fn extract_pcrs(&self, eif: &EifFile) -> Result<PcrValues, pcrs::PcrExtractError> {
         pcrs::extract_pcrs_from_eif(eif)
     }
 
@@ -300,9 +437,7 @@ impl EnclaveBuilder {
     }
 
     pub fn compare_pcrs(&self, local: &PcrValues, remote: &PcrValues) -> bool {
-        local.pcr0 == remote.pcr0
-            && local.pcr1 == remote.pcr1
-            && local.pcr2 == remote.pcr2
+        local.pcr0 == remote.pcr0 && local.pcr1 == remote.pcr1 && local.pcr2 == remote.pcr2
     }
 
     pub fn is_debug_mode(&self, pcrs: &PcrValues) -> bool {
@@ -311,7 +446,10 @@ impl EnclaveBuilder {
 
     /// Resolve framework_source archive URL to a commit SHA
     async fn resolve_framework_commit(framework_source: &str) -> Option<String> {
-        tracing::info!("resolve_framework_commit: framework_source={}", framework_source);
+        tracing::info!(
+            "resolve_framework_commit: framework_source={}",
+            framework_source
+        );
 
         // Extract git URL and ref from archive URL like:
         // https://codeberg.org/caution/platform/archive/main.tar.gz
@@ -332,7 +470,11 @@ impl EnclaveBuilder {
                     tracing::info!("Resolved framework '{}' to commit {}", ref_name, sha);
                     return Some(sha);
                 }
-                tracing::warn!("Could not resolve framework ref '{}' from '{}'", ref_name, git_url);
+                tracing::warn!(
+                    "Could not resolve framework ref '{}' from '{}'",
+                    ref_name,
+                    git_url
+                );
             }
         } else {
             tracing::info!("No /archive/ found in framework_source, skipping commit resolution");
@@ -340,20 +482,40 @@ impl EnclaveBuilder {
         None
     }
 
-    pub async fn build_enclave(&self, user_image: &UserImage, specific_files: Option<Vec<String>>, run_command: Option<String>, app_source_urls: Option<Vec<String>>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>, ports: &[u16], e2e: bool) -> Result<Deployment> {
-        if let Some(cached) = self.get_cached_eif() {
+    pub async fn build_enclave(
+        &self,
+        user_image: &UserImage,
+        specific_files: Option<Vec<String>>,
+        run_command: Option<String>,
+        app_source_urls: Option<Vec<String>>,
+        app_branch: Option<String>,
+        app_commit: Option<String>,
+        metadata: Option<String>,
+        external_manifest: Option<EnclaveManifest>,
+        ports: &[u16],
+        e2e: bool,
+    ) -> Result<Deployment> {
+        if let Some(cached) = self.get_cached_eif().expect(/* XXX */ "cached EIF error") {
             tracing::info!("Using cached EIF from: {}", cached.eif.path.display());
             return Ok(cached);
         }
 
-        tracing::info!("Starting enclave build for user image: {}", user_image.reference);
+        tracing::info!(
+            "Starting enclave build for user image: {}",
+            user_image.reference
+        );
 
-        let binary_path = specific_files.as_ref().and_then(|files| files.first().cloned());
+        let binary_path = specific_files
+            .as_ref()
+            .and_then(|files| files.first().cloned());
         let run_command = run_command.or_else(|| binary_path.clone());
 
         tracing::info!("Extracting user image filesystem...");
         let user_fs = if let Some(ref bin_path) = binary_path {
-            tracing::info!("Binary path specified: {} - extracting static binary only", bin_path);
+            tracing::info!(
+                "Binary path specified: {} - extracting static binary only",
+                bin_path
+            );
             self.extract_static_binary(user_image, bin_path).await?
         } else {
             tracing::info!("No binary path specified - extracting full filesystem");
@@ -364,7 +526,8 @@ impl EnclaveBuilder {
             &self.enclave_source,
             &self.enclave_version,
             &self.work_dir,
-        ).await?;
+        )
+        .await?;
         let enclave_source_path = enclave_source_result.path.clone();
 
         // Resolve framework_source commit
@@ -379,7 +542,9 @@ impl EnclaveBuilder {
                     urls: vec![self.enclave_source.clone()],
                     commit: enclave_source_result.commit.clone(),
                 }
-            } else if self.enclave_source.starts_with("http") || self.enclave_source.starts_with("git@") {
+            } else if self.enclave_source.starts_with("http")
+                || self.enclave_source.starts_with("git@")
+            {
                 EnclaveSource::GitRepository {
                     url: self.enclave_source.clone(),
                     branch: self.enclave_version.clone(),
@@ -392,13 +557,11 @@ impl EnclaveBuilder {
             };
 
             let app_src = match (app_source_urls, app_commit.clone()) {
-                (Some(urls), Some(commit)) if !urls.is_empty() => {
-                    Some(AppSource {
-                        urls,
-                        commit,
-                        branch: app_branch.clone(),
-                    })
-                }
+                (Some(urls), Some(commit)) if !urls.is_empty() => Some(AppSource {
+                    urls,
+                    commit,
+                    branch: app_branch.clone(),
+                }),
                 _ => None,
             };
 
@@ -407,31 +570,43 @@ impl EnclaveBuilder {
                 commit: framework_commit.clone(),
             };
 
-            tracing::info!("Manifest source commits - enclave: {:?}, framework: {:?}, app: {:?}",
+            tracing::info!(
+                "Manifest source commits - enclave: {:?}, framework: {:?}, app: {:?}",
                 enclave_source_result.commit,
                 framework_commit,
-                app_commit);
+                app_commit
+            );
 
-            EnclaveManifest::new(app_src, enclave_src, framework_src, binary_path.clone(), run_command.clone(), metadata)
+            EnclaveManifest::new(
+                app_src,
+                enclave_src,
+                framework_src,
+                binary_path.clone(),
+                run_command.clone(),
+                metadata,
+            )
         };
 
         tracing::info!("Building EIF...");
         let eif_path = self.work_dir.join("enclave.eif");
         let dummy_path = std::path::PathBuf::from("/dev/null");
-        let eif = self.build_eif_native(
-            &user_fs,
-            &dummy_path,
-            &dummy_path,
-            &enclave_source_path,
-            eif_path,
-            run_command,
-            Some(manifest),
-            ports,
-            e2e,
-        ).await?;
+        let eif = self
+            .build_eif_native(
+                &user_fs,
+                &dummy_path,
+                &dummy_path,
+                &enclave_source_path,
+                eif_path,
+                run_command,
+                Some(manifest),
+                ports,
+                e2e,
+            )
+            .await?;
 
         tracing::info!("Extracting PCR values...");
-        let pcrs = self.extract_pcrs(&eif)
+        let pcrs = self
+            .extract_pcrs(&eif)
             .context("Failed to extract PCR values - ensure eif_build generated .pcrs file")?;
 
         if let Err(e) = self.save_pcrs_to_cache(&pcrs) {
@@ -446,19 +621,34 @@ impl EnclaveBuilder {
         })
     }
 
-    pub async fn build_enclave_from_filesystem(&self, user_fs_path: PathBuf, run_command: Option<String>, app_source_urls: Option<Vec<String>>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>, ports: &[u16], e2e: bool) -> Result<Deployment> {
-        if let Some(cached) = self.get_cached_eif() {
+    pub async fn build_enclave_from_filesystem(
+        &self,
+        user_fs_path: PathBuf,
+        run_command: Option<String>,
+        app_source_urls: Option<Vec<String>>,
+        app_branch: Option<String>,
+        app_commit: Option<String>,
+        metadata: Option<String>,
+        external_manifest: Option<EnclaveManifest>,
+        ports: &[u16],
+        e2e: bool,
+    ) -> Result<Deployment> {
+        if let Some(cached) = self.get_cached_eif().expect(/* XXX */ "cached EIF error") {
             tracing::info!("Using cached EIF from: {}", cached.eif.path.display());
             return Ok(cached);
         }
 
-        tracing::info!("Starting enclave build from filesystem: {}", user_fs_path.display());
+        tracing::info!(
+            "Starting enclave build from filesystem: {}",
+            user_fs_path.display()
+        );
 
         let enclave_source_result = compile::get_or_clone_enclave_source(
             &self.enclave_source,
             &self.enclave_version,
             &self.work_dir,
-        ).await?;
+        )
+        .await?;
         let enclave_source_path = enclave_source_result.path.clone();
 
         // Resolve framework_source commit
@@ -473,7 +663,9 @@ impl EnclaveBuilder {
                     urls: vec![self.enclave_source.clone()],
                     commit: enclave_source_result.commit.clone(),
                 }
-            } else if self.enclave_source.starts_with("http") || self.enclave_source.starts_with("git@") {
+            } else if self.enclave_source.starts_with("http")
+                || self.enclave_source.starts_with("git@")
+            {
                 EnclaveSource::GitRepository {
                     url: self.enclave_source.clone(),
                     branch: self.enclave_version.clone(),
@@ -486,13 +678,11 @@ impl EnclaveBuilder {
             };
 
             let app_src = match (app_source_urls, app_commit.clone()) {
-                (Some(urls), Some(commit)) if !urls.is_empty() => {
-                    Some(AppSource {
-                        urls,
-                        commit,
-                        branch: app_branch.clone(),
-                    })
-                }
+                (Some(urls), Some(commit)) if !urls.is_empty() => Some(AppSource {
+                    urls,
+                    commit,
+                    branch: app_branch.clone(),
+                }),
                 _ => None,
             };
 
@@ -501,32 +691,44 @@ impl EnclaveBuilder {
                 commit: framework_commit.clone(),
             };
 
-            tracing::info!("Manifest source commits - enclave: {:?}, framework: {:?}, app: {:?}",
+            tracing::info!(
+                "Manifest source commits - enclave: {:?}, framework: {:?}, app: {:?}",
                 enclave_source_result.commit,
                 framework_commit,
-                app_commit);
+                app_commit
+            );
 
-            EnclaveManifest::new(app_src, enclave_src, framework_src, None, run_command.clone(), metadata)
+            EnclaveManifest::new(
+                app_src,
+                enclave_src,
+                framework_src,
+                None,
+                run_command.clone(),
+                metadata,
+            )
         };
 
         tracing::info!("Building EIF...");
         let eif_path = self.work_dir.join("enclave.eif");
 
         let dummy_path = std::path::PathBuf::from("/dev/null");
-        let eif = self.build_eif_native(
-            &user_fs_path,
-            &dummy_path,
-            &dummy_path,
-            &enclave_source_path,
-            eif_path,
-            run_command,
-            Some(manifest),
-            ports,
-            e2e,
-        ).await?;
+        let eif = self
+            .build_eif_native(
+                &user_fs_path,
+                &dummy_path,
+                &dummy_path,
+                &enclave_source_path,
+                eif_path,
+                run_command,
+                Some(manifest),
+                ports,
+                e2e,
+            )
+            .await?;
 
         tracing::info!("Extracting PCR values...");
-        let pcrs = self.extract_pcrs(&eif)
+        let pcrs = self
+            .extract_pcrs(&eif)
             .context("Failed to extract PCR values - ensure eif_build generated .pcrs file")?;
 
         if let Err(e) = self.save_pcrs_to_cache(&pcrs) {
@@ -541,7 +743,19 @@ impl EnclaveBuilder {
         })
     }
 
-    pub async fn build_enclave_auto(&self, user_image: &UserImage, binary_path: &str, run_command: Option<String>, app_source_urls: Option<Vec<String>>, app_branch: Option<String>, app_commit: Option<String>, metadata: Option<String>, external_manifest: Option<EnclaveManifest>, ports: &[u16], e2e: bool) -> Result<Deployment> {
+    pub async fn build_enclave_auto(
+        &self,
+        user_image: &UserImage,
+        binary_path: &str,
+        run_command: Option<String>,
+        app_source_urls: Option<Vec<String>>,
+        app_branch: Option<String>,
+        app_commit: Option<String>,
+        metadata: Option<String>,
+        external_manifest: Option<EnclaveManifest>,
+        ports: &[u16],
+        e2e: bool,
+    ) -> Result<Deployment> {
         let binary_basename = std::path::Path::new(binary_path)
             .file_name()
             .and_then(|n| n.to_str())
@@ -552,7 +766,10 @@ impl EnclaveBuilder {
         let filesystem_binary = self.work_dir.join("build").join(binary_basename);
 
         if filesystem_binary.exists() {
-            tracing::info!("Found binary on filesystem: {}", filesystem_binary.display());
+            tracing::info!(
+                "Found binary on filesystem: {}",
+                filesystem_binary.display()
+            );
             tracing::info!("Using filesystem build path (skipping Docker extraction)");
 
             let user_service_dir = self.work_dir.join("user-service");
@@ -564,8 +781,11 @@ impl EnclaveBuilder {
             tokio::fs::create_dir_all(&user_service_dir).await?;
 
             let binary_path_obj = std::path::Path::new(binary_path);
-            let parent_dir = binary_path_obj.parent().unwrap_or(std::path::Path::new("/"));
-            let target_dir = user_service_dir.join(parent_dir.strip_prefix("/").unwrap_or(parent_dir));
+            let parent_dir = binary_path_obj
+                .parent()
+                .unwrap_or(std::path::Path::new("/"));
+            let target_dir =
+                user_service_dir.join(parent_dir.strip_prefix("/").unwrap_or(parent_dir));
             tokio::fs::create_dir_all(&target_dir).await?;
 
             let dest_path = target_dir.join(binary_basename);
@@ -573,10 +793,33 @@ impl EnclaveBuilder {
 
             tracing::info!("Copied binary to staging: {}", dest_path.display());
 
-            self.build_enclave_from_filesystem(user_service_dir, run_command, app_source_urls, app_branch.clone(), app_commit.clone(), metadata, external_manifest, ports, e2e).await
+            self.build_enclave_from_filesystem(
+                user_service_dir,
+                run_command,
+                app_source_urls,
+                app_branch.clone(),
+                app_commit.clone(),
+                metadata,
+                external_manifest,
+                ports,
+                e2e,
+            )
+            .await
         } else {
             tracing::info!("Binary not found on filesystem, using Docker extraction");
-            self.build_enclave(user_image, Some(vec![binary_path.to_string()]), run_command, app_source_urls, app_branch, app_commit, metadata, external_manifest, ports, e2e).await
+            self.build_enclave(
+                user_image,
+                Some(vec![binary_path.to_string()]),
+                run_command,
+                app_source_urls,
+                app_branch,
+                app_commit,
+                metadata,
+                external_manifest,
+                ports,
+                e2e,
+            )
+            .await
         }
     }
 }
@@ -601,7 +844,18 @@ mod tests {
             ..pcrs1.clone()
         };
 
-        let builder = EnclaveBuilder::new("test", "v1", "./enclave", "local", "http://test").unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+
+        let builder = EnclaveBuilder::new(
+            "test",
+            "v1",
+            "./enclave",
+            "local",
+            "http://test",
+            &cache_dir,
+            false,
+        )
+        .unwrap();
         assert!(builder.compare_pcrs(&pcrs1, &pcrs2));
         assert!(!builder.compare_pcrs(&pcrs1, &pcrs3));
     }
