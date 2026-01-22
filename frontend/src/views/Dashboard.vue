@@ -1027,8 +1027,10 @@ make build-cli
 
     <AttestationModal
       v-if="attestationApp"
+      :resource-id="attestationApp.id"
       :public-ip="attestationApp.public_ip"
       :app-name="attestationApp.resource_name || 'App'"
+      :session="session"
       @close="attestationApp = null"
     />
 

@@ -149,15 +149,17 @@ export default {
   name: 'AttestationModal',
   components: { BrailleLoader },
   props: {
+    resourceId: { type: String, required: true },
     publicIp: { type: String, required: true },
-    appName: { type: String, default: 'App' }
+    appName: { type: String, default: 'App' },
+    session: { type: String, required: true }
   },
   emits: ['close'],
   setup(props) {
     const checks = ref([])
     const result = ref(null)
     const rawResponse = ref(null)
-    const attestationUrl = `${window.location.protocol}//${props.publicIp}/attestation`
+    const attestationUrl = `/api/resources/${props.resourceId}/attestation`
 
     function addCheck(id, message, status) {
       const existing = checks.value.find(c => c.id === id)
@@ -180,7 +182,10 @@ export default {
         addCheck('request', 'Requesting attestation...', 'pending')
         const response = await fetch(attestationUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Session-ID': props.session
+          },
           body: JSON.stringify({ nonce: Array.from(nonce) })
         })
 

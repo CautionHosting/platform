@@ -1281,6 +1281,65 @@ async fn get_resource(
     Ok(Json(response))
 }
 
+async fn proxy_attestation(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(resource_id): Path<Uuid>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Get the resource to verify ownership and get the public IP
+    let resource: (Option<String>,) = sqlx::query_as(
+        "SELECT cr.public_ip
+         FROM compute_resources cr
+         INNER JOIN organization_members om ON cr.organization_id = om.organization_id
+         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL"
+    )
+    .bind(resource_id)
+    .bind(auth.user_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| (StatusCode::NOT_FOUND, "Resource not found".to_string()))?;
+
+    let public_ip = resource.0.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, "Resource has no public IP".to_string())
+    })?;
+
+    // Create HTTP client that accepts self-signed certs
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create HTTP client: {}", e)))?;
+
+    let attestation_url = format!("https://{}/attestation", public_ip);
+    tracing::info!("Proxying attestation request to {}", attestation_url);
+
+    let response = client
+        .post(&attestation_url)
+        .header("Content-Type", "application/json")
+        .body(body.to_vec())
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!("Attestation proxy request failed: {:?}", e);
+            (StatusCode::BAD_GATEWAY, format!("Failed to reach attestation endpoint: {}", e))
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        tracing::error!("Attestation endpoint returned error: {} - {}", status, body);
+        return Err((StatusCode::BAD_GATEWAY, format!("Attestation endpoint error: {}", status)));
+    }
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Invalid JSON from attestation endpoint: {}", e)))?;
+
+    Ok(Json(json))
+}
+
 async fn rename_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -2600,6 +2659,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/resources/{id}", get(get_resource))
         .route("/resources/{id}", patch(rename_resource))
         .route("/resources/{id}", delete(delete_resource))
+        .route("/resources/{id}/attestation", post(proxy_attestation))
         .route("/resources/managed-onprem", post(create_managed_onprem_resource))
         .route("/deploy", post(deploy_handler))
         .route("/credentials", get(list_cloud_credentials))
