@@ -44,17 +44,10 @@
     <!-- Mobile menu -->
     <div class="mobile-menu" :class="{ active: mobileMenuOpen }">
       <div class="mobile-menu-content">
-        <a href="https://docs.caution.co/" target="_blank" rel="noopener noreferrer" class="mobile-menu-link">Docs</a>
+        <a href="https://caution.co/about.html" class="mobile-menu-link">About</a>
+        <a href="https://caution.co/deployment.html" class="mobile-menu-link">Deployment</a>
+        <a href="https://docs.caution.co/" target="_blank" rel="noopener noreferrer" class="mobile-menu-link">Documentation</a>
         <a href="https://caution.co/blog.html" class="mobile-menu-link">Blog</a>
-        <a href="https://caution.co/contact.html" class="mobile-menu-link"
-          >Contact</a
-        >
-        <a
-          href="/login"
-          @click.prevent="$emit('login')"
-          class="mobile-menu-link"
-          >Log in</a
-        >
         <a href="/" class="btn-dark mobile-menu-cta"> Get started </a>
       </div>
     </div>

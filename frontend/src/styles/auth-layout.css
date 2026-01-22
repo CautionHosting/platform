@@ -442,9 +442,11 @@ p.info a:hover {
 }
 
 .platform-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
+  display: inline;
+}
+
+.platform-item .tooltip-trigger {
+  white-space: nowrap;
 }
 
 .tooltip-trigger {
@@ -512,6 +514,19 @@ p.info a:hover {
   width: 100%;
   max-width: 600px;
   position: relative;
+}
+
+.mobile-blocked {
+  text-align: center;
+  margin: auto;
+  padding: 40px 0;
+}
+
+.mobile-blocked-text {
+  font-size: clamp(1.1rem, 1vw, 1.175rem);
+  color: rgba(0, 0, 0, 0.7);
+  line-height: 1.6;
+  margin-top: 16px;
 }
 
 .login-title {
@@ -1023,7 +1038,7 @@ p.info a:hover {
 
   .right-panel {
     order: 1;
-    padding: 220px 24px 200px 24px;
+    padding: 120px 24px 80px 24px;
     align-items: center;
     justify-content: center;
   }
@@ -1092,6 +1107,22 @@ p.info a:hover {
     gap: 0;
     justify-content: space-between;
     align-items: center;
+  }
+
+  /* Tooltip mobile positioning - prevent going off screen */
+  .tooltip {
+    white-space: normal;
+    min-width: 200px;
+    max-width: 250px;
+    left: auto;
+    right: -10px;
+    transform: none;
+  }
+
+  .tooltip::after {
+    left: auto;
+    right: 16px;
+    transform: none;
   }
 }
 
