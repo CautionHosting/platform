@@ -157,7 +157,7 @@ export default {
     const checks = ref([])
     const result = ref(null)
     const rawResponse = ref(null)
-    const attestationUrl = `http://${props.publicIp}/attestation`
+    const attestationUrl = `${window.location.protocol}//${props.publicIp}/attestation`
 
     function addCheck(id, message, status) {
       const existing = checks.value.find(c => c.id === id)
