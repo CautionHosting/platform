@@ -54,6 +54,13 @@
               <h3 class="footer-column-title">Company</h3>
               <a href="https://caution.co/about.html" class="footer-link">About</a>
               <a href="https://caution.co/contact.html" class="footer-link">Contact</a>
+              <a
+                href="https://matrix.to/#/#caution:matrix.org"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="footer-link"
+                >Community</a
+              >
             </div>
           </div>
         </div>

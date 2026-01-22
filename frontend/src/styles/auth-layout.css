@@ -1156,6 +1156,17 @@ p.info a:hover {
   }
 }
 
+@media (max-width: 665px) {
+  .footer-links {
+    flex-wrap: wrap;
+    row-gap: 32px;
+  }
+
+  .footer-column:last-child {
+    flex-basis: 100%;
+  }
+}
+
 @media (max-width: 550px) {
   .footer-copyright {
     font-size: 0.85rem;
