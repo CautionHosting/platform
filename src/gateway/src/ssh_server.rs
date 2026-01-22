@@ -309,7 +309,7 @@ fn update_repo_head(repo_path: &str) -> Result<String> {
 
 async fn get_user_org(pool: &PgPool, user_id: Uuid) -> Result<Option<Uuid>> {
     let org_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT organization_id FROM organization_members WHERE user_id = $1 LIMIT 1"
+        "SELECT organization_id FROM organization_members WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1"
     )
     .bind(user_id)
     .fetch_optional(pool)
