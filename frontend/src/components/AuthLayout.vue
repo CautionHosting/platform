@@ -94,7 +94,15 @@
       <!-- Right Panel - Light -->
       <div class="right-panel">
         <div class="right-content">
-          <slot name="right-panel"></slot>
+          <!-- Show desktop required message on mobile -->
+          <div v-if="isMobile" class="mobile-blocked">
+            <h2 class="form-title">Desktop required</h2>
+            <p class="mobile-blocked-text">
+              Registration and login require a desktop browser. Please visit this page on a desktop computer to continue.
+            </p>
+          </div>
+          <!-- Show normal content on desktop -->
+          <slot v-else name="right-panel"></slot>
         </div>
       </div>
     </div>
@@ -131,6 +139,11 @@ export default {
   setup() {
     const tooltipPlatformVisible = ref(false);
     const tooltipCloudVisible = ref(false);
+    const isMobile = ref(false);
+
+    const checkMobile = () => {
+      isMobile.value = window.innerWidth <= 960;
+    };
 
     const {
       mobileMenuOpen,
@@ -167,12 +180,29 @@ export default {
       tooltipCloudVisible.value = !tooltipCloudVisible.value;
     };
 
+    const closeAllTooltips = () => {
+      tooltipPlatformVisible.value = false;
+      tooltipCloudVisible.value = false;
+    };
+
+    const handleClickOutside = (event) => {
+      const isTooltipTrigger = event.target.closest('.tooltip-trigger');
+      if (!isTooltipTrigger) {
+        closeAllTooltips();
+      }
+    };
+
     onMounted(() => {
       setupScrollListeners();
+      document.addEventListener('click', handleClickOutside);
+      checkMobile();
+      window.addEventListener('resize', checkMobile);
     });
 
     onUnmounted(() => {
       cleanupScrollListeners();
+      document.removeEventListener('click', handleClickOutside);
+      window.removeEventListener('resize', checkMobile);
     });
 
     return {
@@ -182,6 +212,7 @@ export default {
       navbarOnDark,
       tooltipPlatformVisible,
       tooltipCloudVisible,
+      isMobile,
       closeMobileMenu,
       toggleMobileMenu,
       showTooltipPlatform,
