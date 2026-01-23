@@ -14,19 +14,27 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: proxyTarget,
-        changeOrigin: true
+        changeOrigin: true,
+        secure: false,
+        cookieDomainRewrite: ''
       },
       '/auth': {
         target: proxyTarget,
-        changeOrigin: true
+        changeOrigin: true,
+        secure: false,
+        cookieDomainRewrite: ''
       },
       '/ssh-keys': {
         target: proxyTarget,
-        changeOrigin: true
+        changeOrigin: true,
+        secure: false,
+        cookieDomainRewrite: ''
       },
       '/health': {
         target: proxyTarget,
-        changeOrigin: true
+        changeOrigin: true,
+        secure: false,
+        cookieDomainRewrite: ''
       }
     }
   },

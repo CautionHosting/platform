@@ -84,6 +84,13 @@ async fn main() -> Result<()> {
     let host_key = load_or_generate_host_key(&config.ssh_host_key_path)
         .context("Failed to load SSH host key")?;
 
+    let internal_service_secret = std::env::var("INTERNAL_SERVICE_SECRET").ok();
+    if internal_service_secret.is_some() {
+        tracing::info!("Internal service authentication enabled");
+    } else {
+        tracing::warn!("INTERNAL_SERVICE_SECRET not set - internal service authentication disabled");
+    }
+
     let state = AppState {
         db: pool.clone(),
         webauthn,
@@ -92,6 +99,7 @@ async fn main() -> Result<()> {
         auth_states: Arc::new(RwLock::new(HashMap::new())),
         sign_challenges: Arc::new(RwLock::new(HashMap::new())),
         session_timeout_hours: config.session_timeout_hours,
+        internal_service_secret: internal_service_secret.clone(),
     };
 
     let rate_limiter = rate_limit::RateLimiter::new(100, 60);
@@ -120,6 +128,7 @@ async fn main() -> Result<()> {
         .allow_headers(vec![
             "Content-Type".parse().unwrap(),
             "X-Session-ID".parse().unwrap(),
+            "X-CSRF-Token".parse().unwrap(),
             "Authorization".parse().unwrap(),
             "X-Fido2-Challenge-Id".parse().unwrap(),
             "X-Fido2-Response".parse().unwrap(),
@@ -130,6 +139,7 @@ async fn main() -> Result<()> {
         .route("/auth/register/finish", post(handlers::finish_register_handler))
         .route("/auth/login/begin", post(handlers::begin_login_handler))
         .route("/auth/login/finish", post(handlers::finish_login_handler))
+        .route("/auth/logout", post(handlers::logout_handler))
         .route("/auth/sign-request", post(handlers::begin_sign_request_handler))
         .layer(middleware::from_fn_with_state(
             rate_limiter.clone(),
@@ -200,14 +210,9 @@ async fn main() -> Result<()> {
     let ssh_api_url = config.api_service_url.clone();
     let ssh_data_dir = config.data_dir.clone();
     let ssh_bind_addr = format!("0.0.0.0:{}", config.ssh_port);
-    let internal_service_secret = std::env::var("INTERNAL_SERVICE_SECRET").ok();
-    if internal_service_secret.is_some() {
-        tracing::info!("Internal service authentication enabled");
-    } else {
-        tracing::warn!("INTERNAL_SERVICE_SECRET not set - internal service authentication disabled");
-    }
+    let ssh_internal_service_secret = internal_service_secret.clone();
     tokio::spawn(async move {
-        if let Err(e) = ssh_server::run_ssh_server(ssh_pool, ssh_api_url, ssh_data_dir, internal_service_secret, host_key, &ssh_bind_addr).await {
+        if let Err(e) = ssh_server::run_ssh_server(ssh_pool, ssh_api_url, ssh_data_dir, ssh_internal_service_secret, host_key, &ssh_bind_addr).await {
             tracing::error!("SSH server error: {:?}", e);
         }
     });

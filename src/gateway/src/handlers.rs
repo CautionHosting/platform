@@ -3,11 +3,14 @@
 
 use axum::{
     extract::{State, Path},
-    http::StatusCode,
+    http::{StatusCode, header, HeaderMap, HeaderValue},
     response::{IntoResponse, Response},
     Json,
 };
+use axum_extra::extract::cookie::{Cookie, SameSite};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use webauthn_rs::prelude::*;
 use time::{Duration, format_description::well_known::Rfc3339};
 use serde::{Serialize, Deserialize};
@@ -19,10 +22,12 @@ pub struct AppError(anyhow::Error);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        // Log full error details server-side
         tracing::error!("Application error: {:?}", self.0);
+        // Return generic message to client to avoid leaking internal details
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Internal error: {}", self.0),
+            "An internal error occurred",
         )
             .into_response()
     }
@@ -109,10 +114,57 @@ pub async fn begin_register_handler(
     }))
 }
 
+/// Derive CSRF token from session ID using HMAC.
+/// This cryptographically binds the CSRF token to the session,
+/// so a CSRF token from one session cannot be used with another.
+pub fn derive_csrf_token(session_id: &str, secret: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    type HmacSha256 = Hmac<Sha256>;
+
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(session_id.as_bytes());
+    mac.update(b":csrf"); // domain separation
+
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Get CSRF secret - uses internal service secret or falls back to a default for dev
+fn get_csrf_secret() -> String {
+    std::env::var("INTERNAL_SERVICE_SECRET")
+        .or_else(|_| std::env::var("CSRF_SECRET"))
+        .unwrap_or_else(|_| "dev-csrf-secret-do-not-use-in-production".to_string())
+}
+
+/// Build auth cookies for session and CSRF protection
+fn build_auth_cookies(session_id: &str, csrf_token: &str, max_age_hours: i64, secure: bool) -> (String, String) {
+    // Session cookie: HTTP-only, Secure, SameSite=Lax
+    let session_cookie = Cookie::build(("caution_session", session_id.to_string()))
+        .path("/")
+        .http_only(true)
+        .secure(secure)
+        .same_site(SameSite::Lax)
+        .max_age(cookie::time::Duration::hours(max_age_hours))
+        .build();
+
+    // CSRF cookie: NOT HTTP-only (so JS can read it), Secure, SameSite=Strict
+    let csrf_cookie = Cookie::build(("caution_csrf", csrf_token.to_string()))
+        .path("/")
+        .http_only(false)
+        .secure(secure)
+        .same_site(SameSite::Strict)
+        .max_age(cookie::time::Duration::hours(max_age_hours))
+        .build();
+
+    (session_cookie.to_string(), csrf_cookie.to_string())
+}
+
 pub async fn finish_register_handler(
     State(state): State<AppState>,
     Json(req): Json<serde_json::Value>,
-) -> Result<Json<RegisterFinishResponse>, AppError> {
+) -> Result<Response, AppError> {
     let session_key = req.get("session")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Missing session field"))?
@@ -173,18 +225,35 @@ pub async fn finish_register_handler(
     let credential_id_hex = hex::encode(&credential_id);
 
     let session_id = db::generate_session_id();
+    let csrf_token = derive_csrf_token(&session_id, &get_csrf_secret());
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
     db::create_auth_session(&state.db, &session_id, &credential_id, expires_at).await?;
 
     tracing::debug!("Registration complete with automatic session creation (expires in {} hours)", state.session_timeout_hours);
 
-    Ok(Json(RegisterFinishResponse {
+    // Build the response with cookies
+    let response_body = RegisterFinishResponse {
         status: "success".to_string(),
         credential_id: credential_id_hex,
         session_id: session_id.clone(),
         expires_at: expires_at.format(&Rfc3339).unwrap_or_else(|_| expires_at.to_string()),
-    }))
+    };
+
+    // Check if we're in production (HTTPS) - use secure cookies
+    let secure = std::env::var("ENVIRONMENT").map(|e| e != "development").unwrap_or(true);
+    let (session_cookie, csrf_cookie) = build_auth_cookies(&session_id, &csrf_token, state.session_timeout_hours, secure);
+
+    let body = serde_json::to_string(&response_body)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))?;
+
+    // Use HeaderMap with append to properly set multiple Set-Cookie headers
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.append(header::SET_COOKIE, HeaderValue::from_str(&session_cookie).unwrap());
+    headers.append(header::SET_COOKIE, HeaderValue::from_str(&csrf_cookie).unwrap());
+
+    Ok((StatusCode::OK, headers, body).into_response())
 }
 
 pub async fn begin_login_handler(
@@ -266,7 +335,7 @@ pub async fn begin_login_handler(
 pub async fn finish_login_handler(
     State(state): State<AppState>,
     Json(req): Json<serde_json::Value>,
-) -> Result<Json<LoginFinishResponse>, AppError> {
+) -> Result<Response, AppError> {
     let session_key = req.get("session")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Missing session field"))?
@@ -323,6 +392,7 @@ pub async fn finish_login_handler(
     state.auth_states.write().await.remove(&session_key);
 
     let session_id = db::generate_session_id();
+    let csrf_token = derive_csrf_token(&session_id, &get_csrf_secret());
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
     db::create_auth_session(&state.db, &session_id, &credential_id_bytes, expires_at).await?;
@@ -330,11 +400,27 @@ pub async fn finish_login_handler(
     let credential_id_hex = hex::encode(&credential_id_bytes);
     tracing::debug!("Login complete (session expires in {} hours)", state.session_timeout_hours);
 
-    Ok(Json(LoginFinishResponse {
+    // Build the response with cookies
+    let response_body = LoginFinishResponse {
         session_id: session_id.clone(),
         expires_at: expires_at.format(&Rfc3339).unwrap_or_else(|_| expires_at.to_string()),
         credential_id: credential_id_hex,
-    }))
+    };
+
+    // Check if we're in production (HTTPS) - use secure cookies
+    let secure = std::env::var("ENVIRONMENT").map(|e| e != "development").unwrap_or(true);
+    let (session_cookie, csrf_cookie) = build_auth_cookies(&session_id, &csrf_token, state.session_timeout_hours, secure);
+
+    let body = serde_json::to_string(&response_body)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))?;
+
+    // Use HeaderMap with append to properly set multiple Set-Cookie headers
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.append(header::SET_COOKIE, HeaderValue::from_str(&session_cookie).unwrap());
+    headers.append(header::SET_COOKIE, HeaderValue::from_str(&csrf_cookie).unwrap());
+
+    Ok((StatusCode::OK, headers, body).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -467,4 +553,65 @@ pub async fn begin_sign_request_handler(
         challenge: rcr,
         challenge_id,
     }))
+}
+
+/// Extract session ID from cookie header
+fn get_session_from_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get("cookie")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';')
+                .map(|s| s.trim())
+                .find(|s| s.starts_with("caution_session="))
+                .map(|s| s.trim_start_matches("caution_session=").to_string())
+        })
+}
+
+/// Build cookies that clear auth state (for logout)
+fn build_logout_cookies() -> (String, String) {
+    // Set cookies with immediate expiration to clear them
+    let session_cookie = Cookie::build(("caution_session", ""))
+        .path("/")
+        .http_only(true)
+        .max_age(cookie::time::Duration::ZERO)
+        .build();
+
+    let csrf_cookie = Cookie::build(("caution_csrf", ""))
+        .path("/")
+        .http_only(false)
+        .max_age(cookie::time::Duration::ZERO)
+        .build();
+
+    (session_cookie.to_string(), csrf_cookie.to_string())
+}
+
+pub async fn logout_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AppError> {
+    // Get session from header (CLI) or cookie (browser)
+    let session_id = headers
+        .get("X-Session-ID")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string())
+        .or_else(|| get_session_from_cookie(&headers));
+
+    // Delete session from database if we found one
+    if let Some(session_id) = session_id {
+        if let Err(e) = db::delete_auth_session(&state.db, &session_id).await {
+            tracing::warn!("Failed to delete session during logout: {:?}", e);
+            // Continue anyway - we still want to clear cookies
+        }
+    }
+
+    // Build response with cleared cookies
+    let (session_cookie, csrf_cookie) = build_logout_cookies();
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.append(header::SET_COOKIE, HeaderValue::from_str(&session_cookie).unwrap());
+    headers.append(header::SET_COOKIE, HeaderValue::from_str(&csrf_cookie).unwrap());
+
+    Ok((StatusCode::OK, headers, r#"{"status":"logged_out"}"#).into_response())
 }

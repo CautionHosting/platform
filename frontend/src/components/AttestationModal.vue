@@ -145,14 +145,38 @@ function bytesToHex(bytes) {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
+// Helper to get CSRF token from cookie
+function getCsrfToken() {
+  const match = document.cookie.match(/caution_csrf=([^;]+)/)
+  return match ? match[1] : null
+}
+
+// Helper for authenticated API calls with CSRF protection
+function authFetch(url, options = {}) {
+  const headers = options.headers || {}
+
+  // Add CSRF token for state-changing requests
+  if (options.method && options.method !== 'GET') {
+    const csrfToken = getCsrfToken()
+    if (csrfToken) {
+      headers['X-CSRF-Token'] = csrfToken
+    }
+  }
+
+  return fetch(url, {
+    ...options,
+    headers,
+    credentials: 'include',
+  })
+}
+
 export default {
   name: 'AttestationModal',
   components: { BrailleLoader },
   props: {
     resourceId: { type: String, required: true },
     publicIp: { type: String, required: true },
-    appName: { type: String, default: 'App' },
-    session: { type: String, required: true }
+    appName: { type: String, default: 'App' }
   },
   emits: ['close'],
   setup(props) {
@@ -180,11 +204,10 @@ export default {
         addCheck('nonce', `Challenge nonce: ${bytesToHex(nonce)}`, 'success')
 
         addCheck('request', 'Requesting attestation...', 'pending')
-        const response = await fetch(attestationUrl, {
+        const response = await authFetch(attestationUrl, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
-            'X-Session-ID': props.session
+            'Content-Type': 'application/json'
           },
           body: JSON.stringify({ nonce: Array.from(nonce) })
         })

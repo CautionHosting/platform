@@ -36,6 +36,10 @@ pub async fn proxy_handler(
 
     if let Some(user_id) = user_id_header {
         proxy_req = proxy_req.header("X-Authenticated-User-ID", user_id);
+        // Include internal service secret for authenticated requests
+        if let Some(ref secret) = state.internal_service_secret {
+            proxy_req = proxy_req.header("X-Internal-Service-Secret", secret.clone());
+        }
     }
 
     if let Some(content_type) = content_type_header {

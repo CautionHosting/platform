@@ -58,6 +58,7 @@ rand = "0.8"
 
 # Hashing
 sha2 = "0.10"
+hmac = "0.12"
 
 # Encryption
 aes-gcm = "0.10"

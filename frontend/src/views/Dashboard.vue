@@ -1030,7 +1030,6 @@ make build-cli
       :resource-id="attestationApp.id"
       :public-ip="attestationApp.public_ip"
       :app-name="attestationApp.resource_name || 'App'"
-      :session="session"
       @close="attestationApp = null"
     />
 
@@ -1080,16 +1079,38 @@ function base64UrlToArrayBuffer(base64url) {
   return bytes.buffer;
 }
 
+// Helper to get CSRF token from cookie
+function getCsrfToken() {
+  const match = document.cookie.match(/caution_csrf=([^;]+)/);
+  return match ? match[1] : null;
+}
+
+// Helper for authenticated API calls with CSRF protection
+function authFetch(url, options = {}) {
+  const headers = options.headers || {};
+
+  // Add CSRF token for state-changing requests
+  if (options.method && options.method !== 'GET') {
+    const csrfToken = getCsrfToken();
+    if (csrfToken) {
+      headers['X-CSRF-Token'] = csrfToken;
+    }
+  }
+
+  return fetch(url, {
+    ...options,
+    headers,
+    credentials: 'include',
+  });
+}
+
 export default {
   name: "Dashboard",
   components: {
     DashboardLayout,
     AttestationModal,
   },
-  props: {
-    session: String,
-  },
-  setup(props) {
+  setup() {
     const error = ref(null);
     const activeTab = ref("apps");
     const setupStep = ref(0);
@@ -1247,11 +1268,7 @@ export default {
       loadingApps.value = true;
 
       try {
-        const response = await fetch("/api/resources", {
-          headers: {
-            "X-Session-ID": props.session,
-          },
-        });
+        const response = await authFetch("/api/resources");
 
         if (response.ok) {
           apps.value = await response.json();
@@ -1284,11 +1301,8 @@ export default {
       showToast(`Destroying "${name}"... This may take a few minutes.`, 'info');
 
       try {
-        const response = await fetch(`/api/resources/${id}`, {
+        const response = await authFetch(`/api/resources/${id}`, {
           method: "DELETE",
-          headers: {
-            "X-Session-ID": props.session,
-          },
         });
 
         if (response.ok || response.status === 204) {
@@ -1315,11 +1329,7 @@ export default {
       loadingKeys.value = true;
 
       try {
-        const response = await fetch("/ssh-keys", {
-          headers: {
-            "X-Session-ID": props.session,
-          },
-        });
+        const response = await authFetch("/ssh-keys");
 
         if (response.ok) {
           const data = await response.json();
@@ -1352,11 +1362,10 @@ export default {
         });
         const bodyHash = await sha256Hex(body);
 
-        const challengeRes = await fetch("/auth/sign-request", {
+        const challengeRes = await authFetch("/auth/sign-request", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "X-Session-ID": props.session,
           },
           body: JSON.stringify({
             method: "POST",
@@ -1410,7 +1419,7 @@ export default {
           .replace(/\//g, "_")
           .replace(/=/g, "");
 
-        const response = await fetch("/ssh-keys", {
+        const response = await authFetch("/ssh-keys", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -1456,13 +1465,10 @@ export default {
       showDeleteModal.value = false;
 
       try {
-        const response = await fetch(
+        const response = await authFetch(
           `/ssh-keys/${encodeURIComponent(keyToDelete.value)}`,
           {
             method: "DELETE",
-            headers: {
-              "X-Session-ID": props.session,
-            },
           }
         );
 
@@ -1490,11 +1496,7 @@ export default {
       loadingCreds.value = true;
 
       try {
-        const response = await fetch("/api/credentials", {
-          headers: {
-            "X-Session-ID": props.session,
-          },
-        });
+        const response = await authFetch("/api/credentials");
 
         if (response.ok) {
           credentials.value = await response.json();
@@ -1530,11 +1532,10 @@ export default {
           is_default: newCredIsDefault.value,
         };
 
-        const response = await fetch("/api/credentials", {
+        const response = await authFetch("/api/credentials", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "X-Session-ID": props.session,
           },
           body: JSON.stringify(body),
         });
@@ -1563,11 +1564,8 @@ export default {
       deletingCred.value = id;
 
       try {
-        const response = await fetch(`/api/credentials/${id}`, {
+        const response = await authFetch(`/api/credentials/${id}`, {
           method: "DELETE",
-          headers: {
-            "X-Session-ID": props.session,
-          },
         });
 
         if (response.ok || response.status === 204) {
@@ -1588,11 +1586,8 @@ export default {
       settingDefault.value = id;
 
       try {
-        const response = await fetch(`/api/credentials/${id}/default`, {
+        const response = await authFetch(`/api/credentials/${id}/default`, {
           method: "POST",
-          headers: {
-            "X-Session-ID": props.session,
-          },
         });
 
         if (response.ok) {
@@ -1877,11 +1872,6 @@ export default {
     };
 
     onMounted(async () => {
-      if (!props.session) {
-        window.location.href = "/login";
-        return;
-      }
-
       // Add keyboard event listener
       window.addEventListener("keydown", handleKeyDown);
 

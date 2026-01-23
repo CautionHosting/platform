@@ -3,7 +3,7 @@
 
 <template>
   <div id="app">
-    <component :is="currentView" :session="session" @update-session="handleSessionUpdate" />
+    <component :is="currentView" />
   </div>
 </template>
 
@@ -13,6 +13,7 @@ import Onboarding from './views/Onboarding.vue'
 import Register from './views/Login.vue'
 import AuthLogin from './views/AuthLogin.vue'
 import Dashboard from './views/Dashboard.vue'
+import { getCsrfToken } from './composables/useWebAuthn.js'
 
 export default {
   name: 'App',
@@ -23,18 +24,10 @@ export default {
     Dashboard
   },
   setup() {
-    // Extract session from URL params immediately in setup (before child components mount)
-    const params = new URLSearchParams(window.location.search)
-    const sessionParam = params.get('session')
-
-    // TODO(production): Remove dev mode bypass before production deployment
-    // Dev mode: use ?dev=1 to bypass session checks for UI development
-    // Example: /dashboard?dev=1 or /onboarding?dev=1
-    const devMode = params.get('dev') === '1'
-    const devSession = devMode ? 'dev-session' : null
-    const session = ref(sessionParam || devSession)
-    console.log('[App.vue] Dev mode:', devMode, 'Session param:', sessionParam, 'Final session:', session.value)
-    // END TODO(production)
+    // Session is now stored in HTTP-only cookie, not URL
+    // We track authentication state here, but actual auth is via cookie
+    const isAuthenticated = ref(false)
+    const authChecked = ref(false)
 
     const currentRoute = ref(window.location.pathname)
 
@@ -68,6 +61,19 @@ export default {
       }
     }
 
+    // Check authentication status via API call (session in HTTP-only cookie)
+    const checkAuth = async () => {
+      try {
+        const response = await fetch('/api/user/status', {
+          credentials: 'include',
+        })
+        isAuthenticated.value = response.ok
+      } catch {
+        isAuthenticated.value = false
+      }
+      authChecked.value = true
+    }
+
     // Simple client-side routing
     const currentView = computed(() => {
       const path = currentRoute.value || window.location.pathname
@@ -82,15 +88,15 @@ export default {
         // Login page (WebAuthn authentication)
         return 'AuthLogin'
       } else if (path === '/onboarding') {
-        // Protected route - redirect to home if no session
-        if (!session.value) {
+        // Protected route - redirect to home if not authenticated
+        if (authChecked.value && !isAuthenticated.value) {
           window.location.href = '/'
           return 'Register'
         }
         return 'Onboarding'
       } else if (path === '/dashboard') {
-        // Protected route - redirect to home if no session
-        if (!session.value) {
+        // Protected route - redirect to home if not authenticated
+        if (authChecked.value && !isAuthenticated.value) {
           window.location.href = '/'
           return 'Register'
         }
@@ -102,11 +108,10 @@ export default {
       return 'Register'
     })
 
-    const handleSessionUpdate = (newSession) => {
-      session.value = newSession
-    }
-
     onMounted(() => {
+      // Check authentication on mount
+      checkAuth()
+
       // Handle browser back/forward buttons
       window.addEventListener('popstate', () => {
         currentRoute.value = window.location.pathname
@@ -115,8 +120,8 @@ export default {
 
     return {
       currentView,
-      session,
-      handleSessionUpdate
+      isAuthenticated,
+      getCsrfToken
     }
   }
 }

@@ -56,12 +56,34 @@
 <script>
 import { ref, onMounted } from 'vue'
 
+// Helper to get CSRF token from cookie
+function getCsrfToken() {
+  const match = document.cookie.match(/caution_csrf=([^;]+)/)
+  return match ? match[1] : null
+}
+
+// Helper for authenticated API calls with CSRF protection
+function authFetch(url, options = {}) {
+  const headers = options.headers || {}
+
+  // Add CSRF token for state-changing requests
+  if (options.method && options.method !== 'GET') {
+    const csrfToken = getCsrfToken()
+    if (csrfToken) {
+      headers['X-CSRF-Token'] = csrfToken
+    }
+  }
+
+  return fetch(url, {
+    ...options,
+    headers,
+    credentials: 'include',
+  })
+}
+
 export default {
   name: 'Onboarding',
-  props: {
-    session: String
-  },
-  setup(props) {
+  setup() {
     const step = ref(1)
     const email = ref('')
     const emailSent = ref(false)
@@ -69,18 +91,9 @@ export default {
     const error = ref(null)
 
     onMounted(async () => {
-      if (!props.session) {
-        window.location.href = '/login'
-        return
-      }
-
       // Check onboarding status
       try {
-        const response = await fetch('/api/user/status', {
-          headers: {
-            'X-Session-ID': props.session
-          }
-        })
+        const response = await authFetch('/api/user/status')
 
         if (response.ok) {
           const data = await response.json()
@@ -110,11 +123,10 @@ export default {
       error.value = null
 
       try {
-        const response = await fetch('/api/onboarding/send-verification', {
+        const response = await authFetch('/api/onboarding/send-verification', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
-            'X-Session-ID': props.session
+            'Content-Type': 'application/json'
           },
           body: JSON.stringify({ email: email.value })
         })
@@ -137,11 +149,7 @@ export default {
     const pollEmailVerification = () => {
       const interval = setInterval(async () => {
         try {
-          const response = await fetch('/api/user/status', {
-            headers: {
-              'X-Session-ID': props.session
-            }
-          })
+          const response = await authFetch('/api/user/status')
 
           if (response.ok) {
             const data = await response.json()
@@ -157,7 +165,7 @@ export default {
     }
 
     const goToDashboard = () => {
-      window.location.href = `/dashboard?session=${props.session}`
+      window.location.href = '/dashboard'
     }
 
     return {
