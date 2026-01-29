@@ -55,31 +55,7 @@
 
 <script>
 import { ref, onMounted } from 'vue'
-
-// Helper to get CSRF token from cookie
-function getCsrfToken() {
-  const match = document.cookie.match(/caution_csrf=([^;]+)/)
-  return match ? match[1] : null
-}
-
-// Helper for authenticated API calls with CSRF protection
-function authFetch(url, options = {}) {
-  const headers = options.headers || {}
-
-  // Add CSRF token for state-changing requests
-  if (options.method && options.method !== 'GET') {
-    const csrfToken = getCsrfToken()
-    if (csrfToken) {
-      headers['X-CSRF-Token'] = csrfToken
-    }
-  }
-
-  return fetch(url, {
-    ...options,
-    headers,
-    credentials: 'include',
-  })
-}
+import { authFetch } from '../composables/useWebAuthn.js'
 
 export default {
   name: 'Onboarding',

@@ -139,35 +139,11 @@
 import { ref, onMounted } from 'vue'
 import { verify as verifyNitro } from 'tee-attestation-js/nitro'
 import BrailleLoader from './BrailleLoader.vue'
+import { authFetch } from '../composables/useWebAuthn.js'
 
 function bytesToHex(bytes) {
   if (!bytes) return ''
   return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')
-}
-
-// Helper to get CSRF token from cookie
-function getCsrfToken() {
-  const match = document.cookie.match(/caution_csrf=([^;]+)/)
-  return match ? match[1] : null
-}
-
-// Helper for authenticated API calls with CSRF protection
-function authFetch(url, options = {}) {
-  const headers = options.headers || {}
-
-  // Add CSRF token for state-changing requests
-  if (options.method && options.method !== 'GET') {
-    const csrfToken = getCsrfToken()
-    if (csrfToken) {
-      headers['X-CSRF-Token'] = csrfToken
-    }
-  }
-
-  return fetch(url, {
-    ...options,
-    headers,
-    credentials: 'include',
-  })
 }
 
 export default {

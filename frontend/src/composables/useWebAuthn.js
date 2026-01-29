@@ -27,6 +27,25 @@ export function getCsrfToken() {
   return match ? match[1] : null;
 }
 
+// Helper for authenticated API calls with CSRF protection
+export function authFetch(url, options = {}) {
+  const headers = options.headers || {};
+
+  // Add CSRF token for state-changing requests
+  if (options.method && options.method !== 'GET') {
+    const csrfToken = getCsrfToken();
+    if (csrfToken) {
+      headers['X-CSRF-Token'] = csrfToken;
+    }
+  }
+
+  return fetch(url, {
+    ...options,
+    headers,
+    credentials: 'include',
+  });
+}
+
 export function useWebAuthn() {
   const authenticated = ref(false);
   const loading = ref(false);

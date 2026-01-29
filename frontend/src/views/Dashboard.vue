@@ -1051,6 +1051,7 @@ make build-cli
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import DashboardLayout from "../components/DashboardLayout.vue";
 import AttestationModal from "../components/AttestationModal.vue";
+import { authFetch } from "../composables/useWebAuthn.js";
 
 async function sha256Hex(message) {
   const msgBuffer = new TextEncoder().encode(message);
@@ -1077,31 +1078,6 @@ function base64UrlToArrayBuffer(base64url) {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes.buffer;
-}
-
-// Helper to get CSRF token from cookie
-function getCsrfToken() {
-  const match = document.cookie.match(/caution_csrf=([^;]+)/);
-  return match ? match[1] : null;
-}
-
-// Helper for authenticated API calls with CSRF protection
-function authFetch(url, options = {}) {
-  const headers = options.headers || {};
-
-  // Add CSRF token for state-changing requests
-  if (options.method && options.method !== 'GET') {
-    const csrfToken = getCsrfToken();
-    if (csrfToken) {
-      headers['X-CSRF-Token'] = csrfToken;
-    }
-  }
-
-  return fetch(url, {
-    ...options,
-    headers,
-    credentials: 'include',
-  });
 }
 
 export default {
