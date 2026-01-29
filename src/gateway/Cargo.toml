@@ -24,6 +24,7 @@ time = { workspace = true }
 uuid = { workspace = true, features = ["serde"] }
 sha2 = { workspace = true }
 hmac = { workspace = true }
+subtle = { workspace = true }
 dotenvy = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -37,6 +38,7 @@ webauthn-rs-proto = "0.5"
 russh = "0.44"
 russh-keys = "0.44"
 thiserror = { workspace = true }
+dterror = { git = "https://git.distrust.co/public/dterror", rev = "53b05f70a4644ae54b1ff1813e83d08826b0e5e5" }
 futures = "0.3"
 cookie = "0.18"
 axum-extra = { version = "0.10", features = ["cookie"] }

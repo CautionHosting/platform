@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use russh_keys::key::KeyPair;
 
 mod config;
+mod csrf;
 mod db;
 mod handlers;
 mod auth_middleware;
@@ -201,6 +202,49 @@ async fn main() -> Result<()> {
                 Ok(_) => {}
                 Err(e) => {
                     tracing::error!("Failed to cleanup expired sessions: {:?}", e);
+                }
+            }
+        }
+    });
+
+    // Cleanup expired in-memory challenge states (registration, authentication, sign challenges)
+    let cleanup_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let now = time::OffsetDateTime::now_utc();
+
+            // Clean up expired registration states
+            {
+                let mut reg_states = cleanup_state.reg_states.write().await;
+                let before_count = reg_states.len();
+                reg_states.retain(|_, pending| pending.expires_at > now);
+                let removed = before_count - reg_states.len();
+                if removed > 0 {
+                    tracing::debug!("Cleaned up {} expired registration challenges", removed);
+                }
+            }
+
+            // Clean up expired authentication states
+            {
+                let mut auth_states = cleanup_state.auth_states.write().await;
+                let before_count = auth_states.len();
+                auth_states.retain(|_, pending| pending.expires_at > now);
+                let removed = before_count - auth_states.len();
+                if removed > 0 {
+                    tracing::debug!("Cleaned up {} expired authentication challenges", removed);
+                }
+            }
+
+            // Clean up expired sign challenges
+            {
+                let mut sign_challenges = cleanup_state.sign_challenges.write().await;
+                let before_count = sign_challenges.len();
+                sign_challenges.retain(|_, pending| pending.expires_at > now);
+                let removed = before_count - sign_challenges.len();
+                if removed > 0 {
+                    tracing::debug!("Cleaned up {} expired sign challenges", removed);
                 }
             }
         }

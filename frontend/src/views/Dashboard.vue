@@ -1604,8 +1604,18 @@ export default {
       }
     };
 
-    const logout = () => {
-      window.location.href = "/login";
+    const logout = async () => {
+      try {
+        const response = await authFetch('/auth/logout', { method: 'POST' });
+        if (!response.ok) {
+          showToast('Logout failed. Please try again.', 'error');
+          return;
+        }
+        window.location.href = "/login";
+      } catch (err) {
+        console.error('Logout API call failed:', err);
+        showToast('Could not reach server. Please try again.', 'error');
+      }
     };
 
     const handleTabChange = (newTab) => {

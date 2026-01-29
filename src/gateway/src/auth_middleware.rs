@@ -10,89 +10,77 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Sha256, Digest};
+use std::panic::Location;
 use webauthn_rs::prelude::*;
 
 use crate::db;
 use crate::types::AppState;
 
-/// Extract session ID from cookie header
-fn get_session_from_cookie(req: &Request) -> Option<String> {
-    req.headers()
-        .get("cookie")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|cookies| {
-            cookies.split(';')
-                .map(|s| s.trim())
-                .find(|s| s.starts_with("caution_session="))
-                .map(|s| s.trim_start_matches("caution_session=").to_string())
-        })
+#[derive(Debug)]
+pub enum CsrfValidationErrorKind {
+    MissingHeader,
+    TokenMismatch,
 }
 
-/// Extract CSRF token from cookie header
-fn get_csrf_from_cookie(req: &Request) -> Option<String> {
-    req.headers()
-        .get("cookie")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|cookies| {
-            cookies.split(';')
-                .map(|s| s.trim())
-                .find(|s| s.starts_with("caution_csrf="))
-                .map(|s| s.trim_start_matches("caution_csrf=").to_string())
-        })
+#[derive(Debug, thiserror::Error)]
+#[error("CSRF validation failed ({kind:?}) [{location}]")]
+pub struct CsrfValidationError {
+    kind: CsrfValidationErrorKind,
+    location: &'static Location<'static>,
 }
 
-/// Constant-time comparison to prevent timing attacks.
-/// XORs each byte pair and ORs differences into accumulator.
-/// Takes same time regardless of where mismatch occurs.
-fn constant_time_compare(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
+impl CsrfValidationError {
+    #[track_caller]
+    fn with_kind(kind: CsrfValidationErrorKind) -> Self {
+        Self {
+            kind,
+            location: Location::caller(),
+        }
     }
-    a.bytes()
-        .zip(b.bytes())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+
+    /// Returns a generic message safe to show to end users.
+    /// Specific error details are logged server-side via the Display impl.
+    pub fn user_message(&self) -> &'static str {
+        "Request validation failed"
+    }
 }
 
 /// Validate CSRF token for state-changing requests from browser.
 /// The CSRF token must be derived from the session ID, ensuring it's bound to the session.
-fn validate_csrf(req: &Request) -> Result<(), &'static str> {
-    // Only validate CSRF for state-changing methods when using cookie auth
+///
+/// `using_header_auth` indicates whether the request was authenticated via X-Session-ID header (CLI).
+/// CSRF validation is only required for cookie-based auth (browser).
+fn validate_csrf(req: &Request, session_id: &str, using_header_auth: bool) -> Result<(), CsrfValidationError> {
+    use CsrfValidationErrorKind as ErrorKind;
+
+    // Only validate CSRF for state-changing methods
     if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
         return Ok(());
     }
 
-    // If using X-Session-ID header (CLI), skip CSRF validation
-    if req.headers().contains_key("X-Session-ID") {
+    // CLI clients use X-Session-ID header and don't need CSRF protection
+    // (they can't be victim of CSRF attacks as browsers won't send the header)
+    if using_header_auth {
         return Ok(());
     }
 
-    // Get session ID to derive expected CSRF token
-    let session_id = get_session_from_cookie(req)
-        .ok_or("Missing session cookie")?;
-
     // Derive the expected CSRF token from the session
-    let expected_csrf = crate::handlers::derive_csrf_token(&session_id, &get_csrf_secret());
+    let secret = crate::csrf::get_csrf_secret();
+    let expected_csrf = crate::csrf::derive_csrf_token(session_id, &secret);
 
     // Get CSRF token from header (sent by JavaScript)
     let csrf_header = req
         .headers()
         .get("X-CSRF-Token")
         .and_then(|h| h.to_str().ok())
-        .ok_or("Missing X-CSRF-Token header")?;
+        .ok_or_else(|| CsrfValidationError::with_kind(ErrorKind::MissingHeader))?;
 
     // Use constant-time comparison to prevent timing attacks
-    if !constant_time_compare(&expected_csrf, csrf_header) {
-        return Err("CSRF token mismatch");
+    if !crate::csrf::constant_time_compare(&expected_csrf, csrf_header) {
+        return Err(CsrfValidationError::with_kind(ErrorKind::TokenMismatch));
     }
 
     Ok(())
-}
-
-/// Get CSRF secret for token derivation
-fn get_csrf_secret() -> String {
-    std::env::var("INTERNAL_SERVICE_SECRET")
-        .or_else(|_| std::env::var("CSRF_SECRET"))
-        .unwrap_or_else(|_| "dev-csrf-secret-do-not-use-in-production".to_string())
 }
 
 pub async fn fido2_auth_middleware(
@@ -110,22 +98,21 @@ pub async fn fido2_auth_middleware(
     req.headers_mut().remove("X-Authenticated-User-ID");
 
     // Try to get session ID from X-Session-ID header (CLI) or cookie (browser)
-    let session_id = req
+    // Track which auth method is being used for CSRF validation
+    let (session_id, using_header_auth) = if let Some(header_session) = req
         .headers()
         .get("X-Session-ID")
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string())
-        .or_else(|| get_session_from_cookie(&req))
-        .ok_or_else(|| {
-            (StatusCode::UNAUTHORIZED, "Missing session ID").into_response()
-        })?;
+    {
+        (header_session, true)
+    } else if let Some(cookie_session) = crate::csrf::get_cookie(req.headers(), "caution_session") {
+        (cookie_session, false)
+    } else {
+        return Err((StatusCode::UNAUTHORIZED, "Missing session ID").into_response());
+    };
 
-    // Validate CSRF for cookie-based auth on state-changing requests
-    validate_csrf(&req).map_err(|e| {
-        tracing::warn!("CSRF validation failed: {}", e);
-        (StatusCode::FORBIDDEN, e).into_response()
-    })?;
-
+    // Validate session FIRST to ensure the auth method claim is legitimate
     let credential_id = db::validate_auth_session(&state.db, &session_id)
         .await
         .map_err(|e| {
@@ -135,6 +122,12 @@ pub async fn fido2_auth_middleware(
         .ok_or_else(|| {
             (StatusCode::UNAUTHORIZED, "Invalid or expired session").into_response()
         })?;
+
+    // Now that session is validated, check CSRF for cookie-based auth
+    validate_csrf(&req, &session_id, using_header_auth).map_err(|e| {
+        tracing::warn!("{}", e);
+        (StatusCode::FORBIDDEN, e.user_message()).into_response()
+    })?;
 
     let user_id = db::get_user_id_by_credential(&state.db, &credential_id)
         .await
@@ -160,9 +153,12 @@ pub async fn fido2_auth_middleware(
 
 pub async fn fido2_sign_middleware(
     State(state): State<AppState>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Result<Response, Response> {
+    // SECURITY: Strip X-Authenticated-User-ID to prevent bypass attacks
+    req.headers_mut().remove("X-Authenticated-User-ID");
+
     let challenge_id = match req.headers().get("X-Fido2-Challenge-Id") {
         Some(h) => h.to_str().map_err(|_| {
             (StatusCode::BAD_REQUEST, "Invalid challenge ID header").into_response()

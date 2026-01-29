@@ -13,6 +13,14 @@ use uuid::Uuid;
 pub struct PendingRegistration {
     pub reg_state: PasskeyRegistration,
     pub alpha_code_id: Uuid,
+    pub expires_at: time::OffsetDateTime,
+}
+
+/// Authentication state with expiration
+#[derive(Clone)]
+pub struct PendingAuthentication {
+    pub auth_state: PasskeyAuthentication,
+    pub expires_at: time::OffsetDateTime,
 }
 
 #[derive(Clone)]
@@ -21,7 +29,7 @@ pub struct AppState {
     pub webauthn: Webauthn,
     pub api_service_url: String,
     pub reg_states: Arc<RwLock<HashMap<String, PendingRegistration>>>,
-    pub auth_states: Arc<RwLock<HashMap<String, PasskeyAuthentication>>>,
+    pub auth_states: Arc<RwLock<HashMap<String, PendingAuthentication>>>,
     pub sign_challenges: Arc<RwLock<HashMap<String, PendingSignChallenge>>>,
     pub session_timeout_hours: i64,
     pub internal_service_secret: Option<String>,
@@ -76,7 +84,8 @@ pub struct AuthenticatorAttestationResponseRaw {
 pub struct RegisterFinishResponse {
     pub status: String,
     pub credential_id: String,
-    pub session_id: String,
+    // Session ID is NOT included in body - it's in Set-Cookie header
+    // This prevents XSS from exfiltrating the session
     pub expires_at: String,
 }
 
@@ -107,7 +116,8 @@ pub struct AuthenticatorAssertionResponseRaw {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginFinishResponse {
-    pub session_id: String,
+    // Session ID is NOT included in body - it's in Set-Cookie header
+    // This prevents XSS from exfiltrating the session
     pub expires_at: String,
     pub credential_id: String,
 }
