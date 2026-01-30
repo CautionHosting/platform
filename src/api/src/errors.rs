@@ -226,7 +226,7 @@ impl ValidationError {
             Self::AppNameLength { .. } => Some("Choose a name with 3-63 characters"),
             Self::AppNameReserved { .. } => Some("Reserved names: api, admin, root, system, etc."),
             Self::AppNameInvalidChars { .. } => {
-                Some("Use only lowercase letters, numbers, and hyphens. Must start and end with alphanumeric.")
+                Some("Use only lowercase letters, numbers, hyphens, and underscores. Must start and end with alphanumeric.")
             }
             Self::AppNameConsecutiveHyphens { .. } => {
                 Some("Use single hyphens to separate words: my-app (not my--app)")

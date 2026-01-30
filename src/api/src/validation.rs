@@ -8,7 +8,7 @@ use crate::errors::{ValidationError, Span};
 
 const APP_NAME_MIN_LEN: usize = 3;
 const APP_NAME_MAX_LEN: usize = 63;
-const APP_NAME_PATTERN: &str = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$";
+const APP_NAME_PATTERN: &str = r"^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$";
 
 const ORG_NAME_MIN_LEN: usize = 2;
 const ORG_NAME_MAX_LEN: usize = 100;
@@ -84,29 +84,9 @@ pub fn validate_app_name(name: &str) -> Result<(), ValidationError> {
     }
 
     if !get_app_name_regex().is_match(name) {
-        let (pos, ch) = name
-            .char_indices()
-            .find(|(_, c)| !c.is_ascii_alphanumeric() && *c != '-')
-            .or_else(|| {
-                if name.starts_with('-') {
-                    Some((0, '-'))
-                } else if name.ends_with('-') {
-                    Some((len - 1, '-'))
-                } else {
-                    Some((0, name.chars().next().unwrap_or('?')))
-                }
-            })
-            .unwrap_or((0, '?'));
-
         return Err(ValidationError::AppNameInvalidChars {
-            invalid_char: ch,
-            span: Span::new(pos, pos + ch.len_utf8()),
-        });
-    }
-
-    if let Some(pos) = name.find("--") {
-        return Err(ValidationError::AppNameConsecutiveHyphens {
-            span: Span::new(pos, pos + 2),
+            invalid_char: '?',
+            span: Span::new(0, len),
         });
     }
 
@@ -284,10 +264,15 @@ mod tests {
     #[test]
     fn test_app_name_valid() {
         assert!(validate_app_name("my-app").is_ok());
+        assert!(validate_app_name("my_app").is_ok());
         assert!(validate_app_name("web-frontend").is_ok());
+        assert!(validate_app_name("web_frontend").is_ok());
         assert!(validate_app_name("api-v2").is_ok());
         assert!(validate_app_name("test123").is_ok());
         assert!(validate_app_name("a1b").is_ok());
+        assert!(validate_app_name("my-app_v2").is_ok());
+        assert!(validate_app_name("app--name").is_ok());
+        assert!(validate_app_name("app__name").is_ok());
     }
 
     #[test]
@@ -295,11 +280,11 @@ mod tests {
         assert!(validate_app_name("ab").is_err());
         assert!(validate_app_name("-app").is_err());
         assert!(validate_app_name("app-").is_err());
+        assert!(validate_app_name("_app").is_err());
+        assert!(validate_app_name("app_").is_err());
         assert!(validate_app_name("My-App").is_err());
-        assert!(validate_app_name("app--name").is_err());
-        assert!(validate_app_name("app_name").is_err());
         assert!(validate_app_name("api").is_err());
-        assert!(validate_app_name("a".repeat(64)).is_err());
+        assert!(validate_app_name(&"a".repeat(64)).is_err());
     }
 
     #[test]
