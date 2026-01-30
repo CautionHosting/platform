@@ -139,6 +139,7 @@
 import { ref, onMounted } from 'vue'
 import { verify as verifyNitro } from 'tee-attestation-js/nitro'
 import BrailleLoader from './BrailleLoader.vue'
+import { authFetch } from '../composables/useWebAuthn.js'
 
 function bytesToHex(bytes) {
   if (!bytes) return ''
@@ -151,8 +152,7 @@ export default {
   props: {
     resourceId: { type: String, required: true },
     publicIp: { type: String, required: true },
-    appName: { type: String, default: 'App' },
-    session: { type: String, required: true }
+    appName: { type: String, default: 'App' }
   },
   emits: ['close'],
   setup(props) {
@@ -180,11 +180,10 @@ export default {
         addCheck('nonce', `Challenge nonce: ${bytesToHex(nonce)}`, 'success')
 
         addCheck('request', 'Requesting attestation...', 'pending')
-        const response = await fetch(attestationUrl, {
+        const response = await authFetch(attestationUrl, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
-            'X-Session-ID': props.session
+            'Content-Type': 'application/json'
           },
           body: JSON.stringify({ nonce: Array.from(nonce) })
         })

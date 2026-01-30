@@ -21,6 +21,31 @@ export function uint8ArrayToBase64url(array) {
   return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
 
+// Helper to get CSRF token from cookie (not HTTP-only, so JS can read it)
+export function getCsrfToken() {
+  const match = document.cookie.match(/caution_csrf=([^;]+)/);
+  return match ? match[1] : null;
+}
+
+// Helper for authenticated API calls with CSRF protection
+export function authFetch(url, options = {}) {
+  const headers = options.headers || {};
+
+  // Add CSRF token for state-changing requests
+  if (options.method && options.method !== 'GET') {
+    const csrfToken = getCsrfToken();
+    if (csrfToken) {
+      headers['X-CSRF-Token'] = csrfToken;
+    }
+  }
+
+  return fetch(url, {
+    ...options,
+    headers,
+    credentials: 'include',
+  });
+}
+
 export function useWebAuthn() {
   const authenticated = ref(false);
   const loading = ref(false);
@@ -37,19 +62,16 @@ export function useWebAuthn() {
     return true;
   }
 
-  async function verifySession(session) {
-    if (!session) return false;
-
+  async function verifySession() {
     try {
+      // Session is now in HTTP-only cookie, browser sends it automatically
       const response = await fetch("/api/user/status", {
-        headers: {
-          "X-Session-ID": session,
-        },
+        credentials: "include",
       });
 
       if (response.ok) {
         authenticated.value = true;
-        window.location.href = `/dashboard?session=${session}`;
+        window.location.href = "/dashboard";
         return true;
       } else {
         error.value = "Invalid session. Please authenticate using the CLI.";
@@ -157,13 +179,13 @@ export function useWebAuthn() {
         throw new Error(errorText || "Failed to complete login");
       }
 
-      const result = await finishResponse.json();
+      await finishResponse.json();
       authenticated.value = true;
       status.value = "Login successful!";
 
-      // Redirect to dashboard
+      // Redirect to dashboard (session is now in HTTP-only cookie)
       setTimeout(() => {
-        window.location.href = `/dashboard?session=${result.session_id}`;
+        window.location.href = "/dashboard";
       }, 1000);
     } catch (err) {
       error.value = err.message || "Login failed. Please try again.";
@@ -253,13 +275,13 @@ export function useWebAuthn() {
         throw new Error(errorText || "Failed to complete registration");
       }
 
-      const result = await finishResponse.json();
+      await finishResponse.json();
       authenticated.value = true;
       status.value = "Registration successful!";
 
-      // Redirect to dashboard
+      // Redirect to dashboard (session is now in HTTP-only cookie)
       setTimeout(() => {
-        window.location.href = `/dashboard?session=${result.session_id}`;
+        window.location.href = "/dashboard";
       }, 1000);
 
       return { success: true };

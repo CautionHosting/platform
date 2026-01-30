@@ -3,10 +3,11 @@
 
 use axum::{
     extract::{State, Path},
-    http::StatusCode,
+    http::{StatusCode, header, HeaderMap, HeaderValue},
     response::{IntoResponse, Response},
     Json,
 };
+use axum_extra::extract::cookie::{Cookie, SameSite};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use webauthn_rs::prelude::*;
 use time::{Duration, format_description::well_known::Rfc3339};
@@ -19,10 +20,12 @@ pub struct AppError(anyhow::Error);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        // Log full error details server-side
         tracing::error!("Application error: {:?}", self.0);
+        // Return generic message to client to avoid leaking internal details
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Internal error: {}", self.0),
+            "An internal error occurred",
         )
             .into_response()
     }
@@ -75,7 +78,7 @@ pub async fn begin_register_handler(
         .map(CredentialID::from)
         .collect();
 
-    tracing::info!("Excluding {} existing credentials from registration", exclude_credentials.len());
+    tracing::debug!("Excluding {} existing credentials from registration", exclude_credentials.len());
 
     let user_unique_id = uuid::Uuid::new_v4();
     let user_name = format!("user_{}", user_unique_id);
@@ -90,16 +93,13 @@ pub async fn begin_register_handler(
         )
         .map_err(|e| anyhow::anyhow!("Failed to start registration: {}", e))?;
 
-    tracing::info!("Registration challenge created:");
-    tracing::info!("  RP ID: {}", ccr.public_key.rp.id);
-    tracing::info!("  RP Name: {}", ccr.public_key.rp.name);
-    tracing::info!("  User ID: {}", user_unique_id);
-    tracing::info!("  Challenge: {:?}", ccr.public_key.challenge);
+    tracing::debug!("Registration challenge created for RP {}", ccr.public_key.rp.id);
 
     let state_key = user_unique_id.to_string();
     let pending = crate::types::PendingRegistration {
         reg_state,
         alpha_code_id,
+        expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(2),
     };
     state.reg_states.write().await.insert(state_key.clone(), pending);
 
@@ -109,10 +109,33 @@ pub async fn begin_register_handler(
     }))
 }
 
+/// Build auth cookies for session and CSRF protection
+fn build_auth_cookies(session_id: &str, csrf_token: &str, max_age_hours: i64, secure: bool) -> (String, String) {
+    // Session cookie: HTTP-only, Secure, SameSite=Lax
+    let session_cookie = Cookie::build(("caution_session", session_id.to_string()))
+        .path("/")
+        .http_only(true)
+        .secure(secure)
+        .same_site(SameSite::Lax)
+        .max_age(cookie::time::Duration::hours(max_age_hours))
+        .build();
+
+    // CSRF cookie: NOT HTTP-only (so JS can read it), Secure, SameSite=Strict
+    let csrf_cookie = Cookie::build(("caution_csrf", csrf_token.to_string()))
+        .path("/")
+        .http_only(false)
+        .secure(secure)
+        .same_site(SameSite::Strict)
+        .max_age(cookie::time::Duration::hours(max_age_hours))
+        .build();
+
+    (session_cookie.to_string(), csrf_cookie.to_string())
+}
+
 pub async fn finish_register_handler(
     State(state): State<AppState>,
     Json(req): Json<serde_json::Value>,
-) -> Result<Json<RegisterFinishResponse>, AppError> {
+) -> Result<Response, AppError> {
     let session_key = req.get("session")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Missing session field"))?
@@ -122,6 +145,12 @@ pub async fn finish_register_handler(
         .get(&session_key)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("No matching registration state found"))?;
+
+    // Check if the registration challenge has expired
+    if time::OffsetDateTime::now_utc() > pending.expires_at {
+        state.reg_states.write().await.remove(&session_key);
+        return Err(anyhow::anyhow!("Registration challenge has expired").into());
+    }
 
     let reg_response: RegisterPublicKeyCredential = serde_json::from_value(req.clone())
         .map_err(|e| anyhow::anyhow!("Failed to parse registration response: {}", e))?;
@@ -173,18 +202,34 @@ pub async fn finish_register_handler(
     let credential_id_hex = hex::encode(&credential_id);
 
     let session_id = db::generate_session_id();
+    let csrf_token = crate::csrf::derive_csrf_token(&session_id, &crate::csrf::get_csrf_secret());
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
     db::create_auth_session(&state.db, &session_id, &credential_id, expires_at).await?;
 
     tracing::debug!("Registration complete with automatic session creation (expires in {} hours)", state.session_timeout_hours);
 
-    Ok(Json(RegisterFinishResponse {
+    // Build the response (session_id is in Set-Cookie header, not body)
+    let response_body = RegisterFinishResponse {
         status: "success".to_string(),
         credential_id: credential_id_hex,
-        session_id: session_id.clone(),
         expires_at: expires_at.format(&Rfc3339).unwrap_or_else(|_| expires_at.to_string()),
-    }))
+    };
+
+    // Check if we're in production (HTTPS) - use secure cookies
+    let secure = std::env::var("ENVIRONMENT").map(|e| e != "development").unwrap_or(true);
+    let (session_cookie, csrf_cookie) = build_auth_cookies(&session_id, &csrf_token, state.session_timeout_hours, secure);
+
+    let body = serde_json::to_string(&response_body)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))?;
+
+    // Use HeaderMap with append to properly set multiple Set-Cookie headers
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.append(header::SET_COOKIE, HeaderValue::from_str(&session_cookie).unwrap());
+    headers.append(header::SET_COOKIE, HeaderValue::from_str(&csrf_cookie).unwrap());
+
+    Ok((StatusCode::OK, headers, body).into_response())
 }
 
 pub async fn begin_login_handler(
@@ -201,12 +246,10 @@ pub async fn begin_login_handler(
         anyhow::anyhow!("Failed to fetch credentials: {}", e)
     })?;
 
-    tracing::info!("Found {} credential IDs in database", all_credential_ids.len());
+    tracing::debug!("Found {} credentials in database", all_credential_ids.len());
 
     let mut allow_credentials = Vec::new();
     for (i, cred_id_bytes) in all_credential_ids.iter().enumerate() {
-        tracing::info!("Loading credential {}: ID={}", i, hex::encode(cred_id_bytes));
-
         let cred_bytes = db::get_credential_public_key(&state.db, cred_id_bytes)
             .await
             .map_err(|e| {
@@ -214,27 +257,16 @@ pub async fn begin_login_handler(
                 anyhow::anyhow!("Failed to get credential: {}", e)
             })?;
 
-        tracing::info!("Credential {} raw data length: {} bytes", i, cred_bytes.len());
-
-        // Log the raw credential JSON to see embedded RP_ID
-        let raw_json: serde_json::Value = serde_json::from_slice(&cred_bytes)
-            .unwrap_or_else(|_| serde_json::json!({"error": "failed to parse"}));
-        tracing::info!("Credential {} raw JSON: {}", i, serde_json::to_string_pretty(&raw_json).unwrap_or_default());
-
         let passkey: Passkey = serde_json::from_slice(&cred_bytes)
             .map_err(|e| {
-                tracing::error!("Failed to deserialize credential {}: {:?}", i, e);
-                tracing::error!("Raw credential data: {}", String::from_utf8_lossy(&cred_bytes));
+                tracing::error!("Failed to deserialize credential {}", i);
                 anyhow::anyhow!("Failed to deserialize credential: {}", e)
             })?;
-
-        tracing::info!("Credential {} loaded successfully", i);
-        tracing::info!("  Cred ID (base64url): {}", URL_SAFE_NO_PAD.encode(passkey.cred_id()));
 
         allow_credentials.push(passkey);
     }
 
-    tracing::info!("Starting authentication challenge with {} credentials", allow_credentials.len());
+    tracing::debug!("Starting authentication challenge with {} credentials", allow_credentials.len());
 
     let (rcr, auth_state) = state
         .webauthn
@@ -244,18 +276,18 @@ pub async fn begin_login_handler(
             anyhow::anyhow!("Failed to start authentication: {}", e)
         })?;
 
-    tracing::info!("Authentication challenge created:");
-    tracing::info!("  RP ID in challenge: {}", rcr.public_key.rp_id);
-    tracing::info!("  Challenge: {:?}", rcr.public_key.challenge);
-    tracing::info!("  Timeout: {:?}ms", rcr.public_key.timeout);
-    tracing::info!("  User verification: {:?}", rcr.public_key.user_verification);
-    tracing::info!("  Allow credentials count: {}", rcr.public_key.allow_credentials.len());
-    for (i, cred) in rcr.public_key.allow_credentials.iter().enumerate() {
-        tracing::info!("    Credential {}: type={}, id={:?}", i, cred.type_, cred.id);
-    }
+    tracing::debug!(
+        "Authentication challenge created for RP {} with {} allowed credentials",
+        rcr.public_key.rp_id,
+        rcr.public_key.allow_credentials.len()
+    );
 
     let session_key = uuid::Uuid::new_v4().to_string();
-    state.auth_states.write().await.insert(session_key.clone(), auth_state);
+    let pending = PendingAuthentication {
+        auth_state,
+        expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(2),
+    };
+    state.auth_states.write().await.insert(session_key.clone(), pending);
 
     Ok(Json(LoginBeginResponse {
         challenge: rcr,
@@ -266,16 +298,24 @@ pub async fn begin_login_handler(
 pub async fn finish_login_handler(
     State(state): State<AppState>,
     Json(req): Json<serde_json::Value>,
-) -> Result<Json<LoginFinishResponse>, AppError> {
+) -> Result<Response, AppError> {
     let session_key = req.get("session")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Missing session field"))?
         .to_string();
 
-    let auth_state = state.auth_states.read().await
+    let pending = state.auth_states.read().await
         .get(&session_key)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Invalid or expired session key"))?;
+
+    // Check if the authentication challenge has expired
+    if time::OffsetDateTime::now_utc() > pending.expires_at {
+        state.auth_states.write().await.remove(&session_key);
+        return Err(anyhow::anyhow!("Authentication challenge has expired").into());
+    }
+
+    let auth_state = pending.auth_state;
 
     let auth_response: PublicKeyCredential = serde_json::from_value(req.clone())
         .map_err(|e| anyhow::anyhow!("Failed to parse auth response: {}", e))?;
@@ -323,6 +363,7 @@ pub async fn finish_login_handler(
     state.auth_states.write().await.remove(&session_key);
 
     let session_id = db::generate_session_id();
+    let csrf_token = crate::csrf::derive_csrf_token(&session_id, &crate::csrf::get_csrf_secret());
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
     db::create_auth_session(&state.db, &session_id, &credential_id_bytes, expires_at).await?;
@@ -330,11 +371,26 @@ pub async fn finish_login_handler(
     let credential_id_hex = hex::encode(&credential_id_bytes);
     tracing::debug!("Login complete (session expires in {} hours)", state.session_timeout_hours);
 
-    Ok(Json(LoginFinishResponse {
-        session_id: session_id.clone(),
+    // Build the response (session_id is in Set-Cookie header, not body)
+    let response_body = LoginFinishResponse {
         expires_at: expires_at.format(&Rfc3339).unwrap_or_else(|_| expires_at.to_string()),
         credential_id: credential_id_hex,
-    }))
+    };
+
+    // Check if we're in production (HTTPS) - use secure cookies
+    let secure = std::env::var("ENVIRONMENT").map(|e| e != "development").unwrap_or(true);
+    let (session_cookie, csrf_cookie) = build_auth_cookies(&session_id, &csrf_token, state.session_timeout_hours, secure);
+
+    let body = serde_json::to_string(&response_body)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))?;
+
+    // Use HeaderMap with append to properly set multiple Set-Cookie headers
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.append(header::SET_COOKIE, HeaderValue::from_str(&session_cookie).unwrap());
+    headers.append(header::SET_COOKIE, HeaderValue::from_str(&csrf_cookie).unwrap());
+
+    Ok((StatusCode::OK, headers, body).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -458,7 +514,7 @@ pub async fn begin_sign_request_handler(
         method: req.method,
         path: req.path,
         body_hash: req.body_hash,
-        expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(5),
+        expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(2),
     };
 
     state.sign_challenges.write().await.insert(challenge_id.clone(), pending);
@@ -467,4 +523,62 @@ pub async fn begin_sign_request_handler(
         challenge: rcr,
         challenge_id,
     }))
+}
+
+/// Build cookies that clear auth state (for logout)
+fn build_logout_cookies(secure: bool) -> (String, String) {
+    // Set cookies with immediate expiration to clear them
+    let session_cookie = Cookie::build(("caution_session", ""))
+        .path("/")
+        .http_only(true)
+        .secure(secure)
+        .same_site(SameSite::Lax)
+        .max_age(cookie::time::Duration::ZERO)
+        .build();
+
+    let csrf_cookie = Cookie::build(("caution_csrf", ""))
+        .path("/")
+        .http_only(false)
+        .secure(secure)
+        .same_site(SameSite::Strict)
+        .max_age(cookie::time::Duration::ZERO)
+        .build();
+
+    (session_cookie.to_string(), csrf_cookie.to_string())
+}
+
+pub async fn logout_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AppError> {
+    // Get session from header (CLI) or cookie (browser)
+    let session_id = headers
+        .get("X-Session-ID")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string())
+        .or_else(|| crate::csrf::get_cookie(&headers, "caution_session"));
+
+    // Delete session from database if we found one
+    let mut deletion_failed = false;
+    if let Some(session_id) = session_id {
+        if let Err(e) = db::delete_auth_session(&state.db, &session_id).await {
+            tracing::error!("Failed to delete session during logout: {:?}", e);
+            deletion_failed = true;
+        }
+    }
+
+    // Build response with cleared cookies (clear even on error so client is logged out)
+    let secure = std::env::var("ENVIRONMENT").map(|e| e != "development").unwrap_or(true);
+    let (session_cookie, csrf_cookie) = build_logout_cookies(secure);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.append(header::SET_COOKIE, HeaderValue::from_str(&session_cookie).unwrap());
+    headers.append(header::SET_COOKIE, HeaderValue::from_str(&csrf_cookie).unwrap());
+
+    if deletion_failed {
+        Ok((StatusCode::INTERNAL_SERVER_ERROR, headers, r#"{"error":"Failed to delete session"}"#).into_response())
+    } else {
+        Ok((StatusCode::OK, headers, r#"{"status":"logged_out"}"#).into_response())
+    }
 }

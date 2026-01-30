@@ -58,6 +58,10 @@ rand = "0.8"
 
 # Hashing
 sha2 = "0.10"
+hmac = "0.12"
+
+# Constant-time operations
+subtle = "2.5"
 
 # Encryption
 aes-gcm = "0.10"

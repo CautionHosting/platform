@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use russh_keys::key::KeyPair;
 
 mod config;
+mod csrf;
 mod db;
 mod handlers;
 mod auth_middleware;
@@ -84,6 +85,13 @@ async fn main() -> Result<()> {
     let host_key = load_or_generate_host_key(&config.ssh_host_key_path)
         .context("Failed to load SSH host key")?;
 
+    let internal_service_secret = std::env::var("INTERNAL_SERVICE_SECRET").ok();
+    if internal_service_secret.is_some() {
+        tracing::info!("Internal service authentication enabled");
+    } else {
+        tracing::warn!("INTERNAL_SERVICE_SECRET not set - internal service authentication disabled");
+    }
+
     let state = AppState {
         db: pool.clone(),
         webauthn,
@@ -92,6 +100,7 @@ async fn main() -> Result<()> {
         auth_states: Arc::new(RwLock::new(HashMap::new())),
         sign_challenges: Arc::new(RwLock::new(HashMap::new())),
         session_timeout_hours: config.session_timeout_hours,
+        internal_service_secret: internal_service_secret.clone(),
     };
 
     let rate_limiter = rate_limit::RateLimiter::new(100, 60);
@@ -120,6 +129,7 @@ async fn main() -> Result<()> {
         .allow_headers(vec![
             "Content-Type".parse().unwrap(),
             "X-Session-ID".parse().unwrap(),
+            "X-CSRF-Token".parse().unwrap(),
             "Authorization".parse().unwrap(),
             "X-Fido2-Challenge-Id".parse().unwrap(),
             "X-Fido2-Response".parse().unwrap(),
@@ -130,6 +140,7 @@ async fn main() -> Result<()> {
         .route("/auth/register/finish", post(handlers::finish_register_handler))
         .route("/auth/login/begin", post(handlers::begin_login_handler))
         .route("/auth/login/finish", post(handlers::finish_login_handler))
+        .route("/auth/logout", post(handlers::logout_handler))
         .route("/auth/sign-request", post(handlers::begin_sign_request_handler))
         .layer(middleware::from_fn_with_state(
             rate_limiter.clone(),
@@ -196,18 +207,56 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Cleanup expired in-memory challenge states (registration, authentication, sign challenges)
+    let cleanup_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let now = time::OffsetDateTime::now_utc();
+
+            // Clean up expired registration states
+            {
+                let mut reg_states = cleanup_state.reg_states.write().await;
+                let before_count = reg_states.len();
+                reg_states.retain(|_, pending| pending.expires_at > now);
+                let removed = before_count - reg_states.len();
+                if removed > 0 {
+                    tracing::debug!("Cleaned up {} expired registration challenges", removed);
+                }
+            }
+
+            // Clean up expired authentication states
+            {
+                let mut auth_states = cleanup_state.auth_states.write().await;
+                let before_count = auth_states.len();
+                auth_states.retain(|_, pending| pending.expires_at > now);
+                let removed = before_count - auth_states.len();
+                if removed > 0 {
+                    tracing::debug!("Cleaned up {} expired authentication challenges", removed);
+                }
+            }
+
+            // Clean up expired sign challenges
+            {
+                let mut sign_challenges = cleanup_state.sign_challenges.write().await;
+                let before_count = sign_challenges.len();
+                sign_challenges.retain(|_, pending| pending.expires_at > now);
+                let removed = before_count - sign_challenges.len();
+                if removed > 0 {
+                    tracing::debug!("Cleaned up {} expired sign challenges", removed);
+                }
+            }
+        }
+    });
+
     let ssh_pool = pool.clone();
     let ssh_api_url = config.api_service_url.clone();
     let ssh_data_dir = config.data_dir.clone();
     let ssh_bind_addr = format!("0.0.0.0:{}", config.ssh_port);
-    let internal_service_secret = std::env::var("INTERNAL_SERVICE_SECRET").ok();
-    if internal_service_secret.is_some() {
-        tracing::info!("Internal service authentication enabled");
-    } else {
-        tracing::warn!("INTERNAL_SERVICE_SECRET not set - internal service authentication disabled");
-    }
+    let ssh_internal_service_secret = internal_service_secret.clone();
     tokio::spawn(async move {
-        if let Err(e) = ssh_server::run_ssh_server(ssh_pool, ssh_api_url, ssh_data_dir, internal_service_secret, host_key, &ssh_bind_addr).await {
+        if let Err(e) = ssh_server::run_ssh_server(ssh_pool, ssh_api_url, ssh_data_dir, ssh_internal_service_secret, host_key, &ssh_bind_addr).await {
             tracing::error!("SSH server error: {:?}", e);
         }
     });
