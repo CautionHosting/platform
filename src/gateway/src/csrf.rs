@@ -55,9 +55,6 @@ pub fn derive_csrf_token(session_id: &str, secret: &str) -> String {
 /// Uses the `subtle` crate's audited constant-time comparison.
 /// Returns `true` if the strings are equal, `false` otherwise.
 pub fn constant_time_compare(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
     a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
