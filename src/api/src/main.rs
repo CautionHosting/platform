@@ -2560,7 +2560,7 @@ async fn deploy_logic(
     let _ = tx.send(Ok(milestone("Waiting for health check..."))).await;
 
     tracing::info!("Waiting for attestation endpoint to become healthy...");
-    if let Err(e) = wait_for_attestation_health(&deployment_result.public_ip, 600).await {
+    if let Err(e) = wait_for_attestation_health(&deployment_result.public_ip, 120).await {
         tracing::error!("Attestation health check failed: {}", e);
         return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Enclave failed to become healthy: {}", e)));
     }
