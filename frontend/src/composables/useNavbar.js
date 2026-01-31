@@ -72,10 +72,14 @@ export function useNavbar() {
 
   const closeMobileMenu = () => {
     mobileMenuOpen.value = false;
+    document.documentElement.classList.remove("mobile-menu-active");
+    document.body.classList.remove("mobile-menu-active");
   };
 
   const toggleMobileMenu = () => {
     mobileMenuOpen.value = !mobileMenuOpen.value;
+    document.documentElement.classList.toggle("mobile-menu-active", mobileMenuOpen.value);
+    document.body.classList.toggle("mobile-menu-active", mobileMenuOpen.value);
   };
 
   const setupScrollListeners = () => {

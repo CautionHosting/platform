@@ -31,6 +31,11 @@
             </p>
             <h2 class="info">Overview</h2>
             <ul class="feature-list">
+              <li>
+                <a href="https://caution.co/platform-tour.html" target="_blank" rel="noopener noreferrer">
+                  Platform walkthrough video
+                </a>
+              </li>
               <li>Verified enclave deployments</li>
               <li>Self-guided onboarding</li>
               <li>
