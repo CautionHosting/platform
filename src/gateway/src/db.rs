@@ -385,6 +385,48 @@ pub async fn update_ssh_key_last_used(pool: &PgPool, fingerprint: &str) -> Resul
     Ok(())
 }
 
+/// Check if an SSH key fingerprint exists for any user
+pub async fn ssh_key_exists(pool: &PgPool, fingerprint: &str) -> Result<bool> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM ssh_keys WHERE fingerprint = $1)"
+    )
+    .bind(fingerprint)
+    .fetch_one(pool)
+    .await
+    .context("Failed to check SSH key existence")?;
+
+    Ok(exists)
+}
+
+/// Get the user_id and org_id for a given SSH key fingerprint and app_id.
+/// This finds the user who:
+/// 1. Has the given SSH key fingerprint registered
+/// 2. Is a member of the organization that owns the app
+pub async fn get_user_for_app_by_ssh_key(
+    pool: &PgPool,
+    fingerprint: &str,
+    app_id: &str,
+) -> Result<Option<(Uuid, Uuid)>> {
+    let app_uuid = Uuid::parse_str(app_id).context("Invalid app ID format")?;
+
+    let result: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT om.user_id, om.organization_id
+         FROM ssh_keys sk
+         JOIN organization_members om ON sk.user_id = om.user_id
+         WHERE sk.fingerprint = $1
+           AND om.organization_id = (
+               SELECT organization_id FROM compute_resources WHERE id = $2
+           )"
+    )
+    .bind(fingerprint)
+    .bind(app_uuid)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to get user for app by SSH key")?;
+
+    Ok(result)
+}
+
 pub fn generate_ssh_fingerprint(public_key: &str) -> String {
     let parts: Vec<&str> = public_key.split_whitespace().collect();
     let key_data = if parts.len() >= 2 {

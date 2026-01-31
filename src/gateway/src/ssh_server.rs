@@ -39,8 +39,7 @@ pub struct SshSession {
     api_service_url: String,
     data_dir: String,
     internal_service_secret: Option<String>,
-    user_id: Option<Uuid>,
-    org_id: Option<Uuid>,
+    ssh_fingerprint: Option<String>,
     git_processes: Arc<Mutex<HashMap<ChannelId, Child>>>,
 }
 
@@ -54,8 +53,7 @@ impl russh::server::Server for SshServer {
             api_service_url: self.api_service_url.clone(),
             data_dir: self.data_dir.clone(),
             internal_service_secret: self.internal_service_secret.clone(),
-            user_id: None,
-            org_id: None,
+            ssh_fingerprint: None,
             git_processes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -80,46 +78,25 @@ impl russh::server::Handler for SshSession {
         public_key: &PublicKey,
     ) -> Result<Auth, Self::Error> {
         tracing::info!("SSH public key auth attempt for user: {}", user);
-        
+
         // Convert public key to OpenSSH format
         let pub_key_str = public_key.public_key_base64();
         let key_type = public_key.name();
         let full_key = format!("{} {}", key_type, pub_key_str);
 
-        let calculated_fingerprint = crate::db::generate_ssh_fingerprint(&full_key);
-        tracing::info!("Calculated fingerprint during auth: {}", calculated_fingerprint);
+        let fingerprint = crate::db::generate_ssh_fingerprint(&full_key);
+        tracing::info!("Calculated fingerprint during auth: {}", fingerprint);
         tracing::debug!("Full key being checked: {}", full_key);
-        match crate::db::get_user_by_ssh_key(&self.pool, &full_key).await {
-            Ok(Some(user_id)) => {
-                tracing::info!("SSH auth successful for user_id: {}", user_id);
-                self.user_id = Some(user_id);
 
-                // Update last_used_at for this SSH key
-                if let Err(e) = crate::db::update_ssh_key_last_used(&self.pool, &calculated_fingerprint).await {
-                    tracing::warn!("Failed to update SSH key last_used_at: {:?}", e);
-                }
-
-                match get_user_org(&self.pool, user_id).await {
-                    Ok(Some(org_id)) => {
-                        self.org_id = Some(org_id);
-                        tracing::debug!("User {} belongs to org {}", user_id, org_id);
-                        Ok(Auth::Accept)
-                    }
-                    Ok(None) => {
-                        tracing::warn!("User {} has no organization", user_id);
-                        Ok(Auth::Reject {
-                            proceed_with_methods: None,
-                        })
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to get user org: {:?}", e);
-                        Ok(Auth::Reject {
-                            proceed_with_methods: None,
-                        })
-                    }
-                }
+        // Check if this key belongs to ANY user (we'll resolve the correct user during git push
+        // based on which org owns the app being pushed to)
+        match crate::db::ssh_key_exists(&self.pool, &fingerprint).await {
+            Ok(true) => {
+                tracing::info!("SSH auth accepted for fingerprint: {}", fingerprint);
+                self.ssh_fingerprint = Some(fingerprint);
+                Ok(Auth::Accept)
             }
-            Ok(None) => {
+            Ok(false) => {
                 tracing::warn!("SSH key not found in database");
                 Ok(Auth::Reject {
                     proceed_with_methods: None,
@@ -143,11 +120,44 @@ impl russh::server::Handler for SshSession {
         let command = String::from_utf8_lossy(data);
         tracing::info!("SSH exec request: {}", command);
 
-        let user_id = self.user_id.ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
-        let org_id = self.org_id.ok_or_else(|| anyhow::anyhow!("No organization"))?;
+        let fingerprint = self.ssh_fingerprint.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
 
         if let Some(app_id) = parse_git_receive_pack(&command) {
             tracing::info!("Git push for app: {}", app_id);
+
+            // Resolve user_id and org_id based on the app's org and the SSH fingerprint
+            let (user_id, org_id) = match crate::db::get_user_for_app_by_ssh_key(
+                &self.pool,
+                fingerprint,
+                &app_id,
+            ).await {
+                Ok(Some((user_id, org_id))) => {
+                    tracing::info!("Resolved user {} in org {} for app {}", user_id, org_id, app_id);
+
+                    // Update last_used_at for this SSH key
+                    if let Err(e) = crate::db::update_ssh_key_last_used(&self.pool, fingerprint).await {
+                        tracing::warn!("Failed to update SSH key last_used_at: {:?}", e);
+                    }
+
+                    (user_id, org_id)
+                }
+                Ok(None) => {
+                    let error_msg = "Your SSH key is not registered to any user in this app's organization.\n";
+                    tracing::warn!("SSH key {} not found for any user in app {}'s org", fingerprint, app_id);
+                    session.extended_data(channel, 1, format!("remote: error: {}", error_msg).into_bytes().into());
+                    session.exit_status_request(channel, 1);
+                    session.close(channel);
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::error!("Failed to resolve user for app: {:?}", e);
+                    session.extended_data(channel, 1, format!("remote: error: {}\n", e).into_bytes().into());
+                    session.exit_status_request(channel, 1);
+                    session.close(channel);
+                    return Ok(());
+                }
+            };
 
             match handle_git_push(
                 &self.pool,
@@ -305,18 +315,6 @@ fn update_repo_head(repo_path: &str) -> Result<String> {
     }
 
     Ok(target_branch)
-}
-
-async fn get_user_org(pool: &PgPool, user_id: Uuid) -> Result<Option<Uuid>> {
-    let org_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT organization_id FROM organization_members WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1"
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await
-    .context("Failed to get user org")?;
-
-    Ok(org_id)
 }
 
 async fn handle_git_push(
