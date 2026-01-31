@@ -1,11 +1,9 @@
-# syntax=docker/dockerfile:1
-
 FROM stagex/pallet-rust@sha256:9c38bf1066dd9ad1b6a6b584974dd798c2bf798985bf82e58024fbe0515592ca AS pallet-rust
 FROM stagex/core-musl@sha256:d9af23284cca2e1002cd53159ada469dfe6d6791814e72d6163c7de18d4ae701 AS musl
 FROM stagex/core-libunwind@sha256:eb66122d8fc543f5e2f335bb1616f8c3a471604383e2c0a9df4a8e278505d3bc AS libunwind
 FROM stagex/core-ca-certificates@sha256:d135f1189e9b232eb7316626bf7858534c5540b2fc53dced80a4c9a95f26493e AS ca-certificates
 FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769ff3b37239f3d0 AS git
-FROM stagex/docker AS docker
+FROM stagex/user-docker@sha256:8b9055def1d305374d4f895386339c37a3c922420b148c266c2447fb9186c712 AS docker
 FROM stagex/user-docker-cli-buildx@sha256:e417fa8cc1665e51f4bf1c9f688e8b3b55097afdb1017f96642fd4ca73290519 AS docker-cli
 FROM stagex/core-curl@sha256:bc8bab43d96a9167fbb85022ea773644a45ef335e7a9b747f203078973fa988e AS curl
 FROM stagex/core-user-runtime@sha256:055ae534e1e01259449fb4e0226f035a7474674c7371a136298e8bdac65d90bb AS user-runtime
@@ -13,9 +11,10 @@ FROM stagex/user-opentofu@sha256:81b8970e2b660a44e2074389fa8cd56299522a457e8c27f
 FROM stagex/core-openssl@sha256:d6487f0cb15f4ee02b420c717cb9abd85d73043c0bb3a2c6ce07688b23c1df07 AS openssl
 FROM stagex/pallet-gcc-gnu-busybox@sha256:9f5f67721dacece876a5312d63fe727bbf176461cca73b77a531b3f1b96f8f66 AS gcc
 FROM stagex/core-zlib@sha256:06f5168e20d85d1eb1d19836cdf96addc069769b40f8f0f4a7a70b2f49fc18f8 AS zlib
+FROM stagex/core-busybox@sha256:746853f08cfae08085e26cc00e6b659963e66961ddbfbc3d1e731dd5997320f0 AS busybox
 
 # TODO remove whole stage when packer is packaged (ahaha, look at me, i am the packer now)
-FROM stagex/core-busybox AS downloader
+FROM busybox AS downloader
 
 COPY --from=gcc . /
 COPY --from=ca-certificates . /
