@@ -2186,8 +2186,8 @@ async fn deploy_logic(
         "git --git-dir={} archive {} | tar -xC {}",
         git_dir, commit_sha, work_dir
     );
-    let extract_output = Command::new("bash")
-        .args(&["-c", &extract_cmd])
+    let extract_output = Command::new("sh")
+        .args(["-c", &extract_cmd])
         .output()
         .await
         .map_err(|e| {
