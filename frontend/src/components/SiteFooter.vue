@@ -26,9 +26,9 @@
           <div class="footer-links">
             <div class="footer-column">
               <h3 class="footer-column-title">Platform</h3>
-              <a href="https://caution.co/deployment.html" class="footer-link">Deployment</a>
-              <a href="/" class="footer-link">Get early access</a>
               <a href="/login" class="footer-link">Log in</a>
+              <a href="https://caution.co/platform-tour.html" class="footer-link">Platform demo</a>
+              <a href="https://caution.co/pricing.html" class="footer-link">Pricing</a>
             </div>
 
             <div class="footer-column">
@@ -38,15 +38,17 @@
                 target="_blank"
                 rel="noopener noreferrer"
                 class="footer-link"
-                >Documentation</a
               >
+                Documentation
+              </a>
               <a
                 href="https://codeberg.org/AmpereComputing/caution"
                 target="_blank"
                 rel="noopener noreferrer"
                 class="footer-link"
-                >Source code</a
               >
+                Source code
+              </a>
               <a href="https://caution.co/blog.html" class="footer-link">Blog</a>
             </div>
 
@@ -59,8 +61,9 @@
                 target="_blank"
                 rel="noopener noreferrer"
                 class="footer-link"
-                >Community</a
               >
+                Community
+              </a>
             </div>
           </div>
         </div>
