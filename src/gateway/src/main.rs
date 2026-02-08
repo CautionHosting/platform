@@ -123,6 +123,7 @@ async fn main() -> Result<()> {
             axum::http::Method::GET,
             axum::http::Method::POST,
             axum::http::Method::PUT,
+            axum::http::Method::PATCH,
             axum::http::Method::DELETE,
             axum::http::Method::OPTIONS,
         ])
@@ -174,6 +175,7 @@ async fn main() -> Result<()> {
     let api_proxy = Router::new()
         .fallback(proxy::proxy_handler)
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware::fido2_auth_middleware))
+        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware::fido2_sign_middleware))
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
         .with_state(state.clone())
         .layer(cors.clone());

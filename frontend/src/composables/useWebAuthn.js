@@ -88,6 +88,11 @@ export function useWebAuthn() {
       e.preventDefault();
     }
 
+    // Prevent double invocation
+    if (loading.value) {
+      return;
+    }
+
     error.value = null;
     status.value = null;
     loading.value = true;
@@ -133,7 +138,7 @@ export function useWebAuthn() {
         console.error("WebAuthn error:", credError);
         if (credError.name === "NotAllowedError") {
           throw new Error(
-            "The request could not be completed. Make sure your security key is set up for this account and tap it promptly after clicking <strong>Log in</strong>."
+            "Authentication was blocked by your browser. Make sure you are using the same authenticator you registered with and tap it promptly. If you registered with a password manager, try using <strong>Chrome</strong> or <strong>Edge</strong> — Firefox has limited passkey support."
           );
         }
         throw credError;
@@ -223,7 +228,7 @@ export function useWebAuthn() {
       const beginData = await beginResponse.json();
 
       // Step 2: Create credential with security key
-      status.value = "Tap your security  key";
+      status.value = "Tap your security key";
 
       const publicKey = beginData.publicKey;
       publicKey.challenge = base64urlToUint8Array(publicKey.challenge);
@@ -240,7 +245,29 @@ export function useWebAuthn() {
         }));
       }
 
-      const credential = await navigator.credentials.create({ publicKey });
+      let credential;
+      try {
+        credential = await navigator.credentials.create({ publicKey });
+      } catch (credError) {
+        console.error("WebAuthn registration error:", credError);
+        if (credError.name === "InvalidStateError") {
+          throw new Error(
+            "This authenticator is already registered. If you already have an account, <a href=\"/login\">log in</a> instead."
+          );
+        }
+        if (credError.name === "NotAllowedError") {
+          const hasExcluded = publicKey.excludeCredentials && publicKey.excludeCredentials.length > 0;
+          if (hasExcluded) {
+            throw new Error(
+              "This authenticator may already be registered. If you already have an account, try <a href=\"/login\">logging in</a>. Otherwise, try a different authenticator or browser."
+            );
+          }
+          throw new Error(
+            "Registration was blocked by your browser. Try using a <strong>hardware security key</strong> or your device's built-in authenticator. If you are using a password manager, try <strong>Chrome</strong> or <strong>Edge</strong> instead of Firefox."
+          );
+        }
+        throw credError;
+      }
 
       if (!credential) {
         throw new Error("No credential created");

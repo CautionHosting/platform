@@ -65,6 +65,23 @@
             <span>SSH keys</span>
           </button>
 
+          <button
+            :class="['nav-item', { active: activeTab === 'security' }]"
+            @click="$emit('tab-change', 'security')"
+          >
+            <svg
+              class="nav-icon"
+              :style="{ opacity: activeTab === 'security' ? 1 : 0.5, width: '30px', height: '30px', minWidth: '30px', minHeight: '30px' }"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+            >
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+            <span>Security</span>
+          </button>
+
           <!-- Hidden for now - docs site covers this
           <button
             :class="['nav-item', { active: activeTab === 'guide' }]"

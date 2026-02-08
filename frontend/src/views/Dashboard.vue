@@ -19,6 +19,22 @@
       </div>
     </template>
 
+    <!-- Security Warning Banner (non-dismissible) -->
+    <div v-if="!orgSettings.require_pin && !loadingOrgSettings" class="security-warning-banner">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        <path d="M12 8v4"/>
+        <circle cx="12" cy="16" r="1"/>
+      </svg>
+      <span>
+        <strong>Development mode:</strong> PIN verification is disabled.
+        <button class="security-warning-link" @click="handleTabChange('security')">
+          Enable PIN requirement
+        </button>
+        for production use.
+      </span>
+    </div>
+
     <!-- Applications Tab -->
     <template v-if="activeTab === 'apps'">
       <!-- Loading state -->
@@ -881,6 +897,47 @@ make build-cli
       </template>
     </div>
 
+    <!-- Security Tab -->
+    <div v-if="activeTab === 'security'" class="content-card">
+      <div class="content-header">
+        <div class="content-header-text">
+          <h2 class="content-header-title">Security settings</h2>
+          <p class="content-header-description">
+            Configure authentication requirements for your organization.
+          </p>
+        </div>
+      </div>
+
+      <div v-if="loadingOrgSettings" class="list-item-empty">Loading security settings...</div>
+      <div v-else class="security-settings">
+        <div class="security-setting-item">
+          <div class="security-setting-info">
+            <h3 class="security-setting-title">Require PIN/biometric for authentication</h3>
+            <p class="security-setting-description">
+              When enabled, users must verify their identity with a PIN or biometric (fingerprint, face)
+              when logging in or signing sensitive operations. This provides stronger security but may
+              not be supported by all passkeys.
+            </p>
+          </div>
+          <div class="security-setting-control">
+            <label class="toggle-switch">
+              <input
+                type="checkbox"
+                :checked="orgSettings.require_pin"
+                @change="toggleRequirePin"
+                :disabled="updatingOrgSettings"
+              />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div v-if="orgSettingsError" class="message message--error">
+          {{ orgSettingsError }}
+        </div>
+      </div>
+    </div>
+
     <!-- Delete SSH Key Confirmation Modal -->
     <div v-if="showDeleteModal" class="modal-overlay" @click="cancelDelete">
       <div class="modal-content" @click.stop>
@@ -1236,6 +1293,145 @@ export default {
     const newCredAwsSecret = ref("");
     const newCredIsDefault = ref(false);
 
+    // Organization settings state
+    const orgSettings = ref({ require_pin: false });
+    const loadingOrgSettings = ref(true);
+    const updatingOrgSettings = ref(false);
+    const orgSettingsError = ref(null);
+    const currentOrgId = ref(null);
+
+    const loadOrgSettings = async () => {
+      loadingOrgSettings.value = true;
+      orgSettingsError.value = null;
+
+      try {
+        // First get the user's primary organization
+        const orgsResponse = await authFetch("/api/organizations");
+        if (!orgsResponse.ok) {
+          if (orgsResponse.status === 401) {
+            window.location.href = "/login";
+            return;
+          }
+          throw new Error("Failed to load organizations");
+        }
+
+        const orgs = await orgsResponse.json();
+        if (orgs.length === 0) {
+          loadingOrgSettings.value = false;
+          return;
+        }
+
+        currentOrgId.value = orgs[0].id;
+
+        // Then get the org settings
+        const settingsResponse = await authFetch(`/api/organizations/${currentOrgId.value}/settings`);
+        if (settingsResponse.ok) {
+          orgSettings.value = await settingsResponse.json();
+        } else {
+          throw new Error("Failed to load security settings");
+        }
+      } catch (err) {
+        orgSettingsError.value = err.message || "Failed to load security settings";
+      } finally {
+        loadingOrgSettings.value = false;
+      }
+    };
+
+    const toggleRequirePin = async () => {
+      if (!currentOrgId.value) return;
+
+      updatingOrgSettings.value = true;
+      orgSettingsError.value = null;
+
+      const newValue = !orgSettings.value.require_pin;
+
+      try {
+        // Step 1: Create request body and hash it
+        const body = JSON.stringify({ require_pin: newValue });
+        const bodyHash = await sha256Hex(body);
+
+        // Step 2: Request signing challenge
+        const challengeRes = await authFetch("/auth/sign-request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            method: "PATCH",
+            path: `/organizations/${currentOrgId.value}/settings`,
+            body_hash: bodyHash,
+          }),
+        });
+
+        if (!challengeRes.ok) {
+          const data = await challengeRes.json().catch(() => ({}));
+          throw new Error(data.error || "Failed to authenticate request");
+        }
+
+        const { publicKey, challenge_id } = await challengeRes.json();
+
+        // Step 3: Convert challenge data
+        publicKey.challenge = base64UrlToArrayBuffer(publicKey.challenge);
+        if (publicKey.allowCredentials) {
+          publicKey.allowCredentials = publicKey.allowCredentials.map(
+            (cred) => ({
+              ...cred,
+              id: base64UrlToArrayBuffer(cred.id),
+            })
+          );
+        }
+
+        // Step 4: Get user signature
+        const credential = await navigator.credentials.get({ publicKey });
+
+        const credentialResponse = {
+          id: credential.id,
+          rawId: arrayBufferToBase64Url(credential.rawId),
+          type: credential.type,
+          response: {
+            authenticatorData: arrayBufferToBase64Url(
+              credential.response.authenticatorData
+            ),
+            clientDataJSON: arrayBufferToBase64Url(
+              credential.response.clientDataJSON
+            ),
+            signature: arrayBufferToBase64Url(credential.response.signature),
+            userHandle: credential.response.userHandle
+              ? arrayBufferToBase64Url(credential.response.userHandle)
+              : null,
+          },
+        };
+
+        const fido2Response = btoa(JSON.stringify(credentialResponse))
+          .replace(/\+/g, "-")
+          .replace(/\//g, "_")
+          .replace(/=/g, "");
+
+        // Step 5: Send signed request
+        const response = await authFetch(`/api/organizations/${currentOrgId.value}/settings`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Fido2-Challenge-Id": challenge_id,
+            "X-Fido2-Response": fido2Response,
+          },
+          body: body,
+        });
+
+        if (response.ok) {
+          orgSettings.value = await response.json();
+          showToast(newValue ? "PIN requirement enabled" : "PIN requirement disabled");
+        } else {
+          const data = await response.json().catch(() => ({}));
+          orgSettingsError.value = data.error || "Failed to update settings";
+          showToast(orgSettingsError.value, 'error');
+        }
+      } catch (err) {
+        orgSettingsError.value = err.message || "Failed to connect to server";
+        showToast(orgSettingsError.value, 'error');
+      } finally {
+        updatingOrgSettings.value = false;
+      }
+    };
+
     const pageTitle = computed(() => {
       return "";
     });
@@ -1441,12 +1637,73 @@ export default {
       showDeleteModal.value = false;
 
       try {
-        const response = await authFetch(
-          `/ssh-keys/${encodeURIComponent(keyToDelete.value)}`,
-          {
+        const deletePath = `/ssh-keys/${encodeURIComponent(keyToDelete.value)}`;
+        const body = "";
+        const bodyHash = await sha256Hex(body);
+
+        // Step 1: Request signing challenge
+        const challengeRes = await authFetch("/auth/sign-request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
             method: "DELETE",
-          }
-        );
+            path: deletePath,
+            body_hash: bodyHash,
+          }),
+        });
+
+        if (!challengeRes.ok) {
+          const data = await challengeRes.json().catch(() => ({}));
+          throw new Error(data.error || "Failed to authenticate request");
+        }
+
+        const { publicKey, challenge_id } = await challengeRes.json();
+
+        // Step 2: Convert challenge data
+        publicKey.challenge = base64UrlToArrayBuffer(publicKey.challenge);
+        if (publicKey.allowCredentials) {
+          publicKey.allowCredentials = publicKey.allowCredentials.map(
+            (cred) => ({
+              ...cred,
+              id: base64UrlToArrayBuffer(cred.id),
+            })
+          );
+        }
+
+        // Step 3: Get user signature
+        const credential = await navigator.credentials.get({ publicKey });
+
+        const credentialResponse = {
+          id: credential.id,
+          rawId: arrayBufferToBase64Url(credential.rawId),
+          type: credential.type,
+          response: {
+            authenticatorData: arrayBufferToBase64Url(
+              credential.response.authenticatorData
+            ),
+            clientDataJSON: arrayBufferToBase64Url(
+              credential.response.clientDataJSON
+            ),
+            signature: arrayBufferToBase64Url(credential.response.signature),
+            userHandle: credential.response.userHandle
+              ? arrayBufferToBase64Url(credential.response.userHandle)
+              : null,
+          },
+        };
+
+        const fido2Response = btoa(JSON.stringify(credentialResponse))
+          .replace(/\+/g, "-")
+          .replace(/\//g, "_")
+          .replace(/=/g, "");
+
+        // Step 4: Send signed delete request
+        const response = await authFetch(deletePath, {
+          method: "DELETE",
+          headers: {
+            "X-Fido2-Challenge-Id": challenge_id,
+            "X-Fido2-Response": fido2Response,
+          },
+        });
 
         if (response.ok || response.status === 204) {
           showToast("SSH key deleted");
@@ -1456,7 +1713,11 @@ export default {
           showToast(data.error || "Failed to delete SSH key", 'error');
         }
       } catch (err) {
-        showToast("Failed to connect to server", 'error');
+        if (err.name === "NotAllowedError") {
+          showToast("Security key authentication was cancelled or timed out", 'error');
+        } else {
+          showToast(err.message || "Failed to connect to server", 'error');
+        }
       } finally {
         deletingKey.value = null;
         keyToDelete.value = null;
@@ -1861,7 +2122,7 @@ export default {
       // Add keyboard event listener
       window.addEventListener("keydown", handleKeyDown);
 
-      await Promise.all([loadApps(), loadKeys(), loadCredentials()]);
+      await Promise.all([loadApps(), loadKeys(), loadCredentials(), loadOrgSettings()]);
     });
 
     onUnmounted(() => {
@@ -1926,6 +2187,11 @@ export default {
       addCredential,
       deleteCredential,
       setDefaultCredential,
+      orgSettings,
+      loadingOrgSettings,
+      updatingOrgSettings,
+      orgSettingsError,
+      toggleRequirePin,
       logout,
       handleTabChange,
       formatKeyType,
@@ -3312,5 +3578,131 @@ export default {
   .app-detail-sidebar {
     grid-template-columns: 1fr;
   }
+}
+
+/* Security Warning Banner */
+.security-warning-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  color: #92400e;
+  font-size: 14px;
+}
+
+.security-warning-banner svg {
+  flex-shrink: 0;
+  color: #f59e0b;
+}
+
+.security-warning-link {
+  background: none;
+  border: none;
+  color: #d97706;
+  text-decoration: underline;
+  cursor: pointer;
+  font-size: inherit;
+  padding: 0;
+}
+
+.security-warning-link:hover {
+  color: #b45309;
+}
+
+/* Security Settings */
+.security-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  margin-top: 24px;
+}
+
+.security-setting-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 24px;
+  padding: 20px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.security-setting-info {
+  flex: 1;
+}
+
+.security-setting-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #111827;
+  margin: 0 0 8px 0;
+}
+
+.security-setting-description {
+  font-size: 14px;
+  color: #6b7280;
+  margin: 0;
+  line-height: 1.5;
+}
+
+.security-setting-control {
+  flex-shrink: 0;
+}
+
+/* Toggle Switch */
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 48px;
+  height: 26px;
+}
+
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #d1d5db;
+  transition: 0.3s;
+  border-radius: 26px;
+}
+
+.toggle-slider:before {
+  position: absolute;
+  content: "";
+  height: 20px;
+  width: 20px;
+  left: 3px;
+  bottom: 3px;
+  background-color: white;
+  transition: 0.3s;
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.toggle-switch input:checked + .toggle-slider {
+  background-color: #10b981;
+}
+
+.toggle-switch input:checked + .toggle-slider:before {
+  transform: translateX(22px);
+}
+
+.toggle-switch input:disabled + .toggle-slider {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>

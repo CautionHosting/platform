@@ -159,11 +159,24 @@ pub async fn fido2_sign_middleware(
     // SECURITY: Strip X-Authenticated-User-ID to prevent bypass attacks
     req.headers_mut().remove("X-Authenticated-User-ID");
 
+    // Paths that require signature for write operations
+    let path = req.uri().path();
+    let method = req.method();
+    let requires_signature =
+        (path.contains("/organizations/") && path.ends_with("/settings")
+            && (method == "PATCH" || method == "PUT"))
+        || (path.starts_with("/ssh-keys") && (method == "POST" || method == "DELETE"));
+
     let challenge_id = match req.headers().get("X-Fido2-Challenge-Id") {
         Some(h) => h.to_str().map_err(|_| {
             (StatusCode::BAD_REQUEST, "Invalid challenge ID header").into_response()
         })?.to_string(),
-        None => return Ok(next.run(req).await),
+        None => {
+            if requires_signature {
+                return Err((StatusCode::FORBIDDEN, "This operation requires signature verification").into_response());
+            }
+            return Ok(next.run(req).await);
+        }
     };
 
     let auth_response_b64 = req
@@ -224,21 +237,22 @@ pub async fn fido2_sign_middleware(
         "Verifying FIDO2 signature with credential: {}",
         hex::encode(&credential_id_bytes)
     );
-    let passkey_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
+    let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get credential {}: {}", hex::encode(&credential_id_bytes), e);
             (StatusCode::INTERNAL_SERVER_ERROR, "Failed to verify signature").into_response()
         })?;
 
-    let _passkey: Passkey = serde_json::from_slice(&passkey_bytes).map_err(|e| {
-        tracing::error!("Failed to deserialize passkey: {}", e);
+    // Use SecurityKey for flexible UV policy (Passkey enforces UV=Required)
+    let _seckey: SecurityKey = serde_json::from_slice(&cred_bytes).map_err(|e| {
+        tracing::error!("Failed to deserialize credential: {}", e);
         (StatusCode::INTERNAL_SERVER_ERROR, "Failed to verify signature").into_response()
     })?;
 
     state
         .webauthn
-        .finish_passkey_authentication(&auth_response, &pending.auth_state)
+        .finish_securitykey_authentication(&auth_response, &pending.auth_state)
         .map_err(|e| {
             tracing::error!("FIDO signature verification failed: {:?}", e);
             (StatusCode::UNAUTHORIZED, "Invalid signature").into_response()

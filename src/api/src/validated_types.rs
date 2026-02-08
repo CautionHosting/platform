@@ -232,3 +232,17 @@ impl Validate for RenameResourceRequest {
 pub struct ErrorResponse {
     pub error: String,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateOrgSettingsRequest {
+    pub require_pin: Option<bool>,
+}
+
+impl Validate for UpdateOrgSettingsRequest {
+    fn validate(&self) -> Result<(), String> {
+        if self.require_pin.is_none() {
+            return Err("At least one setting must be provided".to_string());
+        }
+        Ok(())
+    }
+}

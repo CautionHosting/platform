@@ -8,8 +8,8 @@ use axum::{
     Json,
 };
 use axum_extra::extract::cookie::{Cookie, SameSite};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use webauthn_rs::prelude::*;
+use webauthn_rs_proto::{ResidentKeyRequirement, UserVerificationPolicy};
 use time::{Duration, format_description::well_known::Rfc3339};
 use serde::{Serialize, Deserialize};
 
@@ -37,6 +37,68 @@ where
 {
     fn from(err: E) -> Self {
         Self(err.into())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LoginError {
+    #[error("invalid or expired session")]
+    InvalidSession,
+    #[error("authentication challenge has expired")]
+    ChallengeExpired,
+    #[error("your organization requires PIN verification")]
+    PinRequired,
+    #[error("{0}")]
+    Internal(#[from] anyhow::Error),
+}
+
+impl IntoResponse for LoginError {
+    fn into_response(self) -> Response {
+        let (status, message) = match self {
+            Self::InvalidSession | Self::ChallengeExpired => {
+                (StatusCode::UNAUTHORIZED, self.to_string())
+            }
+            Self::PinRequired => {
+                (StatusCode::FORBIDDEN, self.to_string())
+            }
+            Self::Internal(ref e) => {
+                tracing::error!("Login error: {:?}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, "an internal error occurred".into())
+            }
+        };
+        (status, message).into_response()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SignRequestError {
+    #[error("missing session")]
+    MissingSession,
+    #[error("invalid or expired session")]
+    InvalidSession,
+    #[error("missing CSRF token")]
+    CsrfMissing,
+    #[error("invalid CSRF token")]
+    CsrfInvalid,
+    #[error("{0}")]
+    Internal(#[from] anyhow::Error),
+}
+
+impl IntoResponse for SignRequestError {
+    fn into_response(self) -> Response {
+        let (status, message) = match self {
+            Self::MissingSession | Self::InvalidSession => {
+                (StatusCode::UNAUTHORIZED, self.to_string())
+            }
+            Self::CsrfMissing | Self::CsrfInvalid => {
+                (StatusCode::FORBIDDEN, self.to_string())
+            }
+            Self::Internal(ref e) => {
+                tracing::error!("Sign request error: {:?}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, "an internal error occurred".into())
+            }
+        };
+        (status, message).into_response()
     }
 }
 
@@ -83,7 +145,7 @@ pub async fn begin_register_handler(
     let user_unique_id = uuid::Uuid::new_v4();
     let user_name = format!("user_{}", user_unique_id);
 
-    let (ccr, reg_state) = state
+    let (mut ccr, reg_state) = state
         .webauthn
         .start_passkey_registration(
             user_unique_id,
@@ -92,6 +154,19 @@ pub async fn begin_register_handler(
             Some(exclude_credentials).filter(|v| !v.is_empty()),
         )
         .map_err(|e| anyhow::anyhow!("Failed to start registration: {}", e))?;
+
+    // Override authenticator selection to be maximally compatible:
+    // - UV Preferred: authenticators that support PIN/biometric will set it up, but won't block
+    //   basic authenticators. Organizations can require PIN later via security settings.
+    // - Resident key Preferred: allows password managers (which create discoverable credentials)
+    //   while still accepting hardware keys that don't support credential storage.
+    // - Clear extensions: start_passkey_registration sets credProtect to UserVerificationRequired
+    //   which conflicts with UV Preferred and causes Chrome to reject password manager registration.
+    if let Some(ref mut auth_sel) = ccr.public_key.authenticator_selection {
+        auth_sel.user_verification = UserVerificationPolicy::Preferred;
+        auth_sel.resident_key = Some(ResidentKeyRequirement::Preferred);
+    }
+    ccr.public_key.extensions = None;
 
     tracing::debug!("Registration challenge created for RP {}", ccr.public_key.rp.id);
 
@@ -257,24 +332,30 @@ pub async fn begin_login_handler(
                 anyhow::anyhow!("Failed to get credential: {}", e)
             })?;
 
-        let passkey: Passkey = serde_json::from_slice(&cred_bytes)
+        // Use SecurityKey for flexible UV policy (Passkey enforces UV=Required)
+        let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
             .map_err(|e| {
                 tracing::error!("Failed to deserialize credential {}", i);
                 anyhow::anyhow!("Failed to deserialize credential: {}", e)
             })?;
 
-        allow_credentials.push(passkey);
+        allow_credentials.push(seckey);
     }
 
     tracing::debug!("Starting authentication challenge with {} credentials", allow_credentials.len());
 
-    let (rcr, auth_state) = state
+    // Use securitykey auth which allows flexible UV policy (unlike passkey which requires UV)
+    let (mut rcr, auth_state) = state
         .webauthn
-        .start_passkey_authentication(&allow_credentials)
+        .start_securitykey_authentication(&allow_credentials)
         .map_err(|e| {
             tracing::error!("Failed to start authentication: {:?}", e);
             anyhow::anyhow!("Failed to start authentication: {}", e)
         })?;
+
+    // Always use Preferred - we enforce PIN requirement in finish_login based on org settings
+    // This allows the authenticator to decide, and we validate server-side
+    rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
 
     tracing::debug!(
         "Authentication challenge created for RP {} with {} allowed credentials",
@@ -298,21 +379,21 @@ pub async fn begin_login_handler(
 pub async fn finish_login_handler(
     State(state): State<AppState>,
     Json(req): Json<serde_json::Value>,
-) -> Result<Response, AppError> {
+) -> Result<Response, LoginError> {
     let session_key = req.get("session")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Missing session field"))?
+        .ok_or(LoginError::InvalidSession)?
         .to_string();
 
     let pending = state.auth_states.read().await
         .get(&session_key)
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Invalid or expired session key"))?;
+        .ok_or(LoginError::InvalidSession)?;
 
-    // Check if the authentication challenge has expired
+    // Check if the authentication challenge has expired.
     if time::OffsetDateTime::now_utc() > pending.expires_at {
         state.auth_states.write().await.remove(&session_key);
-        return Err(anyhow::anyhow!("Authentication challenge has expired").into());
+        return Err(LoginError::ChallengeExpired);
     }
 
     let auth_state = pending.auth_state;
@@ -325,30 +406,37 @@ pub async fn finish_login_handler(
     let credential_id_bytes = auth_response.raw_id.as_ref().to_vec();
     tracing::debug!("Credential ID: {}", hex::encode(&credential_id_bytes));
 
-    let _user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes).await?;
+    let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes).await?;
 
-    let passkey_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes).await?;
-    let mut passkey: Passkey = serde_json::from_slice(&passkey_bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to deserialize passkey: {}", e))?;
+    let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes).await?;
+    let mut seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to deserialize credential: {}", e))?;
 
-    tracing::debug!("Credential fetched, performing passkey authentication");
+    tracing::debug!("Credential fetched, performing securitykey authentication");
 
     let auth_result = state
         .webauthn
-        .finish_passkey_authentication(&auth_response, &auth_state)
+        .finish_securitykey_authentication(&auth_response, &auth_state)
         .map_err(|e| {
             tracing::error!("Authentication failed: {:?}", e);
             anyhow::anyhow!("Failed to finish authentication: {}", e)
         })?;
 
-    tracing::debug!("Authentication successful");
+    tracing::debug!("Authentication successful, user_verified={}", auth_result.user_verified());
+
+    // Check if user's org requires PIN verification.
+    let requires_pin = db::user_requires_pin(&state.db, user_id).await?;
+    if requires_pin && !auth_result.user_verified() {
+        tracing::warn!("User {} login rejected: org requires PIN but user_verified=false", user_id);
+        return Err(LoginError::PinRequired);
+    }
 
     if auth_result.needs_update() {
-        let update_result = passkey.update_credential(&auth_result);
+        let update_result = seckey.update_credential(&auth_result);
 
         if let Some(true) = update_result {
-            let updated_key_json = serde_json::to_vec(&passkey)
-                .map_err(|e| anyhow::anyhow!("Failed to serialize updated passkey: {}", e))?;
+            let updated_key_json = serde_json::to_vec(&seckey)
+                .map_err(|e| anyhow::anyhow!("Failed to serialize updated credential: {}", e))?;
 
             db::update_fido2_credential(
                 &state.db,
@@ -486,26 +574,56 @@ pub async fn begin_sign_request_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(req): Json<crate::types::SignChallengeRequest>,
-) -> Result<Json<crate::types::SignChallengeResponse>, AppError> {
-    let session_id = headers
+) -> Result<Json<crate::types::SignChallengeResponse>, SignRequestError> {
+    // Support both header auth (CLI) and cookie auth (browser).
+    let (session_id, using_header_auth) = if let Some(header_session) = headers
         .get("X-Session-ID")
         .and_then(|h| h.to_str().ok())
-        .ok_or_else(|| anyhow::anyhow!("Missing session ID"))?;
+        .map(|s| s.to_string())
+    {
+        (header_session, true)
+    } else if let Some(cookie_session) = crate::csrf::get_cookie(&headers, "caution_session") {
+        (cookie_session, false)
+    } else {
+        return Err(SignRequestError::MissingSession);
+    };
 
-    let credential_id = db::validate_auth_session(&state.db, session_id)
+    let credential_id = db::validate_auth_session(&state.db, &session_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Invalid or expired session"))?;
+        .ok_or(SignRequestError::InvalidSession)?;
+
+    // Validate CSRF for cookie-based auth (browser).
+    if !using_header_auth {
+        let secret = crate::csrf::get_csrf_secret();
+        let expected_csrf = crate::csrf::derive_csrf_token(&session_id, &secret);
+        let csrf_header = headers
+            .get("X-CSRF-Token")
+            .and_then(|h| h.to_str().ok())
+            .ok_or(SignRequestError::CsrfMissing)?;
+        if !crate::csrf::constant_time_compare(&expected_csrf, csrf_header) {
+            return Err(SignRequestError::CsrfInvalid);
+        }
+    }
 
     let user_id = db::get_user_id_by_credential(&state.db, &credential_id).await?;
+    let requires_pin = db::user_requires_pin(&state.db, user_id).await?;
 
     let cred_bytes = db::get_credential_public_key(&state.db, &credential_id).await?;
-    let passkey: Passkey = serde_json::from_slice(&cred_bytes)
+    let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
         .map_err(|e| anyhow::anyhow!("Failed to deserialize credential: {}", e))?;
 
-    let (rcr, auth_state) = state
+    let (mut rcr, auth_state) = state
         .webauthn
-        .start_passkey_authentication(&[passkey])
+        .start_securitykey_authentication(&[seckey])
         .map_err(|e| anyhow::anyhow!("Failed to start signing challenge: {}", e))?;
+
+    // Set user verification based on org settings
+    if requires_pin {
+        rcr.public_key.user_verification = UserVerificationPolicy::Required;
+    } else {
+        // Use Preferred when PIN not required - authenticator decides
+        rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
+    }
 
     let challenge_id = uuid::Uuid::new_v4().to_string();
     let pending = crate::types::PendingSignChallenge {

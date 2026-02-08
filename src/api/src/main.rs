@@ -81,7 +81,12 @@ struct OrganizationMember {
     updated_at: DateTime<Utc>,
 }
 
-use validated_types::{AddMemberRequest, UpdateMemberRequest};
+use validated_types::{AddMemberRequest, UpdateMemberRequest, UpdateOrgSettingsRequest};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OrgSettings {
+    require_pin: bool,
+}
 
 #[derive(Debug, Serialize, FromRow)]
 struct ComputeResource {
@@ -247,7 +252,10 @@ async fn check_org_access(
     .bind(user_id)
     .fetch_optional(db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| {
+        tracing::error!("check_org_access failed: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     member.map(|m| m.0).ok_or(StatusCode::FORBIDDEN)
 }
@@ -501,8 +509,9 @@ async fn list_organizations(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<Organization>>, StatusCode> {
+    tracing::debug!("list_organizations called for user {}", auth.user_id);
     let orgs = sqlx::query_as::<_, Organization>(
-        "SELECT o.id, o.name, o.slug, o.is_active, o.created_at, o.updated_at 
+        "SELECT o.id, o.name, o.is_active, o.created_at, o.updated_at
          FROM organizations o
          INNER JOIN organization_members om ON o.id = om.organization_id
          WHERE om.user_id = $1"
@@ -510,8 +519,12 @@ async fn list_organizations(
     .bind(auth.user_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| {
+        tracing::error!("list_organizations failed: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
+    tracing::debug!("list_organizations returning {} orgs", orgs.len());
     Ok(Json(orgs))
 }
 
@@ -552,7 +565,7 @@ async fn get_organization(
     check_org_access(&state.db, auth.user_id, org_id).await?;
 
     let org = sqlx::query_as::<_, Organization>(
-        "SELECT id, name, slug, is_active, created_at, updated_at 
+        "SELECT id, name, is_active, created_at, updated_at
          FROM organizations WHERE id = $1"
     )
     .bind(org_id)
@@ -617,6 +630,74 @@ async fn delete_organization(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_org_settings(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(org_id): Path<Uuid>,
+) -> Result<Json<OrgSettings>, StatusCode> {
+    tracing::debug!("get_org_settings called for org {}", org_id);
+    check_org_access(&state.db, auth.user_id, org_id).await?;
+
+    let settings: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT settings FROM organizations WHERE id = $1"
+    )
+    .bind(org_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("get_org_settings failed: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .flatten();
+
+    let org_settings = settings
+        .and_then(|s| serde_json::from_value(s).ok())
+        .unwrap_or(OrgSettings { require_pin: false });
+
+    tracing::debug!("get_org_settings returning: {:?}", org_settings);
+    Ok(Json(org_settings))
+}
+
+async fn update_org_settings(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(org_id): Path<Uuid>,
+    validated_types::Validated(payload): validated_types::Validated<UpdateOrgSettingsRequest>,
+) -> Result<Json<OrgSettings>, StatusCode> {
+    let role = check_org_access(&state.db, auth.user_id, org_id).await?;
+
+    if !can_manage_org(&role) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Build the settings JSON update
+    let mut settings = serde_json::json!({});
+    if let Some(require_pin) = payload.require_pin {
+        settings["require_pin"] = serde_json::json!(require_pin);
+    }
+
+    let updated_settings: serde_json::Value = sqlx::query_scalar(
+        "UPDATE organizations
+         SET settings = COALESCE(settings, '{}'::jsonb) || $1::jsonb,
+             updated_at = NOW()
+         WHERE id = $2
+         RETURNING settings"
+    )
+    .bind(&settings)
+    .bind(org_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to update org settings: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let org_settings: OrgSettings = serde_json::from_value(updated_settings)
+        .unwrap_or(OrgSettings { require_pin: false });
+
+    Ok(Json(org_settings))
 }
 
 async fn list_members(
@@ -2650,6 +2731,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/organizations/{id}", get(get_organization))
         .route("/organizations/{id}", patch(update_organization))
         .route("/organizations/{id}", delete(delete_organization))
+        .route("/organizations/{id}/settings", get(get_org_settings))
+        .route("/organizations/{id}/settings", patch(update_org_settings))
         .route("/organizations/{id}/members", get(list_members))
         .route("/organizations/{id}/members", post(add_member))
         .route("/organizations/{id}/members/{user_id}", patch(update_member))

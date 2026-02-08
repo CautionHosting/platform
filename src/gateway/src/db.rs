@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use rand::Rng;
-use time::{OffsetDateTime, PrimitiveDateTime};
+use time::OffsetDateTime;
 use base64::Engine;
 use uuid::Uuid;
 
@@ -231,15 +231,13 @@ pub async fn create_auth_session(
     credential_id: &[u8],
     expires_at: OffsetDateTime,
 ) -> Result<()> {
-    let expires_at_primitive = PrimitiveDateTime::new(expires_at.date(), expires_at.time());
-
     sqlx::query(
         "INSERT INTO auth_sessions (session_id, credential_id, created_at, expires_at, last_used_at)
          VALUES ($1, $2, NOW(), $3, NOW())"
     )
     .bind(session_id)
     .bind(credential_id)
-    .bind(expires_at_primitive)
+    .bind(expires_at)
     .execute(pool)
     .await
     .context("Failed to create session")?;
@@ -262,10 +260,7 @@ pub async fn validate_auth_session(pool: &PgPool, session_id: &str) -> Result<Op
         return Ok(None);
     };
 
-    let now_utc = OffsetDateTime::now_utc();
-    let now_primitive = PrimitiveDateTime::new(now_utc.date(), now_utc.time());
-
-    if now_primitive > session.expires_at {
+    if OffsetDateTime::now_utc() > session.expires_at {
         return Ok(None);
     }
 
@@ -461,7 +456,28 @@ pub struct SshKeyInfo {
     pub key_type: String,
     pub name: Option<String>,
     pub public_key: String,
-    pub created_at: time::PrimitiveDateTime,
-    pub last_used_at: Option<time::PrimitiveDateTime>,
+    pub created_at: time::OffsetDateTime,
+    pub last_used_at: Option<time::OffsetDateTime>,
 }
 
+/// Check if any of the user's organizations require PIN for authentication.
+/// Returns true if ANY org the user belongs to has require_pin = true.
+pub async fn user_requires_pin(pool: &PgPool, user_id: Uuid) -> Result<bool> {
+    let requires_pin: Option<bool> = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM organization_members om
+            JOIN organizations o ON o.id = om.organization_id
+            WHERE om.user_id = $1
+              AND (o.settings->>'require_pin')::boolean = true
+        )
+        "#
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to check user PIN requirement")?;
+
+    Ok(requires_pin.unwrap_or(false))
+}

@@ -19,7 +19,7 @@ pub struct PendingRegistration {
 /// Authentication state with expiration
 #[derive(Clone)]
 pub struct PendingAuthentication {
-    pub auth_state: PasskeyAuthentication,
+    pub auth_state: SecurityKeyAuthentication,
     pub expires_at: time::OffsetDateTime,
 }
 
@@ -60,9 +60,9 @@ pub struct DbCredential {
 pub struct DbSession {
     pub session_id: String,
     pub credential_id: Vec<u8>,
-    pub expires_at: time::PrimitiveDateTime,
-    pub created_at: time::PrimitiveDateTime,
-    pub last_used_at: time::PrimitiveDateTime,
+    pub expires_at: time::OffsetDateTime,
+    pub created_at: time::OffsetDateTime,
+    pub last_used_at: time::OffsetDateTime,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -135,7 +135,7 @@ pub struct SessionData {
 
 #[derive(Debug, Clone)]
 pub struct PendingSignChallenge {
-    pub auth_state: PasskeyAuthentication,
+    pub auth_state: SecurityKeyAuthentication,
     pub user_id: Uuid,
     pub method: String,
     pub path: String,
