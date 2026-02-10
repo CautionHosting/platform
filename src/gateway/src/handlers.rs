@@ -42,8 +42,8 @@ where
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoginError {
-    #[error("invalid or expired session")]
-    InvalidSession,
+    #[error("invalid or expired session: {0}")]
+    InvalidSession(String),
     #[error("authentication challenge has expired")]
     ChallengeExpired,
     #[error("your organization requires PIN verification")]
@@ -55,7 +55,7 @@ pub enum LoginError {
 impl IntoResponse for LoginError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            Self::InvalidSession | Self::ChallengeExpired => {
+            Self::InvalidSession(_) | Self::ChallengeExpired => {
                 (StatusCode::UNAUTHORIZED, self.to_string())
             }
             Self::PinRequired => {
@@ -74,12 +74,12 @@ impl IntoResponse for LoginError {
 pub enum SignRequestError {
     #[error("missing session")]
     MissingSession,
-    #[error("invalid or expired session")]
-    InvalidSession,
-    #[error("missing CSRF token")]
-    CsrfMissing,
-    #[error("invalid CSRF token")]
-    CsrfInvalid,
+    #[error("invalid or expired session: {0}")]
+    InvalidSession(String),
+    #[error("missing CSRF token for session: {0}")]
+    CsrfMissing(String),
+    #[error("invalid CSRF token for session: {0}")]
+    CsrfInvalid(String),
     #[error("{0}")]
     Internal(String),
 }
@@ -87,10 +87,10 @@ pub enum SignRequestError {
 impl IntoResponse for SignRequestError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            Self::MissingSession | Self::InvalidSession => {
+            Self::MissingSession | Self::InvalidSession(_) => {
                 (StatusCode::UNAUTHORIZED, self.to_string())
             }
-            Self::CsrfMissing | Self::CsrfInvalid => {
+            Self::CsrfMissing(_) | Self::CsrfInvalid(_) => {
                 (StatusCode::FORBIDDEN, self.to_string())
             }
             Self::Internal(ref e) => {
@@ -382,13 +382,13 @@ pub async fn finish_login_handler(
 ) -> Result<Response, LoginError> {
     let session_key = req.get("session")
         .and_then(|v| v.as_str())
-        .ok_or(LoginError::InvalidSession)?
+        .ok_or_else(|| LoginError::InvalidSession("missing session field".into()))?
         .to_string();
 
     let pending = state.auth_states.read().await
         .get(&session_key)
         .cloned()
-        .ok_or(LoginError::InvalidSession)?;
+        .ok_or_else(|| LoginError::InvalidSession(session_key.clone()))?;
 
     // Check if the authentication challenge has expired.
     if time::OffsetDateTime::now_utc() > pending.expires_at {
@@ -426,7 +426,7 @@ pub async fn finish_login_handler(
             LoginError::Internal(format!("Failed to finish authentication: {}", e))
         })?;
 
-    tracing::debug!("Authentication successful, user_verified={}", auth_result.user_verified());
+    tracing::debug!(user_verified = auth_result.user_verified(), "Authentication successful");
 
     // Check if user's org requires PIN verification.
     let requires_pin = db::user_requires_pin(&state.db, user_id)
@@ -600,7 +600,7 @@ pub async fn begin_sign_request_handler(
     let credential_id = db::validate_auth_session(&state.db, &session_id)
         .await
         .map_err(|e| SignRequestError::Internal(e.to_string()))?
-        .ok_or(SignRequestError::InvalidSession)?;
+        .ok_or_else(|| SignRequestError::InvalidSession(session_id.clone()))?;
 
     // Validate CSRF for cookie-based auth (browser).
     if !using_header_auth {
@@ -609,9 +609,9 @@ pub async fn begin_sign_request_handler(
         let csrf_header = headers
             .get("X-CSRF-Token")
             .and_then(|h| h.to_str().ok())
-            .ok_or(SignRequestError::CsrfMissing)?;
+            .ok_or_else(|| SignRequestError::CsrfMissing(session_id.clone()))?;
         if !crate::csrf::constant_time_compare(&expected_csrf, csrf_header) {
-            return Err(SignRequestError::CsrfInvalid);
+            return Err(SignRequestError::CsrfInvalid(session_id.clone()));
         }
     }
 

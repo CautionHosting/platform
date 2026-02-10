@@ -632,6 +632,7 @@ async fn delete_organization(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[tracing::instrument(skip(state, auth))]
 async fn get_org_settings(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -660,6 +661,7 @@ async fn get_org_settings(
     Ok(Json(org_settings))
 }
 
+#[tracing::instrument(skip(state, auth, payload))]
 async fn update_org_settings(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -694,8 +696,11 @@ async fn update_org_settings(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let org_settings: OrgSettings = serde_json::from_value(updated_settings)
-        .unwrap_or(OrgSettings { require_pin: false });
+    let org_settings: OrgSettings = serde_json::from_value(updated_settings.clone())
+        .map_err(|e| {
+            tracing::error!("Failed to parse updated org settings: {:?}, raw value: {:?}", e, updated_settings);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(Json(org_settings))
 }

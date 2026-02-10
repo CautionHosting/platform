@@ -462,7 +462,7 @@ pub struct SshKeyInfo {
 
 /// Check if any of the user's organizations require PIN for authentication.
 /// Returns true if ANY org the user belongs to has require_pin = true.
-pub async fn user_requires_pin(pool: &PgPool, user_id: Uuid) -> Result<bool> {
+pub async fn user_requires_pin(pool: &PgPool, user_id: Uuid) -> Result<bool, sqlx::Error> {
     let requires_pin: Option<bool> = sqlx::query_scalar(
         r#"
         SELECT EXISTS (
@@ -476,8 +476,7 @@ pub async fn user_requires_pin(pool: &PgPool, user_id: Uuid) -> Result<bool> {
     )
     .bind(user_id)
     .fetch_one(pool)
-    .await
-    .context("Failed to check user PIN requirement")?;
+    .await?;
 
     Ok(requires_pin.unwrap_or(false))
 }
