@@ -8,6 +8,7 @@ use axum::{
     Json,
 };
 use axum_extra::extract::cookie::{Cookie, SameSite};
+use uuid::Uuid;
 use webauthn_rs::prelude::*;
 use webauthn_rs_proto::{ResidentKeyRequirement, UserVerificationPolicy};
 use time::{Duration, format_description::well_known::Rfc3339};
@@ -48,8 +49,26 @@ pub enum LoginError {
     ChallengeExpired,
     #[error("your organization requires PIN verification")]
     PinRequired,
-    #[error("{0}")]
-    Internal(String),
+    #[error("failed to parse pubkey credential")]
+    ParsePubkeyCredential { #[source] source: serde_json::Error },
+    #[error("could not find user ID for: {provided_bytes:?}")]
+    DbGetUserIdByCredential { provided_bytes: Vec<u8>, #[source] source: anyhow::Error },
+    #[error("could not get public key for user {user_id}")]
+    DbGetPublicKeyForCredential { user_id: Uuid, #[source] source: anyhow::Error },
+    #[error("could not find PIN verification info for user {user_id}")]
+    DbUserPinRequired { user_id: Uuid, #[source] source: sqlx::Error },
+    #[error("could not update fido2 credentials for user {user_id}")]
+    DbUpdateFido2Credential { user_id: Uuid, #[source] source: anyhow::Error },
+    #[error("could not create auth session for user {user_id}")]
+    DbCreateAuthSession { user_id: Uuid, #[source] source: anyhow::Error },
+    #[error("could not get security key for user {user_id}")]
+    ParseSecurityKey { user_id: Uuid, #[source] source: serde_json::Error },
+    #[error("security key authentication could not be finalized for user {user_id}")]
+    FinishSecurityKeyAuthentication { user_id: Uuid, #[source] source: WebauthnError },
+    #[error("could not serialize security credential result for user {user_id}")]
+    SerializeSecurityKey { user_id: Uuid, #[source] source: serde_json::Error },
+    #[error("could not serialize login finish response")]
+    SerializeLoginFinishResponse { user_id: Uuid, #[source] source: serde_json::Error },
 }
 
 impl IntoResponse for LoginError {
@@ -61,8 +80,11 @@ impl IntoResponse for LoginError {
             Self::PinRequired => {
                 (StatusCode::FORBIDDEN, self.to_string())
             }
-            Self::Internal(ref e) => {
-                tracing::error!("Login error: {:?}", e);
+            Self::ParsePubkeyCredential { source: _ } => {
+                (StatusCode::BAD_REQUEST, self.to_string())
+            }
+            _ => {
+                tracing::error!(?self, "Login error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "an internal error occurred".into())
             }
         };
@@ -142,7 +164,7 @@ pub async fn begin_register_handler(
 
     tracing::debug!("Excluding {} existing credentials from registration", exclude_credentials.len());
 
-    let user_unique_id = uuid::Uuid::new_v4();
+    let user_unique_id = Uuid::new_v4();
     let user_name = format!("user_{}", user_unique_id);
 
     let (mut ccr, reg_state) = state
@@ -245,7 +267,7 @@ pub async fn finish_register_handler(
 
     state.reg_states.write().await.remove(&session_key);
 
-    let user_unique_id = uuid::Uuid::parse_str(&session_key)
+    let user_unique_id = Uuid::parse_str(&session_key)
         .map_err(|e| anyhow::anyhow!("Failed to parse user ID: {}", e))?;
 
     let user_id = db::create_user(&state.db, &user_unique_id.as_bytes()[..], pending.alpha_code_id)
@@ -363,7 +385,7 @@ pub async fn begin_login_handler(
         rcr.public_key.allow_credentials.len()
     );
 
-    let session_key = uuid::Uuid::new_v4().to_string();
+    let session_key = Uuid::new_v4().to_string();
     let pending = PendingAuthentication {
         auth_state,
         expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(2),
@@ -399,7 +421,7 @@ pub async fn finish_login_handler(
     let auth_state = pending.auth_state;
 
     let auth_response: PublicKeyCredential = serde_json::from_value(req.clone())
-        .map_err(|e| LoginError::Internal(format!("Failed to parse auth response: {}", e)))?;
+        .map_err(|source| LoginError::ParsePubkeyCredential { source })?;
 
     tracing::debug!("Received authentication response");
 
@@ -408,22 +430,30 @@ pub async fn finish_login_handler(
 
     let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
         .await
-        .map_err(|e| LoginError::Internal(e.to_string()))?;
+        .map_err(|source| LoginError::DbGetUserIdByCredential {
+            provided_bytes: credential_id_bytes.clone(),
+            source,
+        })?;
 
     let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
         .await
-        .map_err(|e| LoginError::Internal(e.to_string()))?;
+        .map_err(|source| LoginError::DbGetPublicKeyForCredential {
+            user_id,
+            source,
+        })?;
     let mut seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
-        .map_err(|e| LoginError::Internal(format!("Failed to deserialize credential: {}", e)))?;
+        .map_err(|source| LoginError::ParseSecurityKey { user_id, source })?;
 
     tracing::debug!("Credential fetched, performing securitykey authentication");
 
     let auth_result = state
         .webauthn
         .finish_securitykey_authentication(&auth_response, &auth_state)
-        .map_err(|e| {
-            tracing::error!("Authentication failed: {:?}", e);
-            LoginError::Internal(format!("Failed to finish authentication: {}", e))
+        .map_err(|source| {
+            LoginError::FinishSecurityKeyAuthentication {
+                user_id,
+                source,
+            }
         })?;
 
     tracing::debug!(user_verified = auth_result.user_verified(), "Authentication successful");
@@ -431,7 +461,10 @@ pub async fn finish_login_handler(
     // Check if user's org requires PIN verification.
     let requires_pin = db::user_requires_pin(&state.db, user_id)
         .await
-        .map_err(|e| LoginError::Internal(e.to_string()))?;
+        .map_err(|source| LoginError::DbUserPinRequired {
+            user_id,
+            source,
+        })?;
     if requires_pin && !auth_result.user_verified() {
         tracing::warn!("User {} login rejected: org requires PIN but user_verified=false", user_id);
         return Err(LoginError::PinRequired);
@@ -442,7 +475,7 @@ pub async fn finish_login_handler(
 
         if let Some(true) = update_result {
             let updated_key_json = serde_json::to_vec(&seckey)
-                .map_err(|e| LoginError::Internal(format!("Failed to serialize updated credential: {}", e)))?;
+                .map_err(|source| LoginError::SerializeSecurityKey { user_id, source })?;
 
             db::update_fido2_credential(
                 &state.db,
@@ -451,7 +484,7 @@ pub async fn finish_login_handler(
                 auth_result.counter(),
             )
             .await
-            .map_err(|e| LoginError::Internal(e.to_string()))?;
+            .map_err(|source| LoginError::DbUpdateFido2Credential { user_id, source })?;
         }
     }
 
@@ -463,7 +496,7 @@ pub async fn finish_login_handler(
 
     db::create_auth_session(&state.db, &session_id, &credential_id_bytes, expires_at)
         .await
-        .map_err(|e| LoginError::Internal(e.to_string()))?;
+        .map_err(|source| LoginError::DbCreateAuthSession { user_id, source })?;
 
     let credential_id_hex = hex::encode(&credential_id_bytes);
     tracing::debug!("Login complete (session expires in {} hours)", state.session_timeout_hours);
@@ -479,7 +512,7 @@ pub async fn finish_login_handler(
     let (session_cookie, csrf_cookie) = build_auth_cookies(&session_id, &csrf_token, state.session_timeout_hours, secure);
 
     let body = serde_json::to_string(&response_body)
-        .map_err(|e| LoginError::Internal(format!("Failed to serialize response: {}", e)))?;
+        .map_err(|source| LoginError::SerializeLoginFinishResponse { user_id, source })?;
 
     // Use HeaderMap with append to properly set multiple Set-Cookie headers
     let mut headers = HeaderMap::new();
@@ -498,7 +531,7 @@ pub struct AddSshKeyRequest {
 
 #[derive(Debug, Serialize)]
 pub struct AddSshKeyResponse {
-    pub id: uuid::Uuid,
+    pub id: Uuid,
     pub fingerprint: String,
 }
 
@@ -515,7 +548,7 @@ pub async fn add_ssh_key_handler(
     let user_id = user_id_header
         .get("X-Authenticated-User-ID")
         .and_then(|h| h.to_str().ok())
-        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or_else(|| anyhow::anyhow!("Missing or invalid user ID"))?;
 
     crate::validation::validate_ssh_public_key(&req.public_key)
@@ -550,7 +583,7 @@ pub async fn list_ssh_keys_handler(
     let user_id = user_id_header
         .get("X-Authenticated-User-ID")
         .and_then(|h| h.to_str().ok())
-        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or_else(|| anyhow::anyhow!("Missing or invalid user ID"))?;
 
     let keys = crate::db::list_ssh_keys(&state.db, user_id).await?;
@@ -566,7 +599,7 @@ pub async fn delete_ssh_key_handler(
     let user_id = user_id_header
         .get("X-Authenticated-User-ID")
         .and_then(|h| h.to_str().ok())
-        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or_else(|| anyhow::anyhow!("Missing or invalid user ID"))?;
 
     let deleted = crate::db::delete_ssh_key(&state.db, user_id, &fingerprint).await?;
@@ -641,7 +674,7 @@ pub async fn begin_sign_request_handler(
         rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
     }
 
-    let challenge_id = uuid::Uuid::new_v4().to_string();
+    let challenge_id = Uuid::new_v4().to_string();
     let pending = crate::types::PendingSignChallenge {
         auth_state,
         user_id,
