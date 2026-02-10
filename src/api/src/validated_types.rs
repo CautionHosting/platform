@@ -202,7 +202,7 @@ pub struct CreateResourceResponse {
     pub resource_name: String,
     pub git_url: String,
     pub state: String,
-    pub created_at: chrono::NaiveDateTime,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Serialize)]

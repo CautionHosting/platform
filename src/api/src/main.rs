@@ -17,7 +17,7 @@ use sqlx::{postgres::PgPoolOptions, PgPool, FromRow};
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing::info;
-use chrono::{DateTime, Utc, NaiveDateTime};
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use enclave_builder::{BuildConfig as DockerBuildConfig, build_user_image};
 
@@ -102,8 +102,8 @@ struct ComputeResource {
     domain: Option<String>,
     billing_tag: Option<String>,
     configuration: Option<serde_json::Value>,
-    created_at: chrono::NaiveDateTime,
-    updated_at: chrono::NaiveDateTime,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
 }
 
 use validated_types::{CreateResourceRequest, CreateResourceResponse, RenameResourceRequest};
@@ -1243,7 +1243,7 @@ async fn create_resource(
 
     tracing::debug!("Creating resource with slug: {}", resource_slug);
 
-    let resource: (Uuid, types::ResourceState, NaiveDateTime) = match sqlx::query_as(
+    let resource: (Uuid, types::ResourceState, DateTime<Utc>) = match sqlx::query_as(
         "INSERT INTO compute_resources
          (organization_id, provider_account_id, resource_type_id, provider_resource_id,
           resource_name, state, configuration, created_by)
@@ -1368,9 +1368,9 @@ async fn proxy_attestation(
     Path(resource_id): Path<Uuid>,
     body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Get the resource to verify ownership and get the public IP
-    let resource: (Option<String>,) = sqlx::query_as(
-        "SELECT cr.public_ip
+    // Get the resource to verify ownership and get the public IP + domain
+    let resource: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT cr.public_ip, cr.configuration->>'domain' as domain
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
          WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL"
@@ -1385,14 +1385,19 @@ async fn proxy_attestation(
         (StatusCode::BAD_REQUEST, "Resource has no public IP".to_string())
     })?;
 
-    // Create HTTP client that accepts self-signed certs
+    // Create HTTP client that accepts self-signed certs (for IP fallback)
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create HTTP client: {}", e)))?;
 
-    let attestation_url = format!("https://{}/attestation", public_ip);
+    // Use domain for HTTPS when available, fall back to HTTP by IP
+    let attestation_url = if let Some(ref domain) = resource.1 {
+        format!("https://{}/attestation", domain)
+    } else {
+        format!("http://{}/attestation", public_ip)
+    };
     tracing::info!("Proxying attestation request to {}", attestation_url);
 
     let response = client
@@ -1818,7 +1823,7 @@ async fn create_managed_onprem_resource(
         let resource_slug = format!("app-{}", &provider_resource_id[..8]);
 
         // Create the resource first (so we have a resource_id for the credential)
-        let resource: (Uuid, types::ResourceState, NaiveDateTime) = sqlx::query_as(
+        let resource: (Uuid, types::ResourceState, DateTime<Utc>) = sqlx::query_as(
             "INSERT INTO compute_resources
              (organization_id, provider_account_id, resource_type_id, provider_resource_id,
               resource_name, state, configuration, created_by)
@@ -2000,7 +2005,7 @@ async fn deploy_logic(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get resource type: {}", e)))?;
 
     tracing::info!("Looking up resource by id={}", req.app_id);
-    let existing_resource: Option<(Uuid, Option<String>, Option<serde_json::Value>, Option<chrono::NaiveDateTime>)> = sqlx::query_as(
+    let existing_resource: Option<(Uuid, Option<String>, Option<serde_json::Value>, Option<DateTime<Utc>>)> = sqlx::query_as(
         "SELECT id, resource_name, configuration, destroyed_at FROM compute_resources
          WHERE id = $1 AND organization_id = $2"
     )

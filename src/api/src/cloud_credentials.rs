@@ -34,10 +34,10 @@ pub struct CloudCredential {
     pub config: serde_json::Value,
     pub is_default: bool,
     pub is_active: bool,
-    pub last_validated_at: Option<chrono::NaiveDateTime>,
+    pub last_validated_at: Option<chrono::DateTime<chrono::Utc>>,
     pub validation_error: Option<String>,
-    pub created_at: chrono::NaiveDateTime,
-    pub updated_at: chrono::NaiveDateTime,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Deserialize)]

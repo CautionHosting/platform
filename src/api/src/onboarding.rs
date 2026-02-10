@@ -7,7 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use chrono::{Duration, Local, NaiveDateTime};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, FromRow};
 use std::sync::Arc;
@@ -48,7 +48,7 @@ pub async fn get_user_status(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<UserStatus>, StatusCode> {
-    let result: Option<(Option<NaiveDateTime>, Option<NaiveDateTime>, Option<uuid::Uuid>)> = sqlx::query_as(
+    let result: Option<(Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<uuid::Uuid>)> = sqlx::query_as(
         "SELECT email_verified_at, payment_method_added_at, beta_code_id
          FROM users
          WHERE id = $1"
@@ -96,7 +96,7 @@ pub async fn send_verification_email(
     }
 
     let token = Uuid::new_v4().to_string();
-    let expires_at = Local::now().naive_local() + Duration::hours(24);
+    let expires_at = Utc::now() + Duration::hours(24);
 
     sqlx::query(
         "UPDATE users
@@ -161,7 +161,7 @@ pub async fn verify_email(
     State(state): State<Arc<AppState>>,
     Query(params): Query<VerifyEmailQuery>,
 ) -> Result<Response, StatusCode> {
-    let result: Option<(uuid::Uuid, NaiveDateTime)> = sqlx::query_as(
+    let result: Option<(uuid::Uuid, DateTime<Utc>)> = sqlx::query_as(
         "SELECT id, email_verification_token_expires_at
          FROM users
          WHERE email_verification_token = $1
@@ -186,7 +186,7 @@ pub async fn verify_email(
         }
     };
 
-    if Local::now().naive_local() > expires_at {
+    if Utc::now() > expires_at {
         return Ok((
             StatusCode::BAD_REQUEST,
             "Verification token has expired",
