@@ -49,7 +49,7 @@ pub enum LoginError {
     #[error("your organization requires PIN verification")]
     PinRequired,
     #[error("{0}")]
-    Internal(#[from] anyhow::Error),
+    Internal(String),
 }
 
 impl IntoResponse for LoginError {
@@ -81,7 +81,7 @@ pub enum SignRequestError {
     #[error("invalid CSRF token")]
     CsrfInvalid,
     #[error("{0}")]
-    Internal(#[from] anyhow::Error),
+    Internal(String),
 }
 
 impl IntoResponse for SignRequestError {
@@ -399,18 +399,22 @@ pub async fn finish_login_handler(
     let auth_state = pending.auth_state;
 
     let auth_response: PublicKeyCredential = serde_json::from_value(req.clone())
-        .map_err(|e| anyhow::anyhow!("Failed to parse auth response: {}", e))?;
+        .map_err(|e| LoginError::Internal(format!("Failed to parse auth response: {}", e)))?;
 
     tracing::debug!("Received authentication response");
 
     let credential_id_bytes = auth_response.raw_id.as_ref().to_vec();
     tracing::debug!("Credential ID: {}", hex::encode(&credential_id_bytes));
 
-    let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes).await?;
+    let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
+        .await
+        .map_err(|e| LoginError::Internal(e.to_string()))?;
 
-    let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes).await?;
+    let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
+        .await
+        .map_err(|e| LoginError::Internal(e.to_string()))?;
     let mut seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to deserialize credential: {}", e))?;
+        .map_err(|e| LoginError::Internal(format!("Failed to deserialize credential: {}", e)))?;
 
     tracing::debug!("Credential fetched, performing securitykey authentication");
 
@@ -419,13 +423,15 @@ pub async fn finish_login_handler(
         .finish_securitykey_authentication(&auth_response, &auth_state)
         .map_err(|e| {
             tracing::error!("Authentication failed: {:?}", e);
-            anyhow::anyhow!("Failed to finish authentication: {}", e)
+            LoginError::Internal(format!("Failed to finish authentication: {}", e))
         })?;
 
     tracing::debug!("Authentication successful, user_verified={}", auth_result.user_verified());
 
     // Check if user's org requires PIN verification.
-    let requires_pin = db::user_requires_pin(&state.db, user_id).await?;
+    let requires_pin = db::user_requires_pin(&state.db, user_id)
+        .await
+        .map_err(|e| LoginError::Internal(e.to_string()))?;
     if requires_pin && !auth_result.user_verified() {
         tracing::warn!("User {} login rejected: org requires PIN but user_verified=false", user_id);
         return Err(LoginError::PinRequired);
@@ -436,7 +442,7 @@ pub async fn finish_login_handler(
 
         if let Some(true) = update_result {
             let updated_key_json = serde_json::to_vec(&seckey)
-                .map_err(|e| anyhow::anyhow!("Failed to serialize updated credential: {}", e))?;
+                .map_err(|e| LoginError::Internal(format!("Failed to serialize updated credential: {}", e)))?;
 
             db::update_fido2_credential(
                 &state.db,
@@ -444,7 +450,8 @@ pub async fn finish_login_handler(
                 &updated_key_json,
                 auth_result.counter(),
             )
-            .await?;
+            .await
+            .map_err(|e| LoginError::Internal(e.to_string()))?;
         }
     }
 
@@ -454,7 +461,9 @@ pub async fn finish_login_handler(
     let csrf_token = crate::csrf::derive_csrf_token(&session_id, &crate::csrf::get_csrf_secret());
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
-    db::create_auth_session(&state.db, &session_id, &credential_id_bytes, expires_at).await?;
+    db::create_auth_session(&state.db, &session_id, &credential_id_bytes, expires_at)
+        .await
+        .map_err(|e| LoginError::Internal(e.to_string()))?;
 
     let credential_id_hex = hex::encode(&credential_id_bytes);
     tracing::debug!("Login complete (session expires in {} hours)", state.session_timeout_hours);
@@ -470,7 +479,7 @@ pub async fn finish_login_handler(
     let (session_cookie, csrf_cookie) = build_auth_cookies(&session_id, &csrf_token, state.session_timeout_hours, secure);
 
     let body = serde_json::to_string(&response_body)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))?;
+        .map_err(|e| LoginError::Internal(format!("Failed to serialize response: {}", e)))?;
 
     // Use HeaderMap with append to properly set multiple Set-Cookie headers
     let mut headers = HeaderMap::new();
@@ -589,7 +598,8 @@ pub async fn begin_sign_request_handler(
     };
 
     let credential_id = db::validate_auth_session(&state.db, &session_id)
-        .await?
+        .await
+        .map_err(|e| SignRequestError::Internal(e.to_string()))?
         .ok_or(SignRequestError::InvalidSession)?;
 
     // Validate CSRF for cookie-based auth (browser).
@@ -605,17 +615,23 @@ pub async fn begin_sign_request_handler(
         }
     }
 
-    let user_id = db::get_user_id_by_credential(&state.db, &credential_id).await?;
-    let requires_pin = db::user_requires_pin(&state.db, user_id).await?;
+    let user_id = db::get_user_id_by_credential(&state.db, &credential_id)
+        .await
+        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
+    let requires_pin = db::user_requires_pin(&state.db, user_id)
+        .await
+        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
 
-    let cred_bytes = db::get_credential_public_key(&state.db, &credential_id).await?;
+    let cred_bytes = db::get_credential_public_key(&state.db, &credential_id)
+        .await
+        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
     let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to deserialize credential: {}", e))?;
+        .map_err(|e| SignRequestError::Internal(format!("Failed to deserialize credential: {}", e)))?;
 
     let (mut rcr, auth_state) = state
         .webauthn
         .start_securitykey_authentication(&[seckey])
-        .map_err(|e| anyhow::anyhow!("Failed to start signing challenge: {}", e))?;
+        .map_err(|e| SignRequestError::Internal(format!("Failed to start signing challenge: {}", e)))?;
 
     // Set user verification based on org settings
     if requires_pin {
