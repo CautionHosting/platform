@@ -92,6 +92,14 @@ pub async fn fido2_auth_middleware(
         return Ok(next.run(req).await);
     }
 
+    // If the request was already authenticated by fido2_sign_middleware,
+    // trust its X-Authenticated-User-ID and skip session-based auth.
+    // X-Fido2-Signed is safe to trust here because the sign middleware strips
+    // it from incoming requests before setting it only after FIDO verification.
+    if req.headers().get("X-Fido2-Signed").is_some() {
+        return Ok(next.run(req).await);
+    }
+
     // SECURITY: Never trust X-Authenticated-User-ID from external requests.
     // This header should only be set by this middleware after authentication.
     // Strip it if present to prevent authentication bypass attacks.
@@ -156,8 +164,10 @@ pub async fn fido2_sign_middleware(
     mut req: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    // SECURITY: Strip X-Authenticated-User-ID to prevent bypass attacks
+    // SECURITY: Strip headers to prevent bypass attacks from external requests.
+    // These headers are only set internally by this middleware after verification.
     req.headers_mut().remove("X-Authenticated-User-ID");
+    req.headers_mut().remove("X-Fido2-Signed");
 
     // Paths that require signature for write operations
     let path = req.uri().path();
