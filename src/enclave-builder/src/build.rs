@@ -188,8 +188,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build-steve/target \
-    cargo build --release --locked --target ${{TARGET_ARCH}} -p steve \
-      && install -D -m 0755 /build-steve/target/${{TARGET_ARCH}}/release/steve /binaries/steve
+    cargo build --release --locked --target ${TARGET_ARCH} -p steve \
+      && install -D -m 0755 /build-steve/target/${TARGET_ARCH}/release/steve /binaries/steve
 "#
     } else {
         ""
