@@ -11,7 +11,7 @@ use uuid::Uuid;
 /// Registration state that includes the alpha code ID for closed alpha
 #[derive(Clone)]
 pub struct PendingRegistration {
-    pub reg_state: PasskeyRegistration,
+    pub reg_state: SecurityKeyRegistration,
     pub alpha_code_id: Uuid,
     pub expires_at: time::OffsetDateTime,
 }

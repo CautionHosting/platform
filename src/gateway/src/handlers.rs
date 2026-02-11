@@ -169,21 +169,24 @@ pub async fn begin_register_handler(
 
     let (mut ccr, reg_state) = state
         .webauthn
-        .start_passkey_registration(
+        .start_securitykey_registration(
             user_unique_id,
             &user_name,
             &user_name,
             Some(exclude_credentials).filter(|v| !v.is_empty()),
+            None,
+            None,
         )
         .map_err(|e| anyhow::anyhow!("Failed to start registration: {}", e))?;
 
     // Override authenticator selection to be maximally compatible:
-    // - UV Preferred: authenticators that support PIN/biometric will set it up, but won't block
+    // - UV Preferred: authenticators that support PIN/biometric will use it, but won't block
     //   basic authenticators. Organizations can require PIN later via security settings.
     // - Resident key Preferred: allows password managers (which create discoverable credentials)
     //   while still accepting hardware keys that don't support credential storage.
-    // - Clear extensions: start_passkey_registration sets credProtect to UserVerificationRequired
-    //   which conflicts with UV Preferred and causes Chrome to reject password manager registration.
+    // - Clear extensions: start_securitykey_registration sets credProtect to
+    //   UserVerificationRequired which conflicts with UV Preferred and causes Firefox/Chrome
+    //   to reject PIN-less smart cards and password manager registration.
     if let Some(ref mut auth_sel) = ccr.public_key.authenticator_selection {
         auth_sel.user_verification = UserVerificationPolicy::Preferred;
         auth_sel.resident_key = Some(ResidentKeyRequirement::Preferred);
@@ -252,12 +255,12 @@ pub async fn finish_register_handler(
     let reg_response: RegisterPublicKeyCredential = serde_json::from_value(req.clone())
         .map_err(|e| anyhow::anyhow!("Failed to parse registration response: {}", e))?;
 
-    let passkey = state
+    let seckey = state
         .webauthn
-        .finish_passkey_registration(&reg_response, &pending.reg_state)
+        .finish_securitykey_registration(&reg_response, &pending.reg_state)
         .map_err(|e| anyhow::anyhow!("Failed to finish registration: {}", e))?;
 
-    let credential_id = passkey.cred_id().clone();
+    let credential_id = seckey.cred_id().clone();
     if db::credential_exists(&state.db, &credential_id).await? {
         tracing::warn!("Registration rejected - credential already registered");
         return Err(anyhow::anyhow!(
@@ -280,8 +283,8 @@ pub async fn finish_register_handler(
 
     tracing::debug!("User registered and alpha code redeemed");
 
-    let passkey_json = serde_json::to_vec(&passkey)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize passkey: {}", e))?;
+    let passkey_json = serde_json::to_vec(&seckey)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize credential: {}", e))?;
 
     db::save_fido2_credential(
         &state.db,
