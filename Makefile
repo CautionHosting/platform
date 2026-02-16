@@ -71,7 +71,7 @@ postgres: network volume
 			-e POSTGRES_DB=$(DB_NAME) \
 			-e POSTGRES_USER=$(DB_USER) \
 			-e POSTGRES_PASSWORD=$(DB_PASSWORD) \
-			-p 5432:5432 \
+			-p 127.0.0.1:5432:5432 \
 			postgres:16-alpine && \
 		echo "Postgres started, waiting for ready..." && \
 		sleep 5 && \
