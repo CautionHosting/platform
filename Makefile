@@ -105,7 +105,6 @@ run-api: network postgres
 		--dns 8.8.4.4 \
 		--group-add $$(stat -c '%g' /var/run/docker.sock) \
 		-e AWS_REGION=us-west-2 \
-		-e TERRAFORM_STATE_BUCKET=caution-terraform-state \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
 		-e DATABASE_URL=$(DATABASE_URL) \
