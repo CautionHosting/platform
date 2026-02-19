@@ -5,3 +5,10 @@ env
 git-repos/
 build-cache/
 caution-cache/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfstate.*.backup
+backend.tf.disabled
