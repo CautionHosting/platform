@@ -1247,6 +1247,9 @@ provider "aws" {{
         )
     };
 
+    let eif_bucket = std::env::var("EIF_S3_BUCKET")
+        .unwrap_or_else(|_| "caution-eif-storage".to_string());
+
     let main_tf_content = format!(
         r#"terraform {{
   required_version = ">= 1.0"
@@ -1328,8 +1331,8 @@ resource "aws_iam_role_policy" "enclave_s3" {{
           "s3:ListBucket"
         ]
         Resource = [
-          "arn:aws:s3:::caution-eif-storage",
-          "arn:aws:s3:::caution-eif-storage/*"
+          "arn:aws:s3:::{eif_bucket}",
+          "arn:aws:s3:::{eif_bucket}/*"
         ]
       }}
     ]
@@ -1571,6 +1574,7 @@ output "instance_type" {{
         resource_name = request.resource_name,
         org_id = request.org_id,
         eif_s3_path = eif_s3_path,
+        eif_bucket = eif_bucket,
         memory_mb = request.memory_mb,
         cpu_count = cpu_count_rounded,
         debug_mode = if request.debug_mode { "true" } else { "false" },
