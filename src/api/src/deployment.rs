@@ -1316,7 +1316,7 @@ resource "aws_iam_role" "enclave" {{
   }}
 }}
 
-# IAM policy for S3 access
+# IAM policy for S3 access (scoped to org prefix)
 resource "aws_iam_role_policy" "enclave_s3" {{
   name_prefix = "enclave-s3-{resource_name}-"
   role        = aws_iam_role.enclave.id
@@ -1327,12 +1327,10 @@ resource "aws_iam_role_policy" "enclave_s3" {{
       {{
         Effect = "Allow"
         Action = [
-          "s3:GetObject",
-          "s3:ListBucket"
+          "s3:GetObject"
         ]
         Resource = [
-          "arn:aws:s3:::{eif_bucket}",
-          "arn:aws:s3:::{eif_bucket}/*"
+          "arn:aws:s3:::{eif_bucket}/eifs/{org_id}/*"
         ]
       }}
     ]
