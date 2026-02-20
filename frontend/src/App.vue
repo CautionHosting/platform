@@ -13,6 +13,7 @@ import Onboarding from './views/Onboarding.vue'
 import Register from './views/Login.vue'
 import AuthLogin from './views/AuthLogin.vue'
 import Dashboard from './views/Dashboard.vue'
+import QrLogin from './views/QrLogin.vue'
 import { getCsrfToken } from './composables/useWebAuthn.js'
 
 export default {
@@ -21,7 +22,8 @@ export default {
     Onboarding,
     Register,
     AuthLogin,
-    Dashboard
+    Dashboard,
+    QrLogin
   },
   setup() {
     // Session is now stored in HTTP-only cookie, not URL
@@ -48,6 +50,10 @@ export default {
       '/dashboard': {
         title: 'Dashboard • Caution',
         description: 'Manage your applications and verified enclave deployments.'
+      },
+      '/qr-login': {
+        title: 'CLI Login • Caution',
+        description: 'Authenticate your CLI session using a security key.'
       }
     }
 
@@ -101,6 +107,9 @@ export default {
           return 'Register'
         }
         return 'Dashboard'
+      } else if (path === '/qr-login') {
+        // Public route - QR code CLI login (no auth required)
+        return 'QrLogin'
       }
 
       // Unknown path - redirect to home

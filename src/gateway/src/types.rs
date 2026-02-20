@@ -156,3 +156,46 @@ pub struct SignChallengeResponse {
     pub challenge: RequestChallengeResponse,
     pub challenge_id: String,
 }
+
+// QR Login types
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QrLoginBeginResponse {
+    pub token: String,
+    pub url: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QrLoginStatusResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QrLoginAuthenticateRequest {
+    pub token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QrLoginAuthenticateResponse {
+    #[serde(flatten)]
+    pub challenge: RequestChallengeResponse,
+    pub session: String,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DbQrLoginToken {
+    pub token: String,
+    pub status: String,
+    pub ip_address: Option<String>,
+    pub browser_ip_address: Option<String>,
+    pub auth_challenge_key: Option<String>,
+    pub session_id: Option<String>,
+    pub expires_at: time::OffsetDateTime,
+    pub created_at: time::OffsetDateTime,
+}

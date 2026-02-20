@@ -460,6 +460,106 @@ pub struct SshKeyInfo {
     pub last_used_at: Option<time::OffsetDateTime>,
 }
 
+// QR Login token functions
+
+pub async fn create_qr_login_token(
+    pool: &PgPool,
+    token: &str,
+    ip_address: Option<&str>,
+    expires_at: OffsetDateTime,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO qr_login_tokens (token, status, ip_address, expires_at)
+         VALUES ($1, 'pending', $2, $3)"
+    )
+    .bind(token)
+    .bind(ip_address)
+    .bind(expires_at)
+    .execute(pool)
+    .await
+    .context("Failed to create QR login token")?;
+
+    Ok(())
+}
+
+pub async fn get_qr_login_token(pool: &PgPool, token: &str) -> Result<Option<crate::types::DbQrLoginToken>> {
+    let row: Option<crate::types::DbQrLoginToken> = sqlx::query_as(
+        "SELECT token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at
+         FROM qr_login_tokens
+         WHERE token = $1"
+    )
+    .bind(token)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to get QR login token")?;
+
+    Ok(row)
+}
+
+pub async fn claim_qr_login_token(
+    pool: &PgPool,
+    token: &str,
+    auth_challenge_key: &str,
+    browser_ip: Option<&str>,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE qr_login_tokens
+         SET status = 'authenticated', auth_challenge_key = $2, browser_ip_address = $3
+         WHERE token = $1 AND status = 'pending' AND expires_at > NOW()"
+    )
+    .bind(token)
+    .bind(auth_challenge_key)
+    .bind(browser_ip)
+    .execute(pool)
+    .await
+    .context("Failed to claim QR login token")?;
+
+    Ok(result.rows_affected() == 1)
+}
+
+pub async fn complete_qr_login_token(
+    pool: &PgPool,
+    token: &str,
+    session_id: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE qr_login_tokens
+         SET status = 'completed', session_id = $2
+         WHERE token = $1 AND status = 'authenticated'"
+    )
+    .bind(token)
+    .bind(session_id)
+    .execute(pool)
+    .await
+    .context("Failed to complete QR login token")?;
+
+    Ok(result.rows_affected() == 1)
+}
+
+pub async fn cleanup_expired_qr_login_tokens(pool: &PgPool) -> Result<u64> {
+    let result = sqlx::query(
+        "DELETE FROM qr_login_tokens WHERE expires_at < NOW() - INTERVAL '5 minutes'"
+    )
+    .execute(pool)
+    .await
+    .context("Failed to cleanup expired QR login tokens")?;
+
+    Ok(result.rows_affected())
+}
+
+pub async fn get_auth_session(pool: &PgPool, session_id: &str) -> Result<Option<crate::types::DbSession>> {
+    let session = sqlx::query_as(
+        "SELECT session_id, credential_id, expires_at, created_at, last_used_at
+         FROM auth_sessions WHERE session_id = $1"
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to get auth session")?;
+
+    Ok(session)
+}
+
 /// Check if any of the user's organizations require PIN for authentication.
 /// Returns true if ANY org the user belongs to has require_pin = true.
 pub async fn user_requires_pin(pool: &PgPool, user_id: Uuid) -> Result<bool, sqlx::Error> {

@@ -142,6 +142,10 @@ async fn main() -> Result<()> {
         .route("/auth/login/begin", post(handlers::begin_login_handler))
         .route("/auth/login/finish", post(handlers::finish_login_handler))
         .route("/auth/logout", post(handlers::logout_handler))
+        .route("/auth/qr-login/begin", post(handlers::qr_login_begin_handler))
+        .route("/auth/qr-login/status", get(handlers::qr_login_status_handler))
+        .route("/auth/qr-login/authenticate", post(handlers::qr_login_authenticate_handler))
+        .route("/auth/qr-login/authenticate/finish", post(handlers::qr_login_authenticate_finish_handler))
         .route("/auth/sign-request", post(handlers::begin_sign_request_handler))
         .layer(middleware::from_fn_with_state(
             rate_limiter.clone(),
@@ -204,6 +208,15 @@ async fn main() -> Result<()> {
                 Ok(_) => {}
                 Err(e) => {
                     tracing::error!("Failed to cleanup expired sessions: {:?}", e);
+                }
+            }
+            match db::cleanup_expired_qr_login_tokens(&cleanup_pool).await {
+                Ok(count) if count > 0 => {
+                    tracing::info!("Cleaned up {} expired QR login tokens", count);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!("Failed to cleanup expired QR login tokens: {:?}", e);
                 }
             }
         }
