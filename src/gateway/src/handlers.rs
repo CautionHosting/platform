@@ -11,7 +11,7 @@ use axum_extra::extract::cookie::{Cookie, SameSite};
 use uuid::Uuid;
 use webauthn_rs::prelude::*;
 use webauthn_rs_proto::{ResidentKeyRequirement, UserVerificationPolicy};
-use time::{Duration, format_description::well_known::Rfc3339};
+use time::Duration;
 use serde::{Serialize, Deserialize};
 
 use crate::db;
@@ -87,6 +87,49 @@ impl IntoResponse for LoginError {
             }
             _ => {
                 tracing::error!(?self, "Login error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "an internal error occurred".into())
+            }
+        };
+        (status, message).into_response()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum QrLoginError {
+    #[error("QR login token not found")]
+    TokenNotFound,
+    #[error("QR login token has expired")]
+    TokenExpired,
+    #[error("QR login token in unexpected state: {0}")]
+    UnexpectedState(String),
+    #[error("QR login token already claimed")]
+    AlreadyClaimed,
+    #[error("could not create QR login token")]
+    DbCreateToken { #[source] source: anyhow::Error },
+    #[error("could not query QR login token")]
+    DbGetToken { #[source] source: anyhow::Error },
+    #[error("could not claim QR login token")]
+    DbClaimToken { #[source] source: anyhow::Error },
+    #[error("could not query auth session")]
+    DbGetSession { #[source] source: anyhow::Error },
+    #[error("could not fetch credentials")]
+    DbGetCredentials { #[source] source: anyhow::Error },
+    #[error("could not deserialize credential")]
+    DeserializeCredential { #[source] source: serde_json::Error },
+    #[error("could not start authentication challenge")]
+    StartAuthentication { #[source] source: WebauthnError },
+}
+
+impl IntoResponse for QrLoginError {
+    fn into_response(self) -> Response {
+        let (status, message) = match self {
+            Self::TokenNotFound => (StatusCode::NOT_FOUND, self.to_string()),
+            Self::TokenExpired => (StatusCode::GONE, self.to_string()),
+            Self::UnexpectedState(_) | Self::AlreadyClaimed => {
+                (StatusCode::CONFLICT, self.to_string())
+            }
+            _ => {
+                tracing::error!(?self, "QR login error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "an internal error occurred".into())
             }
         };
@@ -315,7 +358,7 @@ pub async fn finish_register_handler(
     let response_body = RegisterFinishResponse {
         status: "success".to_string(),
         credential_id: credential_id_hex,
-        expires_at: expires_at.format(&Rfc3339).unwrap_or_else(|_| expires_at.to_string()),
+        expires_at: expires_at.to_string(),
     };
 
     // Check if we're in production (HTTPS) - use secure cookies
@@ -338,29 +381,17 @@ pub async fn begin_login_handler(
     State(state): State<AppState>,
 ) -> Result<Json<LoginBeginResponse>, AppError> {
 
-    let all_credential_ids: Vec<Vec<u8>> = sqlx::query_scalar(
-        "SELECT credential_id FROM fido2_credentials"
-    )
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to fetch credentials from DB: {:?}", e);
-        anyhow::anyhow!("Failed to fetch credentials: {}", e)
-    })?;
+    let all_public_keys = db::get_all_credential_public_keys(&state.db).await
+        .map_err(|e| {
+            tracing::error!("Failed to fetch credentials from DB: {:?}", e);
+            anyhow::anyhow!("Failed to fetch credentials: {}", e)
+        })?;
 
-    tracing::debug!("Found {} credentials in database", all_credential_ids.len());
+    tracing::debug!("Found {} credentials in database", all_public_keys.len());
 
     let mut allow_credentials = Vec::new();
-    for (i, cred_id_bytes) in all_credential_ids.iter().enumerate() {
-        let cred_bytes = db::get_credential_public_key(&state.db, cred_id_bytes)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to get credential {}: {:?}", i, e);
-                anyhow::anyhow!("Failed to get credential: {}", e)
-            })?;
-
-        // Use SecurityKey for flexible UV policy (Passkey enforces UV=Required)
-        let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
+    for (i, cred_bytes) in all_public_keys.iter().enumerate() {
+        let seckey: SecurityKey = serde_json::from_slice(cred_bytes)
             .map_err(|e| {
                 tracing::error!("Failed to deserialize credential {}", i);
                 anyhow::anyhow!("Failed to deserialize credential: {}", e)
@@ -508,7 +539,7 @@ pub async fn finish_login_handler(
 
     // Build the response (session_id is in Set-Cookie header, not body)
     let response_body = LoginFinishResponse {
-        expires_at: expires_at.format(&Rfc3339).unwrap_or_else(|_| expires_at.to_string()),
+        expires_at: expires_at.to_string(),
         credential_id: credential_id_hex,
     };
 
@@ -729,7 +760,7 @@ pub struct QrLoginStatusQuery {
 pub async fn qr_login_begin_handler(
     State(state): State<AppState>,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
-) -> Result<Json<crate::types::QrLoginBeginResponse>, AppError> {
+) -> Result<Json<crate::types::QrLoginBeginResponse>, QrLoginError> {
     let token = db::generate_session_id();
     let expires_at = time::OffsetDateTime::now_utc() + Duration::minutes(3);
     let ip_address = connect_info.0.ip().to_string();
@@ -744,24 +775,28 @@ pub async fn qr_login_begin_handler(
 
     let url = format!("{}/qr-login?token={}", rp_origin, token);
 
-    db::create_qr_login_token(&state.db, &token, Some(&ip_address), expires_at).await?;
+    db::create_qr_login_token(&state.db, &token, Some(&ip_address), expires_at)
+        .await
+        .map_err(|source| QrLoginError::DbCreateToken { source })?;
 
     Ok(Json(crate::types::QrLoginBeginResponse {
         token,
         url,
-        expires_at: expires_at.format(&Rfc3339).unwrap_or_else(|_| expires_at.to_string()),
+        expires_at: expires_at.to_string(),
     }))
 }
 
 pub async fn qr_login_status_handler(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<QrLoginStatusQuery>,
-) -> Result<Json<crate::types::QrLoginStatusResponse>, AppError> {
-    let row = db::get_qr_login_token(&state.db, &query.token).await?;
+) -> Result<Json<crate::types::QrLoginStatusResponse>, QrLoginError> {
+    let row = db::get_qr_login_token(&state.db, &query.token)
+        .await
+        .map_err(|source| QrLoginError::DbGetToken { source })?;
 
     let Some(row) = row else {
         return Ok(Json(crate::types::QrLoginStatusResponse {
-            status: "expired".to_string(),
+            status: QrStatus::NotFound,
             session_id: None,
             expires_at: None,
         }));
@@ -769,22 +804,31 @@ pub async fn qr_login_status_handler(
 
     if time::OffsetDateTime::now_utc() > row.expires_at {
         return Ok(Json(crate::types::QrLoginStatusResponse {
-            status: "expired".to_string(),
+            status: QrStatus::Expired,
             session_id: None,
             expires_at: None,
         }));
     }
 
-    if row.status == "completed" {
-        if let Some(ref sid) = row.session_id {
-            let session = db::get_auth_session(&state.db, sid).await?;
+    let Some(status) = QrStatus::from_db(&row.status) else {
+        tracing::warn!("QR login token has unknown DB status: {}", row.status);
+        return Ok(Json(crate::types::QrLoginStatusResponse {
+            status: QrStatus::NotFound,
+            session_id: None,
+            expires_at: None,
+        }));
+    };
 
-            let session_expires = session.map(|s| {
-                s.expires_at.format(&Rfc3339).unwrap_or_else(|_| s.expires_at.to_string())
-            });
+    if status == QrStatus::Completed {
+        if let Some(ref sid) = row.session_id {
+            let session = db::get_auth_session(&state.db, sid)
+                .await
+                .map_err(|source| QrLoginError::DbGetSession { source })?;
+
+            let session_expires = session.map(|s| s.expires_at.to_string());
 
             return Ok(Json(crate::types::QrLoginStatusResponse {
-                status: "completed".to_string(),
+                status: QrStatus::Completed,
                 session_id: row.session_id,
                 expires_at: session_expires,
             }));
@@ -792,7 +836,7 @@ pub async fn qr_login_status_handler(
     }
 
     Ok(Json(crate::types::QrLoginStatusResponse {
-        status: row.status,
+        status,
         session_id: None,
         expires_at: None,
     }))
@@ -802,39 +846,39 @@ pub async fn qr_login_authenticate_handler(
     State(state): State<AppState>,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
     Json(req): Json<crate::types::QrLoginAuthenticateRequest>,
-) -> Result<Json<crate::types::QrLoginAuthenticateResponse>, AppError> {
+) -> Result<Json<crate::types::QrLoginAuthenticateResponse>, QrLoginError> {
     // Verify token exists and is pending
-    let row = db::get_qr_login_token(&state.db, &req.token).await?
-        .ok_or_else(|| anyhow::anyhow!("Invalid or expired QR login token"))?;
-
-    if row.status != "pending" {
-        return Err(anyhow::anyhow!("QR login token already used").into());
-    }
+    let row = db::get_qr_login_token(&state.db, &req.token)
+        .await
+        .map_err(|source| QrLoginError::DbGetToken { source })?
+        .ok_or(QrLoginError::TokenNotFound)?;
 
     if time::OffsetDateTime::now_utc() > row.expires_at {
-        return Err(anyhow::anyhow!("QR login token has expired").into());
+        return Err(QrLoginError::TokenExpired);
+    }
+
+    match QrStatus::from_db(&row.status) {
+        Some(QrStatus::Pending) => {},
+        Some(QrStatus::Authenticated) | Some(QrStatus::Completed) => return Err(QrLoginError::AlreadyClaimed),
+        _ => return Err(QrLoginError::UnexpectedState(row.status)),
     }
 
     // Start WebAuthn challenge (same logic as begin_login_handler)
-    let all_credential_ids: Vec<Vec<u8>> = sqlx::query_scalar(
-        "SELECT credential_id FROM fido2_credentials"
-    )
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to fetch credentials: {}", e))?;
+    let all_public_keys = db::get_all_credential_public_keys(&state.db)
+        .await
+        .map_err(|source| QrLoginError::DbGetCredentials { source })?;
 
     let mut allow_credentials = Vec::new();
-    for cred_id_bytes in all_credential_ids.iter() {
-        let cred_bytes = db::get_credential_public_key(&state.db, cred_id_bytes).await?;
-        let seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(&cred_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize credential: {}", e))?;
+    for cred_bytes in all_public_keys.iter() {
+        let seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(cred_bytes)
+            .map_err(|source| QrLoginError::DeserializeCredential { source })?;
         allow_credentials.push(seckey);
     }
 
     let (mut rcr, auth_state) = state
         .webauthn
         .start_securitykey_authentication(&allow_credentials)
-        .map_err(|e| anyhow::anyhow!("Failed to start authentication: {}", e))?;
+        .map_err(|source| QrLoginError::StartAuthentication { source })?;
 
     rcr.public_key.user_verification = webauthn_rs_proto::UserVerificationPolicy::Preferred;
 
@@ -843,15 +887,16 @@ pub async fn qr_login_authenticate_handler(
         auth_state,
         expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(3),
     };
-    state.auth_states.write().await.insert(session_key.clone(), pending);
 
-    // Atomically claim token
+    // Atomically claim token, then insert auth state under the same write guard
     let browser_ip = connect_info.0.ip().to_string();
-    let claimed = db::claim_qr_login_token(&state.db, &req.token, &session_key, Some(&browser_ip)).await?;
+    let claimed = db::claim_qr_login_token(&state.db, &req.token, &session_key, Some(&browser_ip))
+        .await
+        .map_err(|source| QrLoginError::DbClaimToken { source })?;
     if !claimed {
-        state.auth_states.write().await.remove(&session_key);
-        return Err(anyhow::anyhow!("QR login token already claimed or expired").into());
+        return Err(QrLoginError::AlreadyClaimed);
     }
+    state.auth_states.write().await.insert(session_key.clone(), pending);
 
     Ok(Json(crate::types::QrLoginAuthenticateResponse {
         challenge: rcr,
@@ -862,17 +907,10 @@ pub async fn qr_login_authenticate_handler(
 
 pub async fn qr_login_authenticate_finish_handler(
     State(state): State<AppState>,
-    Json(req): Json<serde_json::Value>,
+    Json(req): Json<crate::types::QrLoginAuthenticateFinishRequest>,
 ) -> Result<Json<serde_json::Value>, LoginError> {
-    let token = req.get("token")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| LoginError::InvalidSession("missing token field".into()))?
-        .to_string();
-
-    let session_key = req.get("session")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| LoginError::InvalidSession("missing session field".into()))?
-        .to_string();
+    let token = req.token;
+    let session_key = req.session;
 
     // Verify token is authenticated and session key matches
     let row = db::get_qr_login_token(&state.db, &token)
@@ -880,28 +918,36 @@ pub async fn qr_login_authenticate_finish_handler(
         .map_err(|e| LoginError::InvalidSession(e.to_string()))?
         .ok_or_else(|| LoginError::InvalidSession("invalid QR login token".into()))?;
 
-    if row.status != "authenticated" {
-        return Err(LoginError::InvalidSession("QR login token not in authenticated state".into()));
+    match QrStatus::from_db(&row.status) {
+        Some(QrStatus::Authenticated) => {},
+        other => {
+            tracing::warn!("QR login finish called with unexpected token status: {:?} (token: {})", other, token);
+            return Err(LoginError::InvalidSession(format!("QR login token in unexpected state: {}", row.status)));
+        }
     }
 
     if row.auth_challenge_key.as_deref() != Some(&session_key) {
+        tracing::warn!(
+            "QR login finish session key mismatch: expected {:?}, got {:?} (token: {})",
+            row.auth_challenge_key, session_key, token
+        );
         return Err(LoginError::InvalidSession("session key mismatch".into()));
     }
 
-    // Reuse finish_login logic: verify assertion
-    let pending = state.auth_states.read().await
-        .get(&session_key)
-        .cloned()
-        .ok_or_else(|| LoginError::InvalidSession(session_key.clone()))?;
+    // Take the pending auth state (single write guard for get + remove)
+    let pending = {
+        let mut auth_states = state.auth_states.write().await;
+        auth_states.remove(&session_key)
+            .ok_or_else(|| LoginError::InvalidSession(session_key.clone()))?
+    };
 
     if time::OffsetDateTime::now_utc() > pending.expires_at {
-        state.auth_states.write().await.remove(&session_key);
         return Err(LoginError::ChallengeExpired);
     }
 
     let auth_state = pending.auth_state;
 
-    let auth_response: webauthn_rs::prelude::PublicKeyCredential = serde_json::from_value(req.clone())
+    let auth_response: webauthn_rs::prelude::PublicKeyCredential = serde_json::from_value(req.credential)
         .map_err(|source| LoginError::ParsePubkeyCredential { source })?;
 
     let credential_id_bytes = auth_response.raw_id.as_ref().to_vec();
@@ -942,8 +988,6 @@ pub async fn qr_login_authenticate_finish_handler(
                 .map_err(|source| LoginError::DbUpdateFido2Credential { user_id, source })?;
         }
     }
-
-    state.auth_states.write().await.remove(&session_key);
 
     // Create auth session (NO cookies — CLI uses header auth)
     let session_id = db::generate_session_id();

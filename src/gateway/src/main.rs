@@ -201,24 +201,7 @@ async fn main() -> Result<()> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
         loop {
             interval.tick().await;
-            match db::cleanup_expired_sessions(&cleanup_pool).await {
-                Ok(count) if count > 0 => {
-                    tracing::info!("Cleaned up {} expired sessions", count);
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::error!("Failed to cleanup expired sessions: {:?}", e);
-                }
-            }
-            match db::cleanup_expired_qr_login_tokens(&cleanup_pool).await {
-                Ok(count) if count > 0 => {
-                    tracing::info!("Cleaned up {} expired QR login tokens", count);
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::error!("Failed to cleanup expired QR login tokens: {:?}", e);
-                }
-            }
+            db::run_cleanups(&cleanup_pool).await;
         }
     });
 

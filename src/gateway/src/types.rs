@@ -159,6 +159,32 @@ pub struct SignChallengeResponse {
 
 // QR Login types
 
+/// QR login token status.
+///
+/// DB stores only: Pending, Authenticated, Completed.
+/// Expired and NotFound are derived in handlers (from expires_at timestamp
+/// and row absence respectively).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QrStatus {
+    Pending,
+    Authenticated,
+    Completed,
+    Expired,
+    NotFound,
+}
+
+impl QrStatus {
+    pub fn from_db(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(Self::Pending),
+            "authenticated" => Some(Self::Authenticated),
+            "completed" => Some(Self::Completed),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QrLoginBeginResponse {
     pub token: String,
@@ -168,7 +194,7 @@ pub struct QrLoginBeginResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QrLoginStatusResponse {
-    pub status: String,
+    pub status: QrStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -186,6 +212,14 @@ pub struct QrLoginAuthenticateResponse {
     pub challenge: RequestChallengeResponse,
     pub session: String,
     pub token: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QrLoginAuthenticateFinishRequest {
+    pub token: String,
+    pub session: String,
+    #[serde(flatten)]
+    pub credential: serde_json::Value,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]

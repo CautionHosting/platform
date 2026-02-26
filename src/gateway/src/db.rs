@@ -133,6 +133,17 @@ pub async fn credential_exists(pool: &PgPool, credential_id: &[u8]) -> Result<bo
     Ok(exists)
 }
 
+pub async fn get_all_credential_public_keys(pool: &PgPool) -> Result<Vec<Vec<u8>>> {
+    let keys: Vec<Vec<u8>> = sqlx::query_scalar(
+        "SELECT public_key FROM fido2_credentials"
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch credential public keys")?;
+
+    Ok(keys)
+}
+
 pub async fn get_credential_public_key(pool: &PgPool, credential_id: &[u8]) -> Result<Vec<u8>> {
     let public_key: Option<Vec<u8>> = sqlx::query_scalar(
         "SELECT public_key FROM fido2_credentials WHERE credential_id = $1"
@@ -284,13 +295,23 @@ pub async fn delete_auth_session(pool: &PgPool, session_id: &str) -> Result<()> 
     Ok(())
 }
 
-pub async fn cleanup_expired_sessions(pool: &PgPool) -> Result<u64> {
-    let result = sqlx::query("DELETE FROM auth_sessions WHERE expires_at < NOW()")
-        .execute(pool)
-        .await
-        .context("Failed to cleanup sessions")?;
-    
-    Ok(result.rows_affected())
+pub async fn run_cleanups(pool: &PgPool) {
+    let tasks: &[(&str, &str)] = &[
+        ("expired sessions", "DELETE FROM auth_sessions WHERE expires_at < NOW()"),
+        ("expired QR login tokens", "DELETE FROM qr_login_tokens WHERE expires_at < NOW() - INTERVAL '5 minutes'"),
+    ];
+
+    for (name, query) in tasks {
+        match sqlx::query(query).execute(pool).await {
+            Ok(result) if result.rows_affected() > 0 => {
+                tracing::info!("Cleaned up {} {}", result.rows_affected(), name);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!("Failed to cleanup {}: {:?}", name, e);
+            }
+        }
+    }
 }
 
 pub fn generate_session_id() -> String {
@@ -536,16 +557,6 @@ pub async fn complete_qr_login_token(
     Ok(result.rows_affected() == 1)
 }
 
-pub async fn cleanup_expired_qr_login_tokens(pool: &PgPool) -> Result<u64> {
-    let result = sqlx::query(
-        "DELETE FROM qr_login_tokens WHERE expires_at < NOW() - INTERVAL '5 minutes'"
-    )
-    .execute(pool)
-    .await
-    .context("Failed to cleanup expired QR login tokens")?;
-
-    Ok(result.rows_affected())
-}
 
 pub async fn get_auth_session(pool: &PgPool, session_id: &str) -> Result<Option<crate::types::DbSession>> {
     let session = sqlx::query_as(
