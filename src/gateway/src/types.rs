@@ -156,3 +156,80 @@ pub struct SignChallengeResponse {
     pub challenge: RequestChallengeResponse,
     pub challenge_id: String,
 }
+
+// QR Login types
+
+/// QR login token status.
+///
+/// DB stores only: Pending, Authenticated, Completed.
+/// Expired and NotFound are derived in handlers (from expires_at timestamp
+/// and row absence respectively).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QrStatus {
+    Pending,
+    Authenticated,
+    Completed,
+    Expired,
+    NotFound,
+}
+
+impl QrStatus {
+    pub fn from_db(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(Self::Pending),
+            "authenticated" => Some(Self::Authenticated),
+            "completed" => Some(Self::Completed),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QrLoginBeginResponse {
+    pub token: String,
+    pub url: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QrLoginStatusResponse {
+    pub status: QrStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QrLoginAuthenticateRequest {
+    pub token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QrLoginAuthenticateResponse {
+    #[serde(flatten)]
+    pub challenge: RequestChallengeResponse,
+    pub session: String,
+    pub token: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QrLoginAuthenticateFinishRequest {
+    pub token: String,
+    pub session: String,
+    #[serde(flatten)]
+    pub credential: serde_json::Value,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DbQrLoginToken {
+    pub token: String,
+    pub status: String,
+    pub ip_address: Option<String>,
+    pub browser_ip_address: Option<String>,
+    pub auth_challenge_key: Option<String>,
+    pub session_id: Option<String>,
+    pub expires_at: time::OffsetDateTime,
+    pub created_at: time::OffsetDateTime,
+}
