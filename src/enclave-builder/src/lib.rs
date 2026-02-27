@@ -266,7 +266,7 @@ impl EnclaveBuilder {
     pub async fn build_eif_native(
         &self,
         user_fs_path: &std::path::Path,
-        attestation_service_path: &std::path::Path,
+        bootproofd_path: &std::path::Path,
         init_path: &std::path::Path,
         enclave_source_path: &std::path::Path,
         output_path: PathBuf,
@@ -277,7 +277,7 @@ impl EnclaveBuilder {
     ) -> Result<EifFile> {
         build::build_eif_from_filesystems(
             user_fs_path,
-            attestation_service_path,
+            bootproofd_path,
             init_path,
             enclave_source_path,
             output_path,

@@ -134,8 +134,8 @@ fi
 
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
-echo "Starting Attestation Service on port 8082..."
-/attestation-service &
+echo "Starting bootproofd on port 8082..."
+/bootproofd &
 
 {steve_section}
 echo "Starting VSOCK-to-TCP proxies..."
@@ -226,6 +226,31 @@ FROM stagex/user-nit@sha256:60b6eef4534ea6ea78d9f29e4c7feb27407b615424f20ad8943d
 FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769ff3b37239f3d0 AS git
 FROM stagex/core-curl@sha256:bc8bab43d96a9167fbb85022ea773644a45ef335e7a9b747f203078973fa988e AS curl
 {steve_builder_stage}
+FROM pallet-rust AS bootproof-builder
+
+COPY --from=git . /
+COPY --from=ca-certificates . /
+COPY --from=curl . /
+
+ENV SOURCE_DATE_EPOCH=1
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
+ENV TARGET_ARCH="x86_64-unknown-linux-musl"
+
+WORKDIR /build-bootproof
+RUN git clone https://git.distrust.co/public/bootproof.git . && \
+    git checkout 64dae0628e58b9f898b89f9b7a404b37e2f0ca9f
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo fetch --locked --target $TARGET_ARCH
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build-bootproof/target \
+    cargo build --release --locked --target ${{TARGET_ARCH}} -p bootproofd \
+      && install -D -m 0755 /build-bootproof/target/${{TARGET_ARCH}}/release/bootproofd /binaries/bootproofd
+
 FROM pallet-rust AS enclave-builder
 
 ENV SOURCE_DATE_EPOCH=1
@@ -240,12 +265,6 @@ COPY enclave/ /build-enclave/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     cargo fetch --locked --target $TARGET_ARCH
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build-enclave/target \
-    cargo build --release --locked --target ${{TARGET_ARCH}} -p attestation-service \
-      && install -D -m 0755 /build-enclave/target/${{TARGET_ARCH}}/release/attestation-service /binaries/attestation-service
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -270,6 +289,7 @@ COPY --from=nit . /
 WORKDIR /build
 
 COPY --from=enclave-builder /binaries/ /build/binaries/
+COPY --from=bootproof-builder /binaries/ /build/binaries/
 {steve_copy}
 
 COPY --from=linux-nitro /bzImage /build/kernel/bzImage
@@ -296,8 +316,8 @@ RUN cp /build/run.sh /build/initramfs/run.sh && \
 RUN cp /build/udhcpc-script.sh /build/initramfs/bin/udhcpc-script && \
     chmod +x /build/initramfs/bin/udhcpc-script
 
-RUN cp /build/binaries/attestation-service /build/initramfs/attestation-service && \
-    chmod +x /build/initramfs/attestation-service
+RUN cp /build/binaries/bootproofd /build/initramfs/bootproofd && \
+    chmod +x /build/initramfs/bootproofd
 
 {steve_install}
 
@@ -368,7 +388,7 @@ COPY --from=eif-builder /build/rootfs.cpio.gz /rootfs.cpio.gz
 
 pub async fn build_eif_from_filesystems(
     user_fs_path: &Path,
-    _attestation_service_path: &Path,
+    _bootproofd_path: &Path,
     _init_path: &Path,
     enclave_source_path: &Path,
     output_path: PathBuf,
