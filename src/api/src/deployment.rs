@@ -109,7 +109,7 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
         ).await.context("Failed to upload EIF to customer bucket")?;
         provision_managed_onprem(&request, &eif_s3_path, &config).await
     } else {
-        let eif_s3_path = upload_eif_to_s3(&request.eif_path, &request.org_id, &request.resource_name).await
+        let eif_s3_path = upload_eif_to_s3(&request.eif_path, &request.org_id, &request.resource_name, &request.aws_account_id).await
             .context("Failed to upload EIF to S3")?;
         provision_nitro_enclave(&request, &eif_s3_path, &config).await
     }
@@ -954,13 +954,13 @@ fn run_tofu_destroy(work_dir: &Path, resource_name: &str, credentials: Option<&A
     Ok(())
 }
 
-async fn upload_eif_to_s3(eif_path: &str, org_id: &Uuid, resource_name: &str) -> Result<String> {
+async fn upload_eif_to_s3(eif_path: &str, org_id: &Uuid, resource_name: &str, aws_account_id: &str) -> Result<String> {
     use aws_sdk_s3::primitives::ByteStream;
 
     tracing::info!("Uploading EIF to S3: {}", eif_path);
 
     let bucket_name = std::env::var("EIF_S3_BUCKET")
-        .unwrap_or_else(|_| "caution-eif-storage".to_string());
+        .unwrap_or_else(|_| format!("caution-eif-storage-{}", aws_account_id));
 
     let s3_key = format!("eifs/{}/{}.eif", org_id, resource_name);
 
@@ -1248,7 +1248,7 @@ provider "aws" {{
     };
 
     let eif_bucket = std::env::var("EIF_S3_BUCKET")
-        .unwrap_or_else(|_| "caution-eif-storage".to_string());
+        .unwrap_or_else(|_| format!("caution-eif-storage-{}", request.aws_account_id));
 
     let main_tf_content = format!(
         r#"terraform {{

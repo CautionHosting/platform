@@ -17,6 +17,7 @@ use sqlx::{postgres::PgPoolOptions, PgPool, FromRow};
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing::info;
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use enclave_builder::{BuildConfig as DockerBuildConfig, build_user_image};
@@ -401,10 +402,10 @@ async fn wait_for_attestation_health(public_ip: &str, timeout_secs: u64) -> Resu
         attempt += 1;
         tracing::info!("Polling attestation endpoint (attempt {}): {}", attempt, url);
 
-        let nonce: [u8; 32] = [0; 32];
+        let nonce_b64 = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
         let result = client
             .post(&url)
-            .json(&serde_json::json!({"nonce": nonce}))
+            .json(&serde_json::json!({"nonce": nonce_b64}))
             .send()
             .await;
 
