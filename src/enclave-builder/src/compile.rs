@@ -9,7 +9,7 @@ use flate2::read::GzDecoder;
 use tar::Archive;
 
 pub struct EnclaveBinaries {
-    pub attestation_service: PathBuf,
+    pub bootproofd: PathBuf,
     pub init: PathBuf,
 }
 
@@ -35,18 +35,15 @@ ENV TARGET_ARCH="x86_64-unknown-linux-musl"
 WORKDIR /build-enclave
 
 COPY Cargo.toml Cargo.lock ./
-COPY src/attestation-service/Cargo.toml ./src/attestation-service/
 COPY src/init/Cargo.toml ./src/init/
 COPY src/aws/Cargo.toml ./src/aws/
 COPY src/system/Cargo.toml ./src/system/
 
-RUN mkdir -p src/init/src src/aws/src src/system/src src/attestation-service/src && \
+RUN mkdir -p src/init/src src/aws/src src/system/src && \
     echo "fn main() {}" > src/init/src/main.rs && \
     echo "pub fn dummy() {}" > src/aws/src/lib.rs && \
-    echo "pub fn dummy() {}" > src/system/src/lib.rs && \
-    echo "fn main() {}" > src/attestation-service/src/main.rs
+    echo "pub fn dummy() {}" > src/system/src/lib.rs
 
-COPY src/attestation-service/src ./src/attestation-service/src
 COPY src/init/init.rs ./src/init/init.rs
 COPY src/aws/src ./src/aws/src
 COPY src/system/src ./src/system/src
@@ -54,12 +51,6 @@ COPY src/system/src ./src/system/src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     cargo fetch --locked --target $TARGET_ARCH
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build-enclave/target \
-    cargo build --release --locked --target ${TARGET_ARCH} -p attestation-service \
-      && install -D -m 0755 /build-enclave/target/${TARGET_ARCH}/release/attestation-service /output/attestation-service
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -98,11 +89,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         );
     }
 
-    let attestation_service = output_dir.join("output").join("attestation-service");
+    let bootproofd = output_dir.join("output").join("bootproofd");
     let init = output_dir.join("output").join("init");
 
-    if !attestation_service.exists() {
-        anyhow::bail!("Attestation service binary not found at: {}", attestation_service.display());
+    if !bootproofd.exists() {
+        anyhow::bail!("bootproofd binary not found at: {}", bootproofd.display());
     }
 
     if !init.exists() {
@@ -111,7 +102,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
     tracing::info!("Enclave binaries compiled successfully");
     Ok(EnclaveBinaries {
-        attestation_service,
+        bootproofd,
         init,
     })
 }

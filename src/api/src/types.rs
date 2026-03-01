@@ -439,10 +439,10 @@ impl BuildConfig {
             }
         }
 
-        // Port 8082 is always reserved for the attestation service
+        // Port 8082 is always reserved for bootproofd
         if ports.contains(&8082) {
             return Err(format!(
-                "Port 8082 is reserved for the attestation service."
+                "Port 8082 is reserved for bootproofd."
             ));
         }
 
