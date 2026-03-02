@@ -6,7 +6,7 @@ export
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-gateway run-frontend up down down-clean logs clean clean-enclave
+.PHONY: build-all build-enclave network postgres migrate run-api run-gateway run-frontend up down down-clean logs clean clean-enclave build-cli release-cli sign-cli verify-cli reproduce-cli
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -20,6 +20,10 @@ DB_VOLUME := caution-postgres-data
 SSH_PORT ?= 2222
 CAUTION_DATA_DIR ?= $(PWD)/caution-cache
 CONTAINER_DATA_DIR := /var/cache/caution
+
+ifdef NOCACHE
+	NO_CACHE := --no-cache
+endif
 
 build-gateway:
 	@echo "Building Gateway binary..."
@@ -43,7 +47,96 @@ build-frontend:
 	@docker build -t caution-frontend -f ./containerfiles/Containerfile.frontend .
 	@echo "Frontend image built: caution-frontend"
 
-build-all: build-gateway build-api build-email build-frontend
+# CLI release variables
+CLI_VERSION := $(shell grep '^version' src/cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+CLI_BINARY := caution-linux-x86_64
+CLI_OUT_DIR := $(OUT_DIR)/cli
+GIT_REF := $(shell git log -1 --format=%H)
+GIT_AUTHOR := $(shell git log -1 --format=%an)
+GIT_PUBKEY := $(shell git log -1 --format=%GK)
+GIT_TIMESTAMP := $(shell git log -1 --format=%cd --date=iso)
+GPG ?= gpg
+
+ifdef REPRODUCE
+	-include dist/cli/release.env
+	export
+endif
+
+build-cli:
+	@echo "Building CLI binary..."
+	@mkdir -p $(CLI_OUT_DIR)
+	@docker build \
+		--progress=plain \
+		--build-arg SOURCE_DATE_EPOCH=1 \
+		$(NO_CACHE) \
+		-t caution-cli \
+		-f ./containerfiles/Containerfile.cli \
+		--target export \
+		.
+	@docker rm -f cli-extract 2>/dev/null || true
+	@docker create --name cli-extract caution-cli
+	@docker cp cli-extract:/caution $(CLI_OUT_DIR)/$(CLI_BINARY)
+	@docker rm cli-extract
+	@echo "CLI binary available at $(CLI_OUT_DIR)/$(CLI_BINARY)"
+
+release-cli:
+	@$(MAKE) build-cli NOCACHE=1
+	@mkdir -p $(CLI_OUT_DIR)
+	@echo 'VERSION=$(CLI_VERSION)'              > $(CLI_OUT_DIR)/release.env
+	@echo 'GIT_REF=$(GIT_REF)'                 >> $(CLI_OUT_DIR)/release.env
+	@echo 'GIT_AUTHOR=$(GIT_AUTHOR)'           >> $(CLI_OUT_DIR)/release.env
+	@echo 'GIT_PUBKEY=$(GIT_PUBKEY)'           >> $(CLI_OUT_DIR)/release.env
+	@echo 'GIT_TIMESTAMP=$(GIT_TIMESTAMP)'     >> $(CLI_OUT_DIR)/release.env
+	@openssl sha256 -r \
+		$(CLI_OUT_DIR)/$(CLI_BINARY) \
+		$(CLI_OUT_DIR)/release.env \
+	| sed -e 's| \*$(CLI_OUT_DIR)/| |g' -e 's| \./| |g' \
+	> $(CLI_OUT_DIR)/manifest.txt
+	@rm -rf dist/cli/*
+	@mkdir -p dist/cli
+	@cp $(CLI_OUT_DIR)/$(CLI_BINARY) $(CLI_OUT_DIR)/release.env $(CLI_OUT_DIR)/manifest.txt dist/cli/
+	@echo ""
+	@echo "Release assets in dist/cli/:"
+	@ls -lh dist/cli/
+	@echo ""
+	@echo "Next steps:"
+	@echo "  1. make sign-cli"
+	@echo "  2. git add dist/cli/ && git commit -m 'Release CLI $(CLI_VERSION)'"
+	@echo "  3. git push"
+
+sign-cli:
+	@set -e; \
+	git config --get user.signingkey 2>&1 >/dev/null || { \
+		echo "Error: git user.signingkey is not defined"; \
+		exit 1; \
+	}; \
+	keyid=$$(git config --get user.signingkey); \
+	fingerprint=$$(echo "$$keyid" | sed 's/.*\([A-Z0-9]\{16\}\).*/\1/g'); \
+	$(GPG) --armor \
+		--detach-sig \
+		--local-user "$$keyid" \
+		--output dist/cli/manifest.$${fingerprint}.asc \
+		dist/cli/manifest.txt; \
+	cp dist/cli/manifest.$${fingerprint}.asc $(CLI_OUT_DIR)/; \
+	echo "Signed: dist/cli/manifest.$${fingerprint}.asc"
+
+verify-cli: | dist/cli/manifest.txt
+	@set -e; \
+	for file in dist/cli/manifest.*.asc; do \
+		echo "\nVerifying: $${file}\n"; \
+		$(GPG) --verify $${file} dist/cli/manifest.txt; \
+	done
+
+reproduce-cli:
+	@rm -rf $(CLI_OUT_DIR)
+	@$(MAKE) build-cli REPRODUCE=true NOCACHE=1
+	@diff -q $(CLI_OUT_DIR)/manifest.txt dist/cli/manifest.txt
+	@echo "Reproduction successful - manifests match"
+
+install-cli: build-cli
+	@./utils/install.sh
+
+build-all: build-gateway build-api build-email build-frontend build-cli
 
 network:
 	@docker network inspect $(NETWORK) >/dev/null 2>&1 || \
