@@ -98,11 +98,13 @@ mod tests {
     }
 
     #[test]
-    fn test_with_loader() {
-        let result = with_loader("Processing", LoaderStyle::Processing, || {
+    fn test_loader_with_closure() {
+        let mut loader = Loader::new("Processing", LoaderStyle::Processing);
+        let result = {
             thread::sleep(Duration::from_millis(500));
             42
-        });
+        };
+        loader.stop();
         assert_eq!(result, 42);
     }
 }

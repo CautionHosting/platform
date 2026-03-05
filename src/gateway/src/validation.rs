@@ -7,16 +7,7 @@ use std::sync::OnceLock;
 
 const APP_NAME_MIN_LEN: usize = 3;
 const APP_NAME_MAX_LEN: usize = 63;
-const APP_NAME_PATTERN: &str = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$";
-
-const RESERVED_NAMES: &[&str] = &[
-    "api", "gateway", "admin", "root", "system",
-    "www", "mail", "smtp", "ftp", "ssh", "git",
-    "aws", "amazon", "s3", "ec2", "vpc",
-    "security", "auth", "login", "register",
-    "metrics", "logs", "status", "health",
-    "localhost", "internal", "private", "public",
-];
+const APP_NAME_PATTERN: &str = r"^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$";
 
 static APP_NAME_REGEX: OnceLock<Regex> = OnceLock::new();
 
@@ -39,15 +30,7 @@ pub fn validate_app_name(name: &str) -> Result<()> {
     }
 
     if !get_app_name_regex().is_match(name) {
-        bail!("App name must contain only lowercase letters, numbers, and hyphens, and must start/end with alphanumeric");
-    }
-
-    if name.contains("--") {
-        bail!("App name cannot contain consecutive hyphens");
-    }
-
-    if RESERVED_NAMES.contains(&name) {
-        bail!("App name '{}' is reserved", name);
+        bail!("App name must contain only letters, numbers, hyphens, and underscores, and must start/end with alphanumeric");
     }
 
     Ok(())
@@ -134,6 +117,9 @@ mod tests {
         assert!(validate_app_name("api-v2").is_ok());
         assert!(validate_app_name("test123").is_ok());
         assert!(validate_app_name("a1b").is_ok());
+        assert!(validate_app_name("My-App").is_ok());
+        assert!(validate_app_name("app--name").is_ok());
+        assert!(validate_app_name("app_name").is_ok());
     }
 
     #[test]
@@ -141,9 +127,103 @@ mod tests {
         assert!(validate_app_name("ab").is_err());
         assert!(validate_app_name("-app").is_err());
         assert!(validate_app_name("app-").is_err());
-        assert!(validate_app_name("My-App").is_err());
-        assert!(validate_app_name("app--name").is_err());
-        assert!(validate_app_name("app_name").is_err());
-        assert!(validate_app_name("api").is_err());
+        assert!(validate_app_name("_app").is_err());
+        assert!(validate_app_name("app_").is_err());
+        assert!(validate_app_name("app.name").is_err());
+        assert!(validate_app_name("app name").is_err());
+    }
+
+    #[test]
+    fn test_app_name_boundary_lengths() {
+        // Exactly min length (3)
+        assert!(validate_app_name("abc").is_ok());
+        // Exactly max length (63)
+        assert!(validate_app_name(&"a".repeat(63)).is_ok());
+        // One over max
+        assert!(validate_app_name(&"a".repeat(64)).is_err());
+        // One under min
+        assert!(validate_app_name("ab").is_err());
+        // Single char
+        assert!(validate_app_name("a").is_err());
+        // Empty
+        assert!(validate_app_name("").is_err());
+    }
+
+    #[test]
+    fn test_app_name_special_characters() {
+        assert!(validate_app_name("app.name").is_err());
+        assert!(validate_app_name("app name").is_err());
+        assert!(validate_app_name("app@name").is_err());
+        assert!(validate_app_name("app/name").is_err());
+        assert!(validate_app_name("app\nname").is_err());
+    }
+
+    #[test]
+    fn test_app_name_numeric_only() {
+        assert!(validate_app_name("123").is_ok());
+        assert!(validate_app_name("1-2-3").is_ok());
+    }
+
+    #[test]
+    fn test_validate_app_id() {
+        assert!(validate_app_id("550e8400-e29b-41d4-a716-446655440000").is_ok());
+        assert!(validate_app_id("not-a-uuid").is_err());
+        assert!(validate_app_id("").is_err());
+        assert!(validate_app_id("550e8400e29b41d4a716446655440000").is_ok()); // no hyphens
+    }
+
+    #[test]
+    fn test_ssh_key_valid_ed25519() {
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl user@host";
+        assert!(validate_ssh_public_key(key).is_ok());
+    }
+
+    #[test]
+    fn test_ssh_key_valid_with_whitespace() {
+        let key = "  ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl user@host  ";
+        assert!(validate_ssh_public_key(key).is_ok());
+    }
+
+    #[test]
+    fn test_ssh_key_too_short() {
+        assert!(validate_ssh_public_key("ssh-ed25519 AAAA").is_err());
+    }
+
+    #[test]
+    fn test_ssh_key_too_long() {
+        let key = format!("ssh-ed25519 {}", "A".repeat(2000));
+        assert!(validate_ssh_public_key(&key).is_err());
+    }
+
+    #[test]
+    fn test_ssh_key_unsupported_type() {
+        let key = "ssh-dss AAAAB3NzaC1kc3MAAACBAJlkjFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA user@host";
+        assert!(validate_ssh_public_key(key).is_err());
+    }
+
+    #[test]
+    fn test_ssh_key_missing_data() {
+        assert!(validate_ssh_public_key("ssh-ed25519").is_err());
+    }
+
+    #[test]
+    fn test_ssh_key_invalid_base64() {
+        let key = "ssh-ed25519 not!valid@base64$$$chars user@host";
+        assert!(validate_ssh_public_key(key).is_err());
+    }
+
+    #[test]
+    fn test_ssh_key_no_comment() {
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+        assert!(validate_ssh_public_key(key).is_ok());
+    }
+
+    #[test]
+    fn test_is_valid_base64() {
+        assert!(is_valid_base64("AAAA"));
+        assert!(is_valid_base64("abc123+/=="));
+        assert!(!is_valid_base64(""));
+        assert!(!is_valid_base64("abc!"));
+        assert!(!is_valid_base64("abc def"));
     }
 }

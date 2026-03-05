@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 resource "aws_security_group" "app" {
-  name_prefix = "app-${var.resource_name}-"
-  description = "Security group for ${var.resource_name}"
+  name_prefix = "app-${var.resource_id}-"
+  description = "Security group for ${var.resource_id}"
   vpc_id      = var.vpc_id
 
   ingress {
@@ -42,9 +42,8 @@ resource "aws_security_group" "app" {
   }
 
   tags = {
-    Name         = "app-${var.resource_name}"
+    Name         = "app-${var.resource_id}"
     ResourceId   = var.resource_id
-    ResourceName = var.resource_name
     OrgId        = var.org_id
     ManagedBy    = "terraform"
   }
@@ -70,9 +69,8 @@ resource "aws_instance" "app" {
   }
 
   tags = {
-    Name         = var.resource_name
+    Name         = var.resource_id
     ResourceId   = var.resource_id
-    ResourceName = var.resource_name
     OrgId        = var.org_id
     ManagedBy    = "terraform"
   }
@@ -83,9 +81,8 @@ resource "aws_eip" "app" {
   instance = aws_instance.app.id
 
   tags = {
-    Name         = "app-${var.resource_name}"
+    Name         = "app-${var.resource_id}"
     ResourceId   = var.resource_id
-    ResourceName = var.resource_name
     OrgId        = var.org_id
     ManagedBy    = "terraform"
   }

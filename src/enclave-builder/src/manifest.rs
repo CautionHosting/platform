@@ -90,3 +90,215 @@ impl EnclaveManifest {
         Ok(manifest)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_manifest(
+        app_source: Option<AppSource>,
+        binary: Option<String>,
+        run_command: Option<String>,
+        metadata: Option<String>,
+    ) -> EnclaveManifest {
+        EnclaveManifest::new(
+            app_source,
+            EnclaveSource::GitArchive {
+                urls: vec!["https://example.com/enclave.tar.gz".to_string()],
+                commit: Some("abc123".to_string()),
+            },
+            FrameworkSource::GitArchive {
+                url: "https://example.com/framework.tar.gz".to_string(),
+                commit: Some("def456".to_string()),
+            },
+            binary,
+            run_command,
+            metadata,
+        )
+    }
+
+    #[test]
+    fn test_manifest_new_defaults() {
+        let manifest = make_manifest(None, None, None, None);
+        assert_eq!(manifest.version, "1.0");
+        assert_eq!(manifest.powered_by, "https://caution.co");
+        assert!(manifest.app_source.is_none());
+        assert!(manifest.binary.is_none());
+        assert!(manifest.run_command.is_none());
+        assert!(manifest.metadata.is_none());
+    }
+
+    #[test]
+    fn test_manifest_serialization_round_trip() {
+        let manifest = make_manifest(
+            Some(AppSource {
+                urls: vec!["https://github.com/user/repo.git".to_string()],
+                commit: "abc123def456".to_string(),
+                branch: Some("main".to_string()),
+            }),
+            Some("/app/server".to_string()),
+            Some("/app/server --port 8080".to_string()),
+            Some("test metadata".to_string()),
+        );
+
+        let json = serde_json::to_string_pretty(&manifest).unwrap();
+        let deserialized: EnclaveManifest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.version, manifest.version);
+        assert_eq!(deserialized.powered_by, manifest.powered_by);
+        assert_eq!(deserialized.binary, manifest.binary);
+        assert_eq!(deserialized.run_command, manifest.run_command);
+        assert_eq!(deserialized.metadata, manifest.metadata);
+
+        let app_src = deserialized.app_source.unwrap();
+        assert_eq!(app_src.commit, "abc123def456");
+        assert_eq!(app_src.branch, Some("main".to_string()));
+        assert_eq!(app_src.urls.len(), 1);
+    }
+
+    #[test]
+    fn test_manifest_optional_fields_omitted() {
+        let manifest = make_manifest(None, None, None, None);
+        let json = serde_json::to_string(&manifest).unwrap();
+
+        // Optional None fields should be omitted from JSON
+        assert!(!json.contains("app_source"));
+        assert!(!json.contains("binary"));
+        assert!(!json.contains("run_command"));
+        assert!(!json.contains("metadata"));
+    }
+
+    #[test]
+    fn test_manifest_optional_fields_present() {
+        let manifest = make_manifest(
+            None,
+            Some("/app/bin".to_string()),
+            Some("/app/bin --flag".to_string()),
+            Some("meta".to_string()),
+        );
+        let json = serde_json::to_string(&manifest).unwrap();
+
+        assert!(json.contains("binary"));
+        assert!(json.contains("run_command"));
+        assert!(json.contains("metadata"));
+    }
+
+    #[test]
+    fn test_enclave_source_git_archive() {
+        let source = EnclaveSource::GitArchive {
+            urls: vec![
+                "https://example.com/a.tar.gz".to_string(),
+                "https://mirror.com/a.tar.gz".to_string(),
+            ],
+            commit: Some("abc123".to_string()),
+        };
+
+        let json = serde_json::to_string(&source).unwrap();
+        assert!(json.contains("\"type\":\"git_archive\""));
+
+        let deserialized: EnclaveSource = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            EnclaveSource::GitArchive { urls, commit } => {
+                assert_eq!(urls.len(), 2);
+                assert_eq!(commit, Some("abc123".to_string()));
+            }
+            _ => panic!("Expected GitArchive"),
+        }
+    }
+
+    #[test]
+    fn test_enclave_source_git_repository() {
+        let source = EnclaveSource::GitRepository {
+            url: "https://github.com/org/repo.git".to_string(),
+            branch: "main".to_string(),
+            commit: None,
+        };
+
+        let json = serde_json::to_string(&source).unwrap();
+        assert!(json.contains("\"type\":\"git_repository\""));
+
+        let deserialized: EnclaveSource = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            EnclaveSource::GitRepository { url, branch, commit } => {
+                assert_eq!(url, "https://github.com/org/repo.git");
+                assert_eq!(branch, "main");
+                assert!(commit.is_none());
+            }
+            _ => panic!("Expected GitRepository"),
+        }
+    }
+
+    #[test]
+    fn test_enclave_source_local() {
+        let source = EnclaveSource::Local {
+            path: "/home/user/enclave".to_string(),
+        };
+
+        let json = serde_json::to_string(&source).unwrap();
+        assert!(json.contains("\"type\":\"local\""));
+    }
+
+    #[test]
+    fn test_framework_source_git_archive() {
+        let source = FrameworkSource::GitArchive {
+            url: "https://example.com/framework.tar.gz".to_string(),
+            commit: None,
+        };
+
+        let json = serde_json::to_string(&source).unwrap();
+        let deserialized: FrameworkSource = serde_json::from_str(&json).unwrap();
+
+        match deserialized {
+            FrameworkSource::GitArchive { url, commit } => {
+                assert_eq!(url, "https://example.com/framework.tar.gz");
+                assert!(commit.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn test_framework_source_commit_omitted_when_none() {
+        let source = FrameworkSource::GitArchive {
+            url: "https://example.com/framework.tar.gz".to_string(),
+            commit: None,
+        };
+
+        let json = serde_json::to_string(&source).unwrap();
+        assert!(!json.contains("commit"));
+    }
+
+    #[test]
+    fn test_app_source_serialization() {
+        let source = AppSource {
+            urls: vec!["https://github.com/user/repo.git".to_string()],
+            commit: "deadbeef".to_string(),
+            branch: None,
+        };
+
+        let json = serde_json::to_string(&source).unwrap();
+        assert!(!json.contains("branch")); // None branch should not be serialized
+
+        let source_with_branch = AppSource {
+            urls: vec!["https://github.com/user/repo.git".to_string()],
+            commit: "deadbeef".to_string(),
+            branch: Some("develop".to_string()),
+        };
+
+        let json = serde_json::to_string(&source_with_branch).unwrap();
+        assert!(json.contains("develop"));
+    }
+
+    #[tokio::test]
+    async fn test_manifest_write_and_read() {
+        let manifest = make_manifest(None, None, None, None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.json");
+
+        manifest.write_to_file(&path).await.unwrap();
+        let loaded = EnclaveManifest::read_from_file(&path).await.unwrap();
+
+        assert_eq!(loaded.version, "1.0");
+        assert_eq!(loaded.powered_by, "https://caution.co");
+    }
+}

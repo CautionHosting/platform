@@ -82,4 +82,74 @@ mod tests {
         let token2 = derive_csrf_token("session123", "secret2");
         assert_ne!(token1, token2);
     }
+
+    #[test]
+    fn test_derive_csrf_token_is_hex() {
+        let token = derive_csrf_token("session", "secret");
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+        // HMAC-SHA256 produces 32 bytes = 64 hex chars
+        assert_eq!(token.len(), 64);
+    }
+
+    #[test]
+    fn test_derive_csrf_token_empty_session() {
+        let token = derive_csrf_token("", "secret");
+        assert_eq!(token.len(), 64);
+        // Should differ from a non-empty session
+        let token2 = derive_csrf_token("x", "secret");
+        assert_ne!(token, token2);
+    }
+
+    #[test]
+    fn test_derive_csrf_token_empty_secret() {
+        let token = derive_csrf_token("session", "");
+        assert_eq!(token.len(), 64);
+    }
+
+    #[test]
+    fn test_constant_time_compare_equal() {
+        assert!(constant_time_compare("hello", "hello"));
+        assert!(constant_time_compare("", ""));
+        assert!(constant_time_compare(
+            "a".repeat(1000).as_str(),
+            "a".repeat(1000).as_str()
+        ));
+    }
+
+    #[test]
+    fn test_constant_time_compare_not_equal() {
+        assert!(!constant_time_compare("hello", "world"));
+        assert!(!constant_time_compare("hello", "Hello"));
+        assert!(!constant_time_compare("hello", "hello!"));
+        assert!(!constant_time_compare("hello", "hell"));
+        assert!(!constant_time_compare("", "x"));
+    }
+
+    #[test]
+    fn test_constant_time_compare_different_lengths() {
+        assert!(!constant_time_compare("short", "a much longer string"));
+        assert!(!constant_time_compare("a much longer string", "short"));
+    }
+
+    #[test]
+    fn test_csrf_token_wrong_secret_rejected() {
+        let token = derive_csrf_token("session123", "correct-secret");
+        let forged = derive_csrf_token("session123", "wrong-secret");
+        assert!(!constant_time_compare(&token, &forged));
+    }
+
+    #[test]
+    fn test_get_cookie_from_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cookie", "session_id=abc123; other=xyz".parse().unwrap());
+        assert_eq!(get_cookie(&headers, "session_id"), Some("abc123".to_string()));
+        assert_eq!(get_cookie(&headers, "other"), Some("xyz".to_string()));
+        assert_eq!(get_cookie(&headers, "missing"), None);
+    }
+
+    #[test]
+    fn test_get_cookie_no_cookie_header() {
+        let headers = HeaderMap::new();
+        assert_eq!(get_cookie(&headers, "session_id"), None);
+    }
 }

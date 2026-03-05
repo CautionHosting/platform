@@ -79,3 +79,123 @@ pub async fn rate_limit_middleware(
 
     next.run(request).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_allows_requests_under_limit() {
+        let limiter = RateLimiter::new(5, 60);
+
+        for _ in 0..5 {
+            assert!(limiter.check_rate_limit("192.168.1.1").await);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_blocks_requests_over_limit() {
+        let limiter = RateLimiter::new(3, 60);
+
+        assert!(limiter.check_rate_limit("10.0.0.1").await);
+        assert!(limiter.check_rate_limit("10.0.0.1").await);
+        assert!(limiter.check_rate_limit("10.0.0.1").await);
+        assert!(!limiter.check_rate_limit("10.0.0.1").await);
+        assert!(!limiter.check_rate_limit("10.0.0.1").await);
+    }
+
+    #[tokio::test]
+    async fn test_different_ips_independent() {
+        let limiter = RateLimiter::new(2, 60);
+
+        assert!(limiter.check_rate_limit("10.0.0.1").await);
+        assert!(limiter.check_rate_limit("10.0.0.1").await);
+        assert!(!limiter.check_rate_limit("10.0.0.1").await);
+
+        // Different IP should have its own counter
+        assert!(limiter.check_rate_limit("10.0.0.2").await);
+        assert!(limiter.check_rate_limit("10.0.0.2").await);
+        assert!(!limiter.check_rate_limit("10.0.0.2").await);
+    }
+
+    #[tokio::test]
+    async fn test_window_reset() {
+        // Use a 1-second window for fast testing
+        let limiter = RateLimiter::new(2, 1);
+
+        assert!(limiter.check_rate_limit("10.0.0.1").await);
+        assert!(limiter.check_rate_limit("10.0.0.1").await);
+        assert!(!limiter.check_rate_limit("10.0.0.1").await);
+
+        // Wait for window to expire
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+
+        // Should be allowed again
+        assert!(limiter.check_rate_limit("10.0.0.1").await);
+    }
+
+    #[tokio::test]
+    async fn test_single_request_limit() {
+        let limiter = RateLimiter::new(1, 60);
+
+        assert!(limiter.check_rate_limit("10.0.0.1").await);
+        assert!(!limiter.check_rate_limit("10.0.0.1").await);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_removes_expired() {
+        let limiter = RateLimiter::new(100, 1);
+
+        // Add some entries
+        limiter.check_rate_limit("10.0.0.1").await;
+        limiter.check_rate_limit("10.0.0.2").await;
+
+        // Verify entries exist
+        {
+            let state = limiter.state.read().await;
+            assert_eq!(state.len(), 2);
+        }
+
+        // Wait for window to expire
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+
+        // Manually trigger cleanup logic
+        {
+            let mut state = limiter.state.write().await;
+            let now = Instant::now();
+            state.retain(|_, (_, last_reset)| {
+                now.duration_since(*last_reset) < limiter.window_duration
+            });
+        }
+
+        // Entries should be cleaned up
+        {
+            let state = limiter.state.read().await;
+            assert_eq!(state.len(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_access() {
+        let limiter = RateLimiter::new(100, 60);
+
+        let mut handles = vec![];
+        for i in 0..10 {
+            let limiter = limiter.clone();
+            let ip = format!("10.0.0.{}", i);
+            handles.push(tokio::spawn(async move {
+                for _ in 0..10 {
+                    limiter.check_rate_limit(&ip).await;
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify all IPs were tracked
+        let state = limiter.state.read().await;
+        assert_eq!(state.len(), 10);
+    }
+}

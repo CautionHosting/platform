@@ -24,6 +24,7 @@ use enclave_builder::{BuildConfig as DockerBuildConfig, build_user_image};
 
 mod provisioning;
 mod deployment;
+mod ec2;
 mod validation;
 mod validated_types;
 mod onboarding;
@@ -923,7 +924,7 @@ async fn export_image_to_tarball(
 }
 
 async fn create_ami_from_image(
-    app_name: &str,
+    resource_id: &str,
     image_tarball: &str,
     aws_region: &str,
     _role_arn: Option<&str>,
@@ -932,7 +933,7 @@ async fn create_ami_from_image(
     use tokio::fs;
     use tokio::process::Command;
 
-    let packer_dir = format!("{}/build/{}-packer", data_dir, app_name);
+    let packer_dir = format!("{}/build/{}-packer", data_dir, resource_id);
     let _ = fs::remove_dir_all(&packer_dir).await;
     fs::create_dir_all(&packer_dir).await?;
 
@@ -940,7 +941,7 @@ async fn create_ami_from_image(
         r#"{{
   "variables": {{
     "aws_region": "{}",
-    "app_name": "{}",
+    "resource_id": "{}",
     "image_tarball": "{}"
   }},
   "builders": [
@@ -958,12 +959,12 @@ async fn create_ami_from_image(
       }},
       "instance_type": "t3.small",
       "ssh_username": "ubuntu",
-      "ami_name": "caution-{{{{ user `app_name` }}}}-{{{{timestamp}}}}",
-      "ami_description": "Caution app: {{{{ user `app_name` }}}}",
+      "ami_name": "caution-{{{{ user `resource_id` }}}}-{{{{timestamp}}}}",
+      "ami_description": "Caution resource: {{{{ user `resource_id` }}}}",
       "tags": {{
-        "Name": "caution-{{{{ user `app_name` }}}}",
+        "Name": "caution-{{{{ user `resource_id` }}}}",
         "ManagedBy": "Caution",
-        "AppName": "{{{{ user `app_name` }}}}"
+        "ResourceId": "{{{{ user `resource_id` }}}}"
       }}
     }}
   ],
@@ -1017,13 +1018,13 @@ async fn create_ami_from_image(
     }}
   ]
 }}"#,
-        aws_region, app_name, image_tarball
+        aws_region, resource_id, image_tarball
     );
 
     let template_path = format!("{}/template.json", packer_dir);
     fs::write(&template_path, packer_template.clone()).await?;
 
-    tracing::info!("Running Packer to create AMI for {}", app_name);
+    tracing::info!("Running Packer to create AMI for {}", resource_id);
     tracing::debug!("Packer template:\n{}", packer_template);
     tracing::debug!("Packer template path: {}", template_path);
     tracing::debug!("Packer working directory: {}", packer_dir);

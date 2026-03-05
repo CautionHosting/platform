@@ -103,13 +103,13 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
         tracing::info!("Using managed on-prem deployment flow");
         let eif_s3_path = upload_eif_to_customer_bucket(
             &request.eif_path,
-            &request.resource_name,
+            &request.resource_id,
             &managed_onprem.eif_bucket,
             request.credentials.as_ref().context("Credentials required for managed on-prem")?,
         ).await.context("Failed to upload EIF to customer bucket")?;
         provision_managed_onprem(&request, &eif_s3_path, &config).await
     } else {
-        let eif_s3_path = upload_eif_to_s3(&request.eif_path, &request.org_id, &request.resource_name, &request.aws_account_id).await
+        let eif_s3_path = upload_eif_to_s3(&request.eif_path, &request.org_id, &request.resource_id, &request.aws_account_id).await
             .context("Failed to upload EIF to S3")?;
         provision_nitro_enclave(&request, &eif_s3_path, &config).await
     }
@@ -160,47 +160,14 @@ pub async fn destroy_app_with_credentials(
 async fn scale_down_asg(asg_name: &str, credentials: &AwsCredentials) -> Result<()> {
     use std::time::{Duration, Instant};
 
-    let asg_creds = aws_sdk_autoscaling::config::Credentials::new(
-        &credentials.access_key_id,
-        &credentials.secret_access_key,
-        None,
-        None,
-        "managed-onprem",
-    );
-
-    let asg_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(aws_sdk_autoscaling::config::Region::new(credentials.region.clone()))
-        .credentials_provider(asg_creds)
-        .load()
-        .await;
-
-    let asg_client = aws_sdk_autoscaling::Client::new(&asg_config);
-
-    asg_client
-        .set_desired_capacity()
-        .auto_scaling_group_name(asg_name)
-        .desired_capacity(0)
-        .send()
+    let asg = crate::ec2::AsgClient::new(credentials);
+    asg.set_desired_capacity(asg_name, 0)
         .await
         .context("Failed to set ASG desired capacity to 0")?;
 
     tracing::info!("Set ASG {} desired capacity to 0, waiting for instance termination...", asg_name);
 
-    let ec2_creds = aws_sdk_ec2::config::Credentials::new(
-        &credentials.access_key_id,
-        &credentials.secret_access_key,
-        None,
-        None,
-        "managed-onprem",
-    );
-
-    let ec2_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(aws_sdk_ec2::config::Region::new(credentials.region.clone()))
-        .credentials_provider(ec2_creds)
-        .load()
-        .await;
-
-    let ec2_client = aws_sdk_ec2::Client::new(&ec2_config);
+    let ec2 = crate::ec2::Ec2Client::new(credentials);
 
     let start = Instant::now();
     let timeout = Duration::from_secs(180);
@@ -211,36 +178,18 @@ async fn scale_down_asg(asg_name: &str, credentials: &AwsCredentials) -> Result<
             break;
         }
 
-        let result = ec2_client
-            .describe_instances()
-            .filters(
-                aws_sdk_ec2::types::Filter::builder()
-                    .name("tag:aws:autoscaling:groupName")
-                    .values(asg_name)
-                    .build(),
-            )
-            .filters(
-                aws_sdk_ec2::types::Filter::builder()
-                    .name("instance-state-name")
-                    .values("pending")
-                    .values("running")
-                    .values("stopping")
-                    .build(),
-            )
-            .send()
-            .await;
+        let result = ec2.describe_instances(&[
+            crate::ec2::Filter::new("tag:aws:autoscaling:groupName", &[asg_name]),
+            crate::ec2::Filter::new("instance-state-name", &["pending", "running", "stopping"]),
+        ]).await;
 
         match result {
-            Ok(response) => {
-                let count: usize = response.reservations().iter()
-                    .flat_map(|r| r.instances())
-                    .count();
-
-                if count == 0 {
+            Ok(instances) => {
+                if instances.is_empty() {
                     tracing::info!("All ASG instances terminated");
                     return Ok(());
                 }
-                tracing::debug!("ASG still has {} instance(s), waiting...", count);
+                tracing::debug!("ASG still has {} instance(s), waiting...", instances.len());
             }
             Err(e) => {
                 tracing::warn!("Error checking instances: {}", e);
@@ -508,7 +457,6 @@ module "app" {{
 
   org_id        = "{}"
   resource_id   = "{}"
-  resource_name = "{}"
   ami_id        = "{}"
   app_port      = {}
   aws_region    = "{}"
@@ -538,7 +486,6 @@ output "url" {{
         aws_region,
         request.org_id,
         request.resource_id,
-        request.resource_name,
         request.ami_id,
         request.app_port,
         aws_region
@@ -778,42 +725,15 @@ async fn update_asg_launch_template(
 ) -> Result<()> {
     tracing::info!("Updating ASG {} with launch template {}", asg_name, launch_template_id);
 
-    let creds = aws_sdk_autoscaling::config::Credentials::new(
-        &credentials.access_key_id,
-        &credentials.secret_access_key,
-        None,
-        None,
-        "managed-onprem",
-    );
+    let asg = crate::ec2::AsgClient::new(credentials);
 
-    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(aws_sdk_autoscaling::config::Region::new(credentials.region.clone()))
-        .credentials_provider(creds)
-        .load()
-        .await;
-
-    let client = aws_sdk_autoscaling::Client::new(&config);
-
-    client
-        .update_auto_scaling_group()
-        .auto_scaling_group_name(asg_name)
-        .launch_template(
-            aws_sdk_autoscaling::types::LaunchTemplateSpecification::builder()
-                .launch_template_id(launch_template_id)
-                .version("$Latest")
-                .build(),
-        )
-        .send()
+    asg.update_auto_scaling_group(asg_name, launch_template_id)
         .await
         .context("Failed to update ASG launch template")?;
 
     tracing::info!("Successfully updated ASG launch template");
 
-    client
-        .set_desired_capacity()
-        .auto_scaling_group_name(asg_name)
-        .desired_capacity(1)
-        .send()
+    asg.set_desired_capacity(asg_name, 1)
         .await
         .context("Failed to set ASG desired capacity")?;
 
@@ -832,21 +752,7 @@ async fn wait_for_asg_instance(
 
     tracing::info!("Waiting for instance to be running in ASG {}...", asg_name);
 
-    let creds = aws_sdk_ec2::config::Credentials::new(
-        &credentials.access_key_id,
-        &credentials.secret_access_key,
-        None,
-        None,
-        "managed-onprem",
-    );
-
-    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(aws_sdk_ec2::config::Region::new(credentials.region.clone()))
-        .credentials_provider(creds)
-        .load()
-        .await;
-
-    let client = aws_sdk_ec2::Client::new(&config);
+    let ec2 = crate::ec2::Ec2Client::new(credentials);
 
     let start = Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
@@ -856,31 +762,14 @@ async fn wait_for_asg_instance(
             bail!("Timeout waiting for instance in ASG {}", asg_name);
         }
 
-        let result = client
-            .describe_instances()
-            .filters(
-                aws_sdk_ec2::types::Filter::builder()
-                    .name("tag:aws:autoscaling:groupName")
-                    .values(asg_name)
-                    .build(),
-            )
-            .filters(
-                aws_sdk_ec2::types::Filter::builder()
-                    .name("instance-state-name")
-                    .values("running")
-                    .build(),
-            )
-            .send()
-            .await
-            .context("Failed to describe instances")?;
+        let instances = ec2.describe_instances(&[
+            crate::ec2::Filter::new("tag:aws:autoscaling:groupName", &[asg_name]),
+            crate::ec2::Filter::new("instance-state-name", &["running"]),
+        ]).await.context("Failed to describe instances")?;
 
-        if let Some(reservation) = result.reservations().first() {
-            if let Some(instance) = reservation.instances().first() {
-                if let Some(instance_id) = instance.instance_id() {
-                    tracing::info!("Found running instance: {}", instance_id);
-                    return Ok(instance_id.to_string());
-                }
-            }
+        if let Some(instance) = instances.first() {
+            tracing::info!("Found running instance: {}", instance.instance_id);
+            return Ok(instance.instance_id.clone());
         }
 
         tracing::debug!("No running instance found yet, waiting 10 seconds...");
@@ -896,27 +785,8 @@ async fn associate_eip_with_instance(
 ) -> Result<()> {
     tracing::info!("Associating EIP {} with instance {}", allocation_id, instance_id);
 
-    let creds = aws_sdk_ec2::config::Credentials::new(
-        &credentials.access_key_id,
-        &credentials.secret_access_key,
-        None,
-        None,
-        "managed-onprem",
-    );
-
-    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(aws_sdk_ec2::config::Region::new(credentials.region.clone()))
-        .credentials_provider(creds)
-        .load()
-        .await;
-
-    let client = aws_sdk_ec2::Client::new(&config);
-
-    client
-        .associate_address()
-        .allocation_id(allocation_id)
-        .instance_id(instance_id)
-        .send()
+    let ec2 = crate::ec2::Ec2Client::new(credentials);
+    ec2.associate_address(allocation_id, instance_id)
         .await
         .context("Failed to associate EIP with instance")?;
 
@@ -954,7 +824,7 @@ fn run_tofu_destroy(work_dir: &Path, resource_name: &str, credentials: Option<&A
     Ok(())
 }
 
-async fn upload_eif_to_s3(eif_path: &str, org_id: &Uuid, resource_name: &str, aws_account_id: &str) -> Result<String> {
+async fn upload_eif_to_s3(eif_path: &str, org_id: &Uuid, resource_id: &Uuid, aws_account_id: &str) -> Result<String> {
     use aws_sdk_s3::primitives::ByteStream;
 
     tracing::info!("Uploading EIF to S3: {}", eif_path);
@@ -962,7 +832,7 @@ async fn upload_eif_to_s3(eif_path: &str, org_id: &Uuid, resource_name: &str, aw
     let bucket_name = std::env::var("EIF_S3_BUCKET")
         .unwrap_or_else(|_| format!("caution-eif-storage-{}", aws_account_id));
 
-    let s3_key = format!("eifs/{}/{}.eif", org_id, resource_name);
+    let s3_key = format!("eifs/{}/{}.eif", org_id, resource_id);
 
     let config = aws_config::load_from_env().await;
     let client = aws_sdk_s3::Client::new(&config);
@@ -988,7 +858,7 @@ async fn upload_eif_to_s3(eif_path: &str, org_id: &Uuid, resource_name: &str, aw
 
 async fn upload_eif_to_customer_bucket(
     eif_path: &str,
-    resource_name: &str,
+    resource_id: &Uuid,
     bucket_name: &str,
     credentials: &AwsCredentials,
 ) -> Result<String> {
@@ -996,7 +866,7 @@ async fn upload_eif_to_customer_bucket(
 
     tracing::info!("Uploading EIF to customer bucket: {}", bucket_name);
 
-    let s3_key = format!("{}.eif", resource_name);
+    let s3_key = format!("{}.eif", resource_id);
 
     let creds = aws_sdk_s3::config::Credentials::new(
         &credentials.access_key_id,
@@ -1292,7 +1162,7 @@ data "aws_ami" "amazon_linux_2023" {{
 
 # IAM role for EC2 instance to access S3
 resource "aws_iam_role" "enclave" {{
-  name_prefix = "enclave-{resource_name}-"
+  name_prefix = "enclave-{short_id}-"
 
   assume_role_policy = jsonencode({{
     Version = "2012-10-17"
@@ -1308,9 +1178,8 @@ resource "aws_iam_role" "enclave" {{
   }})
 
   tags = {{
-    Name         = "enclave-role-{resource_name}"
+    Name         = "enclave-role-{resource_id}"
     ResourceId   = "{resource_id}"
-    ResourceName = "{resource_name}"
     OrgId        = "{org_id}"
     ManagedBy    = "terraform"
   }}
@@ -1318,7 +1187,7 @@ resource "aws_iam_role" "enclave" {{
 
 # IAM policy for S3 access (scoped to org prefix)
 resource "aws_iam_role_policy" "enclave_s3" {{
-  name_prefix = "enclave-s3-{resource_name}-"
+  name_prefix = "enclave-s3-{short_id}-"
   role        = aws_iam_role.enclave.id
 
   policy = jsonencode({{
@@ -1339,13 +1208,12 @@ resource "aws_iam_role_policy" "enclave_s3" {{
 
 # IAM instance profile
 resource "aws_iam_instance_profile" "enclave" {{
-  name_prefix = "enclave-{resource_name}-"
+  name_prefix = "enclave-{short_id}-"
   role        = aws_iam_role.enclave.name
 
   tags = {{
-    Name         = "enclave-profile-{resource_name}"
+    Name         = "enclave-profile-{resource_id}"
     ResourceId   = "{resource_id}"
-    ResourceName = "{resource_name}"
     OrgId        = "{org_id}"
     ManagedBy    = "terraform"
   }}
@@ -1358,9 +1226,8 @@ resource "aws_vpc" "enclave" {{
   enable_dns_support   = true
 
   tags = {{
-    Name         = "vpc-{resource_name}"
+    Name         = "vpc-{resource_id}"
     ResourceId   = "{resource_id}"
-    ResourceName = "{resource_name}"
     OrgId        = "{org_id}"
     ManagedBy    = "terraform"
   }}
@@ -1371,9 +1238,8 @@ resource "aws_internet_gateway" "enclave" {{
   vpc_id = aws_vpc.enclave.id
 
   tags = {{
-    Name         = "igw-{resource_name}"
+    Name         = "igw-{resource_id}"
     ResourceId   = "{resource_id}"
-    ResourceName = "{resource_name}"
     OrgId        = "{org_id}"
     ManagedBy    = "terraform"
   }}
@@ -1387,9 +1253,8 @@ resource "aws_subnet" "enclave" {{
   availability_zone       = data.aws_availability_zones.available.names[0]
 
   tags = {{
-    Name         = "subnet-{resource_name}"
+    Name         = "subnet-{resource_id}"
     ResourceId   = "{resource_id}"
-    ResourceName = "{resource_name}"
     OrgId        = "{org_id}"
     ManagedBy    = "terraform"
   }}
@@ -1405,9 +1270,8 @@ resource "aws_route_table" "enclave" {{
   }}
 
   tags = {{
-    Name         = "rt-{resource_name}"
+    Name         = "rt-{resource_id}"
     ResourceId   = "{resource_id}"
-    ResourceName = "{resource_name}"
     OrgId        = "{org_id}"
     ManagedBy    = "terraform"
   }}
@@ -1429,8 +1293,8 @@ variable "ports" {{
 
 # Security group for the enclave
 resource "aws_security_group" "enclave" {{
-  name_prefix = "enclave-{resource_name}-"
-  description = "Security group for {resource_name} Nitro Enclave"
+  name_prefix = "enclave-{short_id}-"
+  description = "Security group for {resource_id} Nitro Enclave"
   vpc_id      = aws_vpc.enclave.id
 
   # SSH for debugging
@@ -1479,9 +1343,8 @@ resource "aws_security_group" "enclave" {{
   }}
 
   tags = {{
-    Name         = "enclave-{resource_name}"
+    Name         = "enclave-{resource_id}"
     ResourceId   = "{resource_id}"
-    ResourceName = "{resource_name}"
     OrgId        = "{org_id}"
     ManagedBy    = "terraform"
   }}
@@ -1524,9 +1387,8 @@ resource "aws_instance" "enclave" {{
   }}))
 
   tags = {{
-    Name         = "{resource_name}"
+    Name         = "{resource_id}"
     ResourceId   = "{resource_id}"
-    ResourceName = "{resource_name}"
     OrgId        = "{org_id}"
     ManagedBy    = "terraform"
     ConfigDomain = "{domain}"
@@ -1539,9 +1401,8 @@ resource "aws_eip" "enclave" {{
   instance = aws_instance.enclave.id
 
   tags = {{
-    Name         = "enclave-{resource_name}"
+    Name         = "enclave-{resource_id}"
     ResourceId   = "{resource_id}"
-    ResourceName = "{resource_name}"
     OrgId        = "{org_id}"
     ManagedBy    = "terraform"
   }}
@@ -1569,7 +1430,7 @@ output "instance_type" {{
             .map(|key| format!("\n  key_name = \"{}\"", key))
             .unwrap_or_default(),
         resource_id = request.resource_id,
-        resource_name = request.resource_name,
+        short_id = &request.resource_id.to_string()[..8],
         org_id = request.org_id,
         eif_s3_path = eif_s3_path,
         eif_bucket = eif_bucket,
@@ -1677,8 +1538,8 @@ data "aws_ami" "amazon_linux_2023" {{
 }}
 
 resource "aws_security_group" "enclave" {{
-  name_prefix = "enclave-{resource_name}-"
-  description = "Security group for {resource_name} Nitro Enclave"
+  name_prefix = "enclave-{short_id}-"
+  description = "Security group for {resource_id} Nitro Enclave"
   vpc_id      = "{vpc_id}"
 
   # TODO: Remove SSH access after debugging enclave crash issue
@@ -1726,9 +1587,8 @@ resource "aws_security_group" "enclave" {{
   }}
 
   tags = {{
-    Name                  = "enclave-{resource_name}"
+    Name                  = "enclave-{resource_id}"
     ResourceId            = "{resource_id}"
-    ResourceName          = "{resource_name}"
     OrgId                 = "{org_id}"
     ManagedBy             = "terraform"
     (local.scope_tag_key) = local.deployment_tag
@@ -1736,7 +1596,7 @@ resource "aws_security_group" "enclave" {{
 }}
 
 resource "aws_launch_template" "enclave" {{
-  name_prefix   = "enclave-{resource_name}-"
+  name_prefix   = "enclave-{resource_id}-"
   image_id      = data.aws_ami.amazon_linux_2023.id
   instance_type = "{instance_type}"
 
@@ -1778,9 +1638,8 @@ resource "aws_launch_template" "enclave" {{
   tag_specifications {{
     resource_type = "instance"
     tags = {{
-      Name                  = "{resource_name}"
+      Name                  = "{resource_id}"
       ResourceId            = "{resource_id}"
-      ResourceName          = "{resource_name}"
       OrgId                 = "{org_id}"
       ManagedBy             = "terraform"
       ConfigDomain          = "{domain}"
@@ -1791,16 +1650,15 @@ resource "aws_launch_template" "enclave" {{
   tag_specifications {{
     resource_type = "volume"
     tags = {{
-      Name                  = "enclave-{resource_name}"
+      Name                  = "enclave-{resource_id}"
       ResourceId            = "{resource_id}"
       (local.scope_tag_key) = local.deployment_tag
     }}
   }}
 
   tags = {{
-    Name                  = "lt-{resource_name}"
+    Name                  = "lt-{resource_id}"
     ResourceId            = "{resource_id}"
-    ResourceName          = "{resource_name}"
     OrgId                 = "{org_id}"
     ManagedBy             = "terraform"
     (local.scope_tag_key) = local.deployment_tag
@@ -1811,9 +1669,8 @@ resource "aws_eip" "enclave" {{
   domain = "vpc"
 
   tags = {{
-    Name                  = "enclave-{resource_name}"
+    Name                  = "enclave-{resource_id}"
     ResourceId            = "{resource_id}"
-    ResourceName          = "{resource_name}"
     OrgId                 = "{org_id}"
     ManagedBy             = "terraform"
     (local.scope_tag_key) = local.deployment_tag
@@ -1852,7 +1709,7 @@ output "instance_type" {{
         instance_type = instance_type,
         instance_profile_name = onprem.instance_profile_name,
         resource_id = request.resource_id,
-        resource_name = request.resource_name,
+        short_id = &request.resource_id.to_string()[..8],
         org_id = request.org_id,
         eif_s3_path = eif_s3_path,
         memory_mb = request.memory_mb,

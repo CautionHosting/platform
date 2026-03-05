@@ -44,10 +44,6 @@ pub enum ValidationError {
         actual: usize,
         span: Span,
     },
-    AppNameReserved {
-        name: String,
-        span: Span,
-    },
     AppNameInvalidChars {
         invalid_char: char,
         span: Span,
@@ -71,9 +67,6 @@ pub enum ValidationError {
         actual: usize,
     },
     UsernameInvalidChars,
-    UsernameReserved {
-        username: String,
-    },
 
     EmailTooLong {
         max: usize,
@@ -112,9 +105,6 @@ impl fmt::Display for ValidationError {
             Self::AppNameLength { min, max, actual, .. } => {
                 write!(f, "app name must be between {} and {} characters (got {})", min, max, actual)
             }
-            Self::AppNameReserved { name, .. } => {
-                write!(f, "app name '{}' is reserved", name)
-            }
             Self::AppNameInvalidChars { invalid_char, .. } => {
                 write!(f, "app name contains invalid character '{}'", invalid_char)
             }
@@ -138,10 +128,6 @@ impl fmt::Display for ValidationError {
             Self::UsernameInvalidChars => {
                 write!(f, "username contains invalid characters")
             }
-            Self::UsernameReserved { username } => {
-                write!(f, "username '{}' is reserved", username)
-            }
-
             Self::EmailTooLong { max, actual } => {
                 write!(f, "email address must be at most {} characters (got {})", max, actual)
             }
@@ -184,7 +170,6 @@ impl ValidationError {
     pub fn span(&self) -> Option<Span> {
         match self {
             Self::AppNameLength { span, .. } => Some(*span),
-            Self::AppNameReserved { span, .. } => Some(*span),
             Self::AppNameInvalidChars { span, .. } => Some(*span),
             Self::AppNameConsecutiveHyphens { span } => Some(*span),
             _ => None,
@@ -194,7 +179,6 @@ impl ValidationError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::AppNameLength { .. } => "app_name_length",
-            Self::AppNameReserved { .. } => "app_name_reserved",
             Self::AppNameInvalidChars { .. } => "app_name_invalid_chars",
             Self::AppNameConsecutiveHyphens { .. } => "app_name_consecutive_hyphens",
 
@@ -204,7 +188,6 @@ impl ValidationError {
 
             Self::UsernameLength { .. } => "username_length",
             Self::UsernameInvalidChars => "username_invalid_chars",
-            Self::UsernameReserved { .. } => "username_reserved",
 
             Self::EmailTooLong { .. } => "email_too_long",
             Self::EmailInvalidFormat => "email_invalid_format",
@@ -224,9 +207,8 @@ impl ValidationError {
     pub fn help(&self) -> Option<&'static str> {
         match self {
             Self::AppNameLength { .. } => Some("Choose a name with 3-63 characters"),
-            Self::AppNameReserved { .. } => Some("Reserved names: api, admin, root, system, etc."),
             Self::AppNameInvalidChars { .. } => {
-                Some("Use only lowercase letters, numbers, hyphens, and underscores. Must start and end with alphanumeric.")
+                Some("Use only letters, numbers, hyphens, and underscores. Must start and end with alphanumeric.")
             }
             Self::AppNameConsecutiveHyphens { .. } => {
                 Some("Use single hyphens to separate words: my-app (not my--app)")
@@ -239,7 +221,6 @@ impl ValidationError {
             Self::UsernameInvalidChars => {
                 Some("Use only letters, numbers, hyphens, and underscores")
             }
-            Self::UsernameReserved { .. } => Some("Try a different username"),
 
             Self::SshKeyUnsupportedType { .. } => {
                 Some("Supported types: ssh-ed25519, ssh-rsa, ecdsa-sha2-nistp256, ecdsa-sha2-nistp384, ecdsa-sha2-nistp521")

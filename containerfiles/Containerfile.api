@@ -62,21 +62,23 @@ COPY src/api/src ./src/api/src
 COPY src/enclave-builder/src ./src/enclave-builder/src
 
 ENV RUST_BACKTRACE=1
-ENV RUSTFLAGS="-C codegen-units=1"
-ENV RUSTFLAGS="${RUSTFLAGS} -C target-feature=+crt-static"
-ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=-Wl,--build-id=none"
 ENV TARGET_ARCH="x86_64-unknown-linux-musl"
-ENV CARGO_BUILD_JOBS=1
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     cargo fetch --locked --target $TARGET_ARCH
 
+ARG EXTRA_RUSTFLAGS="-C codegen-units=1"
+ARG CARGO_BUILD_FLAGS="--release"
+ARG CARGO_PROFILE_DIR="release"
+
+ENV RUSTFLAGS="${EXTRA_RUSTFLAGS} -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
+
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,id=api-target,target=/build/target \
     --network=none \
-    cargo build --release --frozen \
+    cargo build ${CARGO_BUILD_FLAGS} --frozen \
       --target ${TARGET_ARCH} \
       -p api
 
@@ -84,10 +86,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,id=api-target,target=/build/target \
     --network=none \
-    cargo build --release --frozen \
+    cargo build ${CARGO_BUILD_FLAGS} --frozen \
       --bin api \
       --target ${TARGET_ARCH} \
-      && install -D -m 0755 /build/target/${TARGET_ARCH}/release/api /usr/local/bin/api
+      && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/api /usr/local/bin/api
 
 FROM scratch AS runtime
 COPY --from=user-runtime . /
