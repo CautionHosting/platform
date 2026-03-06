@@ -86,8 +86,8 @@ pub fn generate_encryption_key() -> String {
     general_purpose::STANDARD.encode(key)
 }
 
+#[cfg(test)]
 impl Encryptor {
-    #[cfg(test)]
     fn from_key(key_b64: &str) -> Result<Self, String> {
         let key_bytes = general_purpose::STANDARD
             .decode(key_b64)
