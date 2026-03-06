@@ -42,3 +42,6 @@ dterror = "0.1.0"
 futures = "0.3"
 cookie = "0.18"
 axum-extra = { version = "0.10", features = ["cookie"] }
+
+[features]
+e2e-testing-unsafe = []

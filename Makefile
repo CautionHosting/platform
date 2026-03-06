@@ -6,7 +6,7 @@ export
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-gateway run-frontend up up-dev down down-clean logs clean clean-enclave build-cli release-cli sign-cli verify-cli reproduce-cli test test-unit
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-onprem build-gateway-e2e postgres-test migrate-test
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -60,6 +60,13 @@ build-email-dev:
 	@echo "Building Email service (dev)..."
 	@docker build -t caution-email $(DEV_BUILD_ARGS) -f ./containerfiles/Containerfile.email-service .
 	@echo "Email dev service image built: caution-email"
+
+build-gateway-e2e:
+	@echo "Building Gateway binary (e2e test mode)..."
+	@mkdir -p $(OUT_DIR)
+	@docker rmi -f caution-gateway 2>/dev/null || true
+	@docker build -t caution-gateway $(DEV_BUILD_ARGS) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.gateway .
+	@echo "Gateway e2e image build complete"
 
 build-frontend:
 	@echo "Building Frontend..."
@@ -348,7 +355,132 @@ status:
 	@echo "\n=== Network Status ==="
 	@docker network ls --filter "name=$(NETWORK)"
 
+# ── E2E test infrastructure ──────────────────────────────────────────
+# Uses a separate postgres instance and ephemeral volume so dev data is untouched.
+
+TEST_DB_NAME := caution_test
+TEST_DB_VOLUME := caution-test-postgres-data
+TEST_DB_HOST := postgres-test
+TEST_DATABASE_URL := postgresql://$(DB_USER):$(DB_PASSWORD)@$(TEST_DB_HOST):5432/$(TEST_DB_NAME)
+
+postgres-test: network
+	@docker rm -f $(TEST_DB_HOST) 2>/dev/null || true
+	@docker volume rm $(TEST_DB_VOLUME) 2>/dev/null || true
+	@docker volume create $(TEST_DB_VOLUME) >/dev/null
+	@docker run -d \
+		--name $(TEST_DB_HOST) \
+		--network $(NETWORK) \
+		-v $(TEST_DB_VOLUME):/var/lib/postgresql/data \
+		-e POSTGRES_DB=$(TEST_DB_NAME) \
+		-e POSTGRES_USER=$(DB_USER) \
+		-e POSTGRES_PASSWORD=$(DB_PASSWORD) \
+		postgres:16-alpine >/dev/null && \
+	echo "Test postgres started, waiting for ready..." && \
+	sleep 3 && \
+	until docker exec $(TEST_DB_HOST) pg_isready -U $(DB_USER) > /dev/null 2>&1; do \
+		sleep 1; \
+	done && \
+	echo "Test postgres ready"
+
+migrate-test: postgres-test
+	@echo "Running migrations on test DB..."
+	@for migration in src/api/migrations/*.sql; do \
+		docker run --rm \
+			--network $(NETWORK) \
+			-v $(PWD)/src/api/migrations:/migrations:ro \
+			-e PGPASSWORD=$(DB_PASSWORD) \
+			postgres:16-alpine \
+			psql -h $(TEST_DB_HOST) -U $(DB_USER) -d $(TEST_DB_NAME) -f /migrations/$$(basename $$migration) 2>&1 | grep -v "^$$" || true; \
+	done
+	@echo "Test migrations complete"
+
+run-api-test: network
+	@docker rm -f api 2>/dev/null || true
+	@mkdir -p $(CAUTION_DATA_DIR)/git-repos $(CAUTION_DATA_DIR)/build $(CAUTION_DATA_DIR)/terraform
+	@docker run -d \
+		--name api \
+		--network $(NETWORK) \
+		--dns 8.8.8.8 \
+		--dns 8.8.4.4 \
+		--group-add $$(stat -c '%g' /var/run/docker.sock) \
+		-e AWS_REGION=us-west-2 \
+		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
+		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
+		-e DATABASE_URL=$(TEST_DATABASE_URL) \
+		-e SKIP_PAYMENT_REQUIREMENT=true \
+		-e GIT_HOSTNAME=localhost \
+		--env-file .env \
+		-v $(PWD)/terraform:/app/terraform:ro \
+		-v /var/run/docker.sock:/var/run/docker.sock \
+		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
+		caution-api
+	@echo "API service started in test mode"
+
+run-gateway-test: network
+	@docker rm -f gateway 2>/dev/null || true
+	@mkdir -p $(CAUTION_DATA_DIR)/git-repos
+	@docker run -d \
+		--name gateway \
+		--network $(NETWORK) \
+		-p 127.0.0.1:8000:8080 \
+		-p 127.0.0.1:$(SSH_PORT):$(SSH_PORT) \
+		--env-file .env \
+		-e DATABASE_URL=$(TEST_DATABASE_URL) \
+		-e SSH_PORT=$(SSH_PORT) \
+		-e SSH_HOST_KEY_PATH=$(CONTAINER_DATA_DIR)/ssh_host_ed25519_key \
+		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
+		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
+		caution-gateway
+	@echo "Gateway started on 127.0.0.1:8000 (HTTP) and 127.0.0.1:$(SSH_PORT) (SSH)"
+
+run-frontend-test: network
+	@docker rm -f frontend 2>/dev/null || true
+	@docker run -d \
+		--name frontend \
+		--network $(NETWORK) \
+		-p 127.0.0.1:3000:3000 \
+		--env-file .env \
+		caution-frontend
+	@echo "Frontend started on 127.0.0.1:3000"
+
+up-test: down migrate-test
+	@echo "Building test images (e2e-testing-unsafe mode)..."
+	@$(MAKE) -j3 build-api-dev build-email-dev build-frontend
+	@$(MAKE) build-gateway-e2e
+	@$(MAKE) run-email run-api-test run-frontend-test
+	@echo "Waiting for API to be ready..."
+	@sleep 2
+	@$(MAKE) run-gateway-test
+	@echo "  All services running (e2e-testing-unsafe mode)"
+	@echo "  All ports bound to 127.0.0.1 only (not externally accessible)"
+	@echo "  Test DB: $(TEST_DB_HOST) (ephemeral)"
+	@echo "  Gateway: http://127.0.0.1:8000"
+	@echo "  SSH: 127.0.0.1:$(SSH_PORT)"
+	@echo ""
+	@echo "  E2E login: POST http://127.0.0.1:8000/auth/e2e-login"
+
+down-test:
+	@docker rm -f gateway api email frontend $(TEST_DB_HOST) 2>/dev/null || true
+	@docker volume rm $(TEST_DB_VOLUME) 2>/dev/null || true
+	@echo "Test services and data removed"
+
 test-unit:
 	cargo test --workspace
+
+test-e2e:
+	@$(MAKE) up-test
+	@echo "Running e2e tests..."
+	@bash tests/e2e/test_happy_path.sh; \
+	status=$$?; \
+	$(MAKE) down-test; \
+	exit $$status
+
+test-e2e-onprem:
+	@$(MAKE) up-test
+	@echo "Running managed on-prem e2e tests..."
+	@bash tests/e2e/test_managed_on_prem.sh; \
+	status=$$?; \
+	$(MAKE) down-test; \
+	exit $$status
 
 test: test-unit

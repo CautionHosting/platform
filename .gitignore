@@ -5,6 +5,7 @@ env
 git-repos/
 build-cache/
 caution-cache/
+tests/e2e/logs/
 
 # Terraform
 .terraform/

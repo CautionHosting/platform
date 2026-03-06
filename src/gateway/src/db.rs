@@ -571,6 +571,41 @@ pub async fn get_auth_session(pool: &PgPool, session_id: &str) -> Result<Option<
     Ok(session)
 }
 
+#[cfg(feature = "e2e-testing-unsafe")]
+pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>)> {
+    let username = generate_user_identifier();
+    let user_handle: [u8; 16] = rand::thread_rng().gen();
+    let credential_id: [u8; 16] = rand::thread_rng().gen();
+    let credential_id_vec = credential_id.to_vec();
+
+    let user_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (fido2_user_handle, username, email, beta_code_id)
+         VALUES ($1, $2, NULL, NULL)
+         RETURNING id"
+    )
+    .bind(&user_handle[..])
+    .bind(&username)
+    .fetch_one(pool)
+    .await
+    .context("Failed to create e2e user")?;
+
+    // Insert a dummy credential row so session validation joins work
+    sqlx::query(
+        "INSERT INTO fido2_credentials (
+            credential_id, user_id, public_key, attestation_type,
+            sign_count, created_at, updated_at
+        ) VALUES ($1, $2, $3, 'e2e', 0, NOW(), NOW())"
+    )
+    .bind(&credential_id_vec)
+    .bind(user_id)
+    .bind(b"e2e-dummy-key" as &[u8])
+    .execute(pool)
+    .await
+    .context("Failed to create e2e credential")?;
+
+    Ok((user_id, credential_id_vec))
+}
+
 /// Check if any of the user's organizations require PIN for authentication.
 /// Returns true if ANY org the user belongs to has require_pin = true.
 pub async fn user_requires_pin(pool: &PgPool, user_id: Uuid) -> Result<bool, sqlx::Error> {

@@ -179,7 +179,7 @@ async fn signed_request(
     );
     let signed_headers = "content-type;host;x-amz-date";
     let canonical_request = format!(
-        "POST\n/\n\n{}{}\n{}",
+        "POST\n/\n\n{}\n{}\n{}",
         canonical_headers, signed_headers, payload_hash
     );
 

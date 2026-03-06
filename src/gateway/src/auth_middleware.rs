@@ -169,7 +169,15 @@ pub async fn fido2_sign_middleware(
     req.headers_mut().remove("X-Authenticated-User-ID");
     req.headers_mut().remove("X-Fido2-Signed");
 
+    // In e2e test mode, skip all FIDO2 signing requirements.
+    // Requests will still be authenticated by fido2_auth_middleware (session check).
+    #[cfg(feature = "e2e-testing-unsafe")]
+    {
+        return Ok(next.run(req).await);
+    }
+
     // Paths that require signature for write operations
+    #[allow(unreachable_code)]
     let path = req.uri().path();
     let method = req.method();
     let requires_signature =

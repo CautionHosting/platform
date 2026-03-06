@@ -727,9 +727,25 @@ async fn update_asg_launch_template(
 
     let asg = crate::ec2::AsgClient::new(credentials);
 
-    asg.update_auto_scaling_group(asg_name, launch_template_id)
-        .await
-        .context("Failed to update ASG launch template")?;
+    // Retry with backoff for IAM eventual consistency
+    let mut last_err = None;
+    for attempt in 0..5u32 {
+        if attempt > 0 {
+            let delay = std::time::Duration::from_secs(2u64.pow(attempt));
+            tracing::info!("Retrying ASG update in {:?} (attempt {}/5)", delay, attempt + 1);
+            tokio::time::sleep(delay).await;
+        }
+        match asg.update_auto_scaling_group(asg_name, launch_template_id).await {
+            Ok(_) => { last_err = None; break; }
+            Err(e) => {
+                tracing::warn!("ASG update attempt {} failed: {:?}", attempt + 1, e);
+                last_err = Some(e);
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        return Err(e).context("Failed to update ASG launch template after retries");
+    }
 
     tracing::info!("Successfully updated ASG launch template");
 
@@ -884,23 +900,40 @@ async fn upload_eif_to_customer_bucket(
 
     let client = aws_sdk_s3::Client::new(&config);
 
-    let body = ByteStream::from_path(Path::new(eif_path)).await
-        .context("Failed to read EIF file")?;
+    // Retry with backoff for IAM eventual consistency — newly created
+    // credentials may not be usable immediately across all AWS endpoints.
+    let mut last_err = None;
+    for attempt in 0..5u32 {
+        if attempt > 0 {
+            let delay = std::time::Duration::from_secs(2u64.pow(attempt));
+            tracing::info!("Retrying EIF upload in {:?} (attempt {}/5)", delay, attempt + 1);
+            tokio::time::sleep(delay).await;
+        }
 
-    client
-        .put_object()
-        .bucket(bucket_name)
-        .key(&s3_key)
-        .body(body)
-        .send()
-        .await
-        .context("Failed to upload EIF to customer bucket")?;
+        let body = ByteStream::from_path(Path::new(eif_path)).await
+            .context("Failed to read EIF file")?;
 
-    let s3_path = format!("s3://{}/{}", bucket_name, s3_key);
+        match client
+            .put_object()
+            .bucket(bucket_name)
+            .key(&s3_key)
+            .body(body)
+            .send()
+            .await
+        {
+            Ok(_) => {
+                let s3_path = format!("s3://{}/{}", bucket_name, s3_key);
+                tracing::info!("EIF uploaded successfully to customer bucket: {}", s3_path);
+                return Ok(s3_path);
+            }
+            Err(e) => {
+                tracing::warn!("EIF upload attempt {} failed: {:?}", attempt + 1, e);
+                last_err = Some(e);
+            }
+        }
+    }
 
-    tracing::info!("EIF uploaded successfully to customer bucket: {}", s3_path);
-
-    Ok(s3_path)
+    Err(last_err.unwrap()).context("Failed to upload EIF to customer bucket after retries")
 }
 
 async fn provision_nitro_enclave(

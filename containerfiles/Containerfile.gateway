@@ -48,6 +48,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 ARG EXTRA_RUSTFLAGS="-C codegen-units=1"
 ARG CARGO_BUILD_FLAGS="--release"
 ARG CARGO_PROFILE_DIR="release"
+ARG EXTRA_FEATURES=""
 
 ENV RUSTFLAGS="${EXTRA_RUSTFLAGS} -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
 
@@ -57,6 +58,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --network=none \
     cargo build ${CARGO_BUILD_FLAGS} --frozen \
       --target ${TARGET_ARCH} \
+      ${EXTRA_FEATURES:+--features ${EXTRA_FEATURES}} \
       -p gateway
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -66,6 +68,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build ${CARGO_BUILD_FLAGS} --frozen \
       --bin gateway \
       --target ${TARGET_ARCH} \
+      ${EXTRA_FEATURES:+--features ${EXTRA_FEATURES}} \
       && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/gateway /usr/local/bin/gateway
 
 FROM scratch AS runtime

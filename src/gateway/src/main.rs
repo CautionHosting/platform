@@ -136,7 +136,7 @@ async fn main() -> Result<()> {
             "X-Fido2-Response".parse().unwrap(),
         ]);
 
-    let auth_routes = Router::new()
+    let mut auth_routes = Router::new()
         .route("/auth/register/begin", post(handlers::begin_register_handler))
         .route("/auth/register/finish", post(handlers::finish_register_handler))
         .route("/auth/login/begin", post(handlers::begin_login_handler))
@@ -146,7 +146,15 @@ async fn main() -> Result<()> {
         .route("/auth/qr-login/status", get(handlers::qr_login_status_handler))
         .route("/auth/qr-login/authenticate", post(handlers::qr_login_authenticate_handler))
         .route("/auth/qr-login/authenticate/finish", post(handlers::qr_login_authenticate_finish_handler))
-        .route("/auth/sign-request", post(handlers::begin_sign_request_handler))
+        .route("/auth/sign-request", post(handlers::begin_sign_request_handler));
+
+    #[cfg(feature = "e2e-testing-unsafe")]
+    {
+        tracing::warn!("E2E test mode enabled - /auth/e2e-login endpoint is active");
+        auth_routes = auth_routes.route("/auth/e2e-login", post(handlers::e2e_login_handler));
+    }
+
+    let auth_routes = auth_routes
         .layer(middleware::from_fn_with_state(
             rate_limiter.clone(),
             rate_limit::rate_limit_middleware,
