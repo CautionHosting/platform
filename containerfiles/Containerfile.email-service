@@ -30,9 +30,6 @@ COPY src/email-service/src ./src/email-service/src
 COPY src/enclave-builder/src ./src/enclave-builder/src
 
 ENV RUST_BACKTRACE=1
-ENV RUSTFLAGS="-C codegen-units=1"
-ENV RUSTFLAGS="${RUSTFLAGS} -C target-feature=+crt-static"
-ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=-Wl,--build-id=none"
 ENV TARGET_ARCH="x86_64-unknown-linux-musl"
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -40,11 +37,17 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     find /usr/local/cargo/registry -name '.cargo-ok' -delete 2>/dev/null || true && \
     cargo fetch --locked --target $TARGET_ARCH
 
+ARG EXTRA_RUSTFLAGS="-C codegen-units=1"
+ARG CARGO_BUILD_FLAGS="--release"
+ARG CARGO_PROFILE_DIR="release"
+
+ENV RUSTFLAGS="${EXTRA_RUSTFLAGS} -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
+
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,id=email-target,target=/build/target \
     --network=none \
-    cargo build --release --frozen \
+    cargo build ${CARGO_BUILD_FLAGS} --frozen \
       --target ${TARGET_ARCH} \
       -p email-service
 
@@ -52,10 +55,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,id=email-target,target=/build/target \
     --network=none \
-    cargo build --release --frozen \
+    cargo build ${CARGO_BUILD_FLAGS} --frozen \
       --bin email-service \
       --target ${TARGET_ARCH} \
-      && install -D -m 0755 /build/target/${TARGET_ARCH}/release/email-service /usr/local/bin/email-service
+      && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/email-service /usr/local/bin/email-service
 
 FROM user-runtime AS runtime
 

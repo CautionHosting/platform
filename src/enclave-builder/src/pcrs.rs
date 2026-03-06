@@ -187,6 +187,67 @@ d4f748865131ffc30929eff73c5d651dc2e6d795d8f47b3ec27208b2d293a6c040fc4db6dc44c02b
     }
 
     #[test]
+    fn test_parse_pcrs_file_colon_format() {
+        let content = r#"
+PCR0:d4f748865131ffc30929eff73c5d651dc2e6d795d8f47b3ec27208b2d293a6c040fc4db6dc44c02b8e5fc34f65b3d595
+PCR1:aabbccdd
+PCR2:11223344
+        "#;
+
+        let pcrs = parse_pcrs_file(content).unwrap();
+        assert_eq!(
+            pcrs.pcr0,
+            "d4f748865131ffc30929eff73c5d651dc2e6d795d8f47b3ec27208b2d293a6c040fc4db6dc44c02b8e5fc34f65b3d595"
+        );
+        assert_eq!(pcrs.pcr1, "aabbccdd");
+        assert_eq!(pcrs.pcr2, "11223344");
+    }
+
+    #[test]
+    fn test_parse_pcrs_file_with_pcr3_pcr4() {
+        let content = r#"
+aaa PCR0
+bbb PCR1
+ccc PCR2
+ddd PCR3
+eee PCR4
+        "#;
+
+        let pcrs = parse_pcrs_file(content).unwrap();
+        assert_eq!(pcrs.pcr0, "aaa");
+        assert_eq!(pcrs.pcr1, "bbb");
+        assert_eq!(pcrs.pcr2, "ccc");
+        assert_eq!(pcrs.pcr3, Some("ddd".to_string()));
+        assert_eq!(pcrs.pcr4, Some("eee".to_string()));
+    }
+
+    #[test]
+    fn test_parse_pcrs_file_missing_required() {
+        let content = "aaa PCR0\nbbb PCR1\n";
+        assert!(parse_pcrs_file(content).is_err()); // missing PCR2
+    }
+
+    #[test]
+    fn test_parse_pcrs_file_empty() {
+        assert!(parse_pcrs_file("").is_err());
+    }
+
+    #[test]
+    fn test_parse_pcrs_file_ignores_blank_lines() {
+        let content = "\n\naaa PCR0\n\nbbb PCR1\n\nccc PCR2\n\n";
+        let pcrs = parse_pcrs_file(content).unwrap();
+        assert_eq!(pcrs.pcr0, "aaa");
+    }
+
+    #[test]
+    fn test_parse_pcrs_file_ignores_unknown_labels() {
+        let content = "aaa PCR0\nbbb PCR1\nccc PCR2\nddd PCR99\n";
+        let pcrs = parse_pcrs_file(content).unwrap();
+        assert_eq!(pcrs.pcr0, "aaa");
+        assert!(pcrs.pcr3.is_none());
+    }
+
+    #[test]
     fn test_is_debug_mode() {
         let production_pcrs = PcrValues {
             pcr0: "abc123".to_string(),
@@ -206,5 +267,93 @@ d4f748865131ffc30929eff73c5d651dc2e6d795d8f47b3ec27208b2d293a6c040fc4db6dc44c02b
 
         assert!(!is_debug_mode(&production_pcrs));
         assert!(is_debug_mode(&debug_pcrs));
+    }
+
+    #[test]
+    fn test_is_debug_mode_single_zero_pcr() {
+        // Any single PCR being all zeros should trigger debug mode
+        let pcrs = PcrValues {
+            pcr0: "000000000000".to_string(),
+            pcr1: "abc123".to_string(),
+            pcr2: "def456".to_string(),
+            pcr3: None,
+            pcr4: None,
+        };
+        assert!(is_debug_mode(&pcrs));
+
+        let pcrs = PcrValues {
+            pcr0: "abc123".to_string(),
+            pcr1: "000000".to_string(),
+            pcr2: "def456".to_string(),
+            pcr3: None,
+            pcr4: None,
+        };
+        assert!(is_debug_mode(&pcrs));
+    }
+
+    #[test]
+    fn test_is_debug_mode_pcr3_pcr4_ignored() {
+        // PCR3 and PCR4 being zero should not trigger debug mode
+        let pcrs = PcrValues {
+            pcr0: "abc123".to_string(),
+            pcr1: "def456".to_string(),
+            pcr2: "ghi789".to_string(),
+            pcr3: Some("000000".to_string()),
+            pcr4: Some("000000".to_string()),
+        };
+        assert!(!is_debug_mode(&pcrs));
+    }
+
+    #[test]
+    fn test_format_pcrs_basic() {
+        let pcrs = PcrValues {
+            pcr0: "aaa".to_string(),
+            pcr1: "bbb".to_string(),
+            pcr2: "ccc".to_string(),
+            pcr3: None,
+            pcr4: None,
+        };
+
+        let output = format_pcrs(&pcrs);
+        assert!(output.contains("aaa PCR0"));
+        assert!(output.contains("bbb PCR1"));
+        assert!(output.contains("ccc PCR2"));
+        assert!(!output.contains("PCR3"));
+        assert!(!output.contains("PCR4"));
+    }
+
+    #[test]
+    fn test_format_pcrs_with_optional() {
+        let pcrs = PcrValues {
+            pcr0: "aaa".to_string(),
+            pcr1: "bbb".to_string(),
+            pcr2: "ccc".to_string(),
+            pcr3: Some("ddd".to_string()),
+            pcr4: Some("eee".to_string()),
+        };
+
+        let output = format_pcrs(&pcrs);
+        assert!(output.contains("ddd PCR3"));
+        assert!(output.contains("eee PCR4"));
+    }
+
+    #[test]
+    fn test_format_pcrs_round_trip() {
+        let pcrs = PcrValues {
+            pcr0: "aaa".to_string(),
+            pcr1: "bbb".to_string(),
+            pcr2: "ccc".to_string(),
+            pcr3: Some("ddd".to_string()),
+            pcr4: Some("eee".to_string()),
+        };
+
+        let formatted = format_pcrs(&pcrs);
+        let parsed = parse_pcrs_file(&formatted).unwrap();
+
+        assert_eq!(pcrs.pcr0, parsed.pcr0);
+        assert_eq!(pcrs.pcr1, parsed.pcr1);
+        assert_eq!(pcrs.pcr2, parsed.pcr2);
+        assert_eq!(pcrs.pcr3, parsed.pcr3);
+        assert_eq!(pcrs.pcr4, parsed.pcr4);
     }
 }

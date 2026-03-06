@@ -6,7 +6,7 @@ export
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-gateway run-frontend up down down-clean logs clean clean-enclave build-cli release-cli sign-cli verify-cli reproduce-cli
+.PHONY: build-all build-enclave network postgres migrate run-api run-gateway run-frontend up up-dev down down-clean logs clean clean-enclave build-cli release-cli sign-cli verify-cli reproduce-cli test test-unit
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -25,6 +25,8 @@ ifdef NOCACHE
 	NO_CACHE := --no-cache
 endif
 
+DEV_BUILD_ARGS := --build-arg CARGO_BUILD_FLAGS="" --build-arg CARGO_PROFILE_DIR="debug" --build-arg EXTRA_RUSTFLAGS=""
+
 build-gateway:
 	@echo "Building Gateway binary..."
 	@mkdir -p $(OUT_DIR)
@@ -41,6 +43,23 @@ build-email:
 	@echo "Building Email service..."
 	@docker build -t caution-email -f ./containerfiles/Containerfile.email-service .
 	@echo "Email service image built: caution-email"
+
+build-gateway-dev:
+	@echo "Building Gateway binary (dev)..."
+	@mkdir -p $(OUT_DIR)
+	@docker rmi -f caution-gateway 2>/dev/null || true
+	@docker build -t caution-gateway $(DEV_BUILD_ARGS) -f ./containerfiles/Containerfile.gateway .
+	@echo "Gateway dev image build complete"
+
+build-api-dev:
+	@echo "Building API service (dev)..."
+	@docker build -t caution-api $(DEV_BUILD_ARGS) -f ./containerfiles/Containerfile.api .
+	@echo "API dev service image built: caution-api"
+
+build-email-dev:
+	@echo "Building Email service (dev)..."
+	@docker build -t caution-email $(DEV_BUILD_ARGS) -f ./containerfiles/Containerfile.email-service .
+	@echo "Email dev service image built: caution-email"
 
 build-frontend:
 	@echo "Building Frontend..."
@@ -134,7 +153,8 @@ reproduce-cli:
 	@echo "Reproduction successful - manifests match"
 
 install-cli: build-cli
-	@./utils/install.sh
+	@install -D -m 0755 $(CLI_OUT_DIR)/$(CLI_BINARY) $(HOME)/.local/bin/caution
+	@echo "Installed caution to $(HOME)/.local/bin/caution"
 
 build-all: build-gateway build-api build-email build-frontend build-cli
 
@@ -245,11 +265,30 @@ run-frontend: network
 		caution-frontend
 	@echo "Frontend started on port 3000"
 
-up: build-api build-gateway build-email build-frontend migrate run-email run-api run-frontend
+up: migrate
+	@echo "Building all images in parallel..."
+	@$(MAKE) -j4 build-api build-gateway build-email build-frontend
+	@$(MAKE) run-email run-api run-frontend
 	@echo "Waiting for API to be ready..."
 	@sleep 2
 	@$(MAKE) run-gateway
 	@echo "  All services running"
+	@echo "  Frontend: http://localhost:3000 (dev server with hot reload)"
+	@echo "  Gateway: http://localhost:8000"
+	@echo "  SSH: localhost:2222"
+	@echo "  API: internal only (http://api:8080)"
+	@echo "  Postgres: localhost:5432"
+	@echo ""
+	@echo "Database is persistent - safe to run 'make down' without losing data"
+
+up-dev: migrate
+	@echo "Building all images in parallel (dev)..."
+	@$(MAKE) -j4 build-api-dev build-gateway-dev build-email-dev build-frontend
+	@$(MAKE) run-email run-api run-frontend
+	@echo "Waiting for API to be ready..."
+	@sleep 2
+	@$(MAKE) run-gateway
+	@echo "  All services running (dev builds)"
 	@echo "  Frontend: http://localhost:3000 (dev server with hot reload)"
 	@echo "  Gateway: http://localhost:8000"
 	@echo "  SSH: localhost:2222"
@@ -308,3 +347,8 @@ status:
 	@docker volume ls --filter "name=$(DB_VOLUME)"
 	@echo "\n=== Network Status ==="
 	@docker network ls --filter "name=$(NETWORK)"
+
+test-unit:
+	cargo test --workspace
+
+test: test-unit

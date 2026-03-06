@@ -11,11 +11,6 @@ variable "resource_id" {
   type        = string
 }
 
-variable "resource_name" {
-  description = "Resource name (e.g., resource-415af99a)"
-  type        = string
-}
-
 variable "ami_id" {
   description = "AMI ID containing the pre-built application image"
   type        = string
