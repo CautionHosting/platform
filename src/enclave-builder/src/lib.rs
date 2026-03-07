@@ -1,8 +1,12 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-pub const ENCLAVE_SOURCE: &str = "https://git.distrust.co/public/enclaveos/archive/master.tar.gz";
+const ENCLAVE_SOURCE_BASE: &str = "https://git.distrust.co/public/enclaveos/archive";
 pub const FRAMEWORK_SOURCE: &str = "https://codeberg.org/caution/platform/archive/main.tar.gz";
+
+pub fn enclave_source_url(commit: &str) -> String {
+    format!("{}/{}.tar.gz", ENCLAVE_SOURCE_BASE, commit)
+}
 
 pub mod extract;
 pub mod merge;
@@ -274,6 +278,7 @@ impl EnclaveBuilder {
         manifest: Option<EnclaveManifest>,
         ports: &[u16],
         e2e: bool,
+        templates_dir: Option<&std::path::Path>,
     ) -> Result<EifFile> {
         build::build_eif_from_filesystems(
             user_fs_path,
@@ -287,6 +292,7 @@ impl EnclaveBuilder {
             ports,
             self.no_cache,
             e2e,
+            templates_dir,
         )
         .await
     }
@@ -370,6 +376,19 @@ impl EnclaveBuilder {
         // Resolve framework_source commit
         let framework_commit = Self::resolve_framework_commit(&self.framework_source).await;
 
+        // In reproduction mode, download framework source to get templates
+        let framework_source_path = if external_manifest.is_some() {
+            let path = compile::get_or_clone_framework_source(
+                &self.framework_source,
+                &self.work_dir,
+            ).await?;
+            Some(path)
+        } else {
+            None
+        };
+        let templates_dir = framework_source_path.as_ref()
+            .map(|p| p.join("src/enclave-builder/templates"));
+
         let manifest = if let Some(ext_manifest) = external_manifest {
             tracing::info!("Using external manifest for reproducible build");
             ext_manifest
@@ -386,8 +405,18 @@ impl EnclaveBuilder {
                     commit: enclave_source_result.commit.clone(),
                 }
             } else {
-                EnclaveSource::Local {
-                    path: self.enclave_source.clone(),
+                // Local path - resolve commit from git or ENCLAVEOS_COMMIT env var
+                let commit = enclave_source_result.commit.clone()
+                    .or_else(|| std::env::var("ENCLAVEOS_COMMIT").ok());
+                if let Some(commit) = commit {
+                    EnclaveSource::GitArchive {
+                        urls: vec![enclave_source_url(&commit)],
+                        commit: Some(commit),
+                    }
+                } else {
+                    EnclaveSource::Local {
+                        path: self.enclave_source.clone(),
+                    }
                 }
             };
 
@@ -428,6 +457,7 @@ impl EnclaveBuilder {
             Some(manifest),
             ports,
             e2e,
+            templates_dir.as_deref(),
         ).await?;
 
         tracing::info!("Extracting PCR values...");
@@ -464,6 +494,19 @@ impl EnclaveBuilder {
         // Resolve framework_source commit
         let framework_commit = Self::resolve_framework_commit(&self.framework_source).await;
 
+        // In reproduction mode, download framework source to get templates
+        let framework_source_path = if external_manifest.is_some() {
+            let path = compile::get_or_clone_framework_source(
+                &self.framework_source,
+                &self.work_dir,
+            ).await?;
+            Some(path)
+        } else {
+            None
+        };
+        let templates_dir = framework_source_path.as_ref()
+            .map(|p| p.join("src/enclave-builder/templates"));
+
         let manifest = if let Some(ext_manifest) = external_manifest {
             tracing::info!("Using external manifest for reproducible build");
             ext_manifest
@@ -480,8 +523,18 @@ impl EnclaveBuilder {
                     commit: enclave_source_result.commit.clone(),
                 }
             } else {
-                EnclaveSource::Local {
-                    path: self.enclave_source.clone(),
+                // Local path - resolve commit from git or ENCLAVEOS_COMMIT env var
+                let commit = enclave_source_result.commit.clone()
+                    .or_else(|| std::env::var("ENCLAVEOS_COMMIT").ok());
+                if let Some(commit) = commit {
+                    EnclaveSource::GitArchive {
+                        urls: vec![enclave_source_url(&commit)],
+                        commit: Some(commit),
+                    }
+                } else {
+                    EnclaveSource::Local {
+                        path: self.enclave_source.clone(),
+                    }
                 }
             };
 
@@ -523,6 +576,7 @@ impl EnclaveBuilder {
             Some(manifest),
             ports,
             e2e,
+            templates_dir.as_deref(),
         ).await?;
 
         tracing::info!("Extracting PCR values...");

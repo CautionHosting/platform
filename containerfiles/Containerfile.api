@@ -115,6 +115,7 @@ COPY --from=socat . /
 COPY --from=builder /usr/local/bin/api /usr/local/bin/api
 
 COPY terraform /app/terraform
+COPY src/enclave-builder/templates /app/templates
 
 WORKDIR /app
 

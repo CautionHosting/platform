@@ -20,6 +20,12 @@ pub struct EnclaveManifest {
     pub run_command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enclaveos_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bootproof_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steve_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +81,9 @@ impl EnclaveManifest {
             binary,
             run_command,
             metadata,
+            enclaveos_commit: None,
+            bootproof_commit: None,
+            steve_commit: None,
         }
     }
 

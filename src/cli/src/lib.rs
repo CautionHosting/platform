@@ -2908,7 +2908,7 @@ build: docker build -t app .
         let builder = enclave_builder::EnclaveBuilder::new_with_cache(
             "unused-template",
             "local",
-            enclave_builder::ENCLAVE_SOURCE,
+            enclave_builder::enclave_source_url(&enclave_builder::build::resolve_enclaveos_commit()),
             "unused",
             enclave_builder::FRAMEWORK_SOURCE,
             "local",
@@ -2999,8 +2999,9 @@ build: docker build -t app .
                 log_verbose(self.verbose, &format!("Using enclave source from Procfile: {}", enclave_sources[0]));
                 (enclave_sources[0].clone(), "unused".to_string())
             } else {
-                log_verbose(self.verbose, &format!("Using default enclave source: {}", enclave_builder::ENCLAVE_SOURCE));
-                (enclave_builder::ENCLAVE_SOURCE.to_string(), "unused".to_string())
+                let source = enclave_builder::enclave_source_url(&enclave_builder::build::resolve_enclaveos_commit());
+                log_verbose(self.verbose, &format!("Using default enclave source: {}", source));
+                (source, "unused".to_string())
             }
         };
 

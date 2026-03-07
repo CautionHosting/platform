@@ -2341,7 +2341,7 @@ async fn deploy_logic(
         let enclave_source = if !build_config.enclave_sources.is_empty() {
             build_config.enclave_sources[0].clone()
         } else {
-            enclave_builder::ENCLAVE_SOURCE.to_string()
+            enclave_builder::enclave_source_url(&enclave_builder::build::resolve_enclaveos_commit())
         };
         tracing::info!("Using enclave source: {}", enclave_source);
 

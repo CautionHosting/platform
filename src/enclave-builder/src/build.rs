@@ -10,6 +10,40 @@ use sha2::{Sha256, Digest};
 use crate::EifFile;
 use crate::manifest::EnclaveManifest;
 
+const DEFAULT_ENCLAVEOS_COMMIT: &str = "9582e25239430070667fdd0a6b64d887f1c308df";
+const DEFAULT_BOOTPROOF_COMMIT: &str = "64dae0628e58b9f898b89f9b7a404b37e2f0ca9f";
+const DEFAULT_STEVE_COMMIT: &str = "ed38a190cd5d7a8f452c854e41d00ec748e172bf";
+
+pub fn resolve_enclaveos_commit() -> String {
+    std::env::var("ENCLAVEOS_COMMIT")
+        .unwrap_or_else(|_| DEFAULT_ENCLAVEOS_COMMIT.to_string())
+}
+
+/// Resolve the templates directory at runtime.
+///
+/// Priority:
+/// 1. CAUTION_TEMPLATES_DIR env var (explicit override)
+/// 2. /app/templates (Docker container path)
+/// 3. CARGO_MANIFEST_DIR/templates (local dev fallback)
+fn resolve_templates_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("CAUTION_TEMPLATES_DIR") {
+        let p = PathBuf::from(&dir);
+        anyhow::ensure!(p.exists(), "CAUTION_TEMPLATES_DIR={} does not exist", dir);
+        return Ok(p);
+    }
+
+    let docker_path = PathBuf::from("/app/templates");
+    if docker_path.exists() {
+        return Ok(docker_path);
+    }
+
+    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates");
+    anyhow::ensure!(dev_path.exists(),
+        "Templates directory not found. Checked CAUTION_TEMPLATES_DIR, /app/templates, and {}",
+        dev_path.display());
+    Ok(dev_path)
+}
+
 pub async fn stage_eif_components(
     user_fs_path: &Path,
     enclave_source_path: &Path,
@@ -18,6 +52,7 @@ pub async fn stage_eif_components(
     manifest: Option<EnclaveManifest>,
     ports: &[u16],
     e2e: bool,
+    templates_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     let stage_dir = work_dir.join("eif-stage");
     fs::create_dir_all(&stage_dir).await?;
@@ -38,34 +73,108 @@ pub async fn stage_eif_components(
     tracing::info!("Staging enclave source from: {}", enclave_source_path.display());
     copy_dir_recursive(enclave_source_path, &enclave_dir).await?;
 
-    if let Some(manifest) = manifest {
+    let enclaveos_commit = resolve_enclaveos_commit();
+    let bootproof_commit = std::env::var("BOOTPROOF_COMMIT")
+        .unwrap_or_else(|_| DEFAULT_BOOTPROOF_COMMIT.to_string());
+    let steve_commit = std::env::var("STEVE_COMMIT")
+        .unwrap_or_else(|_| DEFAULT_STEVE_COMMIT.to_string());
+
+    if let Some(mut manifest) = manifest {
+        manifest.enclaveos_commit = Some(enclaveos_commit.clone());
+        manifest.bootproof_commit = Some(bootproof_commit.clone());
+        if e2e {
+            manifest.steve_commit = Some(steve_commit.clone());
+        }
         let manifest_path = stage_dir.join("manifest.json");
         manifest.write_to_file(&manifest_path).await
             .context("Failed to write manifest.json")?;
         tracing::info!("Wrote manifest to: {}", manifest_path.display());
     }
 
-    generate_run_sh(&stage_dir, run_command, ports, e2e).await?;
+    // Read and render templates
+    let templates_dir = match templates_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => resolve_templates_dir()?,
+    };
 
-    generate_containerfile_eif(&stage_dir, e2e).await?;
+    let run_sh_template = templates_dir.join("run.sh.template");
+    anyhow::ensure!(run_sh_template.exists(),
+        "run.sh.template not found at {}",
+        run_sh_template.display());
+
+    let containerfile_template = templates_dir.join("Containerfile.eif");
+    anyhow::ensure!(containerfile_template.exists(),
+        "Containerfile.eif template not found at {}",
+        containerfile_template.display());
+
+    let run_sh_content = render_run_sh_template(&run_sh_template, run_command, ports, e2e).await?;
+    let containerfile_content = render_containerfile_template(
+        &containerfile_template, e2e, &bootproof_commit, &steve_commit,
+    ).await?;
+
+    let run_sh_path = stage_dir.join("run.sh");
+    fs::write(&run_sh_path, &run_sh_content).await?;
+    tracing::info!("Generated run.sh at: {}", run_sh_path.display());
+
+    let containerfile_path = stage_dir.join("Containerfile.eif");
+    fs::write(&containerfile_path, &containerfile_content).await?;
+    tracing::info!("Generated Containerfile.eif at: {}", containerfile_path.display());
 
     tracing::info!("EIF components staged successfully in: {}", stage_dir.display());
     Ok(stage_dir)
 }
 
-async fn generate_run_sh(stage_dir: &Path, run_command: Option<String>, ports: &[u16], e2e: bool) -> Result<()> {
+fn process_template_blocks(content: &str, enabled_blocks: &[&str]) -> String {
+    let mut result = Vec::new();
+    let mut skip = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(block_name) = trimmed.strip_prefix("# {") {
+            let block_name = block_name.trim();
+            if !enabled_blocks.contains(&block_name) {
+                skip = true;
+            }
+            continue;
+        }
+        if trimmed.starts_with("# }") {
+            skip = false;
+            continue;
+        }
+        if !skip {
+            result.push(line);
+        }
+    }
+
+    let mut output = result.join("\n");
+    if content.ends_with('\n') {
+        output.push('\n');
+    }
+    output
+}
+
+async fn render_run_sh_template(
+    template_path: &Path,
+    run_command: Option<String>,
+    ports: &[u16],
+    e2e: bool,
+) -> Result<String> {
+    let template = fs::read_to_string(template_path).await
+        .context("Failed to read run.sh template")?;
+
+    let enabled_blocks: Vec<&str> = if e2e { vec!["STEVE"] } else { vec![] };
+    let processed = process_template_blocks(&template, &enabled_blocks);
+
     let user_cmd = if let Some(cmd) = run_command {
         let escaped_cmd = cmd.replace("'", "'\\''");
         format!("exec sh -c '{}'", escaped_cmd)
     } else {
-        r#"echo "ERROR: No run command specified in Procfile"
-exit 1"#.to_string()
+        "echo \"ERROR: No run command specified in Procfile\"\nexit 1".to_string()
     };
 
-    // Generate proxies for custom user ports (in addition to the hardcoded 8080/8081/8082)
     let custom_port_proxies: String = ports
         .iter()
-        .filter(|&&port| port != 8080 && port != 8081 && port != 8082) // Skip already-hardcoded ports
+        .filter(|&&port| port != 8080 && port != 8081 && port != 8082)
         .map(|port| format!("/bin/socat VSOCK-LISTEN:{},reuseaddr,fork TCP:localhost:{} &", port, port))
         .collect::<Vec<_>>()
         .join("\n");
@@ -76,314 +185,28 @@ exit 1"#.to_string()
         format!("\necho \"Starting custom port proxies...\"\n{}\n", custom_port_proxies)
     };
 
-    // Conditionally include STEVE (end-to-end encryption proxy)
-    let steve_section = if e2e {
-        r#"echo "Starting STEVE (Secure Transport Encryption Via Enclave)..."
-/steve &
-"#
-    } else {
-        r#"echo "E2E encryption disabled, skipping STEVE"
-"#
-    };
+    let result = processed
+        .replace("{{USER_CMD}}", &user_cmd)
+        .replace("{{CUSTOM_PORT_SECTION}}", &custom_port_section);
 
-    let run_sh_content = format!(r#"#!/bin/sh
-set -e
-
-echo "=== Caution Enclave Startup ==="
-
-echo "Setting up network loopback..."
-/bin/busybox ip addr add 127.0.0.1/8 dev lo
-/bin/busybox ip link set dev lo up
-/bin/busybox ip link show lo
-
-echo "127.0.0.1   localhost" > /etc/hosts
-
-echo "Network loopback configured"
-
-echo "Setting up vsock network tunnel to parent..."
-/bin/socat TUN,tun-type=tap,iff-no-pi,iff-up,tun-name=eth0 VSOCK-CONNECT:3:3 &
-SOCAT_PID=$!
-echo "VSock tunnel started (PID: $SOCAT_PID)"
-
-/bin/busybox sleep 2
-
-if /bin/busybox ip link show eth0 2>/dev/null; then
-    echo "eth0 interface created successfully"
-
-    echo "Requesting IP via DHCP..."
-    /bin/busybox udhcpc -i eth0 -n -q -s /bin/udhcpc-script 2>&1 | /bin/busybox grep -E "Lease|obtained" || true
-
-    echo "Network configuration:"
-    /bin/busybox ip addr show eth0
-    /bin/busybox ip route show
-
-    echo "nameserver 10.0.100.1" > /etc/resolv.conf
-
-    echo "Network tunnel established successfully"
-else
-    echo "WARNING: Failed to create eth0 interface, running without internet access"
-    echo "nameserver 127.0.0.1" > /etc/resolv.conf
-fi
-
-echo "Loading NSM kernel module..."
-if [ -f /nsm.ko ]; then
-    insmod /nsm.ko && echo "NSM module loaded successfully" || echo "Failed to load NSM module"
-else
-    echo "WARNING: NSM module not found at /nsm.ko"
-fi
-
-export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-
-echo "Starting bootproofd on port 8082..."
-/bootproofd &
-
-{steve_section}
-echo "Starting VSOCK-to-TCP proxies..."
-# Hardcoded proxies for ports 8080, 8081, 8082
-/bin/socat VSOCK-LISTEN:8080,reuseaddr,fork TCP:localhost:8080 &
-/bin/socat VSOCK-LISTEN:8081,reuseaddr,fork TCP:localhost:8081 &
-/bin/socat VSOCK-LISTEN:8082,reuseaddr,fork TCP:localhost:8082 &
-{custom_port_section}
-/bin/busybox sleep 2
-
-echo "Starting user application..."
-cd /
-
-echo "=== Filesystem structure ==="
-/bin/busybox find / -type f 2>/dev/null | /bin/busybox grep -v "^/proc\|^/sys\|^/dev" | /bin/busybox head -20
-echo "=== Running user application ==="
-
-{user_cmd}
-"#);
-
-    let run_sh_path = stage_dir.join("run.sh");
-    fs::write(&run_sh_path, run_sh_content).await?;
-
-    tracing::info!("Generated run.sh at: {}", run_sh_path.display());
-    Ok(())
+    Ok(result)
 }
 
-async fn generate_containerfile_eif(stage_dir: &Path, e2e: bool) -> Result<()> {
-    // Conditionally include STEVE builder stage
-    let steve_builder_stage = if e2e {
-        r#"
-FROM pallet-rust AS steve-builder
+async fn render_containerfile_template(
+    template_path: &Path,
+    e2e: bool,
+    bootproof_commit: &str,
+    steve_commit: &str,
+) -> Result<String> {
+    let template = fs::read_to_string(template_path).await
+        .context("Failed to read Containerfile.eif template")?;
 
-COPY --from=git . /
-COPY --from=ca-certificates . /
-COPY --from=curl . /
+    let enabled_blocks: Vec<&str> = if e2e { vec!["STEVE"] } else { vec![] };
+    let processed = process_template_blocks(&template, &enabled_blocks);
 
-ENV SOURCE_DATE_EPOCH=1
-ENV CARGO_HOME=/usr/local/cargo
-ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
-ENV TARGET_ARCH="x86_64-unknown-linux-musl"
-
-WORKDIR /build-steve
-RUN git clone --depth 1 https://git.distrust.co/public/steve.git .
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    cargo fetch --locked --target $TARGET_ARCH
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build-steve/target \
-    cargo build --release --locked --target ${TARGET_ARCH} -p steve \
-      && install -D -m 0755 /build-steve/target/${TARGET_ARCH}/release/steve /binaries/steve
-"#
-    } else {
-        ""
-    };
-
-    let steve_copy = if e2e {
-        "COPY --from=steve-builder /binaries/steve /build/binaries/steve"
-    } else {
-        ""
-    };
-
-    let steve_install = if e2e {
-        r#"RUN cp /build/binaries/steve /build/initramfs/steve && \
-    chmod +x /build/initramfs/steve"#
-    } else {
-        ""
-    };
-
-    let containerfile_content = format!(r#"
-FROM stagex/pallet-rust@sha256:9c38bf1066dd9ad1b6a6b584974dd798c2bf798985bf82e58024fbe0515592ca AS pallet-rust
-FROM stagex/core-busybox@sha256:637b1e0d9866807fac94c22d6dc4b2e1f45c8a5ca1113c88172e0324a30c7283 AS busybox
-FROM stagex/core-musl@sha256:d9af23284cca2e1002cd53159ada469dfe6d6791814e72d6163c7de18d4ae701 AS musl
-FROM stagex/core-gcc@sha256:964ffd3793c5a38ca581e9faefd19918c259f1611c4cbf5dc8be612e3a8b72f5 AS gcc
-FROM stagex/core-libunwind@sha256:eb66122d8fc543f5e2f335bb1616f8c3a471604383e2c0a9df4a8e278505d3bc AS libunwind
-FROM stagex/core-openssl@sha256:d6487f0cb15f4ee02b420c717cb9abd85d73043c0bb3a2c6ce07688b23c1df07 AS openssl
-FROM stagex/core-zlib@sha256:06f5168e20d85d1eb1d19836cdf96addc069769b40f8f0f4a7a70b2f49fc18f8 AS zlib
-FROM stagex/core-ca-certificates@sha256:d135f1189e9b232eb7316626bf7858534c5540b2fc53dced80a4c9a95f26493e AS ca-certificates
-FROM stagex/core-libzstd@sha256:5382c221194b6d0690eb65ccca01c720a6bd39f92e610dbc0e99ba43f38f3094 AS libzstd
-FROM stagex/user-cpio@sha256:9c8bf39001eca8a71d5617b46f8c9b4f7426db41a052f198d73400de6f8a16df AS cpio
-FROM stagex/user-socat@sha256:4d1b7a403eba65087a3f69200d2644d01b63f0ea81ef171cedc17de490c8c9a0 AS socat
-FROM stagex/user-eif_build@sha256:935032172a23772ea1a35c6334aa98aa7b0c46f9e34a040347c7b2a73496ef8a AS eif-build
-FROM stagex/user-linux-nitro@sha256:aa1006d91a7265b33b86160031daad2fdf54ec2663ed5ccbd312567cc9beff2c AS linux-nitro
-FROM stagex/user-nit@sha256:60b6eef4534ea6ea78d9f29e4c7feb27407b615424f20ad8943d807191688be7 AS nit
-FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769ff3b37239f3d0 AS git
-FROM stagex/core-curl@sha256:bc8bab43d96a9167fbb85022ea773644a45ef335e7a9b747f203078973fa988e AS curl
-{steve_builder_stage}
-FROM pallet-rust AS bootproof-builder
-
-COPY --from=git . /
-COPY --from=ca-certificates . /
-COPY --from=curl . /
-
-ENV SOURCE_DATE_EPOCH=1
-ENV CARGO_HOME=/usr/local/cargo
-ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
-ENV TARGET_ARCH="x86_64-unknown-linux-musl"
-
-WORKDIR /build-bootproof
-RUN git clone https://git.distrust.co/public/bootproof.git . && \
-    git checkout 64dae0628e58b9f898b89f9b7a404b37e2f0ca9f
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    cargo fetch --locked --target $TARGET_ARCH
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build-bootproof/target \
-    cargo build --release --locked --target ${{TARGET_ARCH}} -p bootproofd \
-      && install -D -m 0755 /build-bootproof/target/${{TARGET_ARCH}}/release/bootproofd /binaries/bootproofd
-
-FROM pallet-rust AS enclave-builder
-
-ENV SOURCE_DATE_EPOCH=1
-ENV CARGO_HOME=/usr/local/cargo
-ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
-ENV TARGET_ARCH="x86_64-unknown-linux-musl"
-
-WORKDIR /build-enclave
-
-COPY enclave/ /build-enclave/
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    cargo fetch --locked --target $TARGET_ARCH
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build-enclave/target \
-    cargo build --release --locked --target ${{TARGET_ARCH}} -p init \
-      && install -D -m 0755 /build-enclave/target/${{TARGET_ARCH}}/release/init /binaries/init
-
-FROM busybox AS eif-builder
-
-COPY --from=musl . /
-COPY --from=gcc . /
-COPY --from=libunwind . /
-COPY --from=openssl . /
-COPY --from=zlib . /
-COPY --from=ca-certificates . /
-COPY --from=libzstd . /
-COPY --from=cpio . /
-COPY --from=socat . /
-COPY --from=eif-build . /
-COPY --from=nit . /
-
-WORKDIR /build
-
-COPY --from=enclave-builder /binaries/ /build/binaries/
-COPY --from=bootproof-builder /binaries/ /build/binaries/
-{steve_copy}
-
-COPY --from=linux-nitro /bzImage /build/kernel/bzImage
-COPY --from=linux-nitro /linux.config /build/kernel/linux.config
-
-COPY app/ /build/app/
-
-COPY run.sh /build/run.sh
-
-COPY enclave/rootfs/udhcpc-script.sh /build/udhcpc-script.sh
-
-COPY manifest.json /build/manifest.json
-
-RUN mkdir -p /build/initramfs/bin && \
-    mkdir -p /build/initramfs/lib && \
-    mkdir -p /build/initramfs/etc/ssl/certs
-
-RUN cp /bin/init /build/initramfs/init && \
-    chmod +x /build/initramfs/init
-
-RUN cp /build/run.sh /build/initramfs/run.sh && \
-    chmod +x /build/initramfs/run.sh
-
-RUN cp /build/udhcpc-script.sh /build/initramfs/bin/udhcpc-script && \
-    chmod +x /build/initramfs/bin/udhcpc-script
-
-RUN cp /build/binaries/bootproofd /build/initramfs/bootproofd && \
-    chmod +x /build/initramfs/bootproofd
-
-{steve_install}
-
-RUN if [ -f /build/manifest.json ]; then \
-        cp /build/manifest.json /build/initramfs/manifest.json; \
-    fi
-
-RUN if [ -f /bin/busybox ]; then \
-        cp /bin/busybox /build/initramfs/bin/busybox && \
-        cd /build/initramfs/bin && \
-        ln -s busybox sh && \
-        ln -s busybox sleep && \
-        ln -s busybox find && \
-        ln -s busybox cat && \
-        ln -s busybox ls && \
-        ln -s busybox mkdir && \
-        ln -s busybox mount && \
-        ln -s busybox chmod && \
-        ln -s busybox ip && \
-        ln -s busybox grep && \
-        ln -s busybox udhcpc; \
-    fi
-
-RUN if [ -f /usr/bin/socat ]; then \
-        cp /usr/bin/socat /build/initramfs/bin/socat && \
-        chmod +x /build/initramfs/bin/socat; \
-    elif [ -f /bin/socat ]; then \
-        cp /bin/socat /build/initramfs/bin/socat && \
-        chmod +x /build/initramfs/bin/socat; \
-    fi
-
-RUN if [ -f /lib/ld-musl-x86_64.so.1 ]; then \
-        cp /lib/ld-musl-x86_64.so.1 /build/initramfs/lib/ld-musl-x86_64.so.1; \
-    fi
-
-RUN if [ -f /etc/ssl/certs/ca-certificates.crt ]; then \
-        cp /etc/ssl/certs/ca-certificates.crt /build/initramfs/etc/ssl/certs/ca-certificates.crt; \
-    fi
-
-# Copy user app files to initramfs root to preserve original paths
-RUN cp -r /build/app/* /build/initramfs/ 2>/dev/null || true
-
-RUN find /build/initramfs -exec touch -hcd "@0" "{{}}" +
-
-RUN cd /build/initramfs && \
-    find . -print0 | sort -z | cpio --null --create --format=newc --reproducible | gzip --best > /build/rootfs.cpio.gz
-
-RUN eif_build \
-    --kernel /build/kernel/bzImage \
-    --kernel_config /build/kernel/linux.config \
-    --ramdisk /build/rootfs.cpio.gz \
-    --output /build/enclave.eif \
-    --pcrs_output /build/enclave.pcrs \
-    --cmdline "reboot=k panic=1 pci=off nomodules console=ttyS0 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd nit.target=/run.sh"
-
-FROM scratch AS output
-COPY --from=eif-builder /build/enclave.eif /enclave.eif
-COPY --from=eif-builder /build/enclave.pcrs /enclave.pcrs
-COPY --from=eif-builder /build/rootfs.cpio.gz /rootfs.cpio.gz
-"#, steve_builder_stage = steve_builder_stage, steve_copy = steve_copy, steve_install = steve_install);
-
-    let containerfile_path = stage_dir.join("Containerfile.eif");
-    fs::write(&containerfile_path, containerfile_content).await?;
-
-    tracing::info!("Generated Containerfile.eif at: {}", containerfile_path.display());
-    Ok(())
+    Ok(processed
+        .replace("{{BOOTPROOF_COMMIT}}", bootproof_commit)
+        .replace("{{STEVE_COMMIT}}", steve_commit))
 }
 
 pub async fn build_eif_from_filesystems(
@@ -398,6 +221,7 @@ pub async fn build_eif_from_filesystems(
     ports: &[u16],
     no_cache: bool,
     e2e: bool,
+    templates_dir: Option<&Path>,
 ) -> Result<EifFile> {
     tracing::info!("Building EIF using transparent Containerfile approach");
 
@@ -405,7 +229,7 @@ pub async fn build_eif_from_filesystems(
         fs::create_dir_all(parent).await?;
     }
 
-    let stage_dir = stage_eif_components(user_fs_path, enclave_source_path, work_dir, run_command, manifest, ports, e2e).await?;
+    let stage_dir = stage_eif_components(user_fs_path, enclave_source_path, work_dir, run_command, manifest, ports, e2e, templates_dir).await?;
 
     tracing::info!("Building EIF using Docker and Containerfile.eif");
     let output_dir = stage_dir.join("output");
@@ -574,4 +398,58 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_process_template_blocks_enabled() {
+        let content = "before\n# {STEVE\nsteve content\n# }STEVE\nafter\n";
+        let result = process_template_blocks(content, &["STEVE"]);
+        assert_eq!(result, "before\nsteve content\nafter\n");
+    }
+
+    #[test]
+    fn test_process_template_blocks_disabled() {
+        let content = "before\n# {STEVE\nsteve content\n# }STEVE\nafter\n";
+        let result = process_template_blocks(content, &[]);
+        assert_eq!(result, "before\nafter\n");
+    }
+
+    #[test]
+    fn test_process_template_blocks_no_markers() {
+        let content = "line1\nline2\nline3\n";
+        let result = process_template_blocks(content, &["STEVE"]);
+        assert_eq!(result, "line1\nline2\nline3\n");
+    }
+
+    #[test]
+    fn test_process_template_blocks_multiple_blocks() {
+        let content = "start\n# {A\na content\n# }A\nmiddle\n# {B\nb content\n# }B\nend\n";
+        let result = process_template_blocks(content, &["A"]);
+        assert_eq!(result, "start\na content\nmiddle\nend\n");
+    }
+
+    #[test]
+    fn test_process_template_blocks_preserves_blank_lines() {
+        let content = "before\n\n# {STEVE\ncontent\n# }STEVE\nafter\n";
+        let result = process_template_blocks(content, &[]);
+        assert_eq!(result, "before\n\nafter\n");
+    }
+
+    #[test]
+    fn test_process_template_blocks_multiline_enabled() {
+        let content = "header\n\n# {STEVE\nline1\nline2\nline3\n# }STEVE\nfooter\n";
+        let result = process_template_blocks(content, &["STEVE"]);
+        assert_eq!(result, "header\n\nline1\nline2\nline3\nfooter\n");
+    }
+
+    #[test]
+    fn test_process_template_blocks_all_enabled() {
+        let content = "start\n# {A\na\n# }A\n# {B\nb\n# }B\nend\n";
+        let result = process_template_blocks(content, &["A", "B"]);
+        assert_eq!(result, "start\na\nb\nend\n");
+    }
 }

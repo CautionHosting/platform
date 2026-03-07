@@ -379,3 +379,63 @@ pub async fn get_or_clone_enclave_source(
         })
     }
 }
+
+/// Download and extract the framework (platform) source archive.
+///
+/// Returns the path to the extracted source directory. Templates are at
+/// `src/enclave-builder/templates/` within the returned path.
+pub async fn get_or_clone_framework_source(
+    framework_source_url: &str,
+    work_dir: &Path,
+) -> Result<PathBuf> {
+    let download_dir = work_dir.join("framework-source");
+
+    if download_dir.exists() {
+        tracing::info!("Removing existing framework source directory: {}", download_dir.display());
+        fs::remove_dir_all(&download_dir).await?;
+    }
+
+    fs::create_dir_all(&download_dir).await?;
+
+    tracing::info!("Downloading framework source archive from: {}", framework_source_url);
+    let response = reqwest::get(framework_source_url)
+        .await
+        .context("Failed to download framework source archive")?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("Failed to download framework source archive: HTTP {}", response.status());
+    }
+
+    let archive_bytes = response.bytes()
+        .await
+        .context("Failed to read framework source archive bytes")?;
+
+    tracing::info!("Downloaded {} bytes, extracting...", archive_bytes.len());
+
+    let decoder = GzDecoder::new(&archive_bytes[..]);
+    let mut archive = Archive::new(decoder);
+
+    for entry in archive.entries().context("Failed to read framework archive entries")? {
+        let mut entry = entry.context("Failed to read framework archive entry")?;
+        let path = entry.path().context("Failed to get entry path")?;
+
+        let components: Vec<_> = path.components().collect();
+        if components.len() <= 1 {
+            continue;
+        }
+
+        let stripped_path: PathBuf = components[1..].iter().collect();
+        let dest_path = download_dir.join(&stripped_path);
+
+        if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+        }
+
+        entry.unpack(&dest_path)
+            .with_context(|| format!("Failed to extract: {}", stripped_path.display()))?;
+    }
+
+    tracing::info!("Framework source extracted to: {}", download_dir.display());
+    Ok(download_dir)
+}
