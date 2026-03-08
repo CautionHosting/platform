@@ -735,6 +735,16 @@ async fn update_asg_launch_template(
             tracing::info!("Retrying ASG update in {:?} (attempt {}/5)", delay, attempt + 1);
             tokio::time::sleep(delay).await;
         }
+        // TODO(error-infra): update_auto_scaling_group can fail with:
+        //   Retryable:
+        //     - HTTP 500/503: transient AWS service errors
+        //     - HTTP 429 (Throttling): rate limit exceeded
+        //     - Network/connection errors (reqwest send failure)
+        //     - HTTP 403 with "not yet propagated": IAM eventual consistency (already handled by this retry loop)
+        //   Non-retryable:
+        //     - HTTP 400 ValidationError: ASG or launch template doesn't exist, invalid params
+        //     - HTTP 403 AccessDenied: IAM policy permanently forbids the action
+        //     - HTTP 400 ScalingActivityInProgress: must wait for current scaling to finish (retryable with longer backoff)
         match asg.update_auto_scaling_group(asg_name, launch_template_id).await {
             Ok(_) => { last_err = None; break; }
             Err(e) => {
@@ -853,9 +863,21 @@ async fn upload_eif_to_s3(eif_path: &str, org_id: &Uuid, resource_id: &Uuid, aws
     let config = aws_config::load_from_env().await;
     let client = aws_sdk_s3::Client::new(&config);
 
+    // TODO(error-infra): ByteStream::from_path can fail with:
+    //   Non-retryable:
+    //     - File not found: EIF build produced no output or path is wrong
+    //     - Permission denied: filesystem permissions on the EIF artifact
     let body = ByteStream::from_path(Path::new(eif_path)).await
         .context("Failed to read EIF file")?;
 
+    // TODO(error-infra): S3 PutObject can fail with:
+    //   Retryable:
+    //     - HTTP 500/503 (InternalError/SlowDown): transient S3 errors
+    //     - Network/connection errors or timeouts (large EIF files)
+    //   Non-retryable:
+    //     - HTTP 404 NoSuchBucket: EIF_S3_BUCKET misconfigured or bucket deleted
+    //     - HTTP 403 AccessDenied: IAM role lacks s3:PutObject on this bucket/key
+    //     - HTTP 400 EntityTooLarge: EIF exceeds S3 single-PUT 5GB limit (should use multipart)
     client
         .put_object()
         .bucket(&bucket_name)
@@ -913,6 +935,16 @@ async fn upload_eif_to_customer_bucket(
         let body = ByteStream::from_path(Path::new(eif_path)).await
             .context("Failed to read EIF file")?;
 
+        // TODO(error-infra): S3 PutObject to customer bucket can fail with:
+        //   Retryable:
+        //     - HTTP 500/503 (InternalError/SlowDown): transient S3 errors
+        //     - HTTP 403 with IAM eventual consistency: newly created credentials not yet propagated (handled by this retry loop)
+        //     - Network/connection errors or timeouts (large EIF files)
+        //   Non-retryable:
+        //     - HTTP 404 NoSuchBucket: customer-provided bucket doesn't exist
+        //     - HTTP 403 AccessDenied: customer IAM role/policy permanently forbids s3:PutObject
+        //     - HTTP 400 EntityTooLarge: EIF exceeds S3 single-PUT 5GB limit (should use multipart)
+        //     - HTTP 400 InvalidBucketName: customer provided an invalid bucket name
         match client
             .put_object()
             .bucket(bucket_name)
