@@ -32,6 +32,7 @@ mod types;
 mod errors;
 mod encryption;
 mod cloud_credentials;
+mod cryptographic_bundles;
 mod gpg;
 
 #[derive(Clone)]
@@ -1702,6 +1703,158 @@ async fn set_default_cloud_credential(
     }
 }
 
+async fn list_quorum_bundles(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<Vec<cryptographic_bundles::QuorumBundle>>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let items = cryptographic_bundles::list_quorum_bundles(&state.db, org_id).await?;
+    Ok(Json(items))
+}
+
+async fn create_quorum_bundle(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<cryptographic_bundles::CreateBundleRequest>,
+) -> Result<Json<cryptographic_bundles::QuorumBundle>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let bundle = cryptographic_bundles::create_quorum_bundle(&state.db, org_id, auth.user_id, req).await?;
+    Ok(Json(bundle))
+}
+
+async fn get_quorum_bundle(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<cryptographic_bundles::QuorumBundle>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let bundle = cryptographic_bundles::get_quorum_bundle(&state.db, org_id, id)
+        .await?
+        .ok_or((StatusCode::NOT_FOUND, "Quorum bundle not found".to_string()))?;
+
+    Ok(Json(bundle))
+}
+
+async fn update_quorum_bundle(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<cryptographic_bundles::UpdateBundleRequest>,
+) -> Result<Json<cryptographic_bundles::QuorumBundle>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let bundle = cryptographic_bundles::update_quorum_bundle(&state.db, org_id, id, req)
+        .await?
+        .ok_or((StatusCode::NOT_FOUND, "Quorum bundle not found".to_string()))?;
+
+    Ok(Json(bundle))
+}
+
+async fn delete_quorum_bundle(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let deleted = cryptographic_bundles::delete_quorum_bundle(&state.db, org_id, id).await?;
+
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, "Quorum bundle not found".to_string()))
+    }
+}
+
+async fn list_secrets_bundles(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<Vec<cryptographic_bundles::SecretsBundle>>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let items = cryptographic_bundles::list_secrets_bundles(&state.db, org_id).await?;
+    Ok(Json(items))
+}
+
+async fn create_secrets_bundle(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<cryptographic_bundles::CreateBundleRequest>,
+) -> Result<Json<cryptographic_bundles::SecretsBundle>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let bundle = cryptographic_bundles::create_secrets_bundle(&state.db, org_id, auth.user_id, req).await?;
+    Ok(Json(bundle))
+}
+
+async fn get_secrets_bundle(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<cryptographic_bundles::SecretsBundle>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let bundle = cryptographic_bundles::get_secrets_bundle(&state.db, org_id, id)
+        .await?
+        .ok_or((StatusCode::NOT_FOUND, "Secrets bundle not found".to_string()))?;
+
+    Ok(Json(bundle))
+}
+
+async fn update_secrets_bundle(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<cryptographic_bundles::UpdateBundleRequest>,
+) -> Result<Json<cryptographic_bundles::SecretsBundle>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let bundle = cryptographic_bundles::update_secrets_bundle(&state.db, org_id, id, req)
+        .await?
+        .ok_or((StatusCode::NOT_FOUND, "Secrets bundle not found".to_string()))?;
+
+    Ok(Json(bundle))
+}
+
+async fn delete_secrets_bundle(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let deleted = cryptographic_bundles::delete_secrets_bundle(&state.db, org_id, id).await?;
+
+    if deleted {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err((StatusCode::NOT_FOUND, "Secrets bundle not found".to_string()))
+    }
+}
+
 /// Create or update a managed on-prem resource.
 /// Accepts either plain JSON or GPG-encrypted config from the setup script.
 /// If resource_id is provided, updates the existing resource; otherwise creates a new one.
@@ -2762,6 +2915,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/credentials/{id}", get(get_cloud_credential))
         .route("/credentials/{id}", delete(delete_cloud_credential))
         .route("/credentials/{id}/default", post(set_default_cloud_credential))
+        .route("/quorum-bundles", get(list_quorum_bundles))
+        .route("/quorum-bundles", post(create_quorum_bundle))
+        .route("/quorum-bundles/{id}", get(get_quorum_bundle))
+        .route("/quorum-bundles/{id}", patch(update_quorum_bundle))
+        .route("/quorum-bundles/{id}", delete(delete_quorum_bundle))
+        .route("/secrets-bundles", get(list_secrets_bundles))
+        .route("/secrets-bundles", post(create_secrets_bundle))
+        .route("/secrets-bundles/{id}", get(get_secrets_bundle))
+        .route("/secrets-bundles/{id}", patch(update_secrets_bundle))
+        .route("/secrets-bundles/{id}", delete(delete_secrets_bundle))
         .layer(middleware::from_fn_with_state(state.clone(), onboarding_middleware))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 
