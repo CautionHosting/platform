@@ -362,6 +362,8 @@ enum SecretCommands {
         threshold: Option<u8>,
         #[arg(long, requires = "threshold", help = "Total number of shares to generate")]
         max: Option<u8>,
+        #[arg(long, help = "Skip uploading bundle to Caution")]
+        no_upload: bool,
     },
 }
 
@@ -4450,7 +4452,7 @@ build: docker build -t app .
         }
     }
 
-    async fn secret_new(&self, keyring: PathBuf, threshold: Option<u8>, max: Option<u8>) -> Result<()> {
+    async fn secret_new(&self, keyring: PathBuf, threshold: Option<u8>, max: Option<u8>, upload: bool) -> Result<()> {
         let keymaker_url = std::env::var("KEYMAKER_URL")
             .context("KEYMAKER_URL environment variable is required")?;
 
@@ -4467,7 +4469,7 @@ build: docker build -t app .
             "label": {},
         });
 
-        println!("Generating quorum (threshold={}, max={})...", threshold, max);
+        eprintln!("Generating quorum (threshold={}, max={})...", threshold, max);
 
         let response = self.client
             .post(format!("{}/generate_quorum", keymaker_url))
@@ -4485,46 +4487,59 @@ build: docker build -t app .
         let quorum_response: serde_json::Value = response.json().await
             .context("Failed to parse Keymaker response")?;
 
-        let secrets_dir = dirs::home_dir()
-            .context("Could not determine home directory")?
-            .join(".caution/secrets");
-        fs::create_dir_all(&secrets_dir)
-            .context("Failed to create secrets directory")?;
-
-        let secret_id = uuid::Uuid::new_v4().to_string();
-        let secret_path = secrets_dir.join(format!("{}.json", secret_id));
         let json = serde_json::to_string_pretty(&quorum_response)?;
-        fs::write(&secret_path, &json)
-            .with_context(|| format!("Failed to write secret to {}", secret_path.display()))?;
 
-        if let Some(fingerprint) = quorum_response.get("secret_recipient_public_key") {
-            println!("\nSecret recipient public key: {}", fingerprint);
-        }
-        println!("Saved to: {}", secret_path.display());
+        let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+        let in_caution_repo = PathBuf::from("Procfile").exists() || PathBuf::from(".caution/deployment.json").exists();
 
-        println!("\nTo back up public key material bundle to Caution, tap your key.");
-        println!("The key material bundle is also accessible at {}", secret_path.display());
-        println!("Press Ctrl+C to cancel.");
+        // Always save to file when in a caution repo
+        if in_caution_repo {
+            let secret_path = PathBuf::from(".caution/quorum-bundle.json");
+            fs::write(&secret_path, &json)
+                .with_context(|| format!("Failed to write secret to {}", secret_path.display()))?;
 
-        let config = self.ensure_authenticated().await?;
-
-        let upload_body = serde_json::json!({
-            "data": quorum_response,
-        });
-
-        let response = self.signed_post(&config.session_id, "/api/quorum-bundles", &upload_body).await?;
-
-        if response.status().is_success() {
-            let result: serde_json::Value = response.json().await?;
-            if let Some(id) = result.get("id") {
-                println!("\nQuorum bundle stored successfully (bundle ID: {})", id);
-            } else {
-                println!("\nQuorum bundle stored successfully.");
+            if let Some(fingerprint) = quorum_response.get("secret_recipient_public_key") {
+                eprintln!("\nSecret recipient public key: {}", fingerprint);
             }
-        } else {
-            let status = response.status();
-            let error = response.text().await?;
-            bail!("Failed to store quorum bundle ({}): {}", status, error);
+            eprintln!("Saved to: {}", secret_path.display());
+        }
+
+        // Warn when not in a caution repo
+        if !in_caution_repo {
+            eprintln!("Warning: not in a Caution repository, outputting bundle to stdout");
+        }
+
+        // Output to stdout when piped or not in a caution repo
+        if !is_tty || !in_caution_repo {
+            print!("{}", json);
+            return Ok(());
+        }
+
+        if upload {
+            eprintln!("\nTo back up public key material bundle to Caution, tap your key.");
+            eprintln!("The key material bundle is also accessible at .caution/quorum-bundle.json");
+            eprintln!("Press Ctrl+C to cancel.");
+
+            let config = self.ensure_authenticated().await?;
+
+            let upload_body = serde_json::json!({
+                "data": quorum_response,
+            });
+
+            let response = self.signed_post(&config.session_id, "/api/quorum-bundles", &upload_body).await?;
+
+            if response.status().is_success() {
+                let result: serde_json::Value = response.json().await?;
+                if let Some(id) = result.get("id") {
+                    eprintln!("\nQuorum bundle stored successfully (bundle ID: {})", id);
+                } else {
+                    eprintln!("\nQuorum bundle stored successfully.");
+                }
+            } else {
+                let status = response.status();
+                let error = response.text().await?;
+                bail!("Failed to store quorum bundle ({}): {}", status, error);
+            }
         }
 
         Ok(())
@@ -4663,8 +4678,8 @@ pub async fn run() -> Result<()> {
         }
         Commands::Secret { command } => {
             match command {
-                SecretCommands::New { keyring, threshold, max } => {
-                    client.secret_new(keyring, threshold, max).await?;
+                SecretCommands::New { keyring, threshold, max, no_upload } => {
+                    client.secret_new(keyring, threshold, max, !no_upload).await?;
                 }
             }
         }
