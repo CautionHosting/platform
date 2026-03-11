@@ -172,6 +172,9 @@ struct Cli {
 
     #[arg(short, long, help = "Enable verbose output")]
     verbose: bool,
+
+    #[arg(long, global = true, help = "Use QR code for cross-device FIDO2 signing (no local security key needed)")]
+    qr: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -364,6 +367,40 @@ enum SecretCommands {
         max: Option<u8>,
         #[arg(long, help = "Skip uploading bundle to Caution")]
         no_upload: bool,
+        #[arg(long, help = "Name for the quorum bundle")]
+        name: Option<String>,
+        #[arg(long = "label", help = "Label in key=value format (can be repeated)", value_name = "KEY=VALUE")]
+        labels: Vec<String>,
+    },
+    #[command(about = "Rename a quorum bundle")]
+    Rename {
+        #[arg(help = "Bundle ID")]
+        id: String,
+        #[arg(help = "New name")]
+        name: String,
+    },
+    #[command(about = "Manage labels on a quorum bundle")]
+    Label {
+        #[command(subcommand)]
+        command: LabelCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum LabelCommands {
+    #[command(about = "Set labels on a quorum bundle")]
+    Set {
+        #[arg(help = "Bundle ID")]
+        id: String,
+        #[arg(help = "Labels in key=value format", required = true)]
+        labels: Vec<String>,
+    },
+    #[command(about = "Remove labels from a quorum bundle")]
+    Remove {
+        #[arg(help = "Bundle ID")]
+        id: String,
+        #[arg(help = "Label keys to remove", required = true)]
+        keys: Vec<String>,
     },
 }
 
@@ -475,6 +512,7 @@ struct LoginFinishResponse {
 struct QrLoginBeginResponse {
     token: String,
     url: String,
+    #[allow(dead_code)]
     expires_at: String,
 }
 
@@ -483,6 +521,22 @@ struct QrLoginStatusResponse {
     status: String,
     session_id: Option<String>,
     expires_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct QrSignBeginResponse {
+    challenge_id: String,
+    token: String,
+    url: String,
+    expires_at: String,
+}
+
+#[derive(Deserialize)]
+struct QrSignStatusResponse {
+    status: String,
+    fido2_response: Option<String>,
+    challenge_id: Option<String>,
 }
 
 /// Extract session ID from Set-Cookie header
@@ -559,10 +613,11 @@ struct ApiClient {
     config_path: PathBuf,
     deployment_path: Option<PathBuf>,
     verbose: bool,
+    qr: bool,
 }
 
 impl ApiClient {
-    fn new(base_url: &str, verbose: bool) -> Result<Self> {
+    fn new(base_url: &str, verbose: bool, qr: bool) -> Result<Self> {
         log_verbose(verbose, "Initializing API client...");
 
         let config_dir = dirs::config_dir()
@@ -593,6 +648,7 @@ impl ApiClient {
             config_path,
             deployment_path,
             verbose,
+            qr,
         })
     }
 
@@ -649,7 +705,11 @@ impl ApiClient {
         match self.load_config() {
             Ok(config) if !self.is_session_expired(&config) && self.is_same_server(&config) => Ok(config),
             _ => {
-                self.login().await?;
+                if self.qr {
+                    self.login_qr().await?;
+                } else {
+                    self.login().await?;
+                }
                 self.load_config()
             }
         }
@@ -1550,14 +1610,21 @@ build: docker build -t app .
         path: &str,
         body: &T,
     ) -> Result<reqwest::Response> {
+        if self.qr {
+            return self.signed_post_qr(session_id, path, body).await;
+        }
+
         let body_json = serde_json::to_vec(body)?;
         let body_hash = hex::encode(Sha256::digest(&body_json));
+
+        // The gateway nests /api routes, so the sign middleware sees paths with /api stripped
+        let challenge_path = path.strip_prefix("/api").unwrap_or(path);
 
         log_verbose(self.verbose, &format!("Requesting FIDO2 sign challenge for POST {}", path));
 
         let sign_req = serde_json::json!({
             "method": "POST",
-            "path": path,
+            "path": challenge_path,
             "body_hash": body_hash,
         });
 
@@ -1594,6 +1661,115 @@ build: docker build -t app .
             .post(format!("{}{}", self.base_url, path))
             .header("X-Fido2-Challenge-Id", &sign_resp.challenge_id)
             .header("X-Fido2-Response", &fido_response_b64)
+            .header("Content-Type", "application/json")
+            .body(body_json)
+            .send()
+            .await?;
+
+        Ok(response)
+    }
+
+    async fn signed_post_qr<T: serde::Serialize>(
+        &self,
+        session_id: &str,
+        path: &str,
+        body: &T,
+    ) -> Result<reqwest::Response> {
+        let body_json = serde_json::to_vec(body)?;
+        let body_hash = hex::encode(Sha256::digest(&body_json));
+
+        // The gateway nests /api routes, so the sign middleware sees paths with /api stripped
+        let challenge_path = path.strip_prefix("/api").unwrap_or(path);
+
+        log_verbose(self.verbose, "Starting QR code cross-device signing...");
+
+        // Step 1: Request a QR sign token from the gateway
+        let body_str = String::from_utf8_lossy(&body_json);
+        let sign_req = serde_json::json!({
+            "method": "POST",
+            "path": challenge_path,
+            "body": body_str,
+            "body_hash": body_hash,
+        });
+
+        let response = self.client
+            .post(format!("{}/auth/qr-sign/begin", self.base_url))
+            .header("X-Session-ID", session_id)
+            .json(&sign_req)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error = response.text().await?;
+            bail!("Failed to start QR signing: {}", error);
+        }
+
+        let begin_resp: QrSignBeginResponse = response.json().await?;
+        log_verbose(self.verbose, &format!("QR sign token: {}", begin_resp.token));
+
+        // Step 2: Render QR code
+        println!();
+        render_qr_code(&begin_resp.url)?;
+        println!();
+        println!("Scan the QR code with your phone to approve the operation, or open:");
+        println!("  {}", begin_resp.url);
+        println!();
+
+        // Step 3: Poll for completion
+        let mut loader = Loader::new("Waiting for approval...", LoaderStyle::Processing);
+
+        let poll_result = async {
+            let timeout = Duration::from_secs(180);
+            let start = std::time::Instant::now();
+
+            loop {
+                if start.elapsed() > timeout {
+                    bail!("QR signing timed out. Please try again.");
+                }
+
+                tokio::time::sleep(Duration::from_secs(2)).await;
+
+                let status_resp = self.client
+                    .get(format!("{}/auth/qr-sign/status", self.base_url))
+                    .query(&[("token", &begin_resp.token)])
+                    .send()
+                    .await?;
+
+                if !status_resp.status().is_success() {
+                    log_verbose(self.verbose, "Status poll failed, retrying...");
+                    continue;
+                }
+
+                let status: QrSignStatusResponse = status_resp.json().await?;
+                log_verbose(self.verbose, &format!("Poll status: {}", status.status));
+
+                match status.status.as_str() {
+                    "completed" => {
+                        let fido2_response = status.fido2_response
+                            .ok_or_else(|| anyhow::anyhow!("Completed but no fido2_response returned"))?;
+                        let challenge_id = status.challenge_id
+                            .ok_or_else(|| anyhow::anyhow!("Completed but no challenge_id returned"))?;
+                        return Ok((fido2_response, challenge_id));
+                    }
+                    "expired" => {
+                        bail!("QR signing token expired. Please try again.");
+                    }
+                    // "pending" or "authenticated" — keep polling
+                    _ => continue,
+                }
+            }
+        }.await;
+
+        loader.stop();
+
+        let (fido2_response, challenge_id) = poll_result?;
+        log_verbose(self.verbose, "Sending QR-signed request");
+
+        // Step 4: Send the actual request with the FIDO2 assertion from the phone
+        let response = self.client
+            .post(format!("{}{}", self.base_url, path))
+            .header("X-Fido2-Challenge-Id", &challenge_id)
+            .header("X-Fido2-Response", &fido2_response)
             .header("Content-Type", "application/json")
             .body(body_json)
             .send()
@@ -4452,7 +4628,7 @@ build: docker build -t app .
         }
     }
 
-    async fn secret_new(&self, keyring: PathBuf, threshold: Option<u8>, max: Option<u8>, upload: bool) -> Result<()> {
+    async fn secret_new(&self, keyring: PathBuf, threshold: Option<u8>, max: Option<u8>, upload: bool, name: Option<String>, labels: Vec<String>) -> Result<()> {
         let keymaker_url = std::env::var("KEYMAKER_URL")
             .context("KEYMAKER_URL environment variable is required")?;
 
@@ -4497,33 +4673,40 @@ build: docker build -t app .
             let secret_path = PathBuf::from(".caution/quorum-bundle.json");
             fs::write(&secret_path, &json)
                 .with_context(|| format!("Failed to write secret to {}", secret_path.display()))?;
-
-            if let Some(fingerprint) = quorum_response.get("secret_recipient_public_key") {
-                eprintln!("\nSecret recipient public key: {}", fingerprint);
-            }
             eprintln!("Saved to: {}", secret_path.display());
         }
 
-        // Warn when not in a caution repo
-        if !in_caution_repo {
-            eprintln!("Warning: not in a Caution repository, outputting bundle to stdout");
-        }
-
-        // Output to stdout when piped or not in a caution repo
-        if !is_tty || !in_caution_repo {
+        // When not uploading (no QR, not in caution repo), output to stdout
+        if !self.qr && (!is_tty || !in_caution_repo) {
+            if !in_caution_repo {
+                eprintln!("Warning: not in a Caution repository, outputting bundle to stdout");
+            }
             print!("{}", json);
             return Ok(());
         }
 
-        if upload {
-            eprintln!("\nTo back up public key material bundle to Caution, tap your key.");
-            eprintln!("The key material bundle is also accessible at .caution/quorum-bundle.json");
+        if upload || self.qr {
+            if self.qr {
+                eprintln!("\nUploading public key material bundle to Caution via QR code signing...");
+            } else {
+                eprintln!("\nTo back up public key material bundle to Caution, tap your key.");
+            }
+            if in_caution_repo {
+                eprintln!("The key material bundle is also accessible at .caution/quorum-bundle.json");
+            }
             eprintln!("Press Ctrl+C to cancel.");
 
             let config = self.ensure_authenticated().await?;
 
+            let label_map: serde_json::Map<String, serde_json::Value> = labels.iter()
+                .filter_map(|l| l.split_once('='))
+                .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+                .collect();
+
             let upload_body = serde_json::json!({
                 "data": quorum_response,
+                "name": name,
+                "labels": label_map,
             });
 
             let response = self.signed_post(&config.session_id, "/api/quorum-bundles", &upload_body).await?;
@@ -4540,6 +4723,129 @@ build: docker build -t app .
                 let error = response.text().await?;
                 bail!("Failed to store quorum bundle ({}): {}", status, error);
             }
+        }
+
+        Ok(())
+    }
+
+    async fn secret_rename(&self, id: String, name: String) -> Result<()> {
+        let config = self.ensure_authenticated().await?;
+
+        let body = serde_json::json!({
+            "name": name,
+        });
+
+        let response = self.client
+            .patch(format!("{}/api/quorum-bundles/{}", self.base_url, id))
+            .header("X-Session-ID", &config.session_id)
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to connect to server")?;
+
+        if response.status().is_success() {
+            eprintln!("Quorum bundle renamed to \"{}\"", name);
+        } else {
+            let status = response.status();
+            let error = response.text().await?;
+            bail!("Failed to rename quorum bundle ({}): {}", status, error);
+        }
+
+        Ok(())
+    }
+
+    async fn secret_label_set(&self, id: String, labels: Vec<String>) -> Result<()> {
+        let config = self.ensure_authenticated().await?;
+
+        // Get current bundle to read existing labels
+        let response = self.client
+            .get(format!("{}/api/quorum-bundles/{}", self.base_url, id))
+            .header("X-Session-ID", &config.session_id)
+            .send()
+            .await
+            .context("Failed to connect to server")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error = response.text().await?;
+            bail!("Failed to fetch quorum bundle ({}): {}", status, error);
+        }
+
+        let bundle: serde_json::Value = response.json().await?;
+        let mut current_labels = bundle.get("labels")
+            .and_then(|l| l.as_object().cloned())
+            .unwrap_or_default();
+
+        // Merge new labels
+        for label in &labels {
+            let (k, v) = label.split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("Invalid label format '{}', expected key=value", label))?;
+            current_labels.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+        }
+
+        let body = serde_json::json!({ "labels": current_labels });
+
+        let response = self.client
+            .patch(format!("{}/api/quorum-bundles/{}", self.base_url, id))
+            .header("X-Session-ID", &config.session_id)
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to connect to server")?;
+
+        if response.status().is_success() {
+            eprintln!("Labels updated successfully");
+        } else {
+            let status = response.status();
+            let error = response.text().await?;
+            bail!("Failed to update labels ({}): {}", status, error);
+        }
+
+        Ok(())
+    }
+
+    async fn secret_label_remove(&self, id: String, keys: Vec<String>) -> Result<()> {
+        let config = self.ensure_authenticated().await?;
+
+        // Get current bundle to read existing labels
+        let response = self.client
+            .get(format!("{}/api/quorum-bundles/{}", self.base_url, id))
+            .header("X-Session-ID", &config.session_id)
+            .send()
+            .await
+            .context("Failed to connect to server")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error = response.text().await?;
+            bail!("Failed to fetch quorum bundle ({}): {}", status, error);
+        }
+
+        let bundle: serde_json::Value = response.json().await?;
+        let mut current_labels = bundle.get("labels")
+            .and_then(|l| l.as_object().cloned())
+            .unwrap_or_default();
+
+        for key in &keys {
+            current_labels.remove(key);
+        }
+
+        let body = serde_json::json!({ "labels": current_labels });
+
+        let response = self.client
+            .patch(format!("{}/api/quorum-bundles/{}", self.base_url, id))
+            .header("X-Session-ID", &config.session_id)
+            .json(&body)
+            .send()
+            .await
+            .context("Failed to connect to server")?;
+
+        if response.status().is_success() {
+            eprintln!("Labels removed successfully");
+        } else {
+            let status = response.status();
+            let error = response.text().await?;
+            bail!("Failed to remove labels ({}): {}", status, error);
         }
 
         Ok(())
@@ -4573,7 +4879,7 @@ pub async fn run() -> Result<()> {
     }
 
     log_verbose(cli.verbose, "Initializing API client...");
-    let client = ApiClient::new(&cli.url, cli.verbose).context("Failed to initialize API client")?;
+    let client = ApiClient::new(&cli.url, cli.verbose, cli.qr).context("Failed to initialize API client")?;
     log_verbose(cli.verbose, "API client ready");
 
     match cli.command {
@@ -4678,8 +4984,21 @@ pub async fn run() -> Result<()> {
         }
         Commands::Secret { command } => {
             match command {
-                SecretCommands::New { keyring, threshold, max, no_upload } => {
-                    client.secret_new(keyring, threshold, max, !no_upload).await?;
+                SecretCommands::New { keyring, threshold, max, no_upload, name, labels } => {
+                    client.secret_new(keyring, threshold, max, !no_upload, name, labels).await?;
+                }
+                SecretCommands::Rename { id, name } => {
+                    client.secret_rename(id, name).await?;
+                }
+                SecretCommands::Label { command } => {
+                    match command {
+                        LabelCommands::Set { id, labels } => {
+                            client.secret_label_set(id, labels).await?;
+                        }
+                        LabelCommands::Remove { id, keys } => {
+                            client.secret_label_remove(id, keys).await?;
+                        }
+                    }
                 }
             }
         }

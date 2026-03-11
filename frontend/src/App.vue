@@ -54,6 +54,10 @@ export default {
       '/qr-login': {
         title: 'CLI Login • Caution',
         description: 'Authenticate your CLI session using a security key.'
+      },
+      '/qr-sign': {
+        title: 'CLI Signing • Caution',
+        description: 'Approve a CLI operation using a security key.'
       }
     }
 
@@ -109,6 +113,10 @@ export default {
         return 'Dashboard'
       } else if (path === '/qr-login') {
         // Public route - QR code CLI login (no auth required)
+        return 'QrLogin'
+      } else if (path === '/qr-sign') {
+        // Public route - QR code CLI signing (no auth required)
+        // Same component as QrLogin — it detects sign vs login from the path
         return 'QrLogin'
       }
 

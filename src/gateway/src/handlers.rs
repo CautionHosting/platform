@@ -14,6 +14,7 @@ use webauthn_rs_proto::{ResidentKeyRequirement, UserVerificationPolicy};
 use time::Duration;
 use serde::{Serialize, Deserialize};
 
+use base64::Engine as _;
 use crate::db;
 use crate::types::*;
 
@@ -648,19 +649,68 @@ pub async fn delete_ssh_key_handler(
     }
 }
 
-pub async fn begin_sign_request_handler(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    Json(req): Json<crate::types::SignChallengeRequest>,
-) -> Result<Json<crate::types::SignChallengeResponse>, SignRequestError> {
-    // Support both header auth (CLI) and cookie auth (browser).
+/// Create a sign challenge for the given credential. Returns (challenge_response, challenge_id).
+/// Stores PendingSignChallenge in state.sign_challenges.
+async fn create_sign_challenge(
+    state: &AppState,
+    credential_id: &[u8],
+    method: String,
+    path: String,
+    body_hash: String,
+    expires_minutes: i64,
+) -> Result<(webauthn_rs_proto::RequestChallengeResponse, String), SignRequestError> {
+    let user_id = db::get_user_id_by_credential(&state.db, credential_id)
+        .await
+        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
+    let requires_pin = db::user_requires_pin(&state.db, user_id)
+        .await
+        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
+
+    let cred_bytes = db::get_credential_public_key(&state.db, credential_id)
+        .await
+        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
+    let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
+        .map_err(|e| SignRequestError::Internal(format!("Failed to deserialize credential: {}", e)))?;
+
+    let (mut rcr, auth_state) = state
+        .webauthn
+        .start_securitykey_authentication(&[seckey])
+        .map_err(|e| SignRequestError::Internal(format!("Failed to start signing challenge: {}", e)))?;
+
+    if requires_pin {
+        rcr.public_key.user_verification = UserVerificationPolicy::Required;
+    } else {
+        rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
+    }
+
+    let challenge_id = Uuid::new_v4().to_string();
+    let pending = crate::types::PendingSignChallenge {
+        auth_state,
+        user_id,
+        method,
+        path,
+        body_hash,
+        expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(expires_minutes),
+    };
+
+    state.sign_challenges.write().await.insert(challenge_id.clone(), pending);
+
+    Ok((rcr, challenge_id))
+}
+
+/// Resolve session ID from headers (X-Session-ID or caution_session cookie),
+/// validate it, and enforce CSRF for cookie-based auth. Returns credential_id.
+async fn authenticate_session(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<Vec<u8>, SignRequestError> {
     let (session_id, using_header_auth) = if let Some(header_session) = headers
         .get("X-Session-ID")
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string())
     {
         (header_session, true)
-    } else if let Some(cookie_session) = crate::csrf::get_cookie(&headers, "caution_session") {
+    } else if let Some(cookie_session) = crate::csrf::get_cookie(headers, "caution_session") {
         (cookie_session, false)
     } else {
         return Err(SignRequestError::MissingSession);
@@ -671,7 +721,6 @@ pub async fn begin_sign_request_handler(
         .map_err(|e| SignRequestError::Internal(e.to_string()))?
         .ok_or_else(|| SignRequestError::InvalidSession(session_id.clone()))?;
 
-    // Validate CSRF for cookie-based auth (browser).
     if !using_header_auth {
         let secret = crate::csrf::get_csrf_secret();
         let expected_csrf = crate::csrf::derive_csrf_token(&session_id, &secret);
@@ -684,43 +733,30 @@ pub async fn begin_sign_request_handler(
         }
     }
 
-    let user_id = db::get_user_id_by_credential(&state.db, &credential_id)
-        .await
-        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
-    let requires_pin = db::user_requires_pin(&state.db, user_id)
-        .await
-        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
+    Ok(credential_id)
+}
 
-    let cred_bytes = db::get_credential_public_key(&state.db, &credential_id)
-        .await
-        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
-    let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
-        .map_err(|e| SignRequestError::Internal(format!("Failed to deserialize credential: {}", e)))?;
+fn get_rp_origin() -> String {
+    std::env::var("RP_ORIGINS")
+        .unwrap_or_else(|_| "http://localhost:3000".to_string())
+        .split(',')
+        .next()
+        .unwrap_or("http://localhost:3000")
+        .trim()
+        .to_string()
+}
 
-    let (mut rcr, auth_state) = state
-        .webauthn
-        .start_securitykey_authentication(&[seckey])
-        .map_err(|e| SignRequestError::Internal(format!("Failed to start signing challenge: {}", e)))?;
+pub async fn begin_sign_request_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<crate::types::SignChallengeRequest>,
+) -> Result<Json<crate::types::SignChallengeResponse>, SignRequestError> {
+    let credential_id = authenticate_session(&state, &headers).await?;
 
-    // Set user verification based on org settings
-    if requires_pin {
-        rcr.public_key.user_verification = UserVerificationPolicy::Required;
-    } else {
-        // Use Preferred when PIN not required - authenticator decides
-        rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
-    }
-
-    let challenge_id = Uuid::new_v4().to_string();
-    let pending = crate::types::PendingSignChallenge {
-        auth_state,
-        user_id,
-        method: req.method,
-        path: req.path,
-        body_hash: req.body_hash,
-        expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(2),
-    };
-
-    state.sign_challenges.write().await.insert(challenge_id.clone(), pending);
+    let (rcr, challenge_id) = create_sign_challenge(
+        &state, &credential_id,
+        req.method, req.path, req.body_hash, 2,
+    ).await?;
 
     Ok(Json(crate::types::SignChallengeResponse {
         challenge: rcr,
@@ -765,15 +801,7 @@ pub async fn qr_login_begin_handler(
     let expires_at = time::OffsetDateTime::now_utc() + Duration::minutes(3);
     let ip_address = connect_info.0.ip().to_string();
 
-    let rp_origin = std::env::var("RP_ORIGINS")
-        .unwrap_or_else(|_| "http://localhost:3000".to_string())
-        .split(',')
-        .next()
-        .unwrap_or("http://localhost:3000")
-        .trim()
-        .to_string();
-
-    let url = format!("{}/qr-login?token={}", rp_origin, token);
+    let url = format!("{}/qr-login?token={}", get_rp_origin(), token);
 
     db::create_qr_login_token(&state.db, &token, Some(&ip_address), expires_at)
         .await
@@ -1007,6 +1035,188 @@ pub async fn qr_login_authenticate_finish_handler(
     Ok(Json(serde_json::json!({
         "status": "success",
         "message": "Authentication complete. You can close this tab."
+    })))
+}
+
+// QR Sign handlers (mid-session signing via phone)
+
+#[derive(Debug, thiserror::Error)]
+pub enum QrSignError {
+    #[error("QR sign token not found")]
+    TokenNotFound,
+    #[error("QR sign token has expired")]
+    TokenExpired,
+    #[error("QR sign token in unexpected state: {0}")]
+    UnexpectedState(String),
+    #[error("{0}")]
+    Internal(String),
+}
+
+impl IntoResponse for QrSignError {
+    fn into_response(self) -> Response {
+        let (status, message) = match self {
+            Self::TokenNotFound => (StatusCode::NOT_FOUND, self.to_string()),
+            Self::TokenExpired => (StatusCode::GONE, self.to_string()),
+            Self::UnexpectedState(_) => (StatusCode::CONFLICT, self.to_string()),
+            Self::Internal(_) => {
+                tracing::error!(?self, "QR sign error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "an internal error occurred".into())
+            }
+        };
+        (status, message).into_response()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QrSignStatusQuery {
+    pub token: String,
+}
+
+pub async fn qr_sign_begin_handler(
+    State(state): State<AppState>,
+    connect_info: ConnectInfo<std::net::SocketAddr>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<crate::types::QrSignChallengeRequest>,
+) -> Result<Json<crate::types::QrSignBeginResponse>, SignRequestError> {
+    let credential_id = authenticate_session(&state, &headers).await?;
+
+    let (rcr, challenge_id) = create_sign_challenge(
+        &state, &credential_id,
+        req.method.clone(), req.path.clone(), req.body_hash.clone(), 3,
+    ).await?;
+
+    let token = db::generate_session_id();
+    let expires_at = time::OffsetDateTime::now_utc() + Duration::minutes(3);
+    let ip_address = connect_info.0.ip().to_string();
+
+    let challenge_json = serde_json::to_string(&rcr)
+        .map_err(|e| SignRequestError::Internal(format!("Failed to serialize challenge: {}", e)))?;
+
+    db::create_qr_sign_token(
+        &state.db, &token, &challenge_id, &challenge_json,
+        &req.method, &req.path, &req.body, &req.body_hash,
+        Some(&ip_address), expires_at,
+    ).await.map_err(|e| SignRequestError::Internal(e.to_string()))?;
+
+    let url = format!("{}/qr-sign?token={}", get_rp_origin(), token);
+
+    Ok(Json(crate::types::QrSignBeginResponse {
+        challenge_id,
+        token,
+        url,
+        expires_at: expires_at.to_string(),
+    }))
+}
+
+pub async fn qr_sign_status_handler(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<QrSignStatusQuery>,
+) -> Result<Json<crate::types::QrSignStatusResponse>, QrSignError> {
+    let row = db::get_qr_sign_token(&state.db, &query.token)
+        .await
+        .map_err(|e| QrSignError::Internal(e.to_string()))?;
+
+    let Some(row) = row else {
+        return Ok(Json(crate::types::QrSignStatusResponse {
+            status: QrStatus::NotFound,
+            fido2_response: None,
+            challenge_id: None,
+        }));
+    };
+
+    if time::OffsetDateTime::now_utc() > row.expires_at {
+        return Ok(Json(crate::types::QrSignStatusResponse {
+            status: QrStatus::Expired,
+            fido2_response: None,
+            challenge_id: None,
+        }));
+    }
+
+    let status = QrStatus::from_db(&row.status).unwrap_or(QrStatus::NotFound);
+
+    if status == QrStatus::Completed {
+        return Ok(Json(crate::types::QrSignStatusResponse {
+            status: QrStatus::Completed,
+            fido2_response: row.fido2_response,
+            challenge_id: Some(row.challenge_id),
+        }));
+    }
+
+    Ok(Json(crate::types::QrSignStatusResponse {
+        status,
+        fido2_response: None,
+        challenge_id: None,
+    }))
+}
+
+pub async fn qr_sign_authenticate_handler(
+    State(state): State<AppState>,
+    connect_info: ConnectInfo<std::net::SocketAddr>,
+    Json(req): Json<crate::types::QrSignAuthenticateRequest>,
+) -> Result<Json<crate::types::QrSignAuthenticateResponse>, QrSignError> {
+    let row = db::get_qr_sign_token(&state.db, &req.token)
+        .await
+        .map_err(|e| QrSignError::Internal(e.to_string()))?
+        .ok_or(QrSignError::TokenNotFound)?;
+
+    if time::OffsetDateTime::now_utc() > row.expires_at {
+        return Err(QrSignError::TokenExpired);
+    }
+
+    match QrStatus::from_db(&row.status) {
+        Some(QrStatus::Pending) => {},
+        other => return Err(QrSignError::UnexpectedState(format!("{:?}", other))),
+    }
+
+    let browser_ip = connect_info.0.ip().to_string();
+    let claimed = db::claim_qr_sign_token(&state.db, &req.token, Some(&browser_ip))
+        .await
+        .map_err(|e| QrSignError::Internal(e.to_string()))?;
+    if !claimed {
+        return Err(QrSignError::UnexpectedState("already claimed".into()));
+    }
+
+    let challenge: webauthn_rs_proto::RequestChallengeResponse = serde_json::from_str(&row.challenge_json)
+        .map_err(|e| QrSignError::Internal(format!("Failed to deserialize challenge: {}", e)))?;
+
+    Ok(Json(crate::types::QrSignAuthenticateResponse {
+        challenge,
+        token: req.token,
+    }))
+}
+
+pub async fn qr_sign_authenticate_finish_handler(
+    State(state): State<AppState>,
+    Json(req): Json<crate::types::QrSignAuthenticateFinishRequest>,
+) -> Result<Json<serde_json::Value>, QrSignError> {
+    let row = db::get_qr_sign_token(&state.db, &req.token)
+        .await
+        .map_err(|e| QrSignError::Internal(e.to_string()))?
+        .ok_or(QrSignError::TokenNotFound)?;
+
+    if time::OffsetDateTime::now_utc() > row.expires_at {
+        return Err(QrSignError::TokenExpired);
+    }
+
+    match QrStatus::from_db(&row.status) {
+        Some(QrStatus::Authenticated) => {},
+        other => return Err(QrSignError::UnexpectedState(format!("{:?}", other))),
+    }
+
+    // base64url-encode the assertion — same format fido2_sign_middleware expects in X-Fido2-Response
+    let credential_json = serde_json::to_vec(&req.credential)
+        .map_err(|e| QrSignError::Internal(format!("Failed to serialize credential: {}", e)))?;
+    let fido2_response = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&credential_json);
+
+    db::complete_qr_sign_token(&state.db, &req.token, &fido2_response)
+        .await
+        .map_err(|e| QrSignError::Internal(e.to_string()))?;
+
+    tracing::debug!("QR sign token completed");
+
+    Ok(Json(serde_json::json!({
+        "status": "success",
+        "message": "Signing approved. You can close this tab."
     })))
 }
 

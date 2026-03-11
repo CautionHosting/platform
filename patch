@@ -1,1158 +1,1916 @@
-diff --git a/containerfiles/Containerfile.api b/containerfiles/Containerfile.api
-index e5d1802..18c1e8a 100644
---- a/containerfiles/Containerfile.api
-+++ b/containerfiles/Containerfile.api
-@@ -115,6 +115,7 @@ COPY --from=socat . /
- COPY --from=builder /usr/local/bin/api /usr/local/bin/api
- 
- COPY terraform /app/terraform
-+COPY src/enclave-builder/templates /app/templates
- 
- WORKDIR /app
- 
-diff --git a/env.example b/env.example
-index 2a4273b..64a547e 100644
---- a/env.example
-+++ b/env.example
-@@ -48,6 +48,11 @@ FROM_NAME=Caution
- CAUTION_ENCLAVE_SOURCE=
- CAUTION_ENCLAVE_VERSION=
- 
-+# Enclave dependency pins (optional - have defaults)
-+ENCLAVEOS_COMMIT=9582e25239430070667fdd0a6b64d887f1c308df
-+BOOTPROOF_COMMIT=64dae0628e58b9f898b89f9b7a404b37e2f0ca9f
-+STEVE_COMMIT=ed38a190cd5d7a8f452c854e41d00ec748e172bf
-+
- # Data Directory (optional - defaults to /var/cache/caution/ in containers)
- # For local dev, set to a local path like ./caution-data
- CAUTION_DATA_DIR=
-diff --git a/src/api/src/main.rs b/src/api/src/main.rs
-index c341cce..271b88d 100644
---- a/src/api/src/main.rs
-+++ b/src/api/src/main.rs
-@@ -2341,7 +2341,7 @@ async fn deploy_logic(
-         let enclave_source = if !build_config.enclave_sources.is_empty() {
-             build_config.enclave_sources[0].clone()
-         } else {
--            enclave_builder::ENCLAVE_SOURCE.to_string()
-+            enclave_builder::enclave_source_url(&enclave_builder::build::resolve_enclaveos_commit())
-         };
-         tracing::info!("Using enclave source: {}", enclave_source);
- 
-diff --git a/src/cli/src/lib.rs b/src/cli/src/lib.rs
-index 6456dd7..4f54ee1 100644
---- a/src/cli/src/lib.rs
-+++ b/src/cli/src/lib.rs
-@@ -2908,7 +2908,7 @@ build: docker build -t app .
-         let builder = enclave_builder::EnclaveBuilder::new_with_cache(
-             "unused-template",
-             "local",
--            enclave_builder::ENCLAVE_SOURCE,
-+            enclave_builder::enclave_source_url(&enclave_builder::build::resolve_enclaveos_commit()),
-             "unused",
-             enclave_builder::FRAMEWORK_SOURCE,
-             "local",
-@@ -2999,8 +2999,9 @@ build: docker build -t app .
-                 log_verbose(self.verbose, &format!("Using enclave source from Procfile: {}", enclave_sources[0]));
-                 (enclave_sources[0].clone(), "unused".to_string())
-             } else {
--                log_verbose(self.verbose, &format!("Using default enclave source: {}", enclave_builder::ENCLAVE_SOURCE));
--                (enclave_builder::ENCLAVE_SOURCE.to_string(), "unused".to_string())
-+                let source = enclave_builder::enclave_source_url(&enclave_builder::build::resolve_enclaveos_commit());
-+                log_verbose(self.verbose, &format!("Using default enclave source: {}", source));
-+                (source, "unused".to_string())
-             }
-         };
- 
-diff --git a/src/enclave-builder/src/build.rs b/src/enclave-builder/src/build.rs
-index 24a6f0f..b1daa14 100644
---- a/src/enclave-builder/src/build.rs
-+++ b/src/enclave-builder/src/build.rs
-@@ -10,6 +10,40 @@ use sha2::{Sha256, Digest};
- use crate::EifFile;
- use crate::manifest::EnclaveManifest;
- 
-+const DEFAULT_ENCLAVEOS_COMMIT: &str = "9582e25239430070667fdd0a6b64d887f1c308df";
-+const DEFAULT_BOOTPROOF_COMMIT: &str = "64dae0628e58b9f898b89f9b7a404b37e2f0ca9f";
-+const DEFAULT_STEVE_COMMIT: &str = "ed38a190cd5d7a8f452c854e41d00ec748e172bf";
-+
-+pub fn resolve_enclaveos_commit() -> String {
-+    std::env::var("ENCLAVEOS_COMMIT")
-+        .unwrap_or_else(|_| DEFAULT_ENCLAVEOS_COMMIT.to_string())
-+}
-+
-+/// Resolve the templates directory at runtime.
-+///
-+/// Priority:
-+/// 1. CAUTION_TEMPLATES_DIR env var (explicit override)
-+/// 2. /app/templates (Docker container path)
-+/// 3. CARGO_MANIFEST_DIR/templates (local dev fallback)
-+fn resolve_templates_dir() -> Result<PathBuf> {
-+    if let Ok(dir) = std::env::var("CAUTION_TEMPLATES_DIR") {
-+        let p = PathBuf::from(&dir);
-+        anyhow::ensure!(p.exists(), "CAUTION_TEMPLATES_DIR={} does not exist", dir);
-+        return Ok(p);
-+    }
-+
-+    let docker_path = PathBuf::from("/app/templates");
-+    if docker_path.exists() {
-+        return Ok(docker_path);
-+    }
-+
-+    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates");
-+    anyhow::ensure!(dev_path.exists(),
-+        "Templates directory not found. Checked CAUTION_TEMPLATES_DIR, /app/templates, and {}",
-+        dev_path.display());
-+    Ok(dev_path)
-+}
-+
- pub async fn stage_eif_components(
-     user_fs_path: &Path,
-     enclave_source_path: &Path,
-@@ -18,6 +52,7 @@ pub async fn stage_eif_components(
-     manifest: Option<EnclaveManifest>,
-     ports: &[u16],
-     e2e: bool,
-+    templates_dir: Option<&Path>,
- ) -> Result<PathBuf> {
-     let stage_dir = work_dir.join("eif-stage");
-     fs::create_dir_all(&stage_dir).await?;
-@@ -38,34 +73,108 @@ pub async fn stage_eif_components(
-     tracing::info!("Staging enclave source from: {}", enclave_source_path.display());
-     copy_dir_recursive(enclave_source_path, &enclave_dir).await?;
- 
--    if let Some(manifest) = manifest {
-+    let enclaveos_commit = resolve_enclaveos_commit();
-+    let bootproof_commit = std::env::var("BOOTPROOF_COMMIT")
-+        .unwrap_or_else(|_| DEFAULT_BOOTPROOF_COMMIT.to_string());
-+    let steve_commit = std::env::var("STEVE_COMMIT")
-+        .unwrap_or_else(|_| DEFAULT_STEVE_COMMIT.to_string());
-+
-+    if let Some(mut manifest) = manifest {
-+        manifest.enclaveos_commit = Some(enclaveos_commit.clone());
-+        manifest.bootproof_commit = Some(bootproof_commit.clone());
-+        if e2e {
-+            manifest.steve_commit = Some(steve_commit.clone());
-+        }
-         let manifest_path = stage_dir.join("manifest.json");
-         manifest.write_to_file(&manifest_path).await
-             .context("Failed to write manifest.json")?;
-         tracing::info!("Wrote manifest to: {}", manifest_path.display());
+diff --git a/frontend/src/App.vue b/frontend/src/App.vue
+index 9de7f3c..14589fa 100644
+--- a/frontend/src/App.vue
++++ b/frontend/src/App.vue
+@@ -54,6 +54,10 @@ export default {
+       '/qr-login': {
+         title: 'CLI Login • Caution',
+         description: 'Authenticate your CLI session using a security key.'
++      },
++      '/qr-sign': {
++        title: 'CLI Signing • Caution',
++        description: 'Approve a CLI operation using a security key.'
+       }
      }
  
--    generate_run_sh(&stage_dir, run_command, ports, e2e).await?;
-+    // Read and render templates
-+    let templates_dir = match templates_dir {
-+        Some(dir) => dir.to_path_buf(),
-+        None => resolve_templates_dir()?,
+@@ -110,6 +114,10 @@ export default {
+       } else if (path === '/qr-login') {
+         // Public route - QR code CLI login (no auth required)
+         return 'QrLogin'
++      } else if (path === '/qr-sign') {
++        // Public route - QR code CLI signing (no auth required)
++        // Same component as QrLogin — it detects sign vs login from the path
++        return 'QrLogin'
+       }
+ 
+       // Unknown path - redirect to home
+diff --git a/frontend/src/components/DashboardLayout.vue b/frontend/src/components/DashboardLayout.vue
+index f4c8eac..b80982d 100644
+--- a/frontend/src/components/DashboardLayout.vue
++++ b/frontend/src/components/DashboardLayout.vue
+@@ -65,19 +65,42 @@
+             <span>SSH keys</span>
+           </button>
+ 
++          <button
++            :class="['nav-item', { active: activeTab === 'keys' }]"
++            @click="$emit('tab-change', 'keys')"
++          >
++            <svg
++              class="nav-icon"
++              width="30" height="30" viewBox="0 0 30 30"
++              fill="none"
++              xmlns="http://www.w3.org/2000/svg"
++            >
++              <rect v-if="activeTab === 'keys'" width="30" height="30" rx="15" fill="white"/>
++              <g transform="translate(5,5) scale(0.833)">
++                <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
++                  :stroke="activeTab === 'keys' ? '#0F0F0F' : '#535455'"
++                />
++              </g>
++            </svg>
++            <span>Key services</span>
++          </button>
++
+           <button
+             :class="['nav-item', { active: activeTab === 'security' }]"
+             @click="$emit('tab-change', 'security')"
+           >
+             <svg
+               class="nav-icon"
+-              :style="{ opacity: activeTab === 'security' ? 1 : 0.5, width: '30px', height: '30px', minWidth: '30px', minHeight: '30px' }"
+-              viewBox="0 0 24 24"
++              width="30" height="30" viewBox="0 0 30 30"
+               fill="none"
+-              stroke="currentColor"
+-              stroke-width="1.5"
++              xmlns="http://www.w3.org/2000/svg"
+             >
+-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
++              <rect v-if="activeTab === 'security'" width="30" height="30" rx="15" fill="white"/>
++              <g transform="translate(5,5) scale(0.833)">
++                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
++                  :stroke="activeTab === 'security' ? '#0F0F0F' : '#535455'"
++                />
++              </g>
+             </svg>
+             <span>Security</span>
+           </button>
+diff --git a/frontend/src/views/Dashboard.vue b/frontend/src/views/Dashboard.vue
+index 2fe22e7..82efaeb 100644
+--- a/frontend/src/views/Dashboard.vue
++++ b/frontend/src/views/Dashboard.vue
+@@ -938,6 +938,105 @@ make build-cli
+       </div>
+     </div>
+ 
++    <!-- Key Services Tab -->
++    <div v-if="activeTab === 'keys'" class="content-card">
++      <div class="content-header">
++        <div class="content-header-text">
++          <h2 class="content-header-title">Quorum bundles</h2>
++          <p class="content-header-description">
++            Manage quorum bundles created via <code>caution secret new</code>.
++          </p>
++        </div>
++      </div>
++
++      <div class="items-list">
++        <div v-if="loadingBundles" class="loading">Loading bundles...</div>
++        <div v-else-if="quorumBundles.length === 0" class="empty-state">
++          No quorum bundles yet. Use <code>caution secret new</code> to create one.
++        </div>
++        <div v-else>
++          <div v-for="bundle in quorumBundles" :key="bundle.id" class="bundle-card">
++            <div class="bundle-header">
++              <div class="item-info">
++                <div v-if="editingBundleName === bundle.id" class="bundle-name-edit">
++                  <input
++                    v-model="editBundleNameValue"
++                    class="bundle-name-input"
++                    placeholder="Bundle name"
++                    @keyup.enter="saveBundleName(bundle.id)"
++                    @keyup.escape="cancelEditBundleName()"
++                  />
++                  <button class="btn-sm btn-primary" @click="saveBundleName(bundle.id)">Save</button>
++                  <button class="btn-sm btn-secondary" @click="cancelEditBundleName()">Cancel</button>
++                </div>
++                <div v-else class="bundle-name-display">
++                  <span class="item-name">{{ bundle.name || truncateId(bundle.id) }}</span>
++                  <button class="btn-icon" @click="startEditBundleName(bundle)" title="Rename bundle">
++                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
++                      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
++                      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
++                    </svg>
++                  </button>
++                </div>
++                <span v-if="bundle.name" class="item-meta-id">{{ truncateId(bundle.id) }}</span>
++                <span class="item-meta">Created {{ formatDate(bundle.created_at) }}</span>
++              </div>
++              <div class="item-actions">
++                <button
++                  @click="deleteBundle(bundle.id)"
++                  class="btn-danger"
++                  :disabled="deletingBundle === bundle.id"
++                >
++                  <svg v-if="deletingBundle === bundle.id" class="spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
++                    <circle cx="12" cy="12" r="10" stroke-opacity="0.25"/>
++                    <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/>
++                  </svg>
++                  {{ deletingBundle === bundle.id ? "Deleting..." : "Delete" }}
++                </button>
++              </div>
++            </div>
++            <div class="bundle-labels">
++              <span v-for="(v, k) in (bundle.labels || {})" :key="k" class="bundle-label-tag">
++                {{ k }}: {{ v }}
++                <button class="label-remove-btn" @click="removeLabel(bundle.id, k)" title="Remove label">&times;</button>
++              </span>
++              <button v-if="addingLabelTo !== bundle.id" class="bundle-label-add" @click="startAddLabel(bundle.id)">+ Add label</button>
++              <span v-else class="label-add-form">
++                <input v-model="newLabelKey" class="label-input" placeholder="key" @keyup.escape="cancelAddLabel()" />
++                <input v-model="newLabelValue" class="label-input" placeholder="value" @keyup.enter="saveLabel(bundle.id)" @keyup.escape="cancelAddLabel()" />
++                <button class="btn-sm btn-primary" @click="saveLabel(bundle.id)">Add</button>
++                <button class="btn-sm btn-secondary" @click="cancelAddLabel()">Cancel</button>
++              </span>
++            </div>
++            <div class="bundle-details" v-if="bundle.data">
++              <div class="bundle-detail-row" v-if="bundleKeyHashes[bundle.id]">
++                <span class="bundle-label">Public key hash</span>
++                <code class="bundle-hash">{{ bundleKeyHashes[bundle.id] }}</code>
++              </div>
++              <div class="bundle-actions">
++                <button
++                  v-if="bundle.data.secret_recipient_public_key"
++                  class="btn-sm btn-download"
++                  @click="downloadFile(bundle.data.secret_recipient_public_key, truncateId(bundle.id) + '_public_key.asc')"
++                >
++                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
++                  Public key
++                </button>
++                <button
++                  v-if="bundle.data.shardfile"
++                  class="btn-sm btn-download"
++                  @click="downloadFile(bundle.data.shardfile, truncateId(bundle.id) + '_shardfile.asc')"
++                >
++                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
++                  Shard file
++                </button>
++              </div>
++            </div>
++          </div>
++        </div>
++      </div>
++    </div>
++
+     <!-- Delete SSH Key Confirmation Modal -->
+     <div v-if="showDeleteModal" class="modal-overlay" @click="cancelDelete">
+       <div class="modal-content" @click.stop>
+@@ -1293,6 +1392,17 @@ export default {
+     const newCredAwsSecret = ref("");
+     const newCredIsDefault = ref(false);
+ 
++    // Quorum bundles state
++    const quorumBundles = ref([]);
++    const loadingBundles = ref(true);
++    const deletingBundle = ref(null);
++    const bundleKeyHashes = ref({});
++    const editingBundleName = ref(null);
++    const editBundleNameValue = ref('');
++    const addingLabelTo = ref(null);
++    const newLabelKey = ref('');
++    const newLabelValue = ref('');
++
+     // Organization settings state
+     const orgSettings = ref({ require_pin: false });
+     const loadingOrgSettings = ref(true);
+@@ -1750,6 +1860,174 @@ export default {
+       }
+     };
+ 
++    const loadBundles = async () => {
++      loadingBundles.value = true;
++
++      try {
++        const response = await authFetch("/api/quorum-bundles");
++
++        if (response.ok) {
++          quorumBundles.value = await response.json();
++          computeBundleHashes();
++        } else if (response.status === 401) {
++          window.location.href = "/login";
++        } else {
++          const data = await response.json().catch(() => ({}));
++          showToast(data.error || "Failed to load quorum bundles", 'error');
++        }
++      } catch (err) {
++        showToast("Failed to connect to server", 'error');
++      } finally {
++        loadingBundles.value = false;
++      }
 +    };
 +
-+    let run_sh_template = templates_dir.join("run.sh.template");
-+    anyhow::ensure!(run_sh_template.exists(),
-+        "run.sh.template not found at {}",
-+        run_sh_template.display());
++    const deleteBundle = async (id) => {
++      if (!confirm("Are you sure you want to delete this quorum bundle?")) return;
++
++      deletingBundle.value = id;
++
++      try {
++        const response = await authFetch(`/api/quorum-bundles/${id}`, {
++          method: "DELETE",
++        });
++
++        if (response.ok || response.status === 204) {
++          showToast("Quorum bundle deleted");
++          await loadBundles();
++        } else {
++          const data = await response.json().catch(() => ({}));
++          showToast(data.error || "Failed to delete quorum bundle", 'error');
++        }
++      } catch (err) {
++        showToast("Failed to connect to server", 'error');
++      } finally {
++        deletingBundle.value = null;
++      }
++    };
++
++    const computeBundleHashes = async () => {
++      for (const bundle of quorumBundles.value) {
++        if (bundle.data?.secret_recipient_public_key) {
++          try {
++            const encoded = new TextEncoder().encode(bundle.data.secret_recipient_public_key);
++            const hashBuffer = await crypto.subtle.digest('SHA-256', encoded);
++            const hashArray = Array.from(new Uint8Array(hashBuffer));
++            const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
++            bundleKeyHashes.value[bundle.id] = hashHex.substring(0, 16);
++          } catch {
++            // skip hash computation on error
++          }
++        }
++      }
++    };
++
++    const startEditBundleName = (bundle) => {
++      editingBundleName.value = bundle.id;
++      editBundleNameValue.value = bundle.name || '';
++    };
++
++    const saveBundleName = async (bundleId) => {
++      try {
++        const response = await authFetch(`/api/quorum-bundles/${bundleId}`, {
++          method: "PATCH",
++          headers: { "Content-Type": "application/json" },
++          body: JSON.stringify({ name: editBundleNameValue.value }),
++        });
++
++        if (response.ok) {
++          showToast("Bundle renamed");
++          editingBundleName.value = null;
++          await loadBundles();
++        } else {
++          const data = await response.json().catch(() => ({}));
++          showToast(data.error || "Failed to rename bundle", 'error');
++        }
++      } catch (err) {
++        showToast("Failed to connect to server", 'error');
++      }
++    };
++
++    const cancelEditBundleName = () => {
++      editingBundleName.value = null;
++      editBundleNameValue.value = '';
++    };
++
++    const startAddLabel = (bundleId) => {
++      addingLabelTo.value = bundleId;
++      newLabelKey.value = '';
++      newLabelValue.value = '';
++    };
++
++    const cancelAddLabel = () => {
++      addingLabelTo.value = null;
++      newLabelKey.value = '';
++      newLabelValue.value = '';
++    };
++
++    const saveLabel = async (bundleId) => {
++      if (!newLabelKey.value.trim()) return;
++      const bundle = quorumBundles.value.find(b => b.id === bundleId);
++      if (!bundle) return;
++
++      const labels = { ...(bundle.labels || {}), [newLabelKey.value.trim()]: newLabelValue.value.trim() };
++
++      try {
++        const response = await authFetch(`/api/quorum-bundles/${bundleId}`, {
++          method: "PATCH",
++          headers: { "Content-Type": "application/json" },
++          body: JSON.stringify({ labels }),
++        });
++
++        if (response.ok) {
++          showToast("Label added");
++          cancelAddLabel();
++          await loadBundles();
++        } else {
++          const data = await response.json().catch(() => ({}));
++          showToast(data.error || "Failed to add label", 'error');
++        }
++      } catch (err) {
++        showToast("Failed to connect to server", 'error');
++      }
++    };
++
++    const removeLabel = async (bundleId, key) => {
++      const bundle = quorumBundles.value.find(b => b.id === bundleId);
++      if (!bundle) return;
++
++      const labels = { ...(bundle.labels || {}) };
++      delete labels[key];
++
++      try {
++        const response = await authFetch(`/api/quorum-bundles/${bundleId}`, {
++          method: "PATCH",
++          headers: { "Content-Type": "application/json" },
++          body: JSON.stringify({ labels }),
++        });
++
++        if (response.ok) {
++          showToast("Label removed");
++          await loadBundles();
++        } else {
++          const data = await response.json().catch(() => ({}));
++          showToast(data.error || "Failed to remove label", 'error');
++        }
++      } catch (err) {
++        showToast("Failed to connect to server", 'error');
++      }
++    };
++
++    const downloadFile = (content, filename) => {
++      const blob = new Blob([content], { type: 'application/octet-stream' });
++      const url = URL.createObjectURL(blob);
++      const a = document.createElement('a');
++      a.href = url;
++      a.download = filename;
++      a.click();
++      URL.revokeObjectURL(url);
++    };
++
+     const addCredential = async () => {
+       if (
+         !newCredName.value.trim() ||
+@@ -2122,7 +2400,7 @@ export default {
+       // Add keyboard event listener
+       window.addEventListener("keydown", handleKeyDown);
  
--    generate_containerfile_eif(&stage_dir, e2e).await?;
-+    let containerfile_template = templates_dir.join("Containerfile.eif");
-+    anyhow::ensure!(containerfile_template.exists(),
-+        "Containerfile.eif template not found at {}",
-+        containerfile_template.display());
-+
-+    let run_sh_content = render_run_sh_template(&run_sh_template, run_command, ports, e2e).await?;
-+    let containerfile_content = render_containerfile_template(
-+        &containerfile_template, e2e, &bootproof_commit, &steve_commit,
-+    ).await?;
-+
-+    let run_sh_path = stage_dir.join("run.sh");
-+    fs::write(&run_sh_path, &run_sh_content).await?;
-+    tracing::info!("Generated run.sh at: {}", run_sh_path.display());
-+
-+    let containerfile_path = stage_dir.join("Containerfile.eif");
-+    fs::write(&containerfile_path, &containerfile_content).await?;
-+    tracing::info!("Generated Containerfile.eif at: {}", containerfile_path.display());
+-      await Promise.all([loadApps(), loadKeys(), loadCredentials(), loadOrgSettings()]);
++      await Promise.all([loadApps(), loadKeys(), loadCredentials(), loadBundles(), loadOrgSettings()]);
+     });
  
-     tracing::info!("EIF components staged successfully in: {}", stage_dir.display());
-     Ok(stage_dir)
+     onUnmounted(() => {
+@@ -2175,6 +2453,24 @@ export default {
+       deleteKey,
+       confirmDelete,
+       cancelDelete,
++      quorumBundles,
++      loadingBundles,
++      deletingBundle,
++      deleteBundle,
++      bundleKeyHashes,
++      editingBundleName,
++      editBundleNameValue,
++      startEditBundleName,
++      saveBundleName,
++      cancelEditBundleName,
++      addingLabelTo,
++      newLabelKey,
++      newLabelValue,
++      startAddLabel,
++      cancelAddLabel,
++      saveLabel,
++      removeLabel,
++      downloadFile,
+       credentials,
+       loadingCreds,
+       addingCred,
+@@ -3705,4 +4001,179 @@ export default {
+   opacity: 0.5;
+   cursor: not-allowed;
  }
- 
--async fn generate_run_sh(stage_dir: &Path, run_command: Option<String>, ports: &[u16], e2e: bool) -> Result<()> {
-+fn process_template_blocks(content: &str, enabled_blocks: &[&str]) -> String {
-+    let mut result = Vec::new();
-+    let mut skip = false;
 +
-+    for line in content.lines() {
-+        let trimmed = line.trim();
-+        if let Some(block_name) = trimmed.strip_prefix("# {") {
-+            let block_name = block_name.trim();
-+            if !enabled_blocks.contains(&block_name) {
-+                skip = true;
-+            }
-+            continue;
-+        }
-+        if trimmed.starts_with("# }") {
-+            skip = false;
-+            continue;
-+        }
-+        if !skip {
-+            result.push(line);
-+        }
-+    }
-+
-+    let mut output = result.join("\n");
-+    if content.ends_with('\n') {
-+        output.push('\n');
-+    }
-+    output
++/* Quorum bundle cards */
++.bundle-card {
++  padding: 16px 20px;
++  border-bottom: 1px solid #eee;
 +}
 +
-+async fn render_run_sh_template(
-+    template_path: &Path,
-+    run_command: Option<String>,
-+    ports: &[u16],
-+    e2e: bool,
-+) -> Result<String> {
-+    let template = fs::read_to_string(template_path).await
-+        .context("Failed to read run.sh template")?;
++.bundle-card:last-child {
++  border-bottom: none;
++}
 +
-+    let enabled_blocks: Vec<&str> = if e2e { vec!["STEVE"] } else { vec![] };
-+    let processed = process_template_blocks(&template, &enabled_blocks);
++.bundle-header {
++  display: flex;
++  justify-content: space-between;
++  align-items: center;
++}
 +
-     let user_cmd = if let Some(cmd) = run_command {
-         let escaped_cmd = cmd.replace("'", "'\\''");
-         format!("exec sh -c '{}'", escaped_cmd)
-     } else {
--        r#"echo "ERROR: No run command specified in Procfile"
--exit 1"#.to_string()
-+        "echo \"ERROR: No run command specified in Procfile\"\nexit 1".to_string()
-     };
- 
--    // Generate proxies for custom user ports (in addition to the hardcoded 8080/8081/8082)
-     let custom_port_proxies: String = ports
-         .iter()
--        .filter(|&&port| port != 8080 && port != 8081 && port != 8082) // Skip already-hardcoded ports
-+        .filter(|&&port| port != 8080 && port != 8081 && port != 8082)
-         .map(|port| format!("/bin/socat VSOCK-LISTEN:{},reuseaddr,fork TCP:localhost:{} &", port, port))
-         .collect::<Vec<_>>()
-         .join("\n");
-@@ -76,314 +185,28 @@ exit 1"#.to_string()
-         format!("\necho \"Starting custom port proxies...\"\n{}\n", custom_port_proxies)
-     };
- 
--    // Conditionally include STEVE (end-to-end encryption proxy)
--    let steve_section = if e2e {
--        r#"echo "Starting STEVE (Secure Transport Encryption Via Enclave)..."
--/steve &
--"#
--    } else {
--        r#"echo "E2E encryption disabled, skipping STEVE"
--"#
--    };
--
--    let run_sh_content = format!(r#"#!/bin/sh
--set -e
--
--echo "=== Caution Enclave Startup ==="
--
--echo "Setting up network loopback..."
--/bin/busybox ip addr add 127.0.0.1/8 dev lo
--/bin/busybox ip link set dev lo up
--/bin/busybox ip link show lo
--
--echo "127.0.0.1   localhost" > /etc/hosts
--
--echo "Network loopback configured"
--
--echo "Setting up vsock network tunnel to parent..."
--/bin/socat TUN,tun-type=tap,iff-no-pi,iff-up,tun-name=eth0 VSOCK-CONNECT:3:3 &
--SOCAT_PID=$!
--echo "VSock tunnel started (PID: $SOCAT_PID)"
--
--/bin/busybox sleep 2
--
--if /bin/busybox ip link show eth0 2>/dev/null; then
--    echo "eth0 interface created successfully"
--
--    echo "Requesting IP via DHCP..."
--    /bin/busybox udhcpc -i eth0 -n -q -s /bin/udhcpc-script 2>&1 | /bin/busybox grep -E "Lease|obtained" || true
--
--    echo "Network configuration:"
--    /bin/busybox ip addr show eth0
--    /bin/busybox ip route show
--
--    echo "nameserver 10.0.100.1" > /etc/resolv.conf
-+    let result = processed
-+        .replace("{{USER_CMD}}", &user_cmd)
-+        .replace("{{CUSTOM_PORT_SECTION}}", &custom_port_section);
- 
--    echo "Network tunnel established successfully"
--else
--    echo "WARNING: Failed to create eth0 interface, running without internet access"
--    echo "nameserver 127.0.0.1" > /etc/resolv.conf
--fi
--
--echo "Loading NSM kernel module..."
--if [ -f /nsm.ko ]; then
--    insmod /nsm.ko && echo "NSM module loaded successfully" || echo "Failed to load NSM module"
--else
--    echo "WARNING: NSM module not found at /nsm.ko"
--fi
--
--export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
--
--echo "Starting bootproofd on port 8082..."
--/bootproofd &
--
--{steve_section}
--echo "Starting VSOCK-to-TCP proxies..."
--# Hardcoded proxies for ports 8080, 8081, 8082
--/bin/socat VSOCK-LISTEN:8080,reuseaddr,fork TCP:localhost:8080 &
--/bin/socat VSOCK-LISTEN:8081,reuseaddr,fork TCP:localhost:8081 &
--/bin/socat VSOCK-LISTEN:8082,reuseaddr,fork TCP:localhost:8082 &
--{custom_port_section}
--/bin/busybox sleep 2
--
--echo "Starting user application..."
--cd /
--
--echo "=== Filesystem structure ==="
--/bin/busybox find / -type f 2>/dev/null | /bin/busybox grep -v "^/proc\|^/sys\|^/dev" | /bin/busybox head -20
--echo "=== Running user application ==="
--
--{user_cmd}
--"#);
--
--    let run_sh_path = stage_dir.join("run.sh");
--    fs::write(&run_sh_path, run_sh_content).await?;
--
--    tracing::info!("Generated run.sh at: {}", run_sh_path.display());
--    Ok(())
-+    Ok(result)
- }
- 
--async fn generate_containerfile_eif(stage_dir: &Path, e2e: bool) -> Result<()> {
--    // Conditionally include STEVE builder stage
--    let steve_builder_stage = if e2e {
--        r#"
--FROM pallet-rust AS steve-builder
--
--COPY --from=git . /
--COPY --from=ca-certificates . /
--COPY --from=curl . /
--
--ENV SOURCE_DATE_EPOCH=1
--ENV CARGO_HOME=/usr/local/cargo
--ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
--ENV TARGET_ARCH="x86_64-unknown-linux-musl"
--
--WORKDIR /build-steve
--RUN git clone --depth 1 https://git.distrust.co/public/steve.git .
--
--RUN --mount=type=cache,target=/usr/local/cargo/registry \
--    --mount=type=cache,target=/usr/local/cargo/git \
--    cargo fetch --locked --target $TARGET_ARCH
--
--RUN --mount=type=cache,target=/usr/local/cargo/registry \
--    --mount=type=cache,target=/usr/local/cargo/git \
--    --mount=type=cache,target=/build-steve/target \
--    cargo build --release --locked --target ${TARGET_ARCH} -p steve \
--      && install -D -m 0755 /build-steve/target/${TARGET_ARCH}/release/steve /binaries/steve
--"#
--    } else {
--        ""
--    };
--
--    let steve_copy = if e2e {
--        "COPY --from=steve-builder /binaries/steve /build/binaries/steve"
--    } else {
--        ""
--    };
--
--    let steve_install = if e2e {
--        r#"RUN cp /build/binaries/steve /build/initramfs/steve && \
--    chmod +x /build/initramfs/steve"#
--    } else {
--        ""
--    };
--
--    let containerfile_content = format!(r#"
--FROM stagex/pallet-rust@sha256:9c38bf1066dd9ad1b6a6b584974dd798c2bf798985bf82e58024fbe0515592ca AS pallet-rust
--FROM stagex/core-busybox@sha256:637b1e0d9866807fac94c22d6dc4b2e1f45c8a5ca1113c88172e0324a30c7283 AS busybox
--FROM stagex/core-musl@sha256:d9af23284cca2e1002cd53159ada469dfe6d6791814e72d6163c7de18d4ae701 AS musl
--FROM stagex/core-gcc@sha256:964ffd3793c5a38ca581e9faefd19918c259f1611c4cbf5dc8be612e3a8b72f5 AS gcc
--FROM stagex/core-libunwind@sha256:eb66122d8fc543f5e2f335bb1616f8c3a471604383e2c0a9df4a8e278505d3bc AS libunwind
--FROM stagex/core-openssl@sha256:d6487f0cb15f4ee02b420c717cb9abd85d73043c0bb3a2c6ce07688b23c1df07 AS openssl
--FROM stagex/core-zlib@sha256:06f5168e20d85d1eb1d19836cdf96addc069769b40f8f0f4a7a70b2f49fc18f8 AS zlib
--FROM stagex/core-ca-certificates@sha256:d135f1189e9b232eb7316626bf7858534c5540b2fc53dced80a4c9a95f26493e AS ca-certificates
--FROM stagex/core-libzstd@sha256:5382c221194b6d0690eb65ccca01c720a6bd39f92e610dbc0e99ba43f38f3094 AS libzstd
--FROM stagex/user-cpio@sha256:9c8bf39001eca8a71d5617b46f8c9b4f7426db41a052f198d73400de6f8a16df AS cpio
--FROM stagex/user-socat@sha256:4d1b7a403eba65087a3f69200d2644d01b63f0ea81ef171cedc17de490c8c9a0 AS socat
--FROM stagex/user-eif_build@sha256:935032172a23772ea1a35c6334aa98aa7b0c46f9e34a040347c7b2a73496ef8a AS eif-build
--FROM stagex/user-linux-nitro@sha256:aa1006d91a7265b33b86160031daad2fdf54ec2663ed5ccbd312567cc9beff2c AS linux-nitro
--FROM stagex/user-nit@sha256:60b6eef4534ea6ea78d9f29e4c7feb27407b615424f20ad8943d807191688be7 AS nit
--FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769ff3b37239f3d0 AS git
--FROM stagex/core-curl@sha256:bc8bab43d96a9167fbb85022ea773644a45ef335e7a9b747f203078973fa988e AS curl
--{steve_builder_stage}
--FROM pallet-rust AS bootproof-builder
--
--COPY --from=git . /
--COPY --from=ca-certificates . /
--COPY --from=curl . /
--
--ENV SOURCE_DATE_EPOCH=1
--ENV CARGO_HOME=/usr/local/cargo
--ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
--ENV TARGET_ARCH="x86_64-unknown-linux-musl"
--
--WORKDIR /build-bootproof
--RUN git clone https://git.distrust.co/public/bootproof.git . && \
--    git checkout 64dae0628e58b9f898b89f9b7a404b37e2f0ca9f
--
--RUN --mount=type=cache,target=/usr/local/cargo/registry \
--    --mount=type=cache,target=/usr/local/cargo/git \
--    cargo fetch --locked --target $TARGET_ARCH
--
--RUN --mount=type=cache,target=/usr/local/cargo/registry \
--    --mount=type=cache,target=/usr/local/cargo/git \
--    --mount=type=cache,target=/build-bootproof/target \
--    cargo build --release --locked --target ${{TARGET_ARCH}} -p bootproofd \
--      && install -D -m 0755 /build-bootproof/target/${{TARGET_ARCH}}/release/bootproofd /binaries/bootproofd
--
--FROM pallet-rust AS enclave-builder
--
--ENV SOURCE_DATE_EPOCH=1
--ENV CARGO_HOME=/usr/local/cargo
--ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
--ENV TARGET_ARCH="x86_64-unknown-linux-musl"
--
--WORKDIR /build-enclave
--
--COPY enclave/ /build-enclave/
--
--RUN --mount=type=cache,target=/usr/local/cargo/registry \
--    --mount=type=cache,target=/usr/local/cargo/git \
--    cargo fetch --locked --target $TARGET_ARCH
--
--RUN --mount=type=cache,target=/usr/local/cargo/registry \
--    --mount=type=cache,target=/usr/local/cargo/git \
--    --mount=type=cache,target=/build-enclave/target \
--    cargo build --release --locked --target ${{TARGET_ARCH}} -p init \
--      && install -D -m 0755 /build-enclave/target/${{TARGET_ARCH}}/release/init /binaries/init
--
--FROM busybox AS eif-builder
--
--COPY --from=musl . /
--COPY --from=gcc . /
--COPY --from=libunwind . /
--COPY --from=openssl . /
--COPY --from=zlib . /
--COPY --from=ca-certificates . /
--COPY --from=libzstd . /
--COPY --from=cpio . /
--COPY --from=socat . /
--COPY --from=eif-build . /
--COPY --from=nit . /
--
--WORKDIR /build
--
--COPY --from=enclave-builder /binaries/ /build/binaries/
--COPY --from=bootproof-builder /binaries/ /build/binaries/
--{steve_copy}
--
--COPY --from=linux-nitro /bzImage /build/kernel/bzImage
--COPY --from=linux-nitro /linux.config /build/kernel/linux.config
--
--COPY app/ /build/app/
--
--COPY run.sh /build/run.sh
--
--COPY enclave/rootfs/udhcpc-script.sh /build/udhcpc-script.sh
--
--COPY manifest.json /build/manifest.json
--
--RUN mkdir -p /build/initramfs/bin && \
--    mkdir -p /build/initramfs/lib && \
--    mkdir -p /build/initramfs/etc/ssl/certs
--
--RUN cp /bin/init /build/initramfs/init && \
--    chmod +x /build/initramfs/init
--
--RUN cp /build/run.sh /build/initramfs/run.sh && \
--    chmod +x /build/initramfs/run.sh
--
--RUN cp /build/udhcpc-script.sh /build/initramfs/bin/udhcpc-script && \
--    chmod +x /build/initramfs/bin/udhcpc-script
--
--RUN cp /build/binaries/bootproofd /build/initramfs/bootproofd && \
--    chmod +x /build/initramfs/bootproofd
--
--{steve_install}
--
--RUN if [ -f /build/manifest.json ]; then \
--        cp /build/manifest.json /build/initramfs/manifest.json; \
--    fi
--
--RUN if [ -f /bin/busybox ]; then \
--        cp /bin/busybox /build/initramfs/bin/busybox && \
--        cd /build/initramfs/bin && \
--        ln -s busybox sh && \
--        ln -s busybox sleep && \
--        ln -s busybox find && \
--        ln -s busybox cat && \
--        ln -s busybox ls && \
--        ln -s busybox mkdir && \
--        ln -s busybox mount && \
--        ln -s busybox chmod && \
--        ln -s busybox ip && \
--        ln -s busybox grep && \
--        ln -s busybox udhcpc; \
--    fi
--
--RUN if [ -f /usr/bin/socat ]; then \
--        cp /usr/bin/socat /build/initramfs/bin/socat && \
--        chmod +x /build/initramfs/bin/socat; \
--    elif [ -f /bin/socat ]; then \
--        cp /bin/socat /build/initramfs/bin/socat && \
--        chmod +x /build/initramfs/bin/socat; \
--    fi
--
--RUN if [ -f /lib/ld-musl-x86_64.so.1 ]; then \
--        cp /lib/ld-musl-x86_64.so.1 /build/initramfs/lib/ld-musl-x86_64.so.1; \
--    fi
--
--RUN if [ -f /etc/ssl/certs/ca-certificates.crt ]; then \
--        cp /etc/ssl/certs/ca-certificates.crt /build/initramfs/etc/ssl/certs/ca-certificates.crt; \
--    fi
--
--# Copy user app files to initramfs root to preserve original paths
--RUN cp -r /build/app/* /build/initramfs/ 2>/dev/null || true
--
--RUN find /build/initramfs -exec touch -hcd "@0" "{{}}" +
--
--RUN cd /build/initramfs && \
--    find . -print0 | sort -z | cpio --null --create --format=newc --reproducible | gzip --best > /build/rootfs.cpio.gz
--
--RUN eif_build \
--    --kernel /build/kernel/bzImage \
--    --kernel_config /build/kernel/linux.config \
--    --ramdisk /build/rootfs.cpio.gz \
--    --output /build/enclave.eif \
--    --pcrs_output /build/enclave.pcrs \
--    --cmdline "reboot=k panic=1 pci=off nomodules console=ttyS0 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd nit.target=/run.sh"
--
--FROM scratch AS output
--COPY --from=eif-builder /build/enclave.eif /enclave.eif
--COPY --from=eif-builder /build/enclave.pcrs /enclave.pcrs
--COPY --from=eif-builder /build/rootfs.cpio.gz /rootfs.cpio.gz
--"#, steve_builder_stage = steve_builder_stage, steve_copy = steve_copy, steve_install = steve_install);
--
--    let containerfile_path = stage_dir.join("Containerfile.eif");
--    fs::write(&containerfile_path, containerfile_content).await?;
--
--    tracing::info!("Generated Containerfile.eif at: {}", containerfile_path.display());
--    Ok(())
-+async fn render_containerfile_template(
-+    template_path: &Path,
-+    e2e: bool,
-+    bootproof_commit: &str,
-+    steve_commit: &str,
-+) -> Result<String> {
-+    let template = fs::read_to_string(template_path).await
-+        .context("Failed to read Containerfile.eif template")?;
++.bundle-details {
++  padding-top: 12px;
++  display: flex;
++  flex-direction: column;
++  gap: 10px;
++}
 +
-+    let enabled_blocks: Vec<&str> = if e2e { vec!["STEVE"] } else { vec![] };
-+    let processed = process_template_blocks(&template, &enabled_blocks);
++.bundle-detail-row {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++}
 +
-+    Ok(processed
-+        .replace("{{BOOTPROOF_COMMIT}}", bootproof_commit)
-+        .replace("{{STEVE_COMMIT}}", steve_commit))
- }
++.bundle-label {
++  font-size: 0.8rem;
++  color: #666;
++}
++
++.bundle-hash {
++  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
++  font-size: 0.8rem;
++  color: #333;
++  background: #f5f5f5;
++  padding: 2px 6px;
++  border-radius: 3px;
++}
++
++.bundle-actions {
++  display: flex;
++  gap: 8px;
++}
++
++.btn-download {
++  display: inline-flex;
++  align-items: center;
++  gap: 4px;
++  padding: 4px 10px;
++  font-size: 0.8rem;
++  color: #555;
++  background: #fff;
++  border: 1px solid #ccc;
++  border-radius: 4px;
++  cursor: pointer;
++}
++.btn-download:hover {
++  border-color: #999;
++  color: #333;
++  background: #f8f8f8;
++}
++
++.bundle-name-display {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++}
++
++.bundle-name-edit {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++}
++
++.bundle-name-input {
++  padding: 4px 8px;
++  font-size: 0.9rem;
++  border: 1px solid #ccc;
++  border-radius: 4px;
++  outline: none;
++  width: 200px;
++}
++
++.bundle-name-input:focus {
++  border-color: #666;
++}
++
++.item-meta-id {
++  font-size: 0.75rem;
++  color: #999;
++  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
++}
++
++.btn-icon {
++  background: none;
++  border: none;
++  cursor: pointer;
++  padding: 2px;
++  color: #999;
++  display: flex;
++  align-items: center;
++}
++
++.btn-icon:hover {
++  color: #333;
++}
++
++.bundle-labels {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 6px;
++  padding-top: 8px;
++}
++
++.bundle-label-tag {
++  font-size: 0.75rem;
++  background: #f0f0f0;
++  color: #555;
++  padding: 2px 8px;
++  border-radius: 10px;
++  border: 1px solid #e0e0e0;
++  display: inline-flex;
++  align-items: center;
++  gap: 2px;
++}
++
++.label-remove-btn {
++  background: none;
++  border: none;
++  cursor: pointer;
++  color: #999;
++  font-size: 0.85rem;
++  padding: 0 2px;
++  margin-left: 2px;
++  line-height: 1;
++}
++.label-remove-btn:hover { color: #dc3545; }
++
++.bundle-label-add {
++  font-size: 0.75rem;
++  color: #999;
++  background: none;
++  border: 1px dashed #ccc;
++  border-radius: 10px;
++  padding: 2px 8px;
++  cursor: pointer;
++}
++.bundle-label-add:hover { color: #333; border-color: #999; }
++
++.label-add-form {
++  display: flex;
++  align-items: center;
++  gap: 4px;
++}
++
++.label-input {
++  padding: 2px 6px;
++  font-size: 0.75rem;
++  border: 1px solid #ccc;
++  border-radius: 4px;
++  width: 80px;
++}
++.label-input:focus { border-color: #666; outline: none; }
++
++.btn-sm {
++  padding: 4px 10px;
++  font-size: 0.8rem;
++  border-radius: 4px;
++  cursor: pointer;
++}
+ </style>
+diff --git a/frontend/src/views/QrLogin.vue b/frontend/src/views/QrLogin.vue
+index ede5aa3..844c956 100644
+--- a/frontend/src/views/QrLogin.vue
++++ b/frontend/src/views/QrLogin.vue
+@@ -4,11 +4,11 @@
+ <template>
+   <div class="qr-login">
+     <div class="qr-card">
+-      <h2 class="qr-title">CLI Login Request</h2>
++      <h2 class="qr-title">{{ title }}</h2>
  
- pub async fn build_eif_from_filesystems(
-@@ -398,6 +221,7 @@ pub async fn build_eif_from_filesystems(
-     ports: &[u16],
-     no_cache: bool,
-     e2e: bool,
-+    templates_dir: Option<&Path>,
- ) -> Result<EifFile> {
-     tracing::info!("Building EIF using transparent Containerfile approach");
+       <div v-if="state === 'ready'">
+         <p class="qr-description">
+-          Authenticate with your security key to log in to the CLI.
++          {{ description }}
+         </p>
+         <button @click="authenticate" class="btn-dark btn qr-btn">
+           Authenticate with security key
+@@ -24,7 +24,7 @@
+       </div>
  
-@@ -405,7 +229,7 @@ pub async fn build_eif_from_filesystems(
-         fs::create_dir_all(parent).await?;
+       <div v-else-if="state === 'success'">
+-        <p class="qr-success">Authentication complete. You can close this tab.</p>
++        <p class="qr-success">{{ successMessage }}</p>
+       </div>
+ 
+       <div v-else-if="state === 'error'">
+@@ -35,7 +35,7 @@
+       </div>
+ 
+       <div v-else-if="state === 'invalid'">
+-        <p class="qr-error">Invalid or expired login request. Please generate a new QR code from the CLI.</p>
++        <p class="qr-error">{{ invalidMessage }}</p>
+       </div>
+     </div>
+   </div>
+@@ -52,6 +52,21 @@ export default {
+     const errorMessage = ref('')
+     const token = ref('')
+ 
++    // Detect mode from URL path
++    const isSign = window.location.pathname === '/qr-sign'
++    const authPrefix = isSign ? '/auth/qr-sign' : '/auth/qr-login'
++
++    const title = isSign ? 'CLI Signing Request' : 'CLI Login Request'
++    const description = isSign
++      ? 'Authenticate with your security key to approve the CLI operation.'
++      : 'Authenticate with your security key to log in to the CLI.'
++    const successMessage = isSign
++      ? 'Operation approved. You can close this tab.'
++      : 'Authentication complete. You can close this tab.'
++    const invalidMessage = isSign
++      ? 'Invalid or expired signing request. Please generate a new QR code from the CLI.'
++      : 'Invalid or expired login request. Please generate a new QR code from the CLI.'
++
+     onMounted(() => {
+       const params = new URLSearchParams(window.location.search)
+       token.value = params.get('token') || ''
+@@ -74,7 +89,7 @@ export default {
+ 
+       try {
+         // Step 1: Start authentication with the QR token
+-        const beginResponse = await fetch('/auth/qr-login/authenticate', {
++        const beginResponse = await fetch(`${authPrefix}/authenticate`, {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/json' },
+           body: JSON.stringify({ token: token.value }),
+@@ -82,7 +97,7 @@ export default {
+ 
+         if (!beginResponse.ok) {
+           const text = await beginResponse.text()
+-          if (text.includes('expired') || text.includes('already')) {
++          if (text.includes('expired') || text.includes('already') || text.includes('not found')) {
+             state.value = 'invalid'
+             return
+           }
+@@ -131,24 +146,30 @@ export default {
+         const clientDataJSON = new Uint8Array(assertion.response.clientDataJSON)
+         const signature = new Uint8Array(assertion.response.signature)
+ 
+-        const finishResponse = await fetch('/auth/qr-login/authenticate/finish', {
++        const finishBody = {
++          id: assertion.id,
++          rawId: uint8ArrayToBase64url(new Uint8Array(assertion.rawId)),
++          type: assertion.type,
++          response: {
++            authenticatorData: uint8ArrayToBase64url(authenticatorData),
++            clientDataJSON: uint8ArrayToBase64url(clientDataJSON),
++            signature: uint8ArrayToBase64url(signature),
++            userHandle: assertion.response.userHandle
++              ? uint8ArrayToBase64url(new Uint8Array(assertion.response.userHandle))
++              : null,
++          },
++          token: beginData.token,
++        }
++
++        // QR login also needs the session key
++        if (beginData.session) {
++          finishBody.session = beginData.session
++        }
++
++        const finishResponse = await fetch(`${authPrefix}/authenticate/finish`, {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/json' },
+-          body: JSON.stringify({
+-            id: assertion.id,
+-            rawId: uint8ArrayToBase64url(new Uint8Array(assertion.rawId)),
+-            type: assertion.type,
+-            response: {
+-              authenticatorData: uint8ArrayToBase64url(authenticatorData),
+-              clientDataJSON: uint8ArrayToBase64url(clientDataJSON),
+-              signature: uint8ArrayToBase64url(signature),
+-              userHandle: assertion.response.userHandle
+-                ? uint8ArrayToBase64url(new Uint8Array(assertion.response.userHandle))
+-                : null,
+-            },
+-            session: beginData.session,
+-            token: beginData.token,
+-          }),
++          body: JSON.stringify(finishBody),
+         })
+ 
+         if (!finishResponse.ok) {
+@@ -171,6 +192,10 @@ export default {
+     return {
+       state,
+       errorMessage,
++      title,
++      description,
++      successMessage,
++      invalidMessage,
+       authenticate,
+       reset,
      }
- 
--    let stage_dir = stage_eif_components(user_fs_path, enclave_source_path, work_dir, run_command, manifest, ports, e2e).await?;
-+    let stage_dir = stage_eif_components(user_fs_path, enclave_source_path, work_dir, run_command, manifest, ports, e2e, templates_dir).await?;
- 
-     tracing::info!("Building EIF using Docker and Containerfile.eif");
-     let output_dir = stage_dir.join("output");
-@@ -575,3 +399,57 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
- 
-     Ok(())
+diff --git a/src/api/migrations/010_qr_sign_tokens.sql b/src/api/migrations/010_qr_sign_tokens.sql
+new file mode 100644
+index 0000000..1e8f774
+--- /dev/null
++++ b/src/api/migrations/010_qr_sign_tokens.sql
+@@ -0,0 +1,21 @@
++-- SPDX-FileCopyrightText: 2025 Caution SEZC
++-- SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
++
++CREATE TABLE qr_sign_tokens (
++    token VARCHAR(255) PRIMARY KEY,
++    status VARCHAR(20) NOT NULL DEFAULT 'pending',
++    challenge_id VARCHAR(255) NOT NULL,
++    challenge_json TEXT NOT NULL,
++    method VARCHAR(10) NOT NULL,
++    path TEXT NOT NULL,
++    body TEXT NOT NULL,
++    body_hash VARCHAR(64) NOT NULL,
++    fido2_response TEXT,
++    ip_address VARCHAR(45),
++    browser_ip_address VARCHAR(45),
++    expires_at TIMESTAMPTZ NOT NULL,
++    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
++);
++
++CREATE INDEX idx_qr_sign_tokens_status ON qr_sign_tokens(status);
++CREATE INDEX idx_qr_sign_tokens_expires ON qr_sign_tokens(expires_at);
+diff --git a/src/api/migrations/011_bundle_name_labels.sql b/src/api/migrations/011_bundle_name_labels.sql
+new file mode 100644
+index 0000000..bbb6733
+--- /dev/null
++++ b/src/api/migrations/011_bundle_name_labels.sql
+@@ -0,0 +1,2 @@
++ALTER TABLE quorum_bundles ADD COLUMN name TEXT;
++ALTER TABLE quorum_bundles ADD COLUMN labels JSONB NOT NULL DEFAULT '{}';
+diff --git a/src/api/src/cryptographic_bundles.rs b/src/api/src/cryptographic_bundles.rs
+index a7d2802..d1506fc 100644
+--- a/src/api/src/cryptographic_bundles.rs
++++ b/src/api/src/cryptographic_bundles.rs
+@@ -11,6 +11,8 @@ pub struct QuorumBundle {
+     pub id: Uuid,
+     pub organization_id: Uuid,
+     pub data: serde_json::Value,
++    pub name: Option<String>,
++    pub labels: serde_json::Value,
+     pub created_by: Option<Uuid>,
+     pub created_at: chrono::DateTime<chrono::Utc>,
+     pub updated_at: chrono::DateTime<chrono::Utc>,
+@@ -29,11 +31,15 @@ pub struct SecretsBundle {
+ #[derive(Debug, Deserialize)]
+ pub struct CreateBundleRequest {
+     pub data: serde_json::Value,
++    pub name: Option<String>,
++    pub labels: Option<serde_json::Value>,
  }
+ 
+ #[derive(Debug, Deserialize)]
+ pub struct UpdateBundleRequest {
+-    pub data: serde_json::Value,
++    pub data: Option<serde_json::Value>,
++    pub name: Option<String>,
++    pub labels: Option<serde_json::Value>,
+ }
+ 
+ // -- Quorum Bundles --
+@@ -43,7 +49,7 @@ pub async fn list_quorum_bundles(
+     org_id: Uuid,
+ ) -> Result<Vec<QuorumBundle>, (StatusCode, String)> {
+     let rows = sqlx::query_as::<_, QuorumBundle>(
+-        "SELECT id, organization_id, data, created_by, created_at, updated_at
++        "SELECT id, organization_id, data, name, labels, created_by, created_at, updated_at
+          FROM quorum_bundles
+          WHERE organization_id = $1
+          ORDER BY created_at"
+@@ -62,7 +68,7 @@ pub async fn get_quorum_bundle(
+     bundle_id: Uuid,
+ ) -> Result<Option<QuorumBundle>, (StatusCode, String)> {
+     let row = sqlx::query_as::<_, QuorumBundle>(
+-        "SELECT id, organization_id, data, created_by, created_at, updated_at
++        "SELECT id, organization_id, data, name, labels, created_by, created_at, updated_at
+          FROM quorum_bundles
+          WHERE organization_id = $1 AND id = $2"
+     )
+@@ -81,13 +87,16 @@ pub async fn create_quorum_bundle(
+     user_id: Uuid,
+     req: CreateBundleRequest,
+ ) -> Result<QuorumBundle, (StatusCode, String)> {
++    let labels = req.labels.unwrap_or(serde_json::json!({}));
+     let row = sqlx::query_as::<_, QuorumBundle>(
+-        "INSERT INTO quorum_bundles (organization_id, data, created_by)
+-         VALUES ($1, $2, $3)
+-         RETURNING id, organization_id, data, created_by, created_at, updated_at"
++        "INSERT INTO quorum_bundles (organization_id, data, name, labels, created_by)
++         VALUES ($1, $2, $3, $4, $5)
++         RETURNING id, organization_id, data, name, labels, created_by, created_at, updated_at"
+     )
+     .bind(org_id)
+     .bind(&req.data)
++    .bind(&req.name)
++    .bind(&labels)
+     .bind(user_id)
+     .fetch_one(pool)
+     .await
+@@ -103,11 +112,17 @@ pub async fn update_quorum_bundle(
+     req: UpdateBundleRequest,
+ ) -> Result<Option<QuorumBundle>, (StatusCode, String)> {
+     let row = sqlx::query_as::<_, QuorumBundle>(
+-        "UPDATE quorum_bundles SET data = $1, updated_at = NOW()
+-         WHERE organization_id = $2 AND id = $3
+-         RETURNING id, organization_id, data, created_by, created_at, updated_at"
++        "UPDATE quorum_bundles
++         SET data = COALESCE($1, data),
++             name = COALESCE($2, name),
++             labels = COALESCE($3, labels),
++             updated_at = NOW()
++         WHERE organization_id = $4 AND id = $5
++         RETURNING id, organization_id, data, name, labels, created_by, created_at, updated_at"
+     )
+     .bind(&req.data)
++    .bind(&req.name)
++    .bind(&req.labels)
+     .bind(org_id)
+     .bind(bundle_id)
+     .fetch_optional(pool)
+@@ -201,7 +216,7 @@ pub async fn update_secrets_bundle(
+     req: UpdateBundleRequest,
+ ) -> Result<Option<SecretsBundle>, (StatusCode, String)> {
+     let row = sqlx::query_as::<_, SecretsBundle>(
+-        "UPDATE secrets_bundles SET data = $1, updated_at = NOW()
++        "UPDATE secrets_bundles SET data = COALESCE($1, data), updated_at = NOW()
+          WHERE organization_id = $2 AND id = $3
+          RETURNING id, organization_id, data, created_by, created_at, updated_at"
+     )
+diff --git a/src/cli/src/lib.rs b/src/cli/src/lib.rs
+index bf26694..05e57c6 100644
+--- a/src/cli/src/lib.rs
++++ b/src/cli/src/lib.rs
+@@ -172,6 +172,9 @@ struct Cli {
+ 
+     #[arg(short, long, help = "Enable verbose output")]
+     verbose: bool,
 +
-+#[cfg(test)]
-+mod tests {
-+    use super::*;
-+
-+    #[test]
-+    fn test_process_template_blocks_enabled() {
-+        let content = "before\n# {STEVE\nsteve content\n# }STEVE\nafter\n";
-+        let result = process_template_blocks(content, &["STEVE"]);
-+        assert_eq!(result, "before\nsteve content\nafter\n");
-+    }
-+
-+    #[test]
-+    fn test_process_template_blocks_disabled() {
-+        let content = "before\n# {STEVE\nsteve content\n# }STEVE\nafter\n";
-+        let result = process_template_blocks(content, &[]);
-+        assert_eq!(result, "before\nafter\n");
-+    }
-+
-+    #[test]
-+    fn test_process_template_blocks_no_markers() {
-+        let content = "line1\nline2\nline3\n";
-+        let result = process_template_blocks(content, &["STEVE"]);
-+        assert_eq!(result, "line1\nline2\nline3\n");
-+    }
-+
-+    #[test]
-+    fn test_process_template_blocks_multiple_blocks() {
-+        let content = "start\n# {A\na content\n# }A\nmiddle\n# {B\nb content\n# }B\nend\n";
-+        let result = process_template_blocks(content, &["A"]);
-+        assert_eq!(result, "start\na content\nmiddle\nend\n");
-+    }
-+
-+    #[test]
-+    fn test_process_template_blocks_preserves_blank_lines() {
-+        let content = "before\n\n# {STEVE\ncontent\n# }STEVE\nafter\n";
-+        let result = process_template_blocks(content, &[]);
-+        assert_eq!(result, "before\n\nafter\n");
-+    }
-+
-+    #[test]
-+    fn test_process_template_blocks_multiline_enabled() {
-+        let content = "header\n\n# {STEVE\nline1\nline2\nline3\n# }STEVE\nfooter\n";
-+        let result = process_template_blocks(content, &["STEVE"]);
-+        assert_eq!(result, "header\n\nline1\nline2\nline3\nfooter\n");
-+    }
-+
-+    #[test]
-+    fn test_process_template_blocks_all_enabled() {
-+        let content = "start\n# {A\na\n# }A\n# {B\nb\n# }B\nend\n";
-+        let result = process_template_blocks(content, &["A", "B"]);
-+        assert_eq!(result, "start\na\nb\nend\n");
-+    }
++    #[arg(long, global = true, help = "Use QR code for cross-device FIDO2 signing (no local security key needed)")]
++    qr: bool,
+ }
+ 
+ #[derive(Subcommand, Debug)]
+@@ -364,6 +367,40 @@ enum SecretCommands {
+         max: Option<u8>,
+         #[arg(long, help = "Skip uploading bundle to Caution")]
+         no_upload: bool,
++        #[arg(long, help = "Name for the quorum bundle")]
++        name: Option<String>,
++        #[arg(long = "label", help = "Label in key=value format (can be repeated)", value_name = "KEY=VALUE")]
++        labels: Vec<String>,
++    },
++    #[command(about = "Rename a quorum bundle")]
++    Rename {
++        #[arg(help = "Bundle ID")]
++        id: String,
++        #[arg(help = "New name")]
++        name: String,
++    },
++    #[command(about = "Manage labels on a quorum bundle")]
++    Label {
++        #[command(subcommand)]
++        command: LabelCommands,
++    },
 +}
-diff --git a/src/enclave-builder/src/compile.rs b/src/enclave-builder/src/compile.rs
-index 5665577..32aec01 100644
---- a/src/enclave-builder/src/compile.rs
-+++ b/src/enclave-builder/src/compile.rs
-@@ -379,3 +379,63 @@ pub async fn get_or_clone_enclave_source(
++
++#[derive(Subcommand, Debug)]
++enum LabelCommands {
++    #[command(about = "Set labels on a quorum bundle")]
++    Set {
++        #[arg(help = "Bundle ID")]
++        id: String,
++        #[arg(help = "Labels in key=value format", required = true)]
++        labels: Vec<String>,
++    },
++    #[command(about = "Remove labels from a quorum bundle")]
++    Remove {
++        #[arg(help = "Bundle ID")]
++        id: String,
++        #[arg(help = "Label keys to remove", required = true)]
++        keys: Vec<String>,
+     },
+ }
+ 
+@@ -475,6 +512,7 @@ struct LoginFinishResponse {
+ struct QrLoginBeginResponse {
+     token: String,
+     url: String,
++    #[allow(dead_code)]
+     expires_at: String,
+ }
+ 
+@@ -485,6 +523,22 @@ struct QrLoginStatusResponse {
+     expires_at: Option<String>,
+ }
+ 
++#[derive(Deserialize)]
++#[allow(dead_code)]
++struct QrSignBeginResponse {
++    challenge_id: String,
++    token: String,
++    url: String,
++    expires_at: String,
++}
++
++#[derive(Deserialize)]
++struct QrSignStatusResponse {
++    status: String,
++    fido2_response: Option<String>,
++    challenge_id: Option<String>,
++}
++
+ /// Extract session ID from Set-Cookie header
+ fn extract_session_from_cookies(response: &reqwest::Response) -> Option<String> {
+     response.headers()
+@@ -559,10 +613,11 @@ struct ApiClient {
+     config_path: PathBuf,
+     deployment_path: Option<PathBuf>,
+     verbose: bool,
++    qr: bool,
+ }
+ 
+ impl ApiClient {
+-    fn new(base_url: &str, verbose: bool) -> Result<Self> {
++    fn new(base_url: &str, verbose: bool, qr: bool) -> Result<Self> {
+         log_verbose(verbose, "Initializing API client...");
+ 
+         let config_dir = dirs::config_dir()
+@@ -593,6 +648,7 @@ impl ApiClient {
+             config_path,
+             deployment_path,
+             verbose,
++            qr,
          })
      }
- }
-+
-+/// Download and extract the framework (platform) source archive.
-+///
-+/// Returns the path to the extracted source directory. Templates are at
-+/// `src/enclave-builder/templates/` within the returned path.
-+pub async fn get_or_clone_framework_source(
-+    framework_source_url: &str,
-+    work_dir: &Path,
-+) -> Result<PathBuf> {
-+    let download_dir = work_dir.join("framework-source");
-+
-+    if download_dir.exists() {
-+        tracing::info!("Removing existing framework source directory: {}", download_dir.display());
-+        fs::remove_dir_all(&download_dir).await?;
-+    }
-+
-+    fs::create_dir_all(&download_dir).await?;
-+
-+    tracing::info!("Downloading framework source archive from: {}", framework_source_url);
-+    let response = reqwest::get(framework_source_url)
-+        .await
-+        .context("Failed to download framework source archive")?;
-+
-+    if !response.status().is_success() {
-+        anyhow::bail!("Failed to download framework source archive: HTTP {}", response.status());
-+    }
-+
-+    let archive_bytes = response.bytes()
-+        .await
-+        .context("Failed to read framework source archive bytes")?;
-+
-+    tracing::info!("Downloaded {} bytes, extracting...", archive_bytes.len());
-+
-+    let decoder = GzDecoder::new(&archive_bytes[..]);
-+    let mut archive = Archive::new(decoder);
-+
-+    for entry in archive.entries().context("Failed to read framework archive entries")? {
-+        let mut entry = entry.context("Failed to read framework archive entry")?;
-+        let path = entry.path().context("Failed to get entry path")?;
-+
-+        let components: Vec<_> = path.components().collect();
-+        if components.len() <= 1 {
-+            continue;
+ 
+@@ -649,7 +705,11 @@ impl ApiClient {
+         match self.load_config() {
+             Ok(config) if !self.is_session_expired(&config) && self.is_same_server(&config) => Ok(config),
+             _ => {
+-                self.login().await?;
++                if self.qr {
++                    self.login_qr().await?;
++                } else {
++                    self.login().await?;
++                }
+                 self.load_config()
+             }
+         }
+@@ -1550,14 +1610,21 @@ build: docker build -t app .
+         path: &str,
+         body: &T,
+     ) -> Result<reqwest::Response> {
++        if self.qr {
++            return self.signed_post_qr(session_id, path, body).await;
 +        }
 +
-+        let stripped_path: PathBuf = components[1..].iter().collect();
-+        let dest_path = download_dir.join(&stripped_path);
-+
-+        if let Some(parent) = dest_path.parent() {
-+            std::fs::create_dir_all(parent)
-+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-+        }
-+
-+        entry.unpack(&dest_path)
-+            .with_context(|| format!("Failed to extract: {}", stripped_path.display()))?;
-+    }
-+
-+    tracing::info!("Framework source extracted to: {}", download_dir.display());
-+    Ok(download_dir)
-+}
-diff --git a/src/enclave-builder/src/lib.rs b/src/enclave-builder/src/lib.rs
-index 128c0d5..6c79319 100644
---- a/src/enclave-builder/src/lib.rs
-+++ b/src/enclave-builder/src/lib.rs
-@@ -1,9 +1,13 @@
- // SPDX-FileCopyrightText: 2025 Caution SEZC
- // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+         let body_json = serde_json::to_vec(body)?;
+         let body_hash = hex::encode(Sha256::digest(&body_json));
  
--pub const ENCLAVE_SOURCE: &str = "https://git.distrust.co/public/enclaveos/archive/master.tar.gz";
-+const ENCLAVE_SOURCE_BASE: &str = "https://git.distrust.co/public/enclaveos/archive";
- pub const FRAMEWORK_SOURCE: &str = "https://codeberg.org/caution/platform/archive/main.tar.gz";
- 
-+pub fn enclave_source_url(commit: &str) -> String {
-+    format!("{}/{}.tar.gz", ENCLAVE_SOURCE_BASE, commit)
-+}
++        // The gateway nests /api routes, so the sign middleware sees paths with /api stripped
++        let challenge_path = path.strip_prefix("/api").unwrap_or(path);
 +
- pub mod extract;
- pub mod merge;
- pub mod build;
-@@ -274,6 +278,7 @@ impl EnclaveBuilder {
-         manifest: Option<EnclaveManifest>,
-         ports: &[u16],
-         e2e: bool,
-+        templates_dir: Option<&std::path::Path>,
-     ) -> Result<EifFile> {
-         build::build_eif_from_filesystems(
-             user_fs_path,
-@@ -287,6 +292,7 @@ impl EnclaveBuilder {
-             ports,
-             self.no_cache,
-             e2e,
-+            templates_dir,
-         )
-         .await
+         log_verbose(self.verbose, &format!("Requesting FIDO2 sign challenge for POST {}", path));
+ 
+         let sign_req = serde_json::json!({
+             "method": "POST",
+-            "path": path,
++            "path": challenge_path,
+             "body_hash": body_hash,
+         });
+ 
+@@ -1602,6 +1669,115 @@ build: docker build -t app .
+         Ok(response)
      }
-@@ -370,6 +376,19 @@ impl EnclaveBuilder {
-         // Resolve framework_source commit
-         let framework_commit = Self::resolve_framework_commit(&self.framework_source).await;
  
-+        // In reproduction mode, download framework source to get templates
-+        let framework_source_path = if external_manifest.is_some() {
-+            let path = compile::get_or_clone_framework_source(
-+                &self.framework_source,
-+                &self.work_dir,
-+            ).await?;
-+            Some(path)
-+        } else {
-+            None
-+        };
-+        let templates_dir = framework_source_path.as_ref()
-+            .map(|p| p.join("src/enclave-builder/templates"));
++    async fn signed_post_qr<T: serde::Serialize>(
++        &self,
++        session_id: &str,
++        path: &str,
++        body: &T,
++    ) -> Result<reqwest::Response> {
++        let body_json = serde_json::to_vec(body)?;
++        let body_hash = hex::encode(Sha256::digest(&body_json));
 +
-         let manifest = if let Some(ext_manifest) = external_manifest {
-             tracing::info!("Using external manifest for reproducible build");
-             ext_manifest
-@@ -386,8 +405,18 @@ impl EnclaveBuilder {
-                     commit: enclave_source_result.commit.clone(),
-                 }
-             } else {
--                EnclaveSource::Local {
--                    path: self.enclave_source.clone(),
-+                // Local path - resolve commit from git or ENCLAVEOS_COMMIT env var
-+                let commit = enclave_source_result.commit.clone()
-+                    .or_else(|| std::env::var("ENCLAVEOS_COMMIT").ok());
-+                if let Some(commit) = commit {
-+                    EnclaveSource::GitArchive {
-+                        urls: vec![enclave_source_url(&commit)],
-+                        commit: Some(commit),
-+                    }
-+                } else {
-+                    EnclaveSource::Local {
-+                        path: self.enclave_source.clone(),
-+                    }
-                 }
-             };
- 
-@@ -428,6 +457,7 @@ impl EnclaveBuilder {
-             Some(manifest),
-             ports,
-             e2e,
-+            templates_dir.as_deref(),
-         ).await?;
- 
-         tracing::info!("Extracting PCR values...");
-@@ -464,6 +494,19 @@ impl EnclaveBuilder {
-         // Resolve framework_source commit
-         let framework_commit = Self::resolve_framework_commit(&self.framework_source).await;
- 
-+        // In reproduction mode, download framework source to get templates
-+        let framework_source_path = if external_manifest.is_some() {
-+            let path = compile::get_or_clone_framework_source(
-+                &self.framework_source,
-+                &self.work_dir,
-+            ).await?;
-+            Some(path)
-+        } else {
-+            None
-+        };
-+        let templates_dir = framework_source_path.as_ref()
-+            .map(|p| p.join("src/enclave-builder/templates"));
++        // The gateway nests /api routes, so the sign middleware sees paths with /api stripped
++        let challenge_path = path.strip_prefix("/api").unwrap_or(path);
 +
-         let manifest = if let Some(ext_manifest) = external_manifest {
-             tracing::info!("Using external manifest for reproducible build");
-             ext_manifest
-@@ -480,8 +523,18 @@ impl EnclaveBuilder {
-                     commit: enclave_source_result.commit.clone(),
-                 }
-             } else {
--                EnclaveSource::Local {
--                    path: self.enclave_source.clone(),
-+                // Local path - resolve commit from git or ENCLAVEOS_COMMIT env var
-+                let commit = enclave_source_result.commit.clone()
-+                    .or_else(|| std::env::var("ENCLAVEOS_COMMIT").ok());
-+                if let Some(commit) = commit {
-+                    EnclaveSource::GitArchive {
-+                        urls: vec![enclave_source_url(&commit)],
-+                        commit: Some(commit),
++        log_verbose(self.verbose, "Starting QR code cross-device signing...");
++
++        // Step 1: Request a QR sign token from the gateway
++        let body_str = String::from_utf8_lossy(&body_json);
++        let sign_req = serde_json::json!({
++            "method": "POST",
++            "path": challenge_path,
++            "body": body_str,
++            "body_hash": body_hash,
++        });
++
++        let response = self.client
++            .post(format!("{}/auth/qr-sign/begin", self.base_url))
++            .header("X-Session-ID", session_id)
++            .json(&sign_req)
++            .send()
++            .await?;
++
++        if !response.status().is_success() {
++            let error = response.text().await?;
++            bail!("Failed to start QR signing: {}", error);
++        }
++
++        let begin_resp: QrSignBeginResponse = response.json().await?;
++        log_verbose(self.verbose, &format!("QR sign token: {}", begin_resp.token));
++
++        // Step 2: Render QR code
++        println!();
++        render_qr_code(&begin_resp.url)?;
++        println!();
++        println!("Scan the QR code with your phone to approve the operation, or open:");
++        println!("  {}", begin_resp.url);
++        println!();
++
++        // Step 3: Poll for completion
++        let mut loader = Loader::new("Waiting for approval...", LoaderStyle::Processing);
++
++        let poll_result = async {
++            let timeout = Duration::from_secs(180);
++            let start = std::time::Instant::now();
++
++            loop {
++                if start.elapsed() > timeout {
++                    bail!("QR signing timed out. Please try again.");
++                }
++
++                tokio::time::sleep(Duration::from_secs(2)).await;
++
++                let status_resp = self.client
++                    .get(format!("{}/auth/qr-sign/status", self.base_url))
++                    .query(&[("token", &begin_resp.token)])
++                    .send()
++                    .await?;
++
++                if !status_resp.status().is_success() {
++                    log_verbose(self.verbose, "Status poll failed, retrying...");
++                    continue;
++                }
++
++                let status: QrSignStatusResponse = status_resp.json().await?;
++                log_verbose(self.verbose, &format!("Poll status: {}", status.status));
++
++                match status.status.as_str() {
++                    "completed" => {
++                        let fido2_response = status.fido2_response
++                            .ok_or_else(|| anyhow::anyhow!("Completed but no fido2_response returned"))?;
++                        let challenge_id = status.challenge_id
++                            .ok_or_else(|| anyhow::anyhow!("Completed but no challenge_id returned"))?;
++                        return Ok((fido2_response, challenge_id));
 +                    }
-+                } else {
-+                    EnclaveSource::Local {
-+                        path: self.enclave_source.clone(),
++                    "expired" => {
++                        bail!("QR signing token expired. Please try again.");
 +                    }
-                 }
-             };
- 
-@@ -523,6 +576,7 @@ impl EnclaveBuilder {
-             Some(manifest),
-             ports,
-             e2e,
-+            templates_dir.as_deref(),
-         ).await?;
- 
-         tracing::info!("Extracting PCR values...");
-diff --git a/src/enclave-builder/src/manifest.rs b/src/enclave-builder/src/manifest.rs
-index df6fb64..8f756e3 100644
---- a/src/enclave-builder/src/manifest.rs
-+++ b/src/enclave-builder/src/manifest.rs
-@@ -20,6 +20,12 @@ pub struct EnclaveManifest {
-     pub run_command: Option<String>,
-     #[serde(skip_serializing_if = "Option::is_none")]
-     pub metadata: Option<String>,
-+    #[serde(skip_serializing_if = "Option::is_none")]
-+    pub enclaveos_commit: Option<String>,
-+    #[serde(skip_serializing_if = "Option::is_none")]
-+    pub bootproof_commit: Option<String>,
-+    #[serde(skip_serializing_if = "Option::is_none")]
-+    pub steve_commit: Option<String>,
- }
- 
- #[derive(Debug, Clone, Serialize, Deserialize)]
-@@ -75,6 +81,9 @@ impl EnclaveManifest {
-             binary,
-             run_command,
-             metadata,
-+            enclaveos_commit: None,
-+            bootproof_commit: None,
-+            steve_commit: None,
++                    // "pending" or "authenticated" — keep polling
++                    _ => continue,
++                }
++            }
++        }.await;
++
++        loader.stop();
++
++        let (fido2_response, challenge_id) = poll_result?;
++        log_verbose(self.verbose, "Sending QR-signed request");
++
++        // Step 4: Send the actual request with the FIDO2 assertion from the phone
++        let response = self.client
++            .post(format!("{}{}", self.base_url, path))
++            .header("X-Fido2-Challenge-Id", &challenge_id)
++            .header("X-Fido2-Response", &fido2_response)
++            .header("Content-Type", "application/json")
++            .body(body_json)
++            .send()
++            .await?;
++
++        Ok(response)
++    }
++
+     fn get_assertion(&self, options: &LoginBeginResponse, base_url: &str) -> Result<AssertionResult> {
+         log_verbose(self.verbose, "Attempting assertion without PIN first...");
+         match self.try_get_assertion(options, base_url, None) {
+@@ -4452,7 +4628,7 @@ build: docker build -t app .
          }
      }
  
-diff --git a/src/enclave-builder/templates/Containerfile.eif b/src/enclave-builder/templates/Containerfile.eif
-new file mode 100644
-index 0000000..73b128a
---- /dev/null
-+++ b/src/enclave-builder/templates/Containerfile.eif
-@@ -0,0 +1,201 @@
+-    async fn secret_new(&self, keyring: PathBuf, threshold: Option<u8>, max: Option<u8>, upload: bool) -> Result<()> {
++    async fn secret_new(&self, keyring: PathBuf, threshold: Option<u8>, max: Option<u8>, upload: bool, name: Option<String>, labels: Vec<String>) -> Result<()> {
+         let keymaker_url = std::env::var("KEYMAKER_URL")
+             .context("KEYMAKER_URL environment variable is required")?;
+ 
+@@ -4497,33 +4673,40 @@ build: docker build -t app .
+             let secret_path = PathBuf::from(".caution/quorum-bundle.json");
+             fs::write(&secret_path, &json)
+                 .with_context(|| format!("Failed to write secret to {}", secret_path.display()))?;
+-
+-            if let Some(fingerprint) = quorum_response.get("secret_recipient_public_key") {
+-                eprintln!("\nSecret recipient public key: {}", fingerprint);
+-            }
+             eprintln!("Saved to: {}", secret_path.display());
+         }
+ 
+-        // Warn when not in a caution repo
+-        if !in_caution_repo {
+-            eprintln!("Warning: not in a Caution repository, outputting bundle to stdout");
+-        }
+-
+-        // Output to stdout when piped or not in a caution repo
+-        if !is_tty || !in_caution_repo {
++        // When not uploading (no QR, not in caution repo), output to stdout
++        if !self.qr && (!is_tty || !in_caution_repo) {
++            if !in_caution_repo {
++                eprintln!("Warning: not in a Caution repository, outputting bundle to stdout");
++            }
+             print!("{}", json);
+             return Ok(());
+         }
+ 
+-        if upload {
+-            eprintln!("\nTo back up public key material bundle to Caution, tap your key.");
+-            eprintln!("The key material bundle is also accessible at .caution/quorum-bundle.json");
++        if upload || self.qr {
++            if self.qr {
++                eprintln!("\nUploading public key material bundle to Caution via QR code signing...");
++            } else {
++                eprintln!("\nTo back up public key material bundle to Caution, tap your key.");
++            }
++            if in_caution_repo {
++                eprintln!("The key material bundle is also accessible at .caution/quorum-bundle.json");
++            }
+             eprintln!("Press Ctrl+C to cancel.");
+ 
+             let config = self.ensure_authenticated().await?;
+ 
++            let label_map: serde_json::Map<String, serde_json::Value> = labels.iter()
++                .filter_map(|l| l.split_once('='))
++                .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
++                .collect();
 +
-+FROM stagex/pallet-rust@sha256:9c38bf1066dd9ad1b6a6b584974dd798c2bf798985bf82e58024fbe0515592ca AS pallet-rust
-+FROM stagex/core-busybox@sha256:637b1e0d9866807fac94c22d6dc4b2e1f45c8a5ca1113c88172e0324a30c7283 AS busybox
-+FROM stagex/core-musl@sha256:d9af23284cca2e1002cd53159ada469dfe6d6791814e72d6163c7de18d4ae701 AS musl
-+FROM stagex/core-gcc@sha256:964ffd3793c5a38ca581e9faefd19918c259f1611c4cbf5dc8be612e3a8b72f5 AS gcc
-+FROM stagex/core-libunwind@sha256:eb66122d8fc543f5e2f335bb1616f8c3a471604383e2c0a9df4a8e278505d3bc AS libunwind
-+FROM stagex/core-openssl@sha256:d6487f0cb15f4ee02b420c717cb9abd85d73043c0bb3a2c6ce07688b23c1df07 AS openssl
-+FROM stagex/core-zlib@sha256:06f5168e20d85d1eb1d19836cdf96addc069769b40f8f0f4a7a70b2f49fc18f8 AS zlib
-+FROM stagex/core-ca-certificates@sha256:d135f1189e9b232eb7316626bf7858534c5540b2fc53dced80a4c9a95f26493e AS ca-certificates
-+FROM stagex/core-libzstd@sha256:5382c221194b6d0690eb65ccca01c720a6bd39f92e610dbc0e99ba43f38f3094 AS libzstd
-+FROM stagex/user-cpio@sha256:9c8bf39001eca8a71d5617b46f8c9b4f7426db41a052f198d73400de6f8a16df AS cpio
-+FROM stagex/user-socat@sha256:4d1b7a403eba65087a3f69200d2644d01b63f0ea81ef171cedc17de490c8c9a0 AS socat
-+FROM stagex/user-eif_build@sha256:935032172a23772ea1a35c6334aa98aa7b0c46f9e34a040347c7b2a73496ef8a AS eif-build
-+FROM stagex/user-linux-nitro@sha256:aa1006d91a7265b33b86160031daad2fdf54ec2663ed5ccbd312567cc9beff2c AS linux-nitro
-+FROM stagex/user-nit@sha256:60b6eef4534ea6ea78d9f29e4c7feb27407b615424f20ad8943d807191688be7 AS nit
-+FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769ff3b37239f3d0 AS git
-+FROM stagex/core-curl@sha256:bc8bab43d96a9167fbb85022ea773644a45ef335e7a9b747f203078973fa988e AS curl
+             let upload_body = serde_json::json!({
+                 "data": quorum_response,
++                "name": name,
++                "labels": label_map,
+             });
+ 
+             let response = self.signed_post(&config.session_id, "/api/quorum-bundles", &upload_body).await?;
+@@ -4544,6 +4727,129 @@ build: docker build -t app .
+ 
+         Ok(())
+     }
 +
-+# {STEVE
-+FROM pallet-rust AS steve-builder
++    async fn secret_rename(&self, id: String, name: String) -> Result<()> {
++        let config = self.ensure_authenticated().await?;
 +
-+COPY --from=git . /
-+COPY --from=ca-certificates . /
-+COPY --from=curl . /
++        let body = serde_json::json!({
++            "name": name,
++        });
 +
-+ENV SOURCE_DATE_EPOCH=1
-+ENV CARGO_HOME=/usr/local/cargo
-+ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
-+ENV TARGET_ARCH="x86_64-unknown-linux-musl"
++        let response = self.client
++            .patch(format!("{}/api/quorum-bundles/{}", self.base_url, id))
++            .header("X-Session-ID", &config.session_id)
++            .json(&body)
++            .send()
++            .await
++            .context("Failed to connect to server")?;
 +
-+WORKDIR /build-steve
-+RUN git clone https://git.distrust.co/public/steve.git . && \
-+    git checkout {{STEVE_COMMIT}}
++        if response.status().is_success() {
++            eprintln!("Quorum bundle renamed to \"{}\"", name);
++        } else {
++            let status = response.status();
++            let error = response.text().await?;
++            bail!("Failed to rename quorum bundle ({}): {}", status, error);
++        }
 +
-+RUN --mount=type=cache,target=/usr/local/cargo/registry \
-+    --mount=type=cache,target=/usr/local/cargo/git \
-+    cargo fetch --locked --target $TARGET_ARCH
++        Ok(())
++    }
 +
-+RUN --mount=type=cache,target=/usr/local/cargo/registry \
-+    --mount=type=cache,target=/usr/local/cargo/git \
-+    --mount=type=cache,target=/build-steve/target \
-+    cargo build --release --locked --target ${TARGET_ARCH} -p steve \
-+      && install -D -m 0755 /build-steve/target/${TARGET_ARCH}/release/steve /binaries/steve
++    async fn secret_label_set(&self, id: String, labels: Vec<String>) -> Result<()> {
++        let config = self.ensure_authenticated().await?;
 +
-+# }STEVE
-+FROM pallet-rust AS bootproof-builder
++        // Get current bundle to read existing labels
++        let response = self.client
++            .get(format!("{}/api/quorum-bundles/{}", self.base_url, id))
++            .header("X-Session-ID", &config.session_id)
++            .send()
++            .await
++            .context("Failed to connect to server")?;
 +
-+COPY --from=git . /
-+COPY --from=ca-certificates . /
-+COPY --from=curl . /
++        if !response.status().is_success() {
++            let status = response.status();
++            let error = response.text().await?;
++            bail!("Failed to fetch quorum bundle ({}): {}", status, error);
++        }
 +
-+ENV SOURCE_DATE_EPOCH=1
-+ENV CARGO_HOME=/usr/local/cargo
-+ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
-+ENV TARGET_ARCH="x86_64-unknown-linux-musl"
++        let bundle: serde_json::Value = response.json().await?;
++        let mut current_labels = bundle.get("labels")
++            .and_then(|l| l.as_object().cloned())
++            .unwrap_or_default();
 +
-+WORKDIR /build-bootproof
-+RUN git clone https://git.distrust.co/public/bootproof.git . && \
-+    git checkout {{BOOTPROOF_COMMIT}}
++        // Merge new labels
++        for label in &labels {
++            let (k, v) = label.split_once('=')
++                .ok_or_else(|| anyhow::anyhow!("Invalid label format '{}', expected key=value", label))?;
++            current_labels.insert(k.to_string(), serde_json::Value::String(v.to_string()));
++        }
 +
-+RUN --mount=type=cache,target=/usr/local/cargo/registry \
-+    --mount=type=cache,target=/usr/local/cargo/git \
-+    cargo fetch --locked --target $TARGET_ARCH
++        let body = serde_json::json!({ "labels": current_labels });
 +
-+RUN --mount=type=cache,target=/usr/local/cargo/registry \
-+    --mount=type=cache,target=/usr/local/cargo/git \
-+    --mount=type=cache,target=/build-bootproof/target \
-+    cargo build --release --locked --target ${TARGET_ARCH} -p bootproofd \
-+      && install -D -m 0755 /build-bootproof/target/${TARGET_ARCH}/release/bootproofd /binaries/bootproofd
++        let response = self.client
++            .patch(format!("{}/api/quorum-bundles/{}", self.base_url, id))
++            .header("X-Session-ID", &config.session_id)
++            .json(&body)
++            .send()
++            .await
++            .context("Failed to connect to server")?;
 +
-+FROM pallet-rust AS enclave-builder
++        if response.status().is_success() {
++            eprintln!("Labels updated successfully");
++        } else {
++            let status = response.status();
++            let error = response.text().await?;
++            bail!("Failed to update labels ({}): {}", status, error);
++        }
 +
-+ENV SOURCE_DATE_EPOCH=1
-+ENV CARGO_HOME=/usr/local/cargo
-+ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
-+ENV TARGET_ARCH="x86_64-unknown-linux-musl"
++        Ok(())
++    }
 +
-+WORKDIR /build-enclave
++    async fn secret_label_remove(&self, id: String, keys: Vec<String>) -> Result<()> {
++        let config = self.ensure_authenticated().await?;
 +
-+COPY enclave/ /build-enclave/
++        // Get current bundle to read existing labels
++        let response = self.client
++            .get(format!("{}/api/quorum-bundles/{}", self.base_url, id))
++            .header("X-Session-ID", &config.session_id)
++            .send()
++            .await
++            .context("Failed to connect to server")?;
 +
-+RUN --mount=type=cache,target=/usr/local/cargo/registry \
-+    --mount=type=cache,target=/usr/local/cargo/git \
-+    cargo fetch --locked --target $TARGET_ARCH
++        if !response.status().is_success() {
++            let status = response.status();
++            let error = response.text().await?;
++            bail!("Failed to fetch quorum bundle ({}): {}", status, error);
++        }
 +
-+RUN --mount=type=cache,target=/usr/local/cargo/registry \
-+    --mount=type=cache,target=/usr/local/cargo/git \
-+    --mount=type=cache,target=/build-enclave/target \
-+    cargo build --release --locked --target ${TARGET_ARCH} -p init \
-+      && install -D -m 0755 /build-enclave/target/${TARGET_ARCH}/release/init /binaries/init
++        let bundle: serde_json::Value = response.json().await?;
++        let mut current_labels = bundle.get("labels")
++            .and_then(|l| l.as_object().cloned())
++            .unwrap_or_default();
 +
-+FROM busybox AS eif-builder
++        for key in &keys {
++            current_labels.remove(key);
++        }
 +
-+COPY --from=musl . /
-+COPY --from=gcc . /
-+COPY --from=libunwind . /
-+COPY --from=openssl . /
-+COPY --from=zlib . /
-+COPY --from=ca-certificates . /
-+COPY --from=libzstd . /
-+COPY --from=cpio . /
-+COPY --from=socat . /
-+COPY --from=eif-build . /
-+COPY --from=nit . /
++        let body = serde_json::json!({ "labels": current_labels });
 +
-+WORKDIR /build
++        let response = self.client
++            .patch(format!("{}/api/quorum-bundles/{}", self.base_url, id))
++            .header("X-Session-ID", &config.session_id)
++            .json(&body)
++            .send()
++            .await
++            .context("Failed to connect to server")?;
 +
-+COPY --from=enclave-builder /binaries/ /build/binaries/
-+COPY --from=bootproof-builder /binaries/ /build/binaries/
-+# {STEVE
-+COPY --from=steve-builder /binaries/steve /build/binaries/steve
-+# }STEVE
++        if response.status().is_success() {
++            eprintln!("Labels removed successfully");
++        } else {
++            let status = response.status();
++            let error = response.text().await?;
++            bail!("Failed to remove labels ({}): {}", status, error);
++        }
 +
-+COPY --from=linux-nitro /bzImage /build/kernel/bzImage
-+COPY --from=linux-nitro /linux.config /build/kernel/linux.config
++        Ok(())
++    }
+ }
+ 
+ struct AssertionResult {
+@@ -4573,7 +4879,7 @@ pub async fn run() -> Result<()> {
+     }
+ 
+     log_verbose(cli.verbose, "Initializing API client...");
+-    let client = ApiClient::new(&cli.url, cli.verbose).context("Failed to initialize API client")?;
++    let client = ApiClient::new(&cli.url, cli.verbose, cli.qr).context("Failed to initialize API client")?;
+     log_verbose(cli.verbose, "API client ready");
+ 
+     match cli.command {
+@@ -4678,8 +4984,21 @@ pub async fn run() -> Result<()> {
+         }
+         Commands::Secret { command } => {
+             match command {
+-                SecretCommands::New { keyring, threshold, max, no_upload } => {
+-                    client.secret_new(keyring, threshold, max, !no_upload).await?;
++                SecretCommands::New { keyring, threshold, max, no_upload, name, labels } => {
++                    client.secret_new(keyring, threshold, max, !no_upload, name, labels).await?;
++                }
++                SecretCommands::Rename { id, name } => {
++                    client.secret_rename(id, name).await?;
++                }
++                SecretCommands::Label { command } => {
++                    match command {
++                        LabelCommands::Set { id, labels } => {
++                            client.secret_label_set(id, labels).await?;
++                        }
++                        LabelCommands::Remove { id, keys } => {
++                            client.secret_label_remove(id, keys).await?;
++                        }
++                    }
+                 }
+             }
+         }
+diff --git a/src/gateway/src/db.rs b/src/gateway/src/db.rs
+index 01eb0b2..52a0776 100644
+--- a/src/gateway/src/db.rs
++++ b/src/gateway/src/db.rs
+@@ -299,6 +299,7 @@ pub async fn run_cleanups(pool: &PgPool) {
+     let tasks: &[(&str, &str)] = &[
+         ("expired sessions", "DELETE FROM auth_sessions WHERE expires_at < NOW()"),
+         ("expired QR login tokens", "DELETE FROM qr_login_tokens WHERE expires_at < NOW() - INTERVAL '5 minutes'"),
++        ("expired QR sign tokens", "DELETE FROM qr_sign_tokens WHERE expires_at < NOW() - INTERVAL '5 minutes'"),
+     ];
+ 
+     for (name, query) in tasks {
+@@ -558,6 +559,92 @@ pub async fn complete_qr_login_token(
+ }
+ 
+ 
++// QR Sign token functions
 +
-+COPY app/ /build/app/
++pub async fn create_qr_sign_token(
++    pool: &PgPool,
++    token: &str,
++    challenge_id: &str,
++    challenge_json: &str,
++    method: &str,
++    path: &str,
++    body: &str,
++    body_hash: &str,
++    ip_address: Option<&str>,
++    expires_at: time::OffsetDateTime,
++) -> Result<()> {
++    sqlx::query(
++        "INSERT INTO qr_sign_tokens (token, status, challenge_id, challenge_json, method, path, body, body_hash, ip_address, expires_at)
++         VALUES ($1, 'pending', $2, $3, $4, $5, $6, $7, $8, $9)"
++    )
++    .bind(token)
++    .bind(challenge_id)
++    .bind(challenge_json)
++    .bind(method)
++    .bind(path)
++    .bind(body)
++    .bind(body_hash)
++    .bind(ip_address)
++    .bind(expires_at)
++    .execute(pool)
++    .await
++    .context("Failed to create QR sign token")?;
 +
-+COPY run.sh /build/run.sh
++    Ok(())
++}
 +
-+COPY enclave/rootfs/udhcpc-script.sh /build/udhcpc-script.sh
++pub async fn get_qr_sign_token(pool: &PgPool, token: &str) -> Result<Option<crate::types::DbQrSignToken>> {
++    let row: Option<crate::types::DbQrSignToken> = sqlx::query_as(
++        "SELECT token, status, challenge_id, challenge_json, method, path, body, body_hash, fido2_response, ip_address, browser_ip_address, expires_at, created_at
++         FROM qr_sign_tokens
++         WHERE token = $1"
++    )
++    .bind(token)
++    .fetch_optional(pool)
++    .await
++    .context("Failed to get QR sign token")?;
 +
-+COPY manifest.json /build/manifest.json
++    Ok(row)
++}
 +
-+RUN mkdir -p /build/initramfs/bin && \
-+    mkdir -p /build/initramfs/lib && \
-+    mkdir -p /build/initramfs/etc/ssl/certs
++pub async fn claim_qr_sign_token(
++    pool: &PgPool,
++    token: &str,
++    browser_ip: Option<&str>,
++) -> Result<bool> {
++    let result = sqlx::query(
++        "UPDATE qr_sign_tokens
++         SET status = 'authenticated', browser_ip_address = $2
++         WHERE token = $1 AND status = 'pending' AND expires_at > NOW()"
++    )
++    .bind(token)
++    .bind(browser_ip)
++    .execute(pool)
++    .await
++    .context("Failed to claim QR sign token")?;
 +
-+RUN cp /bin/init /build/initramfs/init && \
-+    chmod +x /build/initramfs/init
++    Ok(result.rows_affected() == 1)
++}
 +
-+RUN cp /build/run.sh /build/initramfs/run.sh && \
-+    chmod +x /build/initramfs/run.sh
++pub async fn complete_qr_sign_token(
++    pool: &PgPool,
++    token: &str,
++    fido2_response: &str,
++) -> Result<bool> {
++    let result = sqlx::query(
++        "UPDATE qr_sign_tokens
++         SET status = 'completed', fido2_response = $2
++         WHERE token = $1 AND status = 'authenticated'"
++    )
++    .bind(token)
++    .bind(fido2_response)
++    .execute(pool)
++    .await
++    .context("Failed to complete QR sign token")?;
 +
-+RUN cp /build/udhcpc-script.sh /build/initramfs/bin/udhcpc-script && \
-+    chmod +x /build/initramfs/bin/udhcpc-script
++    Ok(result.rows_affected() == 1)
++}
 +
-+RUN cp /build/binaries/bootproofd /build/initramfs/bootproofd && \
-+    chmod +x /build/initramfs/bootproofd
+ pub async fn get_auth_session(pool: &PgPool, session_id: &str) -> Result<Option<crate::types::DbSession>> {
+     let session = sqlx::query_as(
+         "SELECT session_id, credential_id, expires_at, created_at, last_used_at
+diff --git a/src/gateway/src/handlers.rs b/src/gateway/src/handlers.rs
+index ac840bd..be8cc20 100644
+--- a/src/gateway/src/handlers.rs
++++ b/src/gateway/src/handlers.rs
+@@ -14,6 +14,7 @@ use webauthn_rs_proto::{ResidentKeyRequirement, UserVerificationPolicy};
+ use time::Duration;
+ use serde::{Serialize, Deserialize};
+ 
++use base64::Engine as _;
+ use crate::db;
+ use crate::types::*;
+ 
+@@ -648,19 +649,68 @@ pub async fn delete_ssh_key_handler(
+     }
+ }
+ 
+-pub async fn begin_sign_request_handler(
+-    State(state): State<AppState>,
+-    headers: axum::http::HeaderMap,
+-    Json(req): Json<crate::types::SignChallengeRequest>,
+-) -> Result<Json<crate::types::SignChallengeResponse>, SignRequestError> {
+-    // Support both header auth (CLI) and cookie auth (browser).
++/// Create a sign challenge for the given credential. Returns (challenge_response, challenge_id).
++/// Stores PendingSignChallenge in state.sign_challenges.
++async fn create_sign_challenge(
++    state: &AppState,
++    credential_id: &[u8],
++    method: String,
++    path: String,
++    body_hash: String,
++    expires_minutes: i64,
++) -> Result<(webauthn_rs_proto::RequestChallengeResponse, String), SignRequestError> {
++    let user_id = db::get_user_id_by_credential(&state.db, credential_id)
++        .await
++        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
++    let requires_pin = db::user_requires_pin(&state.db, user_id)
++        .await
++        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
 +
-+# {STEVE
-+RUN cp /build/binaries/steve /build/initramfs/steve && \
-+    chmod +x /build/initramfs/steve
-+# }STEVE
++    let cred_bytes = db::get_credential_public_key(&state.db, credential_id)
++        .await
++        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
++    let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
++        .map_err(|e| SignRequestError::Internal(format!("Failed to deserialize credential: {}", e)))?;
 +
-+RUN if [ -f /build/manifest.json ]; then \
-+        cp /build/manifest.json /build/initramfs/manifest.json; \
-+    fi
++    let (mut rcr, auth_state) = state
++        .webauthn
++        .start_securitykey_authentication(&[seckey])
++        .map_err(|e| SignRequestError::Internal(format!("Failed to start signing challenge: {}", e)))?;
 +
-+RUN if [ -f /bin/busybox ]; then \
-+        cp /bin/busybox /build/initramfs/bin/busybox && \
-+        cd /build/initramfs/bin && \
-+        ln -s busybox sh && \
-+        ln -s busybox sleep && \
-+        ln -s busybox find && \
-+        ln -s busybox cat && \
-+        ln -s busybox ls && \
-+        ln -s busybox mkdir && \
-+        ln -s busybox mount && \
-+        ln -s busybox chmod && \
-+        ln -s busybox ip && \
-+        ln -s busybox grep && \
-+        ln -s busybox udhcpc; \
-+    fi
++    if requires_pin {
++        rcr.public_key.user_verification = UserVerificationPolicy::Required;
++    } else {
++        rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
++    }
 +
-+RUN if [ -f /usr/bin/socat ]; then \
-+        cp /usr/bin/socat /build/initramfs/bin/socat && \
-+        chmod +x /build/initramfs/bin/socat; \
-+    elif [ -f /bin/socat ]; then \
-+        cp /bin/socat /build/initramfs/bin/socat && \
-+        chmod +x /build/initramfs/bin/socat; \
-+    fi
++    let challenge_id = Uuid::new_v4().to_string();
++    let pending = crate::types::PendingSignChallenge {
++        auth_state,
++        user_id,
++        method,
++        path,
++        body_hash,
++        expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(expires_minutes),
++    };
 +
-+RUN if [ -f /lib/ld-musl-x86_64.so.1 ]; then \
-+        cp /lib/ld-musl-x86_64.so.1 /build/initramfs/lib/ld-musl-x86_64.so.1; \
-+    fi
++    state.sign_challenges.write().await.insert(challenge_id.clone(), pending);
 +
-+RUN if [ -f /etc/ssl/certs/ca-certificates.crt ]; then \
-+        cp /etc/ssl/certs/ca-certificates.crt /build/initramfs/etc/ssl/certs/ca-certificates.crt; \
-+    fi
++    Ok((rcr, challenge_id))
++}
 +
-+# Copy user app files to initramfs root to preserve original paths
-+RUN cp -r /build/app/* /build/initramfs/ 2>/dev/null || true
++/// Resolve session ID from headers (X-Session-ID or caution_session cookie),
++/// validate it, and enforce CSRF for cookie-based auth. Returns credential_id.
++async fn authenticate_session(
++    state: &AppState,
++    headers: &axum::http::HeaderMap,
++) -> Result<Vec<u8>, SignRequestError> {
+     let (session_id, using_header_auth) = if let Some(header_session) = headers
+         .get("X-Session-ID")
+         .and_then(|h| h.to_str().ok())
+         .map(|s| s.to_string())
+     {
+         (header_session, true)
+-    } else if let Some(cookie_session) = crate::csrf::get_cookie(&headers, "caution_session") {
++    } else if let Some(cookie_session) = crate::csrf::get_cookie(headers, "caution_session") {
+         (cookie_session, false)
+     } else {
+         return Err(SignRequestError::MissingSession);
+@@ -671,7 +721,6 @@ pub async fn begin_sign_request_handler(
+         .map_err(|e| SignRequestError::Internal(e.to_string()))?
+         .ok_or_else(|| SignRequestError::InvalidSession(session_id.clone()))?;
+ 
+-    // Validate CSRF for cookie-based auth (browser).
+     if !using_header_auth {
+         let secret = crate::csrf::get_csrf_secret();
+         let expected_csrf = crate::csrf::derive_csrf_token(&session_id, &secret);
+@@ -684,43 +733,30 @@ pub async fn begin_sign_request_handler(
+         }
+     }
+ 
+-    let user_id = db::get_user_id_by_credential(&state.db, &credential_id)
+-        .await
+-        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
+-    let requires_pin = db::user_requires_pin(&state.db, user_id)
+-        .await
+-        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
+-
+-    let cred_bytes = db::get_credential_public_key(&state.db, &credential_id)
+-        .await
+-        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
+-    let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
+-        .map_err(|e| SignRequestError::Internal(format!("Failed to deserialize credential: {}", e)))?;
+-
+-    let (mut rcr, auth_state) = state
+-        .webauthn
+-        .start_securitykey_authentication(&[seckey])
+-        .map_err(|e| SignRequestError::Internal(format!("Failed to start signing challenge: {}", e)))?;
++    Ok(credential_id)
++}
+ 
+-    // Set user verification based on org settings
+-    if requires_pin {
+-        rcr.public_key.user_verification = UserVerificationPolicy::Required;
+-    } else {
+-        // Use Preferred when PIN not required - authenticator decides
+-        rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
+-    }
++fn get_rp_origin() -> String {
++    std::env::var("RP_ORIGINS")
++        .unwrap_or_else(|_| "http://localhost:3000".to_string())
++        .split(',')
++        .next()
++        .unwrap_or("http://localhost:3000")
++        .trim()
++        .to_string()
++}
+ 
+-    let challenge_id = Uuid::new_v4().to_string();
+-    let pending = crate::types::PendingSignChallenge {
+-        auth_state,
+-        user_id,
+-        method: req.method,
+-        path: req.path,
+-        body_hash: req.body_hash,
+-        expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(2),
+-    };
++pub async fn begin_sign_request_handler(
++    State(state): State<AppState>,
++    headers: axum::http::HeaderMap,
++    Json(req): Json<crate::types::SignChallengeRequest>,
++) -> Result<Json<crate::types::SignChallengeResponse>, SignRequestError> {
++    let credential_id = authenticate_session(&state, &headers).await?;
+ 
+-    state.sign_challenges.write().await.insert(challenge_id.clone(), pending);
++    let (rcr, challenge_id) = create_sign_challenge(
++        &state, &credential_id,
++        req.method, req.path, req.body_hash, 2,
++    ).await?;
+ 
+     Ok(Json(crate::types::SignChallengeResponse {
+         challenge: rcr,
+@@ -765,15 +801,7 @@ pub async fn qr_login_begin_handler(
+     let expires_at = time::OffsetDateTime::now_utc() + Duration::minutes(3);
+     let ip_address = connect_info.0.ip().to_string();
+ 
+-    let rp_origin = std::env::var("RP_ORIGINS")
+-        .unwrap_or_else(|_| "http://localhost:3000".to_string())
+-        .split(',')
+-        .next()
+-        .unwrap_or("http://localhost:3000")
+-        .trim()
+-        .to_string();
+-
+-    let url = format!("{}/qr-login?token={}", rp_origin, token);
++    let url = format!("{}/qr-login?token={}", get_rp_origin(), token);
+ 
+     db::create_qr_login_token(&state.db, &token, Some(&ip_address), expires_at)
+         .await
+@@ -1010,6 +1038,188 @@ pub async fn qr_login_authenticate_finish_handler(
+     })))
+ }
+ 
++// QR Sign handlers (mid-session signing via phone)
 +
-+RUN find /build/initramfs -exec touch -hcd "@0" {} +
++#[derive(Debug, thiserror::Error)]
++pub enum QrSignError {
++    #[error("QR sign token not found")]
++    TokenNotFound,
++    #[error("QR sign token has expired")]
++    TokenExpired,
++    #[error("QR sign token in unexpected state: {0}")]
++    UnexpectedState(String),
++    #[error("{0}")]
++    Internal(String),
++}
 +
-+RUN cd /build/initramfs && \
-+    find . -print0 | sort -z | cpio --null --create --format=newc --reproducible | gzip --best > /build/rootfs.cpio.gz
++impl IntoResponse for QrSignError {
++    fn into_response(self) -> Response {
++        let (status, message) = match self {
++            Self::TokenNotFound => (StatusCode::NOT_FOUND, self.to_string()),
++            Self::TokenExpired => (StatusCode::GONE, self.to_string()),
++            Self::UnexpectedState(_) => (StatusCode::CONFLICT, self.to_string()),
++            Self::Internal(_) => {
++                tracing::error!(?self, "QR sign error");
++                (StatusCode::INTERNAL_SERVER_ERROR, "an internal error occurred".into())
++            }
++        };
++        (status, message).into_response()
++    }
++}
 +
-+RUN eif_build \
-+    --kernel /build/kernel/bzImage \
-+    --kernel_config /build/kernel/linux.config \
-+    --ramdisk /build/rootfs.cpio.gz \
-+    --output /build/enclave.eif \
-+    --pcrs_output /build/enclave.pcrs \
-+    --cmdline "reboot=k panic=1 pci=off nomodules console=ttyS0 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd nit.target=/run.sh"
++#[derive(Debug, Deserialize)]
++pub struct QrSignStatusQuery {
++    pub token: String,
++}
 +
-+FROM scratch AS output
-+COPY --from=eif-builder /build/enclave.eif /enclave.eif
-+COPY --from=eif-builder /build/enclave.pcrs /enclave.pcrs
-+COPY --from=eif-builder /build/rootfs.cpio.gz /rootfs.cpio.gz
-diff --git a/src/enclave-builder/templates/run.sh.template b/src/enclave-builder/templates/run.sh.template
-new file mode 100644
-index 0000000..7ac05dd
---- /dev/null
-+++ b/src/enclave-builder/templates/run.sh.template
-@@ -0,0 +1,72 @@
-+#!/bin/sh
-+set -e
++pub async fn qr_sign_begin_handler(
++    State(state): State<AppState>,
++    connect_info: ConnectInfo<std::net::SocketAddr>,
++    headers: axum::http::HeaderMap,
++    Json(req): Json<crate::types::QrSignChallengeRequest>,
++) -> Result<Json<crate::types::QrSignBeginResponse>, SignRequestError> {
++    let credential_id = authenticate_session(&state, &headers).await?;
 +
-+echo "=== Caution Enclave Startup ==="
++    let (rcr, challenge_id) = create_sign_challenge(
++        &state, &credential_id,
++        req.method.clone(), req.path.clone(), req.body_hash.clone(), 3,
++    ).await?;
 +
-+echo "Setting up network loopback..."
-+/bin/busybox ip addr add 127.0.0.1/8 dev lo
-+/bin/busybox ip link set dev lo up
-+/bin/busybox ip link show lo
++    let token = db::generate_session_id();
++    let expires_at = time::OffsetDateTime::now_utc() + Duration::minutes(3);
++    let ip_address = connect_info.0.ip().to_string();
 +
-+echo "127.0.0.1   localhost" > /etc/hosts
++    let challenge_json = serde_json::to_string(&rcr)
++        .map_err(|e| SignRequestError::Internal(format!("Failed to serialize challenge: {}", e)))?;
 +
-+echo "Network loopback configured"
++    db::create_qr_sign_token(
++        &state.db, &token, &challenge_id, &challenge_json,
++        &req.method, &req.path, &req.body, &req.body_hash,
++        Some(&ip_address), expires_at,
++    ).await.map_err(|e| SignRequestError::Internal(e.to_string()))?;
 +
-+echo "Setting up vsock network tunnel to parent..."
-+/bin/socat TUN,tun-type=tap,iff-no-pi,iff-up,tun-name=eth0 VSOCK-CONNECT:3:3 &
-+SOCAT_PID=$!
-+echo "VSock tunnel started (PID: $SOCAT_PID)"
++    let url = format!("{}/qr-sign?token={}", get_rp_origin(), token);
 +
-+/bin/busybox sleep 2
++    Ok(Json(crate::types::QrSignBeginResponse {
++        challenge_id,
++        token,
++        url,
++        expires_at: expires_at.to_string(),
++    }))
++}
 +
-+if /bin/busybox ip link show eth0 2>/dev/null; then
-+    echo "eth0 interface created successfully"
++pub async fn qr_sign_status_handler(
++    State(state): State<AppState>,
++    axum::extract::Query(query): axum::extract::Query<QrSignStatusQuery>,
++) -> Result<Json<crate::types::QrSignStatusResponse>, QrSignError> {
++    let row = db::get_qr_sign_token(&state.db, &query.token)
++        .await
++        .map_err(|e| QrSignError::Internal(e.to_string()))?;
 +
-+    echo "Requesting IP via DHCP..."
-+    /bin/busybox udhcpc -i eth0 -n -q -s /bin/udhcpc-script 2>&1 | /bin/busybox grep -E "Lease|obtained" || true
++    let Some(row) = row else {
++        return Ok(Json(crate::types::QrSignStatusResponse {
++            status: QrStatus::NotFound,
++            fido2_response: None,
++            challenge_id: None,
++        }));
++    };
 +
-+    echo "Network configuration:"
-+    /bin/busybox ip addr show eth0
-+    /bin/busybox ip route show
++    if time::OffsetDateTime::now_utc() > row.expires_at {
++        return Ok(Json(crate::types::QrSignStatusResponse {
++            status: QrStatus::Expired,
++            fido2_response: None,
++            challenge_id: None,
++        }));
++    }
 +
-+    echo "nameserver 10.0.100.1" > /etc/resolv.conf
++    let status = QrStatus::from_db(&row.status).unwrap_or(QrStatus::NotFound);
 +
-+    echo "Network tunnel established successfully"
-+else
-+    echo "WARNING: Failed to create eth0 interface, running without internet access"
-+    echo "nameserver 127.0.0.1" > /etc/resolv.conf
-+fi
++    if status == QrStatus::Completed {
++        return Ok(Json(crate::types::QrSignStatusResponse {
++            status: QrStatus::Completed,
++            fido2_response: row.fido2_response,
++            challenge_id: Some(row.challenge_id),
++        }));
++    }
 +
-+echo "Loading NSM kernel module..."
-+if [ -f /nsm.ko ]; then
-+    insmod /nsm.ko && echo "NSM module loaded successfully" || echo "Failed to load NSM module"
-+else
-+    echo "WARNING: NSM module not found at /nsm.ko"
-+fi
++    Ok(Json(crate::types::QrSignStatusResponse {
++        status,
++        fido2_response: None,
++        challenge_id: None,
++    }))
++}
 +
-+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
++pub async fn qr_sign_authenticate_handler(
++    State(state): State<AppState>,
++    connect_info: ConnectInfo<std::net::SocketAddr>,
++    Json(req): Json<crate::types::QrSignAuthenticateRequest>,
++) -> Result<Json<crate::types::QrSignAuthenticateResponse>, QrSignError> {
++    let row = db::get_qr_sign_token(&state.db, &req.token)
++        .await
++        .map_err(|e| QrSignError::Internal(e.to_string()))?
++        .ok_or(QrSignError::TokenNotFound)?;
 +
-+echo "Starting bootproofd on port 8082..."
-+/bootproofd &
++    if time::OffsetDateTime::now_utc() > row.expires_at {
++        return Err(QrSignError::TokenExpired);
++    }
 +
-+# {STEVE
-+echo "Starting STEVE (Secure Transport Encryption Via Enclave)..."
-+/steve &
-+# }STEVE
++    match QrStatus::from_db(&row.status) {
++        Some(QrStatus::Pending) => {},
++        other => return Err(QrSignError::UnexpectedState(format!("{:?}", other))),
++    }
 +
-+echo "Starting VSOCK-to-TCP proxies..."
-+# Hardcoded proxies for ports 8080, 8081, 8082
-+/bin/socat VSOCK-LISTEN:8080,reuseaddr,fork TCP:localhost:8080 &
-+/bin/socat VSOCK-LISTEN:8081,reuseaddr,fork TCP:localhost:8081 &
-+/bin/socat VSOCK-LISTEN:8082,reuseaddr,fork TCP:localhost:8082 &
-+{{CUSTOM_PORT_SECTION}}
-+/bin/busybox sleep 2
++    let browser_ip = connect_info.0.ip().to_string();
++    let claimed = db::claim_qr_sign_token(&state.db, &req.token, Some(&browser_ip))
++        .await
++        .map_err(|e| QrSignError::Internal(e.to_string()))?;
++    if !claimed {
++        return Err(QrSignError::UnexpectedState("already claimed".into()));
++    }
 +
-+echo "Starting user application..."
-+cd /
++    let challenge: webauthn_rs_proto::RequestChallengeResponse = serde_json::from_str(&row.challenge_json)
++        .map_err(|e| QrSignError::Internal(format!("Failed to deserialize challenge: {}", e)))?;
 +
-+echo "=== Filesystem structure ==="
-+/bin/busybox find / -type f 2>/dev/null | /bin/busybox grep -v "^/proc\|^/sys\|^/dev" | /bin/busybox head -20
-+echo "=== Running user application ==="
++    Ok(Json(crate::types::QrSignAuthenticateResponse {
++        challenge,
++        token: req.token,
++    }))
++}
 +
-+{{USER_CMD}}
++pub async fn qr_sign_authenticate_finish_handler(
++    State(state): State<AppState>,
++    Json(req): Json<crate::types::QrSignAuthenticateFinishRequest>,
++) -> Result<Json<serde_json::Value>, QrSignError> {
++    let row = db::get_qr_sign_token(&state.db, &req.token)
++        .await
++        .map_err(|e| QrSignError::Internal(e.to_string()))?
++        .ok_or(QrSignError::TokenNotFound)?;
++
++    if time::OffsetDateTime::now_utc() > row.expires_at {
++        return Err(QrSignError::TokenExpired);
++    }
++
++    match QrStatus::from_db(&row.status) {
++        Some(QrStatus::Authenticated) => {},
++        other => return Err(QrSignError::UnexpectedState(format!("{:?}", other))),
++    }
++
++    // base64url-encode the assertion — same format fido2_sign_middleware expects in X-Fido2-Response
++    let credential_json = serde_json::to_vec(&req.credential)
++        .map_err(|e| QrSignError::Internal(format!("Failed to serialize credential: {}", e)))?;
++    let fido2_response = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&credential_json);
++
++    db::complete_qr_sign_token(&state.db, &req.token, &fido2_response)
++        .await
++        .map_err(|e| QrSignError::Internal(e.to_string()))?;
++
++    tracing::debug!("QR sign token completed");
++
++    Ok(Json(serde_json::json!({
++        "status": "success",
++        "message": "Signing approved. You can close this tab."
++    })))
++}
++
+ #[cfg(feature = "e2e-testing-unsafe")]
+ pub async fn e2e_login_handler(
+     State(state): State<AppState>,
+diff --git a/src/gateway/src/main.rs b/src/gateway/src/main.rs
+index 238cb49..cf107a0 100644
+--- a/src/gateway/src/main.rs
++++ b/src/gateway/src/main.rs
+@@ -146,7 +146,11 @@ async fn main() -> Result<()> {
+         .route("/auth/qr-login/status", get(handlers::qr_login_status_handler))
+         .route("/auth/qr-login/authenticate", post(handlers::qr_login_authenticate_handler))
+         .route("/auth/qr-login/authenticate/finish", post(handlers::qr_login_authenticate_finish_handler))
+-        .route("/auth/sign-request", post(handlers::begin_sign_request_handler));
++        .route("/auth/sign-request", post(handlers::begin_sign_request_handler))
++        .route("/auth/qr-sign/begin", post(handlers::qr_sign_begin_handler))
++        .route("/auth/qr-sign/status", get(handlers::qr_sign_status_handler))
++        .route("/auth/qr-sign/authenticate", post(handlers::qr_sign_authenticate_handler))
++        .route("/auth/qr-sign/authenticate/finish", post(handlers::qr_sign_authenticate_finish_handler));
+ 
+     #[cfg(feature = "e2e-testing-unsafe")]
+     {
+@@ -253,6 +257,7 @@ async fn main() -> Result<()> {
+                     tracing::debug!("Cleaned up {} expired sign challenges", removed);
+                 }
+             }
++
+         }
+     });
+ 
+diff --git a/src/gateway/src/types.rs b/src/gateway/src/types.rs
+index 09f11cc..2649bca 100644
+--- a/src/gateway/src/types.rs
++++ b/src/gateway/src/types.rs
+@@ -233,3 +233,66 @@ pub struct DbQrLoginToken {
+     pub expires_at: time::OffsetDateTime,
+     pub created_at: time::OffsetDateTime,
+ }
++
++#[derive(Debug, Serialize, Deserialize)]
++pub struct QrSignChallengeRequest {
++    pub method: String,
++    pub path: String,
++    pub body: String,
++    pub body_hash: String,
++}
++
++// QR Sign types (mid-session signing via phone)
++
++#[derive(Debug, Clone, sqlx::FromRow)]
++pub struct DbQrSignToken {
++    pub token: String,
++    pub status: String,
++    pub challenge_id: String,
++    pub challenge_json: String,
++    pub method: String,
++    pub path: String,
++    pub body: String,
++    pub body_hash: String,
++    pub fido2_response: Option<String>,
++    pub ip_address: Option<String>,
++    pub browser_ip_address: Option<String>,
++    pub expires_at: time::OffsetDateTime,
++    pub created_at: time::OffsetDateTime,
++}
++
++#[derive(Debug, Serialize, Deserialize)]
++pub struct QrSignBeginResponse {
++    pub challenge_id: String,
++    pub token: String,
++    pub url: String,
++    pub expires_at: String,
++}
++
++#[derive(Debug, Serialize, Deserialize)]
++pub struct QrSignStatusResponse {
++    pub status: QrStatus,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub fido2_response: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub challenge_id: Option<String>,
++}
++
++#[derive(Debug, Deserialize)]
++pub struct QrSignAuthenticateRequest {
++    pub token: String,
++}
++
++#[derive(Debug, Serialize, Deserialize)]
++pub struct QrSignAuthenticateResponse {
++    #[serde(flatten)]
++    pub challenge: webauthn_rs_proto::RequestChallengeResponse,
++    pub token: String,
++}
++
++#[derive(Debug, Deserialize)]
++pub struct QrSignAuthenticateFinishRequest {
++    pub token: String,
++    #[serde(flatten)]
++    pub credential: serde_json::Value,
++}

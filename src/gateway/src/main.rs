@@ -146,7 +146,11 @@ async fn main() -> Result<()> {
         .route("/auth/qr-login/status", get(handlers::qr_login_status_handler))
         .route("/auth/qr-login/authenticate", post(handlers::qr_login_authenticate_handler))
         .route("/auth/qr-login/authenticate/finish", post(handlers::qr_login_authenticate_finish_handler))
-        .route("/auth/sign-request", post(handlers::begin_sign_request_handler));
+        .route("/auth/sign-request", post(handlers::begin_sign_request_handler))
+        .route("/auth/qr-sign/begin", post(handlers::qr_sign_begin_handler))
+        .route("/auth/qr-sign/status", get(handlers::qr_sign_status_handler))
+        .route("/auth/qr-sign/authenticate", post(handlers::qr_sign_authenticate_handler))
+        .route("/auth/qr-sign/authenticate/finish", post(handlers::qr_sign_authenticate_finish_handler));
 
     #[cfg(feature = "e2e-testing-unsafe")]
     {
@@ -253,6 +257,7 @@ async fn main() -> Result<()> {
                     tracing::debug!("Cleaned up {} expired sign challenges", removed);
                 }
             }
+
         }
     });
 

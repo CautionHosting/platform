@@ -66,18 +66,41 @@
           </button>
 
           <button
+            :class="['nav-item', { active: activeTab === 'keys' }]"
+            @click="$emit('tab-change', 'keys')"
+          >
+            <svg
+              class="nav-icon"
+              width="30" height="30" viewBox="0 0 30 30"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <rect v-if="activeTab === 'keys'" width="30" height="30" rx="15" fill="white"/>
+              <g transform="translate(5,5) scale(0.833)">
+                <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+                  :stroke="activeTab === 'keys' ? '#0F0F0F' : '#535455'"
+                />
+              </g>
+            </svg>
+            <span>Key services</span>
+          </button>
+
+          <button
             :class="['nav-item', { active: activeTab === 'security' }]"
             @click="$emit('tab-change', 'security')"
           >
             <svg
               class="nav-icon"
-              :style="{ opacity: activeTab === 'security' ? 1 : 0.5, width: '30px', height: '30px', minWidth: '30px', minHeight: '30px' }"
-              viewBox="0 0 24 24"
+              width="30" height="30" viewBox="0 0 30 30"
               fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
+              xmlns="http://www.w3.org/2000/svg"
             >
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              <rect v-if="activeTab === 'security'" width="30" height="30" rx="15" fill="white"/>
+              <g transform="translate(5,5) scale(0.833)">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+                  :stroke="activeTab === 'security' ? '#0F0F0F' : '#535455'"
+                />
+              </g>
             </svg>
             <span>Security</span>
           </button>
