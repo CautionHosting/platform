@@ -35,19 +35,24 @@ use loader::{Loader, LoaderStyle};
 mod attestation;
 
 fn prompt_for_pin() -> Result<Option<String>> {
-    use std::io::{self, Write};
+    let pin = rpassword::prompt_password(
+        "Enter your security key PIN (or press Enter if no PIN is set): "
+    )?;
 
-    print!("Enter your security key PIN (or press Enter if no PIN is set): ");
-    io::stdout().flush()?;
-
-    let mut pin = String::new();
-    io::stdin().read_line(&mut pin)?;
-
-    let trimmed = pin.trim().to_string();
-    if trimmed.is_empty() {
+    if pin.trim().is_empty() {
         Ok(None)
     } else {
-        Ok(Some(trimmed))
+        Ok(Some(pin))
+    }
+}
+
+/// Wrapper that zeroizes the PIN string on drop.
+struct ZeroizePin(String);
+
+impl Drop for ZeroizePin {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
     }
 }
 
@@ -671,7 +676,19 @@ impl ApiClient {
         };
 
         let json = serde_json::to_string_pretty(&config)?;
-        fs::write(&self.config_path, json)?;
+
+        // Write with restricted permissions so other users cannot read session tokens
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&self.config_path)?;
+            file.write_all(json.as_bytes())?;
+        }
+
         Ok(())
     }
 
@@ -1325,7 +1342,8 @@ build: docker build -t app .
                     println!("Your security key requires a PIN.");
                     match prompt_for_pin()? {
                         Some(pin_string) => {
-                            let pin = Pin::new(&pin_string);
+                            let pin_string = ZeroizePin(pin_string);
+                            let pin = Pin::new(&pin_string.0);
                             log_verbose(self.verbose, "Retrying registration with PIN...");
                             self.try_make_credential(options, base_url, Some(pin))
                         },
@@ -1794,7 +1812,8 @@ build: docker build -t app .
                     println!("Your security key requires a PIN.");
                     match prompt_for_pin()? {
                         Some(pin_string) => {
-                            let pin = Pin::new(&pin_string);
+                            let pin_string = ZeroizePin(pin_string);
+                            let pin = Pin::new(&pin_string.0);
                             log_verbose(self.verbose, "Retrying assertion with PIN...");
                             self.try_get_assertion(options, base_url, Some(pin))
                         },
@@ -3857,6 +3876,9 @@ build: docker build -t app .
         let decoder = GzDecoder::new(&archive_bytes[..]);
         let mut archive = Archive::new(decoder);
 
+        let canonical_extract = extract_dir.canonicalize()
+            .with_context(|| format!("Failed to canonicalize extract dir: {}", extract_dir.display()))?;
+
         for entry in archive.entries().context("Failed to read archive entries")? {
             let mut entry = entry.context("Failed to read archive entry")?;
             let path = entry.path().context("Failed to get entry path")?;
@@ -3868,11 +3890,18 @@ build: docker build -t app .
             }
 
             let stripped_path: PathBuf = components[1..].iter().collect();
-            let dest_path = extract_dir.join(&stripped_path);
+            let dest_path = canonical_extract.join(&stripped_path);
 
             if let Some(parent) = dest_path.parent() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+
+                // Security: verify the resolved path stays within the extract directory
+                let canonical_parent = parent.canonicalize()
+                    .with_context(|| format!("Failed to canonicalize: {}", parent.display()))?;
+                if !canonical_parent.starts_with(&canonical_extract) {
+                    bail!("Archive path traversal detected: {}", stripped_path.display());
+                }
             }
 
             entry.unpack(&dest_path)

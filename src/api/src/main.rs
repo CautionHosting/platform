@@ -314,11 +314,12 @@ async fn get_or_create_provider_account(
             sqlx::query(
                 "UPDATE provider_accounts
                  SET role_arn = $1, is_active = true, external_account_id = $2
-                 WHERE id = $3"
+                 WHERE id = $3 AND organization_id = $4"
             )
             .bind(&role_arn)
             .bind(&aws_account_id)
             .bind(id)
+            .bind(org_id)
             .execute(db)
             .await
             .map_err(|e| {
@@ -1493,7 +1494,7 @@ async fn rename_resource(
     let updated_resource = sqlx::query_as::<_, ComputeResource>(
         "UPDATE compute_resources
          SET resource_name = $1
-         WHERE id = $2
+         WHERE id = $2 AND organization_id = $3
          RETURNING id, organization_id, provider_account_id, resource_type_id,
                    provider_resource_id, resource_name, state::text as state,
                    region, public_ip, configuration->>'domain' as domain,
@@ -1501,6 +1502,7 @@ async fn rename_resource(
     )
     .bind(&payload.name)
     .bind(resource_id)
+    .bind(org_id)
     .fetch_one(&state.db)
     .await
     .map_err(|e| {
@@ -1610,10 +1612,11 @@ async fn delete_resource(
     sqlx::query(
         "UPDATE compute_resources
          SET destroyed_at = NOW(), state = $1
-         WHERE id = $2"
+         WHERE id = $2 AND organization_id = $3"
     )
     .bind(types::ResourceState::Terminated)
     .bind(resource_id)
+    .bind(org_id)
     .execute(&state.db)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1928,16 +1931,18 @@ async fn create_managed_onprem_resource(
 
         sqlx::query(
             "UPDATE compute_resources SET configuration = $1, updated_at = NOW()
-             WHERE id = $2"
+             WHERE id = $2 AND organization_id = $3"
         )
         .bind(&configuration)
         .bind(existing_resource_id)
+        .bind(org_id)
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update resource: {}", e)))?;
 
-        sqlx::query("DELETE FROM cloud_credentials WHERE resource_id = $1")
+        sqlx::query("DELETE FROM cloud_credentials WHERE resource_id = $1 AND organization_id = $2")
             .bind(existing_resource_id)
+            .bind(org_id)
             .execute(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete old credential: {}", e)))?;
@@ -2189,9 +2194,10 @@ async fn deploy_logic(
 
     if was_destroyed {
         tracing::info!("Reactivating previously destroyed resource {}", resource_id);
-        sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1 WHERE id = $2")
+        sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1 WHERE id = $2 AND organization_id = $3")
             .bind(types::ResourceState::Pending)
             .bind(resource_id)
+            .bind(req.org_id)
             .execute(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to reactivate resource: {}", e)))?;
@@ -2776,7 +2782,7 @@ async fn deploy_logic(
     sqlx::query(
         "UPDATE compute_resources
          SET provider_resource_id = $1, state = $2, public_ip = $3, region = $4, configuration = COALESCE(configuration, '{}'::jsonb) || $5::jsonb
-         WHERE id = $6"
+         WHERE id = $6 AND organization_id = $7"
     )
     .bind(&deployment_result.instance_id)
     .bind(types::ResourceState::Running)
@@ -2784,6 +2790,7 @@ async fn deploy_logic(
     .bind(&deployed_region)
     .bind(&final_config)
     .bind(resource_id)
+    .bind(req.org_id)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update resource: {}", e)))?;

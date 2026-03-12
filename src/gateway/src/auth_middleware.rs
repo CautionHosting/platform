@@ -14,7 +14,7 @@ use std::panic::Location;
 use webauthn_rs::prelude::*;
 
 use crate::db;
-use crate::types::AppState;
+use crate::types::{AppState, AuthenticatedUserId};
 
 #[derive(Debug)]
 pub enum CsrfValidationErrorKind {
@@ -148,6 +148,7 @@ pub async fn fido2_auth_middleware(
         "X-Authenticated-User-ID",
         HeaderValue::from_str(&user_id.to_string()).unwrap(),
     );
+    req.extensions_mut().insert(AuthenticatedUserId(user_id));
 
     tracing::debug!(
         "Authenticated request - session: {}, credential: {}, user_id: {}",
@@ -292,6 +293,7 @@ pub async fn fido2_sign_middleware(
         "X-Fido2-Signed",
         HeaderValue::from_static("true"),
     );
+    req.extensions_mut().insert(AuthenticatedUserId(pending.user_id));
 
     Ok(next.run(req).await)
 }

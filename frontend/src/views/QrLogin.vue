@@ -28,7 +28,7 @@
       </div>
 
       <div v-else-if="state === 'error'">
-        <p class="qr-error" v-html="errorMessage"></p>
+        <p class="qr-error">{{ errorMessage }}</p>
         <button @click="reset" class="btn-dark btn qr-btn">
           Try again
         </button>

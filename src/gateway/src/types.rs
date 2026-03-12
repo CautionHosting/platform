@@ -8,6 +8,12 @@ use tokio::sync::RwLock;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Extension type set by auth middleware to communicate the authenticated user ID
+/// to downstream handlers. Using extensions instead of headers prevents spoofing
+/// on routes where auth middleware may not run.
+#[derive(Clone)]
+pub struct AuthenticatedUserId(pub Uuid);
+
 /// Registration state that includes the alpha code ID for closed alpha
 #[derive(Clone)]
 pub struct PendingRegistration {
