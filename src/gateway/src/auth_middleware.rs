@@ -50,7 +50,7 @@ impl CsrfValidationError {
 ///
 /// `using_header_auth` indicates whether the request was authenticated via X-Session-ID header (CLI).
 /// CSRF validation is only required for cookie-based auth (browser).
-fn validate_csrf(req: &Request, session_id: &str, using_header_auth: bool) -> Result<(), CsrfValidationError> {
+fn validate_csrf(req: &Request, session_id: &str, using_header_auth: bool, csrf_secret: &str) -> Result<(), CsrfValidationError> {
     use CsrfValidationErrorKind as ErrorKind;
 
     // Only validate CSRF for state-changing methods
@@ -65,8 +65,7 @@ fn validate_csrf(req: &Request, session_id: &str, using_header_auth: bool) -> Re
     }
 
     // Derive the expected CSRF token from the session
-    let secret = crate::csrf::get_csrf_secret();
-    let expected_csrf = crate::csrf::derive_csrf_token(session_id, &secret);
+    let expected_csrf = crate::csrf::derive_csrf_token(session_id, csrf_secret);
 
     // Get CSRF token from header (sent by JavaScript)
     let csrf_header = req
@@ -132,7 +131,7 @@ pub async fn fido2_auth_middleware(
         })?;
 
     // Now that session is validated, check CSRF for cookie-based auth
-    validate_csrf(&req, &session_id, using_header_auth).map_err(|e| {
+    validate_csrf(&req, &session_id, using_header_auth, &state.csrf_secret).map_err(|e| {
         tracing::warn!("{}", e);
         (StatusCode::FORBIDDEN, e.user_message()).into_response()
     })?;
@@ -150,12 +149,7 @@ pub async fn fido2_auth_middleware(
     );
     req.extensions_mut().insert(AuthenticatedUserId(user_id));
 
-    tracing::debug!(
-        "Authenticated request - session: {}, credential: {}, user_id: {}",
-        session_id,
-        hex::encode(&credential_id),
-        user_id
-    );
+    tracing::debug!("Authenticated request - user_id: {}", user_id);
 
     Ok(next.run(req).await)
 }
@@ -216,6 +210,11 @@ pub async fn fido2_sign_middleware(
             (StatusCode::BAD_REQUEST, "Invalid FIDO response format").into_response()
         })?;
 
+    // SECURITY: Remove-then-check is intentional. Atomically removing the challenge
+    // before checking expiry prevents replay attacks — even an expired challenge is
+    // consumed and cannot be retried. Checking expiry first would introduce a TOCTOU
+    // race where a concurrent request could use the same challenge between the check
+    // and removal. The user must request a fresh challenge regardless.
     let pending = state
         .sign_challenges
         .write()

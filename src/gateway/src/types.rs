@@ -39,6 +39,7 @@ pub struct AppState {
     pub sign_challenges: Arc<RwLock<HashMap<String, PendingSignChallenge>>>,
     pub session_timeout_hours: i64,
     pub internal_service_secret: Option<String>,
+    pub csrf_secret: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]

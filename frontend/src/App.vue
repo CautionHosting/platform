@@ -3,7 +3,7 @@
 
 <template>
   <div id="app">
-    <component :is="currentView" />
+    <component v-if="currentView" :is="currentView" />
   </div>
 </template>
 
@@ -98,15 +98,17 @@ export default {
         // Login page (WebAuthn authentication)
         return 'AuthLogin'
       } else if (path === '/onboarding') {
-        // Protected route - redirect to home if not authenticated
-        if (authChecked.value && !isAuthenticated.value) {
+        // Protected route - show nothing until auth check completes
+        if (!authChecked.value) return null
+        if (!isAuthenticated.value) {
           window.location.href = '/'
           return 'Register'
         }
         return 'Onboarding'
       } else if (path === '/dashboard') {
-        // Protected route - redirect to home if not authenticated
-        if (authChecked.value && !isAuthenticated.value) {
+        // Protected route - show nothing until auth check completes
+        if (!authChecked.value) return null
+        if (!isAuthenticated.value) {
           window.location.href = '/'
           return 'Register'
         }

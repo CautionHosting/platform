@@ -10,6 +10,7 @@ use axum::{
 use reqwest::Client;
 
 use crate::types::{AppState, AuthenticatedUserId};
+use crate::request_id::RequestId;
 
 pub async fn proxy_handler(
     State(state): State<AppState>,
@@ -28,6 +29,7 @@ pub async fn proxy_handler(
     // Read authenticated user from middleware extension, not from headers.
     // This prevents spoofing on routes where auth middleware doesn't run.
     let authenticated_user = req.extensions().get::<AuthenticatedUserId>().cloned();
+    let request_id = req.extensions().get::<RequestId>().cloned();
 
     let method = req.method().clone();
     let mut proxy_req = client.request(method, &target_url);
@@ -46,6 +48,10 @@ pub async fn proxy_handler(
 
     if let Some(content_type) = content_type_header {
         proxy_req = proxy_req.header("Content-Type", content_type);
+    }
+
+    if let Some(RequestId(id)) = request_id {
+        proxy_req = proxy_req.header("X-Request-Id", id);
     }
 
     let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX)

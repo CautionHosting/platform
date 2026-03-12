@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use base64::Engine;
+use subtle::ConstantTimeEq;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use enclave_builder::{BuildConfig as DockerBuildConfig, build_user_image};
@@ -129,7 +130,7 @@ async fn auth_middleware(
             return Err((StatusCode::UNAUTHORIZED, "Internal service authentication not configured".to_string()));
         };
 
-        if provided_secret != configured_secret.as_str() {
+        if provided_secret.as_bytes().ct_eq(configured_secret.as_bytes()).unwrap_u8() != 1 {
             tracing::warn!("Auth middleware: internal service auth rejected - invalid secret");
             return Err((StatusCode::UNAUTHORIZED, "Invalid internal service secret".to_string()));
         }
@@ -151,7 +152,7 @@ async fn auth_middleware(
 
     // Session-based authentication
     if let Some(session_id) = session_id {
-        tracing::debug!("Auth middleware: validating session {}", session_id);
+        tracing::debug!("Auth middleware: validating session");
         let user_id = validate_session(&state.db, session_id).await.map_err(|status| {
             let msg = match status {
                 StatusCode::UNAUTHORIZED => "Invalid or expired session".to_string(),
@@ -198,7 +199,7 @@ async fn validate_session(db: &PgPool, session_id: &str) -> Result<Uuid, StatusC
     })?;
 
     result.map(|(user_id,)| user_id).ok_or_else(|| {
-        tracing::warn!("Invalid or expired session: {}", session_id);
+        tracing::warn!("Invalid or expired session");
         StatusCode::UNAUTHORIZED
     })
 }
@@ -2434,22 +2435,46 @@ async fn deploy_logic(
         (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create work directory: {}", e))
     })?;
 
-    let extract_cmd = format!(
-        "git --git-dir={} archive {} | tar -xC {}",
-        git_dir, commit_sha, work_dir
-    );
-    let extract_output = Command::new("sh")
-        .args(["-c", &extract_cmd])
+    let mut git_archive = Command::new("git")
+        .args(["--git-dir", &git_dir, "archive", &commit_sha])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            tracing::error!("Failed to spawn git archive: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Repository extraction failed".to_string())
+        })?;
+
+    let git_stdout = git_archive.stdout.take().expect("piped stdout")
+        .into_owned_fd().map_err(|e| {
+            tracing::error!("Failed to get git stdout fd: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Repository extraction failed".to_string())
+        })?;
+
+    let tar_output = Command::new("tar")
+        .args(["-xC", &work_dir])
+        .stdin(git_stdout)
+        .stderr(std::process::Stdio::piped())
         .output()
         .await
         .map_err(|e| {
-            tracing::error!("Failed to extract repository: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("Repository extraction failed: {}", e))
+            tracing::error!("Failed to run tar extract: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Repository extraction failed".to_string())
         })?;
 
-    if !extract_output.status.success() {
-        let stderr = String::from_utf8_lossy(&extract_output.stderr);
-        tracing::error!("Failed to extract repository archive: {}", stderr);
+    let git_status = git_archive.wait().await.map_err(|e| {
+        tracing::error!("Failed to wait for git archive: {}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Repository extraction failed".to_string())
+    })?;
+
+    if !git_status.success() {
+        tracing::error!("git archive failed with status {}", git_status);
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to extract repository".to_string()));
+    }
+
+    if !tar_output.status.success() {
+        let stderr = String::from_utf8_lossy(&tar_output.stderr);
+        tracing::error!("tar extract failed: {}", stderr);
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to extract repository".to_string()));
     }
 
@@ -2951,7 +2976,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     info!("API server listening on 0.0.0.0:8080");
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    let mut sigterm = tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::terminate(),
+    )
+    .expect("failed to register SIGTERM handler");
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("Received SIGINT, shutting down"),
+        _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down"),
+    }
 }

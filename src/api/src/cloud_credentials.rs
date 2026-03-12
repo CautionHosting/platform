@@ -40,7 +40,7 @@ pub struct CloudCredential {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct CreateCredentialRequest {
     pub platform: CloudPlatform,
     pub resource_id: Option<Uuid>,
@@ -66,6 +66,33 @@ pub struct CreateCredentialRequest {
     pub aws_region: Option<String>,
     pub aws_account_id: Option<String>,
     pub scope_tag: Option<String>,
+}
+
+impl std::fmt::Debug for CreateCredentialRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateCredentialRequest")
+            .field("platform", &self.platform)
+            .field("resource_id", &self.resource_id)
+            .field("managed_on_prem", &self.managed_on_prem)
+            .field("is_default", &self.is_default)
+            .field("access_key_id", &"[REDACTED]")
+            .field("secret_access_key", &"[REDACTED]")
+            .field("deployment_id", &self.deployment_id)
+            .field("asg_name", &self.asg_name)
+            .field("launch_template_name", &self.launch_template_name)
+            .field("launch_template_id", &self.launch_template_id)
+            .field("vpc_id", &self.vpc_id)
+            .field("subnet_ids", &self.subnet_ids)
+            .field("eif_bucket", &self.eif_bucket)
+            .field("instance_profile_name", &self.instance_profile_name)
+            .field("iam_user", &self.iam_user)
+            .field("aws_access_key_id", &"[REDACTED]")
+            .field("aws_secret_access_key", &"[REDACTED]")
+            .field("aws_region", &self.aws_region)
+            .field("aws_account_id", &self.aws_account_id)
+            .field("scope_tag", &self.scope_tag)
+            .finish()
+    }
 }
 
 impl CreateCredentialRequest {
@@ -174,7 +201,23 @@ pub async fn create_credential(
         .bind(req.platform)
         .execute(pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
+    }
+
+    // Verify resource_id belongs to this org to prevent IDOR
+    if let Some(resource_id) = req.resource_id {
+        let owns_resource: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM compute_resources WHERE id = $1 AND organization_id = $2"
+        )
+        .bind(resource_id)
+        .bind(org_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
+
+        if owns_resource.is_none() {
+            return Err((StatusCode::NOT_FOUND, "Resource not found".to_string()));
+        }
     }
 
     let existing_cred = if let Some(resource_id) = req.resource_id {
@@ -207,7 +250,7 @@ pub async fn create_credential(
         .bind(org_id)
         .fetch_one(pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
 
         return Ok(row);
     }
@@ -231,7 +274,7 @@ pub async fn create_credential(
     .bind(user_id)
     .fetch_one(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
 
     Ok(row)
 }
@@ -251,7 +294,7 @@ pub async fn list_credentials(
     .bind(org_id)
     .fetch_all(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
 
     Ok(rows)
 }
@@ -272,7 +315,7 @@ pub async fn get_credential(
     .bind(credential_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
 
     Ok(row)
 }
@@ -291,7 +334,7 @@ pub async fn get_credential_secrets(
     .bind(credential_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
 
     match row {
         Some((secrets_encrypted,)) => {
@@ -316,7 +359,7 @@ pub async fn delete_credential(
     .bind(credential_id)
     .execute(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -340,7 +383,7 @@ pub async fn set_default_credential(
     .bind(cred.platform)
     .execute(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
 
     let result = sqlx::query(
         "UPDATE cloud_credentials SET is_default = true
@@ -350,7 +393,7 @@ pub async fn set_default_credential(
     .bind(credential_id)
     .execute(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -371,12 +414,12 @@ pub async fn get_default_credential_for_platform(
     .bind(platform)
     .fetch_optional(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
 
     Ok(row)
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ManagedOnPremCredentialData {
     pub deployment_id: String,
     pub asg_name: String,
@@ -389,6 +432,24 @@ pub struct ManagedOnPremCredentialData {
     pub aws_access_key_id: String,
     pub aws_secret_access_key: String,
     pub aws_region: String,
+}
+
+impl std::fmt::Debug for ManagedOnPremCredentialData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ManagedOnPremCredentialData")
+            .field("deployment_id", &self.deployment_id)
+            .field("asg_name", &self.asg_name)
+            .field("launch_template_name", &self.launch_template_name)
+            .field("launch_template_id", &self.launch_template_id)
+            .field("vpc_id", &self.vpc_id)
+            .field("subnet_ids", &self.subnet_ids)
+            .field("eif_bucket", &self.eif_bucket)
+            .field("instance_profile_name", &self.instance_profile_name)
+            .field("aws_access_key_id", &"[REDACTED]")
+            .field("aws_secret_access_key", &"[REDACTED]")
+            .field("aws_region", &self.aws_region)
+            .finish()
+    }
 }
 
 pub async fn get_managed_onprem_credential(
@@ -445,7 +506,7 @@ pub async fn list_managed_onprem_credentials(
     .bind(org_id)
     .fetch_all(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
 
     Ok(rows)
 }
@@ -466,7 +527,7 @@ pub async fn get_credential_by_resource(
     .bind(resource_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
 
     Ok(row)
 }
@@ -487,7 +548,7 @@ pub async fn get_credential_by_identifier(
     .bind(identifier)
     .fetch_optional(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
 
     Ok(row)
 }

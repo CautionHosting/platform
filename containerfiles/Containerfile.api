@@ -25,6 +25,7 @@ WORKDIR /downloads
 
 # TODO: package packer (ha-ha) in stagex
 RUN curl -fsSL https://releases.hashicorp.com/packer/1.11.2/packer_1.11.2_linux_amd64.zip -o packer.zip && \
+    echo "ced13efc257d0255932d14b8ae8f38863265133739a007c430cae106afcfc45a  packer.zip" | sha256sum -c && \
     unzip packer.zip && \
     rm packer.zip && \
     chmod +x packer

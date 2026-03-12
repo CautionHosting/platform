@@ -17,6 +17,7 @@ pub struct Config {
     pub ssh_host_key_path: String,
     pub session_timeout_hours: i64,
     pub data_dir: String,
+    pub csrf_secret: String,
 }
 
 impl Config {
@@ -73,6 +74,9 @@ impl Config {
         let data_dir = env::var("CAUTION_DATA_DIR")
             .unwrap_or_else(|_| "/var/cache/caution".to_string());
 
+        let csrf_secret = env::var("CSRF_SECRET")
+            .context("CSRF_SECRET environment variable must be set")?;
+
         Ok(Config {
             database_url,
             api_service_url,
@@ -84,6 +88,7 @@ impl Config {
             ssh_host_key_path,
             session_timeout_hours,
             data_dir,
+            csrf_secret,
         })
     }
 }

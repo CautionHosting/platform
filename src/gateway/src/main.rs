@@ -30,6 +30,8 @@ mod types;
 mod ssh_server;
 mod validation;
 mod rate_limit;
+mod request_id;
+mod security_headers;
 
 use config::Config;
 use types::AppState;
@@ -101,6 +103,7 @@ async fn main() -> Result<()> {
         sign_challenges: Arc::new(RwLock::new(HashMap::new())),
         session_timeout_hours: config.session_timeout_hours,
         internal_service_secret: internal_service_secret.clone(),
+        csrf_secret: config.csrf_secret.clone(),
     };
 
     let rate_limiter = rate_limit::RateLimiter::new(100, 60);
@@ -206,7 +209,9 @@ async fn main() -> Result<()> {
         .merge(protected)
         .nest("/api", public_api_proxy.merge(api_proxy))
         .fallback_service(frontend_service)
-        .layer(cors);
+        .layer(cors)
+        .layer(middleware::from_fn(request_id::request_id_middleware))
+        .layer(middleware::from_fn(security_headers::security_headers_middleware));
 
     let cleanup_pool = pool.clone();
     tokio::spawn(async move {
@@ -284,10 +289,23 @@ async fn main() -> Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await
     .context("Server error")?;
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    let mut sigterm = tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::terminate(),
+    )
+    .expect("failed to register SIGTERM handler");
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("Received SIGINT, shutting down"),
+        _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down"),
+    }
 }
 
 fn load_or_generate_host_key(path: &str) -> Result<KeyPair> {

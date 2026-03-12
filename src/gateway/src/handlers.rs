@@ -348,7 +348,7 @@ pub async fn finish_register_handler(
     let credential_id_hex = hex::encode(&credential_id);
 
     let session_id = db::generate_session_id();
-    let csrf_token = crate::csrf::derive_csrf_token(&session_id, &crate::csrf::get_csrf_secret());
+    let csrf_token = crate::csrf::derive_csrf_token(&session_id, &state.csrf_secret);
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
     db::create_auth_session(&state.db, &session_id, &credential_id, expires_at).await?;
@@ -528,7 +528,7 @@ pub async fn finish_login_handler(
     state.auth_states.write().await.remove(&session_key);
 
     let session_id = db::generate_session_id();
-    let csrf_token = crate::csrf::derive_csrf_token(&session_id, &crate::csrf::get_csrf_secret());
+    let csrf_token = crate::csrf::derive_csrf_token(&session_id, &state.csrf_secret);
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
     db::create_auth_session(&state.db, &session_id, &credential_id_bytes, expires_at)
@@ -722,8 +722,7 @@ async fn authenticate_session(
         .ok_or_else(|| SignRequestError::InvalidSession(session_id.clone()))?;
 
     if !using_header_auth {
-        let secret = crate::csrf::get_csrf_secret();
-        let expected_csrf = crate::csrf::derive_csrf_token(&session_id, &secret);
+        let expected_csrf = crate::csrf::derive_csrf_token(&session_id, &state.csrf_secret);
         let csrf_header = headers
             .get("X-CSRF-Token")
             .and_then(|h| h.to_str().ok())
