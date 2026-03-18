@@ -63,6 +63,19 @@ struct SendVerificationResponse {
     message: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct SendEmailRequest {
+    to: String,
+    template: String,
+    data: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct SendEmailResponse {
+    success: bool,
+    message: String,
+}
+
 async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok", "service": "email" }))
 }
@@ -194,6 +207,367 @@ async fn send_verification_handler(
     }))
 }
 
+// Generic email send handler with templates
+async fn send_email_handler(
+    State(state): State<AppState>,
+    Json(req): Json<SendEmailRequest>,
+) -> Result<Json<SendEmailResponse>, AppError> {
+    info!("Sending {} email to: {}", req.template, req.to);
+
+    let (subject, html_body, text_body) = match req.template.as_str() {
+        "invoice" => generate_invoice_email(&req.data),
+        "payment_confirmation" => generate_payment_confirmation_email(&req.data),
+        "payment_failure" => generate_payment_failure_email(&req.data),
+        "insufficient_balance" => generate_insufficient_balance_email(&req.data),
+        _ => {
+            return Ok(Json(SendEmailResponse {
+                success: false,
+                message: format!("Unknown template: {}", req.template),
+            }));
+        }
+    };
+
+    if state.test_mode {
+        info!("");
+        info!("========================================");
+        info!("EMAIL TEST MODE - {}", req.template.to_uppercase());
+        info!("========================================");
+        info!("To: {}", req.to);
+        info!("Subject: {}", subject);
+        info!("Data: {}", serde_json::to_string_pretty(&req.data).unwrap_or_default());
+        info!("========================================");
+        info!("");
+
+        return Ok(Json(SendEmailResponse {
+            success: true,
+            message: format!("TEST MODE: {} email logged (not sent to {})", req.template, req.to),
+        }));
+    }
+
+    let email = Message::builder()
+        .from(
+            format!("{} <{}>", state.from_name, state.from_email)
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid from address: {}", e))?,
+        )
+        .to(req
+            .to
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid recipient address: {}", e))?)
+        .subject(subject)
+        .header(ContentType::TEXT_HTML)
+        .multipart(
+            lettre::message::MultiPart::alternative()
+                .singlepart(
+                    lettre::message::SinglePart::builder()
+                        .header(ContentType::TEXT_PLAIN)
+                        .body(text_body),
+                )
+                .singlepart(
+                    lettre::message::SinglePart::builder()
+                        .header(ContentType::TEXT_HTML)
+                        .body(html_body),
+                ),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to build email: {}", e))?;
+
+    let smtp_transport = state
+        .smtp_transport
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("SMTP transport not configured"))?;
+
+    let result: SmtpResponse = smtp_transport
+        .send(&email)
+        .map_err(|e| anyhow::anyhow!("Failed to send email: {}", e))?;
+
+    info!(
+        "Email sent successfully to {}: {:?}",
+        req.to,
+        result.code()
+    );
+
+    Ok(Json(SendEmailResponse {
+        success: true,
+        message: format!("{} email sent to {}", req.template, req.to),
+    }))
+}
+
+fn generate_invoice_email(data: &serde_json::Value) -> (String, String, String) {
+    let invoice_number = data["invoice_number"].as_str().unwrap_or("N/A");
+    let amount = data["amount"].as_str().unwrap_or("$0.00");
+    let date = data["date"].as_str().unwrap_or("N/A");
+    let pdf_url = data["pdf_url"].as_str();
+
+    let subject = format!("Invoice {} - Caution", invoice_number);
+
+    let pdf_link = pdf_url
+        .map(|url| format!(r#"<p><a href="{}" style="color: #3498db;">Download Invoice PDF</a></p>"#, url))
+        .unwrap_or_default();
+
+    let html_body = format!(
+        r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Invoice</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background-color: #f4f4f4; padding: 20px; border-radius: 10px;">
+        <h1 style="color: #2c3e50; margin-top: 0;">Invoice {}</h1>
+
+        <p>Your invoice is ready.</p>
+
+        <div style="background-color: white; padding: 20px; border-radius: 5px; margin: 20px 0;">
+            <table style="width: 100%;">
+                <tr>
+                    <td style="color: #7f8c8d;">Invoice Number:</td>
+                    <td style="text-align: right; font-weight: bold;">{}</td>
+                </tr>
+                <tr>
+                    <td style="color: #7f8c8d;">Date:</td>
+                    <td style="text-align: right;">{}</td>
+                </tr>
+                <tr>
+                    <td style="color: #7f8c8d; padding-top: 10px; border-top: 1px solid #eee;">Amount Due:</td>
+                    <td style="text-align: right; font-weight: bold; font-size: 1.2em; padding-top: 10px; border-top: 1px solid #eee;">{}</td>
+                </tr>
+            </table>
+        </div>
+
+        {}
+
+        <p style="color: #7f8c8d; font-size: 14px;">
+            If you have any questions about this invoice, please contact support.
+        </p>
+    </div>
+
+    <p style="color: #95a5a6; font-size: 12px; text-align: center; margin-top: 20px;">
+        &copy; 2025 Caution. All rights reserved.
+    </p>
+</body>
+</html>
+        "#,
+        invoice_number, invoice_number, date, amount, pdf_link
+    );
+
+    let text_body = format!(
+        "Invoice {}\n\n\
+         Your invoice is ready.\n\n\
+         Invoice Number: {}\n\
+         Date: {}\n\
+         Amount Due: {}\n\n\
+         If you have any questions, please contact support.\n\n\
+         --\n\
+         Caution Team",
+        invoice_number, invoice_number, date, amount
+    );
+
+    (subject, html_body, text_body)
+}
+
+fn generate_payment_confirmation_email(data: &serde_json::Value) -> (String, String, String) {
+    let invoice_number = data["invoice_number"].as_str().unwrap_or("N/A");
+    let amount = data["amount"].as_str().unwrap_or("$0.00");
+
+    let subject = format!("Payment Received - Invoice {}", invoice_number);
+
+    let html_body = format!(
+        r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Payment Confirmation</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background-color: #f4f4f4; padding: 20px; border-radius: 10px;">
+        <h1 style="color: #27ae60; margin-top: 0;">Payment Received</h1>
+
+        <p>Thank you! We've received your payment.</p>
+
+        <div style="background-color: white; padding: 20px; border-radius: 5px; margin: 20px 0;">
+            <table style="width: 100%;">
+                <tr>
+                    <td style="color: #7f8c8d;">Invoice Number:</td>
+                    <td style="text-align: right; font-weight: bold;">{}</td>
+                </tr>
+                <tr>
+                    <td style="color: #7f8c8d;">Amount Paid:</td>
+                    <td style="text-align: right; font-weight: bold; color: #27ae60;">{}</td>
+                </tr>
+            </table>
+        </div>
+
+        <p style="color: #7f8c8d; font-size: 14px;">
+            Your account is in good standing. Thank you for using Caution!
+        </p>
+    </div>
+
+    <p style="color: #95a5a6; font-size: 12px; text-align: center; margin-top: 20px;">
+        &copy; 2025 Caution. All rights reserved.
+    </p>
+</body>
+</html>
+        "#,
+        invoice_number, amount
+    );
+
+    let text_body = format!(
+        "Payment Received\n\n\
+         Thank you! We've received your payment.\n\n\
+         Invoice Number: {}\n\
+         Amount Paid: {}\n\n\
+         Your account is in good standing. Thank you for using Caution!\n\n\
+         --\n\
+         Caution Team",
+        invoice_number, amount
+    );
+
+    (subject, html_body, text_body)
+}
+
+fn generate_payment_failure_email(data: &serde_json::Value) -> (String, String, String) {
+    let invoice_number = data["invoice_number"].as_str().unwrap_or("N/A");
+    let amount = data["amount"].as_str().unwrap_or("$0.00");
+
+    let subject = format!("Payment Failed - Invoice {}", invoice_number);
+
+    let html_body = format!(
+        r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Payment Failed</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background-color: #f4f4f4; padding: 20px; border-radius: 10px;">
+        <h1 style="color: #e74c3c; margin-top: 0;">Payment Failed</h1>
+
+        <p>We were unable to process your payment.</p>
+
+        <div style="background-color: white; padding: 20px; border-radius: 5px; margin: 20px 0;">
+            <table style="width: 100%;">
+                <tr>
+                    <td style="color: #7f8c8d;">Invoice Number:</td>
+                    <td style="text-align: right; font-weight: bold;">{}</td>
+                </tr>
+                <tr>
+                    <td style="color: #7f8c8d;">Amount Due:</td>
+                    <td style="text-align: right; font-weight: bold; color: #e74c3c;">{}</td>
+                </tr>
+            </table>
+        </div>
+
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="https://caution.co/billing"
+               style="background-color: #3498db; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">
+                Update Payment Method
+            </a>
+        </div>
+
+        <p style="color: #7f8c8d; font-size: 14px;">
+            Please update your payment method to avoid service interruption.
+            If you believe this is an error, please contact support.
+        </p>
+    </div>
+
+    <p style="color: #95a5a6; font-size: 12px; text-align: center; margin-top: 20px;">
+        &copy; 2025 Caution. All rights reserved.
+    </p>
+</body>
+</html>
+        "#,
+        invoice_number, amount
+    );
+
+    let text_body = format!(
+        "Payment Failed\n\n\
+         We were unable to process your payment.\n\n\
+         Invoice Number: {}\n\
+         Amount Due: {}\n\n\
+         Please update your payment method at https://caution.co/billing to avoid service interruption.\n\n\
+         If you believe this is an error, please contact support.\n\n\
+         --\n\
+         Caution Team",
+        invoice_number, amount
+    );
+
+    (subject, html_body, text_body)
+}
+
+fn generate_insufficient_balance_email(data: &serde_json::Value) -> (String, String, String) {
+    let invoice_number = data["invoice_number"].as_str().unwrap_or("N/A");
+    let amount = data["amount"].as_str().unwrap_or("$0.00");
+    let topup_url = data["topup_url"].as_str().unwrap_or("https://caution.co/billing/topup");
+
+    let subject = format!("Action Required: Insufficient Balance - Invoice {}", invoice_number);
+
+    let html_body = format!(
+        r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Insufficient Balance</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background-color: #f4f4f4; padding: 20px; border-radius: 10px;">
+        <h1 style="color: #f39c12; margin-top: 0;">Insufficient Balance</h1>
+
+        <p>Your account balance is insufficient to cover your latest invoice.</p>
+
+        <div style="background-color: white; padding: 20px; border-radius: 5px; margin: 20px 0;">
+            <table style="width: 100%;">
+                <tr>
+                    <td style="color: #7f8c8d;">Invoice Number:</td>
+                    <td style="text-align: right; font-weight: bold;">{}</td>
+                </tr>
+                <tr>
+                    <td style="color: #7f8c8d;">Amount Due:</td>
+                    <td style="text-align: right; font-weight: bold;">{}</td>
+                </tr>
+            </table>
+        </div>
+
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="{}"
+               style="background-color: #27ae60; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">
+                Add Funds to Your Account
+            </a>
+        </div>
+
+        <p style="color: #7f8c8d; font-size: 14px;">
+            Please add funds to your account to continue using Caution services.
+            Your services may be suspended if the balance is not replenished.
+        </p>
+    </div>
+
+    <p style="color: #95a5a6; font-size: 12px; text-align: center; margin-top: 20px;">
+        &copy; 2025 Caution. All rights reserved.
+    </p>
+</body>
+</html>
+        "#,
+        invoice_number, amount, topup_url
+    );
+
+    let text_body = format!(
+        "Insufficient Balance\n\n\
+         Your account balance is insufficient to cover your latest invoice.\n\n\
+         Invoice Number: {}\n\
+         Amount Due: {}\n\n\
+         Please add funds at {} to continue using Caution services.\n\n\
+         Your services may be suspended if the balance is not replenished.\n\n\
+         --\n\
+         Caution Team",
+        invoice_number, amount, topup_url
+    );
+
+    (subject, html_body, text_body)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -228,10 +602,17 @@ async fn main() -> anyhow::Result<()> {
         info!("Configuring SMTP transport: {}:{}", smtp_host, smtp_port);
 
         let creds = Credentials::new(smtp_username, smtp_password);
-        let transport = SmtpTransport::relay(&smtp_host)?
-            .port(smtp_port)
-            .credentials(creds)
-            .build();
+        let transport = if smtp_port == 465 {
+            SmtpTransport::relay(&smtp_host)?
+                .port(smtp_port)
+                .credentials(creds)
+                .build()
+        } else {
+            SmtpTransport::starttls_relay(&smtp_host)?
+                .port(smtp_port)
+                .credentials(creds)
+                .build()
+        };
 
         Some(Arc::new(transport))
     };
@@ -249,6 +630,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/send-verification", post(send_verification_handler))
+        .route("/send", post(send_email_handler))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
