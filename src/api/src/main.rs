@@ -130,7 +130,7 @@ async fn auth_middleware(
             return Err((StatusCode::UNAUTHORIZED, "Internal service authentication not configured".to_string()));
         };
 
-        if provided_secret.as_bytes().ct_eq(configured_secret.as_bytes()).unwrap_u8() != 1 {
+        if !provided_secret.as_bytes().ct_eq(configured_secret.as_bytes()).into() {
             tracing::warn!("Auth middleware: internal service auth rejected - invalid secret");
             return Err((StatusCode::UNAUTHORIZED, "Invalid internal service secret".to_string()));
         }
