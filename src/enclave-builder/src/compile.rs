@@ -291,6 +291,12 @@ pub async fn get_or_clone_enclave_source(
             }
 
             let stripped_path: PathBuf = components[1..].iter().collect();
+
+            // Reject paths with .. components (zip-slip prevention)
+            if stripped_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                anyhow::bail!("Path traversal detected in archive entry: {}", path.display());
+            }
+
             let dest_path = download_dir.join(&stripped_path);
 
             // Create parent directories if needed
@@ -425,6 +431,12 @@ pub async fn get_or_clone_framework_source(
         }
 
         let stripped_path: PathBuf = components[1..].iter().collect();
+
+        // Reject paths with .. components (zip-slip prevention)
+        if stripped_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            anyhow::bail!("Path traversal detected in archive entry: {}", path.display());
+        }
+
         let dest_path = download_dir.join(&stripped_path);
 
         if let Some(parent) = dest_path.parent() {

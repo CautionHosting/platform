@@ -938,6 +938,105 @@ make build-cli
       </div>
     </div>
 
+    <!-- Key Services Tab -->
+    <div v-if="activeTab === 'keys'" class="content-card">
+      <div class="content-header">
+        <div class="content-header-text">
+          <h2 class="content-header-title">Quorum bundles</h2>
+          <p class="content-header-description">
+            Manage quorum bundles created via <code>caution secret new</code>.
+          </p>
+        </div>
+      </div>
+
+      <div class="items-list">
+        <div v-if="loadingBundles" class="loading">Loading bundles...</div>
+        <div v-else-if="quorumBundles.length === 0" class="empty-state">
+          No quorum bundles yet. Use <code>caution secret new</code> to create one.
+        </div>
+        <div v-else>
+          <div v-for="bundle in quorumBundles" :key="bundle.id" class="bundle-card">
+            <div class="bundle-header">
+              <div class="item-info">
+                <div v-if="editingBundleName === bundle.id" class="bundle-name-edit">
+                  <input
+                    v-model="editBundleNameValue"
+                    class="bundle-name-input"
+                    placeholder="Bundle name"
+                    @keyup.enter="saveBundleName(bundle.id)"
+                    @keyup.escape="cancelEditBundleName()"
+                  />
+                  <button class="btn-sm btn-primary" @click="saveBundleName(bundle.id)">Save</button>
+                  <button class="btn-sm btn-secondary" @click="cancelEditBundleName()">Cancel</button>
+                </div>
+                <div v-else class="bundle-name-display">
+                  <span class="item-name">{{ bundle.name || truncateId(bundle.id) }}</span>
+                  <button class="btn-icon" @click="startEditBundleName(bundle)" title="Rename bundle">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                    </svg>
+                  </button>
+                </div>
+                <span v-if="bundle.name" class="item-meta-id">{{ truncateId(bundle.id) }}</span>
+                <span class="item-meta">Created {{ formatDate(bundle.created_at) }}</span>
+              </div>
+              <div class="item-actions">
+                <button
+                  @click="deleteBundle(bundle.id)"
+                  class="btn-danger"
+                  :disabled="deletingBundle === bundle.id"
+                >
+                  <svg v-if="deletingBundle === bundle.id" class="spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10" stroke-opacity="0.25"/>
+                    <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/>
+                  </svg>
+                  {{ deletingBundle === bundle.id ? "Deleting..." : "Delete" }}
+                </button>
+              </div>
+            </div>
+            <div class="bundle-labels">
+              <span v-for="(v, k) in (bundle.labels || {})" :key="k" class="bundle-label-tag">
+                {{ k }}: {{ v }}
+                <button class="label-remove-btn" @click="removeLabel(bundle.id, k)" title="Remove label">&times;</button>
+              </span>
+              <button v-if="addingLabelTo !== bundle.id" class="bundle-label-add" @click="startAddLabel(bundle.id)">+ Add label</button>
+              <span v-else class="label-add-form">
+                <input v-model="newLabelKey" class="label-input" placeholder="key" @keyup.escape="cancelAddLabel()" />
+                <input v-model="newLabelValue" class="label-input" placeholder="value" @keyup.enter="saveLabel(bundle.id)" @keyup.escape="cancelAddLabel()" />
+                <button class="btn-sm btn-primary" @click="saveLabel(bundle.id)">Add</button>
+                <button class="btn-sm btn-secondary" @click="cancelAddLabel()">Cancel</button>
+              </span>
+            </div>
+            <div class="bundle-details" v-if="bundle.data">
+              <div class="bundle-detail-row" v-if="bundleKeyHashes[bundle.id]">
+                <span class="bundle-label">Public key hash</span>
+                <code class="bundle-hash">{{ bundleKeyHashes[bundle.id] }}</code>
+              </div>
+              <div class="bundle-actions">
+                <button
+                  v-if="bundle.data.secret_recipient_public_key"
+                  class="btn-sm btn-download"
+                  @click="downloadFile(bundle.data.secret_recipient_public_key, truncateId(bundle.id) + '_public_key.asc')"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Public key
+                </button>
+                <button
+                  v-if="bundle.data.shardfile"
+                  class="btn-sm btn-download"
+                  @click="downloadFile(bundle.data.shardfile, truncateId(bundle.id) + '_shardfile.asc')"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Shard file
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Delete SSH Key Confirmation Modal -->
     <div v-if="showDeleteModal" class="modal-overlay" @click="cancelDelete">
       <div class="modal-content" @click.stop>
@@ -1292,6 +1391,17 @@ export default {
     const newCredAwsKeyId = ref("");
     const newCredAwsSecret = ref("");
     const newCredIsDefault = ref(false);
+
+    // Quorum bundles state
+    const quorumBundles = ref([]);
+    const loadingBundles = ref(true);
+    const deletingBundle = ref(null);
+    const bundleKeyHashes = ref({});
+    const editingBundleName = ref(null);
+    const editBundleNameValue = ref('');
+    const addingLabelTo = ref(null);
+    const newLabelKey = ref('');
+    const newLabelValue = ref('');
 
     // Organization settings state
     const orgSettings = ref({ require_pin: false });
@@ -1750,6 +1860,174 @@ export default {
       }
     };
 
+    const loadBundles = async () => {
+      loadingBundles.value = true;
+
+      try {
+        const response = await authFetch("/api/quorum-bundles");
+
+        if (response.ok) {
+          quorumBundles.value = await response.json();
+          computeBundleHashes();
+        } else if (response.status === 401) {
+          window.location.href = "/login";
+        } else {
+          const data = await response.json().catch(() => ({}));
+          showToast(data.error || "Failed to load quorum bundles", 'error');
+        }
+      } catch (err) {
+        showToast("Failed to connect to server", 'error');
+      } finally {
+        loadingBundles.value = false;
+      }
+    };
+
+    const deleteBundle = async (id) => {
+      if (!confirm("Are you sure you want to delete this quorum bundle?")) return;
+
+      deletingBundle.value = id;
+
+      try {
+        const response = await authFetch(`/api/quorum-bundles/${id}`, {
+          method: "DELETE",
+        });
+
+        if (response.ok || response.status === 204) {
+          showToast("Quorum bundle deleted");
+          await loadBundles();
+        } else {
+          const data = await response.json().catch(() => ({}));
+          showToast(data.error || "Failed to delete quorum bundle", 'error');
+        }
+      } catch (err) {
+        showToast("Failed to connect to server", 'error');
+      } finally {
+        deletingBundle.value = null;
+      }
+    };
+
+    const computeBundleHashes = async () => {
+      for (const bundle of quorumBundles.value) {
+        if (bundle.data?.secret_recipient_public_key) {
+          try {
+            const encoded = new TextEncoder().encode(bundle.data.secret_recipient_public_key);
+            const hashBuffer = await crypto.subtle.digest('SHA-256', encoded);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+            bundleKeyHashes.value[bundle.id] = hashHex.substring(0, 16);
+          } catch {
+            // skip hash computation on error
+          }
+        }
+      }
+    };
+
+    const startEditBundleName = (bundle) => {
+      editingBundleName.value = bundle.id;
+      editBundleNameValue.value = bundle.name || '';
+    };
+
+    const saveBundleName = async (bundleId) => {
+      try {
+        const response = await authFetch(`/api/quorum-bundles/${bundleId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: editBundleNameValue.value }),
+        });
+
+        if (response.ok) {
+          showToast("Bundle renamed");
+          editingBundleName.value = null;
+          await loadBundles();
+        } else {
+          const data = await response.json().catch(() => ({}));
+          showToast(data.error || "Failed to rename bundle", 'error');
+        }
+      } catch (err) {
+        showToast("Failed to connect to server", 'error');
+      }
+    };
+
+    const cancelEditBundleName = () => {
+      editingBundleName.value = null;
+      editBundleNameValue.value = '';
+    };
+
+    const startAddLabel = (bundleId) => {
+      addingLabelTo.value = bundleId;
+      newLabelKey.value = '';
+      newLabelValue.value = '';
+    };
+
+    const cancelAddLabel = () => {
+      addingLabelTo.value = null;
+      newLabelKey.value = '';
+      newLabelValue.value = '';
+    };
+
+    const saveLabel = async (bundleId) => {
+      if (!newLabelKey.value.trim()) return;
+      const bundle = quorumBundles.value.find(b => b.id === bundleId);
+      if (!bundle) return;
+
+      const labels = { ...(bundle.labels || {}), [newLabelKey.value.trim()]: newLabelValue.value.trim() };
+
+      try {
+        const response = await authFetch(`/api/quorum-bundles/${bundleId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ labels }),
+        });
+
+        if (response.ok) {
+          showToast("Label added");
+          cancelAddLabel();
+          await loadBundles();
+        } else {
+          const data = await response.json().catch(() => ({}));
+          showToast(data.error || "Failed to add label", 'error');
+        }
+      } catch (err) {
+        showToast("Failed to connect to server", 'error');
+      }
+    };
+
+    const removeLabel = async (bundleId, key) => {
+      const bundle = quorumBundles.value.find(b => b.id === bundleId);
+      if (!bundle) return;
+
+      const labels = { ...(bundle.labels || {}) };
+      delete labels[key];
+
+      try {
+        const response = await authFetch(`/api/quorum-bundles/${bundleId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ labels }),
+        });
+
+        if (response.ok) {
+          showToast("Label removed");
+          await loadBundles();
+        } else {
+          const data = await response.json().catch(() => ({}));
+          showToast(data.error || "Failed to remove label", 'error');
+        }
+      } catch (err) {
+        showToast("Failed to connect to server", 'error');
+      }
+    };
+
+    const downloadFile = (content, filename) => {
+      const blob = new Blob([content], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+
     const addCredential = async () => {
       if (
         !newCredName.value.trim() ||
@@ -2122,7 +2400,7 @@ export default {
       // Add keyboard event listener
       window.addEventListener("keydown", handleKeyDown);
 
-      await Promise.all([loadApps(), loadKeys(), loadCredentials(), loadOrgSettings()]);
+      await Promise.all([loadApps(), loadKeys(), loadCredentials(), loadBundles(), loadOrgSettings()]);
     });
 
     onUnmounted(() => {
@@ -2175,6 +2453,24 @@ export default {
       deleteKey,
       confirmDelete,
       cancelDelete,
+      quorumBundles,
+      loadingBundles,
+      deletingBundle,
+      deleteBundle,
+      bundleKeyHashes,
+      editingBundleName,
+      editBundleNameValue,
+      startEditBundleName,
+      saveBundleName,
+      cancelEditBundleName,
+      addingLabelTo,
+      newLabelKey,
+      newLabelValue,
+      startAddLabel,
+      cancelAddLabel,
+      saveLabel,
+      removeLabel,
+      downloadFile,
       credentials,
       loadingCreds,
       addingCred,
@@ -3704,5 +4000,180 @@ export default {
 .toggle-switch input:disabled + .toggle-slider {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Quorum bundle cards */
+.bundle-card {
+  padding: 16px 20px;
+  border-bottom: 1px solid #eee;
+}
+
+.bundle-card:last-child {
+  border-bottom: none;
+}
+
+.bundle-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.bundle-details {
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bundle-detail-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bundle-label {
+  font-size: 0.8rem;
+  color: #666;
+}
+
+.bundle-hash {
+  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
+  font-size: 0.8rem;
+  color: #333;
+  background: #f5f5f5;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.bundle-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  font-size: 0.8rem;
+  color: #555;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.btn-download:hover {
+  border-color: #999;
+  color: #333;
+  background: #f8f8f8;
+}
+
+.bundle-name-display {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bundle-name-edit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bundle-name-input {
+  padding: 4px 8px;
+  font-size: 0.9rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  outline: none;
+  width: 200px;
+}
+
+.bundle-name-input:focus {
+  border-color: #666;
+}
+
+.item-meta-id {
+  font-size: 0.75rem;
+  color: #999;
+  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
+}
+
+.btn-icon {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px;
+  color: #999;
+  display: flex;
+  align-items: center;
+}
+
+.btn-icon:hover {
+  color: #333;
+}
+
+.bundle-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 8px;
+}
+
+.bundle-label-tag {
+  font-size: 0.75rem;
+  background: #f0f0f0;
+  color: #555;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid #e0e0e0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.label-remove-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #999;
+  font-size: 0.85rem;
+  padding: 0 2px;
+  margin-left: 2px;
+  line-height: 1;
+}
+.label-remove-btn:hover { color: #dc3545; }
+
+.bundle-label-add {
+  font-size: 0.75rem;
+  color: #999;
+  background: none;
+  border: 1px dashed #ccc;
+  border-radius: 10px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.bundle-label-add:hover { color: #333; border-color: #999; }
+
+.label-add-form {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.label-input {
+  padding: 2px 6px;
+  font-size: 0.75rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  width: 80px;
+}
+.label-input:focus { border-color: #666; outline: none; }
+
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 0.8rem;
+  border-radius: 4px;
+  cursor: pointer;
 }
 </style>

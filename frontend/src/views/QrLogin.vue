@@ -4,11 +4,11 @@
 <template>
   <div class="qr-login">
     <div class="qr-card">
-      <h2 class="qr-title">CLI Login Request</h2>
+      <h2 class="qr-title">{{ title }}</h2>
 
       <div v-if="state === 'ready'">
         <p class="qr-description">
-          Authenticate with your security key to log in to the CLI.
+          {{ description }}
         </p>
         <button @click="authenticate" class="btn-dark btn qr-btn">
           Authenticate with security key
@@ -24,18 +24,18 @@
       </div>
 
       <div v-else-if="state === 'success'">
-        <p class="qr-success">Authentication complete. You can close this tab.</p>
+        <p class="qr-success">{{ successMessage }}</p>
       </div>
 
       <div v-else-if="state === 'error'">
-        <p class="qr-error" v-html="errorMessage"></p>
+        <p class="qr-error">{{ errorMessage }}</p>
         <button @click="reset" class="btn-dark btn qr-btn">
           Try again
         </button>
       </div>
 
       <div v-else-if="state === 'invalid'">
-        <p class="qr-error">Invalid or expired login request. Please generate a new QR code from the CLI.</p>
+        <p class="qr-error">{{ invalidMessage }}</p>
       </div>
     </div>
   </div>
@@ -51,6 +51,21 @@ export default {
     const state = ref('ready')
     const errorMessage = ref('')
     const token = ref('')
+
+    // Detect mode from URL path
+    const isSign = window.location.pathname === '/qr-sign'
+    const authPrefix = isSign ? '/auth/qr-sign' : '/auth/qr-login'
+
+    const title = isSign ? 'CLI Signing Request' : 'CLI Login Request'
+    const description = isSign
+      ? 'Authenticate with your security key to approve the CLI operation.'
+      : 'Authenticate with your security key to log in to the CLI.'
+    const successMessage = isSign
+      ? 'Operation approved. You can close this tab.'
+      : 'Authentication complete. You can close this tab.'
+    const invalidMessage = isSign
+      ? 'Invalid or expired signing request. Please generate a new QR code from the CLI.'
+      : 'Invalid or expired login request. Please generate a new QR code from the CLI.'
 
     onMounted(() => {
       const params = new URLSearchParams(window.location.search)
@@ -74,7 +89,7 @@ export default {
 
       try {
         // Step 1: Start authentication with the QR token
-        const beginResponse = await fetch('/auth/qr-login/authenticate', {
+        const beginResponse = await fetch(`${authPrefix}/authenticate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ token: token.value }),
@@ -82,7 +97,7 @@ export default {
 
         if (!beginResponse.ok) {
           const text = await beginResponse.text()
-          if (text.includes('expired') || text.includes('already')) {
+          if (text.includes('expired') || text.includes('already') || text.includes('not found')) {
             state.value = 'invalid'
             return
           }
@@ -131,24 +146,30 @@ export default {
         const clientDataJSON = new Uint8Array(assertion.response.clientDataJSON)
         const signature = new Uint8Array(assertion.response.signature)
 
-        const finishResponse = await fetch('/auth/qr-login/authenticate/finish', {
+        const finishBody = {
+          id: assertion.id,
+          rawId: uint8ArrayToBase64url(new Uint8Array(assertion.rawId)),
+          type: assertion.type,
+          response: {
+            authenticatorData: uint8ArrayToBase64url(authenticatorData),
+            clientDataJSON: uint8ArrayToBase64url(clientDataJSON),
+            signature: uint8ArrayToBase64url(signature),
+            userHandle: assertion.response.userHandle
+              ? uint8ArrayToBase64url(new Uint8Array(assertion.response.userHandle))
+              : null,
+          },
+          token: beginData.token,
+        }
+
+        // QR login also needs the session key
+        if (beginData.session) {
+          finishBody.session = beginData.session
+        }
+
+        const finishResponse = await fetch(`${authPrefix}/authenticate/finish`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            id: assertion.id,
-            rawId: uint8ArrayToBase64url(new Uint8Array(assertion.rawId)),
-            type: assertion.type,
-            response: {
-              authenticatorData: uint8ArrayToBase64url(authenticatorData),
-              clientDataJSON: uint8ArrayToBase64url(clientDataJSON),
-              signature: uint8ArrayToBase64url(signature),
-              userHandle: assertion.response.userHandle
-                ? uint8ArrayToBase64url(new Uint8Array(assertion.response.userHandle))
-                : null,
-            },
-            session: beginData.session,
-            token: beginData.token,
-          }),
+          body: JSON.stringify(finishBody),
         })
 
         if (!finishResponse.ok) {
@@ -171,6 +192,10 @@ export default {
     return {
       state,
       errorMessage,
+      title,
+      description,
+      successMessage,
+      invalidMessage,
       authenticate,
       reset,
     }

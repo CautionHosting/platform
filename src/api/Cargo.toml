@@ -48,9 +48,10 @@ aws-sdk-s3 = "1.15"
 
 hmac = { workspace = true }
 hex = { workspace = true }
+subtle = { workspace = true }
 
 # Cache directory
 dirs = { workspace = true }
 
 # GPG decryption for managed on-prem
-sequoia-openpgp = { version = "1.21", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto", "compression-deflate"] }
+sequoia-openpgp = { version = "1.21", default-features = false, features = ["crypto-rust", "compression-deflate"] }

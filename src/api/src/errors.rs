@@ -97,6 +97,13 @@ pub enum ValidationError {
     InvalidRole {
         role: String,
     },
+
+    BranchNameLength {
+        min: usize,
+        max: usize,
+        actual: usize,
+    },
+    BranchNameInvalidChars,
 }
 
 impl fmt::Display for ValidationError {
@@ -160,6 +167,13 @@ impl fmt::Display for ValidationError {
             Self::InvalidRole { role } => {
                 write!(f, "invalid role '{}'", role)
             }
+
+            Self::BranchNameLength { min, max, actual } => {
+                write!(f, "branch name must be between {} and {} characters (got {})", min, max, actual)
+            }
+            Self::BranchNameInvalidChars => {
+                write!(f, "branch name contains invalid characters")
+            }
         }
     }
 }
@@ -201,6 +215,9 @@ impl ValidationError {
             Self::SshKeyEmptyData => "ssh_key_empty_data",
 
             Self::InvalidRole { .. } => "invalid_role",
+
+            Self::BranchNameLength { .. } => "branch_name_length",
+            Self::BranchNameInvalidChars => "branch_name_invalid_chars",
         }
     }
 
@@ -228,6 +245,10 @@ impl ValidationError {
 
             Self::InvalidRole { .. } => {
                 Some("Valid roles: owner, admin, member, viewer")
+            }
+
+            Self::BranchNameInvalidChars => {
+                Some("Use only letters, numbers, slashes, underscores, dots, and hyphens. Must start with alphanumeric.")
             }
 
             _ => None,

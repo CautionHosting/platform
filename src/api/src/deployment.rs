@@ -9,11 +9,21 @@ use tempfile::TempDir;
 use tokio::fs;
 use uuid::Uuid;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AwsCredentials {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub region: String,
+}
+
+impl std::fmt::Debug for AwsCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwsCredentials")
+            .field("access_key_id", &"[REDACTED]")
+            .field("secret_access_key", &"[REDACTED]")
+            .field("region", &self.region)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1362,14 +1372,7 @@ resource "aws_security_group" "enclave" {{
   description = "Security group for {resource_id} Nitro Enclave"
   vpc_id      = aws_vpc.enclave.id
 
-  # SSH for debugging
-  ingress {{
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow SSH for debugging"
-  }}
+  {ssh_ingress}
 
   ingress {{
     from_port   = 80
@@ -1503,6 +1506,11 @@ output "instance_type" {{
         cpu_count = cpu_count_rounded,
         debug_mode = if request.debug_mode { "true" } else { "false" },
         ssh_keys_json = serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string()),
+        ssh_ingress = if request.ssh_keys.is_empty() {
+            "# SSH ingress disabled (no ssh_keys in Procfile)".to_string()
+        } else {
+            "# SSH enabled (ssh_keys configured in Procfile)\n  ingress {\n    from_port   = 22\n    to_port     = 22\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow SSH\"\n  }".to_string()
+        },
         domain = request.domain.as_deref().unwrap_or(""),
         url_output = if let Some(ref domain) = request.domain {
             format!("https://{}", domain)
@@ -1607,14 +1615,7 @@ resource "aws_security_group" "enclave" {{
   description = "Security group for {resource_id} Nitro Enclave"
   vpc_id      = "{vpc_id}"
 
-  # TODO: Remove SSH access after debugging enclave crash issue
-  ingress {{
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow SSH"
-  }}
+  {ssh_ingress}
 
   ingress {{
     from_port   = 80
@@ -1781,6 +1782,11 @@ output "instance_type" {{
         cpu_count = cpu_count_rounded,
         debug_mode = if request.debug_mode { "true" } else { "false" },
         ssh_keys_json = serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string()),
+        ssh_ingress = if request.ssh_keys.is_empty() {
+            "# SSH ingress disabled (no ssh_keys in Procfile)".to_string()
+        } else {
+            "# SSH enabled (ssh_keys configured in Procfile)\n  ingress {\n    from_port   = 22\n    to_port     = 22\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow SSH\"\n  }".to_string()
+        },
         domain = request.domain.as_deref().unwrap_or(""),
         url_output = if let Some(ref domain) = request.domain {
             format!("https://{}", domain)

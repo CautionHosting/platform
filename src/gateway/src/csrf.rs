@@ -23,14 +23,6 @@ pub fn get_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(|c| c.value().to_string())
 }
 
-/// Get CSRF secret from environment variables.
-///
-/// Requires `CSRF_SECRET` to be set. Panics if not configured.
-pub fn get_csrf_secret() -> String {
-    std::env::var("CSRF_SECRET")
-        .expect("CSRF_SECRET environment variable must be set")
-}
-
 /// Derive a CSRF token from a session ID using HMAC-SHA256.
 ///
 /// This cryptographically binds the CSRF token to the session,

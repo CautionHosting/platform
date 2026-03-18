@@ -3,7 +3,7 @@
 
 <template>
   <div id="app">
-    <component :is="currentView" />
+    <component v-if="currentView" :is="currentView" />
   </div>
 </template>
 
@@ -54,6 +54,10 @@ export default {
       '/qr-login': {
         title: 'CLI Login • Caution',
         description: 'Authenticate your CLI session using a security key.'
+      },
+      '/qr-sign': {
+        title: 'CLI Signing • Caution',
+        description: 'Approve a CLI operation using a security key.'
       }
     }
 
@@ -94,21 +98,27 @@ export default {
         // Login page (WebAuthn authentication)
         return 'AuthLogin'
       } else if (path === '/onboarding') {
-        // Protected route - redirect to home if not authenticated
-        if (authChecked.value && !isAuthenticated.value) {
+        // Protected route - show nothing until auth check completes
+        if (!authChecked.value) return null
+        if (!isAuthenticated.value) {
           window.location.href = '/'
           return 'Register'
         }
         return 'Onboarding'
       } else if (path === '/dashboard') {
-        // Protected route - redirect to home if not authenticated
-        if (authChecked.value && !isAuthenticated.value) {
+        // Protected route - show nothing until auth check completes
+        if (!authChecked.value) return null
+        if (!isAuthenticated.value) {
           window.location.href = '/'
           return 'Register'
         }
         return 'Dashboard'
       } else if (path === '/qr-login') {
         // Public route - QR code CLI login (no auth required)
+        return 'QrLogin'
+      } else if (path === '/qr-sign') {
+        // Public route - QR code CLI signing (no auth required)
+        // Same component as QrLogin — it detects sign vs login from the path
         return 'QrLogin'
       }
 

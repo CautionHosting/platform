@@ -192,6 +192,8 @@ fn default_branch() -> String {
 
 impl Validate for DeployRequest {
     fn validate(&self) -> Result<(), String> {
+        validation::validate_branch_name(&self.branch)
+            .map_err(|e| format!("Invalid branch name: {}", e))?;
         Ok(())
     }
 }

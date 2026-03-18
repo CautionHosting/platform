@@ -14,6 +14,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{AppState, AuthContext};
+use crate::validation::validate_email;
 
 #[derive(Debug, Serialize, FromRow)]
 pub struct UserStatus {
@@ -33,9 +34,17 @@ pub struct SendVerificationResponse {
     pub message: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct VerifyEmailQuery {
     pub token: String,
+}
+
+impl std::fmt::Debug for VerifyEmailQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifyEmailQuery")
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -88,10 +97,10 @@ pub async fn send_verification_email(
     Extension(auth): Extension<AuthContext>,
     Json(payload): Json<SendVerificationRequest>,
 ) -> Result<Json<SendVerificationResponse>, StatusCode> {
-    if !payload.email.contains('@') {
+    if let Err(e) = validate_email(&payload.email) {
         return Ok(Json(SendVerificationResponse {
             success: false,
-            message: "Invalid email format".to_string(),
+            message: format!("Invalid email: {}", e),
         }));
     }
 

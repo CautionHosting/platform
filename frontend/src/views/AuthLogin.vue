@@ -42,7 +42,7 @@
             {{ status }}
           </div>
 
-          <div v-if="error" class="error-message" v-html="error"></div>
+          <div v-if="error" class="error-message">{{ error }}</div>
         </div>
       </div>
 

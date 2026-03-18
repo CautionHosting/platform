@@ -25,6 +25,10 @@ const USERNAME_PATTERN: &str = r"^[a-zA-Z0-9][a-zA-Z0-9_-]*[a-zA-Z0-9]$";
 const EMAIL_MAX_LEN: usize = 254;
 const EMAIL_PATTERN: &str = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$";
 
+const BRANCH_NAME_MIN_LEN: usize = 1;
+const BRANCH_NAME_MAX_LEN: usize = 255;
+const BRANCH_NAME_PATTERN: &str = r"^[a-zA-Z0-9][a-zA-Z0-9/_.\-]*$";
+
 const ALLOWED_SSH_KEY_TYPES: &[&str] = &[
     "ssh-ed25519",
     "ecdsa-sha2-nistp256",
@@ -40,6 +44,7 @@ static APP_NAME_REGEX: OnceLock<Regex> = OnceLock::new();
 static ORG_NAME_REGEX: OnceLock<Regex> = OnceLock::new();
 static ORG_SLUG_REGEX: OnceLock<Regex> = OnceLock::new();
 static USERNAME_REGEX: OnceLock<Regex> = OnceLock::new();
+static BRANCH_NAME_REGEX: OnceLock<Regex> = OnceLock::new();
 static EMAIL_REGEX: OnceLock<Regex> = OnceLock::new();
 
 fn get_app_name_regex() -> &'static Regex {
@@ -56,6 +61,10 @@ fn get_org_slug_regex() -> &'static Regex {
 
 fn get_username_regex() -> &'static Regex {
     USERNAME_REGEX.get_or_init(|| Regex::new(USERNAME_PATTERN).unwrap())
+}
+
+fn get_branch_name_regex() -> &'static Regex {
+    BRANCH_NAME_REGEX.get_or_init(|| Regex::new(BRANCH_NAME_PATTERN).unwrap())
 }
 
 fn get_email_regex() -> &'static Regex {
@@ -91,6 +100,29 @@ pub fn validate_app_name(name: &str) -> Result<(), ValidationError> {
             invalid_char,
             span: Span::new(0, len),
         });
+    }
+
+    Ok(())
+}
+
+pub fn validate_branch_name(name: &str) -> Result<(), ValidationError> {
+    let len = name.len();
+
+    if len < BRANCH_NAME_MIN_LEN || len > BRANCH_NAME_MAX_LEN {
+        return Err(ValidationError::BranchNameLength {
+            min: BRANCH_NAME_MIN_LEN,
+            max: BRANCH_NAME_MAX_LEN,
+            actual: len,
+        });
+    }
+
+    if !get_branch_name_regex().is_match(name) {
+        return Err(ValidationError::BranchNameInvalidChars);
+    }
+
+    // Reject git-unsafe patterns
+    if name.contains("..") || name.contains("@{") || name.ends_with('/') || name.ends_with('.') {
+        return Err(ValidationError::BranchNameInvalidChars);
     }
 
     Ok(())

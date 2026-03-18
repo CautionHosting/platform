@@ -9,6 +9,28 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
+/// Safely unpack a tar archive into `dest`, rejecting any entry whose path
+/// contains `..` components (zip-slip / path traversal).
+fn safe_unpack(archive: &mut tar::Archive<impl std::io::Read>, dest: &Path) -> Result<()> {
+    for entry in archive.entries().context("Failed to read archive entries")? {
+        let mut entry = entry.context("Failed to read archive entry")?;
+        let path = entry.path().context("Failed to get entry path")?.into_owned();
+
+        for component in path.components() {
+            if matches!(component, std::path::Component::ParentDir) {
+                anyhow::bail!(
+                    "Path traversal detected in archive entry: {}",
+                    path.display()
+                );
+            }
+        }
+
+        entry.unpack_in(dest)
+            .with_context(|| format!("Failed to extract: {}", path.display()))?;
+    }
+    Ok(())
+}
+
 pub async fn extract_image_filesystem(image_ref: &str, work_dir: &Path) -> Result<PathBuf> {
     tracing::info!("Extracting filesystem from image: {}", image_ref);
 
@@ -109,8 +131,7 @@ async fn export_container_filesystem(
     archive.set_preserve_mtime(true);
     archive.set_unpack_xattrs(true);
 
-    archive
-        .unpack(output_dir)
+    safe_unpack(&mut archive, output_dir)
         .context("Failed to extract tar archive")?;
 
     fs::remove_file(&tar_path).await.ok();
@@ -180,8 +201,7 @@ pub async fn extract_specific_files(
         archive.set_preserve_mtime(true);
         archive.set_unpack_xattrs(true);
 
-        archive
-            .unpack(&output_dir)
+        safe_unpack(&mut archive, &output_dir)
             .context("Failed to extract tar archive")?;
 
         fs::remove_file(&tar_path).await.ok();
@@ -262,8 +282,7 @@ pub async fn extract_static_binary(
     archive.set_preserve_mtime(true);
     archive.set_unpack_xattrs(true);
 
-    archive
-        .unpack(&target_dir)
+    safe_unpack(&mut archive, &target_dir)
         .context("Failed to extract tar archive")?;
 
     fs::remove_file(&tar_path).await.ok();
@@ -302,7 +321,7 @@ pub async fn extract_static_binary(
 
             if let Ok(tar_file) = std::fs::File::open(&ca_tar_path) {
                 let mut archive = tar::Archive::new(tar_file);
-                archive.unpack(&ca_target_dir).ok();
+                safe_unpack(&mut archive, &ca_target_dir).ok();
             }
         }
         fs::remove_file(&ca_tar_path).await.ok();
@@ -345,7 +364,7 @@ pub async fn extract_last_layer_only(image_ref: &str, work_dir: &Path) -> Result
 
     let tar_file = std::fs::File::open(&save_path)?;
     let mut archive = tar::Archive::new(tar_file);
-    archive.unpack(&extract_dir)?;
+    safe_unpack(&mut archive, &extract_dir)?;
 
     let manifest_path = extract_dir.join("manifest.json");
     let manifest_data = fs::read_to_string(&manifest_path).await?;
@@ -360,13 +379,18 @@ pub async fn extract_last_layer_only(image_ref: &str, work_dir: &Path) -> Result
         .and_then(|v| v.as_str())
         .context("Failed to get last layer")?;
 
+    // Validate manifest layer path doesn't escape extract_dir
+    if std::path::Path::new(last_layer).components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        anyhow::bail!("Path traversal detected in manifest layer path: {}", last_layer);
+    }
+
     let layer_path = extract_dir.join(last_layer);
     let output_dir = work_dir.join("user-service");
     fs::create_dir_all(&output_dir).await?;
 
     let layer_file = std::fs::File::open(&layer_path)?;
     let mut layer_archive = tar::Archive::new(layer_file);
-    layer_archive.unpack(&output_dir)?;
+    safe_unpack(&mut layer_archive, &output_dir)?;
 
     fs::remove_file(&save_path).await.ok();
     fs::remove_dir_all(&extract_dir).await.ok();

@@ -8,6 +8,12 @@ use tokio::sync::RwLock;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Extension type set by auth middleware to communicate the authenticated user ID
+/// to downstream handlers. Using extensions instead of headers prevents spoofing
+/// on routes where auth middleware may not run.
+#[derive(Clone)]
+pub struct AuthenticatedUserId(pub Uuid);
+
 /// Registration state that includes the alpha code ID for closed alpha
 #[derive(Clone)]
 pub struct PendingRegistration {
@@ -33,6 +39,7 @@ pub struct AppState {
     pub sign_challenges: Arc<RwLock<HashMap<String, PendingSignChallenge>>>,
     pub session_timeout_hours: i64,
     pub internal_service_secret: Option<String>,
+    pub csrf_secret: String,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -232,4 +239,67 @@ pub struct DbQrLoginToken {
     pub session_id: Option<String>,
     pub expires_at: time::OffsetDateTime,
     pub created_at: time::OffsetDateTime,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QrSignChallengeRequest {
+    pub method: String,
+    pub path: String,
+    pub body: String,
+    pub body_hash: String,
+}
+
+// QR Sign types (mid-session signing via phone)
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DbQrSignToken {
+    pub token: String,
+    pub status: String,
+    pub challenge_id: String,
+    pub challenge_json: String,
+    pub method: String,
+    pub path: String,
+    pub body: String,
+    pub body_hash: String,
+    pub fido2_response: Option<String>,
+    pub ip_address: Option<String>,
+    pub browser_ip_address: Option<String>,
+    pub expires_at: time::OffsetDateTime,
+    pub created_at: time::OffsetDateTime,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QrSignBeginResponse {
+    pub challenge_id: String,
+    pub token: String,
+    pub url: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QrSignStatusResponse {
+    pub status: QrStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fido2_response: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub challenge_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QrSignAuthenticateRequest {
+    pub token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QrSignAuthenticateResponse {
+    #[serde(flatten)]
+    pub challenge: webauthn_rs_proto::RequestChallengeResponse,
+    pub token: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QrSignAuthenticateFinishRequest {
+    pub token: String,
+    #[serde(flatten)]
+    pub credential: serde_json::Value,
 }

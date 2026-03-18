@@ -252,12 +252,28 @@ async fn main() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8082")
+    let bind_addr = std::env::var("EMAIL_BIND_ADDR")
+        .unwrap_or_else(|_| "127.0.0.1:8082".to_string());
+    let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await?;
 
-    info!("Email service listening on 0.0.0.0:8082");
+    info!("Email service listening on {}", bind_addr);
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    let mut sigterm = tokio::signal::unix::signal(
+        tokio::signal::unix::SignalKind::terminate(),
+    )
+    .expect("failed to register SIGTERM handler");
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("Received SIGINT, shutting down"),
+        _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down"),
+    }
 }

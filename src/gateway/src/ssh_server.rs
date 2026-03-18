@@ -152,7 +152,7 @@ impl russh::server::Handler for SshSession {
                 }
                 Err(e) => {
                     tracing::error!("Failed to resolve user for app: {:?}", e);
-                    session.extended_data(channel, 1, format!("remote: error: {}\n", e).into_bytes().into());
+                    session.extended_data(channel, 1, "remote: error: Internal error, please try again later.\n".as_bytes().into());
                     session.exit_status_request(channel, 1);
                     session.close(channel);
                     return Ok(());
@@ -303,7 +303,7 @@ fn update_repo_head(repo_path: &str) -> Result<String> {
     tracing::info!("Setting HEAD to refs/heads/{}", target_branch);
 
     let output = Command::new("git")
-        .args(&["--git-dir", repo_path, "symbolic-ref", "HEAD", &format!("refs/heads/{}", target_branch)])
+        .args(&["--git-dir", repo_path, "symbolic-ref", "--", "HEAD", &format!("refs/heads/{}", target_branch)])
         .output()
         .context("Failed to update HEAD")?;
 
@@ -505,7 +505,7 @@ async fn handle_git_push(
             Ok(resp) => resp,
             Err(e) => {
                 tracing::error!("Failed to send deployment request: {}", e);
-                let error_msg = format!("remote: error: Failed to trigger deployment: {}\n", e);
+                let error_msg = "remote: error: Failed to trigger deployment, please try again later.\n".to_string();
                 let _ = session_handle.extended_data(channel, 1, error_msg.into_bytes().into()).await;
                 let _ = session_handle.exit_status_request(channel, 1).await;
                 let _ = session_handle.close(channel).await;
@@ -516,7 +516,7 @@ async fn handle_git_push(
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
             tracing::error!("Deployment failed: {}", error_text);
-            let error_msg = format!("remote: error: Deployment failed: {}\n", error_text);
+            let error_msg = "remote: error: Deployment failed, please try again later.\n".to_string();
             let _ = session_handle.extended_data(channel, 1, error_msg.into_bytes().into()).await;
             let _ = session_handle.exit_status_request(channel, 1).await;
             let _ = session_handle.close(channel).await;

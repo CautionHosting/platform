@@ -9,7 +9,8 @@ use axum::{
 };
 use reqwest::Client;
 
-use crate::types::AppState;
+use crate::types::{AppState, AuthenticatedUserId};
+use crate::request_id::RequestId;
 
 pub async fn proxy_handler(
     State(state): State<AppState>,
@@ -24,8 +25,11 @@ pub async fn proxy_handler(
     tracing::debug!("Proxying request to: {}", target_url);
 
     let session_id_header = req.headers().get("X-Session-ID").cloned();
-    let user_id_header = req.headers().get("X-Authenticated-User-ID").cloned();
     let content_type_header = req.headers().get("Content-Type").cloned();
+    // Read authenticated user from middleware extension, not from headers.
+    // This prevents spoofing on routes where auth middleware doesn't run.
+    let authenticated_user = req.extensions().get::<AuthenticatedUserId>().cloned();
+    let request_id = req.extensions().get::<RequestId>().cloned();
 
     let method = req.method().clone();
     let mut proxy_req = client.request(method, &target_url);
@@ -34,8 +38,8 @@ pub async fn proxy_handler(
         proxy_req = proxy_req.header("X-Session-ID", session_id);
     }
 
-    if let Some(user_id) = user_id_header {
-        proxy_req = proxy_req.header("X-Authenticated-User-ID", user_id);
+    if let Some(AuthenticatedUserId(user_id)) = authenticated_user {
+        proxy_req = proxy_req.header("X-Authenticated-User-ID", user_id.to_string());
         // Include internal service secret for authenticated requests
         if let Some(ref secret) = state.internal_service_secret {
             proxy_req = proxy_req.header("X-Internal-Service-Secret", secret.clone());
@@ -44,6 +48,10 @@ pub async fn proxy_handler(
 
     if let Some(content_type) = content_type_header {
         proxy_req = proxy_req.header("Content-Type", content_type);
+    }
+
+    if let Some(RequestId(id)) = request_id {
+        proxy_req = proxy_req.header("X-Request-Id", id);
     }
 
     let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
@@ -75,8 +83,21 @@ pub async fn proxy_handler(
 
     let mut response = Response::builder().status(status);
     
+    const ALLOWED_RESPONSE_HEADERS: &[&str] = &[
+        "content-type",
+        "content-length",
+        "content-encoding",
+        "cache-control",
+        "etag",
+        "last-modified",
+        "vary",
+        "x-request-id",
+    ];
+
     for (key, value) in headers.iter() {
-        response = response.header(key, value);
+        if ALLOWED_RESPONSE_HEADERS.contains(&key.as_str()) {
+            response = response.header(key, value);
+        }
     }
     
     response
