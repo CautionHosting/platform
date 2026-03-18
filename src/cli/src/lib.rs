@@ -3266,20 +3266,14 @@ build: docker build -t app .
             nonce
         };
 
-        let nonce_b64 = base64::engine::general_purpose::STANDARD.encode(&nonce);
         println!("\nChallenge nonce (sent): {}", hex::encode(&nonce));
 
         log_verbose(self.verbose, &format!("Requesting attestation from: {}", attestation_url));
         println!("Requesting attestation...");
 
-        #[derive(Serialize)]
-        struct AttestationRequest {
-            nonce: String,
-        }
-
         let response = self.client
             .post(&attestation_url)
-            .json(&AttestationRequest { nonce: nonce_b64 })
+            .json(&serde_json::json!({"nonce": nonce}))
             .send()
             .await
             .context("Failed to fetch attestation document")?;
@@ -3288,16 +3282,12 @@ build: docker build -t app .
             bail!("Failed to fetch attestation: {}", response.status());
         }
 
-        #[derive(Deserialize)]
-        struct AttestationResponse {
-            document: String,
-            manifest: Option<serde_json::Value>,
-        }
-
-        let attest_resp: AttestationResponse = response.json().await
+        let attest_resp: serde_json::Value = response.json().await
             .context("Failed to parse attestation response as JSON")?;
 
-        let attestation_b64 = &attest_resp.document;
+        let attestation_b64 = attest_resp.get("attestation_document")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("No attestation document in response. Fields: {:?}", attest_resp.as_object().map(|o| o.keys().collect::<Vec<_>>())))?;
         log_verbose(self.verbose, &format!("Received attestation: {} bytes", attestation_b64.len()));
         let attestation_bytes = base64::engine::general_purpose::STANDARD.decode(attestation_b64)
             .context("Failed to decode attestation document")?;
@@ -3311,7 +3301,7 @@ build: docker build -t app .
         println!("  PCR1: {}", remote_pcrs.pcr1);
         println!("  PCR2: {}", remote_pcrs.pcr2);
 
-        let manifest: Option<enclave_builder::EnclaveManifest> = if let Some(manifest_val) = attest_resp.manifest {
+        let manifest: Option<enclave_builder::EnclaveManifest> = if let Some(manifest_val) = attest_resp.get("manifest").cloned() {
             match serde_json::from_value(manifest_val) {
                 Ok(m) => Some(m),
                 Err(e) => {
