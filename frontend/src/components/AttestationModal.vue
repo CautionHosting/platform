@@ -185,7 +185,7 @@ export default {
           headers: {
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({ nonce: Array.from(nonce) })
+          body: JSON.stringify({ nonce: btoa(String.fromCharCode(...nonce)) })
         })
 
         if (!response.ok) throw new Error(`Request failed: ${response.status}`)
@@ -195,7 +195,7 @@ export default {
         rawResponse.value = jsonResponse
         if (jsonResponse.error) throw new Error(jsonResponse.error)
 
-        const attestationB64 = jsonResponse.attestation_document
+        const attestationB64 = jsonResponse.document || jsonResponse.attestation_document
         if (!attestationB64) throw new Error('No attestation document')
 
         const attestationBytes = Uint8Array.from(atob(attestationB64), c => c.charCodeAt(0))
