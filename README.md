@@ -41,18 +41,11 @@ cp env.example .env
 
 Install the CLI:
 
-**Option A: Install script**
 ```bash
-curl -fsSL https://codeberg.org/caution/cli/raw/branch/main/install.sh | sh
+make install-cli
 ```
 
-**Option B: Build from source**
-```bash
-git clone https://codeberg.org/caution/cli
-cd cli
-make build
-make install
-```
+See [src/cli/README.md](src/cli/README.md) for additional installation options including signature verification and reproducible builds.
 
 Start the platform services:
 

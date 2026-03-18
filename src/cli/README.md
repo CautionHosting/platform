@@ -37,14 +37,14 @@ anti-pattern when it comes to good security practices.
 
 | Version | OS    | Architecture | Download |
 | ------- | ----- | ------------ | -------- |
-| v0.1.0-alpha | Linux | x86_64 | [caution-linux-x86_64](https://codeberg.org/caution/cli/raw/branch/main/dist/caution-linux-x86_64) |
+| v0.1.0-alpha | Linux | x86_64 | [caution-linux-x86_64](https://codeberg.org/caution/platform/raw/branch/main/dist/cli/caution-linux-x86_64) |
 
 #### From Source
 
 ```sh
-git clone https://codeberg.org/caution/cli
-cd cli
-make install
+git clone https://codeberg.org/caution/platform
+cd platform
+make install-cli
 ```
 
 ### Moderate Trust
@@ -63,8 +63,8 @@ more information on these practices.
 1. Clone repo
 
    ```sh
-   git clone https://codeberg.org/caution/cli
-   cd cli
+   git clone https://codeberg.org/caution/platform
+   cd platform
    ```
 
 2. Review and import signing keys
@@ -85,7 +85,7 @@ more information on these practices.
 3. Verify signatures
 
    ```sh
-   make verify
+   make verify-cli
    ```
 
    Note: See Trust section below for expected keys/signers
@@ -93,7 +93,7 @@ more information on these practices.
 4. Install binary
 
    ```sh
-   make install
+   make install-cli
    ```
 
 ### Zero Trust
@@ -109,8 +109,8 @@ to attempt to force one or more of us to tamper with the software.
 1. Clone repo
 
    ```sh
-   git clone https://codeberg.org/caution/cli
-   cd cli
+   git clone https://codeberg.org/caution/platform
+   cd platform
    ```
 
 2. Review source
@@ -121,7 +121,7 @@ to attempt to force one or more of us to tamper with the software.
 3. Reproduce binaries
 
    ```sh
-   make reproduce
+   make reproduce-cli
    ```
 
    Note: See Trust section below for expected keys/signers
@@ -129,7 +129,7 @@ to attempt to force one or more of us to tamper with the software.
 4. Install binaries
 
    ```sh
-   make install
+   make install-cli
    ```
 
 5. Upload signature (optional)
@@ -139,8 +139,8 @@ to attempt to force one or more of us to tamper with the software.
    we have public evidence third parties are checking our work.
 
    ```sh
-   make sign
-   git add dist/manifest.*.asc && git commit -m "Co-sign release"
+   make sign-cli
+   git add dist/cli/manifest.*.asc && git commit -m "Co-sign release"
    # Submit a pull request with your signature
    ```
 
@@ -175,7 +175,7 @@ To address both problems we take the following steps:
 To learn who signed the current release run:
 
 ```sh
-make verify
+make verify-cli
 ```
 
 Commits will be signed by at least one of the keys under the signers section
