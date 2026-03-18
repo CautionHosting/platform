@@ -8,6 +8,7 @@ members = [
     "src/email-service",
     "src/enclave-builder",
     "src/cli",
+    "src/metering",
 ]
 resolver = "2"
 
