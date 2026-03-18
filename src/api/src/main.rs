@@ -1400,11 +1400,12 @@ async fn proxy_attestation(
         .build()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create HTTP client: {}", e)))?;
 
-    // Use domain for HTTPS when available, fall back to HTTP by IP
+    // Always use HTTPS — domain gets Let's Encrypt, IP gets self-signed cert
+    // (danger_accept_invalid_certs handles the self-signed case)
     let attestation_url = if let Some(ref domain) = resource.1 {
         format!("https://{}/attestation", domain)
     } else {
-        format!("http://{}/attestation", public_ip)
+        format!("https://{}/attestation", public_ip)
     };
     tracing::info!("Proxying attestation request to {}", attestation_url);
 
