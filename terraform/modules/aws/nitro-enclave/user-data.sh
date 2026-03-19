@@ -61,6 +61,10 @@ echo "Starting vsock network proxy..."
 
 echo 1 > /proc/sys/net/ipv4/ip_forward
 
+# Detect primary network interface dynamically
+DEFAULT_IFACE=$(ip route show default | awk '{print $5}' | head -1)
+echo "Detected primary network interface: $DEFAULT_IFACE"
+
 ip tuntap add mode tap name enclave0
 ip addr add 10.0.100.1/24 dev enclave0
 ip link set enclave0 up
@@ -69,9 +73,9 @@ socat TUN,tun-type=tap,iff-no-pi,tun-name=enclave0 VSOCK-LISTEN:3,fork,reuseaddr
 SOCAT_PID=$!
 echo "VSock bridge started (PID: $SOCAT_PID)"
 
-iptables -t nat -A POSTROUTING -s 10.0.100.0/24 -o eth0 -j MASQUERADE
-iptables -A FORWARD -i enclave0 -o eth0 -j ACCEPT
-iptables -A FORWARD -i eth0 -o enclave0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -t nat -A POSTROUTING -s 10.0.100.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
+iptables -A FORWARD -i enclave0 -o "$DEFAULT_IFACE" -j ACCEPT
+iptables -A FORWARD -i "$DEFAULT_IFACE" -o enclave0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 
 echo "NAT rules configured"
 
