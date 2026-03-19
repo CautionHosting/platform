@@ -25,6 +25,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+futures = "0.3"
 
 # Webhook signature verification
 hmac = { workspace = true }
