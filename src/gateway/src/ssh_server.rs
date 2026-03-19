@@ -152,7 +152,7 @@ impl russh::server::Handler for SshSession {
                 }
                 Err(e) => {
                     tracing::error!("Failed to resolve user for app: {:?}", e);
-                    session.extended_data(channel, 1, "remote: error: Internal error, please try again later.\n".as_bytes().into());
+                    session.extended_data(channel, 1, "remote: error: Internal error, please try again later.\n".as_bytes().to_vec().into());
                     session.exit_status_request(channel, 1);
                     session.close(channel);
                     return Ok(());

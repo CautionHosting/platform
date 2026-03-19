@@ -10,7 +10,6 @@ use axum::{
     routing::{get, post, put, patch, delete},
     Json, Router,
 };
-use futures::stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgPoolOptions, PgPool, FromRow};
@@ -130,7 +129,7 @@ async fn auth_middleware(
             return Err((StatusCode::UNAUTHORIZED, "Internal service authentication not configured".to_string()));
         };
 
-        if !provided_secret.as_bytes().ct_eq(configured_secret.as_bytes()).into() {
+        if !bool::from(provided_secret.as_bytes().ct_eq(configured_secret.as_bytes())) {
             tracing::warn!("Auth middleware: internal service auth rejected - invalid secret");
             return Err((StatusCode::UNAUTHORIZED, "Invalid internal service secret".to_string()));
         }
@@ -2479,7 +2478,7 @@ async fn deploy_logic(
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to extract repository".to_string()));
     }
 
-    let containerfile_path = format!("{}/{}", work_dir, containerfile);
+    let _containerfile_path = format!("{}/{}", work_dir, containerfile);
 
     let enclave_config = types::EnclaveConfig {
         binary_path: build_config.binary.clone().unwrap_or_else(|| "/app".to_string()),
@@ -2490,8 +2489,8 @@ async fn deploy_logic(
         ports: build_config.ports.clone(),
     };
 
-    let prebuilt_eif_path = format!("{}/nitro.eif", work_dir);
-    let prebuilt_pcrs_path = format!("{}/nitro.pcrs", work_dir);
+    let _prebuilt_eif_path = format!("{}/nitro.eif", work_dir);
+    let _prebuilt_pcrs_path = format!("{}/nitro.pcrs", work_dir);
 
     let cached_eif_path = format!("{}/{}-{}.eif", cache_dir_str, app_id_str, commit_sha);
     let cached_pcrs_path = format!("{}/{}-{}.pcrs", cache_dir_str, app_id_str, commit_sha);
