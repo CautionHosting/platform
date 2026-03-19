@@ -87,19 +87,43 @@ async fn main() -> Result<()> {
         .unwrap_or(300);
 
     tokio::spawn(async move {
-        run_collection_loop(collection_state, collection_interval_secs).await;
+        loop {
+            let result = std::panic::AssertUnwindSafe(
+                run_collection_loop(collection_state.clone(), collection_interval_secs)
+            );
+            if let Err(e) = futures::FutureExt::catch_unwind(result).await {
+                tracing::error!("Collection loop panicked: {:?}. Restarting in 60s...", e);
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+        }
     });
 
     // Start monthly billing cycle (checks daily, runs at month-end)
     let billing_state = state.clone();
     tokio::spawn(async move {
-        run_monthly_billing_loop(billing_state).await;
+        loop {
+            let result = std::panic::AssertUnwindSafe(
+                run_monthly_billing_loop(billing_state.clone())
+            );
+            if let Err(e) = futures::FutureExt::catch_unwind(result).await {
+                tracing::error!("Monthly billing loop panicked: {:?}. Restarting in 60s...", e);
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+        }
     });
 
     // Start dunning enforcement loop (checks every hour)
     let dunning_state = state.clone();
     tokio::spawn(async move {
-        run_dunning_loop(dunning_state).await;
+        loop {
+            let result = std::panic::AssertUnwindSafe(
+                run_dunning_loop(dunning_state.clone())
+            );
+            if let Err(e) = futures::FutureExt::catch_unwind(result).await {
+                tracing::error!("Dunning loop panicked: {:?}. Restarting in 60s...", e);
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+        }
     });
 
     let enable_test_endpoints = std::env::var("ENABLE_TEST_ENDPOINTS")
@@ -400,9 +424,6 @@ async fn run_monthly_billing_loop(state: Arc<AppState>) {
     // Check once per hour
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
 
-    // Track if we've already billed this month
-    let mut last_billed_month: Option<time::Month> = None;
-
     loop {
         interval.tick().await;
 
@@ -419,8 +440,15 @@ async fn run_monthly_billing_loop(state: Arc<AppState>) {
         let is_last_day = is_last_day_of_month(today);
         let is_first_of_month = today.day() <= 3; // Fallback: run in first 3 days if we missed month-end
 
-        // Only bill once per month
-        let already_billed = last_billed_month == Some(current_month);
+        // Check database for whether we've already billed this month (survives restarts)
+        let year_month = format!("{}-{:02}", now.year(), current_month as u8);
+        let already_billed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM usage_records WHERE resource_id LIKE 'monthly-%' AND recorded_at >= $1::timestamptz)"
+        )
+        .bind(format!("{}-01T00:00:00Z", year_month))
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(false);
 
         if (is_last_day || (is_first_of_month && !already_billed)) && !already_billed {
             tracing::info!("Running monthly billing cycle for {}", current_month);
@@ -428,7 +456,6 @@ async fn run_monthly_billing_loop(state: Arc<AppState>) {
             if let Err(e) = run_monthly_billing_cycle(&state).await {
                 tracing::error!("Monthly billing cycle failed: {}", e);
             } else {
-                last_billed_month = Some(current_month);
                 tracing::info!("Monthly billing cycle completed for {}", current_month);
             }
         }
@@ -598,11 +625,24 @@ async fn run_monthly_billing_cycle(state: &AppState) -> Result<()> {
             continue;
         }
 
-        // Look up the org's Paddle customer ID
+        // Resolve the actual user_id from the org for billing_config lookup
+        let billing_user_id: Option<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1"
+        )
+        .bind(user_id)
+        .fetch_optional(&state.pool)
+        .await?;
+
+        let Some(billing_user_id) = billing_user_id else {
+            tracing::warn!("No user found for org {}, skipping Paddle charge", org_id);
+            continue;
+        };
+
+        // Look up the user's Paddle customer ID
         let paddle_customer = sqlx::query(
             "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1",
         )
-        .bind(user_id)
+        .bind(billing_user_id)
         .fetch_optional(&state.pool)
         .await?;
 
@@ -709,11 +749,11 @@ async fn run_subscription_billing(state: &AppState) -> Result<()> {
         let mut event_status = if remainder_cents == 0 { "credits_covered" } else { "pending" };
 
         if remainder_cents > 0 {
-            // Look up Paddle customer ID
+            // Look up Paddle customer ID (billing_config is keyed by user_id, not org_id)
             let paddle_customer_id: Option<String> = sqlx::query(
                 "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
             )
-            .bind(&org_id)
+            .bind(user_id)
             .fetch_optional(&state.pool)
             .await?
             .and_then(|row| row.get::<Option<String>, _>("paddle_customer_id"));

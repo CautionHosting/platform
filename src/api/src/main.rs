@@ -347,7 +347,7 @@ async fn internal_auth_middleware(
         return Err((StatusCode::UNAUTHORIZED, "Internal service authentication not configured".to_string()));
     };
 
-    if provided_secret != configured_secret.as_str() {
+    if !bool::from(provided_secret.as_bytes().ct_eq(configured_secret.as_bytes())) {
         return Err((StatusCode::UNAUTHORIZED, "Invalid internal service secret".to_string()));
     }
 
@@ -2369,11 +2369,11 @@ async fn get_paddle_client_token(
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
 
-    // Get the org's Paddle customer ID if one exists
+    // Get the user's Paddle customer ID if one exists
     let paddle_customer_id: Option<String> = sqlx::query_scalar(
         "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
     )
-    .bind(org_id)
+    .bind(auth.user_id)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -2444,12 +2444,12 @@ async fn paddle_transaction_completed(
                  VALUES ($1, $2)
                  ON CONFLICT (user_id) DO UPDATE SET paddle_customer_id = $2"
             )
-            .bind(org_id)
+            .bind(auth.user_id)
             .bind(&customer_id)
             .execute(&state.db)
             .await;
 
-            tracing::info!("Stored paddle_customer_id {} for org {}", customer_id, org_id);
+            tracing::info!("Stored paddle_customer_id {} for user {}", customer_id, auth.user_id);
         }
     }
 
@@ -2554,6 +2554,32 @@ async fn purchase_credits(
     // Determine the transaction_id — either provided by frontend (checkout flow)
     // or created server-side using saved payment method
     let transaction_id = if let Some(txn_id) = req.transaction_id {
+        // Verify the transaction with Paddle before accepting
+        let paddle_api_key = state.paddle_api_key.as_ref()
+            .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "Paddle API not configured".to_string()))?;
+
+        let client = reqwest::Client::new();
+        let verify_resp = client
+            .get(format!("{}/transactions/{}", state.paddle_api_url, txn_id))
+            .header("Authorization", format!("Bearer {}", paddle_api_key))
+            .send()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to verify transaction: {}", e)))?;
+
+        if !verify_resp.status().is_success() {
+            tracing::warn!("Paddle transaction verification failed for txn_id={}: {}", txn_id, verify_resp.status());
+            return Err((StatusCode::BAD_REQUEST, "Invalid transaction ID".to_string()));
+        }
+
+        let verify_data: serde_json::Value = verify_resp.json().await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to parse Paddle response: {}", e)))?;
+
+        let txn_status = verify_data["data"]["status"].as_str().unwrap_or("");
+        if txn_status != "completed" && txn_status != "paid" && txn_status != "billed" {
+            tracing::warn!("Paddle transaction {} has status '{}', not completed", txn_id, txn_status);
+            return Err((StatusCode::PAYMENT_REQUIRED, format!("Transaction not completed (status: {})", txn_status)));
+        }
+
         txn_id
     } else {
         // Try to charge the card on file via Paddle API
@@ -2564,7 +2590,7 @@ async fn purchase_credits(
         let mut paddle_customer_id: Option<String> = sqlx::query_scalar(
             "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
         )
-        .bind(org_id)
+        .bind(auth.user_id)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -2592,7 +2618,7 @@ async fn purchase_credits(
                          VALUES ($1, $2)
                          ON CONFLICT (user_id) DO UPDATE SET paddle_customer_id = $2"
                     )
-                    .bind(org_id)
+                    .bind(auth.user_id)
                     .bind(&cid)
                     .execute(&state.db)
                     .await;
@@ -2803,18 +2829,32 @@ async fn redeem_credit_code(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
+    // Apply credits within the same transaction so redemption + credit are atomic
+    let new_balance: i64 = sqlx::query_scalar(
+        "INSERT INTO wallet_balance (user_id, balance_cents)
+         VALUES ($1, $2)
+         ON CONFLICT (user_id) DO UPDATE SET balance_cents = wallet_balance.balance_cents + $2
+         RETURNING balance_cents"
+    )
+    .bind(auth.user_id)
+    .bind(amount_cents)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to apply credit: {}", e)))?;
+
+    sqlx::query(
+        "INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description)
+         VALUES ($1, $2, $3, 'code_redemption', 'Redeemed credit code')"
+    )
+    .bind(auth.user_id)
+    .bind(amount_cents)
+    .bind(new_balance)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record ledger entry: {}", e)))?;
+
     tx.commit().await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-
-    let new_balance = apply_credit(
-        &state.db,
-        auth.user_id,
-        amount_cents,
-        "code_redemption",
-        "Redeemed credit code",
-        None,
-        None,
-    ).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to apply credit: {}", e)))?;
 
     tracing::info!(
         "Credit code redeemed: user={}, code_id={}, +{} cents, new_balance={}",
@@ -3017,29 +3057,10 @@ async fn subscribe(
     let price_per_cycle = calculate_cycle_price(annual_cents, &req.billing_period, &state.pricing.billing_discounts);
     let period_end = calculate_period_end(now, &req.billing_period);
 
-    // Insert subscription
-    let sub_id: (Uuid,) = sqlx::query_as(
-        "INSERT INTO subscriptions (user_id, organization_id, tier, billing_period, max_vcpus, max_apps,
-         price_cents_per_cycle, current_period_end, next_billing_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
-         RETURNING id"
-    )
-    .bind(auth.user_id)
-    .bind(org_id)
-    .bind(tier.id)
-    .bind(&req.billing_period)
-    .bind(tier.max_vcpus)
-    .bind(tier.max_apps)
-    .bind(price_per_cycle)
-    .bind(period_end)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create subscription: {}", e)))?;
-
     // Charge first period: credits first, then Paddle for remainder
     let total_charge = price_per_cycle;
 
-    // Try credit deduction via wallet
+    // Check credit balance
     let balance_cents: i64 = sqlx::query_scalar(
         "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
     )
@@ -3052,24 +3073,15 @@ async fn subscribe(
     let credits_to_apply = balance_cents.min(total_charge).max(0);
     let remainder_cents = total_charge - credits_to_apply;
 
-    if credits_to_apply > 0 {
-        let _ = apply_credit(
-            &state.db, auth.user_id, -credits_to_apply,
-            "billing_deduction",
-            &format!("Subscription: {} {}", tier.name, req.billing_period),
-            None, None,
-        ).await;
-    }
-
+    // If Paddle charge is needed, do it BEFORE creating the subscription
     let mut paddle_txn_id: Option<String> = None;
-    let mut event_status = if remainder_cents == 0 { "credits_covered" } else { "pending" };
+    let event_status;
 
     if remainder_cents > 0 {
-        // Charge via Paddle
         let paddle_customer_id: Option<String> = sqlx::query_scalar(
             "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
         )
-        .bind(org_id)
+        .bind(auth.user_id)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -3111,19 +3123,79 @@ async fn subscribe(
                     let resp: serde_json::Value = response.json().await
                         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Parse error: {}", e)))?;
                     paddle_txn_id = resp["data"]["id"].as_str().map(|s| s.to_string());
+                    event_status = "paid";
                 } else {
                     let status = response.status();
-                    tracing::error!("Paddle subscription charge failed: {}", status);
-                    event_status = "payment_failed";
+                    let err_body = response.text().await.unwrap_or_default();
+                    tracing::error!("Paddle subscription charge failed: {} - {}", status, err_body);
+                    return Err((StatusCode::PAYMENT_REQUIRED, format!("Payment failed: {}", status)));
                 }
+            } else {
+                return Err((StatusCode::SERVICE_UNAVAILABLE, "Paddle API not configured".to_string()));
             }
         } else {
             return Err((StatusCode::PAYMENT_REQUIRED, "no_payment_method".to_string()));
         }
+    } else {
+        event_status = "credits_covered";
+    }
+
+    // Payment succeeded (or fully covered by credits) — now create subscription in a transaction
+    let mut tx = state.db.begin().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let sub_id: (Uuid,) = sqlx::query_as(
+        "INSERT INTO subscriptions (user_id, organization_id, tier, billing_period, max_vcpus, max_apps,
+         price_cents_per_cycle, current_period_end, next_billing_at, last_billed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, NOW())
+         RETURNING id"
+    )
+    .bind(auth.user_id)
+    .bind(org_id)
+    .bind(tier.id)
+    .bind(&req.billing_period)
+    .bind(tier.max_vcpus)
+    .bind(tier.max_apps)
+    .bind(price_per_cycle)
+    .bind(period_end)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create subscription: {}", e)))?;
+
+    // Deduct credits within the transaction
+    if credits_to_apply > 0 {
+        sqlx::query(
+            "UPDATE wallet_balance SET balance_cents = balance_cents - $1 WHERE user_id = $2"
+        )
+        .bind(credits_to_apply)
+        .bind(auth.user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to deduct credits: {}", e)))?;
+
+        let new_balance: i64 = sqlx::query_scalar(
+            "SELECT balance_cents FROM wallet_balance WHERE user_id = $1"
+        )
+        .bind(auth.user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+        sqlx::query(
+            "INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description)
+             VALUES ($1, $2, $3, 'billing_deduction', $4)"
+        )
+        .bind(auth.user_id)
+        .bind(-credits_to_apply)
+        .bind(new_balance)
+        .bind(format!("Subscription: {} {}", tier.name, req.billing_period))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record ledger: {}", e)))?;
     }
 
     // Record billing event
-    let _ = sqlx::query(
+    sqlx::query(
         "INSERT INTO subscription_billing_events
          (subscription_id, user_id, billing_period_start, billing_period_end, tier,
           base_amount_cents, total_amount_cents, credits_applied_cents, charged_amount_cents,
@@ -3141,18 +3213,13 @@ async fn subscribe(
     .bind(remainder_cents)
     .bind(&paddle_txn_id)
     .bind(event_status)
-    .execute(&state.db)
-    .await;
-
-    // Update last_billed_at
-    let _ = sqlx::query("UPDATE subscriptions SET last_billed_at = NOW() WHERE id = $1")
-        .bind(sub_id.0)
-        .execute(&state.db)
-        .await;
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record billing event: {}", e)))?;
 
     // Record invoice
     let invoice_number = format!("INV-SUB-{}", &sub_id.0.to_string()[..8]);
-    let _ = sqlx::query(
+    sqlx::query(
         "INSERT INTO invoices (paddle_transaction_id, user_id, invoice_number, amount_cents, currency, status, payment_status, billing_provider, created_at)
          VALUES ($1, $2, $3, $4, 'USD', 'finalized', $5, $6, NOW())"
     )
@@ -3160,10 +3227,14 @@ async fn subscribe(
     .bind(auth.user_id)
     .bind(&invoice_number)
     .bind(total_charge)
-    .bind(if remainder_cents == 0 { "credits_applied" } else { "pending" })
+    .bind(if remainder_cents == 0 { "credits_applied" } else { "paid" })
     .bind(if remainder_cents == 0 { "credits" } else { "paddle" })
-    .execute(&state.db)
-    .await;
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record invoice: {}", e)))?;
+
+    tx.commit().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to commit: {}", e)))?;
 
     tracing::info!(
         "Subscription created: sub={}, tier={}, org={}, charge={} cents (credits={}, paddle={})",
@@ -3288,6 +3359,74 @@ async fn add_subscription_capacity(
     let new_app_blocks = cur_app_blocks + add_app;
     let new_extra_price = cur_extra_price + additional_price;
 
+    // Collect payment BEFORE updating capacity
+    let mut credits_applied = 0i64;
+    if prorated_charge > 0 {
+        let balance: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+        )
+        .bind(auth.user_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+        .unwrap_or(0);
+
+        credits_applied = balance.min(prorated_charge).max(0);
+        let remainder = prorated_charge - credits_applied;
+
+        if remainder > 0 {
+            // Charge via Paddle — must succeed before we update capacity
+            let paddle_customer_id: Option<String> = sqlx::query_scalar(
+                "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
+            )
+            .bind(auth.user_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+            .flatten();
+
+            let customer_id = paddle_customer_id
+                .ok_or_else(|| (StatusCode::PAYMENT_REQUIRED, "no_payment_method".to_string()))?;
+            let api_key = state.paddle_api_key.as_ref()
+                .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "Paddle API not configured".to_string()))?;
+
+            let client = reqwest::Client::new();
+            let amount_str = remainder.to_string();
+            let body = serde_json::json!({
+                "customer_id": customer_id,
+                "items": [{
+                    "quantity": 1,
+                    "price": {
+                        "description": format!("Extra capacity blocks (prorated)"),
+                        "unit_price": { "amount": amount_str, "currency_code": "USD" },
+                        "product": { "name": "Extra Capacity Block", "tax_category": "standard" }
+                    }
+                }],
+                "collection_mode": "automatic",
+            });
+
+            let response = client
+                .post(format!("{}/transactions", state.paddle_api_url))
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Paddle API error: {}", e)))?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let err_body = response.text().await.unwrap_or_default();
+                tracing::error!("Paddle capacity charge failed: {} - {}", status, err_body);
+                return Err((StatusCode::PAYMENT_REQUIRED, format!("Payment failed: {}", status)));
+            }
+        }
+    }
+
+    // Payment succeeded — now update capacity and apply credits atomically
+    let mut tx = state.db.begin().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
     sqlx::query(
         "UPDATE subscriptions SET
          extra_vcpu_blocks = $1, extra_app_blocks = $2,
@@ -3302,69 +3441,42 @@ async fn add_subscription_capacity(
     .bind(add_vcpu * 64)
     .bind(add_app * 10)
     .bind(sub_id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
-    // Charge prorated amount for rest of current period
-    if prorated_charge > 0 {
-        // Try credits first
-        let balance: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+    if credits_applied > 0 {
+        sqlx::query(
+            "UPDATE wallet_balance SET balance_cents = balance_cents - $1 WHERE user_id = $2"
+        )
+        .bind(credits_applied)
+        .bind(auth.user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to deduct credits: {}", e)))?;
+
+        let new_balance: i64 = sqlx::query_scalar(
+            "SELECT balance_cents FROM wallet_balance WHERE user_id = $1"
         )
         .bind(auth.user_id)
-        .fetch_optional(&state.db)
+        .fetch_one(&mut *tx)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
-        .unwrap_or(0);
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
-        let credits_to_apply = balance.min(prorated_charge).max(0);
-        if credits_to_apply > 0 {
-            let _ = apply_credit(
-                &state.db, auth.user_id, -credits_to_apply,
-                "billing_deduction",
-                &format!("Subscription capacity addon (prorated)"),
-                None, None,
-            ).await;
-        }
-
-        let remainder = prorated_charge - credits_to_apply;
-        if remainder > 0 {
-            // Charge via Paddle (similar to subscribe)
-            let paddle_customer_id: Option<String> = sqlx::query_scalar(
-                "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
-            )
-            .bind(org_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
-            .flatten();
-
-            if let (Some(customer_id), Some(ref api_key)) = (paddle_customer_id, &state.paddle_api_key) {
-                let client = reqwest::Client::new();
-                let amount_str = remainder.to_string();
-                let body = serde_json::json!({
-                    "customer_id": customer_id,
-                    "items": [{
-                        "quantity": 1,
-                        "price": {
-                            "description": format!("Extra capacity blocks (prorated)"),
-                            "unit_price": { "amount": amount_str, "currency_code": "USD" },
-                            "product": { "name": "Extra Capacity Block", "tax_category": "standard" }
-                        }
-                    }],
-                    "collection_mode": "automatic",
-                });
-                let _ = client
-                    .post(format!("{}/transactions", state.paddle_api_url))
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .header("Content-Type", "application/json")
-                    .json(&body)
-                    .send()
-                    .await;
-            }
-        }
+        sqlx::query(
+            "INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description)
+             VALUES ($1, $2, $3, 'billing_deduction', 'Subscription capacity addon (prorated)')"
+        )
+        .bind(auth.user_id)
+        .bind(-credits_applied)
+        .bind(new_balance)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record ledger: {}", e)))?;
     }
+
+    tx.commit().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to commit: {}", e)))?;
 
     tracing::info!("Added {} vCPU blocks + {} app blocks to sub {}, prorated charge: {} cents",
         add_vcpu, add_app, sub_id, prorated_charge);

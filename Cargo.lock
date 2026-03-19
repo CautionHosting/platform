@@ -3222,6 +3222,7 @@ dependencies = [
  "axum",
  "chrono",
  "dotenvy",
+ "futures",
  "hex",
  "hmac",
  "reqwest 0.12.28",
