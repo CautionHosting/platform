@@ -129,6 +129,9 @@ pub struct EnclaveConfig {
 
     #[serde(default)]
     pub ports: Vec<u16>,
+
+    #[serde(default)]
+    pub http_port: Option<u16>,
 }
 
 fn default_memory_mb() -> u32 {
@@ -148,6 +151,7 @@ impl Default for EnclaveConfig {
             cpus: 2,
             debug: false,
             ports: Vec::new(),
+            http_port: None,
         }
     }
 }
@@ -209,6 +213,8 @@ pub struct BuildConfig {
     #[serde(default)]
     pub ports: Vec<u16>,
 
+    pub http_port: Option<u16>,
+
     #[serde(default)]
     pub ssh_keys: Vec<String>,
 
@@ -237,6 +243,7 @@ impl Default for BuildConfig {
             debug: false,
             no_cache: false,
             ports: Vec::new(),
+            http_port: None,
             ssh_keys: Vec::new(),
             domain: None,
             managed_on_prem: None,
@@ -261,6 +268,7 @@ impl BuildConfig {
         let mut no_cache = None;
         let mut e2e = None;
         let mut ports: Vec<u16> = Vec::new();
+        let mut http_port: Option<u16> = None;
         let mut ssh_keys: Vec<String> = Vec::new();
         let mut domain: Option<String> = None;
 
@@ -386,6 +394,17 @@ impl BuildConfig {
                             tracing::info!("Parsed ports from Procfile: {:?}", ports);
                         }
                     }
+                    "http_port" => {
+                        match value.parse::<u16>() {
+                            Ok(port) if port > 0 => {
+                                http_port = Some(port);
+                                tracing::info!("Parsed http_port from Procfile: {}", port);
+                            }
+                            _ => {
+                                tracing::warn!("Invalid http_port '{}' in Procfile, ignoring", value);
+                            }
+                        }
+                    }
                     "ssh_keys" | "ssh_key" => {
                         if !value.is_empty() {
                             let unquoted = value.trim_matches('"').trim_matches('\'').trim();
@@ -463,6 +482,14 @@ impl BuildConfig {
             }
         }
 
+        if let Some(hp) = http_port {
+            if !ports.contains(&hp) {
+                return Err(format!(
+                    "http_port {} must also be listed in ports", hp
+                ));
+            }
+        }
+
         let managed_on_prem_config = if managed_on_prem {
             let platform = platform.ok_or("managed_on_prem requires 'platform' to be specified")?;
 
@@ -499,6 +526,7 @@ impl BuildConfig {
             debug: debug.unwrap_or(false),
             no_cache: no_cache.unwrap_or(false),
             ports,
+            http_port,
             ssh_keys,
             domain,
             managed_on_prem: managed_on_prem_config,

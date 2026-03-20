@@ -2649,6 +2649,7 @@ async fn deploy_logic(
         "cpus": enclave_config.cpus,
         "debug": enclave_config.debug,
         "ports": enclave_config.ports,
+        "http_port": enclave_config.http_port,
     });
 
     let memory_bytes = (enclave_config.memory_mb as u64) * 1024 * 1024;
@@ -2773,6 +2774,7 @@ async fn deploy_logic(
         cpu_count: enclave_config.cpus,
         debug_mode: enclave_config.debug,
         ports: enclave_config.ports.clone(),
+        http_port: enclave_config.http_port,
         ssh_keys: build_config.ssh_keys.clone(),
         domain: build_config.domain.clone(),
         credentials,

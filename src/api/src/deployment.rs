@@ -72,6 +72,7 @@ pub struct NitroDeploymentRequest {
     pub cpu_count: u32,
     pub debug_mode: bool,
     pub ports: Vec<u16>,
+    pub http_port: Option<u16>,
     pub ssh_keys: Vec<String>,
     pub domain: Option<String>,
     #[serde(skip)]
@@ -537,10 +538,10 @@ fn run_tofu_init(work_dir: &Path, credentials: Option<&AwsCredentials>) -> Resul
 }
 
 fn run_tofu_apply(work_dir: &Path, resource_name: &str, credentials: Option<&AwsCredentials>) -> Result<()> {
-    run_tofu_apply_with_vars(work_dir, resource_name, &[], credentials)
+    run_tofu_apply_with_vars(work_dir, resource_name, &[], None, credentials)
 }
 
-fn run_tofu_apply_with_vars(work_dir: &Path, resource_name: &str, ports: &[u16], credentials: Option<&AwsCredentials>) -> Result<()> {
+fn run_tofu_apply_with_vars(work_dir: &Path, resource_name: &str, ports: &[u16], http_port: Option<u16>, credentials: Option<&AwsCredentials>) -> Result<()> {
     tracing::info!("Running tofu apply for {}...", resource_name);
 
     let mut args = vec!["apply", "-auto-approve", "-no-color"];
@@ -555,9 +556,12 @@ fn run_tofu_apply_with_vars(work_dir: &Path, resource_name: &str, ports: &[u16],
     args.push("-var");
     let ports_var_ref: &str = &ports_var;
 
+    let http_port_var = format!("http_port={}", http_port.unwrap_or(0));
+
     let mut cmd = Command::new("tofu");
     cmd.args(&args)
         .arg(ports_var_ref)
+        .arg("-var").arg(&http_port_var)
         .current_dir(work_dir);
 
     if let Some(creds) = credentials {
@@ -585,6 +589,7 @@ fn run_tofu_apply_with_provider_creds(
     work_dir: &Path,
     resource_name: &str,
     ports: &[u16],
+    http_port: Option<u16>,
     credentials: Option<&AwsCredentials>,
 ) -> Result<()> {
     tracing::info!("Running tofu apply for {}...", resource_name);
@@ -602,6 +607,7 @@ fn run_tofu_apply_with_provider_creds(
         "ports=[]".to_string()
     };
     cmd.arg("-var").arg(&ports_var);
+    cmd.arg("-var").arg(format!("http_port={}", http_port.unwrap_or(0)));
 
     if let Some(creds) = credentials {
         tracing::info!("Passing user credentials to AWS provider via Terraform variables");
@@ -1012,7 +1018,7 @@ async fn provision_nitro_enclave(
 
     // Pass user credentials as Terraform variables, not env vars
     // This keeps Caution's creds for S3 state but uses user's creds for AWS provider
-    run_tofu_apply_with_provider_creds(work_dir, &request.resource_name, &request.ports, request.credentials.as_ref())
+    run_tofu_apply_with_provider_creds(work_dir, &request.resource_name, &request.ports, request.http_port, request.credentials.as_ref())
         .context("Failed to run tofu apply")?;
 
     let result = get_tofu_outputs(work_dir)
@@ -1059,7 +1065,7 @@ async fn provision_managed_onprem(
     run_tofu_init(work_dir, None)
         .context("Failed to run tofu init")?;
 
-    run_tofu_apply_with_provider_creds(work_dir, &request.resource_name, &request.ports, request.credentials.as_ref())
+    run_tofu_apply_with_provider_creds(work_dir, &request.resource_name, &request.ports, request.http_port, request.credentials.as_ref())
         .context("Failed to run tofu apply")?;
 
     let tf_outputs = get_managed_onprem_tofu_outputs(work_dir)
@@ -1366,6 +1372,11 @@ variable "ports" {{
   default = []
 }}
 
+variable "http_port" {{
+  type    = number
+  default = 0
+}}
+
 # Security group for the enclave
 resource "aws_security_group" "enclave" {{
   name_prefix = "enclave-{short_id}-"
@@ -1450,6 +1461,7 @@ resource "aws_instance" "enclave" {{
     cpu_count   = {cpu_count}
     debug_mode  = "{debug_mode}"
     ports       = var.ports
+    http_port   = var.http_port
     ssh_keys    = {ssh_keys_json}
     domain      = "{domain}"
   }}))
@@ -1584,6 +1596,11 @@ variable "ports" {{
   default = []
 }}
 
+variable "http_port" {{
+  type    = number
+  default = 0
+}}
+
 locals {{
   deployment_tag = "{deployment_id}"
   scope_tag_key  = "caution:deployment-id"
@@ -1697,6 +1714,7 @@ resource "aws_launch_template" "enclave" {{
     cpu_count   = {cpu_count}
     debug_mode  = "{debug_mode}"
     ports       = var.ports
+    http_port   = var.http_port
     ssh_keys    = {ssh_keys_json}
     domain      = "{domain}"
   }}))

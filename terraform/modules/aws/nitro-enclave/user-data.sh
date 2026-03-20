@@ -209,6 +209,12 @@ useradd --system --home /var/lib/caddy --shell /usr/sbin/nologin caddy || true
 mkdir -p /etc/caddy /var/lib/caddy /var/log/caddy
 chown caddy:caddy /var/lib/caddy /var/log/caddy
 
+%{ if http_port != 0 ~}
+CADDY_DEFAULT_UPSTREAM="reverse_proxy localhost:${http_port}"
+%{ else ~}
+CADDY_DEFAULT_UPSTREAM="respond 404"
+%{ endif ~}
+
 %{ if domain != "" ~}
 echo "Configuring Caddy with Let's Encrypt for ${domain}"
 cat > /etc/caddy/Caddyfile <<EOF
@@ -225,7 +231,7 @@ https://${domain} {
     }
 
     handle {
-        reverse_proxy localhost:8080
+        $CADDY_DEFAULT_UPSTREAM
     }
 }
 
@@ -239,7 +245,7 @@ https://${domain} {
     }
 
     handle {
-        reverse_proxy localhost:8080
+        $CADDY_DEFAULT_UPSTREAM
     }
 }
 EOF
@@ -270,7 +276,7 @@ cat > /etc/caddy/Caddyfile <<EOF
     }
 
     handle {
-        reverse_proxy localhost:8080
+        $CADDY_DEFAULT_UPSTREAM
     }
 }
 
@@ -284,7 +290,7 @@ cat > /etc/caddy/Caddyfile <<EOF
     }
 
     handle {
-        reverse_proxy localhost:8080
+        $CADDY_DEFAULT_UPSTREAM
     }
 }
 EOF

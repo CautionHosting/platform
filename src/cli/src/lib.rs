@@ -850,6 +850,11 @@ impl ApiClient {
         }
     }
 
+    fn read_procfile_http_port(&self) -> Option<u16> {
+        self.read_procfile_field("http_port")
+            .and_then(|s| s.trim().parse::<u16>().ok())
+    }
+
     fn read_procfile_sources(&self) -> Vec<String> {
         self.read_procfile_field("app_sources")
             .or_else(|| self.read_procfile_field("app_source"))
@@ -2167,6 +2172,11 @@ build: docker build -t app .
                             .filter_map(|p| p.as_u64().map(|n| n.to_string()))
                             .collect();
                         println!("  Ports: {}", ports_str.join(", "));
+                    }
+                }
+                if let Some(http_port) = enclave_config.get("http_port").and_then(|v| v.as_u64()) {
+                    if http_port > 0 {
+                        println!("  HTTP Port: {}", http_port);
                     }
                 }
             }
