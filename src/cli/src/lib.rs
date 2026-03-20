@@ -1003,6 +1003,11 @@ build: docker build -t app .
     }
 
     fn git_url_to_archive_urls(&self, git_url: &str, commit: &str) -> Result<Vec<String>> {
+        // If the URL is already a direct archive URL, use it as-is
+        if git_url.contains("/archive/") && (git_url.ends_with(".tar.gz") || git_url.ends_with(".tar")) {
+            return Ok(vec![git_url.to_string()]);
+        }
+
         let (host, path) = if git_url.starts_with("git@") {
             let without_prefix = git_url.strip_prefix("git@")
                 .ok_or_else(|| anyhow::anyhow!("Invalid git URL format"))?;
