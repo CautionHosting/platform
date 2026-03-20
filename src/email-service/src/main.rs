@@ -369,16 +369,28 @@ async fn send_email_handler(
     }))
 }
 
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+     .replace('<', "&lt;")
+     .replace('>', "&gt;")
+     .replace('"', "&quot;")
+     .replace('\'', "&#x27;")
+}
+
 fn generate_invoice_email(data: &serde_json::Value) -> (String, String, String) {
-    let invoice_number = data["invoice_number"].as_str().unwrap_or("N/A");
-    let amount = data["amount"].as_str().unwrap_or("$0.00");
-    let date = data["date"].as_str().unwrap_or("N/A");
+    let invoice_number_raw = data["invoice_number"].as_str().unwrap_or("N/A");
+    let amount_raw = data["amount"].as_str().unwrap_or("$0.00");
+    let date_raw = data["date"].as_str().unwrap_or("N/A");
     let pdf_url = data["pdf_url"].as_str();
 
-    let subject = format!("Invoice {} - Caution", invoice_number);
+    let invoice_number = html_escape(invoice_number_raw);
+    let amount = html_escape(amount_raw);
+    let date = html_escape(date_raw);
+
+    let subject = format!("Invoice {} - Caution", invoice_number_raw);
 
     let pdf_link = pdf_url
-        .map(|url| format!(r#"<p><a href="{}" style="color: #3498db;">Download Invoice PDF</a></p>"#, url))
+        .map(|url| format!(r#"<p><a href="{}" style="color: #3498db;">Download Invoice PDF</a></p>"#, html_escape(url)))
         .unwrap_or_default();
 
     let html_body = format!(
@@ -437,17 +449,20 @@ fn generate_invoice_email(data: &serde_json::Value) -> (String, String, String) 
          If you have any questions, please contact support.\n\n\
          --\n\
          Caution Team",
-        invoice_number, invoice_number, date, amount
+        invoice_number_raw, invoice_number_raw, date_raw, amount_raw
     );
 
     (subject, html_body, text_body)
 }
 
 fn generate_payment_confirmation_email(data: &serde_json::Value) -> (String, String, String) {
-    let invoice_number = data["invoice_number"].as_str().unwrap_or("N/A");
-    let amount = data["amount"].as_str().unwrap_or("$0.00");
+    let invoice_number_raw = data["invoice_number"].as_str().unwrap_or("N/A");
+    let amount_raw = data["amount"].as_str().unwrap_or("$0.00");
 
-    let subject = format!("Payment Received - Invoice {}", invoice_number);
+    let invoice_number = html_escape(invoice_number_raw);
+    let amount = html_escape(amount_raw);
+
+    let subject = format!("Payment Received - Invoice {}", invoice_number_raw);
 
     let html_body = format!(
         r#"
@@ -498,17 +513,20 @@ fn generate_payment_confirmation_email(data: &serde_json::Value) -> (String, Str
          Your account is in good standing. Thank you for using Caution!\n\n\
          --\n\
          Caution Team",
-        invoice_number, amount
+        invoice_number_raw, amount_raw
     );
 
     (subject, html_body, text_body)
 }
 
 fn generate_payment_failure_email(data: &serde_json::Value) -> (String, String, String) {
-    let invoice_number = data["invoice_number"].as_str().unwrap_or("N/A");
-    let amount = data["amount"].as_str().unwrap_or("$0.00");
+    let invoice_number_raw = data["invoice_number"].as_str().unwrap_or("N/A");
+    let amount_raw = data["amount"].as_str().unwrap_or("$0.00");
 
-    let subject = format!("Payment Failed - Invoice {}", invoice_number);
+    let invoice_number = html_escape(invoice_number_raw);
+    let amount = html_escape(amount_raw);
+
+    let subject = format!("Payment Failed - Invoice {}", invoice_number_raw);
 
     let html_body = format!(
         r#"
@@ -568,18 +586,22 @@ fn generate_payment_failure_email(data: &serde_json::Value) -> (String, String, 
          If you believe this is an error, please contact support.\n\n\
          --\n\
          Caution Team",
-        invoice_number, amount
+        invoice_number_raw, amount_raw
     );
 
     (subject, html_body, text_body)
 }
 
 fn generate_insufficient_balance_email(data: &serde_json::Value) -> (String, String, String) {
-    let invoice_number = data["invoice_number"].as_str().unwrap_or("N/A");
-    let amount = data["amount"].as_str().unwrap_or("$0.00");
-    let topup_url = data["topup_url"].as_str().unwrap_or("https://caution.co/billing/topup");
+    let invoice_number_raw = data["invoice_number"].as_str().unwrap_or("N/A");
+    let amount_raw = data["amount"].as_str().unwrap_or("$0.00");
+    let topup_url_raw = data["topup_url"].as_str().unwrap_or("https://caution.co/billing/topup");
 
-    let subject = format!("Action Required: Insufficient Balance - Invoice {}", invoice_number);
+    let invoice_number = html_escape(invoice_number_raw);
+    let amount = html_escape(amount_raw);
+    let topup_url = html_escape(topup_url_raw);
+
+    let subject = format!("Action Required: Insufficient Balance - Invoice {}", invoice_number_raw);
 
     let html_body = format!(
         r#"
@@ -639,7 +661,7 @@ fn generate_insufficient_balance_email(data: &serde_json::Value) -> (String, Str
          Your services may be suspended if the balance is not replenished.\n\n\
          --\n\
          Caution Team",
-        invoice_number, amount, topup_url
+        invoice_number_raw, amount_raw, topup_url_raw
     );
 
     (subject, html_body, text_body)
@@ -647,7 +669,8 @@ fn generate_insufficient_balance_email(data: &serde_json::Value) -> (String, Str
 
 fn generate_suspension_warning_email(data: &serde_json::Value) -> (String, String, String) {
     let days_remaining = data["days_remaining"].as_i64().unwrap_or(4);
-    let amount = data["amount"].as_str().unwrap_or("$0.00");
+    let amount_raw = data["amount"].as_str().unwrap_or("$0.00");
+    let amount = html_escape(amount_raw);
 
     let subject = "Action Required: Your services will be suspended".to_string();
 
@@ -700,14 +723,15 @@ fn generate_suspension_warning_email(data: &serde_json::Value) -> (String, Strin
          your services will be automatically restored.\n\n\
          --\n\
          Caution Team",
-        amount, days_remaining
+        amount_raw, days_remaining
     );
 
     (subject, html_body, text_body)
 }
 
 fn generate_suspension_notice_email(data: &serde_json::Value) -> (String, String, String) {
-    let amount = data["amount"].as_str().unwrap_or("$0.00");
+    let amount_raw = data["amount"].as_str().unwrap_or("$0.00");
+    let amount = html_escape(amount_raw);
     let app_count = data["app_count"].as_i64().unwrap_or(0);
 
     let subject = "Your services have been suspended".to_string();
@@ -758,7 +782,7 @@ fn generate_suspension_notice_email(data: &serde_json::Value) -> (String, String
          Resolve payment at https://caution.dev/settings/billing\n\n\
          --\n\
          Caution Team",
-        amount, app_count
+        amount_raw, app_count
     );
 
     (subject, html_body, text_body)

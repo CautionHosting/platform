@@ -192,23 +192,33 @@ async fn health_check() -> &'static str {
 /// Allows `max_requests` per `window` duration per source IP.
 #[derive(Clone)]
 struct RateLimiter {
-    requests: Arc<std::sync::Mutex<HashMap<String, Vec<std::time::Instant>>>>,
+    requests: Arc<tokio::sync::Mutex<HashMap<String, Vec<std::time::Instant>>>>,
     max_requests: usize,
     window: std::time::Duration,
+    max_entries: usize,
 }
 
 impl RateLimiter {
     fn new(max_requests: usize, window: std::time::Duration) -> Self {
         Self {
-            requests: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            requests: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             max_requests,
             window,
+            max_entries: 10_000,
         }
     }
 
-    fn check(&self, ip: &str) -> bool {
+    async fn check(&self, ip: &str) -> bool {
         let now = std::time::Instant::now();
-        let mut map = self.requests.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.requests.lock().await;
+
+        // Evict stale entries to prevent unbounded growth
+        if map.len() > self.max_entries {
+            map.retain(|_, entries| {
+                entries.last().map_or(false, |t| now.duration_since(*t) < self.window)
+            });
+        }
+
         let entries = map.entry(ip.to_string()).or_default();
         entries.retain(|t| now.duration_since(*t) < self.window);
         if entries.len() >= self.max_requests {
@@ -228,12 +238,12 @@ async fn webhook_rate_limit_middleware(
     let ip = req.headers()
         .get("x-forwarded-for")
         .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.split(',').next())
+        .and_then(|s| s.split(',').last())
         .unwrap_or("unknown")
         .trim()
         .to_string();
 
-    if !limiter.check(&ip) {
+    if !limiter.check(&ip).await {
         return (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded").into_response();
     }
 
@@ -470,6 +480,16 @@ fn is_last_day_of_month(date: time::Date) -> bool {
 
 /// Run the monthly billing cycle
 async fn run_monthly_billing_cycle(state: &AppState) -> Result<()> {
+    if !try_advisory_lock(&state.pool, LOCK_MONTHLY_BILLING).await {
+        tracing::debug!("Monthly billing skipped — another instance holds the lock");
+        return Ok(());
+    }
+    let result = run_monthly_billing_cycle_inner(state).await;
+    advisory_unlock(&state.pool, LOCK_MONTHLY_BILLING).await;
+    result
+}
+
+async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
     // Get previous month's date range (bill for the month that just ended)
     let (start_date, end_date) = cost_explorer::previous_month_billing_period();
 
@@ -588,7 +608,7 @@ async fn run_monthly_billing_cycle(state: &AppState) -> Result<()> {
         if remainder_cents == 0 {
             // Fully covered by credits — record a credits-covered invoice, skip Paddle
             let invoice_number = format!("INV-CR-{}-{}", &org_id[..8], start_date);
-            let _ = sqlx::query(
+            if let Err(e) = sqlx::query(
                 r#"
                 INSERT INTO invoices (
                     user_id, invoice_number,
@@ -602,7 +622,9 @@ async fn run_monthly_billing_cycle(state: &AppState) -> Result<()> {
             .bind(&invoice_number)
             .bind(total_cost_cents)
             .execute(&state.pool)
-            .await;
+            .await {
+                tracing::error!("Failed to insert credits-covered invoice for org {}: {}", org_id, e);
+            }
 
             tracing::info!(
                 "Org {} billing fully covered by credits (${:.2})",
@@ -657,7 +679,7 @@ async fn run_monthly_billing_cycle(state: &AppState) -> Result<()> {
                         txn.id, org_id, remainder_cost, credits_applied as f64 / 100.0
                     );
                     // Record the invoice locally with paddle_transaction_id
-                    let _ = sqlx::query(
+                    if let Err(e) = sqlx::query(
                         r#"
                         INSERT INTO invoices (
                             paddle_transaction_id, user_id, invoice_number,
@@ -672,7 +694,9 @@ async fn run_monthly_billing_cycle(state: &AppState) -> Result<()> {
                     .bind(format!("INV-{}", &txn.id[4..]))
                     .bind(remainder_cents)
                     .execute(&state.pool)
-                    .await;
+                    .await {
+                        tracing::error!("Failed to insert paddle invoice for org {}: {}", org_id, e);
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Failed to create Paddle transaction for org {}: {}", org_id, e);
@@ -690,6 +714,16 @@ async fn run_monthly_billing_cycle(state: &AppState) -> Result<()> {
 
 /// Process subscription renewals — called on every hourly tick
 async fn run_subscription_billing(state: &AppState) -> Result<()> {
+    if !try_advisory_lock(&state.pool, LOCK_SUBSCRIPTION_BILLING).await {
+        tracing::debug!("Subscription billing skipped — another instance holds the lock");
+        return Ok(());
+    }
+    let result = run_subscription_billing_inner(state).await;
+    advisory_unlock(&state.pool, LOCK_SUBSCRIPTION_BILLING).await;
+    result
+}
+
+async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
     let due_subs = sqlx::query(
         r#"
         SELECT id, user_id, organization_id, tier, billing_period,
@@ -775,7 +809,7 @@ async fn run_subscription_billing(state: &AppState) -> Result<()> {
                         paddle_txn_id = Some(txn.id.clone());
 
                         // Record invoice
-                        let _ = sqlx::query(
+                        if let Err(e) = sqlx::query(
                             r#"
                             INSERT INTO invoices (
                                 paddle_transaction_id, user_id, invoice_number,
@@ -790,30 +824,36 @@ async fn run_subscription_billing(state: &AppState) -> Result<()> {
                         .bind(format!("INV-SUB-{}", &txn.id[4..]))
                         .bind(remainder_cents)
                         .execute(&state.pool)
-                        .await;
+                        .await {
+                            tracing::error!("Failed to insert sub invoice for sub {}: {}", sub_id, e);
+                        }
                     }
                     Err(e) => {
                         tracing::error!("Paddle charge failed for sub {}: {}", sub_id, e);
                         event_status = "payment_failed";
                         // Mark subscription as past_due
-                        let _ = sqlx::query("UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE id = $1")
+                        if let Err(e) = sqlx::query("UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE id = $1")
                             .bind(&sub_id)
                             .execute(&state.pool)
-                            .await;
+                            .await {
+                            tracing::error!("Failed to mark sub {} as past_due: {}", sub_id, e);
+                        }
                     }
                 }
             } else {
                 tracing::warn!("Sub {} org {} has no paddle_customer_id", sub_id, org_id);
                 event_status = "payment_failed";
-                let _ = sqlx::query("UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE id = $1")
+                if let Err(e) = sqlx::query("UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE id = $1")
                     .bind(&sub_id)
                     .execute(&state.pool)
-                    .await;
+                    .await {
+                    tracing::error!("Failed to mark sub {} as past_due: {}", sub_id, e);
+                }
             }
         } else {
             // Fully credit-covered: record credit-only invoice
             let invoice_number = format!("INV-SUB-CR-{}", &sub_id.to_string()[..8]);
-            let _ = sqlx::query(
+            if let Err(e) = sqlx::query(
                 r#"
                 INSERT INTO invoices (
                     user_id, invoice_number, amount_cents, currency, status, payment_status, billing_provider, created_at, paid_at
@@ -825,11 +865,13 @@ async fn run_subscription_billing(state: &AppState) -> Result<()> {
             .bind(&invoice_number)
             .bind(total_charge)
             .execute(&state.pool)
-            .await;
+            .await {
+                tracing::error!("Failed to insert credit-covered sub invoice for sub {}: {}", sub_id, e);
+            }
         }
 
         // Record billing event
-        let _ = sqlx::query(
+        if let Err(e) = sqlx::query(
             r#"
             INSERT INTO subscription_billing_events
             (subscription_id, user_id, billing_period_start, billing_period_end, tier,
@@ -850,11 +892,13 @@ async fn run_subscription_billing(state: &AppState) -> Result<()> {
         .bind(&paddle_txn_id)
         .bind(event_status)
         .execute(&state.pool)
-        .await;
+        .await {
+            tracing::error!("Failed to record billing event for sub {}: {}", sub_id, e);
+        }
 
         // Advance period (only if charge wasn't a total failure)
         if event_status != "payment_failed" {
-            let _ = sqlx::query(
+            if let Err(e) = sqlx::query(
                 "UPDATE subscriptions SET
                  current_period_start = current_period_end,
                  current_period_end = $1,
@@ -866,7 +910,9 @@ async fn run_subscription_billing(state: &AppState) -> Result<()> {
             .bind(period_end)
             .bind(&sub_id)
             .execute(&state.pool)
-            .await;
+            .await {
+                tracing::error!("Failed to advance billing period for sub {}: {}", sub_id, e);
+            }
         }
     }
 
@@ -874,36 +920,73 @@ async fn run_subscription_billing(state: &AppState) -> Result<()> {
 }
 
 fn calculate_subscription_period_end(start: chrono::DateTime<chrono::Utc>, billing_period: &str) -> chrono::DateTime<chrono::Utc> {
-    use chrono::Datelike;
-    match billing_period {
-        "yearly" => start + chrono::Duration::days(365),
-        "2year"  => start + chrono::Duration::days(730),
-        _ => {
-            let (y, m) = if start.month() == 12 {
-                (start.year() + 1, 1)
-            } else {
-                (start.year(), start.month() + 1)
-            };
-            let max_day = chrono::NaiveDate::from_ymd_opt(
-                if m == 1 && start.month() == 12 { y } else { y },
-                m, 1
-            ).and_then(|d| d.succ_opt())
-            .map(|_| {
-                let next_m = if m == 12 { 1 } else { m + 1 };
-                let next_y = if m == 12 { y + 1 } else { y };
-                (chrono::NaiveDate::from_ymd_opt(next_y, next_m, 1).unwrap()
-                    - chrono::NaiveDate::from_ymd_opt(y, m, 1).unwrap()).num_days() as u32
-            })
-            .unwrap_or(30);
-            let day = start.day().min(max_day);
-            start.with_year(y).unwrap()
-                 .with_month(m).unwrap()
-                 .with_day(day).unwrap()
-        }
-    }
+    use chrono::{Datelike, NaiveDate};
+
+    let add_months = match billing_period {
+        "yearly" => 12,
+        "2year"  => 24,
+        _        => 1,
+    };
+
+    let total_months = start.month0() as i32 + add_months;
+    let target_year = start.year() + total_months / 12;
+    let target_month = (total_months % 12) as u32 + 1;
+
+    // Clamp day to last day of target month to avoid panics (e.g. Jan 31 -> Feb 28)
+    let last_day_of_target = NaiveDate::from_ymd_opt(
+        target_year,
+        if target_month == 12 { 1 } else { target_month + 1 },
+        1,
+    )
+    .unwrap_or_else(|| NaiveDate::from_ymd_opt(target_year + 1, 1, 1).unwrap())
+    .pred_opt()
+    .unwrap()
+    .day();
+
+    let day = start.day().min(last_day_of_target);
+
+    start
+        .date_naive()
+        .with_year(target_year).unwrap_or(start.date_naive())
+        .with_month(target_month).unwrap_or(start.date_naive())
+        .with_day(day).unwrap_or(start.date_naive())
+        .and_time(start.time())
+        .and_utc()
+}
+
+// Advisory lock IDs for distributed coordination
+const LOCK_COLLECTION: i64 = 1001;
+const LOCK_MONTHLY_BILLING: i64 = 1002;
+const LOCK_SUBSCRIPTION_BILLING: i64 = 1003;
+
+/// Try to acquire an advisory lock, run the closure, and release the lock.
+/// Returns None if the lock is already held by another instance.
+async fn try_advisory_lock(pool: &sqlx::PgPool, lock_id: i64) -> bool {
+    sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(lock_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false)
+}
+
+async fn advisory_unlock(pool: &sqlx::PgPool, lock_id: i64) {
+    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(lock_id)
+        .execute(pool)
+        .await;
 }
 
 async fn run_collection_cycle(state: &AppState) -> Result<usize> {
+    if !try_advisory_lock(&state.pool, LOCK_COLLECTION).await {
+        tracing::debug!("Collection cycle skipped — another instance holds the lock");
+        return Ok(0);
+    }
+    let result = run_collection_cycle_inner(state).await;
+    advisory_unlock(&state.pool, LOCK_COLLECTION).await;
+    result
+}
+
+async fn run_collection_cycle_inner(state: &AppState) -> Result<usize> {
     tracing::info!("Running metering collection cycle");
 
     let resources = sqlx::query_as::<_, TrackedResource>(
@@ -1144,12 +1227,14 @@ async fn check_balance_thresholds(state: &AppState, user_id: uuid::Uuid) -> Resu
         if cooldown_ok {
             tracing::info!("Low balance warning for user {} ({}c)", user_id, balance_cents);
 
-            let _ = sqlx::query(
+            if let Err(e) = sqlx::query(
                 "UPDATE billing_config SET low_balance_warned_at = NOW() WHERE user_id = $1"
             )
             .bind(user_id)
             .execute(&state.pool)
-            .await;
+            .await {
+                tracing::error!("Failed to update low_balance_warned_at for user {}: {}", user_id, e);
+            }
 
             send_dunning_email(state, org_id, "insufficient_balance", serde_json::json!({
                 "balance": format!("${:.2}", balance_cents as f64 / 100.0),
@@ -1165,12 +1250,14 @@ async fn check_balance_thresholds(state: &AppState, user_id: uuid::Uuid) -> Resu
 /// Suspend only fully-managed resources for an org (not managed on-prem).
 async fn suspend_fully_managed_org(state: &AppState, org_id: uuid::Uuid) {
     // Set credit_suspended_at
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "UPDATE organizations SET credit_suspended_at = NOW() WHERE id = $1 AND credit_suspended_at IS NULL"
     )
     .bind(org_id)
     .execute(&state.pool)
-    .await;
+    .await {
+        tracing::error!("Failed to set credit_suspended_at for org {}: {}", org_id, e);
+    }
 
     let api_url = std::env::var("API_URL").unwrap_or_else(|_| "http://api:8080".to_string());
     let Some(ref internal_secret) = state.internal_service_secret else {
@@ -1237,12 +1324,14 @@ async fn trigger_auto_topup(
     );
 
     // Optimistic: set last_auto_topup_at to prevent rapid-fire
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "UPDATE billing_config SET last_auto_topup_at = NOW() WHERE user_id = $1"
     )
     .bind(user_id)
     .execute(&state.pool)
-    .await;
+    .await {
+        tracing::error!("Failed to set last_auto_topup_at for user {}: {}", user_id, e);
+    }
 
     let topup_dollars = topup_cents as f64 / 100.0;
     let line_items = vec![paddle::LineItem {
@@ -1279,12 +1368,14 @@ async fn trigger_auto_topup(
 
     // All retries exhausted — clear last_auto_topup_at so the next collection cycle can retry
     tracing::error!("Auto top-up failed after 3 attempts for user {}: {}", user_id, last_err.unwrap());
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "UPDATE billing_config SET last_auto_topup_at = NULL WHERE user_id = $1"
     )
     .bind(user_id)
     .execute(&state.pool)
-    .await;
+    .await {
+        tracing::error!("Failed to clear last_auto_topup_at for user {}: {}", user_id, e);
+    }
 
     // Send payment failure email
     let org_id: Option<uuid::Uuid> = sqlx::query_scalar(
@@ -1407,7 +1498,7 @@ async fn test_simulate_paddle_transaction(
 
     // Ensure the user has a paddle_customer_id in billing_config
     let customer_id = format!("ctm_test_{}", req.user_id);
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         r#"
         UPDATE billing_config SET paddle_customer_id = $1 WHERE user_id = $2
         "#,
@@ -1415,7 +1506,9 @@ async fn test_simulate_paddle_transaction(
     .bind(&customer_id)
     .bind(req.user_id)
     .execute(&state.pool)
-    .await;
+    .await {
+        tracing::error!("Failed to update paddle_customer_id for test user {}: {}", req.user_id, e);
+    }
 
     // Build a fake Paddle webhook payload
     let payload = webhooks::PaddleWebhookPayload {

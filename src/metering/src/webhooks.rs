@@ -176,12 +176,14 @@ async fn handle_transaction_completed(
     .await?;
 
     // Also mark any subscription billing event as paid
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "UPDATE subscription_billing_events SET status = 'paid' WHERE paddle_transaction_id = $1"
     )
     .bind(transaction_id)
     .execute(&state.pool)
-    .await;
+    .await {
+        tracing::error!("Failed to mark billing event as paid for txn {}: {}", transaction_id, e);
+    }
 
     // Send confirmation email
     send_payment_confirmation_email(state, user_id, transaction_id).await?;
@@ -400,7 +402,7 @@ async fn handle_payment_failed(
     .await?;
 
     // Mark subscription as past_due if this was a subscription payment
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         r#"
         UPDATE subscriptions SET status = 'past_due', updated_at = NOW()
         WHERE id IN (
@@ -411,15 +413,19 @@ async fn handle_payment_failed(
     )
     .bind(transaction_id)
     .execute(&state.pool)
-    .await;
+    .await {
+        tracing::error!("Failed to mark subscription as past_due for txn {}: {}", transaction_id, e);
+    }
 
     // Mark the billing event as failed
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "UPDATE subscription_billing_events SET status = 'payment_failed' WHERE paddle_transaction_id = $1"
     )
     .bind(transaction_id)
     .execute(&state.pool)
-    .await;
+    .await {
+        tracing::error!("Failed to mark billing event as payment_failed for txn {}: {}", transaction_id, e);
+    }
 
     send_payment_failure_email(state, user_id, transaction_id).await?;
 
@@ -432,7 +438,7 @@ pub async fn handle_paddle_transaction_test(
     payload: PaddleWebhookPayload,
 ) -> anyhow::Result<()> {
     // Record the event for idempotency (same as real webhook handler)
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         r#"
         INSERT INTO paddle_webhook_events (event_id, event_type, payload)
         VALUES ($1, $2, $3)
@@ -443,7 +449,9 @@ pub async fn handle_paddle_transaction_test(
     .bind(&payload.event_type)
     .bind(serde_json::to_value(&payload).unwrap_or_default())
     .execute(&state.pool)
-    .await;
+    .await {
+        tracing::error!("Failed to record test webhook event {}: {}", payload.event_id, e);
+    }
 
     match payload.event_type.as_str() {
         "transaction.completed" => handle_transaction_completed(state, &payload).await,

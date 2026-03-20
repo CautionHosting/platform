@@ -14,6 +14,9 @@ use webauthn_rs_proto::{ResidentKeyRequirement, UserVerificationPolicy};
 use time::Duration;
 use serde::{Serialize, Deserialize};
 
+/// Maximum number of pending challenges per store to prevent OOM from abuse
+const MAX_PENDING_CHALLENGES: usize = 10_000;
+
 use base64::Engine as _;
 use crate::db;
 use crate::types::*;
@@ -247,7 +250,13 @@ pub async fn begin_register_handler(
         alpha_code_id,
         expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(2),
     };
-    state.reg_states.write().await.insert(state_key.clone(), pending);
+    {
+        let mut reg_states = state.reg_states.write().await;
+        if reg_states.len() >= MAX_PENDING_CHALLENGES {
+            return Err(anyhow::anyhow!("Too many pending registrations").into());
+        }
+        reg_states.insert(state_key.clone(), pending);
+    }
 
     Ok(Json(RegisterBeginResponse {
         challenge: ccr,
@@ -427,7 +436,13 @@ pub async fn begin_login_handler(
         auth_state,
         expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(2),
     };
-    state.auth_states.write().await.insert(session_key.clone(), pending);
+    {
+        let mut auth_states = state.auth_states.write().await;
+        if auth_states.len() >= MAX_PENDING_CHALLENGES {
+            return Err(anyhow::anyhow!("Too many pending logins").into());
+        }
+        auth_states.insert(session_key.clone(), pending);
+    }
 
     Ok(Json(LoginBeginResponse {
         challenge: rcr,
@@ -693,7 +708,13 @@ async fn create_sign_challenge(
         expires_at: time::OffsetDateTime::now_utc() + time::Duration::minutes(expires_minutes),
     };
 
-    state.sign_challenges.write().await.insert(challenge_id.clone(), pending);
+    {
+        let mut sign_challenges = state.sign_challenges.write().await;
+        if sign_challenges.len() >= MAX_PENDING_CHALLENGES {
+            return Err(SignRequestError::Internal("Too many pending sign challenges".to_string()));
+        }
+        sign_challenges.insert(challenge_id.clone(), pending);
+    }
 
     Ok((rcr, challenge_id))
 }
@@ -923,7 +944,13 @@ pub async fn qr_login_authenticate_handler(
     if !claimed {
         return Err(QrLoginError::AlreadyClaimed);
     }
-    state.auth_states.write().await.insert(session_key.clone(), pending);
+    {
+        let mut auth_states = state.auth_states.write().await;
+        if auth_states.len() >= MAX_PENDING_CHALLENGES {
+            return Err(QrLoginError::UnexpectedState("Too many pending challenges".to_string()));
+        }
+        auth_states.insert(session_key.clone(), pending);
+    }
 
     Ok(Json(crate::types::QrLoginAuthenticateResponse {
         challenge: rcr,
