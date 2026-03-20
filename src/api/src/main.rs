@@ -2773,6 +2773,7 @@ async fn deploy_logic(
         eif_path: eif_path.clone(),
         memory_mb: enclave_config.memory_mb,
         cpu_count: enclave_config.cpus,
+        disk_gb: build_config.disk_gb,
         debug_mode: enclave_config.debug,
         ports: enclave_config.ports.clone(),
         http_port: enclave_config.http_port,

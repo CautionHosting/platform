@@ -206,6 +206,8 @@ pub struct BuildConfig {
 
     pub cpus: u32,
 
+    pub disk_gb: u32,
+
     pub debug: bool,
 
     pub no_cache: bool,
@@ -240,6 +242,7 @@ impl Default for BuildConfig {
             metadata: None,
             memory_mb: 512,
             cpus: 2,
+            disk_gb: 30,
             debug: false,
             no_cache: false,
             ports: Vec::new(),
@@ -264,6 +267,7 @@ impl BuildConfig {
         let mut metadata = None;
         let mut memory_mb = None;
         let mut cpus = None;
+        let mut disk_gb = None;
         let mut debug = None;
         let mut no_cache = None;
         let mut e2e = None;
@@ -357,6 +361,11 @@ impl BuildConfig {
                     "cpu" | "cpus" => {
                         if let Ok(val) = value.parse::<u32>() {
                             cpus = Some(val);
+                        }
+                    }
+                    "disk" | "disk_gb" => {
+                        if let Ok(val) = value.parse::<u32>() {
+                            disk_gb = Some(val);
                         }
                     }
                     "debug" => {
@@ -532,6 +541,7 @@ impl BuildConfig {
             metadata,
             memory_mb: memory_mb.unwrap_or(512),
             cpus: cpus.unwrap_or(2),
+            disk_gb: disk_gb.unwrap_or(30),
             debug: debug.unwrap_or(false),
             no_cache: no_cache.unwrap_or(false),
             ports,

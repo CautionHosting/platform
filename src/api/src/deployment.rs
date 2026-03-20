@@ -70,6 +70,7 @@ pub struct NitroDeploymentRequest {
     pub eif_path: String,
     pub memory_mb: u32,
     pub cpu_count: u32,
+    pub disk_gb: u32,
     pub debug_mode: bool,
     pub ports: Vec<u16>,
     pub http_port: Option<u16>,
@@ -1448,7 +1449,7 @@ resource "aws_instance" "enclave" {{
   }}
 
   root_block_device {{
-    volume_size           = 30
+    volume_size           = {disk_gb}
     volume_type           = "gp3"
     delete_on_termination = true
     encrypted             = true
@@ -1516,6 +1517,7 @@ output "instance_type" {{
         eif_bucket = eif_bucket,
         memory_mb = request.memory_mb,
         cpu_count = cpu_count_rounded,
+        disk_gb = request.disk_gb,
         debug_mode = if request.debug_mode { "true" } else { "false" },
         ssh_keys_json = serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string()),
         ssh_ingress = if request.ssh_keys.is_empty() {
@@ -1701,7 +1703,7 @@ resource "aws_launch_template" "enclave" {{
   block_device_mappings {{
     device_name = "/dev/xvda"
     ebs {{
-      volume_size           = 30
+      volume_size           = {disk_gb}
       volume_type           = "gp3"
       delete_on_termination = true
       encrypted             = true
@@ -1798,6 +1800,7 @@ output "instance_type" {{
         eif_s3_path = eif_s3_path,
         memory_mb = request.memory_mb,
         cpu_count = cpu_count_rounded,
+        disk_gb = request.disk_gb,
         debug_mode = if request.debug_mode { "true" } else { "false" },
         ssh_keys_json = serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string()),
         ssh_ingress = if request.ssh_keys.is_empty() {
