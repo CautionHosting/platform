@@ -275,12 +275,14 @@ pub async fn validate_auth_session(pool: &PgPool, session_id: &str) -> Result<Op
         return Ok(None);
     }
 
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "UPDATE auth_sessions SET last_used_at = NOW() WHERE session_id = $1"
     )
     .bind(session_id)
     .execute(pool)
-    .await;
+    .await {
+        tracing::warn!("Failed to update last_used_at for session: {}", e);
+    }
 
     Ok(Some(session.credential_id))
 }

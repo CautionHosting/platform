@@ -12,6 +12,8 @@ use reqwest::Client;
 use crate::types::{AppState, AuthenticatedUserId};
 use crate::request_id::RequestId;
 
+const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB
+
 /// Proxy webhooks to the metering service (no auth — verified by signature)
 pub async fn metering_proxy_handler(
     State(state): State<AppState>,
@@ -24,11 +26,17 @@ pub async fn metering_proxy_handler(
 
     tracing::debug!("Proxying webhook to metering: {}", target_url);
 
-    // Forward all headers (Paddle-Signature is needed for verification)
+    // Only forward headers needed for webhook signature verification
+    const ALLOWED_WEBHOOK_HEADERS: &[&str] = &[
+        "content-type",
+        "content-length",
+        "paddle-signature",
+    ];
+
     let headers = req.headers().clone();
     let method = req.method().clone();
 
-    let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+    let body_bytes = axum::body::to_bytes(req.into_body(), MAX_BODY_SIZE)
         .await
         .map_err(|e| {
             tracing::error!("Failed to read webhook body: {:?}", e);
@@ -37,7 +45,9 @@ pub async fn metering_proxy_handler(
 
     let mut proxy_req = client.request(method, &target_url);
     for (key, value) in headers.iter() {
-        proxy_req = proxy_req.header(key, value);
+        if ALLOWED_WEBHOOK_HEADERS.contains(&key.as_str()) {
+            proxy_req = proxy_req.header(key, value);
+        }
     }
     if !body_bytes.is_empty() {
         proxy_req = proxy_req.body(body_bytes.to_vec());
@@ -107,7 +117,7 @@ pub async fn proxy_handler(
         proxy_req = proxy_req.header("X-Request-Id", id);
     }
 
-    let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+    let body_bytes = axum::body::to_bytes(req.into_body(), MAX_BODY_SIZE)
         .await
         .map_err(|e| {
             tracing::error!("Failed to read request body: {:?}", e);
