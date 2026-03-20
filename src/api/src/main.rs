@@ -12,13 +12,13 @@ use axum::{
 };
 use tokio_stream::wrappers::ReceiverStream;
 use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgPoolOptions, PgPool, FromRow};
+use sqlx::{postgres::PgPoolOptions, PgPool, FromRow, Row};
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use base64::Engine;
 use subtle::ConstantTimeEq;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use uuid::Uuid;
 use enclave_builder::{BuildConfig as DockerBuildConfig, build_user_image};
 
@@ -35,6 +35,79 @@ mod cloud_credentials;
 mod cryptographic_bundles;
 mod gpg;
 
+#[derive(Clone, Debug, Deserialize)]
+struct PricingConfig {
+    #[serde(default)]
+    compute_margin_percent: f64,
+    #[serde(default)]
+    subscription_tiers: std::collections::HashMap<String, TierPricing>,
+    #[serde(default)]
+    extra_block_annual_cents: i64,
+    #[serde(default)]
+    billing_discounts: BillingDiscounts,
+    #[serde(default)]
+    credit_packages: std::collections::HashMap<String, CreditPackagePricing>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct TierPricing {
+    annual_cents: i64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct BillingDiscounts {
+    #[serde(default)]
+    yearly_percent_off: f64,
+    #[serde(default)]
+    two_year_percent_off: f64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct CreditPackagePricing {
+    bonus_percent: f64,
+}
+
+impl Default for PricingConfig {
+    fn default() -> Self {
+        Self {
+            compute_margin_percent: 0.0,
+            subscription_tiers: std::collections::HashMap::new(),
+            extra_block_annual_cents: 0,
+            billing_discounts: BillingDiscounts::default(),
+            credit_packages: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl PricingConfig {
+    fn load() -> Self {
+        match std::fs::read_to_string("prices.json") {
+            Ok(contents) => match serde_json::from_str(&contents) {
+                Ok(config) => {
+                    tracing::info!("Loaded pricing config from prices.json");
+                    config
+                }
+                Err(e) => {
+                    tracing::error!("Failed to parse prices.json: {}. Using defaults (all zeros).", e);
+                    Self::default()
+                }
+            },
+            Err(_) => {
+                tracing::warn!("prices.json not found. Using defaults (all zeros). Copy prices.json.example to prices.json to configure pricing.");
+                Self::default()
+            }
+        }
+    }
+
+    fn tier_annual_cents(&self, tier_id: &str) -> i64 {
+        self.subscription_tiers.get(tier_id).map(|t| t.annual_cents).unwrap_or(0)
+    }
+
+    fn credit_bonus_percent(&self, package_key: &str) -> f64 {
+        self.credit_packages.get(package_key).map(|p| p.bonus_percent).unwrap_or(0.0)
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     db: PgPool,
@@ -43,9 +116,12 @@ struct AppState {
     data_dir: String,
     encryptor: Option<Arc<encryption::Encryptor>>,
     internal_service_secret: Option<String>,
-    paypal_client_id: Option<String>,
-    paypal_client_secret: Option<String>,
-    paypal_api_base: String,
+    paddle_client_token: Option<String>,
+    paddle_setup_price_id: Option<String>,
+    paddle_credits_price_ids: [Option<String>; 3],
+    paddle_api_url: String,
+    paddle_api_key: Option<String>,
+    pricing: PricingConfig,
 }
 
 #[derive(Clone)]
@@ -115,6 +191,88 @@ struct ComputeResource {
 use validated_types::{CreateResourceRequest, CreateResourceResponse, RenameResourceRequest};
 use validated_types::{DeployRequest, DeployResponse};
 
+#[derive(Debug, Serialize, Clone)]
+struct CreditPackage {
+    purchase_cents: i64,
+    credit_cents: i64,
+    bonus_percent: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paddle_price_id: Option<String>,
+}
+
+// Credit package base amounts (purchase_cents). Bonus percentages come from prices.json.
+const CREDIT_PACKAGE_BASES: &[(i64, &str)] = &[
+    (100_000,   "1000"),
+    (500_000,   "5000"),
+    (2_500_000, "25000"),
+];
+
+fn build_credit_packages(pricing: &PricingConfig, paddle_ids: &[Option<String>; 3]) -> Vec<CreditPackage> {
+    CREDIT_PACKAGE_BASES.iter().enumerate().map(|(i, &(purchase_cents, key))| {
+        let bonus_percent = pricing.credit_bonus_percent(key);
+        let credit_cents = purchase_cents + (purchase_cents as f64 * bonus_percent / 100.0) as i64;
+        CreditPackage {
+            purchase_cents,
+            credit_cents,
+            bonus_percent,
+            paddle_price_id: paddle_ids[i].clone(),
+        }
+    }).collect()
+}
+
+// --- Managed On-Prem Subscription Tiers ---
+
+#[derive(Debug, Clone, Serialize)]
+struct SubscriptionTier {
+    id: &'static str,
+    name: &'static str,
+    max_vcpus: i32,
+    max_apps: i32, // -1 = unlimited
+}
+
+const SUBSCRIPTION_TIERS: &[SubscriptionTier] = &[
+    SubscriptionTier { id: "starter",       name: "Starter",         max_vcpus: 16,  max_apps: 2  },
+    SubscriptionTier { id: "developer",     name: "Developer",       max_vcpus: 64,  max_apps: 5  },
+    SubscriptionTier { id: "base_platform", name: "Base Platform",   max_vcpus: 64,  max_apps: 10 },
+    SubscriptionTier { id: "growth",        name: "Growth Band",     max_vcpus: 256, max_apps: 25 },
+    SubscriptionTier { id: "enterprise",    name: "Enterprise Band", max_vcpus: 512, max_apps: 50 },
+];
+
+fn calculate_cycle_price(annual_cents: i64, billing_period: &str, discounts: &BillingDiscounts) -> i64 {
+    match billing_period {
+        "yearly" => (annual_cents as f64 * (1.0 - discounts.yearly_percent_off / 100.0)) as i64,
+        "2year"  => (annual_cents as f64 * 2.0 * (1.0 - discounts.two_year_percent_off / 100.0)) as i64,
+        _        => annual_cents / 12,
+    }
+}
+
+fn calculate_period_end(start: DateTime<Utc>, billing_period: &str) -> DateTime<Utc> {
+    match billing_period {
+        "yearly" => start + chrono::Duration::days(365),
+        "2year"  => start + chrono::Duration::days(730),
+        _        => {
+            // Monthly: advance by 1 calendar month
+            let (y, m) = if start.month() == 12 {
+                (start.year() + 1, 1)
+            } else {
+                (start.year(), start.month() + 1)
+            };
+            let day = start.day().min(days_in_month(y, m));
+            start.with_year(y).unwrap()
+                 .with_month(m).unwrap()
+                 .with_day(day).unwrap()
+        }
+    }
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    use chrono::NaiveDate;
+    let (ny, nm) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+    NaiveDate::from_ymd_opt(ny, nm, 1).unwrap()
+        .signed_duration_since(NaiveDate::from_ymd_opt(year, month, 1).unwrap())
+        .num_days() as u32
+}
+
 async fn auth_middleware(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -170,6 +328,37 @@ async fn auth_middleware(
     // No valid authentication method provided
     tracing::debug!("Auth middleware: no authentication provided");
     Err((StatusCode::UNAUTHORIZED, "No authentication provided".to_string()))
+}
+
+/// Internal-only auth middleware — rejects session-based auth, requires service secret + user_id.
+async fn internal_auth_middleware(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, (StatusCode, String)> {
+    let internal_secret = headers.get("x-internal-service-secret").and_then(|h| h.to_str().ok());
+
+    let Some(provided_secret) = internal_secret else {
+        return Err((StatusCode::UNAUTHORIZED, "Internal service secret required".to_string()));
+    };
+
+    let Some(ref configured_secret) = state.internal_service_secret else {
+        return Err((StatusCode::UNAUTHORIZED, "Internal service authentication not configured".to_string()));
+    };
+
+    if provided_secret != configured_secret.as_str() {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid internal service secret".to_string()));
+    }
+
+    // User ID is optional for internal routes — most operate on org_id from path
+    if let Some(user_id_str) = headers.get("x-authenticated-user-id").and_then(|h| h.to_str().ok()) {
+        if let Ok(user_id) = Uuid::parse_str(user_id_str) {
+            request.extensions_mut().insert(AuthContext { user_id });
+        }
+    }
+
+    Ok(next.run(request).await)
 }
 
 async fn onboarding_middleware(
@@ -1873,7 +2062,11 @@ async fn get_billing_usage(
 
     // Get all running resources for the org
     let resources: Vec<ComputeResource> = sqlx::query_as(
-        "SELECT * FROM compute_resources
+        "SELECT id, organization_id, provider_account_id, resource_type_id, provider_resource_id,
+                resource_name, state::text as state, region, public_ip,
+                configuration->>'domain' as domain, billing_tag, configuration,
+                created_at, updated_at
+         FROM compute_resources
          WHERE organization_id = $1 AND state = 'running'
          ORDER BY created_at DESC"
     )
@@ -1882,29 +2075,59 @@ async fn get_billing_usage(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
-    // Verifiable compute margin (55% markup)
-    let margin_percent = 55.0;
+    // Verifiable compute margin (from prices.json, default 0%)
+    let margin_percent = state.pricing.compute_margin_percent;
 
-    // Base AWS rates by instance type (from metering/calculator.rs)
+    // Base AWS on-demand rates by instance type (USD/hr, us-west-2)
     let get_base_rate = |instance_type: &str| -> f64 {
         match instance_type {
             "m5.xlarge" => 0.192,
             "m5.2xlarge" => 0.384,
+            "m5.4xlarge" => 0.768,
+            "m5.8xlarge" => 1.536,
+            "m5.12xlarge" => 2.304,
+            "m5.16xlarge" => 3.072,
+            "m5.24xlarge" => 4.608,
             "c5.xlarge" => 0.17,
+            "c5.2xlarge" => 0.34,
+            "c5.4xlarge" => 0.68,
             "c6i.xlarge" => 0.17,
+            "c6i.2xlarge" => 0.34,
             "c6a.xlarge" => 0.153,
+            "c6a.2xlarge" => 0.306,
             _ => 0.20, // default rate
         }
     };
 
+    use chrono::Datelike;
+    let now = chrono::Utc::now();
+
+    // Calculate billing period (first of current month to end of month)
+    let first_of_month_naive = chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1).unwrap();
+    let first_of_month_dt = first_of_month_naive.and_hms_opt(0, 0, 0).unwrap().and_utc();
+    let next_month_naive = if now.month() == 12 {
+        chrono::NaiveDate::from_ymd_opt(now.year() + 1, 1, 1).unwrap()
+    } else {
+        chrono::NaiveDate::from_ymd_opt(now.year(), now.month() + 1, 1).unwrap()
+    };
+    let days_in_month = next_month_naive.signed_duration_since(first_of_month_naive).num_days() as f64;
+    let hours_in_month = days_in_month * 24.0;
+
+    // Hours elapsed in the current billing period
+    let hours_elapsed_in_period = now.signed_duration_since(first_of_month_dt).num_hours() as f64;
+
     let mut total_cost = 0.0;
+    let mut total_projected = 0.0;
     let mut items = Vec::new();
 
     for resource in resources {
-        // Calculate hours since creation (using chrono)
-        let now = chrono::Utc::now().naive_utc();
-        let duration = now.signed_duration_since(resource.created_at);
-        let hours_running = (duration.num_hours() as f64).max(0.0);
+        // Hours in current billing period (resource may have started before this month)
+        let resource_start_of_period = if resource.created_at > first_of_month_dt {
+            resource.created_at
+        } else {
+            first_of_month_dt
+        };
+        let hours_this_period = now.signed_duration_since(resource_start_of_period).num_hours() as f64;
 
         // Get instance type from config
         let instance_type = resource.configuration
@@ -1915,8 +2138,14 @@ async fn get_billing_usage(
 
         let base_rate = get_base_rate(instance_type);
         let hourly_rate = base_rate * (1.0 + margin_percent / 100.0);
-        let cost = hours_running * hourly_rate;
-        total_cost += cost;
+        let cost_this_period = hours_this_period.max(0.0) * hourly_rate;
+
+        // Project: assume resource runs for the rest of the month
+        let remaining_hours = hours_in_month - hours_elapsed_in_period;
+        let projected_cost = cost_this_period + (remaining_hours.max(0.0) * hourly_rate);
+
+        total_cost += cost_this_period;
+        total_projected += projected_cost;
 
         items.push(serde_json::json!({
             "id": resource.id,
@@ -1924,17 +2153,21 @@ async fn get_billing_usage(
             "resource_name": resource.resource_name.clone().unwrap_or_else(|| "Unnamed".to_string()),
             "resource_type": "compute",
             "instance_type": instance_type,
-            "quantity": hours_running,
+            "quantity": hours_this_period.max(0.0),
             "unit": "hours",
             "base_rate": format!("{:.3}", base_rate),
             "rate": format!("{:.2}", hourly_rate),
-            "cost": cost,
+            "cost": cost_this_period,
+            "projected_cost": projected_cost,
         }));
     }
 
     Ok(Json(serde_json::json!({
         "total_cost": total_cost,
+        "projected_cost": total_projected,
         "currency": "USD",
+        "billing_period_start": first_of_month_naive.to_string(),
+        "billing_period_end": next_month_naive.to_string(),
         "items": items,
     })))
 }
@@ -1977,8 +2210,8 @@ async fn get_billing_invoices(
     })))
 }
 
-/// Get saved payment method
-async fn get_payment_method(
+/// Get all active payment methods
+async fn get_payment_methods(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -1986,11 +2219,715 @@ async fn get_payment_method(
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
 
-    // Query payment method from database
-    let payment_method: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT payment_type, last4, email
+    let rows: Vec<(Uuid, String, Option<String>, Option<String>, Option<String>, bool)> = sqlx::query_as(
+        "SELECT id, payment_type, last4, card_brand, email, is_primary
          FROM payment_methods
          WHERE organization_id = $1 AND is_active = true
+         ORDER BY is_primary DESC, created_at DESC"
+    )
+    .bind(org_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let methods: Vec<serde_json::Value> = rows.into_iter().map(|(id, payment_type, last4, card_brand, email, is_primary)| {
+        serde_json::json!({
+            "id": id,
+            "type": payment_type,
+            "last4": last4,
+            "card_brand": card_brand,
+            "email": email,
+            "is_primary": is_primary,
+        })
+    }).collect();
+
+    Ok(Json(serde_json::json!({
+        "payment_methods": methods
+    })))
+}
+
+/// Delete a specific payment method by ID
+async fn delete_payment_method(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(method_id): Path<Uuid>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    // Verify the method belongs to this org and get its primary status
+    let method: Option<(bool,)> = sqlx::query_as(
+        "SELECT is_primary FROM payment_methods WHERE id = $1 AND organization_id = $2 AND is_active = true"
+    )
+    .bind(method_id)
+    .bind(org_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let Some((was_primary,)) = method else {
+        return Err((StatusCode::NOT_FOUND, "Payment method not found".to_string()));
+    };
+
+    // Block deletion if this is the last active payment method and org has running resources
+    let active_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM payment_methods WHERE organization_id = $1 AND is_active = true"
+    )
+    .bind(org_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    if active_count <= 1 {
+        return Err((StatusCode::CONFLICT,
+            "You must have at least one payment method on file. Add another payment method before removing this one.".to_string()));
+    }
+
+    // Soft-delete
+    sqlx::query(
+        "UPDATE payment_methods SET is_active = false, is_primary = false WHERE id = $1"
+    )
+    .bind(method_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    // If deleted method was primary, promote the most recent remaining card
+    if was_primary {
+        sqlx::query(
+            "UPDATE payment_methods SET is_primary = true
+             WHERE id = (
+                SELECT id FROM payment_methods
+                WHERE organization_id = $1 AND is_active = true
+                ORDER BY created_at DESC LIMIT 1
+             )"
+        )
+        .bind(org_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Set a payment method as primary
+async fn set_primary_payment_method(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(method_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    // Verify the method belongs to this org
+    let exists: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM payment_methods WHERE id = $1 AND organization_id = $2 AND is_active = true"
+    )
+    .bind(method_id)
+    .bind(org_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    if exists.is_none() {
+        return Err((StatusCode::NOT_FOUND, "Payment method not found".to_string()));
+    }
+
+    // Unset primary on all org methods
+    sqlx::query(
+        "UPDATE payment_methods SET is_primary = false WHERE organization_id = $1 AND is_active = true"
+    )
+    .bind(org_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    // Set primary on the specified method
+    sqlx::query(
+        "UPDATE payment_methods SET is_primary = true WHERE id = $1"
+    )
+    .bind(method_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+/// Get Paddle client token and customer ID for frontend Paddle.js initialization
+async fn get_paddle_client_token(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let client_token = state.paddle_client_token.as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "Paddle is not configured".to_string()))?;
+
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    // Get the org's Paddle customer ID if one exists
+    let paddle_customer_id: Option<String> = sqlx::query_scalar(
+        "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
+    )
+    .bind(org_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+    .flatten();
+
+    Ok(Json(serde_json::json!({
+        "client_token": client_token,
+        "paddle_customer_id": paddle_customer_id,
+        "setup_price_id": state.paddle_setup_price_id,
+    })))
+}
+
+#[derive(Deserialize)]
+struct PaddleTransactionCompletedRequest {
+    transaction_id: String,
+    #[serde(default)]
+    payment_method_id: Option<String>,
+    #[serde(default)]
+    card_last4: Option<String>,
+    #[serde(default)]
+    card_brand: Option<String>,
+}
+
+/// Frontend callback after Paddle checkout completion — records payment method reference locally
+async fn paddle_transaction_completed(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<PaddleTransactionCompletedRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    // Check if the org already has any active payment methods
+    let existing_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM payment_methods WHERE organization_id = $1 AND is_active = true"
+    )
+    .bind(org_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let is_primary = existing_count == 0;
+
+    // Save the new payment method reference (keep existing methods active)
+    sqlx::query(
+        "INSERT INTO payment_methods (id, organization_id, payment_type, provider_token, paddle_payment_method_id, last4, card_brand, is_active, is_primary, created_at)
+         VALUES ($1, $2, 'card', $3, $4, $5, $6, true, $7, NOW())"
+    )
+    .bind(Uuid::new_v4())
+    .bind(org_id)
+    .bind(&req.transaction_id)
+    .bind(&req.payment_method_id)
+    .bind(&req.card_last4)
+    .bind(&req.card_brand)
+    .bind(is_primary)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    // Look up the Paddle customer ID from this transaction and store it
+    if let Some(ref api_key) = state.paddle_api_key {
+        if let Ok(customer_id) = fetch_paddle_customer_id_from_txn(
+            &state.paddle_api_url, api_key, &req.transaction_id
+        ).await {
+            let _ = sqlx::query(
+                "INSERT INTO billing_config (user_id, paddle_customer_id)
+                 VALUES ($1, $2)
+                 ON CONFLICT (user_id) DO UPDATE SET paddle_customer_id = $2"
+            )
+            .bind(org_id)
+            .bind(&customer_id)
+            .execute(&state.db)
+            .await;
+
+            tracing::info!("Stored paddle_customer_id {} for org {}", customer_id, org_id);
+        }
+    }
+
+    tracing::info!(
+        "Paddle transaction {} completed for org {}",
+        req.transaction_id, org_id
+    );
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "transaction_id": req.transaction_id,
+    })))
+}
+
+/// Fetch the customer_id from a Paddle transaction
+async fn fetch_paddle_customer_id_from_txn(
+    api_url: &str,
+    api_key: &str,
+    transaction_id: &str,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{}/transactions/{}", api_url, transaction_id))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .send()
+        .await
+        .map_err(|e| format!("Paddle API error: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Paddle API returned {}", resp.status()));
+    }
+
+    let body: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Parse error: {}", e))?;
+
+    body["data"]["customer_id"].as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "No customer_id in transaction".to_string())
+}
+
+// --- Prepaid Credits ---
+
+async fn get_credit_balance(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let balance_cents: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+    )
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+    .unwrap_or(0);
+
+    Ok(Json(serde_json::json!({
+        "balance_cents": balance_cents,
+        "balance_display": format!("${:.2}", balance_cents as f64 / 100.0),
+    })))
+}
+
+async fn get_credit_packages(
+    State(state): State<Arc<AppState>>,
+    Extension(_auth): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let credit_packages = build_credit_packages(&state.pricing, &state.paddle_credits_price_ids);
+    let packages: Vec<serde_json::Value> = credit_packages.iter().map(|pkg| {
+        serde_json::json!({
+            "purchase_cents": pkg.purchase_cents,
+            "credit_cents": pkg.credit_cents,
+            "bonus_percent": pkg.bonus_percent,
+            "purchase_display": format!("${}", pkg.purchase_cents / 100),
+            "credit_display": format!("${}", pkg.credit_cents / 100),
+            "paddle_price_id": pkg.paddle_price_id,
+        })
+    }).collect();
+
+    Ok(Json(serde_json::json!({ "packages": packages })))
+}
+
+#[derive(Deserialize)]
+struct PurchaseCreditsRequest {
+    /// Set by frontend after inline checkout completes (fallback flow)
+    #[serde(default)]
+    transaction_id: Option<String>,
+    package_index: usize,
+}
+
+async fn purchase_credits(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<PurchaseCreditsRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let credit_packages = build_credit_packages(&state.pricing, &state.paddle_credits_price_ids);
+    let pkg = credit_packages.get(req.package_index)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid package index".to_string()))?;
+
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    // Determine the transaction_id — either provided by frontend (checkout flow)
+    // or created server-side using saved payment method
+    let transaction_id = if let Some(txn_id) = req.transaction_id {
+        txn_id
+    } else {
+        // Try to charge the card on file via Paddle API
+        let paddle_api_key = state.paddle_api_key.as_ref()
+            .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "Paddle API not configured".to_string()))?;
+
+        // Try billing_config first, then resolve from an existing payment method transaction
+        let mut paddle_customer_id: Option<String> = sqlx::query_scalar(
+            "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
+        )
+        .bind(org_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+        .flatten();
+
+        // If no billing_config row, resolve customer_id from an existing payment method's transaction
+        if paddle_customer_id.is_none() {
+            let existing_txn: Option<String> = sqlx::query_scalar(
+                "SELECT provider_token FROM payment_methods
+                 WHERE organization_id = $1 AND is_active = true AND provider_token IS NOT NULL
+                 LIMIT 1"
+            )
+            .bind(org_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+            if let Some(txn_id) = existing_txn {
+                if let Ok(cid) = fetch_paddle_customer_id_from_txn(
+                    &state.paddle_api_url, paddle_api_key, &txn_id
+                ).await {
+                    // Cache it in billing_config for future use
+                    let _ = sqlx::query(
+                        "INSERT INTO billing_config (user_id, paddle_customer_id)
+                         VALUES ($1, $2)
+                         ON CONFLICT (user_id) DO UPDATE SET paddle_customer_id = $2"
+                    )
+                    .bind(org_id)
+                    .bind(&cid)
+                    .execute(&state.db)
+                    .await;
+
+                    tracing::info!("Resolved and cached paddle_customer_id {} for org {}", cid, org_id);
+                    paddle_customer_id = Some(cid);
+                }
+            }
+        }
+
+        let customer_id = paddle_customer_id
+            .ok_or_else(|| (StatusCode::PAYMENT_REQUIRED, "no_payment_method".to_string()))?;
+
+        // Get price ID for this package
+        let price_id = state.paddle_credits_price_ids[req.package_index].as_ref()
+            .ok_or_else(|| (StatusCode::BAD_REQUEST, "Credit package price not configured".to_string()))?;
+
+        // Create transaction via Paddle API — automatic collection charges saved payment method
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({
+            "customer_id": customer_id,
+            "items": [{
+                "price_id": price_id,
+                "quantity": 1,
+            }],
+            "collection_mode": "automatic",
+        });
+
+        let response = client
+            .post(format!("{}/transactions", state.paddle_api_url))
+            .header("Authorization", format!("Bearer {}", paddle_api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Paddle API error: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let err_body = response.text().await.unwrap_or_default();
+            tracing::error!("Paddle transaction failed: {} - {}", status, err_body);
+            return Err((StatusCode::BAD_GATEWAY, format!("Paddle payment failed: {}", status)));
+        }
+
+        let resp: serde_json::Value = response.json().await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Paddle response parse error: {}", e)))?;
+
+        let txn_id = resp["data"]["id"].as_str()
+            .ok_or_else(|| (StatusCode::BAD_GATEWAY, "Missing transaction ID in Paddle response".to_string()))?
+            .to_string();
+
+        tracing::info!("Created Paddle transaction {} for credit purchase (card on file)", txn_id);
+        txn_id
+    };
+
+    // Idempotency: check if this transaction was already processed
+    let already_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM credit_ledger WHERE paddle_transaction_id = $1)"
+    )
+    .bind(&transaction_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    if already_exists {
+        let balance_cents: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+        )
+        .bind(auth.user_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+        .unwrap_or(0);
+
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "balance_cents": balance_cents,
+            "balance_display": format!("${:.2}", balance_cents as f64 / 100.0),
+            "already_processed": true,
+        })));
+    }
+
+    let description = format!(
+        "Credit purchase: ${} → ${} credits ({}% bonus)",
+        pkg.purchase_cents / 100,
+        pkg.credit_cents / 100,
+        pkg.bonus_percent,
+    );
+
+    let new_balance = apply_credit(
+        &state.db,
+        auth.user_id,
+        pkg.credit_cents,
+        "purchase",
+        &description,
+        Some(&transaction_id),
+        None,
+    ).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to apply credit: {}", e)))?;
+
+    tracing::info!(
+        "Credit purchase: user={}, txn={}, +{} cents, new_balance={}",
+        auth.user_id, transaction_id, pkg.credit_cents, new_balance
+    );
+
+    // Check if org was credit-suspended and unsuspend if balance is now positive
+    if new_balance > 0 {
+        if let Ok(org_id) = get_user_primary_org(&state.db, auth.user_id).await {
+            let suspended: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+                "SELECT credit_suspended_at FROM organizations WHERE id = $1"
+            )
+            .bind(org_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .flatten();
+
+            if suspended.is_some() {
+                tracing::info!("Clearing credit suspension for org {} after credit purchase", org_id);
+                let _ = sqlx::query(
+                    "UPDATE organizations SET credit_suspended_at = NULL WHERE id = $1"
+                )
+                .bind(org_id)
+                .execute(&state.db)
+                .await;
+
+                // Trigger unsuspend via internal endpoint
+                let _ = call_internal_unsuspend(&state, org_id).await;
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "balance_cents": new_balance,
+        "balance_display": format!("${:.2}", new_balance as f64 / 100.0),
+    })))
+}
+
+async fn get_credit_ledger(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let rows: Vec<(Uuid, i64, i64, String, String, Option<String>, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT id, delta_cents, balance_after, entry_type, description, paddle_transaction_id, created_at
+         FROM credit_ledger
+         WHERE user_id = $1
+         ORDER BY created_at DESC
+         LIMIT 50"
+    )
+    .bind(auth.user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let entries: Vec<serde_json::Value> = rows.into_iter().map(|(id, delta, balance_after, entry_type, desc, txn_id, created_at)| {
+        serde_json::json!({
+            "id": id,
+            "delta_cents": delta,
+            "balance_after": balance_after,
+            "entry_type": entry_type,
+            "description": desc,
+            "paddle_transaction_id": txn_id,
+            "created_at": created_at,
+        })
+    }).collect();
+
+    Ok(Json(serde_json::json!({ "entries": entries })))
+}
+
+async fn redeem_credit_code(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let code = body.get("code")
+        .and_then(|v| v.as_str())
+        .ok_or((StatusCode::BAD_REQUEST, "Missing 'code' field".to_string()))?
+        .trim()
+        .replace('-', "");
+
+    if code.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Code cannot be empty".to_string()));
+    }
+
+    let mut tx = state.db.begin().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let row: Option<(Uuid, i64)> = sqlx::query_as(
+        "SELECT id, amount_cents FROM credit_codes WHERE UPPER(code) = UPPER($1) AND redeemed_by IS NULL FOR UPDATE"
+    )
+    .bind(&code)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let (code_id, amount_cents) = match row {
+        Some(r) => r,
+        None => {
+            return Err((StatusCode::NOT_FOUND, "Invalid or already redeemed code".to_string()));
+        }
+    };
+
+    sqlx::query("UPDATE credit_codes SET redeemed_by = $1, redeemed_at = NOW() WHERE id = $2")
+        .bind(auth.user_id)
+        .bind(code_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    tx.commit().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let new_balance = apply_credit(
+        &state.db,
+        auth.user_id,
+        amount_cents,
+        "code_redemption",
+        "Redeemed credit code",
+        None,
+        None,
+    ).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to apply credit: {}", e)))?;
+
+    tracing::info!(
+        "Credit code redeemed: user={}, code_id={}, +{} cents, new_balance={}",
+        auth.user_id, code_id, amount_cents, new_balance
+    );
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "amount_cents": amount_cents,
+        "new_balance": new_balance,
+    })))
+}
+
+/// Atomically upsert wallet_balance and insert a credit_ledger row.
+/// Returns the new balance.
+async fn apply_credit(
+    db: &PgPool,
+    user_id: Uuid,
+    delta_cents: i64,
+    entry_type: &str,
+    description: &str,
+    paddle_txn_id: Option<&str>,
+    invoice_id: Option<Uuid>,
+) -> Result<i64, String> {
+    let mut tx = db.begin().await.map_err(|e| format!("Failed to begin transaction: {}", e))?;
+
+    let new_balance: i64 = sqlx::query_scalar(
+        "INSERT INTO wallet_balance (user_id, balance_cents)
+         VALUES ($1, $2)
+         ON CONFLICT (user_id) DO UPDATE SET balance_cents = wallet_balance.balance_cents + $2
+         RETURNING balance_cents"
+    )
+    .bind(user_id)
+    .bind(delta_cents)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to upsert wallet_balance: {}", e))?;
+
+    sqlx::query(
+        "INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description, paddle_transaction_id, invoice_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)"
+    )
+    .bind(user_id)
+    .bind(delta_cents)
+    .bind(new_balance)
+    .bind(entry_type)
+    .bind(description)
+    .bind(paddle_txn_id)
+    .bind(invoice_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to insert credit_ledger: {}", e))?;
+
+    tx.commit().await.map_err(|e| format!("Failed to commit transaction: {}", e))?;
+
+    Ok(new_balance)
+}
+
+// --- Managed On-Prem Subscriptions ---
+
+async fn get_subscription_tiers(
+    State(state): State<Arc<AppState>>,
+    Extension(_auth): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let discounts = &state.pricing.billing_discounts;
+    let extra_block_annual = state.pricing.extra_block_annual_cents;
+
+    let tiers: Vec<serde_json::Value> = SUBSCRIPTION_TIERS.iter().map(|t| {
+        let annual_cents = state.pricing.tier_annual_cents(t.id);
+        serde_json::json!({
+            "id": t.id,
+            "name": t.name,
+            "annual_cents": annual_cents,
+            "max_vcpus": t.max_vcpus,
+            "max_apps": t.max_apps,
+            "prices": {
+                "monthly": calculate_cycle_price(annual_cents, "monthly", discounts),
+                "yearly": calculate_cycle_price(annual_cents, "yearly", discounts),
+                "2year": calculate_cycle_price(annual_cents, "2year", discounts),
+            },
+        })
+    }).collect();
+
+    Ok(Json(serde_json::json!({
+        "tiers": tiers,
+        "extra_block": {
+            "annual_cents": extra_block_annual,
+            "vcpus": 64,
+            "apps": 10,
+            "prices": {
+                "monthly": calculate_cycle_price(extra_block_annual, "monthly", discounts),
+                "yearly": calculate_cycle_price(extra_block_annual, "yearly", discounts),
+                "2year": calculate_cycle_price(extra_block_annual, "2year", discounts),
+            },
+        },
+    })))
+}
+
+async fn get_subscription(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let row = sqlx::query(
+        "SELECT id, user_id, organization_id, tier, billing_period, max_vcpus, max_apps, price_cents_per_cycle,
+                extra_vcpu_blocks, extra_app_blocks, extra_block_price_cents_per_cycle, status,
+                started_at, current_period_start, current_period_end, canceled_at, cancel_at_period_end,
+                last_billed_at, next_billing_at, created_at, updated_at
+         FROM subscriptions
+         WHERE organization_id = $1 AND status IN ('active', 'past_due')
          LIMIT 1"
     )
     .bind(org_id)
@@ -1998,212 +2935,522 @@ async fn get_payment_method(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
-    match payment_method {
-        Some((payment_type, last4, email)) => {
-            Ok(Json(serde_json::json!({
-                "payment_method": {
-                    "type": payment_type,
-                    "last4": last4,
-                    "email": email,
-                }
-            })))
-        }
-        None => {
-            Ok(Json(serde_json::json!({
-                "payment_method": null
-            })))
-        }
-    }
-}
-
-/// Delete payment method
-async fn delete_payment_method(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
-        .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
-
-    sqlx::query(
-        "UPDATE payment_methods SET is_active = false WHERE organization_id = $1"
-    )
-    .bind(org_id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// Create PayPal vault setup token
-async fn create_paypal_setup_token(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (client_id, client_secret) = match (&state.paypal_client_id, &state.paypal_client_secret) {
-        (Some(id), Some(secret)) => (id, secret),
-        _ => return Err((StatusCode::SERVICE_UNAVAILABLE, "PayPal is not configured".to_string())),
+    let Some(row) = row else {
+        return Ok(Json(serde_json::json!({ "subscription": null })));
     };
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
-        .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
-
-    // Get PayPal access token
-    let http_client = reqwest::Client::new();
-    let token_response = http_client
-        .post(format!("{}/v1/oauth2/token", state.paypal_api_base))
-        .basic_auth(client_id, Some(client_secret))
-        .form(&[("grant_type", "client_credentials")])
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PayPal request failed: {}", e)))?;
-
-    if !token_response.status().is_success() {
-        let error_text = token_response.text().await.unwrap_or_default();
-        return Err((StatusCode::BAD_GATEWAY, format!("PayPal auth failed: {}", error_text)));
-    }
-
-    let token_data: serde_json::Value = token_response.json().await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PayPal response parse error: {}", e)))?;
-
-    let access_token = token_data["access_token"].as_str()
-        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No access token in PayPal response".to_string()))?;
-
-    // Create vault setup token for card
-    let setup_response = http_client
-        .post(format!("{}/v3/vault/setup-tokens", state.paypal_api_base))
-        .bearer_auth(access_token)
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({
-            "payment_source": {
-                "card": {}
-            }
-        }))
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PayPal setup token request failed: {}", e)))?;
-
-    if !setup_response.status().is_success() {
-        let error_text = setup_response.text().await.unwrap_or_default();
-        tracing::error!("PayPal setup token error: {}", error_text);
-        return Err((StatusCode::BAD_GATEWAY, format!("PayPal setup token failed: {}", error_text)));
-    }
-
-    let setup_data: serde_json::Value = setup_response.json().await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PayPal response parse error: {}", e)))?;
-
-    let setup_token = setup_data["id"].as_str()
-        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No setup token in PayPal response".to_string()))?;
+    let tier: String = row.get("tier");
+    let billing_period: String = row.get("billing_period");
+    let price_cents_per_cycle: i64 = row.get("price_cents_per_cycle");
+    let extra_block_price: i64 = row.get("extra_block_price_cents_per_cycle");
+    let tier_info = SUBSCRIPTION_TIERS.iter().find(|t| t.id == tier);
 
     Ok(Json(serde_json::json!({
-        "setup_token": setup_token
+        "subscription": {
+            "id": row.get::<Uuid, _>("id"),
+            "user_id": row.get::<Uuid, _>("user_id"),
+            "organization_id": row.get::<Uuid, _>("organization_id"),
+            "tier": tier,
+            "tier_name": tier_info.map(|t| t.name).unwrap_or("Unknown"),
+            "billing_period": billing_period,
+            "max_vcpus": row.get::<i32, _>("max_vcpus"),
+            "max_apps": row.get::<i32, _>("max_apps"),
+            "price_cents_per_cycle": price_cents_per_cycle,
+            "extra_vcpu_blocks": row.get::<i32, _>("extra_vcpu_blocks"),
+            "extra_app_blocks": row.get::<i32, _>("extra_app_blocks"),
+            "extra_block_price_cents_per_cycle": extra_block_price,
+            "total_price_cents_per_cycle": price_cents_per_cycle + extra_block_price,
+            "status": row.get::<String, _>("status"),
+            "started_at": row.get::<DateTime<Utc>, _>("started_at"),
+            "current_period_start": row.get::<DateTime<Utc>, _>("current_period_start"),
+            "current_period_end": row.get::<DateTime<Utc>, _>("current_period_end"),
+            "canceled_at": row.get::<Option<DateTime<Utc>>, _>("canceled_at"),
+            "cancel_at_period_end": row.get::<bool, _>("cancel_at_period_end"),
+            "last_billed_at": row.get::<Option<DateTime<Utc>>, _>("last_billed_at"),
+            "next_billing_at": row.get::<DateTime<Utc>, _>("next_billing_at"),
+            "created_at": row.get::<DateTime<Utc>, _>("created_at"),
+            "updated_at": row.get::<DateTime<Utc>, _>("updated_at"),
+        }
     })))
 }
 
 #[derive(Deserialize)]
-struct SavePaymentMethodRequest {
-    vault_setup_token: String,
+struct SubscribeRequest {
+    tier_id: String,
+    #[serde(default = "default_billing_period")]
+    billing_period: String,
 }
 
-/// Save PayPal payment method after customer approval
-async fn save_paypal_payment_method(
+fn default_billing_period() -> String { "monthly".to_string() }
+
+async fn subscribe(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-    Json(req): Json<SavePaymentMethodRequest>,
+    Json(req): Json<SubscribeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (client_id, client_secret) = match (&state.paypal_client_id, &state.paypal_client_secret) {
-        (Some(id), Some(secret)) => (id, secret),
-        _ => return Err((StatusCode::SERVICE_UNAVAILABLE, "PayPal is not configured".to_string())),
-    };
+    let tier = SUBSCRIPTION_TIERS.iter().find(|t| t.id == req.tier_id)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
+
+    if !["monthly", "yearly", "2year"].contains(&req.billing_period.as_str()) {
+        return Err((StatusCode::BAD_REQUEST, "Invalid billing_period. Use monthly, yearly, or 2year".to_string()));
+    }
 
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
 
-    // Get PayPal access token
-    let http_client = reqwest::Client::new();
-    let token_response = http_client
-        .post(format!("{}/v1/oauth2/token", state.paypal_api_base))
-        .basic_auth(client_id, Some(client_secret))
-        .form(&[("grant_type", "client_credentials")])
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PayPal request failed: {}", e)))?;
+    // Check no existing active subscription
+    let existing: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM subscriptions WHERE organization_id = $1 AND status IN ('active', 'past_due') LIMIT 1"
+    )
+    .bind(org_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
-    if !token_response.status().is_success() {
-        let error_text = token_response.text().await.unwrap_or_default();
-        return Err((StatusCode::BAD_GATEWAY, format!("PayPal auth failed: {}", error_text)));
+    if existing.is_some() {
+        return Err((StatusCode::CONFLICT, "Organization already has an active subscription".to_string()));
     }
 
-    let token_data: serde_json::Value = token_response.json().await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PayPal response parse error: {}", e)))?;
+    let now = Utc::now();
+    let annual_cents = state.pricing.tier_annual_cents(tier.id);
+    let price_per_cycle = calculate_cycle_price(annual_cents, &req.billing_period, &state.pricing.billing_discounts);
+    let period_end = calculate_period_end(now, &req.billing_period);
 
-    let access_token = token_data["access_token"].as_str()
-        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No access token in PayPal response".to_string()))?;
+    // Insert subscription
+    let sub_id: (Uuid,) = sqlx::query_as(
+        "INSERT INTO subscriptions (user_id, organization_id, tier, billing_period, max_vcpus, max_apps,
+         price_cents_per_cycle, current_period_end, next_billing_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+         RETURNING id"
+    )
+    .bind(auth.user_id)
+    .bind(org_id)
+    .bind(tier.id)
+    .bind(&req.billing_period)
+    .bind(tier.max_vcpus)
+    .bind(tier.max_apps)
+    .bind(price_per_cycle)
+    .bind(period_end)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create subscription: {}", e)))?;
 
-    // Exchange setup token for payment token
-    let payment_token_response = http_client
-        .post(format!("{}/v3/vault/payment-tokens", state.paypal_api_base))
-        .bearer_auth(access_token)
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({
-            "payment_source": {
-                "token": {
-                    "id": req.vault_setup_token,
-                    "type": "SETUP_TOKEN"
+    // Charge first period: credits first, then Paddle for remainder
+    let total_charge = price_per_cycle;
+
+    // Try credit deduction via wallet
+    let balance_cents: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+    )
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+    .unwrap_or(0);
+
+    let credits_to_apply = balance_cents.min(total_charge).max(0);
+    let remainder_cents = total_charge - credits_to_apply;
+
+    if credits_to_apply > 0 {
+        let _ = apply_credit(
+            &state.db, auth.user_id, -credits_to_apply,
+            "billing_deduction",
+            &format!("Subscription: {} {}", tier.name, req.billing_period),
+            None, None,
+        ).await;
+    }
+
+    let mut paddle_txn_id: Option<String> = None;
+    let mut event_status = if remainder_cents == 0 { "credits_covered" } else { "pending" };
+
+    if remainder_cents > 0 {
+        // Charge via Paddle
+        let paddle_customer_id: Option<String> = sqlx::query_scalar(
+            "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
+        )
+        .bind(org_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+        .flatten();
+
+        if let Some(customer_id) = paddle_customer_id {
+            if let Some(ref api_key) = state.paddle_api_key {
+                let client = reqwest::Client::new();
+                let amount_str = remainder_cents.to_string();
+                let body = serde_json::json!({
+                    "customer_id": customer_id,
+                    "items": [{
+                        "quantity": 1,
+                        "price": {
+                            "description": format!("{} subscription ({})", tier.name, req.billing_period),
+                            "unit_price": {
+                                "amount": amount_str,
+                                "currency_code": "USD",
+                            },
+                            "product": {
+                                "name": format!("{} Subscription", tier.name),
+                                "tax_category": "standard",
+                            }
+                        }
+                    }],
+                    "collection_mode": "automatic",
+                });
+
+                let response = client
+                    .post(format!("{}/transactions", state.paddle_api_url))
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Paddle API error: {}", e)))?;
+
+                if response.status().is_success() {
+                    let resp: serde_json::Value = response.json().await
+                        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Parse error: {}", e)))?;
+                    paddle_txn_id = resp["data"]["id"].as_str().map(|s| s.to_string());
+                } else {
+                    let status = response.status();
+                    tracing::error!("Paddle subscription charge failed: {}", status);
+                    event_status = "payment_failed";
                 }
             }
-        }))
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PayPal payment token request failed: {}", e)))?;
-
-    if !payment_token_response.status().is_success() {
-        let error_text = payment_token_response.text().await.unwrap_or_default();
-        tracing::error!("PayPal payment token error: {}", error_text);
-        return Err((StatusCode::BAD_GATEWAY, format!("PayPal payment token failed: {}", error_text)));
+        } else {
+            return Err((StatusCode::PAYMENT_REQUIRED, "no_payment_method".to_string()));
+        }
     }
 
-    let payment_data: serde_json::Value = payment_token_response.json().await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PayPal response parse error: {}", e)))?;
-
-    let payment_token = payment_data["id"].as_str()
-        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No payment token in PayPal response".to_string()))?;
-
-    // Extract card details from PayPal response
-    let card_data = &payment_data["payment_source"]["card"];
-    let last4 = card_data["last_digits"].as_str();
-    let brand = card_data["brand"].as_str().unwrap_or("card");
-
-    // Deactivate existing payment methods
-    sqlx::query("UPDATE payment_methods SET is_active = false WHERE organization_id = $1")
-        .bind(org_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-
-    // Save the new payment method
-    sqlx::query(
-        "INSERT INTO payment_methods (id, organization_id, payment_type, provider_token, last4, is_active, created_at)
-         VALUES ($1, $2, 'card', $3, $4, true, NOW())"
+    // Record billing event
+    let _ = sqlx::query(
+        "INSERT INTO subscription_billing_events
+         (subscription_id, user_id, billing_period_start, billing_period_end, tier,
+          base_amount_cents, total_amount_cents, credits_applied_cents, charged_amount_cents,
+          paddle_transaction_id, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
     )
-    .bind(Uuid::new_v4())
+    .bind(sub_id.0)
+    .bind(auth.user_id)
+    .bind(now)
+    .bind(period_end)
+    .bind(tier.id)
+    .bind(price_per_cycle)
+    .bind(total_charge)
+    .bind(credits_to_apply)
+    .bind(remainder_cents)
+    .bind(&paddle_txn_id)
+    .bind(event_status)
+    .execute(&state.db)
+    .await;
+
+    // Update last_billed_at
+    let _ = sqlx::query("UPDATE subscriptions SET last_billed_at = NOW() WHERE id = $1")
+        .bind(sub_id.0)
+        .execute(&state.db)
+        .await;
+
+    // Record invoice
+    let invoice_number = format!("INV-SUB-{}", &sub_id.0.to_string()[..8]);
+    let _ = sqlx::query(
+        "INSERT INTO invoices (paddle_transaction_id, user_id, invoice_number, amount_cents, currency, status, payment_status, billing_provider, created_at)
+         VALUES ($1, $2, $3, $4, 'USD', 'finalized', $5, $6, NOW())"
+    )
+    .bind(&paddle_txn_id)
+    .bind(auth.user_id)
+    .bind(&invoice_number)
+    .bind(total_charge)
+    .bind(if remainder_cents == 0 { "credits_applied" } else { "pending" })
+    .bind(if remainder_cents == 0 { "credits" } else { "paddle" })
+    .execute(&state.db)
+    .await;
+
+    tracing::info!(
+        "Subscription created: sub={}, tier={}, org={}, charge={} cents (credits={}, paddle={})",
+        sub_id.0, tier.id, org_id, total_charge, credits_to_apply, remainder_cents
+    );
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "subscription_id": sub_id.0,
+        "tier": tier.id,
+        "billing_period": req.billing_period,
+        "price_cents_per_cycle": price_per_cycle,
+        "credits_applied": credits_to_apply,
+        "charged": remainder_cents,
+    })))
+}
+
+#[derive(Deserialize)]
+struct ChangeTierRequest {
+    tier_id: String,
+}
+
+async fn change_subscription_tier(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<ChangeTierRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let new_tier = SUBSCRIPTION_TIERS.iter().find(|t| t.id == req.tier_id)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
+
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let sub: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, billing_period FROM subscriptions WHERE organization_id = $1 AND status IN ('active', 'past_due') LIMIT 1"
+    )
     .bind(org_id)
-    .bind(payment_token)
-    .bind(last4)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let Some((sub_id, billing_period)) = sub else {
+        return Err((StatusCode::NOT_FOUND, "No active subscription".to_string()));
+    };
+
+    let new_annual_cents = state.pricing.tier_annual_cents(new_tier.id);
+    let new_price = calculate_cycle_price(new_annual_cents, &billing_period, &state.pricing.billing_discounts);
+
+    // Change takes effect at next billing cycle
+    sqlx::query(
+        "UPDATE subscriptions SET tier = $1, max_vcpus = $2, max_apps = $3, price_cents_per_cycle = $4, updated_at = NOW()
+         WHERE id = $5"
+    )
+    .bind(new_tier.id)
+    .bind(new_tier.max_vcpus)
+    .bind(new_tier.max_apps)
+    .bind(new_price)
+    .bind(sub_id)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
+    tracing::info!("Subscription {} tier changed to {} (takes effect next cycle)", sub_id, new_tier.id);
+
     Ok(Json(serde_json::json!({
         "success": true,
-        "payment_method": {
-            "type": "card",
-            "brand": brand,
-            "last4": last4,
+        "new_tier": new_tier.id,
+        "new_price_cents_per_cycle": new_price,
+        "effective": "next_billing_cycle",
+    })))
+}
+
+#[derive(Deserialize)]
+struct AddCapacityRequest {
+    vcpu_blocks: Option<i32>,
+    app_blocks: Option<i32>,
+}
+
+async fn add_subscription_capacity(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<AddCapacityRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let sub: Option<(Uuid, String, i32, i32, i64, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT id, billing_period, extra_vcpu_blocks, extra_app_blocks, extra_block_price_cents_per_cycle,
+                current_period_start, current_period_end
+         FROM subscriptions WHERE organization_id = $1 AND status = 'active' LIMIT 1"
+    )
+    .bind(org_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let Some((sub_id, billing_period, cur_vcpu_blocks, cur_app_blocks, cur_extra_price, period_start, period_end)) = sub else {
+        return Err((StatusCode::NOT_FOUND, "No active subscription".to_string()));
+    };
+
+    let add_vcpu = req.vcpu_blocks.unwrap_or(0).max(0);
+    let add_app = req.app_blocks.unwrap_or(0).max(0);
+    let total_new_blocks = add_vcpu + add_app;
+
+    if total_new_blocks == 0 {
+        return Err((StatusCode::BAD_REQUEST, "Must add at least one block".to_string()));
+    }
+
+    let block_price_per_cycle = calculate_cycle_price(state.pricing.extra_block_annual_cents, &billing_period, &state.pricing.billing_discounts);
+    let additional_price = block_price_per_cycle * total_new_blocks as i64;
+
+    // Prorate: charge only for remaining portion of current period
+    let now = Utc::now();
+    let total_period_secs = (period_end - period_start).num_seconds().max(1);
+    let remaining_secs = (period_end - now).num_seconds().max(0);
+    let prorate_fraction = remaining_secs as f64 / total_period_secs as f64;
+    let prorated_charge = (additional_price as f64 * prorate_fraction).round() as i64;
+
+    let new_vcpu_blocks = cur_vcpu_blocks + add_vcpu;
+    let new_app_blocks = cur_app_blocks + add_app;
+    let new_extra_price = cur_extra_price + additional_price;
+
+    sqlx::query(
+        "UPDATE subscriptions SET
+         extra_vcpu_blocks = $1, extra_app_blocks = $2,
+         extra_block_price_cents_per_cycle = $3,
+         max_vcpus = max_vcpus + $4, max_apps = CASE WHEN max_apps = -1 THEN -1 ELSE max_apps + $5 END,
+         updated_at = NOW()
+         WHERE id = $6"
+    )
+    .bind(new_vcpu_blocks)
+    .bind(new_app_blocks)
+    .bind(new_extra_price)
+    .bind(add_vcpu * 64)
+    .bind(add_app * 10)
+    .bind(sub_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    // Charge prorated amount for rest of current period
+    if prorated_charge > 0 {
+        // Try credits first
+        let balance: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+        )
+        .bind(auth.user_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+        .unwrap_or(0);
+
+        let credits_to_apply = balance.min(prorated_charge).max(0);
+        if credits_to_apply > 0 {
+            let _ = apply_credit(
+                &state.db, auth.user_id, -credits_to_apply,
+                "billing_deduction",
+                &format!("Subscription capacity addon (prorated)"),
+                None, None,
+            ).await;
         }
+
+        let remainder = prorated_charge - credits_to_apply;
+        if remainder > 0 {
+            // Charge via Paddle (similar to subscribe)
+            let paddle_customer_id: Option<String> = sqlx::query_scalar(
+                "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
+            )
+            .bind(org_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+            .flatten();
+
+            if let (Some(customer_id), Some(ref api_key)) = (paddle_customer_id, &state.paddle_api_key) {
+                let client = reqwest::Client::new();
+                let amount_str = remainder.to_string();
+                let body = serde_json::json!({
+                    "customer_id": customer_id,
+                    "items": [{
+                        "quantity": 1,
+                        "price": {
+                            "description": format!("Extra capacity blocks (prorated)"),
+                            "unit_price": { "amount": amount_str, "currency_code": "USD" },
+                            "product": { "name": "Extra Capacity Block", "tax_category": "standard" }
+                        }
+                    }],
+                    "collection_mode": "automatic",
+                });
+                let _ = client
+                    .post(format!("{}/transactions", state.paddle_api_url))
+                    .header("Authorization", format!("Bearer {}", api_key))
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await;
+            }
+        }
+    }
+
+    tracing::info!("Added {} vCPU blocks + {} app blocks to sub {}, prorated charge: {} cents",
+        add_vcpu, add_app, sub_id, prorated_charge);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "extra_vcpu_blocks": new_vcpu_blocks,
+        "extra_app_blocks": new_app_blocks,
+        "prorated_charge_cents": prorated_charge,
+    })))
+}
+
+async fn cancel_subscription(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let sub: Option<(Uuid, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT id, current_period_end FROM subscriptions WHERE organization_id = $1 AND status = 'active' LIMIT 1"
+    )
+    .bind(org_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let Some((sub_id, period_end)) = sub else {
+        return Err((StatusCode::NOT_FOUND, "No active subscription".to_string()));
+    };
+
+    sqlx::query(
+        "UPDATE subscriptions SET cancel_at_period_end = true, canceled_at = NOW(), updated_at = NOW() WHERE id = $1"
+    )
+    .bind(sub_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    tracing::info!("Subscription {} set to cancel at period end ({})", sub_id, period_end);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "cancel_at_period_end": true,
+        "active_until": period_end,
+    })))
+}
+
+async fn reactivate_subscription(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let sub: Option<(Uuid, bool)> = sqlx::query_as(
+        "SELECT id, cancel_at_period_end FROM subscriptions WHERE organization_id = $1 AND status = 'active' LIMIT 1"
+    )
+    .bind(org_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let Some((sub_id, cancel_pending)) = sub else {
+        return Err((StatusCode::NOT_FOUND, "No active subscription".to_string()));
+    };
+
+    if !cancel_pending {
+        return Err((StatusCode::BAD_REQUEST, "Subscription is not pending cancellation".to_string()));
+    }
+
+    sqlx::query(
+        "UPDATE subscriptions SET cancel_at_period_end = false, canceled_at = NULL, updated_at = NOW() WHERE id = $1"
+    )
+    .bind(sub_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    tracing::info!("Subscription {} reactivated", sub_id);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "cancel_at_period_end": false,
     })))
 }
 
@@ -2541,6 +3788,86 @@ async fn deploy_logic(
         None => return Err((StatusCode::NOT_FOUND, format!("App with id {} not found", req.app_id))),
     };
 
+    tracing::info!("Found resource: id={}, name={}", resource_id, app_name);
+
+    // --- Billing gate (pre-deploy) --- must run before reactivation to avoid side effects on failure
+    let cred = cloud_credentials::get_credential_by_resource(&state.db, req.org_id, resource_id).await?;
+    let is_managed_onprem = cred.as_ref().map(|c| c.managed_on_prem).unwrap_or(false);
+
+    if is_managed_onprem {
+        // Managed on-prem: require active subscription with capacity
+        let sub: Option<(Uuid, i32)> = sqlx::query_as(
+            "SELECT id, max_apps FROM subscriptions
+             WHERE organization_id = $1 AND status IN ('active', 'past_due') LIMIT 1"
+        )
+        .bind(req.org_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+        let Some((sub_id, max_apps)) = sub else {
+            return Err((StatusCode::PAYMENT_REQUIRED,
+                "Managed on-premises deployment requires an active subscription. Choose a plan in Settings at https://caution.dev".to_string()));
+        };
+
+        // Count current managed on-prem apps (exclude this resource if redeploying)
+        let current_apps: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compute_resources cr
+             JOIN cloud_credentials cc ON cc.resource_id = cr.id
+             WHERE cr.organization_id = $1 AND cc.managed_on_prem = true
+               AND cr.state != 'terminated' AND cr.id != $2"
+        )
+        .bind(req.org_id)
+        .bind(resource_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+        // +1 for the app being deployed
+        if current_apps + 1 > max_apps as i64 {
+            return Err((StatusCode::PAYMENT_REQUIRED,
+                format!("App limit reached ({}/{}). Upgrade your plan or add capacity in Settings at https://caution.dev",
+                    current_apps + 1, max_apps)));
+        }
+
+        tracing::info!("Billing gate passed: managed on-prem app {}/{}, sub={}", current_apps + 1, max_apps, sub_id);
+    } else {
+        // Fully managed: require >= $5 (500 cents) in wallet credits
+        let balance: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+        )
+        .bind(auth.user_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+        .unwrap_or(0);
+
+        if balance < 500 {
+            return Err((StatusCode::PAYMENT_REQUIRED,
+                format!("Minimum $5.00 in credits required to deploy (current balance: ${:.2}). \
+                         Purchase credits at https://caution.dev/settings/billing",
+                         balance as f64 / 100.0)));
+        }
+
+        // Block deploy if org is credit-suspended (awaiting credit deposit)
+        let credit_suspended: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT credit_suspended_at FROM organizations WHERE id = $1"
+        )
+        .bind(req.org_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+        .flatten();
+
+        if credit_suspended.is_some() {
+            return Err((StatusCode::PAYMENT_REQUIRED,
+                "Your organization is suspended due to credit exhaustion. \
+                 Add credits at https://caution.dev/settings/billing to resume.".to_string()));
+        }
+
+        tracing::info!("Billing gate passed: fully managed, balance_cents={}", balance);
+    }
+
     if was_destroyed {
         tracing::info!("Reactivating previously destroyed resource {}", resource_id);
         sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1 WHERE id = $2 AND organization_id = $3")
@@ -2552,7 +3879,6 @@ async fn deploy_logic(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to reactivate resource: {}", e)))?;
     }
 
-    tracing::info!("Found resource: id={}, name={}", resource_id, app_name);
     tracing::info!("Deploying branch: {}", req.branch);
 
     let commit_sha = match get_commit_sha(&app_id_str, &req.branch, &state.data_dir).await {
@@ -2837,8 +4163,43 @@ async fn deploy_logic(
         ports: build_config.ports.clone(),
     };
 
-    let _prebuilt_eif_path = format!("{}/nitro.eif", work_dir);
-    let _prebuilt_pcrs_path = format!("{}/nitro.pcrs", work_dir);
+    // --- Billing gate: vCPU check (post-Procfile parse, managed on-prem only) ---
+    if is_managed_onprem {
+        let sub_vcpus: Option<(i32,)> = sqlx::query_as(
+            "SELECT max_vcpus FROM subscriptions
+             WHERE organization_id = $1 AND status IN ('active', 'past_due') LIMIT 1"
+        )
+        .bind(req.org_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+        if let Some((max_vcpus,)) = sub_vcpus {
+            let used_vcpus: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(SUM((cr.configuration->>'vcpus')::int), 0)
+                 FROM compute_resources cr
+                 JOIN cloud_credentials cc ON cc.resource_id = cr.id
+                 WHERE cr.organization_id = $1 AND cc.managed_on_prem = true
+                   AND cr.state = 'running' AND cr.id != $2"
+            )
+            .bind(req.org_id)
+            .bind(resource_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+            let requested_vcpus = enclave_config.cpus as i64;
+            if used_vcpus + requested_vcpus > max_vcpus as i64 {
+                return Err((StatusCode::PAYMENT_REQUIRED,
+                    format!("vCPU limit would be exceeded ({}+{}/{}). Upgrade your plan or add capacity in Settings at https://caution.dev",
+                        used_vcpus, requested_vcpus, max_vcpus)));
+            }
+            tracing::info!("vCPU gate passed: {}+{}/{}", used_vcpus, requested_vcpus, max_vcpus);
+        }
+    }
+
+    let prebuilt_eif_path = format!("{}/nitro.eif", work_dir);
+    let prebuilt_pcrs_path = format!("{}/nitro.pcrs", work_dir);
 
     let cached_eif_path = format!("{}/{}-{}.eif", cache_dir_str, app_id_str, commit_sha);
     let cached_pcrs_path = format!("{}/{}-{}.pcrs", cache_dir_str, app_id_str, commit_sha);
@@ -3208,6 +4569,361 @@ async fn deploy_logic(
     })
 }
 
+/// Helper: call the internal unsuspend endpoint (used after credit purchase/auto-topup).
+async fn call_internal_unsuspend(state: &AppState, org_id: Uuid) -> Result<(), String> {
+    let secret = state.internal_service_secret.as_deref().unwrap_or_default();
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:8080/internal/org/{}/unsuspend", org_id))
+        .header("x-internal-service-secret", secret)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to call unsuspend: {}", e))?;
+
+    if resp.status().is_success() {
+        tracing::info!("Unsuspended org {} after credit deposit", org_id);
+        Ok(())
+    } else {
+        Err(format!("Unsuspend returned {}", resp.status()))
+    }
+}
+
+/// Internal endpoint: suspend only fully-managed resources for an org (credit exhaustion).
+/// Unlike suspend_org_resources which suspends ALL resources, this only suspends resources
+/// that are NOT managed on-prem — credit exhaustion should not affect BYOC deployments.
+async fn suspend_managed_resources(
+    State(state): State<Arc<AppState>>,
+    Path(org_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    tracing::info!("Suspending fully-managed resources for org {} (credit exhaustion)", org_id);
+
+    let resources: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT cr.id, cr.resource_name FROM compute_resources cr
+         WHERE cr.organization_id = $1 AND cr.state = 'running'
+           AND NOT EXISTS (
+               SELECT 1 FROM cloud_credentials cc
+               WHERE cc.resource_id = cr.id AND cc.managed_on_prem = true
+           )"
+    )
+    .bind(org_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let mut stopped = 0u32;
+    let mut errors = Vec::new();
+
+    for (resource_id, resource_name) in &resources {
+        let aws_creds = get_aws_credentials_for_resource(&state, org_id, *resource_id).await;
+
+        if let Some(creds) = aws_creds {
+            let ec2 = ec2::Ec2Client::new(&creds);
+            let tag_filter = ec2::Filter::new("tag:Name", &[resource_name.as_str()]);
+            let state_filter = ec2::Filter::new("instance-state-name", &["running"]);
+
+            match ec2.describe_instances(&[tag_filter, state_filter]).await {
+                Ok(instances) if !instances.is_empty() => {
+                    let ids: Vec<String> = instances.iter().map(|i| i.instance_id.clone()).collect();
+                    if let Err(e) = ec2.stop_instances(&ids).await {
+                        tracing::error!("Failed to stop instances for {}: {}", resource_name, e);
+                        errors.push(format!("{}: {}", resource_name, e));
+                        continue;
+                    }
+                    tracing::info!("Stopped {} instance(s) for resource {}", ids.len(), resource_name);
+                }
+                Ok(_) => {
+                    tracing::info!("No running instances found for resource {}", resource_name);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to describe instances for {}: {}", resource_name, e);
+                    errors.push(format!("{}: {}", resource_name, e));
+                    continue;
+                }
+            }
+        }
+
+        let _ = sqlx::query("UPDATE compute_resources SET state = 'stopped' WHERE id = $1")
+            .bind(resource_id)
+            .execute(&state.db)
+            .await;
+        stopped += 1;
+    }
+
+    Ok(Json(serde_json::json!({
+        "stopped": stopped,
+        "total": resources.len(),
+        "errors": errors,
+    })))
+}
+
+// -- Auto top-up API endpoints --
+
+#[derive(Deserialize)]
+struct AutoTopupConfig {
+    enabled: bool,
+    amount_dollars: i32,
+}
+
+async fn get_auto_topup(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let row = sqlx::query(
+        "SELECT auto_topup_enabled, auto_topup_amount_dollars FROM billing_config WHERE user_id = $1"
+    )
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let (enabled, amount) = match row {
+        Some(r) => (
+            r.get::<Option<bool>, _>("auto_topup_enabled").unwrap_or(false),
+            r.get::<Option<i32>, _>("auto_topup_amount_dollars").unwrap_or(0),
+        ),
+        None => (false, 0),
+    };
+
+    Ok(Json(serde_json::json!({
+        "enabled": enabled,
+        "amount_dollars": amount,
+    })))
+}
+
+async fn put_auto_topup(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<AutoTopupConfig>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if req.amount_dollars < 0 || req.amount_dollars > 10_000 {
+        return Err((StatusCode::BAD_REQUEST,
+            "Auto top-up amount must be between $0 and $10,000".to_string()));
+    }
+    if req.enabled && req.amount_dollars < 10 {
+        return Err((StatusCode::BAD_REQUEST,
+            "Auto top-up target must be at least $10".to_string()));
+    }
+
+    // Verify user has an active payment method (required for auto-topup)
+    if req.enabled {
+        let org_id = get_user_primary_org(&state.db, auth.user_id)
+            .await
+            .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+        let payment_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM payment_methods WHERE organization_id = $1 AND is_active = true"
+        )
+        .bind(org_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+        if payment_count == 0 {
+            return Err((StatusCode::PAYMENT_REQUIRED,
+                "An active payment method is required to enable auto top-up".to_string()));
+        }
+    }
+
+    sqlx::query(
+        "INSERT INTO billing_config (user_id, auto_topup_enabled, auto_topup_amount_dollars)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (user_id) DO UPDATE SET
+             auto_topup_enabled = $2,
+             auto_topup_amount_dollars = $3"
+    )
+    .bind(auth.user_id)
+    .bind(req.enabled)
+    .bind(req.amount_dollars)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    Ok(Json(serde_json::json!({
+        "enabled": req.enabled,
+        "amount_dollars": req.amount_dollars,
+    })))
+}
+
+/// Internal endpoint: suspend all running resources for an org (stop EC2 instances).
+/// Called by the metering service during dunning enforcement.
+async fn suspend_org_resources(
+    State(state): State<Arc<AppState>>,
+    Path(org_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    tracing::info!("Suspending all running resources for org {}", org_id);
+
+    let resources: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, resource_name FROM compute_resources
+         WHERE organization_id = $1 AND state = 'running'"
+    )
+    .bind(org_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let mut stopped = 0u32;
+    let mut errors = Vec::new();
+
+    for (resource_id, resource_name) in &resources {
+        // Get AWS credentials for this resource
+        let aws_creds = get_aws_credentials_for_resource(&state, org_id, *resource_id).await;
+
+        if let Some(creds) = aws_creds {
+            let ec2 = ec2::Ec2Client::new(&creds);
+            let tag_filter = ec2::Filter::new("tag:Name", &[resource_name.as_str()]);
+            let state_filter = ec2::Filter::new("instance-state-name", &["running"]);
+
+            match ec2.describe_instances(&[tag_filter, state_filter]).await {
+                Ok(instances) if !instances.is_empty() => {
+                    let ids: Vec<String> = instances.iter().map(|i| i.instance_id.clone()).collect();
+                    if let Err(e) = ec2.stop_instances(&ids).await {
+                        tracing::error!("Failed to stop instances for {}: {}", resource_name, e);
+                        errors.push(format!("{}: {}", resource_name, e));
+                        continue;
+                    }
+                    tracing::info!("Stopped {} instance(s) for resource {}", ids.len(), resource_name);
+                }
+                Ok(_) => {
+                    tracing::info!("No running instances found for resource {}", resource_name);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to describe instances for {}: {}", resource_name, e);
+                    errors.push(format!("{}: {}", resource_name, e));
+                    continue;
+                }
+            }
+        }
+
+        // Mark resource as stopped in DB regardless
+        let _ = sqlx::query("UPDATE compute_resources SET state = 'stopped' WHERE id = $1")
+            .bind(resource_id)
+            .execute(&state.db)
+            .await;
+        stopped += 1;
+    }
+
+    // Mark org as suspended
+    let _ = sqlx::query(
+        "UPDATE organizations SET dunning_stage = 'suspended' WHERE id = $1"
+    )
+    .bind(org_id)
+    .execute(&state.db)
+    .await;
+
+    Ok(Json(serde_json::json!({
+        "stopped": stopped,
+        "total": resources.len(),
+        "errors": errors,
+    })))
+}
+
+/// Internal endpoint: unsuspend org — restart stopped resources and clear dunning state.
+/// Called when payment is resolved (credit deposit, new payment method, etc).
+async fn unsuspend_org_resources(
+    State(state): State<Arc<AppState>>,
+    Path(org_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    tracing::info!("Unsuspending resources for org {}", org_id);
+
+    let resources: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, resource_name FROM compute_resources
+         WHERE organization_id = $1 AND state = 'stopped'"
+    )
+    .bind(org_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let mut started = 0u32;
+    let mut errors = Vec::new();
+
+    for (resource_id, resource_name) in &resources {
+        let aws_creds = get_aws_credentials_for_resource(&state, org_id, *resource_id).await;
+
+        if let Some(creds) = aws_creds {
+            let ec2 = ec2::Ec2Client::new(&creds);
+            let tag_filter = ec2::Filter::new("tag:Name", &[resource_name.as_str()]);
+            let state_filter = ec2::Filter::new("instance-state-name", &["stopped"]);
+
+            match ec2.describe_instances(&[tag_filter, state_filter]).await {
+                Ok(instances) if !instances.is_empty() => {
+                    let ids: Vec<String> = instances.iter().map(|i| i.instance_id.clone()).collect();
+                    if let Err(e) = ec2.start_instances(&ids).await {
+                        tracing::error!("Failed to start instances for {}: {}", resource_name, e);
+                        errors.push(format!("{}: {}", resource_name, e));
+                        continue;
+                    }
+                    tracing::info!("Started {} instance(s) for resource {}", ids.len(), resource_name);
+                }
+                Ok(_) => {
+                    tracing::info!("No stopped instances found for resource {}", resource_name);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to describe instances for {}: {}", resource_name, e);
+                    errors.push(format!("{}: {}", resource_name, e));
+                    continue;
+                }
+            }
+        }
+
+        let _ = sqlx::query("UPDATE compute_resources SET state = 'running' WHERE id = $1")
+            .bind(resource_id)
+            .execute(&state.db)
+            .await;
+        started += 1;
+    }
+
+    // Clear dunning state
+    let _ = sqlx::query(
+        "UPDATE organizations SET payment_failed_at = NULL, dunning_stage = 'none' WHERE id = $1"
+    )
+    .bind(org_id)
+    .execute(&state.db)
+    .await;
+
+    Ok(Json(serde_json::json!({
+        "started": started,
+        "total": resources.len(),
+        "errors": errors,
+    })))
+}
+
+/// Helper: get AWS credentials for a resource (managed on-prem or platform default).
+async fn get_aws_credentials_for_resource(
+    state: &AppState,
+    org_id: Uuid,
+    resource_id: Uuid,
+) -> Option<deployment::AwsCredentials> {
+    // Check for managed on-prem credentials first
+    if let Some(encryptor) = state.encryptor.as_ref() {
+        if let Ok(Some(credential)) = cloud_credentials::get_credential_by_resource(&state.db, org_id, resource_id).await {
+            if credential.managed_on_prem {
+                if let Ok(Some(secrets)) = cloud_credentials::get_credential_secrets(&state.db, encryptor, org_id, credential.id).await {
+                    let region = credential.config["aws_region"].as_str()
+                        .map(|s| s.to_string())
+                        .or_else(|| std::env::var("AWS_REGION").ok())
+                        .unwrap_or_else(|| "us-west-2".to_string());
+                    return Some(deployment::AwsCredentials {
+                        access_key_id: secrets["aws_access_key_id"].as_str().unwrap_or("").to_string(),
+                        secret_access_key: secrets["aws_secret_access_key"].as_str().unwrap_or("").to_string(),
+                        region,
+                    });
+                }
+            }
+        }
+    }
+
+    // Fall back to platform credentials from env
+    let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").ok()?;
+    let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").ok()?;
+    let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string());
+    Some(deployment::AwsCredentials {
+        access_key_id,
+        secret_access_key,
+        region,
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
@@ -3253,14 +4969,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("INTERNAL_SERVICE_SECRET not set - internal service authentication disabled");
     }
 
-    // PayPal configuration
-    let paypal_client_id = std::env::var("PAYPAL_CLIENT_ID").ok();
-    let paypal_client_secret = std::env::var("PAYPAL_CLIENT_SECRET").ok();
-    let paypal_api_base = std::env::var("PAYPAL_API_BASE")
-        .unwrap_or_else(|_| "https://api-m.sandbox.paypal.com".to_string());
-    if paypal_client_id.is_some() && paypal_client_secret.is_some() {
-        info!("PayPal integration enabled ({})", paypal_api_base);
+    // Paddle configuration
+    let paddle_client_token = std::env::var("PADDLE_CLIENT_TOKEN").ok();
+    let paddle_setup_price_id = std::env::var("PADDLE_SETUP_PRICE_ID").ok();
+    if paddle_client_token.is_some() {
+        info!("Paddle billing integration enabled");
     }
+    if paddle_setup_price_id.is_none() {
+        tracing::warn!("PADDLE_SETUP_PRICE_ID not set - checkout will not have items");
+    }
+
+    let paddle_credits_price_ids = [
+        std::env::var("PADDLE_CREDITS_PRICE_ID_1000").ok(),
+        std::env::var("PADDLE_CREDITS_PRICE_ID_5000").ok(),
+        std::env::var("PADDLE_CREDITS_PRICE_ID_25000").ok(),
+    ];
+
+    let paddle_api_url = std::env::var("PADDLE_API_URL").unwrap_or_default();
+    let paddle_api_key = std::env::var("PADDLE_API_KEY").ok();
+
+    if paddle_api_key.is_some() && paddle_api_url.is_empty() {
+        return Err("PADDLE_API_KEY is set but PADDLE_API_URL is not — set PADDLE_API_URL to the Paddle API base URL (e.g. https://sandbox-api.paddle.com or https://api.paddle.com)".into());
+    }
+
+    let pricing = PricingConfig::load();
 
     let state = Arc::new(AppState {
         db: pool,
@@ -3269,9 +5001,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         data_dir,
         encryptor,
         internal_service_secret,
-        paypal_client_id,
-        paypal_client_secret,
-        paypal_api_base,
+        paddle_client_token,
+        paddle_setup_price_id,
+        paddle_credits_price_ids,
+        paddle_api_url,
+        paddle_api_key,
+        pricing,
     });
 
     let onboarding_routes = Router::new()
@@ -3319,12 +5054,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/secrets-bundles/{id}", delete(delete_secrets_bundle))
         .route("/billing/usage", get(get_billing_usage))
         .route("/billing/invoices", get(get_billing_invoices))
-        .route("/billing/payment-method", get(get_payment_method))
-        .route("/billing/payment-method", delete(delete_payment_method))
-        .route("/billing/paypal/setup-token", post(create_paypal_setup_token))
-        .route("/billing/paypal/save-payment-method", post(save_paypal_payment_method))
+        .route("/billing/payment-methods", get(get_payment_methods))
+        .route("/billing/payment-methods/{id}", delete(delete_payment_method))
+        .route("/billing/payment-methods/{id}/set-primary", post(set_primary_payment_method))
+        .route("/billing/paddle/client-token", get(get_paddle_client_token))
+        .route("/billing/paddle/transaction-completed", post(paddle_transaction_completed))
+        .route("/billing/credits/balance", get(get_credit_balance))
+        .route("/billing/credits/packages", get(get_credit_packages))
+        .route("/billing/credits/purchase", post(purchase_credits))
+        .route("/billing/credits/ledger", get(get_credit_ledger))
+        .route("/billing/credits/redeem", post(redeem_credit_code))
+        .route("/billing/auto-topup", get(get_auto_topup))
+        .route("/billing/auto-topup", put(put_auto_topup))
+        .route("/billing/subscription/tiers", get(get_subscription_tiers))
+        .route("/billing/subscription", get(get_subscription))
+        .route("/billing/subscription/subscribe", post(subscribe))
+        .route("/billing/subscription/change-tier", post(change_subscription_tier))
+        .route("/billing/subscription/add-capacity", post(add_subscription_capacity))
+        .route("/billing/subscription/cancel", post(cancel_subscription))
+        .route("/billing/subscription/reactivate", post(reactivate_subscription))
         .layer(middleware::from_fn_with_state(state.clone(), onboarding_middleware))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
+
+    let internal_routes = Router::new()
+        .route("/internal/org/{org_id}/suspend", post(suspend_org_resources))
+        .route("/internal/org/{org_id}/suspend-managed", post(suspend_managed_resources))
+        .route("/internal/org/{org_id}/unsuspend", post(unsuspend_org_resources))
+        .layer(middleware::from_fn_with_state(state.clone(), internal_auth_middleware));
 
     let public_routes = Router::new()
         .route("/health", get(health_check))
@@ -3333,6 +5089,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .merge(onboarding_routes)
         .merge(resource_routes)
+        .merge(internal_routes)
         .merge(public_routes)
         .layer(TraceLayer::new_for_http())
         .with_state(state);

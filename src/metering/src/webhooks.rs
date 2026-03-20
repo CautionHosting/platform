@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-//! Webhook handlers for Lago billing events
+//! Webhook handlers for Paddle billing events
+//!
+//! Paddle acts as merchant of record — it handles payment collection,
+//! so we no longer need charge_payment_method() or wallet logic.
 
 use axum::{
     extract::State,
@@ -15,359 +18,482 @@ use std::sync::Arc;
 
 use crate::AppState;
 
-/// Lago webhook event types we care about
-#[derive(Debug, Deserialize)]
-#[serde(tag = "webhook_type")]
-#[serde(rename_all = "snake_case")]
-pub enum LagoWebhookEvent {
-    InvoiceCreated { invoice: Invoice },
-    InvoicePaymentStatusUpdated { invoice: Invoice },
-    InvoicePaymentFailure { invoice: Invoice },
-    WalletTransactionCreated { wallet_transaction: WalletTransaction },
-    WalletTransactionUpdated { wallet_transaction: WalletTransaction },
-    #[serde(other)]
-    Unknown,
-}
-
+/// Paddle webhook payload
 #[derive(Debug, Deserialize, Serialize)]
-pub struct Invoice {
-    pub lago_id: String,
-    pub sequential_id: i64,
-    pub number: String,
-    pub issuing_date: String,
-    pub status: String,  // draft, finalized, voided
-    pub payment_status: String,  // pending, succeeded, failed
-    pub currency: String,
-    pub total_amount_cents: i64,
-    pub taxes_amount_cents: i64,
-    pub sub_total_excluding_taxes_amount_cents: i64,
-    pub customer: InvoiceCustomer,
-    #[serde(default)]
-    pub fees: Vec<InvoiceFee>,
-    pub file_url: Option<String>,  // PDF URL
+pub struct PaddleWebhookPayload {
+    pub event_id: String,
+    pub event_type: String,
+    pub occurred_at: String,
+    pub data: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct InvoiceCustomer {
-    pub lago_id: String,
-    pub external_id: String,  // Our user_id
-    pub email: Option<String>,
-    pub name: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct InvoiceFee {
-    pub lago_id: String,
-    pub amount_cents: i64,
-    pub units: String,
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct WalletTransaction {
-    pub lago_id: String,
-    pub lago_wallet_id: String,
-    pub status: String,
-    pub transaction_type: String,
-    pub amount: String,
-    pub credit_amount: String,
-}
-
-/// Handle incoming Lago webhooks
-pub async fn lago_webhook_handler(
+/// Handle incoming Paddle webhooks
+pub async fn paddle_webhook_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(payload): Json<serde_json::Value>,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    // TODO: Verify webhook signature from X-Lago-Signature header
-    let _signature = headers.get("X-Lago-Signature");
-
-    tracing::info!("Received Lago webhook: {}", serde_json::to_string_pretty(&payload).unwrap_or_default());
-
-    // Parse the webhook event
-    let event: LagoWebhookEvent = match serde_json::from_value(payload.clone()) {
-        Ok(e) => e,
+    // Verify webhook signature
+    match state.paddle.verify_webhook_signature(&headers, &body) {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!("Invalid Paddle webhook signature");
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "invalid signature"})),
+            );
+        }
         Err(e) => {
-            tracing::warn!("Failed to parse Lago webhook: {}", e);
-            return (StatusCode::OK, Json(serde_json::json!({"status": "ignored"})));
+            tracing::warn!("Paddle webhook signature verification error: {}", e);
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "signature verification failed"})),
+            );
+        }
+    }
+
+    // Parse the payload
+    let payload: PaddleWebhookPayload = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Failed to parse Paddle webhook: {}", e);
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "ignored", "reason": "parse error"})),
+            );
         }
     };
 
-    match event {
-        LagoWebhookEvent::InvoiceCreated { invoice } => {
-            if let Err(e) = handle_invoice_created(&state, invoice).await {
-                tracing::error!("Failed to handle invoice created: {}", e);
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})));
-            }
-        }
-        LagoWebhookEvent::InvoicePaymentStatusUpdated { invoice } => {
-            if let Err(e) = handle_invoice_payment_updated(&state, invoice).await {
-                tracing::error!("Failed to handle payment update: {}", e);
-            }
-        }
-        LagoWebhookEvent::InvoicePaymentFailure { invoice } => {
-            if let Err(e) = handle_invoice_payment_failure(&state, invoice).await {
-                tracing::error!("Failed to handle payment failure: {}", e);
-            }
-        }
-        LagoWebhookEvent::WalletTransactionCreated { wallet_transaction } |
-        LagoWebhookEvent::WalletTransactionUpdated { wallet_transaction } => {
-            tracing::info!("Wallet transaction: {:?}", wallet_transaction);
-        }
-        LagoWebhookEvent::Unknown => {
-            tracing::debug!("Ignoring unknown webhook type");
-        }
-    }
-
-    (StatusCode::OK, Json(serde_json::json!({"status": "processed"})))
-}
-
-/// Handle new invoice - attempt to charge customer
-/// Public alias for testing
-pub async fn handle_invoice_created_test(state: &AppState, invoice: Invoice) -> anyhow::Result<()> {
-    handle_invoice_created(state, invoice).await
-}
-
-async fn handle_invoice_created(state: &AppState, invoice: Invoice) -> anyhow::Result<()> {
-    let user_id: uuid::Uuid = invoice.customer.external_id.parse()?;
-
     tracing::info!(
-        "Invoice created for user {}: {} ({} cents)",
-        user_id,
-        invoice.number,
-        invoice.total_amount_cents
+        "Received Paddle webhook: {} ({})",
+        payload.event_type,
+        payload.event_id
     );
 
-    // Get user's billing config
-    let billing_config = sqlx::query(
-        r#"SELECT billing_mode, payment_method FROM billing_config WHERE user_id = $1"#,
+    // Atomic idempotency: INSERT returns rows_affected=0 if event_id already exists
+    let idempotency_result = sqlx::query(
+        r#"
+        INSERT INTO paddle_webhook_events (event_id, event_type, payload)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (event_id) DO NOTHING
+        "#,
     )
-    .bind(user_id)
+    .bind(&payload.event_id)
+    .bind(&payload.event_type)
+    .bind(&payload.data)
+    .execute(&state.pool)
+    .await;
+
+    match idempotency_result {
+        Ok(result) if result.rows_affected() == 0 => {
+            tracing::debug!("Webhook {} already processed, skipping", payload.event_id);
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "already_processed"})),
+            );
+        }
+        Err(e) => {
+            tracing::error!("Failed to record webhook event for idempotency: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "idempotency check failed"})),
+            );
+        }
+        Ok(_) => {} // rows_affected=1, new event — proceed
+    }
+
+    // Dispatch by event type
+    let result = match payload.event_type.as_str() {
+        "transaction.completed" => handle_transaction_completed(&state, &payload).await,
+        "transaction.billed" => handle_transaction_billed(&state, &payload).await,
+        "transaction.payment_failed" => handle_payment_failed(&state, &payload).await,
+        _ => {
+            tracing::debug!("Ignoring Paddle event type: {}", payload.event_type);
+            Ok(())
+        }
+    };
+
+    if let Err(e) = result {
+        tracing::error!("Failed to handle Paddle webhook {}: {}", payload.event_type, e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "processed"})),
+    )
+}
+
+/// Handle transaction.completed — payment was collected successfully
+async fn handle_transaction_completed(
+    state: &AppState,
+    payload: &PaddleWebhookPayload,
+) -> anyhow::Result<()> {
+    let transaction_id = payload.data["id"]
+        .as_str()
+        .unwrap_or_default();
+    let customer_id = payload.data["customer_id"]
+        .as_str()
+        .unwrap_or_default();
+
+    tracing::info!(
+        "Transaction completed: {} for customer {}",
+        transaction_id,
+        customer_id
+    );
+
+    // Find the user by paddle_customer_id
+    let user_row = sqlx::query(
+        "SELECT user_id FROM billing_config WHERE paddle_customer_id = $1",
+    )
+    .bind(customer_id)
     .fetch_optional(&state.pool)
     .await?;
 
-    let (billing_mode, payment_method): (String, Option<String>) = billing_config
-        .map(|row| {
-            (
-                row.get::<String, _>("billing_mode"),
-                row.get::<Option<String>, _>("payment_method"),
-            )
-        })
-        .unwrap_or(("prepaid".to_string(), None));
+    let Some(user_row) = user_row else {
+        tracing::warn!(
+            "No billing_config found for paddle_customer_id: {}",
+            customer_id
+        );
+        return Ok(());
+    };
 
-    // Record invoice locally
+    let user_id: uuid::Uuid = user_row.get("user_id");
+
+    // Update invoice status to paid
     sqlx::query(
         r#"
-        INSERT INTO invoices (lago_invoice_id, user_id, invoice_number, amount_cents, currency, status, payment_status, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-        ON CONFLICT (lago_invoice_id) DO UPDATE SET
-            status = $6,
-            payment_status = $7
+        UPDATE invoices
+        SET payment_status = 'succeeded', paid_at = NOW()
+        WHERE paddle_transaction_id = $1
         "#,
     )
-    .bind(&invoice.lago_id)
-    .bind(user_id)
-    .bind(&invoice.number)
-    .bind(invoice.total_amount_cents)
-    .bind(&invoice.currency)
-    .bind(&invoice.status)
-    .bind(&invoice.payment_status)
+    .bind(transaction_id)
     .execute(&state.pool)
     .await?;
 
-    // Try to pay the invoice
-    match billing_mode.as_str() {
-        "prepaid" => {
-            // Check wallet balance first
-            let balance: i64 = sqlx::query(
-                r#"SELECT balance_cents FROM wallet_balance WHERE user_id = $1"#,
+    // Also mark any subscription billing event as paid
+    let _ = sqlx::query(
+        "UPDATE subscription_billing_events SET status = 'paid' WHERE paddle_transaction_id = $1"
+    )
+    .bind(transaction_id)
+    .execute(&state.pool)
+    .await;
+
+    // Send confirmation email
+    send_payment_confirmation_email(state, user_id, transaction_id).await?;
+
+    // Check if this was an auto top-up transaction — deposit credits and unsuspend if needed
+    let line_items = payload.data["details"]["line_items"].as_array();
+    let is_auto_topup = line_items
+        .map(|items| items.iter().any(|item| {
+            item["description"].as_str()
+                .map(|d| d.starts_with("Auto top-up"))
+                .unwrap_or(false)
+        }))
+        .unwrap_or(false);
+
+    if is_auto_topup {
+        let total_cents = payload.data["details"]["totals"]["total"]
+            .as_str()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+
+        if total_cents > 0 {
+            tracing::info!("Auto top-up completed: depositing {} cents for user {}", total_cents, user_id);
+
+            // Deposit credits to wallet
+            let mut tx = state.pool.begin().await?;
+
+            let new_balance: i64 = sqlx::query_scalar(
+                "INSERT INTO wallet_balance (user_id, balance_cents)
+                 VALUES ($1, $2)
+                 ON CONFLICT (user_id) DO UPDATE SET balance_cents = wallet_balance.balance_cents + $2
+                 RETURNING balance_cents"
+            )
+            .bind(user_id)
+            .bind(total_cents)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            sqlx::query(
+                "INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description, paddle_transaction_id)
+                 VALUES ($1, $2, $3, 'auto_topup', $4, $5)"
+            )
+            .bind(user_id)
+            .bind(total_cents)
+            .bind(new_balance)
+            .bind(format!("Auto top-up: ${:.2}", total_cents as f64 / 100.0))
+            .bind(transaction_id)
+            .execute(&mut *tx)
+            .await?;
+
+            tx.commit().await?;
+
+            tracing::info!("Auto top-up credited: user={}, +{}c, new_balance={}", user_id, total_cents, new_balance);
+
+            // Check if org was credit-suspended and unsuspend
+            let org_id: Option<uuid::Uuid> = sqlx::query_scalar(
+                "SELECT organization_id FROM organization_members WHERE user_id = $1 LIMIT 1"
             )
             .bind(user_id)
             .fetch_optional(&state.pool)
-            .await?
-            .map(|row| row.get::<i64, _>("balance_cents"))
-            .unwrap_or(0);
+            .await?;
 
-            if balance >= invoice.total_amount_cents {
-                // Deduct from wallet - Lago handles this automatically if configured
-                tracing::info!("User {} has sufficient balance, Lago will deduct from wallet", user_id);
-            } else {
-                // Insufficient balance - try fallback payment method
-                tracing::warn!("User {} has insufficient balance ({} < {})", user_id, balance, invoice.total_amount_cents);
-                if let Some(ref method) = payment_method {
-                    charge_payment_method(state, user_id, &invoice, method).await?;
-                } else {
-                    // Send email about insufficient balance
-                    send_insufficient_balance_email(state, user_id, &invoice).await?;
+            if let Some(org_id) = org_id {
+                let suspended: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+                    "SELECT credit_suspended_at FROM organizations WHERE id = $1"
+                )
+                .bind(org_id)
+                .fetch_optional(&state.pool)
+                .await?
+                .flatten();
+
+                if suspended.is_some() {
+                    tracing::info!("Clearing credit suspension for org {} after auto top-up", org_id);
+                    sqlx::query("UPDATE organizations SET credit_suspended_at = NULL WHERE id = $1")
+                        .bind(org_id)
+                        .execute(&state.pool)
+                        .await?;
+
+                    // Trigger unsuspend
+                    let api_url = std::env::var("API_URL").unwrap_or_else(|_| "http://api:8080".to_string());
+                    let internal_secret = std::env::var("INTERNAL_SERVICE_SECRET").unwrap_or_default();
+                    let client = reqwest::Client::new();
+                    let _ = client
+                        .post(format!("{}/internal/org/{}/unsuspend", api_url, org_id))
+                        .header("x-internal-service-secret", &internal_secret)
+                        .header("x-authenticated-user-id", user_id.to_string())
+                        .send()
+                        .await;
                 }
             }
         }
-        "postpaid" => {
-            // Charge the payment method directly
-            if let Some(ref method) = payment_method {
-                charge_payment_method(state, user_id, &invoice, method).await?;
-            } else {
-                tracing::error!("User {} is postpaid but has no payment method configured", user_id);
-            }
-        }
-        _ => {
-            tracing::warn!("Unknown billing mode: {}", billing_mode);
-        }
-    }
-
-    // Send invoice email
-    send_invoice_email(state, user_id, &invoice).await?;
-
-    Ok(())
-}
-
-/// Handle invoice payment status update
-async fn handle_invoice_payment_updated(state: &AppState, invoice: Invoice) -> anyhow::Result<()> {
-    let user_id: uuid::Uuid = invoice.customer.external_id.parse()?;
-
-    tracing::info!(
-        "Invoice {} payment status updated: {}",
-        invoice.number,
-        invoice.payment_status
-    );
-
-    // Update local record
-    sqlx::query(
-        r#"
-        UPDATE invoices SET payment_status = $1 WHERE lago_invoice_id = $2
-        "#,
-    )
-    .bind(&invoice.payment_status)
-    .bind(&invoice.lago_id)
-    .execute(&state.pool)
-    .await?;
-
-    if invoice.payment_status == "succeeded" {
-        send_payment_confirmation_email(state, user_id, &invoice).await?;
     }
 
     Ok(())
 }
 
-/// Handle invoice payment failure
-async fn handle_invoice_payment_failure(state: &AppState, invoice: Invoice) -> anyhow::Result<()> {
-    let user_id: uuid::Uuid = invoice.customer.external_id.parse()?;
-
-    tracing::warn!(
-        "Invoice {} payment failed for user {}",
-        invoice.number,
-        user_id
-    );
-
-    // Update local record
-    sqlx::query(
-        r#"
-        UPDATE invoices SET payment_status = 'failed' WHERE lago_invoice_id = $1
-        "#,
-    )
-    .bind(&invoice.lago_id)
-    .execute(&state.pool)
-    .await?;
-
-    // Send payment failure email
-    send_payment_failure_email(state, user_id, &invoice).await?;
-
-    Ok(())
-}
-
-/// Charge a payment method (PayPal, etc.)
-async fn charge_payment_method(
+/// Handle transaction.billed — invoice was created/issued
+async fn handle_transaction_billed(
     state: &AppState,
-    user_id: uuid::Uuid,
-    invoice: &Invoice,
-    payment_method: &str,
+    payload: &PaddleWebhookPayload,
 ) -> anyhow::Result<()> {
+    let transaction_id = payload.data["id"]
+        .as_str()
+        .unwrap_or_default();
+    let customer_id = payload.data["customer_id"]
+        .as_str()
+        .unwrap_or_default();
+    let total = payload.data["details"]["totals"]["total"]
+        .as_str()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+    let tax = payload.data["details"]["totals"]["tax"]
+        .as_str()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+    let currency = payload.data["currency_code"]
+        .as_str()
+        .unwrap_or("USD");
+    let invoice_number = payload.data["invoice_number"]
+        .as_str()
+        .unwrap_or("");
+
     tracing::info!(
-        "Charging user {} via {} for invoice {}",
-        user_id,
-        payment_method,
-        invoice.number
+        "Transaction billed: {} ({} cents) for customer {}",
+        transaction_id,
+        total,
+        customer_id
     );
 
-    // Record the payment attempt
-    let result = sqlx::query(
-        r#"
-        INSERT INTO payment_transactions (user_id, amount_cents, currency, payment_method, transaction_type, status, metadata)
-        VALUES ($1, $2, $3, $4, 'invoice_payment', 'pending', $5)
-        RETURNING id
-        "#,
+    // Find the user
+    let user_row = sqlx::query(
+        "SELECT user_id FROM billing_config WHERE paddle_customer_id = $1",
     )
-    .bind(user_id)
-    .bind(invoice.total_amount_cents)
-    .bind(&invoice.currency)
-    .bind(payment_method)
-    .bind(serde_json::json!({
-        "invoice_number": invoice.number,
-        "lago_invoice_id": invoice.lago_id,
-    }))
-    .fetch_one(&state.pool)
-    .await?;
-
-    let transaction_id: uuid::Uuid = result.get("id");
-
-    match payment_method {
-        "paypal" => {
-            // TODO: Implement PayPal charge
-            // 1. Get user's PayPal billing agreement ID from storage
-            // 2. Call PayPal Billing Agreements API to charge
-            // 3. Update transaction status based on result
-            tracing::info!("PayPal payment would be processed here for transaction {}", transaction_id);
-        }
-        "crypto" => {
-            // TODO: Implement crypto payment request
-            // 1. Generate payment address/invoice
-            // 2. Send payment request to user
-            // 3. Monitor for payment (separate process)
-            tracing::info!("Crypto payment would be requested here for transaction {}", transaction_id);
-        }
-        "card" => {
-            // TODO: Implement card charge via PayPal or Stripe
-            tracing::info!("Card payment would be processed here for transaction {}", transaction_id);
-        }
-        _ => {
-            tracing::warn!("Unknown payment method: {}", payment_method);
-        }
-    }
-
-    Ok(())
-}
-
-/// Send invoice email to user
-async fn send_invoice_email(state: &AppState, user_id: uuid::Uuid, invoice: &Invoice) -> anyhow::Result<()> {
-    // Get user email
-    let user = sqlx::query(
-        r#"SELECT email FROM users WHERE id = $1"#,
-    )
-    .bind(user_id)
+    .bind(customer_id)
     .fetch_optional(&state.pool)
     .await?;
+
+    let Some(user_row) = user_row else {
+        tracing::warn!(
+            "No billing_config found for paddle_customer_id: {}",
+            customer_id
+        );
+        return Ok(());
+    };
+
+    let user_id: uuid::Uuid = user_row.get("user_id");
+
+    // Record the invoice
+    sqlx::query(
+        r#"
+        INSERT INTO invoices (
+            paddle_transaction_id, user_id, invoice_number,
+            amount_cents, tax_amount_cents, currency,
+            status, payment_status, billing_provider, created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, 'finalized', 'pending', 'paddle', NOW())
+        ON CONFLICT (paddle_transaction_id) DO UPDATE SET
+            status = 'finalized',
+            payment_status = 'pending',
+            amount_cents = $4,
+            tax_amount_cents = $5
+        "#,
+    )
+    .bind(transaction_id)
+    .bind(user_id)
+    .bind(invoice_number)
+    .bind(total)
+    .bind(tax)
+    .bind(currency)
+    .execute(&state.pool)
+    .await?;
+
+    // Send invoice email
+    send_invoice_email(state, user_id, transaction_id, total, invoice_number).await?;
+
+    Ok(())
+}
+
+/// Handle transaction.payment_failed — payment collection failed
+async fn handle_payment_failed(
+    state: &AppState,
+    payload: &PaddleWebhookPayload,
+) -> anyhow::Result<()> {
+    let transaction_id = payload.data["id"]
+        .as_str()
+        .unwrap_or_default();
+    let customer_id = payload.data["customer_id"]
+        .as_str()
+        .unwrap_or_default();
+
+    tracing::warn!(
+        "Transaction payment failed: {} for customer {}",
+        transaction_id,
+        customer_id
+    );
+
+    // Find the user
+    let user_row = sqlx::query(
+        "SELECT user_id FROM billing_config WHERE paddle_customer_id = $1",
+    )
+    .bind(customer_id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let Some(user_row) = user_row else {
+        return Ok(());
+    };
+
+    let user_id: uuid::Uuid = user_row.get("user_id");
+
+    // Update invoice status
+    sqlx::query(
+        r#"UPDATE invoices SET payment_status = 'failed' WHERE paddle_transaction_id = $1"#,
+    )
+    .bind(transaction_id)
+    .execute(&state.pool)
+    .await?;
+
+    // Mark subscription as past_due if this was a subscription payment
+    let _ = sqlx::query(
+        r#"
+        UPDATE subscriptions SET status = 'past_due', updated_at = NOW()
+        WHERE id IN (
+            SELECT subscription_id FROM subscription_billing_events
+            WHERE paddle_transaction_id = $1
+        )
+        "#,
+    )
+    .bind(transaction_id)
+    .execute(&state.pool)
+    .await;
+
+    // Mark the billing event as failed
+    let _ = sqlx::query(
+        "UPDATE subscription_billing_events SET status = 'payment_failed' WHERE paddle_transaction_id = $1"
+    )
+    .bind(transaction_id)
+    .execute(&state.pool)
+    .await;
+
+    send_payment_failure_email(state, user_id, transaction_id).await?;
+
+    Ok(())
+}
+
+/// Public entry point for test simulation
+pub async fn handle_paddle_transaction_test(
+    state: &AppState,
+    payload: PaddleWebhookPayload,
+) -> anyhow::Result<()> {
+    // Record the event for idempotency (same as real webhook handler)
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO paddle_webhook_events (event_id, event_type, payload)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (event_id) DO NOTHING
+        "#,
+    )
+    .bind(&payload.event_id)
+    .bind(&payload.event_type)
+    .bind(serde_json::to_value(&payload).unwrap_or_default())
+    .execute(&state.pool)
+    .await;
+
+    match payload.event_type.as_str() {
+        "transaction.completed" => handle_transaction_completed(state, &payload).await,
+        "transaction.billed" => handle_transaction_billed(state, &payload).await,
+        "transaction.payment_failed" => handle_payment_failed(state, &payload).await,
+        _ => Ok(()),
+    }
+}
+
+// =============================================================================
+// Email helpers (same as before, adapted for Paddle data)
+// =============================================================================
+
+async fn send_invoice_email(
+    state: &AppState,
+    user_id: uuid::Uuid,
+    transaction_id: &str,
+    amount_cents: i64,
+    invoice_number: &str,
+) -> anyhow::Result<()> {
+    let user = sqlx::query(r#"SELECT email FROM users WHERE id = $1"#)
+        .bind(user_id)
+        .fetch_optional(&state.pool)
+        .await?;
 
     let Some(user) = user else {
         tracing::warn!("User {} not found for invoice email", user_id);
         return Ok(());
     };
 
-    let email: String = user.get("email");
+    let email: Option<String> = user.get("email");
 
-    let email_service_url = std::env::var("EMAIL_SERVICE_URL")
-        .unwrap_or_else(|_| "http://email:8082".to_string());
+    let Some(email) = email else {
+        tracing::warn!("User {} has no email address, skipping invoice email", user_id);
+        return Ok(());
+    };
 
-    let amount_dollars = invoice.total_amount_cents as f64 / 100.0;
+    let email_service_url =
+        std::env::var("EMAIL_SERVICE_URL").unwrap_or_else(|_| "http://email:8082".to_string());
+
+    let amount_dollars = amount_cents as f64 / 100.0;
 
     let email_request = serde_json::json!({
         "to": email,
         "template": "invoice",
         "data": {
-            "invoice_number": invoice.number,
+            "invoice_number": invoice_number,
             "amount": format!("${:.2}", amount_dollars),
-            "currency": invoice.currency,
-            "date": invoice.issuing_date,
-            "pdf_url": invoice.file_url,
+            "currency": "USD",
+            "transaction_id": transaction_id,
         }
     });
 
@@ -393,31 +519,34 @@ async fn send_invoice_email(state: &AppState, user_id: uuid::Uuid, invoice: &Inv
     Ok(())
 }
 
-async fn send_payment_confirmation_email(state: &AppState, user_id: uuid::Uuid, invoice: &Invoice) -> anyhow::Result<()> {
-    let user = sqlx::query(
-        r#"SELECT email FROM users WHERE id = $1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(&state.pool)
-    .await?;
+async fn send_payment_confirmation_email(
+    state: &AppState,
+    user_id: uuid::Uuid,
+    transaction_id: &str,
+) -> anyhow::Result<()> {
+    let user = sqlx::query(r#"SELECT email FROM users WHERE id = $1"#)
+        .bind(user_id)
+        .fetch_optional(&state.pool)
+        .await?;
 
     let Some(user) = user else {
         return Ok(());
     };
 
-    let email: String = user.get("email");
+    let email: Option<String> = user.get("email");
+    let Some(email) = email else {
+        tracing::warn!("User {} has no email, skipping payment confirmation", user_id);
+        return Ok(());
+    };
 
-    let email_service_url = std::env::var("EMAIL_SERVICE_URL")
-        .unwrap_or_else(|_| "http://email:8082".to_string());
-
-    let amount_dollars = invoice.total_amount_cents as f64 / 100.0;
+    let email_service_url =
+        std::env::var("EMAIL_SERVICE_URL").unwrap_or_else(|_| "http://email:8082".to_string());
 
     let email_request = serde_json::json!({
         "to": email,
         "template": "payment_confirmation",
         "data": {
-            "invoice_number": invoice.number,
-            "amount": format!("${:.2}", amount_dollars),
+            "transaction_id": transaction_id,
         }
     });
 
@@ -431,31 +560,35 @@ async fn send_payment_confirmation_email(state: &AppState, user_id: uuid::Uuid, 
     Ok(())
 }
 
-async fn send_payment_failure_email(state: &AppState, user_id: uuid::Uuid, invoice: &Invoice) -> anyhow::Result<()> {
-    let user = sqlx::query(
-        r#"SELECT email FROM users WHERE id = $1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(&state.pool)
-    .await?;
+async fn send_payment_failure_email(
+    state: &AppState,
+    user_id: uuid::Uuid,
+    transaction_id: &str,
+) -> anyhow::Result<()> {
+    let user = sqlx::query(r#"SELECT email FROM users WHERE id = $1"#)
+        .bind(user_id)
+        .fetch_optional(&state.pool)
+        .await?;
 
     let Some(user) = user else {
         return Ok(());
     };
 
-    let email: String = user.get("email");
+    let email: Option<String> = user.get("email");
+    let Some(email) = email else {
+        tracing::warn!("User {} has no email, skipping payment failure email", user_id);
+        return Ok(());
+    };
 
-    let email_service_url = std::env::var("EMAIL_SERVICE_URL")
-        .unwrap_or_else(|_| "http://email:8082".to_string());
-
-    let amount_dollars = invoice.total_amount_cents as f64 / 100.0;
+    let email_service_url =
+        std::env::var("EMAIL_SERVICE_URL").unwrap_or_else(|_| "http://email:8082".to_string());
 
     let email_request = serde_json::json!({
         "to": email,
         "template": "payment_failure",
         "data": {
-            "invoice_number": invoice.number,
-            "amount": format!("${:.2}", amount_dollars),
+            "transaction_id": transaction_id,
+            "update_payment_url": "https://caution.co/billing",
         }
     });
 
@@ -469,41 +602,92 @@ async fn send_payment_failure_email(state: &AppState, user_id: uuid::Uuid, invoi
     Ok(())
 }
 
-async fn send_insufficient_balance_email(state: &AppState, user_id: uuid::Uuid, invoice: &Invoice) -> anyhow::Result<()> {
-    let user = sqlx::query(
-        r#"SELECT email FROM users WHERE id = $1"#,
-    )
-    .bind(user_id)
-    .fetch_optional(&state.pool)
-    .await?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let Some(user) = user else {
-        return Ok(());
-    };
+    #[test]
+    fn test_parse_transaction_completed_webhook() {
+        let json = serde_json::json!({
+            "event_id": "evt_01h8bkz0d2c8jxqw3f5n0p7m6k",
+            "event_type": "transaction.completed",
+            "occurred_at": "2025-01-15T10:30:00Z",
+            "data": {
+                "id": "txn_01h8bkz0d2c8jxqw3f5n0p7m6k",
+                "status": "completed",
+                "customer_id": "ctm_01h8bkz0d2c8jxqw3f5n0p7m6k",
+                "currency_code": "USD",
+                "details": {
+                    "totals": {
+                        "total": "4250",
+                        "tax": "0"
+                    }
+                }
+            }
+        });
 
-    let email: String = user.get("email");
+        let payload: PaddleWebhookPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(payload.event_type, "transaction.completed");
+        assert_eq!(
+            payload.data["id"].as_str().unwrap(),
+            "txn_01h8bkz0d2c8jxqw3f5n0p7m6k"
+        );
+    }
 
-    let email_service_url = std::env::var("EMAIL_SERVICE_URL")
-        .unwrap_or_else(|_| "http://email:8082".to_string());
+    #[test]
+    fn test_parse_transaction_billed_webhook() {
+        let json = serde_json::json!({
+            "event_id": "evt_billed_123",
+            "event_type": "transaction.billed",
+            "occurred_at": "2025-01-15T10:30:00Z",
+            "data": {
+                "id": "txn_billed_123",
+                "status": "billed",
+                "customer_id": "ctm_123",
+                "currency_code": "USD",
+                "invoice_number": "INV-2025-001",
+                "details": {
+                    "totals": {
+                        "total": "5000",
+                        "tax": "500"
+                    }
+                }
+            }
+        });
 
-    let amount_dollars = invoice.total_amount_cents as f64 / 100.0;
+        let payload: PaddleWebhookPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(payload.event_type, "transaction.billed");
+        assert_eq!(payload.data["invoice_number"].as_str().unwrap(), "INV-2025-001");
+    }
 
-    let email_request = serde_json::json!({
-        "to": email,
-        "template": "insufficient_balance",
-        "data": {
-            "invoice_number": invoice.number,
-            "amount": format!("${:.2}", amount_dollars),
-            "topup_url": "https://caution.co/billing/topup",
-        }
-    });
+    #[test]
+    fn test_parse_payment_failed_webhook() {
+        let json = serde_json::json!({
+            "event_id": "evt_failed_456",
+            "event_type": "transaction.payment_failed",
+            "occurred_at": "2025-01-15T10:30:00Z",
+            "data": {
+                "id": "txn_failed_456",
+                "status": "past_due",
+                "customer_id": "ctm_456"
+            }
+        });
 
-    let client = reqwest::Client::new();
-    let _ = client
-        .post(format!("{}/send", email_service_url))
-        .json(&email_request)
-        .send()
-        .await;
+        let payload: PaddleWebhookPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(payload.event_type, "transaction.payment_failed");
+    }
 
-    Ok(())
+    #[test]
+    fn test_unknown_event_ignored() {
+        let json = serde_json::json!({
+            "event_id": "evt_unknown_789",
+            "event_type": "subscription.activated",
+            "occurred_at": "2025-01-15T10:30:00Z",
+            "data": {}
+        });
+
+        let payload: PaddleWebhookPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(payload.event_type, "subscription.activated");
+        // Should parse without error — unknown events are simply ignored
+    }
 }

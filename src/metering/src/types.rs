@@ -96,15 +96,6 @@ impl UsageUnit {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct LagoEvent {
-    pub transaction_id: String,
-    pub external_customer_id: String,
-    pub code: String,
-    pub timestamp: i64,
-    pub properties: serde_json::Value,
-}
-
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct TrackedResource {
     pub resource_id: String,

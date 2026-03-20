@@ -28,15 +28,15 @@ pub struct PricingRate {
 impl Default for PricingRules {
     fn default() -> Self {
         Self {
-            margin_percent: 55.0, // 55% margin for verifiable compute
+            margin_percent: 75.0, // 75% margin on top of base cloud costs
             rates: vec![
-                // AWS compute pricing (approximate on-demand rates)
+                // AWS compute pricing (on-demand rates, us-west-2)
                 PricingRate {
                     provider: Provider::Aws,
                     resource_type: ResourceType::Compute,
                     instance_type: Some("m5.xlarge".to_string()),
                     region: None,
-                    rate_per_unit: 0.192, // ~$0.192/hr
+                    rate_per_unit: 0.192,
                 },
                 PricingRate {
                     provider: Provider::Aws,
@@ -48,9 +48,58 @@ impl Default for PricingRules {
                 PricingRate {
                     provider: Provider::Aws,
                     resource_type: ResourceType::Compute,
+                    instance_type: Some("m5.4xlarge".to_string()),
+                    region: None,
+                    rate_per_unit: 0.768,
+                },
+                PricingRate {
+                    provider: Provider::Aws,
+                    resource_type: ResourceType::Compute,
+                    instance_type: Some("m5.8xlarge".to_string()),
+                    region: None,
+                    rate_per_unit: 1.536,
+                },
+                PricingRate {
+                    provider: Provider::Aws,
+                    resource_type: ResourceType::Compute,
+                    instance_type: Some("m5.12xlarge".to_string()),
+                    region: None,
+                    rate_per_unit: 2.304,
+                },
+                PricingRate {
+                    provider: Provider::Aws,
+                    resource_type: ResourceType::Compute,
+                    instance_type: Some("m5.16xlarge".to_string()),
+                    region: None,
+                    rate_per_unit: 3.072,
+                },
+                PricingRate {
+                    provider: Provider::Aws,
+                    resource_type: ResourceType::Compute,
+                    instance_type: Some("m5.24xlarge".to_string()),
+                    region: None,
+                    rate_per_unit: 4.608,
+                },
+                PricingRate {
+                    provider: Provider::Aws,
+                    resource_type: ResourceType::Compute,
                     instance_type: Some("c5.xlarge".to_string()),
                     region: None,
                     rate_per_unit: 0.17,
+                },
+                PricingRate {
+                    provider: Provider::Aws,
+                    resource_type: ResourceType::Compute,
+                    instance_type: Some("c5.2xlarge".to_string()),
+                    region: None,
+                    rate_per_unit: 0.34,
+                },
+                PricingRate {
+                    provider: Provider::Aws,
+                    resource_type: ResourceType::Compute,
+                    instance_type: Some("c5.4xlarge".to_string()),
+                    region: None,
+                    rate_per_unit: 0.68,
                 },
                 PricingRate {
                     provider: Provider::Aws,
@@ -59,13 +108,34 @@ impl Default for PricingRules {
                     region: None,
                     rate_per_unit: 0.17,
                 },
+                PricingRate {
+                    provider: Provider::Aws,
+                    resource_type: ResourceType::Compute,
+                    instance_type: Some("c6i.2xlarge".to_string()),
+                    region: None,
+                    rate_per_unit: 0.34,
+                },
+                PricingRate {
+                    provider: Provider::Aws,
+                    resource_type: ResourceType::Compute,
+                    instance_type: Some("c6a.xlarge".to_string()),
+                    region: None,
+                    rate_per_unit: 0.153,
+                },
+                PricingRate {
+                    provider: Provider::Aws,
+                    resource_type: ResourceType::Compute,
+                    instance_type: Some("c6a.2xlarge".to_string()),
+                    region: None,
+                    rate_per_unit: 0.306,
+                },
                 // Default AWS compute rate
                 PricingRate {
                     provider: Provider::Aws,
                     resource_type: ResourceType::Compute,
                     instance_type: None,
                     region: None,
-                    rate_per_unit: 0.20, // Default ~$0.20/hr
+                    rate_per_unit: 0.20,
                 },
                 // AWS storage
                 PricingRate {
@@ -205,26 +275,300 @@ mod tests {
     use time::OffsetDateTime;
     use uuid::Uuid;
 
+    fn make_usage(provider: Provider, resource_type: ResourceType, quantity: f64, metadata: serde_json::Value) -> ResourceUsage {
+        ResourceUsage {
+            user_id: Uuid::new_v4(),
+            resource_id: "test-resource".to_string(),
+            provider,
+            resource_type,
+            quantity,
+            unit: UsageUnit::Hours,
+            timestamp: OffsetDateTime::now_utc(),
+            metadata,
+        }
+    }
+
     #[test]
     fn test_calculate_cost_with_margin() {
         let calculator = CostCalculator::new(PricingRules::default());
 
-        let usage = ResourceUsage {
-            user_id: Uuid::new_v4(),
-            resource_id: "test-resource".to_string(),
-            provider: Provider::Aws,
-            resource_type: ResourceType::Compute,
-            quantity: 10.0, // 10 hours
-            unit: UsageUnit::Hours,
-            timestamp: OffsetDateTime::now_utc(),
-            metadata: serde_json::json!({
-                "instance_type": "m5.xlarge",
-            }),
-        };
+        let usage = make_usage(
+            Provider::Aws,
+            ResourceType::Compute,
+            10.0,
+            serde_json::json!({"instance_type": "m5.xlarge"}),
+        );
 
         let cost = calculator.calculate_cost(&usage);
 
-        // $0.192/hr * 10 hrs * 1.20 margin = $2.304
-        assert!((cost - 2.304).abs() < 0.001);
+        // $0.192/hr * 10 hrs * 1.75 margin = $3.36
+        assert!((cost - 3.36).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_fallback_to_default_rate() {
+        let calculator = CostCalculator::new(PricingRules::default());
+
+        // Unknown instance type should fall back to default AWS compute rate ($0.20/hr)
+        let usage = make_usage(
+            Provider::Aws,
+            ResourceType::Compute,
+            10.0,
+            serde_json::json!({"instance_type": "r6g.metal"}),
+        );
+
+        let cost = calculator.calculate_cost(&usage);
+
+        // $0.20/hr * 10 hrs * 1.75 = $3.50
+        assert!((cost - 3.50).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_no_instance_type_uses_default() {
+        let calculator = CostCalculator::new(PricingRules::default());
+
+        // No instance_type in metadata → default rate
+        let usage = make_usage(
+            Provider::Aws,
+            ResourceType::Compute,
+            5.0,
+            serde_json::json!({}),
+        );
+
+        let cost = calculator.calculate_cost(&usage);
+
+        // $0.20/hr * 5 hrs * 1.75 = $1.75
+        assert!((cost - 1.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_zero_quantity_returns_zero() {
+        let calculator = CostCalculator::new(PricingRules::default());
+
+        let usage = make_usage(
+            Provider::Aws,
+            ResourceType::Compute,
+            0.0,
+            serde_json::json!({"instance_type": "m5.xlarge"}),
+        );
+
+        assert_eq!(calculator.calculate_cost(&usage), 0.0);
+    }
+
+    #[test]
+    fn test_gcp_compute_default_rate() {
+        let calculator = CostCalculator::new(PricingRules::default());
+
+        let usage = make_usage(
+            Provider::Gcp,
+            ResourceType::Compute,
+            10.0,
+            serde_json::json!({}),
+        );
+
+        let cost = calculator.calculate_cost(&usage);
+
+        // $0.19/hr * 10 hrs * 1.75 = $3.325
+        assert!((cost - 3.325).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_azure_compute_default_rate() {
+        let calculator = CostCalculator::new(PricingRules::default());
+
+        let usage = make_usage(
+            Provider::Azure,
+            ResourceType::Compute,
+            10.0,
+            serde_json::json!({}),
+        );
+
+        let cost = calculator.calculate_cost(&usage);
+        assert!((cost - 3.325).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_baremetal_compute_default_rate() {
+        let calculator = CostCalculator::new(PricingRules::default());
+
+        let usage = make_usage(
+            Provider::Baremetal,
+            ResourceType::Compute,
+            10.0,
+            serde_json::json!({}),
+        );
+
+        let cost = calculator.calculate_cost(&usage);
+
+        // $0.15/hr * 10 hrs * 1.75 = $2.625
+        assert!((cost - 2.625).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_aws_storage_pricing() {
+        let calculator = CostCalculator::new(PricingRules::default());
+
+        let usage = make_usage(
+            Provider::Aws,
+            ResourceType::Storage,
+            720.0, // 720 hours = 1 month
+            serde_json::json!({}),
+        );
+
+        let cost = calculator.calculate_cost(&usage);
+
+        // ($0.10/720)/hr * 720 hrs * 1.75 = $0.175
+        assert!((cost - 0.175).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_aws_network_pricing() {
+        let calculator = CostCalculator::new(PricingRules::default());
+
+        let usage = make_usage(
+            Provider::Aws,
+            ResourceType::Network,
+            100.0, // 100 GB
+            serde_json::json!({}),
+        );
+
+        let cost = calculator.calculate_cost(&usage);
+
+        // $0.09/GB * 100 GB * 1.75 = $15.75
+        assert!((cost - 15.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_aws_public_ip_pricing() {
+        let calculator = CostCalculator::new(PricingRules::default());
+
+        let usage = make_usage(
+            Provider::Aws,
+            ResourceType::PublicIp,
+            720.0, // 720 hours
+            serde_json::json!({}),
+        );
+
+        let cost = calculator.calculate_cost(&usage);
+
+        // $0.005/hr * 720 hrs * 1.75 = $6.30
+        assert!((cost - 6.30).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_custom_resource_type_returns_zero() {
+        let calculator = CostCalculator::new(PricingRules::default());
+
+        let usage = make_usage(
+            Provider::Aws,
+            ResourceType::Custom("gpu".to_string()),
+            10.0,
+            serde_json::json!({}),
+        );
+
+        // No rate for custom type, returns 0
+        assert_eq!(calculator.calculate_cost(&usage), 0.0);
+    }
+
+    #[test]
+    fn test_specific_instance_type_preferred_over_default() {
+        let calculator = CostCalculator::new(PricingRules::default());
+
+        // c5.xlarge has a specific rate of $0.17/hr, default is $0.20/hr
+        let usage = make_usage(
+            Provider::Aws,
+            ResourceType::Compute,
+            10.0,
+            serde_json::json!({"instance_type": "c5.xlarge"}),
+        );
+
+        let cost = calculator.calculate_cost(&usage);
+
+        // $0.17/hr * 10 * 1.75 = $2.975 (NOT $3.50 from default)
+        assert!((cost - 2.975).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_pricing_rate_matches_exact_instance() {
+        let rate = PricingRate {
+            provider: Provider::Aws,
+            resource_type: ResourceType::Compute,
+            instance_type: Some("m5.xlarge".to_string()),
+            region: None,
+            rate_per_unit: 0.192,
+        };
+
+        let usage_match = make_usage(
+            Provider::Aws,
+            ResourceType::Compute,
+            1.0,
+            serde_json::json!({"instance_type": "m5.xlarge"}),
+        );
+        assert!(rate.matches(&usage_match));
+
+        let usage_no_match = make_usage(
+            Provider::Aws,
+            ResourceType::Compute,
+            1.0,
+            serde_json::json!({"instance_type": "m5.2xlarge"}),
+        );
+        assert!(!rate.matches(&usage_no_match));
+    }
+
+    #[test]
+    fn test_pricing_rate_matches_provider() {
+        let rate = PricingRate {
+            provider: Provider::Aws,
+            resource_type: ResourceType::Compute,
+            instance_type: None,
+            region: None,
+            rate_per_unit: 0.20,
+        };
+
+        let aws_usage = make_usage(Provider::Aws, ResourceType::Compute, 1.0, serde_json::json!({}));
+        assert!(rate.matches(&aws_usage));
+
+        let gcp_usage = make_usage(Provider::Gcp, ResourceType::Compute, 1.0, serde_json::json!({}));
+        assert!(!rate.matches(&gcp_usage));
+    }
+
+    #[test]
+    fn test_custom_margin() {
+        let mut rules = PricingRules::default();
+        rules.margin_percent = 100.0; // 100% margin = 2x base cost
+
+        let calculator = CostCalculator::new(rules);
+
+        let usage = make_usage(
+            Provider::Aws,
+            ResourceType::Compute,
+            10.0,
+            serde_json::json!({"instance_type": "m5.xlarge"}),
+        );
+
+        let cost = calculator.calculate_cost(&usage);
+
+        // $0.192/hr * 10 hrs * 2.0 = $3.84
+        assert!((cost - 3.84).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_zero_margin() {
+        let mut rules = PricingRules::default();
+        rules.margin_percent = 0.0;
+
+        let calculator = CostCalculator::new(rules);
+
+        let usage = make_usage(
+            Provider::Aws,
+            ResourceType::Compute,
+            10.0,
+            serde_json::json!({"instance_type": "m5.xlarge"}),
+        );
+
+        let cost = calculator.calculate_cost(&usage);
+
+        // $0.192/hr * 10 hrs * 1.0 = $1.92
+        assert!((cost - 1.92).abs() < 0.001);
     }
 }

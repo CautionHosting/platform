@@ -9,6 +9,7 @@ use url::Url;
 pub struct Config {
     pub database_url: String,
     pub api_service_url: String,
+    pub metering_service_url: String,
     pub rp_id: String,
     pub rp_display_name: String,
     pub rp_origins: Vec<String>,
@@ -33,6 +34,9 @@ impl Config {
         // Validate API service URL
         Url::parse(&api_service_url)
             .context("Invalid API_SERVICE_URL")?;
+
+        let metering_service_url = env::var("METERING_SERVICE_URL")
+            .unwrap_or_else(|_| "http://metering:8083".to_string());
 
         let rp_id = env::var("RP_ID")
             .unwrap_or_else(|_| "localhost".to_string());
@@ -80,6 +84,7 @@ impl Config {
         Ok(Config {
             database_url,
             api_service_url,
+            metering_service_url,
             rp_id,
             rp_display_name,
             rp_origins,

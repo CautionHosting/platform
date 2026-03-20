@@ -63,6 +63,30 @@ impl Ec2Client {
         Ok(parse_instance_ids(&body))
     }
 
+    pub async fn stop_instances(&self, instance_ids: &[String]) -> Result<()> {
+        let mut params = vec![
+            ("Action".to_string(), "StopInstances".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+        ];
+        for (i, id) in instance_ids.iter().enumerate() {
+            params.push((format!("InstanceId.{}", i + 1), id.clone()));
+        }
+        self.signed_request(&params).await?;
+        Ok(())
+    }
+
+    pub async fn start_instances(&self, instance_ids: &[String]) -> Result<()> {
+        let mut params = vec![
+            ("Action".to_string(), "StartInstances".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+        ];
+        for (i, id) in instance_ids.iter().enumerate() {
+            params.push((format!("InstanceId.{}", i + 1), id.clone()));
+        }
+        self.signed_request(&params).await?;
+        Ok(())
+    }
+
     pub async fn associate_address(
         &self,
         allocation_id: &str,
@@ -348,6 +372,81 @@ mod tests {
             encode_form(&params),
             "Action=DescribeInstances&Version=2016-11-15"
         );
+    }
+
+    // Verify stop/start param construction by testing the pattern they use
+    // (same approach as testing describe_instances params via encode_form)
+
+    #[test]
+    fn test_stop_instances_params_single() {
+        let mut params = vec![
+            ("Action".to_string(), "StopInstances".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+        ];
+        let instance_ids = vec!["i-abc123".to_string()];
+        for (i, id) in instance_ids.iter().enumerate() {
+            params.push((format!("InstanceId.{}", i + 1), id.clone()));
+        }
+
+        let encoded = encode_form(&params);
+        assert!(encoded.contains("Action=StopInstances"));
+        assert!(encoded.contains("InstanceId.1=i-abc123"));
+    }
+
+    #[test]
+    fn test_stop_instances_params_multiple() {
+        let mut params = vec![
+            ("Action".to_string(), "StopInstances".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+        ];
+        let instance_ids = vec![
+            "i-aaa111".to_string(),
+            "i-bbb222".to_string(),
+            "i-ccc333".to_string(),
+        ];
+        for (i, id) in instance_ids.iter().enumerate() {
+            params.push((format!("InstanceId.{}", i + 1), id.clone()));
+        }
+
+        let encoded = encode_form(&params);
+        assert!(encoded.contains("Action=StopInstances"));
+        assert!(encoded.contains("InstanceId.1=i-aaa111"));
+        assert!(encoded.contains("InstanceId.2=i-bbb222"));
+        assert!(encoded.contains("InstanceId.3=i-ccc333"));
+        // Verify correct 1-based indexing (not 0-based)
+        assert!(!encoded.contains("InstanceId.0"));
+    }
+
+    #[test]
+    fn test_start_instances_params_single() {
+        let mut params = vec![
+            ("Action".to_string(), "StartInstances".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+        ];
+        let instance_ids = vec!["i-xyz789".to_string()];
+        for (i, id) in instance_ids.iter().enumerate() {
+            params.push((format!("InstanceId.{}", i + 1), id.clone()));
+        }
+
+        let encoded = encode_form(&params);
+        assert!(encoded.contains("Action=StartInstances"));
+        assert!(encoded.contains("InstanceId.1=i-xyz789"));
+    }
+
+    #[test]
+    fn test_stop_instances_params_empty() {
+        let mut params = vec![
+            ("Action".to_string(), "StopInstances".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+        ];
+        let instance_ids: Vec<String> = vec![];
+        for (i, id) in instance_ids.iter().enumerate() {
+            params.push((format!("InstanceId.{}", i + 1), id.clone()));
+        }
+
+        let encoded = encode_form(&params);
+        assert_eq!(encoded, "Action=StopInstances&Version=2016-11-15");
+        assert!(!encoded.contains("InstanceId"));
     }
 
     #[test]

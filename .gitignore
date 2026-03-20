@@ -2,6 +2,7 @@ out/
 Procfile.json
 env
 .env
+prices.json
 git-repos/
 build-cache/
 caution-cache/
