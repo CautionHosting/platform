@@ -2487,6 +2487,7 @@ async fn deploy_logic(
         cpus: build_config.cpus,
         debug: build_config.debug,
         ports: build_config.ports.clone(),
+        http_port: build_config.http_port,
     };
 
     let _prebuilt_eif_path = format!("{}/nitro.eif", work_dir);
