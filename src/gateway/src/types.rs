@@ -34,6 +34,7 @@ pub struct AppState {
     pub db: sqlx::PgPool,
     pub webauthn: Webauthn,
     pub api_service_url: String,
+    pub metering_service_url: String,
     pub reg_states: Arc<RwLock<HashMap<String, PendingRegistration>>>,
     pub auth_states: Arc<RwLock<HashMap<String, PendingAuthentication>>>,
     pub sign_challenges: Arc<RwLock<HashMap<String, PendingSignChallenge>>>,

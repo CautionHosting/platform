@@ -26,6 +26,11 @@ tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 
+# Webhook signature verification
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+
 # AWS SDK for Cost Explorer
 aws-config = "1.1"
 aws-sdk-costexplorer = "1.15"

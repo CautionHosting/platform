@@ -1070,15 +1070,148 @@ make build-cli
     </div>
 
     <!-- Billing Tab -->
-    <div v-if="activeTab === 'billing'" class="content-card">
+    <div v-if="activeTab === 'settings'" class="content-card">
       <div class="content-header">
         <div class="content-header-text">
-          <h2 class="content-header-title">Billing</h2>
+          <h2 class="content-header-title">Settings</h2>
           <p class="content-header-description">
-            View your usage and costs for the current billing period.
+            Manage your account email and billing.
           </p>
         </div>
       </div>
+
+      <!-- Email Section -->
+      <div class="billing-section">
+        <h3 class="billing-section-title">Email</h3>
+        <div class="email-settings">
+          <div v-if="!editingEmail" class="email-display">
+            <span v-if="userEmail" class="email-current">{{ userEmail }}</span>
+            <span v-else class="email-not-set">No email set</span>
+            <button @click="startEditEmail" class="btn-secondary btn-small">{{ userEmail ? 'Change' : 'Set email' }}</button>
+          </div>
+          <div v-else class="email-edit">
+            <input
+              v-model="emailInput"
+              type="email"
+              placeholder="you@example.com"
+              class="email-input"
+              @keyup.enter="saveEmail"
+            />
+            <div class="email-edit-actions">
+              <button @click="saveEmail" :disabled="savingEmail" class="btn-primary btn-small">
+                {{ savingEmail ? 'Saving...' : 'Save' }}
+              </button>
+              <button @click="editingEmail = false" class="btn-secondary btn-small">Cancel</button>
+            </div>
+            <div v-if="emailError" class="card-error">{{ emailError }}</div>
+          </div>
+          <p class="email-hint">Used for invoice and payment notifications.</p>
+        </div>
+      </div>
+
+      <!-- Prepaid Credits -->
+      <div class="billing-section">
+        <h3 class="billing-section-title" style="margin-top: 2rem;">Prepaid credits</h3>
+        <div class="credits-balance-card">
+          <div class="credits-balance-row">
+            <div class="credits-balance-info">
+              <span class="credits-balance-amount">{{ creditBalance.balance_display }}</span>
+              <span class="credits-balance-label">credit balance</span>
+            </div>
+            <button @click="showAddCreditsModal = true" class="btn-primary btn-small">Add credits</button>
+          </div>
+          <p class="credits-hint">Credits are deducted in real-time as your deployments run. Minimum $5 required to deploy.</p>
+          <div class="redeem-code-row">
+            <input
+              v-model="redeemCode"
+              type="text"
+              class="redeem-code-input"
+              placeholder="Enter credit code"
+              :disabled="redeemingCode"
+              @keyup.enter="redeemCreditCode"
+            />
+            <button
+              @click="redeemCreditCode"
+              class="btn-primary btn-small"
+              :disabled="redeemingCode || !redeemCode.trim()"
+            >
+              {{ redeemingCode ? 'Redeeming...' : 'Redeem' }}
+            </button>
+          </div>
+        </div>
+
+        <!-- Auto Top-up -->
+        <div class="auto-topup-card">
+          <div class="auto-topup-header">
+            <div>
+              <strong>Auto top-up</strong>
+              <p class="credits-hint" style="margin-top: 0.25rem;">Automatically recharge when your balance gets low.</p>
+            </div>
+            <label class="toggle-switch">
+              <input type="checkbox" v-model="autoTopup.enabled" @change="onAutoTopupToggle" :disabled="savingAutoTopup" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div v-if="autoTopup.enabled" class="auto-topup-settings">
+            <div class="auto-topup-field">
+              <label class="auto-topup-label">Top-up to</label>
+              <div class="auto-topup-input-row">
+                <span class="auto-topup-currency">$</span>
+                <input type="number" v-model.number="autoTopup.amount_dollars" min="10" step="5" class="auto-topup-input" :disabled="savingAutoTopup" />
+              </div>
+              <span class="auto-topup-hint">Triggers when balance drops below 5% of this amount (min $10)</span>
+            </div>
+            <button @click="saveAutoTopup" class="btn-primary btn-small" :disabled="savingAutoTopup || autoTopup.amount_dollars < 10" style="margin-top: 0.5rem;">
+              {{ savingAutoTopup ? 'Saving...' : 'Save' }}
+            </button>
+            <span v-if="autoTopupError" class="auto-topup-error">{{ autoTopupError }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Subscription Section -->
+      <div class="billing-section">
+        <h3 class="billing-section-title" style="margin-top: 2rem;">Managed on-premises subscription</h3>
+        <div v-if="subscription" class="subscription-card">
+          <div class="subscription-info">
+            <div class="subscription-tier-name">{{ subscription.tier_name }}</div>
+            <span :class="['subscription-status', `status-${subscription.status}`]">{{ subscription.status }}</span>
+          </div>
+          <div class="subscription-details">
+            <div class="subscription-detail-item">
+              <span class="subscription-detail-label">Price</span>
+              <span class="subscription-detail-value">${{ (subscription.total_price_cents_per_cycle / 100).toLocaleString() }}/{{ subscription.billing_period === '2year' ? '2yr' : subscription.billing_period === 'yearly' ? 'yr' : 'mo' }}</span>
+            </div>
+            <div class="subscription-detail-item">
+              <span class="subscription-detail-label">vCPUs</span>
+              <span class="subscription-detail-value">Up to {{ subscription.max_vcpus }}</span>
+            </div>
+            <div class="subscription-detail-item">
+              <span class="subscription-detail-label">Apps</span>
+              <span class="subscription-detail-value">{{ subscription.max_apps === -1 ? 'Unlimited' : subscription.max_apps }}</span>
+            </div>
+            <div class="subscription-detail-item">
+              <span class="subscription-detail-label">Period</span>
+              <span class="subscription-detail-value">{{ formatDate(subscription.current_period_start) }} - {{ formatDate(subscription.current_period_end) }}</span>
+            </div>
+          </div>
+          <div v-if="subscription.cancel_at_period_end" class="subscription-cancel-notice">
+            Cancels at end of current period ({{ formatDate(subscription.current_period_end) }})
+            <button @click="reactivateSubscription" class="btn-primary btn-small" style="margin-left: 0.5rem;">Reactivate</button>
+          </div>
+          <div class="subscription-actions">
+            <button @click="showSelectPlanModal = true" class="btn-secondary btn-small">Change plan</button>
+            <button v-if="!subscription.cancel_at_period_end" @click="cancelSubscription" class="btn-secondary btn-small btn-danger-text">Cancel</button>
+          </div>
+        </div>
+        <div v-else class="subscription-empty">
+          <p>No active managed on-premises subscription.</p>
+          <button @click="showSelectPlanModal = true" class="btn-primary btn-small">Choose a plan</button>
+        </div>
+      </div>
+
+      <!-- Billing Section -->
+      <h3 class="billing-section-title" style="margin-top: 2rem;">Billing</h3>
 
       <!-- Current Period Summary -->
       <div class="billing-summary">
@@ -1087,8 +1220,12 @@ make build-cli
           <span class="billing-period-dates">{{ currentBillingPeriod }}</span>
         </div>
         <div class="billing-total">
-          <span class="billing-total-label">Estimated total</span>
+          <span class="billing-total-label">Cost so far</span>
           <span class="billing-total-amount">${{ billingData.totalCost?.toFixed(2) || '0.00' }}</span>
+        </div>
+        <div class="billing-total">
+          <span class="billing-total-label">Projected total</span>
+          <span class="billing-total-amount billing-projected">${{ billingData.projectedCost?.toFixed(2) || '0.00' }}</span>
         </div>
       </div>
 
@@ -1118,20 +1255,26 @@ make build-cli
         </div>
       </div>
 
-      <!-- Payment Method -->
+      <!-- Payment Methods -->
       <div class="billing-section">
-        <h3 class="billing-section-title">Payment method</h3>
-        <div v-if="paymentMethod" class="payment-method-card">
-          <div class="payment-method-info">
-            <span class="payment-method-type">{{ paymentMethod.type }}</span>
-            <span class="payment-method-details">{{ paymentMethod.last4 ? `•••• ${paymentMethod.last4}` : paymentMethod.email }}</span>
+        <h3 class="billing-section-title">Payment methods</h3>
+        <div v-if="paymentMethods.length > 0" class="payment-methods-list">
+          <div v-for="pm in paymentMethods" :key="pm.id" class="payment-method-card">
+            <div class="payment-method-info">
+              <span class="payment-method-type">{{ pm.card_brand || pm.type }}</span>
+              <span class="payment-method-details">{{ pm.last4 ? `•••• ${pm.last4}` : pm.email }}</span>
+              <span v-if="pm.is_primary" class="payment-method-badge">Primary</span>
+            </div>
+            <div class="payment-method-actions">
+              <button v-if="!pm.is_primary" @click="setPrimaryPaymentMethod(pm.id)" class="btn-secondary btn-small">Set as primary</button>
+              <button @click="removePaymentMethod(pm.id)" class="btn-secondary btn-small btn-danger-text">Remove</button>
+            </div>
           </div>
-          <button @click="removePaymentMethod" class="btn-secondary btn-small">Remove</button>
         </div>
-        <div v-else class="payment-method-empty">
+        <div v-if="paymentMethods.length === 0" class="payment-method-empty">
           <p>No payment method on file.</p>
-          <button @click="showAddPaymentModal = true" class="btn-primary">Add payment method</button>
         </div>
+        <button @click="showAddPaymentModal = true" class="btn-secondary" style="margin-top: 0.75rem;">Add payment method</button>
       </div>
 
       <!-- Invoices -->
@@ -1164,46 +1307,109 @@ make build-cli
       <div class="modal-content modal-content--wide" @click.stop>
         <h3 class="modal-title">Add payment method</h3>
 
-        <!-- Card Form -->
-        <div class="card-form">
-          <div class="card-form-row">
-            <label class="card-form-label">Card number</label>
-            <div id="card-number" class="card-field"></div>
-          </div>
-          <div class="card-form-row card-form-row--split">
-            <div class="card-form-col">
-              <label class="card-form-label">Expiry</label>
-              <div id="card-expiry" class="card-field"></div>
-            </div>
-            <div class="card-form-col">
-              <label class="card-form-label">CVV</label>
-              <div id="card-cvv" class="card-field"></div>
-            </div>
-          </div>
-          <div class="card-form-row">
-            <label class="card-form-label">Name on card</label>
-            <input
-              v-model="cardHolderName"
-              type="text"
-              class="form-input"
-              placeholder="John Smith"
-            />
-          </div>
-        </div>
+        <!-- Paddle Checkout Container -->
+        <div class="paddle-checkout-container"></div>
 
         <div v-if="cardError" class="card-error">{{ cardError }}</div>
 
         <div class="modal-actions">
           <button @click="showAddPaymentModal = false" class="btn-secondary">Cancel</button>
-          <button @click="submitCard" class="btn-primary" :disabled="savingCard">
-            {{ savingCard ? 'Saving...' : 'Save card' }}
-          </button>
         </div>
 
         <p class="card-privacy-notice">
-          By saving your card, you acknowledge that your data will be processed by PayPal subject to the
-          <a href="https://www.paypal.com/privacy" target="_blank" rel="noopener">PayPal Privacy Statement</a>.
+          Payments are processed securely by
+          <a href="https://www.paddle.com" target="_blank" rel="noopener">Paddle</a>,
+          our merchant of record.
         </p>
+      </div>
+    </div>
+
+    <!-- Add Credits Modal -->
+    <div v-if="showAddCreditsModal" class="modal-overlay" @click="showAddCreditsModal = false">
+      <div class="modal-content" @click.stop>
+        <h3 class="modal-title">Add prepaid credits</h3>
+        <p class="modal-description">Purchase credits at a volume discount. Credits never expire and are applied automatically at billing time.</p>
+
+        <div class="credit-packages">
+          <button
+            v-for="(pkg, index) in creditPackages"
+            :key="index"
+            class="credit-package-card"
+            :class="{ 'credit-package-card--selected': selectedPackage === index }"
+            @click="selectedPackage = index"
+          >
+            <span class="credit-package-pay">Pay {{ pkg.purchase_display }}</span>
+            <span class="credit-package-get">Get {{ pkg.credit_display }} in credits</span>
+            <span class="credit-package-bonus">{{ pkg.bonus_percent }}% bonus</span>
+          </button>
+        </div>
+
+        <div v-if="creditPurchaseError" class="card-error">{{ creditPurchaseError }}</div>
+
+        <div class="modal-actions">
+          <button
+            v-if="selectedPackage !== null"
+            @click="openCreditCheckout"
+            class="btn-primary"
+            :disabled="purchasingCredits"
+          >
+            {{ purchasingCredits ? 'Processing...' : 'Purchase with card on file' }}
+          </button>
+          <button @click="closeCreditsModal" class="btn-secondary">Cancel</button>
+        </div>
+
+        <p class="card-privacy-notice">
+          Payments are processed securely by
+          <a href="https://www.paddle.com" target="_blank" rel="noopener">Paddle</a>,
+          our merchant of record.
+        </p>
+      </div>
+    </div>
+
+    <!-- Select Plan Modal -->
+    <div v-if="showSelectPlanModal" class="modal-overlay" @click="showSelectPlanModal = false">
+      <div class="modal-content modal-content--wide" @click.stop>
+        <h3 class="modal-title">Choose a plan</h3>
+        <p class="modal-description">Select a managed on-premises subscription tier.</p>
+
+        <div class="billing-period-toggle">
+          <button
+            v-for="period in ['monthly', 'yearly', '2year']"
+            :key="period"
+            :class="['billing-period-btn', { 'billing-period-btn--active': selectedBillingPeriod === period }]"
+            @click="selectedBillingPeriod = period"
+          >
+            {{ period === 'monthly' ? 'Monthly' : period === 'yearly' ? 'Yearly (10% off)' : '2-Year (20% off)' }}
+          </button>
+        </div>
+
+        <div class="tier-cards">
+          <button
+            v-for="tier in subscriptionTiers"
+            :key="tier.id"
+            class="tier-card"
+            :class="{ 'tier-card--selected': selectedTier?.id === tier.id }"
+            @click="selectedTier = tier"
+          >
+            <span class="tier-card-name">{{ tier.name }}</span>
+            <span class="tier-card-price">{{ formatTierPrice(tier, selectedBillingPeriod) }}<span class="tier-card-period">/{{ selectedBillingPeriod === '2year' ? '2yr' : selectedBillingPeriod === 'yearly' ? 'yr' : 'mo' }}</span></span>
+            <span class="tier-card-limits">{{ tier.max_vcpus }} vCPUs &middot; {{ tier.max_apps === -1 ? 'Unlimited apps' : tier.max_apps + ' apps' }}</span>
+          </button>
+        </div>
+
+        <div v-if="subscribeError" class="card-error">{{ subscribeError }}</div>
+
+        <div class="modal-actions">
+          <button
+            v-if="selectedTier"
+            @click="doSubscribe"
+            class="btn-primary"
+            :disabled="subscribing"
+          >
+            {{ subscribing ? 'Processing...' : 'Subscribe now' }}
+          </button>
+          <button @click="showSelectPlanModal = false; subscribeError = ''" class="btn-secondary">Cancel</button>
+        </div>
       </div>
     </div>
 
@@ -1685,16 +1891,45 @@ export default {
     };
 
     // Billing state
-    const billingData = ref({ totalCost: 0, items: [] });
+    const billingData = ref({ totalCost: 0, projectedCost: 0, items: [] });
     const loadingBilling = ref(false);
     const invoices = ref([]);
     const loadingInvoices = ref(false);
-    const paymentMethod = ref(null);
+    const paymentMethods = ref([]);
     const showAddPaymentModal = ref(false);
-    const cardHolderName = ref('');
     const cardError = ref('');
-    const savingCard = ref(false);
-    const cardFieldsInstance = ref(null);
+
+    // Credits state
+    const creditBalance = ref({ balance_cents: 0, balance_display: '$0.00' });
+    const creditPackages = ref([]);
+    const showAddCreditsModal = ref(false);
+    const selectedPackage = ref(null);
+    const purchasingCredits = ref(false);
+    const creditPurchaseError = ref('');
+    const creditCheckoutOpen = ref(false);
+    const redeemCode = ref('');
+    const redeemingCode = ref(false);
+
+    // Auto top-up state
+    const autoTopup = ref({ enabled: false, amount_dollars: 0 });
+    const savingAutoTopup = ref(false);
+    const autoTopupError = ref('');
+
+    // Subscription state
+    const subscription = ref(null);
+    const subscriptionTiers = ref([]);
+    const showSelectPlanModal = ref(false);
+    const selectedTier = ref(null);
+    const selectedBillingPeriod = ref('monthly');
+    const subscribing = ref(false);
+    const subscribeError = ref('');
+
+    // Email settings
+    const userEmail = ref('');
+    const editingEmail = ref(false);
+    const emailInput = ref('');
+    const savingEmail = ref(false);
+    const emailError = ref('');
 
     const currentBillingPeriod = computed(() => {
       const now = new Date();
@@ -1797,16 +2032,15 @@ export default {
       loadingBilling.value = true;
 
       try {
-        const response = await fetch("/api/billing/usage", {
-          headers: {
-            "X-Session-ID": props.session,
-          },
-        });
+        const response = await authFetch("/api/billing/usage");
 
         if (response.ok) {
           const data = await response.json();
           billingData.value = {
             totalCost: data.total_cost || 0,
+            projectedCost: data.projected_cost || 0,
+            billingPeriodStart: data.billing_period_start || '',
+            billingPeriodEnd: data.billing_period_end || '',
             items: (data.items || []).map(item => ({
               id: item.id || item.resource_id,
               resourceName: item.resource_name || item.resource_id,
@@ -1815,6 +2049,7 @@ export default {
               unit: item.unit || 'hours',
               rate: item.rate || '0.05',
               cost: item.cost || 0,
+              projectedCost: item.projected_cost || 0,
             })),
           };
         } else if (response.status === 401) {
@@ -1895,11 +2130,7 @@ export default {
     const loadInvoices = async () => {
       loadingInvoices.value = true;
       try {
-        const response = await fetch("/api/billing/invoices", {
-          headers: {
-            "X-Session-ID": props.session,
-          },
-        });
+        const response = await authFetch("/api/billing/invoices");
 
         if (response.ok) {
           const data = await response.json();
@@ -1916,180 +2147,459 @@ export default {
       }
     };
 
-    const loadPaymentMethod = async () => {
+    const loadUserEmail = async () => {
       try {
-        const response = await fetch("/api/billing/payment-method", {
-          headers: {
-            "X-Session-ID": props.session,
-          },
-        });
-
+        const response = await authFetch("/api/users/me");
         if (response.ok) {
           const data = await response.json();
-          paymentMethod.value = data.payment_method || null;
-        } else {
-          paymentMethod.value = null;
+          userEmail.value = data.email || '';
         }
       } catch (err) {
-        paymentMethod.value = null;
+        // ignore
       }
     };
 
-    const initPayPalCardFields = async () => {
-      const clientId = import.meta.env.VITE_PAYPAL_CLIENT_ID || 'sb';
+    const startEditEmail = () => {
+      emailInput.value = userEmail.value;
+      emailError.value = '';
+      editingEmail.value = true;
+    };
 
-      // Load PayPal SDK with card-fields component if not already loaded
-      if (!window.paypal?.CardFields) {
+    const saveEmail = async () => {
+      const email = emailInput.value.trim();
+      if (!email) {
+        emailError.value = 'Email is required';
+        return;
+      }
+      savingEmail.value = true;
+      emailError.value = '';
+      try {
+        const response = await authFetch("/api/users/me", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email }),
+        });
+        if (response.ok) {
+          const data = await response.json();
+          userEmail.value = data.email || email;
+          editingEmail.value = false;
+          showToast('Email updated');
+        } else {
+          const data = await response.json().catch(() => ({}));
+          emailError.value = data.error || 'Failed to update email';
+        }
+      } catch (err) {
+        emailError.value = 'Failed to connect to server';
+      } finally {
+        savingEmail.value = false;
+      }
+    };
+
+    const loadPaymentMethods = async () => {
+      try {
+        const response = await authFetch("/api/billing/payment-methods");
+
+        if (response.ok) {
+          const data = await response.json();
+          paymentMethods.value = data.payment_methods || [];
+        } else {
+          paymentMethods.value = [];
+        }
+      } catch (err) {
+        paymentMethods.value = [];
+      }
+    };
+
+    const initPaddleCheckout = async () => {
+      // Load Paddle.js if not already loaded
+      if (!window.Paddle) {
         const script = document.createElement('script');
-        script.src = `https://www.paypal.com/sdk/js?client-id=${clientId}&components=card-fields&vault=true`;
-        script.onload = () => renderCardFields();
+        script.src = 'https://cdn.paddle.com/paddle/v2/paddle.js';
+        script.onload = () => openPaddleCheckout();
         script.onerror = () => {
           cardError.value = 'Failed to load payment form. Please refresh and try again.';
         };
         document.body.appendChild(script);
       } else {
-        renderCardFields();
+        openPaddleCheckout();
       }
     };
 
-    const renderCardFields = async () => {
-      if (!window.paypal?.CardFields) {
+    const openPaddleCheckout = async () => {
+      if (!window.Paddle) {
         cardError.value = 'Payment form not available.';
         return;
       }
 
-      // First get a setup token from our backend
       try {
-        const setupResponse = await fetch('/api/billing/paypal/setup-token', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Session-ID': props.session,
-          },
-          body: JSON.stringify({ payment_source: 'card' }),
-        });
+        // Get client token and customer ID from our backend
+        const tokenResponse = await authFetch('/api/billing/paddle/client-token');
 
-        if (!setupResponse.ok) {
+        if (!tokenResponse.ok) {
           throw new Error('Failed to initialize payment form');
         }
 
-        const { setup_token } = await setupResponse.json();
+        const { client_token, paddle_customer_id, setup_price_id } = await tokenResponse.json();
 
-        // Initialize card fields with the setup token
-        const cardFields = window.paypal.CardFields({
-          createVaultSetupToken: async () => setup_token,
-          style: {
-            input: {
-              'font-size': '14px',
-              'font-family': '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-              color: '#1f2937',
-            },
-            '.invalid': {
-              color: '#dc2626',
-            },
-          },
-          onApprove: async (data) => {
-            await saveCardPaymentMethod(data.vaultSetupToken);
-          },
-          onError: (err) => {
-            console.error('Card field error:', err);
-            cardError.value = 'An error occurred. Please try again.';
+        const isSandbox = import.meta.env.VITE_PADDLE_SANDBOX === 'true';
+
+        // Set sandbox environment before initializing
+        if (isSandbox) {
+          window.Paddle.Environment.set('sandbox');
+        }
+
+        // Initialize Paddle
+        window.Paddle.Initialize({
+          token: client_token,
+          eventCallback: async (event) => {
+            if (event.name === 'checkout.completed') {
+              const data = event.data;
+              console.log('Paddle checkout.completed data:', JSON.stringify(data, null, 2));
+              // Notify our backend about the completed transaction
+              try {
+                const payment = data.payment || {};
+                const card = payment.method_details?.card || {};
+                const response = await authFetch('/api/billing/paddle/transaction-completed', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    transaction_id: data.transaction_id,
+                    payment_method_id: payment.payment_method_id || payment.stored_payment_method_id || null,
+                    card_last4: card.last4 || null,
+                    card_brand: card.type || null,
+                  }),
+                });
+
+                if (response.ok) {
+                  showToast('Payment method saved successfully');
+                  showAddPaymentModal.value = false;
+                  await loadPaymentMethods();
+                } else {
+                  cardError.value = 'Failed to save payment method. Please try again.';
+                }
+              } catch (err) {
+                console.error('Transaction completed callback error:', err);
+                cardError.value = 'Failed to save payment method. Please try again.';
+              }
+            }
           },
         });
 
-        // Check if card fields are eligible
-        if (cardFields.isEligible()) {
-          // Render the individual card fields
-          cardFields.NumberField().render('#card-number');
-          cardFields.ExpiryField().render('#card-expiry');
-          cardFields.CVVField().render('#card-cvv');
-          cardFieldsInstance.value = cardFields;
-        } else {
-          cardError.value = 'Card payments are not available. Please contact support.';
+        // Open inline checkout
+        if (!setup_price_id) {
+          throw new Error('Paddle setup price not configured. Contact support.');
         }
+
+        const checkoutSettings = {
+          settings: {
+            displayMode: 'inline',
+            frameTarget: 'paddle-checkout-container',
+            frameInitialHeight: 450,
+            frameStyle: 'width: 100%; background-color: transparent; border: none;',
+          },
+          items: [{ priceId: setup_price_id, quantity: 1 }],
+        };
+
+        if (paddle_customer_id) {
+          checkoutSettings.customer = { id: paddle_customer_id };
+        } else if (userEmail.value) {
+          checkoutSettings.customer = { email: userEmail.value };
+        }
+
+        window.Paddle.Checkout.open(checkoutSettings);
       } catch (err) {
-        console.error('Failed to initialize card fields:', err);
+        console.error('Failed to initialize Paddle checkout:', err);
         cardError.value = 'Failed to initialize payment form. Please try again.';
       }
     };
 
-    const submitCard = async () => {
-      if (!cardFieldsInstance.value) {
-        cardError.value = 'Payment form not ready. Please wait and try again.';
-        return;
-      }
-
-      if (!cardHolderName.value.trim()) {
-        cardError.value = 'Please enter the name on card.';
-        return;
-      }
-
-      cardError.value = '';
-      savingCard.value = true;
+    const removePaymentMethod = async (id) => {
+      if (!confirm('Are you sure you want to remove this payment method?')) return;
 
       try {
-        // Submit the card fields - this triggers onApprove callback
-        await cardFieldsInstance.value.submit({
-          cardholderName: cardHolderName.value.trim(),
-        });
-      } catch (err) {
-        console.error('Card submission error:', err);
-        cardError.value = err.message || 'Failed to save card. Please check your details and try again.';
-        savingCard.value = false;
-      }
-    };
-
-    const saveCardPaymentMethod = async (vaultSetupToken) => {
-      try {
-        const response = await fetch('/api/billing/paypal/save-payment-method', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Session-ID': props.session,
-          },
-          body: JSON.stringify({
-            vault_setup_token: vaultSetupToken,
-            cardholder_name: cardHolderName.value.trim(),
-          }),
-        });
-
-        if (response.ok) {
-          showToast('Card saved successfully');
-          showAddPaymentModal.value = false;
-          cardHolderName.value = '';
-          cardFieldsInstance.value = null;
-          await loadPaymentMethod();
-        } else {
-          const err = await response.json().catch(() => ({}));
-          cardError.value = err.error || 'Failed to save card. Please try again.';
-        }
-      } catch (err) {
-        console.error('Save payment method error:', err);
-        cardError.value = 'Failed to save card. Please try again.';
-      } finally {
-        savingCard.value = false;
-      }
-    };
-
-    const removePaymentMethod = async () => {
-      if (!confirm('Are you sure you want to remove your payment method?')) return;
-
-      try {
-        const response = await fetch('/api/billing/payment-method', {
+        const response = await authFetch(`/api/billing/payment-methods/${id}`, {
           method: 'DELETE',
-          headers: {
-            'X-Session-ID': props.session,
-          },
         });
 
         if (response.ok || response.status === 204) {
-          paymentMethod.value = null;
+          await loadPaymentMethods();
           showToast('Payment method removed');
         } else {
           showToast('Failed to remove payment method', 'error');
         }
       } catch (err) {
         showToast('Failed to remove payment method', 'error');
+      }
+    };
+
+    const setPrimaryPaymentMethod = async (id) => {
+      try {
+        const response = await authFetch(`/api/billing/payment-methods/${id}/set-primary`, {
+          method: 'POST',
+        });
+
+        if (response.ok) {
+          await loadPaymentMethods();
+          showToast('Primary payment method updated');
+        } else {
+          showToast('Failed to update primary payment method', 'error');
+        }
+      } catch (err) {
+        showToast('Failed to update primary payment method', 'error');
+      }
+    };
+
+    const loadCreditBalance = async () => {
+      try {
+        const response = await authFetch('/api/billing/credits/balance');
+        if (response.ok) {
+          creditBalance.value = await response.json();
+        }
+      } catch (err) {
+        // silently fail — balance stays at $0.00
+      }
+    };
+
+    const loadCreditPackages = async () => {
+      try {
+        const response = await authFetch('/api/billing/credits/packages');
+        if (response.ok) {
+          const data = await response.json();
+          creditPackages.value = data.packages || [];
+        }
+      } catch (err) {
+        // silently fail
+      }
+    };
+
+    const loadAutoTopup = async () => {
+      try {
+        const response = await authFetch('/api/billing/auto-topup');
+        if (response.ok) {
+          const data = await response.json();
+          autoTopup.value = { enabled: data.enabled, amount_dollars: data.amount_dollars || 0 };
+        }
+      } catch (err) {
+        // silently fail
+      }
+    };
+
+    const saveAutoTopup = async () => {
+      autoTopupError.value = '';
+      if (autoTopup.value.enabled && autoTopup.value.amount_dollars < 10) {
+        autoTopupError.value = 'Minimum top-up target is $10';
+        return;
+      }
+      savingAutoTopup.value = true;
+      try {
+        const response = await authFetch('/api/billing/auto-topup', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            enabled: autoTopup.value.enabled,
+            amount_dollars: autoTopup.value.enabled ? autoTopup.value.amount_dollars : 0,
+          }),
+        });
+        if (response.ok) {
+          const data = await response.json();
+          autoTopup.value = { enabled: data.enabled, amount_dollars: data.amount_dollars };
+          showToast('Auto top-up settings saved');
+        } else {
+          const err = await response.text();
+          autoTopupError.value = err || 'Failed to save';
+          // Revert toggle if it was a toggle change
+          await loadAutoTopup();
+        }
+      } catch (err) {
+        autoTopupError.value = 'Failed to save auto top-up settings';
+        await loadAutoTopup();
+      } finally {
+        savingAutoTopup.value = false;
+      }
+    };
+
+    // Only auto-save when disabling (no config needed); when enabling, let user set amount first
+    const onAutoTopupToggle = () => {
+      if (!autoTopup.value.enabled) {
+        saveAutoTopup();
+      }
+    };
+
+    // Balance polling — refresh every 30s when settings tab is active
+    let balancePollingInterval = null;
+    const startBalancePolling = () => {
+      stopBalancePolling();
+      balancePollingInterval = setInterval(loadCreditBalance, 30000);
+    };
+    const stopBalancePolling = () => {
+      if (balancePollingInterval) {
+        clearInterval(balancePollingInterval);
+        balancePollingInterval = null;
+      }
+    };
+
+    const loadSubscription = async () => {
+      try {
+        const response = await authFetch('/api/billing/subscription');
+        if (response.ok) {
+          const data = await response.json();
+          subscription.value = data.subscription || null;
+        }
+      } catch (err) {
+        // silently fail
+      }
+    };
+
+    const loadSubscriptionTiers = async () => {
+      try {
+        const response = await authFetch('/api/billing/subscription/tiers');
+        if (response.ok) {
+          const data = await response.json();
+          subscriptionTiers.value = data.tiers || [];
+        }
+      } catch (err) {
+        // silently fail
+      }
+    };
+
+    const formatTierPrice = (tier, period) => {
+      const cents = tier.prices?.[period] || 0;
+      return `$${(cents / 100).toLocaleString()}`;
+    };
+
+    const formatBillingPeriod = (period) => {
+      const labels = { monthly: 'Monthly', yearly: 'Yearly', '2year': '2-Year' };
+      return labels[period] || period;
+    };
+
+    const doSubscribe = async () => {
+      if (!selectedTier.value) return;
+      subscribing.value = true;
+      subscribeError.value = '';
+      try {
+        const response = await authFetch('/api/billing/subscription/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tier_id: selectedTier.value.id,
+            billing_period: selectedBillingPeriod.value,
+          }),
+        });
+        if (response.ok) {
+          showToast('Subscription activated!');
+          showSelectPlanModal.value = false;
+          await loadSubscription();
+          await loadCreditBalance();
+        } else if (response.status === 402) {
+          subscribeError.value = 'Please add a payment method first.';
+        } else if (response.status === 409) {
+          subscribeError.value = 'You already have an active subscription.';
+        } else {
+          const text = await response.text().catch(() => '');
+          subscribeError.value = text || 'Subscription failed. Please try again.';
+        }
+      } catch (err) {
+        subscribeError.value = 'Failed to connect to server.';
+      } finally {
+        subscribing.value = false;
+      }
+    };
+
+    const cancelSubscription = async () => {
+      if (!confirm('Cancel your subscription? It will remain active until the end of the current billing period.')) return;
+      try {
+        const response = await authFetch('/api/billing/subscription/cancel', { method: 'POST' });
+        if (response.ok) {
+          showToast('Subscription will cancel at period end');
+          await loadSubscription();
+        } else {
+          showToast('Failed to cancel subscription', 'error');
+        }
+      } catch (err) {
+        showToast('Failed to connect to server', 'error');
+      }
+    };
+
+    const reactivateSubscription = async () => {
+      try {
+        const response = await authFetch('/api/billing/subscription/reactivate', { method: 'POST' });
+        if (response.ok) {
+          showToast('Subscription reactivated');
+          await loadSubscription();
+        } else {
+          const text = await response.text().catch(() => '');
+          showToast(text || 'Failed to reactivate subscription', 'error');
+        }
+      } catch (err) {
+        showToast('Failed to connect to server', 'error');
+      }
+    };
+
+    const redeemCreditCode = async () => {
+      if (!redeemCode.value.trim()) return;
+      redeemingCode.value = true;
+      try {
+        const response = await authFetch('/api/billing/credits/redeem', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: redeemCode.value.trim() }),
+        });
+        if (response.ok) {
+          const result = await response.json();
+          const dollars = (result.amount_cents / 100).toFixed(2);
+          showToast(`$${dollars} in credits added to your account!`);
+          redeemCode.value = '';
+          await loadCreditBalance();
+        } else {
+          const text = await response.text().catch(() => '');
+          showToast(text || 'Invalid or already redeemed code', 'error');
+        }
+      } catch (err) {
+        showToast('Failed to redeem code', 'error');
+      }
+      redeemingCode.value = false;
+    };
+
+    const closeCreditsModal = () => {
+      showAddCreditsModal.value = false;
+      selectedPackage.value = null;
+      creditPurchaseError.value = '';
+      creditCheckoutOpen.value = false;
+    };
+
+    const openCreditCheckout = async () => {
+      if (selectedPackage.value === null) return;
+
+      creditPurchaseError.value = '';
+      purchasingCredits.value = true;
+
+      try {
+        // Try server-side charge using card on file
+        const response = await authFetch('/api/billing/credits/purchase', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ package_index: selectedPackage.value }),
+        });
+
+        if (response.ok) {
+          const result = await response.json();
+          creditBalance.value = {
+            balance_cents: result.balance_cents,
+            balance_display: result.balance_display,
+          };
+          showToast('Credits added successfully!');
+          closeCreditsModal();
+        } else if (response.status === 402) {
+          // No payment method on file
+          creditPurchaseError.value = 'Please add a payment method first, then come back to purchase credits.';
+        } else {
+          const errData = await response.text().catch(() => '');
+          creditPurchaseError.value = `Payment failed: ${errData || 'Please try again.'}`;
+        }
+      } catch (err) {
+        creditPurchaseError.value = 'Failed to process payment. Please try again.';
+      } finally {
+        purchasingCredits.value = false;
       }
     };
 
@@ -2607,10 +3117,22 @@ export default {
         newKeyName.value = "";
         newPublicKey.value = "";
         error.value = null;
-      } else if (newTab === "billing") {
+      } else if (newTab === "settings") {
+        loadUserEmail();
         loadBilling();
         loadInvoices();
-        loadPaymentMethod();
+        loadPaymentMethods();
+        loadCreditBalance();
+        loadCreditPackages();
+        loadAutoTopup();
+        loadSubscription();
+        loadSubscriptionTiers();
+        startBalancePolling();
+      }
+
+      // Stop polling when leaving settings tab
+      if (activeTab.value === "settings" && newTab !== "settings") {
+        stopBalancePolling();
       }
     };
 
@@ -2870,20 +3392,16 @@ export default {
     });
 
     onUnmounted(() => {
-      // Clean up keyboard event listener
       window.removeEventListener("keydown", handleKeyDown);
+      stopBalancePolling();
     });
 
-    // Initialize card fields when payment modal opens
+    // Initialize Paddle checkout when payment modal opens
     watch(showAddPaymentModal, (isOpen) => {
       if (isOpen) {
         cardError.value = '';
-        cardHolderName.value = '';
-        // Wait for DOM to update then initialize card fields
-        setTimeout(() => initPayPalCardFields(), 100);
-      } else {
-        // Clean up when modal closes
-        cardFieldsInstance.value = null;
+        // Wait for DOM to update then initialize Paddle checkout
+        setTimeout(() => initPaddleCheckout(), 100);
       }
     });
 
@@ -2974,13 +3492,50 @@ export default {
       invoices,
       loadingInvoices,
       loadInvoices,
-      paymentMethod,
+      paymentMethods,
       showAddPaymentModal,
-      cardHolderName,
       cardError,
-      savingCard,
-      submitCard,
       removePaymentMethod,
+      setPrimaryPaymentMethod,
+      creditBalance,
+      creditPackages,
+      showAddCreditsModal,
+      autoTopup,
+      savingAutoTopup,
+      autoTopupError,
+      saveAutoTopup,
+      onAutoTopupToggle,
+      selectedPackage,
+      purchasingCredits,
+      creditPurchaseError,
+      loadCreditBalance,
+      loadCreditPackages,
+      openCreditCheckout,
+      closeCreditsModal,
+      redeemCode,
+      redeemingCode,
+      redeemCreditCode,
+      subscription,
+      subscriptionTiers,
+      showSelectPlanModal,
+      selectedTier,
+      selectedBillingPeriod,
+      subscribing,
+      subscribeError,
+      loadSubscription,
+      loadSubscriptionTiers,
+      formatTierPrice,
+      formatBillingPeriod,
+      doSubscribe,
+      cancelSubscription,
+      reactivateSubscription,
+      userEmail,
+      editingEmail,
+      emailInput,
+      savingEmail,
+      emailError,
+      startEditEmail,
+      saveEmail,
       calculateAppMonthlyCost,
       logout,
       handleTabChange,
@@ -4487,6 +5042,10 @@ export default {
   color: #1f2937;
 }
 
+.billing-total-amount.billing-projected {
+  color: #6b7280;
+}
+
 .billing-section {
   margin-bottom: 2rem;
 }
@@ -4595,6 +5154,12 @@ export default {
 }
 
 /* Payment method styles */
+.payment-methods-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
 .payment-method-card {
   display: flex;
   align-items: center;
@@ -4603,6 +5168,29 @@ export default {
   background: white;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
+}
+
+.payment-method-badge {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #059669;
+  background: #ecfdf5;
+  padding: 0.125rem 0.5rem;
+  border-radius: 9999px;
+}
+
+.payment-method-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.btn-danger-text {
+  color: #dc2626;
+}
+
+.btn-danger-text:hover {
+  color: #b91c1c;
 }
 
 .security-setting-info {
@@ -5066,5 +5654,442 @@ export default {
   .billing-pricing-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* Email settings */
+.email-settings {
+  padding: 0.5rem 0;
+}
+
+.email-display {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.email-current {
+  font-size: 0.95rem;
+  color: var(--color-text);
+}
+
+.email-not-set {
+  font-size: 0.95rem;
+  color: var(--color-text-muted, #888);
+  font-style: italic;
+}
+
+.email-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 400px;
+}
+
+.email-input {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--color-border, #ddd);
+  border-radius: 6px;
+  font-size: 0.95rem;
+  background: var(--color-bg, #fff);
+  color: var(--color-text);
+}
+
+.email-input:focus {
+  outline: none;
+  border-color: var(--color-primary, #000);
+}
+
+.email-edit-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.email-hint {
+  font-size: 0.8rem;
+  color: var(--color-text-muted, #888);
+  margin-top: 0.5rem;
+}
+
+/* Prepaid Credits */
+.credits-balance-card {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+}
+
+.credits-balance-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.credits-balance-info {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.credits-balance-amount {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #15803d;
+}
+
+.credits-balance-label {
+  font-size: 0.875rem;
+  color: #4b5563;
+}
+
+.credits-hint {
+  font-size: 0.8rem;
+  color: #6b7280;
+  margin-top: 0.5rem;
+}
+
+.redeem-code-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.redeem-code-input {
+  flex: 1;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.875rem;
+  font-family: monospace;
+  max-width: 240px;
+}
+
+.redeem-code-input:focus {
+  outline: none;
+  border-color: var(--color-primary, #000);
+}
+
+/* Auto Top-up */
+.auto-topup-card {
+  margin-top: 1rem;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+}
+.auto-topup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  flex-shrink: 0;
+}
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background-color: #d1d5db;
+  border-radius: 24px;
+  transition: 0.2s;
+}
+.toggle-slider::before {
+  content: "";
+  position: absolute;
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background-color: #fff;
+  border-radius: 50%;
+  transition: 0.2s;
+}
+.toggle-switch input:checked + .toggle-slider {
+  background-color: #22c55e;
+}
+.toggle-switch input:checked + .toggle-slider::before {
+  transform: translateX(20px);
+}
+.auto-topup-settings {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #e5e7eb;
+}
+.auto-topup-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.auto-topup-label {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: #374151;
+}
+.auto-topup-input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+.auto-topup-currency {
+  font-size: 0.95rem;
+  color: #374151;
+  font-weight: 500;
+}
+.auto-topup-input {
+  width: 100px;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.9rem;
+}
+.auto-topup-hint {
+  font-size: 0.75rem;
+  color: #9ca3af;
+}
+.auto-topup-error {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.8rem;
+  color: #ef4444;
+}
+
+.credit-packages {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.credit-package-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s;
+  text-align: left;
+}
+
+.credit-package-card:hover {
+  border-color: #a7f3d0;
+  background: #f0fdf4;
+}
+
+.credit-package-card--selected {
+  border-color: #16a34a;
+  background: #f0fdf4;
+  box-shadow: 0 0 0 1px #16a34a;
+}
+
+.credit-package-pay {
+  font-weight: 600;
+  font-size: 1rem;
+  color: #111827;
+}
+
+.credit-package-get {
+  font-size: 0.875rem;
+  color: #4b5563;
+}
+
+.credit-package-bonus {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: #16a34a;
+  background: #dcfce7;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+}
+
+.modal-description {
+  font-size: 0.875rem;
+  color: #6b7280;
+  margin-bottom: 0.5rem;
+}
+
+/* Subscription */
+.subscription-card {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.subscription-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+
+.subscription-tier-name {
+  font-weight: 600;
+  font-size: 1.125rem;
+  color: #111827;
+}
+
+.subscription-status {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  text-transform: capitalize;
+}
+
+.subscription-status.status-active {
+  background: #dcfce7;
+  color: #16a34a;
+}
+
+.subscription-status.status-past_due {
+  background: #fef3c7;
+  color: #d97706;
+}
+
+.subscription-status.status-canceled {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+
+.subscription-details {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.subscription-detail-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.subscription-detail-label {
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+.subscription-detail-value {
+  font-size: 0.875rem;
+  color: #111827;
+  font-weight: 500;
+}
+
+.subscription-cancel-notice {
+  font-size: 0.8125rem;
+  color: #d97706;
+  background: #fffbeb;
+  border: 1px solid #fef3c7;
+  border-radius: 4px;
+  padding: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.subscription-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.subscription-empty {
+  color: #6b7280;
+  font-size: 0.875rem;
+}
+
+.subscription-empty p {
+  margin-bottom: 0.75rem;
+}
+
+/* Plan selection modal */
+.billing-period-toggle {
+  display: flex;
+  gap: 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 1rem;
+}
+
+.billing-period-btn {
+  flex: 1;
+  padding: 0.5rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  border: none;
+  background: #fff;
+  color: #6b7280;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.billing-period-btn:not(:last-child) {
+  border-right: 1px solid #e5e7eb;
+}
+
+.billing-period-btn--active {
+  background: #111827;
+  color: #fff;
+}
+
+.tier-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.tier-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  padding: 1rem;
+  border: 2px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+  transition: border-color 0.15s;
+  text-align: left;
+}
+
+.tier-card:hover {
+  border-color: #9ca3af;
+}
+
+.tier-card--selected {
+  border-color: #111827;
+  background: #f9fafb;
+}
+
+.tier-card-name {
+  font-weight: 600;
+  font-size: 0.9375rem;
+  color: #111827;
+}
+
+.tier-card-price {
+  font-weight: 700;
+  font-size: 1.125rem;
+  color: #111827;
+}
+
+.tier-card-period {
+  font-weight: 400;
+  font-size: 0.8125rem;
+  color: #6b7280;
+}
+
+.tier-card-limits {
+  font-size: 0.8125rem;
+  color: #6b7280;
 }
 </style>

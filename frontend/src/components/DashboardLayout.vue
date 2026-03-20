@@ -89,7 +89,9 @@
             :class="['nav-item', { active: activeTab === 'security' }]"
             @click="$emit('tab-change', 'security')"
           >
-            <svg
+            <img
+              :src="activeTab === 'security' ? '/assets/icons/security--act.svg' : '/assets/icons/security--inact.svg'"
+              alt=""
               class="nav-icon"
               width="30" height="30" viewBox="0 0 30 30"
               fill="none"
@@ -106,15 +108,15 @@
           </button>
 
           <button
-            :class="['nav-item', { active: activeTab === 'billing' }]"
-            @click="$emit('tab-change', 'billing')"
+            :class="['nav-item', { active: activeTab === 'settings' }]"
+            @click="$emit('tab-change', 'settings')"
           >
             <img
-              :src="activeTab === 'billing' ? '/assets/icons/billing--act.svg' : '/assets/icons/billing--inact.svg'"
+              :src="activeTab === 'settings' ? '/assets/icons/settings--act.svg' : '/assets/icons/settings--inact.svg'"
               alt=""
               class="nav-icon"
             />
-            <span>Billing</span>
+            <span>Settings</span>
           </button>
 
           <!-- Hidden for now - docs site covers this

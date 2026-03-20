@@ -1,0 +1,20 @@
+{
+  "compute_margin_percent": 0,
+  "subscription_tiers": {
+    "starter":       { "annual_cents": 0 },
+    "developer":     { "annual_cents": 0 },
+    "base_platform": { "annual_cents": 0 },
+    "growth":        { "annual_cents": 0 },
+    "enterprise":    { "annual_cents": 0 }
+  },
+  "extra_block_annual_cents": 0,
+  "billing_discounts": {
+    "yearly_percent_off": 0,
+    "two_year_percent_off": 0
+  },
+  "credit_packages": {
+    "1000":  { "bonus_percent": 0 },
+    "5000":  { "bonus_percent": 0 },
+    "25000": { "bonus_percent": 0 }
+  }
+}

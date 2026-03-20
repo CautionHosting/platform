@@ -12,6 +12,59 @@ use reqwest::Client;
 use crate::types::{AppState, AuthenticatedUserId};
 use crate::request_id::RequestId;
 
+/// Proxy webhooks to the metering service (no auth — verified by signature)
+pub async fn metering_proxy_handler(
+    State(state): State<AppState>,
+    req: Request,
+) -> Result<Response, Response> {
+    let client = Client::new();
+
+    let path = req.uri().path();
+    let target_url = format!("{}{}", state.metering_service_url, path);
+
+    tracing::debug!("Proxying webhook to metering: {}", target_url);
+
+    // Forward all headers (Paddle-Signature is needed for verification)
+    let headers = req.headers().clone();
+    let method = req.method().clone();
+
+    let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to read webhook body: {:?}", e);
+            (StatusCode::BAD_REQUEST, "Failed to read request body").into_response()
+        })?;
+
+    let mut proxy_req = client.request(method, &target_url);
+    for (key, value) in headers.iter() {
+        proxy_req = proxy_req.header(key, value);
+    }
+    if !body_bytes.is_empty() {
+        proxy_req = proxy_req.body(body_bytes.to_vec());
+    }
+
+    let proxy_response = proxy_req.send().await.map_err(|e| {
+        tracing::error!("Metering proxy request failed: {:?}", e);
+        (StatusCode::BAD_GATEWAY, "Metering service unavailable").into_response()
+    })?;
+
+    let status = proxy_response.status();
+    let resp_headers = proxy_response.headers().clone();
+    let resp_body = proxy_response.bytes().await.map_err(|e| {
+        tracing::error!("Failed to read metering response: {:?}", e);
+        (StatusCode::BAD_GATEWAY, "Failed to read metering response").into_response()
+    })?;
+
+    let mut response = Response::builder().status(status);
+    for (key, value) in resp_headers.iter() {
+        response = response.header(key, value);
+    }
+    response.body(Body::from(resp_body)).map_err(|e| {
+        tracing::error!("Failed to build response: {:?}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+    })
+}
+
 pub async fn proxy_handler(
     State(state): State<AppState>,
     req: Request,

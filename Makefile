@@ -6,8 +6,7 @@ export
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-onprem build-gateway-e2e postgres-test migrate-test
-.PHONY: lago-build lago-redis lago-db lago-migrate lago-run lago-up lago-down lago-logs
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-onprem test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -276,7 +275,6 @@ run-metering: network postgres
 		--network $(NETWORK) \
 		--env-file .env \
 		-e DATABASE_URL=$(DATABASE_URL) \
-		-e LAGO_URL=http://lago-api:3000 \
 		-e METERING_INTERVAL_SECS=300 \
 		caution-metering
 	@echo "Metering service started (internal port 8083)"
@@ -292,97 +290,6 @@ run-frontend: network
 	@echo "Frontend started on port 3000"
 
 # =============================================================================
-# Billing / Lago
-# =============================================================================
-
-lago-build:
-	@echo "Building Lago API from source..."
-	@docker build -t caution-lago -f ./containerfiles/Containerfile.lago .
-	@echo "Lago image built: caution-lago"
-
-lago-redis: network
-	@if docker ps -a --format '{{.Names}}' | grep -q '^lago-redis$$'; then \
-		if docker ps --format '{{.Names}}' | grep -q '^lago-redis$$'; then \
-			echo "Lago Redis already running"; \
-		else \
-			echo "Starting existing lago-redis container..."; \
-			docker start lago-redis; \
-			echo "Lago Redis started"; \
-		fi \
-	else \
-		docker run -d \
-			--name lago-redis \
-			--network $(NETWORK) \
-			redis:7-alpine && \
-		echo "Lago Redis started"; \
-	fi
-
-lago-db: postgres
-	@echo "Creating Lago database..."
-	@docker exec postgres psql -U $(DB_USER) -tc "SELECT 1 FROM pg_database WHERE datname = 'lago'" | grep -q 1 || \
-		docker exec postgres psql -U $(DB_USER) -c "CREATE DATABASE lago"
-	@echo "Lago database ready"
-
-lago-migrate: lago-build lago-db lago-redis
-	@echo "Running Lago database migrations..."
-	@docker run --rm \
-		--network $(NETWORK) \
-		-e DATABASE_URL=postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):5432/lago \
-		-e REDIS_URL=redis://lago-redis:6379 \
-		-e SECRET_KEY_BASE=$${LAGO_SECRET_KEY_BASE:-$$(openssl rand -hex 64)} \
-		-e LAGO_RSA_PRIVATE_KEY="$${LAGO_RSA_PRIVATE_KEY}" \
-		-e RAILS_ENV=production \
-		caution-lago \
-		bundle exec rails db:migrate 2>/dev/null || echo "Lago migrations completed (or already up to date)"
-
-lago-run: lago-migrate
-	@docker rm -f lago-api lago-worker 2>/dev/null || true
-	@echo "Starting Lago API..."
-	@docker run -d \
-		--name lago-api \
-		--network $(NETWORK) \
-		-e DATABASE_URL=postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):5432/lago \
-		-e REDIS_URL=redis://lago-redis:6379 \
-		-e SECRET_KEY_BASE=$${LAGO_SECRET_KEY_BASE:-$$(openssl rand -hex 64)} \
-		-e LAGO_RSA_PRIVATE_KEY="$${LAGO_RSA_PRIVATE_KEY}" \
-		-e LAGO_API_URL=http://lago-api:3000 \
-		-e LAGO_FRONT_URL=http://localhost:3001 \
-		-e LAGO_DISABLE_SIGNUP=true \
-		-e LAGO_WEBHOOK_URL=http://metering:8083/webhooks/lago \
-		-e RAILS_ENV=production \
-		-e RAILS_LOG_TO_STDOUT=true \
-		caution-lago
-	@echo "Starting Lago Worker..."
-	@docker run -d \
-		--name lago-worker \
-		--network $(NETWORK) \
-		-e DATABASE_URL=postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):5432/lago \
-		-e REDIS_URL=redis://lago-redis:6379 \
-		-e SECRET_KEY_BASE=$${LAGO_SECRET_KEY_BASE:-$$(openssl rand -hex 64)} \
-		-e LAGO_RSA_PRIVATE_KEY="$${LAGO_RSA_PRIVATE_KEY}" \
-		-e RAILS_ENV=production \
-		-e RAILS_LOG_TO_STDOUT=true \
-		--entrypoint "" \
-		caution-lago \
-		bundle exec sidekiq -C config/sidekiq.yml
-	@echo "Lago services started (API on internal port 3000)"
-
-lago-up: lago-run
-	@echo "Lago billing system is running"
-
-lago-down:
-	@docker rm -f lago-api lago-worker 2>/dev/null || true
-	@docker stop lago-redis 2>/dev/null || true
-	@echo "Lago services stopped"
-
-lago-logs:
-	@echo "=== Lago API Logs ==="
-	@docker logs lago-api 2>&1 | tail -n 30 || true
-	@echo "\n=== Lago Worker Logs ==="
-	@docker logs lago-worker 2>&1 | tail -n 30 || true
-	@echo "\n=== Lago Redis Logs ==="
-	@docker logs lago-redis 2>&1 | tail -n 10 || true
-
 # =============================================================================
 # Main targets
 # =============================================================================
@@ -390,7 +297,7 @@ lago-logs:
 up: migrate
 	@echo "Building all images in parallel..."
 	@$(MAKE) -j4 build-api build-gateway build-email build-metering build-frontend
-	@$(MAKE) lago-up run-email run-metering run-api run-frontend
+	@$(MAKE) run-email run-metering run-api run-frontend
 	@echo "Waiting for API to be ready..."
 	@sleep 2
 	@$(MAKE) run-gateway
@@ -400,15 +307,14 @@ up: migrate
 	@echo "  SSH: localhost:2222"
 	@echo "  API: internal only (http://api:8080)"
 	@echo "  Metering: internal only (http://metering:8083)"
-	@echo "  Lago: internal only (http://lago-api:3000)"
 	@echo "  Postgres: localhost:5432"
 	@echo ""
 	@echo "Database is persistent - safe to run 'make down' without losing data"
 
 up-dev: migrate
 	@echo "Building all images in parallel (dev)..."
-	@$(MAKE) -j4 build-api-dev build-gateway-dev build-email-dev build-frontend
-	@$(MAKE) run-email run-api run-frontend
+	@$(MAKE) -j4 build-api-dev build-gateway-dev build-email-dev build-metering build-frontend
+	@$(MAKE) run-email run-metering run-api run-frontend
 	@echo "Waiting for API to be ready..."
 	@sleep 2
 	@$(MAKE) run-gateway
@@ -417,20 +323,20 @@ up-dev: migrate
 	@echo "  Gateway: http://localhost:8000"
 	@echo "  SSH: localhost:2222"
 	@echo "  API: internal only (http://api:8080)"
+	@echo "  Metering: internal only (http://metering:8083)"
 	@echo "  Postgres: localhost:5432"
 	@echo ""
 	@echo "Database is persistent - safe to run 'make down' without losing data"
 
 down:
 	@docker rm -f gateway api email metering frontend 2>/dev/null || true
-	@$(MAKE) lago-down
 	@docker stop postgres 2>/dev/null || true
 	@echo "Services stopped (postgres data preserved)"
 	@echo "Run 'make up' to restart"
 	@echo "Run 'make down-clean' to remove all data"
 
 down-clean:
-	@docker rm -f gateway api email metering frontend lago-api lago-worker lago-redis postgres 2>/dev/null || true
+	@docker rm -f gateway api email metering frontend postgres 2>/dev/null || true
 	@docker volume rm $(DB_VOLUME) 2>/dev/null || true
 	@docker network rm $(NETWORK) 2>/dev/null || true
 	@echo "All services and data removed"
@@ -448,12 +354,11 @@ logs:
 	@docker logs frontend 2>&1 | tail -n 20 || true
 	@echo "\n=== Postgres Logs ==="
 	@docker logs postgres 2>&1 | tail -n 20 || true
-	@echo "\n(Run 'make lago-logs' for Lago billing logs)"
 
 clean:
 	@echo "Cleaning build artifacts..."
 	@rm -rf $(OUT_DIR)
-	@docker rmi -f caution-cli caution-gateway caution-api caution-email caution-metering caution-frontend caution-lago 2>/dev/null || true
+	@docker rmi -f caution-cli caution-gateway caution-api caution-email caution-metering caution-frontend 2>/dev/null || true
 	@echo "Clean complete"
 
 clean-enclave:
@@ -470,7 +375,7 @@ db-reset: down-clean
 
 status:
 	@echo "=== Container Status ==="
-	@docker ps -a --filter "name=gateway" --filter "name=api" --filter "name=email" --filter "name=metering" --filter "name=frontend" --filter "name=postgres" --filter "name=lago-" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+	@docker ps -a --filter "name=gateway" --filter "name=api" --filter "name=email" --filter "name=metering" --filter "name=frontend" --filter "name=postgres" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 	@echo "\n=== Volume Status ==="
 	@docker volume ls --filter "name=$(DB_VOLUME)"
 	@echo "\n=== Network Status ==="
@@ -523,12 +428,12 @@ run-api-test: network
 		--network $(NETWORK) \
 		--dns 8.8.8.8 \
 		--dns 8.8.4.4 \
+		-p 127.0.0.1:8080:8080 \
 		--group-add $$(stat -c '%g' /var/run/docker.sock) \
 		-e AWS_REGION=us-west-2 \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
-		-e SKIP_PAYMENT_REQUIREMENT=true \
 		-e GIT_HOSTNAME=localhost \
 		--env-file .env \
 		-v $(PWD)/terraform:/app/terraform:ro \
@@ -554,6 +459,18 @@ run-gateway-test: network
 		caution-gateway
 	@echo "Gateway started on 127.0.0.1:8000 (HTTP) and 127.0.0.1:$(SSH_PORT) (SSH)"
 
+run-email-test: network
+	@docker rm -f email 2>/dev/null || true
+	@docker run -d \
+		--name email \
+		--network $(NETWORK) \
+		--env-file .env \
+		-e FRONTEND_URL=http://localhost:3000 \
+		-e EMAIL_TEST_MODE=true \
+		-p 127.0.0.1:8082:8082 \
+		caution-email
+	@echo "Email service started on 127.0.0.1:8082 (test mode, /sent endpoint enabled)"
+
 run-frontend-test: network
 	@docker rm -f frontend 2>/dev/null || true
 	@docker run -d \
@@ -564,11 +481,23 @@ run-frontend-test: network
 		caution-frontend
 	@echo "Frontend started on 127.0.0.1:3000"
 
+run-metering-test: network
+	@docker rm -f metering 2>/dev/null || true
+	@docker run -d \
+		--name metering \
+		--network $(NETWORK) \
+		-p 127.0.0.1:8083:8083 \
+		--env-file .env \
+		-e DATABASE_URL=$(TEST_DATABASE_URL) \
+		-e METERING_INTERVAL_SECS=9999 \
+		caution-metering
+	@echo "Metering started on 127.0.0.1:8083 (test mode, collection disabled)"
+
 up-test: down migrate-test
 	@echo "Building test images (e2e-testing-unsafe mode)..."
 	@$(MAKE) -j3 build-api-dev build-email-dev build-frontend
 	@$(MAKE) build-gateway-e2e
-	@$(MAKE) run-email run-api-test run-frontend-test
+	@$(MAKE) run-email-test run-api-test run-frontend-test
 	@echo "Waiting for API to be ready..."
 	@sleep 2
 	@$(MAKE) run-gateway-test
@@ -580,8 +509,26 @@ up-test: down migrate-test
 	@echo ""
 	@echo "  E2E login: POST http://127.0.0.1:8000/auth/e2e-login"
 
+up-test-billing: down-test-billing migrate-test
+	@echo "Building test images for billing e2e..."
+	@$(MAKE) -j4 build-api-dev build-email-dev build-metering build-frontend
+	@$(MAKE) build-gateway-e2e
+	@$(MAKE) run-email-test run-metering-test run-api-test run-frontend-test
+	@echo "Waiting for API to be ready..."
+	@sleep 2
+	@$(MAKE) run-gateway-test
+	@echo "  All services running (billing e2e mode)"
+	@echo "  Gateway:  http://127.0.0.1:8000"
+	@echo "  Metering: http://127.0.0.1:8083"
+	@echo "  Test DB:  $(TEST_DB_HOST) (ephemeral)"
+
+down-test-billing:
+	@docker rm -f gateway api email metering frontend $(TEST_DB_HOST) 2>/dev/null || true
+	@docker volume rm $(TEST_DB_VOLUME) 2>/dev/null || true
+	@echo "Billing test services and data removed"
+
 down-test:
-	@docker rm -f gateway api email frontend $(TEST_DB_HOST) 2>/dev/null || true
+	@docker rm -f gateway api email metering frontend $(TEST_DB_HOST) 2>/dev/null || true
 	@docker volume rm $(TEST_DB_VOLUME) 2>/dev/null || true
 	@echo "Test services and data removed"
 
@@ -603,5 +550,26 @@ test-e2e-onprem:
 	status=$$?; \
 	$(MAKE) down-test; \
 	exit $$status
+
+test-e2e-billing:
+	@$(MAKE) up-test-billing
+	@echo "Running billing e2e tests..."
+	@bash tests/e2e/test_billing.sh; \
+	status=$$?; \
+	$(MAKE) down-test-billing; \
+	exit $$status
+
+test-e2e-billing-gates:
+	@$(MAKE) up-test-billing
+	@echo "Running billing gates e2e tests..."
+	@bash tests/e2e/test_billing_gates.sh; \
+	status=$$?; \
+	$(MAKE) down-test-billing; \
+	exit $$status
+
+test-paddle-sandbox:
+	@echo "Running Paddle sandbox integration tests..."
+	@echo "Uses PADDLE_API_KEY and PADDLE_API_URL from .env"
+	cargo test --package metering -- sandbox --nocapture
 
 test: test-unit

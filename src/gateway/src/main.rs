@@ -98,6 +98,7 @@ async fn main() -> Result<()> {
         db: pool.clone(),
         webauthn,
         api_service_url: config.api_service_url.clone(),
+        metering_service_url: config.metering_service_url.clone(),
         reg_states: Arc::new(RwLock::new(HashMap::new())),
         auth_states: Arc::new(RwLock::new(HashMap::new())),
         sign_challenges: Arc::new(RwLock::new(HashMap::new())),
@@ -205,8 +206,16 @@ async fn main() -> Result<()> {
     let frontend_service = ServeDir::new(&frontend_dir)
         .append_index_html_on_directories(true);
 
+    // Webhook proxy to metering service (no auth required — Paddle verifies via signature)
+    let webhook_proxy = Router::new()
+        .route("/webhooks/paddle", post(proxy::metering_proxy_handler))
+        .layer(RequestBodyLimitLayer::new(1024 * 1024))
+        .with_state(state.clone())
+        .layer(cors.clone());
+
     let app = app
         .merge(protected)
+        .merge(webhook_proxy)
         .nest("/api", public_api_proxy.merge(api_proxy))
         .fallback_service(frontend_service)
         .layer(cors)

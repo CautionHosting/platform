@@ -14,7 +14,7 @@ use lettre::{
     SmtpTransport, Transport,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
@@ -41,6 +41,15 @@ where
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct SentEmail {
+    to: String,
+    template: String,
+    subject: String,
+    data: serde_json::Value,
+    timestamp: String,
+}
+
 #[derive(Clone)]
 struct AppState {
     smtp_transport: Option<Arc<SmtpTransport>>,
@@ -48,6 +57,8 @@ struct AppState {
     from_name: String,
     base_url: String,
     test_mode: bool,
+    /// In-memory store of sent emails (test mode only) for E2E verification
+    sent_emails: Arc<Mutex<Vec<SentEmail>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +91,47 @@ async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok", "service": "email" }))
 }
 
+/// Query sent emails (test mode only). Supports optional ?template= and ?to= filters.
+async fn get_sent_handler(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    if !state.test_mode {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "only available in test mode"}))).into_response();
+    }
+
+    let sent = state.sent_emails.lock().unwrap_or_else(|e| e.into_inner());
+    let template_filter = params.get("template");
+    let to_filter = params.get("to");
+
+    let filtered: Vec<&SentEmail> = sent.iter()
+        .filter(|e| template_filter.map_or(true, |t| &e.template == t))
+        .filter(|e| to_filter.map_or(true, |t| &e.to == t))
+        .collect();
+
+    Json(serde_json::json!({
+        "count": filtered.len(),
+        "emails": filtered,
+    })).into_response()
+}
+
+/// Clear sent emails store (test mode only).
+async fn clear_sent_handler(
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if !state.test_mode {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "only available in test mode"}))).into_response();
+    }
+
+    let mut sent = state.sent_emails.lock().unwrap_or_else(|e| e.into_inner());
+    let count = sent.len();
+    sent.clear();
+
+    Json(serde_json::json!({
+        "cleared": count,
+    })).into_response()
+}
+
 async fn send_verification_handler(
     State(state): State<AppState>,
     Json(req): Json<SendVerificationRequest>,
@@ -102,6 +154,19 @@ async fn send_verification_handler(
         info!("Copy the URL above to verify the email");
         info!("========================================");
         info!("");
+
+        if let Ok(mut sent) = state.sent_emails.lock() {
+            sent.push(SentEmail {
+                to: req.email.clone(),
+                template: "verification".to_string(),
+                subject: "Verify Your Email - Caution".to_string(),
+                data: serde_json::json!({
+                    "user_id": req.user_id.to_string(),
+                    "verification_url": verification_url,
+                }),
+                timestamp: format!("{:?}", std::time::SystemTime::now()),
+            });
+        }
 
         return Ok(Json(SendVerificationResponse {
             success: true,
@@ -219,6 +284,8 @@ async fn send_email_handler(
         "payment_confirmation" => generate_payment_confirmation_email(&req.data),
         "payment_failure" => generate_payment_failure_email(&req.data),
         "insufficient_balance" => generate_insufficient_balance_email(&req.data),
+        "suspension_warning" => generate_suspension_warning_email(&req.data),
+        "suspension_notice" => generate_suspension_notice_email(&req.data),
         _ => {
             return Ok(Json(SendEmailResponse {
                 success: false,
@@ -237,6 +304,16 @@ async fn send_email_handler(
         info!("Data: {}", serde_json::to_string_pretty(&req.data).unwrap_or_default());
         info!("========================================");
         info!("");
+
+        if let Ok(mut sent) = state.sent_emails.lock() {
+            sent.push(SentEmail {
+                to: req.to.clone(),
+                template: req.template.clone(),
+                subject: subject.clone(),
+                data: req.data.clone(),
+                timestamp: format!("{:?}", std::time::SystemTime::now()),
+            });
+        }
 
         return Ok(Json(SendEmailResponse {
             success: true,
@@ -568,6 +645,125 @@ fn generate_insufficient_balance_email(data: &serde_json::Value) -> (String, Str
     (subject, html_body, text_body)
 }
 
+fn generate_suspension_warning_email(data: &serde_json::Value) -> (String, String, String) {
+    let days_remaining = data["days_remaining"].as_i64().unwrap_or(4);
+    let amount = data["amount"].as_str().unwrap_or("$0.00");
+
+    let subject = "Action Required: Your services will be suspended".to_string();
+
+    let html_body = format!(
+        r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Suspension Warning</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background-color: #f4f4f4; padding: 20px; border-radius: 10px;">
+        <h1 style="color: #e67e22; margin-top: 0;">Your Services Will Be Suspended</h1>
+
+        <p>We've been unable to collect payment of <strong>{}</strong> for your account.</p>
+
+        <p style="color: #e74c3c; font-weight: bold;">
+            Your running deployments will be suspended in {} days if payment is not received.
+        </p>
+
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="https://caution.dev/settings/billing"
+               style="background-color: #e74c3c; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">
+                Update Payment Method
+            </a>
+        </div>
+
+        <p style="color: #7f8c8d; font-size: 14px;">
+            Suspended instances are stopped but not destroyed. Once payment is received,
+            your services will be automatically restored.
+        </p>
+    </div>
+
+    <p style="color: #95a5a6; font-size: 12px; text-align: center; margin-top: 20px;">
+        &copy; 2025 Caution. All rights reserved.
+    </p>
+</body>
+</html>
+        "#,
+        amount, days_remaining
+    );
+
+    let text_body = format!(
+        "Your Services Will Be Suspended\n\n\
+         We've been unable to collect payment of {} for your account.\n\n\
+         Your running deployments will be suspended in {} days if payment is not received.\n\n\
+         Update your payment method at https://caution.dev/settings/billing\n\n\
+         Suspended instances are stopped but not destroyed. Once payment is received, \
+         your services will be automatically restored.\n\n\
+         --\n\
+         Caution Team",
+        amount, days_remaining
+    );
+
+    (subject, html_body, text_body)
+}
+
+fn generate_suspension_notice_email(data: &serde_json::Value) -> (String, String, String) {
+    let amount = data["amount"].as_str().unwrap_or("$0.00");
+    let app_count = data["app_count"].as_i64().unwrap_or(0);
+
+    let subject = "Your services have been suspended".to_string();
+
+    let html_body = format!(
+        r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Services Suspended</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background-color: #f4f4f4; padding: 20px; border-radius: 10px;">
+        <h1 style="color: #e74c3c; margin-top: 0;">Your Services Have Been Suspended</h1>
+
+        <p>Due to non-payment of <strong>{}</strong>, we have stopped <strong>{}</strong> running deployment(s).</p>
+
+        <p>Your data has <strong>not</strong> been deleted. Once payment is received, your services will be automatically restored.</p>
+
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="https://caution.dev/settings/billing"
+               style="background-color: #27ae60; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">
+                Resolve Payment &amp; Restore Services
+            </a>
+        </div>
+
+        <p style="color: #7f8c8d; font-size: 14px;">
+            If you no longer need these services, you can destroy them in your dashboard
+            to stop further charges.
+        </p>
+    </div>
+
+    <p style="color: #95a5a6; font-size: 12px; text-align: center; margin-top: 20px;">
+        &copy; 2025 Caution. All rights reserved.
+    </p>
+</body>
+</html>
+        "#,
+        amount, app_count
+    );
+
+    let text_body = format!(
+        "Your Services Have Been Suspended\n\n\
+         Due to non-payment of {}, we have stopped {} running deployment(s).\n\n\
+         Your data has NOT been deleted. Once payment is received, your services \
+         will be automatically restored.\n\n\
+         Resolve payment at https://caution.dev/settings/billing\n\n\
+         --\n\
+         Caution Team",
+        amount, app_count
+    );
+
+    (subject, html_body, text_body)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -623,14 +819,23 @@ async fn main() -> anyhow::Result<()> {
         from_name,
         base_url,
         test_mode,
+        sent_emails: Arc::new(Mutex::new(Vec::new())),
     };
 
     info!("Email service configured successfully");
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/health", get(health_handler))
         .route("/send-verification", post(send_verification_handler))
-        .route("/send", post(send_email_handler))
+        .route("/send", post(send_email_handler));
+
+    if test_mode {
+        app = app
+            .route("/sent", get(get_sent_handler).delete(clear_sent_handler));
+        info!("Test mode: GET /sent and DELETE /sent endpoints enabled");
+    }
+
+    let app = app
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -657,5 +862,155 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => tracing::info!("Received SIGINT, shutting down"),
         _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- suspension_warning template ----
+
+    #[test]
+    fn test_suspension_warning_email_content() {
+        let data = serde_json::json!({
+            "days_remaining": 4,
+            "amount": "$25.00",
+        });
+        let (subject, html, text) = generate_suspension_warning_email(&data);
+
+        assert_eq!(subject, "Action Required: Your services will be suspended");
+        assert!(html.contains("$25.00"));
+        assert!(html.contains("4 days"));
+        assert!(html.contains("https://caution.dev/settings/billing"));
+        assert!(text.contains("$25.00"));
+        assert!(text.contains("4 days"));
+        assert!(text.contains("https://caution.dev/settings/billing"));
+    }
+
+    #[test]
+    fn test_suspension_warning_email_defaults() {
+        let data = serde_json::json!({});
+        let (subject, html, text) = generate_suspension_warning_email(&data);
+
+        assert_eq!(subject, "Action Required: Your services will be suspended");
+        // defaults: amount = "$0.00", days_remaining = 4
+        assert!(html.contains("$0.00"));
+        assert!(html.contains("4 days"));
+        assert!(text.contains("$0.00"));
+        assert!(text.contains("4 days"));
+    }
+
+    #[test]
+    fn test_suspension_warning_email_custom_days() {
+        let data = serde_json::json!({
+            "days_remaining": 1,
+            "amount": "$5.00",
+        });
+        let (_, html, text) = generate_suspension_warning_email(&data);
+
+        assert!(html.contains("1 days"));
+        assert!(text.contains("1 days"));
+    }
+
+    // ---- suspension_notice template ----
+
+    #[test]
+    fn test_suspension_notice_email_content() {
+        let data = serde_json::json!({
+            "amount": "$42.50",
+            "app_count": 3,
+        });
+        let (subject, html, text) = generate_suspension_notice_email(&data);
+
+        assert_eq!(subject, "Your services have been suspended");
+        assert!(html.contains("$42.50"));
+        assert!(html.contains("<strong>3</strong> running deployment(s)"));
+        assert!(html.contains("has <strong>not</strong> been deleted"));
+        assert!(html.contains("https://caution.dev/settings/billing"));
+        assert!(text.contains("$42.50"));
+        assert!(text.contains("3 running deployment(s)"));
+        assert!(text.contains("has NOT been deleted"));
+    }
+
+    #[test]
+    fn test_suspension_notice_email_defaults() {
+        let data = serde_json::json!({});
+        let (subject, html, text) = generate_suspension_notice_email(&data);
+
+        assert_eq!(subject, "Your services have been suspended");
+        // defaults: amount = "$0.00", app_count = 0
+        assert!(html.contains("$0.00"));
+        assert!(html.contains("<strong>0</strong> running deployment(s)"));
+        assert!(text.contains("$0.00"));
+        assert!(text.contains("0 running deployment(s)"));
+    }
+
+    #[test]
+    fn test_suspension_notice_email_single_app() {
+        let data = serde_json::json!({
+            "amount": "$10.00",
+            "app_count": 1,
+        });
+        let (_, html, text) = generate_suspension_notice_email(&data);
+        assert!(html.contains("<strong>1</strong> running deployment(s)"));
+        assert!(text.contains("1 running deployment(s)"));
+    }
+
+    // ---- template dispatch ----
+
+    #[test]
+    fn test_all_templates_dispatched() {
+        // Verify the template names match what the dunning loop sends
+        let templates = vec![
+            "invoice",
+            "payment_confirmation",
+            "payment_failure",
+            "insufficient_balance",
+            "suspension_warning",
+            "suspension_notice",
+        ];
+
+        for template in templates {
+            let data = serde_json::json!({
+                "invoice_number": "INV-001",
+                "amount": "$10.00",
+                "date": "2025-01-01",
+                "days_remaining": 4,
+                "app_count": 1,
+            });
+
+            let result = match template {
+                "invoice" => generate_invoice_email(&data),
+                "payment_confirmation" => generate_payment_confirmation_email(&data),
+                "payment_failure" => generate_payment_failure_email(&data),
+                "insufficient_balance" => generate_insufficient_balance_email(&data),
+                "suspension_warning" => generate_suspension_warning_email(&data),
+                "suspension_notice" => generate_suspension_notice_email(&data),
+                _ => panic!("Unknown template: {}", template),
+            };
+
+            let (subject, html, text) = result;
+            assert!(!subject.is_empty(), "Subject empty for template: {}", template);
+            assert!(!html.is_empty(), "HTML empty for template: {}", template);
+            assert!(!text.is_empty(), "Text empty for template: {}", template);
+            assert!(html.contains("</html>"), "HTML not well-formed for template: {}", template);
+            assert!(text.contains("Caution"), "Text missing branding for template: {}", template);
+        }
+    }
+
+    // ---- existing templates still work ----
+
+    #[test]
+    fn test_payment_failure_email_has_update_link() {
+        let data = serde_json::json!({
+            "invoice_number": "INV-123",
+            "amount": "$15.00",
+        });
+        let (subject, html, text) = generate_payment_failure_email(&data);
+
+        assert!(subject.contains("Payment Failed"));
+        assert!(html.contains("Update Payment Method"));
+        assert!(text.contains("update your payment method"));
     }
 }
