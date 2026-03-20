@@ -3882,6 +3882,8 @@ build: docker build -t app .
         let decoder = GzDecoder::new(&archive_bytes[..]);
         let mut archive = Archive::new(decoder);
 
+        std::fs::create_dir_all(&extract_dir)
+            .with_context(|| format!("Failed to create extract dir: {}", extract_dir.display()))?;
         let canonical_extract = extract_dir.canonicalize()
             .with_context(|| format!("Failed to canonicalize extract dir: {}", extract_dir.display()))?;
 
@@ -3934,10 +3936,7 @@ build: docker build -t app .
             match self.download_and_extract_app_source(url).await {
                 Ok(path) => return Ok(path),
                 Err(e) => {
-                    if i < urls.len() - 1 {
-                        eprintln!("Failed to download from {}: {}", url, e);
-                        eprintln!("Trying next URL...");
-                    }
+                    log_verbose(self.verbose, &format!("Failed to download from {}: {}", url, e));
                     last_error = Some(e);
                 }
             }
@@ -3961,7 +3960,7 @@ build: docker build -t app .
         }
 
         if let Some((git_url, commit, branch)) = git_fallback {
-            println!("Archive download failed. Trying git clone (may require SSH access)...");
+            log_verbose(self.verbose, "Archive download failed. Trying git clone...");
 
             let temp_dir = tempfile::TempDir::new()
                 .context("Failed to create temp directory")?;
