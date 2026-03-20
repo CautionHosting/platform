@@ -467,6 +467,7 @@ run-email-test: network
 		--env-file .env \
 		-e FRONTEND_URL=http://localhost:3000 \
 		-e EMAIL_TEST_MODE=true \
+		-e EMAIL_BIND_ADDR=0.0.0.0:8082 \
 		-p 127.0.0.1:8082:8082 \
 		caution-email
 	@echo "Email service started on 127.0.0.1:8082 (test mode, /sent endpoint enabled)"
@@ -490,8 +491,9 @@ run-metering-test: network
 		--env-file .env \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
 		-e METERING_INTERVAL_SECS=9999 \
+		-e ENABLE_TEST_ENDPOINTS=true \
 		caution-metering
-	@echo "Metering started on 127.0.0.1:8083 (test mode, collection disabled)"
+	@echo "Metering started on 127.0.0.1:8083 (test mode, collection disabled, test endpoints enabled)"
 
 up-test: down migrate-test
 	@echo "Building test images (e2e-testing-unsafe mode)..."

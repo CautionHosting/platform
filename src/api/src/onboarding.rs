@@ -77,12 +77,7 @@ pub async fn get_user_status(
     let is_alpha_user = alpha_code_id.is_some();
     let email_verified = is_alpha_user || email_verified_at.is_some();
 
-    let skip_payment = std::env::var("SKIP_PAYMENT_REQUIREMENT")
-        .unwrap_or_else(|_| "false".to_string())
-        .parse::<bool>()
-        .unwrap_or(false);
-
-    let payment_method_added = is_alpha_user || skip_payment || payment_method_added_at.is_some();
+    let payment_method_added = is_alpha_user || payment_method_added_at.is_some();
     let onboarding_complete = email_verified && payment_method_added;
 
     Ok(Json(UserStatus {
@@ -300,16 +295,6 @@ pub async fn verify_email(
 }
 
 pub async fn check_onboarding_status(db: &PgPool, user_id: uuid::Uuid) -> Result<bool, StatusCode> {
-    let skip_payment = std::env::var("SKIP_PAYMENT_REQUIREMENT")
-        .unwrap_or_else(|_| "false".to_string())
-        .parse::<bool>()
-        .unwrap_or(false);
-
-    if skip_payment {
-        tracing::debug!("Skipping onboarding check for user {} (dev mode)", user_id);
-        return Ok(true);
-    }
-
     let result: Option<bool> = sqlx::query_scalar(
         "SELECT user_is_onboarded($1)"
     )

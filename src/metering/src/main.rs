@@ -381,8 +381,8 @@ async fn get_user_usage(
         SELECT
             provider,
             resource_type,
-            SUM(quantity) as total_quantity,
-            SUM(cost_usd) as total_cost
+            SUM(quantity)::float8 as total_quantity,
+            SUM(cost_usd)::float8 as total_cost
         FROM usage_records
         WHERE user_id = $1
         AND recorded_at >= NOW() - INTERVAL '30 days'
@@ -412,7 +412,9 @@ async fn get_user_usage(
 async fn trigger_collection(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    match run_collection_cycle(&state).await {
+    // Bypass advisory lock for explicitly triggered collections — the lock only
+    // prevents duplicate background loop runs, not manual API invocations.
+    match run_collection_cycle_inner(&state).await {
         Ok(count) => (StatusCode::OK, Json(serde_json::json!({"collected": count}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))),
     }

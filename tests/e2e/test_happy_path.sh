@@ -131,6 +131,13 @@ cat > "$CONFIG_DIR/config.json" <<EOF
 EOF
 step_pass "E2E login (user: $USER_ID)"
 
+# Seed credits for deploy gate ($5 minimum required)
+log "Seeding test credits for deploy gate..."
+docker exec postgres-test psql -U postgres -d caution_test -c "
+INSERT INTO wallet_balance (user_id, balance_cents) VALUES ('$USER_ID', 10000)
+ON CONFLICT (user_id) DO UPDATE SET balance_cents = 10000;
+" >/dev/null 2>&1 || log "  Warning: could not seed credits (wallet_balance table may not exist)"
+
 # ── Step 3: Add SSH Key ──────────────────────────────────────────────
 
 STEP_NUM=3
