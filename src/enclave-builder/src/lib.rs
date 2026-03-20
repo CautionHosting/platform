@@ -422,6 +422,9 @@ impl EnclaveBuilder {
 
             let app_src = match (app_source_urls, app_commit.clone()) {
                 (Some(urls), Some(commit)) if !urls.is_empty() => {
+                    let urls = urls.iter()
+                        .map(|u| u.replace("${COMMIT}", &commit))
+                        .collect();
                     Some(AppSource {
                         urls,
                         commit,
@@ -540,6 +543,9 @@ impl EnclaveBuilder {
 
             let app_src = match (app_source_urls, app_commit.clone()) {
                 (Some(urls), Some(commit)) if !urls.is_empty() => {
+                    let urls = urls.iter()
+                        .map(|u| u.replace("${COMMIT}", &commit))
+                        .collect();
                     Some(AppSource {
                         urls,
                         commit,

@@ -3478,7 +3478,7 @@ build: docker build -t app .
 
         let response = self.client
             .post(&attestation_url)
-            .json(&serde_json::json!({"nonce": nonce}))
+            .json(&serde_json::json!({"nonce": general_purpose::STANDARD.encode(&nonce)}))
             .send()
             .await
             .context("Failed to fetch attestation document")?;
@@ -3491,6 +3491,7 @@ build: docker build -t app .
             .context("Failed to parse attestation response as JSON")?;
 
         let attestation_b64 = attest_resp.get("attestation_document")
+            .or_else(|| attest_resp.get("document"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("No attestation document in response. Fields: {:?}", attest_resp.as_object().map(|o| o.keys().collect::<Vec<_>>())))?;
         log_verbose(self.verbose, &format!("Received attestation: {} bytes", attestation_b64.len()));
