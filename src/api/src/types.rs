@@ -482,13 +482,22 @@ impl BuildConfig {
             }
         }
 
-        if let Some(hp) = http_port {
-            if !ports.contains(&hp) {
-                return Err(format!(
-                    "http_port {} must also be listed in ports", hp
-                ));
+        // Default http_port to the single port if only one is specified
+        let http_port = match http_port {
+            Some(hp) => {
+                if !ports.contains(&hp) {
+                    return Err(format!(
+                        "http_port {} must also be listed in ports", hp
+                    ));
+                }
+                Some(hp)
             }
-        }
+            None if ports.len() == 1 => {
+                tracing::info!("Defaulting http_port to {} (only port specified)", ports[0]);
+                Some(ports[0])
+            }
+            None => None,
+        };
 
         let managed_on_prem_config = if managed_on_prem {
             let platform = platform.ok_or("managed_on_prem requires 'platform' to be specified")?;
