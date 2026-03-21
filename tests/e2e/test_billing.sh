@@ -209,11 +209,12 @@ log "  Org ID: $ORG_ID"
 
 # Set an email on the test user so billing email notifications work
 # Use unique email per run to avoid UNIQUE constraint collision with stale test users
+# Also mark user as onboarded so API onboarding middleware doesn't block requests (402)
 TEST_EMAIL="e2e-billing-${USER_ID:0:8}@example.com"
 docker exec "${TEST_DB_HOST:-postgres-test}" psql -U postgres -d caution_test -c "
-UPDATE users SET email = '$TEST_EMAIL' WHERE id = '$USER_ID';
+UPDATE users SET email = '$TEST_EMAIL', email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';
 " >/dev/null 2>&1
-log "  Set test user email to $TEST_EMAIL"
+log "  Set test user email to $TEST_EMAIL (marked as onboarded)"
 
 step_pass "E2E login (user: ${USER_ID:0:8}..., org: ${ORG_ID:0:8}...)"
 

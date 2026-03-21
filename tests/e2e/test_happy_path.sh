@@ -131,6 +131,12 @@ cat > "$CONFIG_DIR/config.json" <<EOF
 EOF
 step_pass "E2E login (user: $USER_ID)"
 
+# Mark test user as onboarded so API onboarding middleware doesn't block requests (402)
+log "Marking test user as onboarded..."
+docker exec postgres-test psql -U postgres -d caution_test -c "
+UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';
+" >/dev/null 2>&1 || log "  Warning: could not mark user as onboarded"
+
 # Seed credits for deploy gate ($5 minimum required)
 log "Seeding test credits for deploy gate..."
 docker exec postgres-test psql -U postgres -d caution_test -c "
