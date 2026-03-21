@@ -235,7 +235,6 @@ async fn send_verification_handler(
             .parse()
             .map_err(|e| anyhow::anyhow!("Invalid recipient address: {}", e))?)
         .subject("Verify Your Email - Caution")
-        .header(ContentType::TEXT_HTML)
         .multipart(
             lettre::message::MultiPart::alternative()
                 .singlepart(
@@ -332,7 +331,6 @@ async fn send_email_handler(
             .parse()
             .map_err(|e| anyhow::anyhow!("Invalid recipient address: {}", e))?)
         .subject(subject)
-        .header(ContentType::TEXT_HTML)
         .multipart(
             lettre::message::MultiPart::alternative()
                 .singlepart(

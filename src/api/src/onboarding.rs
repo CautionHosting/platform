@@ -224,67 +224,60 @@ pub async fn verify_email(
     let frontend_url = std::env::var("FRONTEND_URL")
         .unwrap_or_else(|_| "http://localhost:3000".to_string());
 
-    let html = format!(r#"
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Email Verified</title>
-            <style>
-                body {{
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    min-height: 100vh;
-                    margin: 0;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                }}
-                .card {{
-                    background: white;
-                    border-radius: 16px;
-                    padding: 40px;
-                    max-width: 500px;
-                    text-align: center;
-                    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
-                }}
-                .success-icon {{
-                    width: 80px;
-                    height: 80px;
-                    border-radius: 50%;
-                    background: #48bb78;
-                    color: white;
-                    font-size: 48px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    margin: 0 auto 24px;
-                }}
-                h1 {{ color: #333; margin-bottom: 16px; }}
-                p {{ color: #666; line-height: 1.6; }}
-                .btn {{
-                    display: inline-block;
-                    margin-top: 24px;
-                    padding: 14px 32px;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: white;
-                    text-decoration: none;
-                    border-radius: 8px;
-                    font-weight: 600;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="card">
-                <div class="success-icon">✓</div>
-                <h1>Email Verified!</h1>
-                <p>Your email has been successfully verified.</p>
-                <p>If you have your onboarding tab open, it will automatically advance to the next step.</p>
-                <p>Otherwise, you can continue onboarding by logging in again.</p>
-                <a href="{}/login" class="btn">Go to Login</a>
-            </div>
-        </body>
-        </html>
-    "#, frontend_url);
+    let html = format!(r#"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Email Verified</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+body {{
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  margin: 0;
+  background: radial-gradient(circle at 50% 25%, white 0%, transparent 60%) no-repeat, #E8F4FC;
+}}
+.card {{
+  background: white;
+  border-radius: 12px;
+  padding: 3rem;
+  max-width: 440px;
+  width: 100%;
+  text-align: center;
+  border: 1px solid #eee;
+}}
+h1 {{
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #0f0f0f;
+  margin: 0 0 1.5rem;
+}}
+a {{
+  display: inline-block;
+  padding: 0.7rem 1.5rem;
+  background: #0f0f0f;
+  color: white;
+  text-decoration: none;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 500;
+  transition: background-color 0.15s ease;
+}}
+a:hover {{ background: #333; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Your email has been successfully verified.</h1>
+  <a href="{frontend_url}/login">Go to Login</a>
+</div>
+</body>
+</html>"#);
 
     Ok((
         StatusCode::OK,

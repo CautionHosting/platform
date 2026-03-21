@@ -1105,6 +1105,7 @@ make build-cli
             </div>
             <div v-if="emailError" class="card-error">{{ emailError }}</div>
           </div>
+          <p v-if="userEmail && emailVerified === false" class="email-unverified-warning">Email not verified — check your inbox for a verification link.</p>
           <p class="email-hint">Used for invoice and payment notifications.</p>
         </div>
       </div>
@@ -1926,6 +1927,7 @@ export default {
 
     // Email settings
     const userEmail = ref('');
+    const emailVerified = ref(null);
     const editingEmail = ref(false);
     const emailInput = ref('');
     const savingEmail = ref(false);
@@ -2157,6 +2159,15 @@ export default {
       } catch (err) {
         // ignore
       }
+      try {
+        const statusRes = await authFetch("/api/user/status");
+        if (statusRes.ok) {
+          const status = await statusRes.json();
+          emailVerified.value = status.email_verified;
+        }
+      } catch (err) {
+        // ignore
+      }
     };
 
     const startEditEmail = () => {
@@ -2182,8 +2193,9 @@ export default {
         if (response.ok) {
           const data = await response.json();
           userEmail.value = data.email || email;
+          emailVerified.value = false;
           editingEmail.value = false;
-          showToast('Email updated');
+          showToast('Verification email sent — check your inbox');
         } else {
           const data = await response.json().catch(() => ({}));
           emailError.value = data.error || 'Failed to update email';
@@ -3530,6 +3542,7 @@ export default {
       cancelSubscription,
       reactivateSubscription,
       userEmail,
+      emailVerified,
       editingEmail,
       emailInput,
       savingEmail,
@@ -5702,6 +5715,12 @@ export default {
 .email-edit-actions {
   display: flex;
   gap: 0.5rem;
+}
+
+.email-unverified-warning {
+  font-size: 0.8rem;
+  color: #e8a735;
+  margin-top: 0.5rem;
 }
 
 .email-hint {

@@ -89,9 +89,7 @@
             :class="['nav-item', { active: activeTab === 'security' }]"
             @click="$emit('tab-change', 'security')"
           >
-            <img
-              :src="activeTab === 'security' ? '/assets/icons/security--act.svg' : '/assets/icons/security--inact.svg'"
-              alt=""
+            <svg
               class="nav-icon"
               width="30" height="30" viewBox="0 0 30 30"
               fill="none"

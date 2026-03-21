@@ -263,8 +263,8 @@ run-email: network
 		--name email \
 		--network $(NETWORK) \
 		--env-file .env \
-		-e FRONTEND_URL=http://localhost:3000 \
-		-p 8082:8082 \
+		-e EMAIL_BIND_ADDR=0.0.0.0:8082 \
+		-p 127.0.0.1:8082:8082 \
 		caution-email
 	@echo "Email service started on http://localhost:8082"
 

@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::sync::Arc;
@@ -63,14 +63,24 @@ pub async fn update_current_user(
         has_updates = true;
     }
 
-    if let Some(email) = &payload.email {
+    let new_email = payload.email.clone();
+    let mut verification_token: Option<String> = None;
+
+    if let Some(email) = &new_email {
         if has_updates {
             query_builder.push(", ");
         }
         query_builder.push("email = ");
         query_builder.push_bind(email);
-        // Reset verification status — user must re-verify the new address
-        query_builder.push(", email_verified_at = NULL, email_verification_token = NULL, email_verification_token_expires_at = NULL");
+
+        // Generate verification token and reset verified status
+        let token = Uuid::new_v4().to_string();
+        let expires_at = Utc::now() + Duration::hours(24);
+        query_builder.push(", email_verified_at = NULL, email_verification_token = ");
+        query_builder.push_bind(token.clone());
+        query_builder.push(", email_verification_token_expires_at = ");
+        query_builder.push_bind(expires_at);
+        verification_token = Some(token);
         has_updates = true;
     }
 
@@ -83,6 +93,28 @@ pub async fn update_current_user(
         .fetch_one(&state.db)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Send verification email for the new address
+    if let (Some(email), Some(token)) = (&new_email, &verification_token) {
+        let email_service_url = std::env::var("EMAIL_SERVICE_URL")
+            .unwrap_or_else(|_| "http://email:8082".to_string());
+
+        let client = reqwest::Client::new();
+        let email_request = serde_json::json!({
+            "email": email,
+            "token": token,
+            "user_id": auth.user_id,
+        });
+
+        if let Err(e) = client
+            .post(format!("{}/send-verification", email_service_url))
+            .json(&email_request)
+            .send()
+            .await
+        {
+            tracing::error!("Failed to send verification email on email change: {:?}", e);
+        }
+    }
 
     Ok(Json(user))
 }
