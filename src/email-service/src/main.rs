@@ -186,8 +186,6 @@ async fn send_verification_handler(
     <div style="background-color: #f4f4f4; padding: 20px; border-radius: 10px;">
         <h1 style="color: #2c3e50; margin-top: 0;">Welcome to Caution!</h1>
 
-        <p>Thank you for registering. To complete your account setup, please verify your email address.</p>
-
         <div style="text-align: center; margin: 30px 0;">
             <a href="{}"
                style="background-color: #3498db; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">
@@ -216,7 +214,6 @@ async fn send_verification_handler(
 
     let text_body = format!(
         "Welcome to Caution!\n\n\
-         Thank you for registering. To complete your account setup, please verify your email address.\n\n\
          Click here to verify: {}\n\n\
          This link will expire in 24 hours. If you didn't create an account, you can safely ignore this email.\n\n\
          --\n\
