@@ -69,6 +69,8 @@ pub async fn update_current_user(
         }
         query_builder.push("email = ");
         query_builder.push_bind(email);
+        // Reset verification status — user must re-verify the new address
+        query_builder.push(", email_verified_at = NULL, email_verification_token = NULL, email_verification_token_expires_at = NULL");
         has_updates = true;
     }
 
