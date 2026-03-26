@@ -935,16 +935,38 @@ aws_region: us-east-1
         };
 
         let procfile_content = format!(r#"# Caution Procfile - https://docs.caution.co/reference/procfile/
-binary: /app/myapp
+
+# Build configuration
+run: /app/myapp
 build: docker build -t app .
+# containerfile: Containerfile
+# oci_tarball: image.tar
+# binary: /app/myapp  # extracts only this binary, not the full container filesystem
+
+# Source verification
 {source_line}
+# enclave_sources: https://codeberg.org/caution/enclave
+# metadata:
+
+# Resource allocation
+# memory: 512
+# cpus: 2
+
+# Features
+# domain: app.example.com
+# ports: 8083
+# http_port: 8083
+# e2e: false
+# debug: false
+# no_cache: false
+# ssh_keys: ssh-ed25519 AAAA...
 {managed_on_prem_section}"#);
 
         fs::write(procfile_path, procfile_content)
             .context("Failed to create Procfile")?;
 
         println!("\nCreated Procfile in current directory");
-        println!("Edit the required 'binary' field to match your application");
+        println!("Edit the required 'run' field to match your application");
         if managed_on_prem {
             println!("Configure AWS deployment settings in the managed_on_prem section");
         }
