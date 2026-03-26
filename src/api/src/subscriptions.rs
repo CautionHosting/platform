@@ -4,30 +4,12 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, Datelike, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sqlx::Row;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{AppState, AuthContext, get_user_primary_org, BillingDiscounts};
-
-// --- Managed On-Prem Subscription Tiers ---
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SubscriptionTier {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub max_vcpus: i32,
-    pub max_apps: i32, // -1 = unlimited
-}
-
-pub const SUBSCRIPTION_TIERS: &[SubscriptionTier] = &[
-    SubscriptionTier { id: "starter",       name: "Starter",         max_vcpus: 16,  max_apps: 2  },
-    SubscriptionTier { id: "developer",     name: "Developer",       max_vcpus: 64,  max_apps: 5  },
-    SubscriptionTier { id: "base_platform", name: "Base Platform",   max_vcpus: 64,  max_apps: 10 },
-    SubscriptionTier { id: "growth",        name: "Growth Band",     max_vcpus: 256, max_apps: 25 },
-    SubscriptionTier { id: "enterprise",    name: "Enterprise Band", max_vcpus: 512, max_apps: 50 },
-];
 
 pub fn calculate_cycle_price(annual_cents: i64, billing_period: &str, discounts: &BillingDiscounts) -> i64 {
     match billing_period {
@@ -66,25 +48,38 @@ pub fn days_in_month(year: i32, month: u32) -> u32 {
         .day()
 }
 
+fn tier_display_name(id: &str) -> String {
+    id.split('_').map(|w| {
+        let mut c = w.chars();
+        match c.next() {
+            None => String::new(),
+            Some(f) => f.to_uppercase().to_string() + c.as_str(),
+        }
+    }).collect::<Vec<_>>().join(" ")
+}
+
 pub async fn get_subscription_tiers(
     State(state): State<Arc<AppState>>,
     Extension(_auth): Extension<AuthContext>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let discounts = &state.pricing.billing_discounts;
-    let extra_block_annual = state.pricing.extra_block_annual_cents;
+    let extra_block = &state.pricing.extra_block;
 
-    let tiers: Vec<serde_json::Value> = SUBSCRIPTION_TIERS.iter().map(|t| {
-        let annual_cents = state.pricing.tier_annual_cents(t.id);
+    let mut tier_entries: Vec<(&String, &crate::TierPricing)> = state.pricing.subscription_tiers.iter().collect();
+    tier_entries.sort_by_key(|(_, t)| t.annual_cents);
+
+    let tiers: Vec<serde_json::Value> = tier_entries.iter().map(|(id, t)| {
         serde_json::json!({
-            "id": t.id,
-            "name": t.name,
-            "annual_cents": annual_cents,
-            "max_vcpus": t.max_vcpus,
-            "max_apps": t.max_apps,
+            "id": id,
+            "name": tier_display_name(id),
+            "annual_cents": t.annual_cents,
+            "enclaves": t.enclaves,
+            "vcpu": t.vcpu,
+            "ram_gb": t.ram_gb,
             "prices": {
-                "monthly": calculate_cycle_price(annual_cents, "monthly", discounts),
-                "yearly": calculate_cycle_price(annual_cents, "yearly", discounts),
-                "2year": calculate_cycle_price(annual_cents, "2year", discounts),
+                "monthly": t.cycle_price("monthly", discounts),
+                "yearly": t.cycle_price("yearly", discounts),
+                "2year": t.cycle_price("2year", discounts),
             },
         })
     }).collect();
@@ -92,13 +87,14 @@ pub async fn get_subscription_tiers(
     Ok(Json(serde_json::json!({
         "tiers": tiers,
         "extra_block": {
-            "annual_cents": extra_block_annual,
-            "vcpus": 64,
-            "apps": 10,
+            "annual_cents": extra_block.annual_cents,
+            "enclaves": extra_block.enclaves,
+            "vcpu": extra_block.vcpu,
+            "ram_gb": extra_block.ram_gb,
             "prices": {
-                "monthly": calculate_cycle_price(extra_block_annual, "monthly", discounts),
-                "yearly": calculate_cycle_price(extra_block_annual, "yearly", discounts),
-                "2year": calculate_cycle_price(extra_block_annual, "2year", discounts),
+                "monthly": calculate_cycle_price(extra_block.annual_cents, "monthly", discounts),
+                "yearly": calculate_cycle_price(extra_block.annual_cents, "yearly", discounts),
+                "2year": calculate_cycle_price(extra_block.annual_cents, "2year", discounts),
             },
         },
     })))
@@ -134,7 +130,9 @@ pub async fn get_subscription(
     let billing_period: String = row.get("billing_period");
     let price_cents_per_cycle: i64 = row.get("price_cents_per_cycle");
     let extra_block_price: i64 = row.get("extra_block_price_cents_per_cycle");
-    let tier_info = SUBSCRIPTION_TIERS.iter().find(|t| t.id == tier);
+    let tier_name = state.pricing.subscription_tiers.get(&tier)
+        .map(|_| tier_display_name(&tier))
+        .unwrap_or_else(|| "Unknown".to_string());
 
     Ok(Json(serde_json::json!({
         "subscription": {
@@ -142,7 +140,7 @@ pub async fn get_subscription(
             "user_id": row.get::<Uuid, _>("user_id"),
             "organization_id": row.get::<Uuid, _>("organization_id"),
             "tier": tier,
-            "tier_name": tier_info.map(|t| t.name).unwrap_or("Unknown"),
+            "tier_name": tier_name,
             "billing_period": billing_period,
             "max_vcpus": row.get::<i32, _>("max_vcpus"),
             "max_apps": row.get::<i32, _>("max_apps"),
@@ -179,8 +177,9 @@ pub async fn subscribe(
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<SubscribeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let tier = SUBSCRIPTION_TIERS.iter().find(|t| t.id == req.tier_id)
+    let tier = state.pricing.subscription_tiers.get(&req.tier_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
+    let tier_name = tier_display_name(&req.tier_id);
 
     if !["monthly", "yearly", "2year"].contains(&req.billing_period.as_str()) {
         return Err((StatusCode::BAD_REQUEST, "Invalid billing_period. Use monthly, yearly, or 2year".to_string()));
@@ -204,8 +203,7 @@ pub async fn subscribe(
     }
 
     let now = Utc::now();
-    let annual_cents = state.pricing.tier_annual_cents(tier.id);
-    let price_per_cycle = calculate_cycle_price(annual_cents, &req.billing_period, &state.pricing.billing_discounts);
+    let price_per_cycle = tier.cycle_price(&req.billing_period, &state.pricing.billing_discounts);
     let period_end = calculate_period_end(now, &req.billing_period);
 
     // Charge first period: credits first, then Paddle for remainder
@@ -247,13 +245,13 @@ pub async fn subscribe(
                     "items": [{
                         "quantity": 1,
                         "price": {
-                            "description": format!("{} subscription ({})", tier.name, req.billing_period),
+                            "description": format!("{} subscription ({})", tier_name, req.billing_period),
                             "unit_price": {
                                 "amount": amount_str,
                                 "currency_code": "USD",
                             },
                             "product": {
-                                "name": format!("{} Subscription", tier.name),
+                                "name": format!("{} Subscription", tier_name),
                                 "tax_category": "standard",
                             }
                         }
@@ -303,10 +301,10 @@ pub async fn subscribe(
     )
     .bind(auth.user_id)
     .bind(org_id)
-    .bind(tier.id)
+    .bind(&req.tier_id)
     .bind(&req.billing_period)
-    .bind(tier.max_vcpus)
-    .bind(tier.max_apps)
+    .bind(tier.vcpu)
+    .bind(tier.enclaves)
     .bind(price_per_cycle)
     .bind(period_end)
     .fetch_one(&mut *tx)
@@ -358,7 +356,7 @@ pub async fn subscribe(
         .bind(auth.user_id)
         .bind(-credits_to_apply)
         .bind(new_balance)
-        .bind(format!("Subscription: {} {}", tier.name, req.billing_period))
+        .bind(format!("Subscription: {} {}", tier_name, req.billing_period))
         .execute(&mut *tx)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record ledger: {}", e)))?;
@@ -376,7 +374,7 @@ pub async fn subscribe(
     .bind(auth.user_id)
     .bind(now)
     .bind(period_end)
-    .bind(tier.id)
+    .bind(&req.tier_id)
     .bind(price_per_cycle)
     .bind(total_charge)
     .bind(credits_to_apply)
@@ -408,13 +406,13 @@ pub async fn subscribe(
 
     tracing::info!(
         "Subscription created: sub={}, tier={}, org={}, charge={} cents (credits={}, paddle={})",
-        sub_id.0, tier.id, org_id, total_charge, credits_to_apply, remainder_cents
+        sub_id.0, req.tier_id, org_id, total_charge, credits_to_apply, remainder_cents
     );
 
     Ok(Json(serde_json::json!({
         "success": true,
         "subscription_id": sub_id.0,
-        "tier": tier.id,
+        "tier": req.tier_id,
         "billing_period": req.billing_period,
         "price_cents_per_cycle": price_per_cycle,
         "credits_applied": credits_to_apply,
@@ -432,7 +430,7 @@ pub async fn change_subscription_tier(
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<ChangeTierRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let new_tier = SUBSCRIPTION_TIERS.iter().find(|t| t.id == req.tier_id)
+    let new_tier = state.pricing.subscription_tiers.get(&req.tier_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
 
     let org_id = get_user_primary_org(&state.db, auth.user_id)
@@ -452,12 +450,11 @@ pub async fn change_subscription_tier(
         return Err((StatusCode::NOT_FOUND, "No active subscription".to_string()));
     };
 
-    if old_tier_id == new_tier.id {
+    if old_tier_id == req.tier_id {
         return Err((StatusCode::BAD_REQUEST, "Already on this tier".to_string()));
     }
 
-    let new_annual_cents = state.pricing.tier_annual_cents(new_tier.id);
-    let new_price = calculate_cycle_price(new_annual_cents, &billing_period, &state.pricing.billing_discounts);
+    let new_price = new_tier.cycle_price(&billing_period, &state.pricing.billing_discounts);
 
     // Prorate: credit remaining old tier, charge remaining new tier
     let now = Utc::now();
@@ -506,7 +503,7 @@ pub async fn change_subscription_tier(
                 "items": [{
                     "quantity": 1,
                     "price": {
-                        "description": format!("Tier upgrade proration: {} → {}", old_tier_id, new_tier.id),
+                        "description": format!("Tier upgrade proration: {} → {}", old_tier_id, req.tier_id),
                         "unit_price": { "amount": remainder.to_string(), "currency_code": "USD" },
                         "product": { "name": "Subscription Tier Upgrade", "tax_category": "standard" }
                     }
@@ -541,9 +538,9 @@ pub async fn change_subscription_tier(
         "UPDATE subscriptions SET tier = $1, max_vcpus = $2, max_apps = $3, price_cents_per_cycle = $4, updated_at = NOW()
          WHERE id = $5"
     )
-    .bind(new_tier.id)
-    .bind(new_tier.max_vcpus)
-    .bind(new_tier.max_apps)
+    .bind(&req.tier_id)
+    .bind(new_tier.vcpu)
+    .bind(new_tier.enclaves)
     .bind(new_price)
     .bind(sub_id)
     .execute(&mut *tx)
@@ -594,7 +591,7 @@ pub async fn change_subscription_tier(
             .bind(auth.user_id)
             .bind(-credits_to_apply)
             .bind(new_balance)
-            .bind(format!("Tier upgrade proration: {} → {}", old_tier_id, new_tier.id))
+            .bind(format!("Tier upgrade proration: {} → {}", old_tier_id, req.tier_id))
             .execute(&mut *tx)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record ledger: {}", e)))?;
@@ -628,7 +625,7 @@ pub async fn change_subscription_tier(
         .bind(auth.user_id)
         .bind(refund_cents)
         .bind(new_balance)
-        .bind(format!("Tier downgrade proration: {} → {}", old_tier_id, new_tier.id))
+        .bind(format!("Tier downgrade proration: {} → {}", old_tier_id, req.tier_id))
         .execute(&mut *tx)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record ledger: {}", e)))?;
@@ -639,12 +636,12 @@ pub async fn change_subscription_tier(
 
     tracing::info!(
         "Subscription {} tier changed {} → {} (prorated: old_credit={}c, new_charge={}c, net={}c)",
-        sub_id, old_tier_id, new_tier.id, old_credit, new_charge, net_charge
+        sub_id, old_tier_id, req.tier_id, old_credit, new_charge, net_charge
     );
 
     Ok(Json(serde_json::json!({
         "success": true,
-        "new_tier": new_tier.id,
+        "new_tier": req.tier_id,
         "new_price_cents_per_cycle": new_price,
         "prorated_credit_cents": old_credit,
         "prorated_charge_cents": new_charge,
@@ -690,7 +687,7 @@ pub async fn add_subscription_capacity(
         return Err((StatusCode::BAD_REQUEST, "Must add at least one block".to_string()));
     }
 
-    let block_price_per_cycle = calculate_cycle_price(state.pricing.extra_block_annual_cents, &billing_period, &state.pricing.billing_discounts);
+    let block_price_per_cycle = calculate_cycle_price(state.pricing.extra_block.annual_cents, &billing_period, &state.pricing.billing_discounts);
     let additional_price = block_price_per_cycle * total_new_blocks as i64;
 
     // Prorate: charge only for remaining portion of current period
@@ -785,8 +782,8 @@ pub async fn add_subscription_capacity(
     .bind(new_vcpu_blocks)
     .bind(new_app_blocks)
     .bind(new_extra_price)
-    .bind(add_vcpu * 64)
-    .bind(add_app * 10)
+    .bind(add_vcpu * state.pricing.extra_block.vcpu)
+    .bind(add_app * state.pricing.extra_block.enclaves)
     .bind(sub_id)
     .execute(&mut *tx)
     .await

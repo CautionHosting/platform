@@ -47,16 +47,49 @@ pub(crate) struct PricingConfig {
     #[serde(default)]
     pub(crate) subscription_tiers: std::collections::HashMap<String, TierPricing>,
     #[serde(default)]
-    pub(crate) extra_block_annual_cents: i64,
+    pub(crate) extra_block: ExtraBlock,
     #[serde(default)]
     pub(crate) billing_discounts: BillingDiscounts,
     #[serde(default)]
     pub(crate) credit_packages: std::collections::HashMap<String, CreditPackagePricing>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct TierPricing {
+    #[serde(default)]
     pub(crate) annual_cents: i64,
+    #[serde(default)]
+    pub(crate) enclaves: i32,
+    #[serde(default)]
+    pub(crate) vcpu: i32,
+    #[serde(default)]
+    pub(crate) ram_gb: i32,
+    #[serde(default)]
+    pub(crate) storage_gb: i32,
+}
+
+impl TierPricing {
+    pub(crate) fn cycle_price(&self, billing_period: &str, discounts: &BillingDiscounts) -> i64 {
+        match billing_period {
+            "yearly" => (self.annual_cents as f64 * (1.0 - discounts.yearly_percent_off / 100.0)) as i64,
+            "2year" => (self.annual_cents as f64 * 2.0 * (1.0 - discounts.two_year_percent_off / 100.0)) as i64,
+            _ => self.annual_cents / 12,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct ExtraBlock {
+    #[serde(default)]
+    pub(crate) annual_cents: i64,
+    #[serde(default)]
+    pub(crate) enclaves: i32,
+    #[serde(default)]
+    pub(crate) vcpu: i32,
+    #[serde(default)]
+    pub(crate) ram_gb: i32,
+    #[serde(default)]
+    pub(crate) storage_gb: i32,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -77,7 +110,7 @@ impl Default for PricingConfig {
         Self {
             compute_margin_percent: 0.0,
             subscription_tiers: std::collections::HashMap::new(),
-            extra_block_annual_cents: 0,
+            extra_block: ExtraBlock::default(),
             billing_discounts: BillingDiscounts::default(),
             credit_packages: std::collections::HashMap::new(),
         }
@@ -102,10 +135,6 @@ impl PricingConfig {
                 Self::default()
             }
         }
-    }
-
-    pub(crate) fn tier_annual_cents(&self, tier_id: &str) -> i64 {
-        self.subscription_tiers.get(tier_id).map(|t| t.annual_cents).unwrap_or(0)
     }
 
     pub(crate) fn credit_bonus_percent(&self, package_key: &str) -> f64 {

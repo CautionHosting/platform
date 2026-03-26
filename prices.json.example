@@ -1,13 +1,49 @@
 {
   "compute_margin_percent": 0,
   "subscription_tiers": {
-    "starter":       { "annual_cents": 0 },
-    "developer":     { "annual_cents": 0 },
-    "base_platform": { "annual_cents": 0 },
-    "growth":        { "annual_cents": 0 },
-    "enterprise":    { "annual_cents": 0 }
+    "starter": {
+      "annual_cents": 0,
+      "enclaves": 1,
+      "vcpu": 16,
+      "ram_gb": 64,
+      "storage_gb": 500
+    },
+    "developer": {
+      "annual_cents": 0,
+      "enclaves": 2,
+      "vcpu": 32,
+      "ram_gb": 128,
+      "storage_gb": 1000
+    },
+    "base_platform": {
+      "annual_cents": 0,
+      "enclaves": 3,
+      "vcpu": 48,
+      "ram_gb": 192,
+      "storage_gb": 1500
+    },
+    "growth": {
+      "annual_cents": 0,
+      "enclaves": 6,
+      "vcpu": 96,
+      "ram_gb": 384,
+      "storage_gb": 4000
+    },
+    "enterprise": {
+      "annual_cents": 0,
+      "enclaves": 12,
+      "vcpu": 192,
+      "ram_gb": 768,
+      "storage_gb": 10000
+    }
   },
-  "extra_block_annual_cents": 0,
+  "extra_block": {
+    "annual_cents": 0,
+    "enclaves": 1,
+    "vcpu": 16,
+    "ram_gb": 64,
+    "storage_gb": 500
+  },
   "billing_discounts": {
     "yearly_percent_off": 0,
     "two_year_percent_off": 0

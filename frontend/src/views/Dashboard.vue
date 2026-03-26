@@ -1188,8 +1188,8 @@ make build-cli
               <span class="subscription-detail-value">Up to {{ subscription.max_vcpus }}</span>
             </div>
             <div class="subscription-detail-item">
-              <span class="subscription-detail-label">Apps</span>
-              <span class="subscription-detail-value">{{ subscription.max_apps === -1 ? 'Unlimited' : subscription.max_apps }}</span>
+              <span class="subscription-detail-label">Enclaves</span>
+              <span class="subscription-detail-value">{{ subscription.max_apps }}</span>
             </div>
             <div class="subscription-detail-item">
               <span class="subscription-detail-label">Period</span>
@@ -1394,7 +1394,7 @@ make build-cli
           >
             <span class="tier-card-name">{{ tier.name }}</span>
             <span class="tier-card-price">{{ formatTierPrice(tier, selectedBillingPeriod) }}<span class="tier-card-period">/{{ selectedBillingPeriod === '2year' ? '2yr' : selectedBillingPeriod === 'yearly' ? 'yr' : 'mo' }}</span></span>
-            <span class="tier-card-limits">{{ tier.max_vcpus }} vCPUs &middot; {{ tier.max_apps === -1 ? 'Unlimited apps' : tier.max_apps + ' apps' }}</span>
+            <span class="tier-card-limits">{{ tier.enclaves }} {{ tier.enclaves === 1 ? 'enclave' : 'enclaves' }} &middot; {{ tier.vcpu }} vCPUs &middot; {{ tier.ram_gb }} GB RAM</span>
           </button>
         </div>
 
