@@ -172,7 +172,7 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    #[arg(short, long, default_value = "https://alpha.caution.co", env = "CAUTION_BACKEND_URL", help = "Caution API server URL")]
+    #[arg(short, long, default_value = "https://alpha.caution.co", env = "CAUTION_BACKEND_URL", help = "Caution API server URL", global = true)]
     url: String,
 
     #[arg(short, long, help = "Enable verbose output")]
