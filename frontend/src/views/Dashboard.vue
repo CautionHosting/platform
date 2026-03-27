@@ -3402,16 +3402,45 @@ export default {
       }
     };
 
+    // Refresh active tab data when browser tab regains focus
+    const handleVisibilityChange = () => {
+      if (document.hidden) return;
+      if (activeTab.value === "apps") {
+        loadApps();
+      } else if (activeTab.value === "ssh") {
+        loadKeys();
+      } else if (activeTab.value === "credentials") {
+        loadCredentials();
+      } else if (activeTab.value === "keys") {
+        loadBundles();
+      } else if (activeTab.value === "settings") {
+        loadCreditBalance();
+        loadBilling();
+        loadPaymentMethods();
+        loadSubscription();
+      }
+    };
+
     onMounted(async () => {
       // Add keyboard event listener
       window.addEventListener("keydown", handleKeyDown);
+      document.addEventListener("visibilitychange", handleVisibilityChange);
 
       await Promise.all([loadApps(), loadKeys(), loadCredentials(), loadBundles(), loadOrgSettings()]);
     });
 
     onUnmounted(() => {
       window.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       stopBalancePolling();
+    });
+
+    // Keep selectedApp in sync when apps list is refreshed
+    watch(apps, (newApps) => {
+      if (selectedApp.value) {
+        const updated = newApps.find(app => app.id === selectedApp.value.id);
+        selectedApp.value = updated || null;
+      }
     });
 
     // Initialize Paddle checkout when payment modal opens
