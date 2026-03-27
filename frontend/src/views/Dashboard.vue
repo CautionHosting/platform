@@ -3122,6 +3122,7 @@ export default {
       if (newTab === "apps") {
         setupStep.value = 0;
         selectedApp.value = null;
+        loadApps();
       } else if (newTab === "guide") {
         setupStep.value = 0;
       } else if (newTab === "ssh") {
@@ -3129,6 +3130,11 @@ export default {
         newKeyName.value = "";
         newPublicKey.value = "";
         error.value = null;
+        loadKeys();
+      } else if (newTab === "credentials") {
+        loadCredentials();
+      } else if (newTab === "keys") {
+        loadBundles();
       } else if (newTab === "settings") {
         loadUserEmail();
         loadBilling();
