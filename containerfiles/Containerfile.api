@@ -53,6 +53,7 @@ RUN mkdir -p src/gateway/src src/email-service/src src/enclave-builder/src src/c
 
 COPY src/api/src ./src/api/src
 COPY src/enclave-builder/src ./src/enclave-builder/src
+COPY src/enclave-builder/templates ./src/enclave-builder/templates
 
 ENV RUST_BACKTRACE=1
 ENV TARGET_ARCH="x86_64-unknown-linux-musl"

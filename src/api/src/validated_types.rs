@@ -184,6 +184,9 @@ pub struct DeployRequest {
     pub app_id: Uuid,
     #[serde(default = "default_branch")]
     pub branch: String,
+    /// Builder instance size: "small" (default), "medium", or "large"
+    #[serde(default)]
+    pub builder_size: Option<String>,
 }
 
 fn default_branch() -> String {

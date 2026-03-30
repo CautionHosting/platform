@@ -571,6 +571,33 @@ test-e2e-billing-gates:
 	$(MAKE) down-test-billing; \
 	exit $$status
 
+setup-builder:
+	@echo "Bootstrapping dedicated builder infrastructure via infra-bootstrap..."
+	@cd infra-bootstrap && \
+	terraform apply -auto-approve
+	@cd infra-bootstrap && \
+	AMI=$$(terraform output -raw builder_ami_id) && \
+	SG=$$(terraform output -raw builder_security_group_id) && \
+	SUBNET=$$(terraform output -raw builder_subnet_id) && \
+	PROFILE=$$(terraform output -raw builder_instance_profile) && \
+	cd .. && \
+	grep -q "^BUILDER_ENABLED" .env 2>/dev/null && sed -i "s/^BUILDER_ENABLED=.*/BUILDER_ENABLED=true/" .env || echo "BUILDER_ENABLED=true" >> .env && \
+	grep -q "^BUILDER_AMI_ID" .env 2>/dev/null && sed -i "s/^BUILDER_AMI_ID=.*/BUILDER_AMI_ID=$$AMI/" .env || echo "BUILDER_AMI_ID=$$AMI" >> .env && \
+	grep -q "^BUILDER_SECURITY_GROUP_ID" .env 2>/dev/null && sed -i "s/^BUILDER_SECURITY_GROUP_ID=.*/BUILDER_SECURITY_GROUP_ID=$$SG/" .env || echo "BUILDER_SECURITY_GROUP_ID=$$SG" >> .env && \
+	grep -q "^BUILDER_SUBNET_ID" .env 2>/dev/null && sed -i "s/^BUILDER_SUBNET_ID=.*/BUILDER_SUBNET_ID=$$SUBNET/" .env || echo "BUILDER_SUBNET_ID=$$SUBNET" >> .env && \
+	grep -q "^BUILDER_INSTANCE_PROFILE" .env 2>/dev/null && sed -i "s/^BUILDER_INSTANCE_PROFILE=.*/BUILDER_INSTANCE_PROFILE=$$PROFILE/" .env || echo "BUILDER_INSTANCE_PROFILE=$$PROFILE" >> .env
+	@echo "Builder env vars written to .env"
+
+test-e2e-builder:
+	@echo "Reading builder config from infra-bootstrap state..."
+	@cd infra-bootstrap && terraform output builder_ami_id > /dev/null 2>&1 || \
+		(echo "ERROR: Builder infrastructure not found. Run 'make setup-builder' first." && exit 1)
+	@$(MAKE) up-test
+	@bash tests/e2e/test_dedicated_builder.sh; \
+	status=$$?; \
+	$(MAKE) down-test; \
+	exit $$status
+
 test-paddle-sandbox:
 	@echo "Running Paddle sandbox integration tests..."
 	@echo "Uses PADDLE_API_KEY and PADDLE_API_URL from .env"

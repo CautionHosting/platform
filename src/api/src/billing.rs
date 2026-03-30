@@ -10,6 +10,28 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{AppState, AuthContext, PricingConfig, get_user_primary_org};
+
+/// Base AWS on-demand rates by instance type (USD/hr, us-west-2).
+/// Used by both compute metering and builder billing.
+pub(crate) fn base_instance_rate(instance_type: &str) -> f64 {
+    match instance_type {
+        "m5.xlarge" => 0.192,
+        "m5.2xlarge" => 0.384,
+        "m5.4xlarge" => 0.768,
+        "m5.8xlarge" => 1.536,
+        "m5.12xlarge" => 2.304,
+        "m5.16xlarge" => 3.072,
+        "m5.24xlarge" => 4.608,
+        "c5.xlarge" => 0.17,
+        "c5.2xlarge" => 0.34,
+        "c5.4xlarge" => 0.68,
+        "c6i.xlarge" => 0.17,
+        "c6i.2xlarge" => 0.34,
+        "c6a.xlarge" => 0.153,
+        "c6a.2xlarge" => 0.306,
+        _ => 0.20,
+    }
+}
 use crate::resources::ComputeResource;
 use crate::suspension::call_internal_unsuspend;
 use serde::Serialize;
@@ -69,25 +91,8 @@ pub async fn get_billing_usage(
     // Verifiable compute margin (from prices.json, default 0%)
     let margin_percent = state.pricing.compute_margin_percent;
 
-    // Base AWS on-demand rates by instance type (USD/hr, us-west-2)
     let get_base_rate = |instance_type: &str| -> f64 {
-        match instance_type {
-            "m5.xlarge" => 0.192,
-            "m5.2xlarge" => 0.384,
-            "m5.4xlarge" => 0.768,
-            "m5.8xlarge" => 1.536,
-            "m5.12xlarge" => 2.304,
-            "m5.16xlarge" => 3.072,
-            "m5.24xlarge" => 4.608,
-            "c5.xlarge" => 0.17,
-            "c5.2xlarge" => 0.34,
-            "c5.4xlarge" => 0.68,
-            "c6i.xlarge" => 0.17,
-            "c6i.2xlarge" => 0.34,
-            "c6a.xlarge" => 0.153,
-            "c6a.2xlarge" => 0.306,
-            _ => 0.20, // default rate
-        }
+        base_instance_rate(instance_type)
     };
 
     let now = chrono::Utc::now();

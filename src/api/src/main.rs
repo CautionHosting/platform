@@ -39,6 +39,7 @@ mod resources;
 mod billing;
 mod subscriptions;
 mod suspension;
+mod builder;
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct PricingConfig {
@@ -118,6 +119,12 @@ impl Default for PricingConfig {
 }
 
 impl PricingConfig {
+    /// Get the hourly rate for an instance type (with margin applied), in USD.
+    pub(crate) fn instance_hourly_rate(&self, instance_type: &str) -> f64 {
+        let base = billing::base_instance_rate(instance_type);
+        base * (1.0 + self.compute_margin_percent / 100.0)
+    }
+
     pub(crate) fn load() -> Self {
         match std::fs::read_to_string("prices.json") {
             Ok(contents) => match serde_json::from_str(&contents) {
@@ -156,6 +163,7 @@ pub(crate) struct AppState {
     pub(crate) paddle_api_url: String,
     pub(crate) paddle_api_key: Option<String>,
     pub(crate) pricing: PricingConfig,
+    pub(crate) builder_config: Option<builder::BuilderConfig>,
 }
 
 #[derive(Clone)]
@@ -1150,6 +1158,77 @@ fn milestone_error(msg: &str) -> bytes::Bytes {
     bytes::Bytes::from(format!("error: {}\n", msg))
 }
 
+async fn get_builder_config(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(resource_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let config: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT configuration FROM compute_resources WHERE id = $1 AND organization_id = $2"
+    )
+    .bind(resource_id)
+    .bind(org_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let config = config.ok_or((StatusCode::NOT_FOUND, "Resource not found".to_string()))?;
+    let builder_size = config.get("builder_size").and_then(|v| v.as_str()).unwrap_or("small");
+    let builder_enabled = state.builder_config.is_some();
+
+    Ok(Json(serde_json::json!({
+        "builder_size": builder_size,
+        "builder_enabled": builder_enabled,
+        "options": [
+            { "id": "small", "label": "Small", "instance_type": "c5.xlarge", "vcpus": 4, "ram_gb": 8 },
+            { "id": "medium", "label": "Medium", "instance_type": "c5.2xlarge", "vcpus": 8, "ram_gb": 16 },
+            { "id": "large", "label": "Large", "instance_type": "c5.4xlarge", "vcpus": 16, "ram_gb": 32 },
+        ],
+    })))
+}
+
+async fn set_builder_config(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(resource_id): Path<Uuid>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let builder_size = body.get("builder_size")
+        .and_then(|v| v.as_str())
+        .unwrap_or("small");
+
+    if !["small", "medium", "large"].contains(&builder_size) {
+        return Err((StatusCode::BAD_REQUEST, "builder_size must be small, medium, or large".to_string()));
+    }
+
+    let result = sqlx::query(
+        "UPDATE compute_resources
+         SET configuration = COALESCE(configuration, '{}'::jsonb) || jsonb_build_object('builder_size', $1::text)::jsonb,
+             updated_at = NOW()
+         WHERE id = $2 AND organization_id = $3"
+    )
+    .bind(builder_size)
+    .bind(resource_id)
+    .bind(org_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "Resource not found".to_string()));
+    }
+
+    Ok(Json(serde_json::json!({ "builder_size": builder_size })))
+}
+
 async fn deploy_handler(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1437,6 +1516,157 @@ async fn deploy_logic(
 
     tracing::info!("Build command for {}: {}", app_name, build_command);
 
+    let enclave_config = types::EnclaveConfig {
+        binary_path: build_config.binary.clone().unwrap_or_else(|| "/app".to_string()),
+        args: vec![],
+        memory_mb: build_config.memory_mb,
+        cpus: build_config.cpus,
+        debug: build_config.debug,
+        ports: build_config.ports.clone(),
+        http_port: build_config.http_port,
+    };
+
+    // --- Dedicated builder path ---
+    // If BUILDER_ENABLED=true, offload the build to an ephemeral EC2 instance.
+    // The builder handles Docker image build + EIF build + S3 upload.
+    // The result is an S3 key pointing to the cached EIF.
+    let builder_eif_s3_key: Option<String> = if let Some(ref builder_cfg) = state.builder_config {
+        let procfile_content = String::from_utf8_lossy(&procfile_output.stdout).to_string();
+        let enclaveos_commit = enclave_builder::build::resolve_enclaveos_commit();
+        let cache_key = builder::compute_cache_key(
+            &commit_sha, &enclaveos_commit, &procfile_content, build_config.e2e,
+        );
+
+        // Check cache first
+        let cached_result = if !build_config.no_cache {
+            builder::check_build_cache(&state.db, req.org_id, &cache_key).await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Cache lookup failed: {}", e)))?
+        } else {
+            None
+        };
+
+        if let Some(cached) = cached_result {
+            let _ = tx.send(Ok(milestone("Using cached build..."))).await;
+            tracing::info!("Builder cache HIT: cache_key={}, s3_key={}", cache_key, cached.eif_s3_key);
+            Some(cached.eif_s3_key)
+        } else {
+            let _ = tx.send(Ok(milestone("Starting build on dedicated instance..."))).await;
+
+            // Archive source and upload to S3
+            let git_dir = format!("{}/git-repos/{}.git", state.data_dir, app_id_str);
+            let s3_config = aws_config::from_env()
+                .region(aws_sdk_s3::config::Region::new(
+                    std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string())
+                ))
+                .load()
+                .await;
+            let s3_client = aws_sdk_s3::Client::new(&s3_config);
+
+            // Pre-build balance check: refuse if user can't cover minimum build cost (~$0.30 for 1 min)
+            let min_build_cost_cents: i64 = 50; // $0.50 minimum balance required
+            let balance: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+            )
+            .bind(auth.user_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)))?
+            .unwrap_or(0);
+
+            if balance < min_build_cost_cents {
+                return Err((
+                    StatusCode::PAYMENT_REQUIRED,
+                    format!("Insufficient credits for builder (balance: {}c, minimum: {}c)", balance, min_build_cost_cents),
+                ));
+            }
+
+            let build_id = uuid::Uuid::new_v4();
+            let source_s3_key = builder::upload_source_archive(
+                &s3_client, &builder_cfg.eif_s3_bucket, &git_dir, &commit_sha, build_id,
+            ).await.map_err(|e| {
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to upload source archive: {}", e))
+            })?;
+
+            let platform_creds = crate::deployment::AwsCredentials {
+                access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
+                secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),
+                region: std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()),
+            };
+            let ec2_client = crate::ec2::Ec2Client::new(&platform_creds);
+
+            let build_request = builder::BuildRequest {
+                org_id: req.org_id,
+                app_name: app_name.clone(),
+                commit_sha: commit_sha.clone(),
+                branch: req.branch.clone(),
+                source_s3_key,
+                procfile_content,
+                run_command: build_config.run.clone(),
+                build_command: Some(build_command.clone()),
+                binary_path: build_config.binary.clone(),
+                ports: enclave_config.ports.clone(),
+                e2e: build_config.e2e,
+                enclaveos_commit,
+                builder_size: builder::BuilderSize::from_str_opt(
+                    req.builder_size.as_deref()
+                        .or_else(|| configuration.get("builder_size").and_then(|v| v.as_str()))
+                ),
+            };
+
+            let hourly_rate = state.pricing.instance_hourly_rate(build_request.builder_size.instance_type());
+
+            let build_result = builder::execute_remote_build(
+                &state.db, &ec2_client, &s3_client, builder_cfg, &build_request, &cache_key, &tx,
+                auth.user_id, hourly_rate,
+            ).await.map_err(|e| {
+                tracing::error!("Dedicated builder failed: {:?}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, format!("Build failed: {}", e))
+            })?;
+
+            Some(build_result.eif_s3_key)
+        }
+    } else {
+        None
+    };
+
+    // If builder produced an EIF, construct eif_config and skip inline build entirely
+    let (eif_path, eif_hash, eif_config, eif_size_bytes): (String, String, serde_json::Value, u64) = if let Some(ref s3_key) = builder_eif_s3_key {
+        let bucket = state.builder_config.as_ref().map(|c| c.eif_s3_bucket.as_str()).unwrap_or("");
+        let path = format!("s3://{}/{}", bucket, s3_key);
+        // Look up the build metadata from DB
+        let (hash, size) = sqlx::query_as::<_, (String, i64)>(
+            "SELECT eif_sha256, eif_size_bytes FROM eif_builds WHERE eif_s3_key = $1 AND status = 'completed' LIMIT 1"
+        )
+        .bind(s3_key)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)))?
+        .unwrap_or_else(|| {
+            tracing::warn!("Could not find eif_builds metadata for s3_key={}, using defaults", s3_key);
+            ("unknown".to_string(), 0)
+        });
+
+        tracing::info!("Using builder EIF: s3_key={}, hash={}", s3_key, hash);
+
+        let config = serde_json::json!({
+            "eif_path": path,
+            "eif_hash": hash,
+            "eif_s3_key": s3_key,
+            "eif_size_bytes": size,
+            "commit_sha": commit_sha,
+            "run_command": build_config.run,
+            "domain": build_config.domain,
+            "memory_mb": enclave_config.memory_mb,
+            "cpus": enclave_config.cpus,
+            "debug": enclave_config.debug,
+            "ports": enclave_config.ports,
+            "http_port": enclave_config.http_port,
+        });
+
+        (path, hash, config, size as u64)
+    } else {
+
+    // --- Inline build path (original behavior, used when builder is disabled) ---
     let cache_dir = format!("{}/build/{}", state.data_dir, req.org_id);
     let cache_dir_str = cache_dir.clone();
     tokio::fs::create_dir_all(&cache_dir).await.map_err(|e| {
@@ -1656,16 +1886,6 @@ async fn deploy_logic(
 
     let _containerfile_path = format!("{}/{}", work_dir, containerfile);
 
-    let enclave_config = types::EnclaveConfig {
-        binary_path: build_config.binary.clone().unwrap_or_else(|| "/app".to_string()),
-        args: vec![],
-        memory_mb: build_config.memory_mb,
-        cpus: build_config.cpus,
-        debug: build_config.debug,
-        ports: build_config.ports.clone(),
-        http_port: build_config.http_port,
-    };
-
     // --- Billing gate: vCPU check (post-Procfile parse, managed on-prem only) ---
     if is_managed_onprem {
         let sub_vcpus: Option<(i32,)> = sqlx::query_as(
@@ -1849,7 +2069,7 @@ async fn deploy_logic(
 
     tracing::info!("Storing EIF metadata: path={}, hash={}", eif_path, eif_hash);
 
-    let eif_config = serde_json::json!({
+    let config = serde_json::json!({
         "eif_path": eif_path,
         "eif_hash": eif_hash,
         "pcrs_path": eif_result.pcrs_path,
@@ -1864,21 +2084,24 @@ async fn deploy_logic(
         "http_port": enclave_config.http_port,
     });
 
+    (eif_path, eif_hash, config, eif_result.eif_size_bytes)
+    }; // end if/else builder vs inline
+
     let memory_bytes = (enclave_config.memory_mb as u64) * 1024 * 1024;
-    if eif_result.eif_size_bytes > memory_bytes {
+    if eif_size_bytes > memory_bytes {
         return Err((
             StatusCode::BAD_REQUEST,
             format!(
                 "EIF size ({} MB) exceeds allocated enclave memory ({} MB). Increase memory_mb in Procfile.",
-                eif_result.eif_size_bytes / (1024 * 1024),
+                eif_size_bytes / (1024 * 1024),
                 enclave_config.memory_mb
             ),
         ));
     }
-    if eif_result.eif_size_bytes > memory_bytes * 80 / 100 {
+    if eif_size_bytes > memory_bytes * 80 / 100 {
         tracing::warn!(
             "EIF size ({} MB) is more than 80% of allocated memory ({} MB). Consider increasing memory_mb.",
-            eif_result.eif_size_bytes / (1024 * 1024),
+            eif_size_bytes / (1024 * 1024),
             enclave_config.memory_mb
         );
     }
@@ -1982,6 +2205,7 @@ async fn deploy_logic(
         aws_account_id: aws_account_id.clone(),
         role_arn: role_arn_opt.clone(),
         eif_path: eif_path.clone(),
+        eif_s3_key: builder_eif_s3_key.clone(),
         memory_mb: enclave_config.memory_mb,
         cpu_count: enclave_config.cpus,
         disk_gb: build_config.disk_gb,
@@ -2146,6 +2370,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pricing = PricingConfig::load();
 
+    let builder_config = builder::BuilderConfig::from_env();
+    if builder_config.is_some() {
+        info!("Dedicated builder enabled");
+    }
+
     let state = Arc::new(AppState {
         db: pool,
         git_hostname,
@@ -2159,6 +2388,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         paddle_api_url,
         paddle_api_key,
         pricing,
+        builder_config,
     });
 
     let onboarding_routes = Router::new()
@@ -2187,6 +2417,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/resources/{id}", patch(resources::rename_resource))
         .route("/resources/{id}", delete(resources::delete_resource))
         .route("/resources/{id}/attestation", post(resources::proxy_attestation))
+        .route("/resources/{id}/builder-config", get(get_builder_config))
+        .route("/resources/{id}/builder-config", put(set_builder_config))
         .route("/resources/managed-onprem", post(create_managed_onprem_resource))
         .route("/deploy", post(deploy_handler))
         .route("/credentials", get(list_cloud_credentials))
@@ -2238,6 +2470,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(health_check))
         .route("/onboarding/verify", get(onboarding::verify_email));
 
+    // Background task: reap orphaned builder instances
+    if state.builder_config.is_some() {
+        let reaper_state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                let platform_creds = crate::deployment::AwsCredentials {
+                    access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
+                    secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),
+                    region: std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()),
+                };
+                let ec2 = crate::ec2::Ec2Client::new(&platform_creds);
+                builder::reap_orphaned_builders(&reaper_state.db, &ec2).await;
+            }
+        });
+        info!("Builder orphan reaper started (runs every 5 minutes)");
+    }
+
     let app = Router::new()
         .merge(onboarding_routes)
         .merge(resource_routes)
@@ -2248,7 +2498,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
         .await?;
-    
+
     info!("API server listening on 0.0.0.0:8080");
 
     axum::serve(listener, app)

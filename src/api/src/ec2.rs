@@ -8,7 +8,19 @@ use anyhow::{Context, Result, bail};
 use hmac::{Hmac, Mac};
 use sha2::{Sha256, Digest};
 
+use base64::Engine;
+
 use crate::deployment::AwsCredentials;
+
+pub struct RunInstancesParams {
+    pub image_id: String,
+    pub instance_type: String,
+    pub user_data: String,
+    pub iam_instance_profile: String,
+    pub security_group_ids: Vec<String>,
+    pub subnet_id: String,
+    pub tags: Vec<(String, String)>,
+}
 
 pub struct Ec2Client {
     access_key_id: String,
@@ -78,6 +90,65 @@ impl Ec2Client {
     pub async fn start_instances(&self, instance_ids: &[String]) -> Result<()> {
         let mut params = vec![
             ("Action".to_string(), "StartInstances".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+        ];
+        for (i, id) in instance_ids.iter().enumerate() {
+            params.push((format!("InstanceId.{}", i + 1), id.clone()));
+        }
+        self.signed_request(&params).await?;
+        Ok(())
+    }
+
+    pub async fn run_instances(&self, params: &RunInstancesParams) -> Result<String> {
+        let user_data_b64 = base64::engine::general_purpose::STANDARD.encode(&params.user_data);
+
+        let mut req_params = vec![
+            ("Action".to_string(), "RunInstances".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+            ("ImageId".to_string(), params.image_id.clone()),
+            ("InstanceType".to_string(), params.instance_type.clone()),
+            ("MinCount".to_string(), "1".to_string()),
+            ("MaxCount".to_string(), "1".to_string()),
+            ("UserData".to_string(), user_data_b64),
+            ("SubnetId".to_string(), params.subnet_id.clone()),
+            ("IamInstanceProfile.Name".to_string(), params.iam_instance_profile.clone()),
+            // IMDSv2 required
+            ("MetadataOptions.HttpTokens".to_string(), "required".to_string()),
+            ("MetadataOptions.HttpPutResponseHopLimit".to_string(), "2".to_string()),
+            // Encrypted root volume
+            ("BlockDeviceMapping.1.DeviceName".to_string(), "/dev/xvda".to_string()),
+            ("BlockDeviceMapping.1.Ebs.VolumeSize".to_string(), "50".to_string()),
+            ("BlockDeviceMapping.1.Ebs.VolumeType".to_string(), "gp3".to_string()),
+            ("BlockDeviceMapping.1.Ebs.Encrypted".to_string(), "true".to_string()),
+        ];
+
+        for (i, sg_id) in params.security_group_ids.iter().enumerate() {
+            req_params.push((format!("SecurityGroupId.{}", i + 1), sg_id.clone()));
+        }
+
+        if !params.tags.is_empty() {
+            req_params.push(("TagSpecification.1.ResourceType".to_string(), "instance".to_string()));
+            for (i, (key, value)) in params.tags.iter().enumerate() {
+                let idx = i + 1;
+                req_params.push((format!("TagSpecification.1.Tag.{}.Key", idx), key.clone()));
+                req_params.push((format!("TagSpecification.1.Tag.{}.Value", idx), value.clone()));
+            }
+        }
+
+        let body = self.signed_request(&req_params).await?;
+
+        // Parse instance ID from RunInstances response
+        let instances = parse_instance_ids(&body);
+        instances
+            .into_iter()
+            .next()
+            .map(|i| i.instance_id)
+            .ok_or_else(|| anyhow::anyhow!("RunInstances response did not contain an instance ID"))
+    }
+
+    pub async fn terminate_instances(&self, instance_ids: &[String]) -> Result<()> {
+        let mut params = vec![
+            ("Action".to_string(), "TerminateInstances".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
         ];
         for (i, id) in instance_ids.iter().enumerate() {

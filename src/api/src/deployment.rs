@@ -68,6 +68,9 @@ pub struct NitroDeploymentRequest {
     pub aws_account_id: String,
     pub role_arn: Option<String>,
     pub eif_path: String,
+    /// If set, EIF is already in S3 at this key — skip local upload.
+    #[serde(default)]
+    pub eif_s3_key: Option<String>,
     pub memory_mb: u32,
     pub cpu_count: u32,
     pub disk_gb: u32,
@@ -120,6 +123,15 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
             request.credentials.as_ref().context("Credentials required for managed on-prem")?,
         ).await.context("Failed to upload EIF to customer bucket")?;
         provision_managed_onprem(&request, &eif_s3_path, &config).await
+    } else if let Some(ref s3_key) = request.eif_s3_key {
+        // EIF already in S3 (uploaded by dedicated builder)
+        let bucket = std::env::var("EIF_S3_BUCKET").unwrap_or_else(|_| {
+            let account = std::env::var("AWS_ACCOUNT_ID").unwrap_or_default();
+            format!("caution-eif-storage-{}", account)
+        });
+        let eif_s3_path = format!("s3://{}/{}", bucket, s3_key);
+        tracing::info!("Using pre-uploaded EIF: {}", eif_s3_path);
+        provision_nitro_enclave(&request, &eif_s3_path, &config).await
     } else {
         let eif_s3_path = upload_eif_to_s3(&request.eif_path, &request.org_id, &request.resource_id, &request.aws_account_id).await
             .context("Failed to upload EIF to S3")?;

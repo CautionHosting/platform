@@ -287,6 +287,23 @@
           </div>
         </div>
 
+        <!-- Builder Configuration -->
+        <div v-if="builderConfig.builder_enabled" class="app-detail-section app-detail-section--fullwidth app-detail-section--borderless">
+          <h3 class="app-detail-section-title">Build instance</h3>
+          <p class="app-detail-helper-text">Select the dedicated builder size for this app. Larger builders compile faster.</p>
+          <div class="builder-size-options">
+            <button
+              v-for="opt in builderConfig.options"
+              :key="opt.id"
+              :class="['builder-size-btn', { 'builder-size-btn--active': builderConfig.builder_size === opt.id }]"
+              @click="setBuilderSize(opt.id)"
+            >
+              <span class="builder-size-label">{{ opt.label }}</span>
+              <span class="builder-size-specs">{{ opt.vcpus }} vCPU &middot; {{ opt.ram_gb }} GB RAM</span>
+            </button>
+          </div>
+        </div>
+
         <!-- Deployment Section (full width, outside the two-column layout) -->
         <div v-if="selectedApp.git_url" class="app-detail-section app-detail-section--fullwidth app-detail-section--borderless">
           <h3 class="app-detail-section-title">Deploy via Git</h3>
@@ -1637,6 +1654,7 @@ export default {
     const copiedAppId = ref(null);
     const copiedField = ref(null);
     const appSearchQuery = ref('');
+    const builderConfig = ref({ builder_enabled: false, builder_size: 'small', options: [] });
 
     const filteredApps = computed(() => {
       if (!appSearchQuery.value.trim()) {
@@ -1654,8 +1672,37 @@ export default {
       );
     });
 
-    const openAppDetail = (app) => {
+    const openAppDetail = async (app) => {
       selectedApp.value = app;
+      loadBuilderConfig(app.id);
+    };
+
+    const loadBuilderConfig = async (resourceId) => {
+      try {
+        const response = await authFetch(`/api/resources/${resourceId}/builder-config`);
+        if (response.ok) {
+          builderConfig.value = await response.json();
+        }
+      } catch (e) {
+        // Builder config not available — leave defaults
+      }
+    };
+
+    const setBuilderSize = async (size) => {
+      if (!selectedApp.value) return;
+      try {
+        const response = await authFetch(`/api/resources/${selectedApp.value.id}/builder-config`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ builder_size: size }),
+        });
+        if (response.ok) {
+          builderConfig.value.builder_size = size;
+          showToast(`Builder size set to ${size}`, 'success');
+        }
+      } catch (e) {
+        showToast('Failed to update builder size', 'error');
+      }
     };
 
     const closeAppDetail = () => {
@@ -3473,6 +3520,8 @@ export default {
       selectedApp,
       openAppDetail,
       closeAppDetail,
+      builderConfig,
+      setBuilderSize,
       copiedField,
       copyToClipboard,
       truncateGitUrl,
@@ -6144,6 +6193,41 @@ export default {
 
 .tier-card-limits {
   font-size: 0.8125rem;
+  color: #6b7280;
+}
+
+/* Builder size selector */
+.builder-size-options {
+  display: flex;
+  gap: 0.75rem;
+}
+.builder-size-btn {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #d1d5db;
+  border-radius: 0.5rem;
+  background: #fff;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.builder-size-btn:hover {
+  border-color: #9ca3af;
+}
+.builder-size-btn--active {
+  border-color: #111827;
+  background: #f9fafb;
+}
+.builder-size-label {
+  font-weight: 600;
+  font-size: 0.875rem;
+  color: #111827;
+}
+.builder-size-specs {
+  font-size: 0.75rem;
   color: #6b7280;
 }
 </style>

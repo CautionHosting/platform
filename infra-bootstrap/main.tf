@@ -263,6 +263,130 @@ resource "aws_iam_user_policy_attachment" "platform" {
   policy_arn = aws_iam_policy.platform_deploy.arn
 }
 
+# --- Dedicated Builder: IAM Role + Instance Profile + Security Group ---
+
+data "aws_vpc" "default" {
+  default = true
+}
+
+data "aws_subnets" "public" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+
+  filter {
+    name   = "map-public-ip-on-launch"
+    values = ["true"]
+  }
+}
+
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
+}
+
+resource "aws_security_group" "builder" {
+  name_prefix = "caution-builder-"
+  description = "Caution dedicated builder instances (egress only)"
+  vpc_id      = data.aws_vpc.default.id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow all outbound (Docker pulls, S3)"
+  }
+
+  tags = {
+    Name      = "caution-builder"
+    ManagedBy = "infra-bootstrap"
+  }
+}
+
+resource "aws_iam_role" "builder" {
+  name = "caution-builder"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Action    = "sts:AssumeRole"
+      Principal = { Service = "ec2.amazonaws.com" }
+    }]
+  })
+
+  tags = {
+    Name      = "caution-builder"
+    ManagedBy = "infra-bootstrap"
+  }
+}
+
+resource "aws_iam_role_policy" "builder_s3" {
+  name = "caution-builder-s3"
+  role = aws_iam_role.builder.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket",
+      ]
+      Resource = [
+        aws_s3_bucket.eif_storage.arn,
+        "${aws_s3_bucket.eif_storage.arn}/*",
+      ]
+    }]
+  })
+}
+
+resource "aws_iam_instance_profile" "builder" {
+  name = "caution-builder"
+  role = aws_iam_role.builder.name
+
+  tags = {
+    Name      = "caution-builder"
+    ManagedBy = "infra-bootstrap"
+  }
+}
+
+# Also grant the platform user permission to pass the builder role and manage builder instances
+resource "aws_iam_user_policy" "platform_builder" {
+  name = "CautionPlatformBuilder"
+  user = aws_iam_user.platform.name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "PassBuilderRole"
+        Effect   = "Allow"
+        Action   = "iam:PassRole"
+        Resource = aws_iam_role.builder.arn
+      },
+    ]
+  })
+}
+
 # --- Outputs ---
 
 output "s3_bucket_name" {
@@ -307,6 +431,26 @@ output "account_id" {
   value       = data.aws_caller_identity.current.account_id
 }
 
+output "builder_ami_id" {
+  description = "Amazon Linux 2023 AMI ID for builders — put in .env as BUILDER_AMI_ID"
+  value       = data.aws_ami.al2023.id
+}
+
+output "builder_security_group_id" {
+  description = "Builder security group ID — put in .env as BUILDER_SECURITY_GROUP_ID"
+  value       = aws_security_group.builder.id
+}
+
+output "builder_instance_profile" {
+  description = "Builder instance profile name — put in .env as BUILDER_INSTANCE_PROFILE"
+  value       = aws_iam_instance_profile.builder.name
+}
+
+output "builder_subnet_id" {
+  description = "Default VPC public subnet for builders — put in .env as BUILDER_SUBNET_ID"
+  value       = data.aws_subnets.public.ids[0]
+}
+
 output "configuration_summary" {
   description = "Summary of created resources"
   value = {
@@ -316,5 +460,9 @@ output "configuration_summary" {
     iam_user         = aws_iam_user.platform.name
     account_id       = data.aws_caller_identity.current.account_id
     region           = var.aws_region
+    builder_ami      = data.aws_ami.al2023.id
+    builder_sg       = aws_security_group.builder.id
+    builder_profile  = aws_iam_instance_profile.builder.name
+    builder_subnet   = data.aws_subnets.public.ids[0]
   }
 }
