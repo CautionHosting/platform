@@ -618,7 +618,7 @@ pub async fn add_ssh_key_handler(
     )
     .await?;
 
-    let fingerprint = crate::db::generate_ssh_fingerprint(&req.public_key);
+    let fingerprint = crate::db::generate_ssh_fingerprint(&req.public_key)?;
 
     tracing::debug!("SSH key added");
     

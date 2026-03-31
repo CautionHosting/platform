@@ -331,7 +331,7 @@ pub async fn add_ssh_key(
     key_type: &str,
     name: Option<&str>,
 ) -> Result<Uuid> {
-    let fingerprint = generate_ssh_fingerprint(public_key);
+    let fingerprint = generate_ssh_fingerprint(public_key)?;
 
     let key_id: Uuid = sqlx::query_scalar(
         "INSERT INTO ssh_keys (user_id, public_key, fingerprint, key_type, name)
@@ -351,7 +351,7 @@ pub async fn add_ssh_key(
 }
 
 pub async fn get_user_by_ssh_key(pool: &PgPool, public_key: &str) -> Result<Option<Uuid>> {
-    let fingerprint = generate_ssh_fingerprint(public_key);
+    let fingerprint = generate_ssh_fingerprint(public_key)?;
 
     let user_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT user_id FROM ssh_keys WHERE fingerprint = $1"
@@ -446,7 +446,7 @@ pub async fn get_user_for_app_by_ssh_key(
     Ok(result)
 }
 
-pub fn generate_ssh_fingerprint(public_key: &str) -> String {
+pub fn generate_ssh_fingerprint(public_key: &str) -> Result<String> {
     let parts: Vec<&str> = public_key.split_whitespace().collect();
     let key_data = if parts.len() >= 2 {
         parts[1]
@@ -456,21 +456,13 @@ pub fn generate_ssh_fingerprint(public_key: &str) -> String {
 
     // Decode the base64 key data first, then hash the decoded bytes
     // This matches OpenSSH's fingerprint format: SHA256:<base64_of_sha256_of_decoded_key>
-    match base64::engine::general_purpose::STANDARD.decode(key_data) {
-        Ok(decoded) => {
-            let mut hasher = Sha256::new();
-            hasher.update(&decoded);
-            let result = hasher.finalize();
-            base64::engine::general_purpose::STANDARD_NO_PAD.encode(result)
-        }
-        Err(_) => {
-            // Fallback: hash the raw string if base64 decode fails
-            let mut hasher = Sha256::new();
-            hasher.update(key_data.as_bytes());
-            let result = hasher.finalize();
-            base64::engine::general_purpose::STANDARD_NO_PAD.encode(result)
-        }
-    }
+    let decoded = base64::engine::general_purpose::STANDARD.decode(key_data)
+        .map_err(|_| anyhow::anyhow!("Invalid SSH key: base64 decode failed"))?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(&decoded);
+    let result = hasher.finalize();
+    Ok(base64::engine::general_purpose::STANDARD_NO_PAD.encode(result))
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]

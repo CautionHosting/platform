@@ -84,7 +84,13 @@ impl russh::server::Handler for SshSession {
         let key_type = public_key.name();
         let full_key = format!("{} {}", key_type, pub_key_str);
 
-        let fingerprint = crate::db::generate_ssh_fingerprint(&full_key);
+        let fingerprint = match crate::db::generate_ssh_fingerprint(&full_key) {
+            Ok(fp) => fp,
+            Err(e) => {
+                tracing::warn!("Failed to generate SSH fingerprint: {}", e);
+                return Ok(Auth::Reject { proceed_with_methods: None });
+            }
+        };
         tracing::info!("Calculated fingerprint during auth: {}", fingerprint);
         tracing::debug!("Full key being checked: {}", full_key);
 
