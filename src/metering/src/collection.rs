@@ -160,7 +160,9 @@ pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) 
 
     let cost = state.calculator.calculate_cost(&usage);
 
-    // Record locally
+    // Record usage and advance last_billed_at atomically to prevent double-counting
+    let mut tx = state.pool.begin().await?;
+
     sqlx::query(
         r#"
         INSERT INTO usage_records (user_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
@@ -176,15 +178,16 @@ pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) 
     .bind(cost)
     .bind(now)
     .bind(&usage.metadata)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
 
-    // Update last_billed_at
     sqlx::query(r#"UPDATE tracked_resources SET last_billed_at = $1 WHERE resource_id = $2"#)
         .bind(now)
         .bind(resource_id)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
+
+    tx.commit().await?;
 
     tracing::debug!(
         "Recorded usage for {}: {:.4} hours, ${:.4}",
