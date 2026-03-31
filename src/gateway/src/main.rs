@@ -46,6 +46,16 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    #[cfg(feature = "e2e-testing-unsafe")]
+    {
+        let env = std::env::var("ENVIRONMENT").unwrap_or_default();
+        if env == "production" {
+            eprintln!("FATAL: e2e-testing-unsafe feature is enabled in a production build. Refusing to start.");
+            std::process::exit(1);
+        }
+        tracing::warn!("e2e-testing-unsafe feature is enabled — /auth/e2e-login endpoint is active. Do NOT use in production.");
+    }
+
     let config = Config::from_env().context("Failed to load configuration")?;
 
     let pool = PgPoolOptions::new()
