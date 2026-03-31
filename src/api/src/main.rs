@@ -164,6 +164,7 @@ pub(crate) struct AppState {
     pub(crate) paddle_api_key: Option<String>,
     pub(crate) pricing: PricingConfig,
     pub(crate) builder_config: Option<builder::BuilderConfig>,
+    pub(crate) builder_sizes: builder::BuilderSizesConfig,
 }
 
 #[derive(Clone)]
@@ -1183,11 +1184,7 @@ async fn get_builder_config(
     Ok(Json(serde_json::json!({
         "builder_size": builder_size,
         "builder_enabled": builder_enabled,
-        "options": [
-            { "id": "small", "label": "Small", "instance_type": "c5.xlarge", "vcpus": 4, "ram_gb": 8 },
-            { "id": "medium", "label": "Medium", "instance_type": "c5.2xlarge", "vcpus": 8, "ram_gb": 16 },
-            { "id": "large", "label": "Large", "instance_type": "c5.4xlarge", "vcpus": 16, "ram_gb": 32 },
-        ],
+        "options": state.builder_sizes.builder_sizes,
     })))
 }
 
@@ -1205,8 +1202,9 @@ async fn set_builder_config(
         .and_then(|v| v.as_str())
         .unwrap_or("small");
 
-    if !["small", "medium", "large"].contains(&builder_size) {
-        return Err((StatusCode::BAD_REQUEST, "builder_size must be small, medium, or large".to_string()));
+    if !state.builder_sizes.is_valid(builder_size) {
+        let valid: Vec<&str> = state.builder_sizes.builder_sizes.iter().map(|s| s.id.as_str()).collect();
+        return Err((StatusCode::BAD_REQUEST, format!("builder_size must be one of: {}", valid.join(", "))));
     }
 
     let result = sqlx::query(
@@ -1594,6 +1592,10 @@ async fn deploy_logic(
             };
             let ec2_client = crate::ec2::Ec2Client::new(&platform_creds);
 
+            let size_id = req.builder_size.as_deref()
+                .or_else(|| configuration.get("builder_size").and_then(|v| v.as_str()));
+            let resolved_size = state.builder_sizes.resolve(size_id);
+
             let build_request = builder::BuildRequest {
                 org_id: req.org_id,
                 app_name: app_name.clone(),
@@ -1607,13 +1609,11 @@ async fn deploy_logic(
                 ports: enclave_config.ports.clone(),
                 e2e: build_config.e2e,
                 enclaveos_commit,
-                builder_size: builder::BuilderSize::from_str_opt(
-                    req.builder_size.as_deref()
-                        .or_else(|| configuration.get("builder_size").and_then(|v| v.as_str()))
-                ),
+                builder_size: resolved_size.id.clone(),
+                builder_instance_type: resolved_size.instance_type.clone(),
             };
 
-            let hourly_rate = state.pricing.instance_hourly_rate(build_request.builder_size.instance_type());
+            let hourly_rate = state.pricing.instance_hourly_rate(&build_request.builder_instance_type);
 
             let build_result = builder::execute_remote_build(
                 &state.db, &ec2_client, &s3_client, builder_cfg, &build_request, &cache_key, &tx,
@@ -2369,6 +2369,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let pricing = PricingConfig::load();
+    let builder_sizes = builder::BuilderSizesConfig::load()?;
 
     let builder_config = builder::BuilderConfig::from_env();
     if builder_config.is_some() {
@@ -2389,6 +2390,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         paddle_api_key,
         pricing,
         builder_config,
+        builder_sizes,
     });
 
     let onboarding_routes = Router::new()

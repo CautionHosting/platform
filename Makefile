@@ -238,6 +238,7 @@ run-api: network postgres
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		$(if $(wildcard $(PWD)/prices.json),-v $(PWD)/prices.json:/app/prices.json:ro) \
+		-v $(PWD)/config.json:/app/config.json:ro \
 		caution-api
 	@echo "API service started (internal port 8080)"
 
@@ -441,6 +442,7 @@ run-api-test: network
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		$(if $(wildcard $(PWD)/prices.json),-v $(PWD)/prices.json:/app/prices.json:ro) \
+		-v $(PWD)/config.json:/app/config.json:ro \
 		caution-api
 	@echo "API service started in test mode"
 

@@ -17,30 +17,51 @@ use crate::ec2::{Ec2Client, RunInstancesParams};
 const CONTAINERFILE_EIF_TEMPLATE: &str = include_str!("../../enclave-builder/templates/Containerfile.eif");
 const RUN_SH_TEMPLATE: &str = include_str!("../../enclave-builder/templates/run.sh.template");
 
-/// Builder instance size labels exposed to users.
-#[derive(Debug, Clone, Copy, Default)]
-pub enum BuilderSize {
-    #[default]
-    Small,
-    Medium,
-    Large,
+/// Specification for a builder instance size, loaded from config.json.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct BuilderSizeSpec {
+    pub id: String,
+    pub label: String,
+    pub instance_type: String,
+    pub vcpus: u32,
+    pub ram_gb: u32,
 }
 
-impl BuilderSize {
-    pub fn from_str_opt(s: Option<&str>) -> Self {
-        match s.map(|s| s.to_lowercase()).as_deref() {
-            Some("medium") => Self::Medium,
-            Some("large") => Self::Large,
-            _ => Self::Small,
+/// Builder size configuration loaded from config.json.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct BuilderSizesConfig {
+    pub builder_sizes: Vec<BuilderSizeSpec>,
+}
+
+impl BuilderSizesConfig {
+    pub fn load() -> Result<Self> {
+        let contents = std::fs::read_to_string("config.json")
+            .context("config.json not found. Copy config.json.example to config.json to configure.")?;
+        let config: Self = serde_json::from_str(&contents)
+            .context("Failed to parse config.json")?;
+        if config.builder_sizes.is_empty() {
+            bail!("config.json: builder_sizes must not be empty");
+        }
+        Ok(config)
+    }
+
+    /// Find a builder size spec by id (case-insensitive). Returns the first entry if not found.
+    pub fn resolve(&self, size_id: Option<&str>) -> &BuilderSizeSpec {
+        let first = &self.builder_sizes[0];
+        match size_id {
+            Some(id) => {
+                let lower = id.to_lowercase();
+                self.builder_sizes.iter()
+                    .find(|s| s.id == lower)
+                    .unwrap_or(first)
+            }
+            None => first,
         }
     }
 
-    pub fn instance_type(&self) -> &'static str {
-        match self {
-            Self::Small => "c5.xlarge",
-            Self::Medium => "c5.2xlarge",
-            Self::Large => "c5.4xlarge",
-        }
+    /// Check if a size id is valid.
+    pub fn is_valid(&self, size_id: &str) -> bool {
+        self.builder_sizes.iter().any(|s| s.id == size_id)
     }
 }
 
@@ -114,7 +135,8 @@ pub struct BuildRequest {
     pub ports: Vec<u16>,
     pub e2e: bool,
     pub enclaveos_commit: String,
-    pub builder_size: BuilderSize,
+    pub builder_size: String,
+    pub builder_instance_type: String,
 }
 
 /// Compute a cache key from all inputs that affect the EIF output.
@@ -215,7 +237,7 @@ pub async fn execute_remote_build(
     hourly_rate_usd: f64,
 ) -> Result<BuildResult> {
     let build_id = Uuid::new_v4();
-    let instance_type = request.builder_size.instance_type();
+    let instance_type = request.builder_instance_type.as_str();
     let eif_s3_key = format!("eifs/{}/{}.eif", request.org_id, cache_key);
     let procfile_hash = format!("{:x}", Sha256::digest(request.procfile_content.as_bytes()));
 
@@ -335,11 +357,7 @@ pub async fn execute_remote_build(
                         .bind(cost_usd)
                         .bind(serde_json::json!({
                             "instance_type": instance_type,
-                            "builder_size": match request.builder_size {
-                                BuilderSize::Small => "small",
-                                BuilderSize::Medium => "medium",
-                                BuilderSize::Large => "large",
-                            },
+                            "builder_size": &request.builder_size,
                             "duration_secs": duration_secs as i64,
                         }))
                         .execute(&mut *tx)
@@ -833,42 +851,53 @@ mod tests {
         assert_eq!(result, "line1\nline2\n");
     }
 
-    // --- BuilderSize ---
+    // --- BuilderSizesConfig ---
 
-    #[test]
-    fn test_builder_size_default() {
-        let size = BuilderSize::from_str_opt(None);
-        assert_eq!(size.instance_type(), "c5.xlarge");
+    fn test_config() -> BuilderSizesConfig {
+        serde_json::from_str(r#"{
+            "builder_sizes": [
+                { "id": "small", "label": "Small", "instance_type": "c5.xlarge", "vcpus": 4, "ram_gb": 8 },
+                { "id": "medium", "label": "Medium", "instance_type": "c5.2xlarge", "vcpus": 8, "ram_gb": 16 },
+                { "id": "large", "label": "Large", "instance_type": "c5.4xlarge", "vcpus": 16, "ram_gb": 32 }
+            ]
+        }"#).unwrap()
     }
 
     #[test]
-    fn test_builder_size_small() {
-        let size = BuilderSize::from_str_opt(Some("small"));
-        assert_eq!(size.instance_type(), "c5.xlarge");
+    fn test_builder_size_resolve_default() {
+        let config = test_config();
+        let spec = config.resolve(None);
+        assert_eq!(spec.id, "small");
+        assert_eq!(spec.instance_type, "c5.xlarge");
     }
 
     #[test]
-    fn test_builder_size_medium() {
-        let size = BuilderSize::from_str_opt(Some("medium"));
-        assert_eq!(size.instance_type(), "c5.2xlarge");
+    fn test_builder_size_resolve_by_id() {
+        let config = test_config();
+        assert_eq!(config.resolve(Some("small")).instance_type, "c5.xlarge");
+        assert_eq!(config.resolve(Some("medium")).instance_type, "c5.2xlarge");
+        assert_eq!(config.resolve(Some("large")).instance_type, "c5.4xlarge");
     }
 
     #[test]
-    fn test_builder_size_large() {
-        let size = BuilderSize::from_str_opt(Some("large"));
-        assert_eq!(size.instance_type(), "c5.4xlarge");
+    fn test_builder_size_resolve_case_insensitive() {
+        let config = test_config();
+        assert_eq!(config.resolve(Some("MEDIUM")).instance_type, "c5.2xlarge");
     }
 
     #[test]
-    fn test_builder_size_case_insensitive() {
-        let size = BuilderSize::from_str_opt(Some("MEDIUM"));
-        assert_eq!(size.instance_type(), "c5.2xlarge");
+    fn test_builder_size_resolve_unknown_defaults_to_first() {
+        let config = test_config();
+        assert_eq!(config.resolve(Some("xlarge")).instance_type, "c5.xlarge");
     }
 
     #[test]
-    fn test_builder_size_unknown_defaults_small() {
-        let size = BuilderSize::from_str_opt(Some("xlarge"));
-        assert_eq!(size.instance_type(), "c5.xlarge");
+    fn test_builder_size_is_valid() {
+        let config = test_config();
+        assert!(config.is_valid("small"));
+        assert!(config.is_valid("medium"));
+        assert!(config.is_valid("large"));
+        assert!(!config.is_valid("xlarge"));
     }
 
     // --- render_templates ---
@@ -888,7 +917,8 @@ mod tests {
             ports: vec![],
             e2e: false,
             enclaveos_commit: "abc".to_string(),
-            builder_size: BuilderSize::Small,
+            builder_size: "small".to_string(),
+            builder_instance_type: "c5.xlarge".to_string(),
         };
 
         let (containerfile, run_sh) = render_templates(&request);
@@ -918,7 +948,8 @@ mod tests {
             ports: vec![],
             e2e: true,
             enclaveos_commit: "abc".to_string(),
-            builder_size: BuilderSize::Small,
+            builder_size: "small".to_string(),
+            builder_instance_type: "c5.xlarge".to_string(),
         };
 
         let (containerfile, run_sh) = render_templates(&request);
@@ -942,7 +973,8 @@ mod tests {
             ports: vec![8080, 9090, 3000],
             e2e: false,
             enclaveos_commit: "abc".to_string(),
-            builder_size: BuilderSize::Small,
+            builder_size: "small".to_string(),
+            builder_instance_type: "c5.xlarge".to_string(),
         };
 
         let (_containerfile, run_sh) = render_templates(&request);
@@ -980,7 +1012,8 @@ mod tests {
             ports: vec![],
             e2e: false,
             enclaveos_commit: "enclave-abc".to_string(),
-            builder_size: BuilderSize::Small,
+            builder_size: "small".to_string(),
+            builder_instance_type: "c5.xlarge".to_string(),
         };
 
         let build_id = Uuid::new_v4();
@@ -1044,7 +1077,8 @@ mod tests {
             ports: vec![],
             e2e: false,
             enclaveos_commit: "abc".to_string(),
-            builder_size: BuilderSize::Small,
+            builder_size: "small".to_string(),
+            builder_instance_type: "c5.xlarge".to_string(),
         };
 
         let userdata = generate_builder_userdata(Uuid::new_v4(), &config, &request, "eifs/test.eif");
