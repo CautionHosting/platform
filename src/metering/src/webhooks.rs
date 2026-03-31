@@ -70,7 +70,33 @@ pub async fn paddle_webhook_handler(
         payload.event_id
     );
 
-    // Atomic idempotency: INSERT returns rows_affected=0 if event_id already exists
+    // Acquire advisory lock to serialize concurrent processing of same event_id.
+    // This prevents two simultaneous deliveries from both passing the INSERT check.
+    let lock_key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        payload.event_id.hash(&mut hasher);
+        hasher.finish() as i64
+    };
+
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::error!("Failed to begin transaction: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "internal error"})));
+        }
+    };
+
+    if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut *tx)
+        .await
+    {
+        tracing::error!("Failed to acquire advisory lock: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "internal error"})));
+    }
+
+    // Idempotency check (serialized by advisory lock)
     let idempotency_result = sqlx::query(
         r#"
         INSERT INTO paddle_webhook_events (event_id, event_type, payload)
@@ -81,12 +107,13 @@ pub async fn paddle_webhook_handler(
     .bind(&payload.event_id)
     .bind(&payload.event_type)
     .bind(&payload.data)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await;
 
     match idempotency_result {
         Ok(result) if result.rows_affected() == 0 => {
             tracing::debug!("Webhook {} already processed, skipping", payload.event_id);
+            // tx drops here, releasing the advisory lock
             return (
                 StatusCode::OK,
                 Json(serde_json::json!({"status": "already_processed"})),
@@ -100,6 +127,13 @@ pub async fn paddle_webhook_handler(
             );
         }
         Ok(_) => {} // rows_affected=1, new event — proceed
+    }
+
+    // Commit the idempotency record and release the advisory lock before dispatching.
+    // The lock serialization ensures only one handler runs; the committed row prevents retries.
+    if let Err(e) = tx.commit().await {
+        tracing::error!("Failed to commit idempotency record: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "internal error"})));
     }
 
     // Dispatch by event type
