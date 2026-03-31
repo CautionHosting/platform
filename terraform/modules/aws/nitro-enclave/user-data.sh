@@ -254,7 +254,7 @@ TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-meta
 PUBLIC_IP=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 -s)
 echo "Configuring Caddy with self-signed cert for $PUBLIC_IP and HTTP fallback"
 
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
   -keyout /etc/caddy/server.key \
   -out /etc/caddy/server.crt \
   -subj "/CN=$PUBLIC_IP" \

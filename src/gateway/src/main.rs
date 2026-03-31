@@ -79,6 +79,18 @@ async fn main() -> Result<()> {
         anyhow::bail!("No valid RP origins configured");
     }
 
+    let is_production = std::env::var("ENVIRONMENT").map(|e| e == "production").unwrap_or(false);
+    if is_production {
+        for origin in &origins {
+            if origin.scheme() == "http" && origin.host_str() != Some("localhost") {
+                anyhow::bail!(
+                    "Non-localhost RP origin must use HTTPS in production: {}",
+                    origin
+                );
+            }
+        }
+    }
+
     let rp_id = &config.rp_id;
     let mut builder = WebauthnBuilder::new(rp_id, &origins[0])
         .context("Failed to create WebAuthn builder")?;
