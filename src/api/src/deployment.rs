@@ -541,7 +541,7 @@ fn run_tofu_init(work_dir: &Path, credentials: Option<&AwsCredentials>) -> Resul
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::error!("Tofu init failed: {}", stderr);
-        bail!("Tofu init failed: {}", stderr);
+        bail!("Infrastructure initialization failed");
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -588,8 +588,8 @@ fn run_tofu_apply_with_vars(work_dir: &Path, resource_name: &str, ports: &[u16],
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!("Tofu apply failed: {}", stderr);
-        bail!("Tofu apply failed: {}", stderr);
+        tracing::error!("Tofu apply failed for {}: {}", resource_name, stderr);
+        bail!("Infrastructure provisioning failed");
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -623,10 +623,10 @@ fn run_tofu_apply_with_provider_creds(
     cmd.arg("-var").arg(format!("http_port={}", http_port.unwrap_or(0)));
 
     if let Some(creds) = credentials {
-        tracing::info!("Passing user credentials to AWS provider via Terraform variables");
-        cmd.arg("-var").arg(format!("provider_access_key={}", creds.access_key_id));
-        cmd.arg("-var").arg(format!("provider_secret_key={}", creds.secret_access_key));
-        cmd.arg("-var").arg(format!("provider_region={}", creds.region));
+        tracing::info!("Passing user credentials to AWS provider via environment variables");
+        cmd.env("TF_VAR_provider_access_key", &creds.access_key_id);
+        cmd.env("TF_VAR_provider_secret_key", &creds.secret_access_key);
+        cmd.env("TF_VAR_provider_region", &creds.region);
     }
 
     let output = cmd.output()
@@ -634,8 +634,8 @@ fn run_tofu_apply_with_provider_creds(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!("Tofu apply failed: {}", stderr);
-        bail!("Tofu apply failed: {}", stderr);
+        tracing::error!("Tofu apply failed for {}", resource_name);
+        bail!("Infrastructure provisioning failed");
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -655,7 +655,8 @@ fn get_tofu_outputs(work_dir: &Path) -> Result<DeploymentResult> {
     
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Tofu output failed: {}", stderr);
+        tracing::error!("Tofu output failed: {}", stderr);
+        bail!("Failed to read infrastructure outputs");
     }
     
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -711,7 +712,8 @@ fn get_managed_onprem_tofu_outputs(work_dir: &Path) -> Result<ManagedOnPremTerra
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Tofu output failed: {}", stderr);
+        tracing::error!("Tofu output failed: {}", stderr);
+        bail!("Failed to read infrastructure outputs");
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -858,10 +860,10 @@ fn run_tofu_destroy(work_dir: &Path, resource_name: &str, credentials: Option<&A
         .current_dir(work_dir);
 
     if let Some(creds) = credentials {
-        tracing::info!("Passing user credentials to AWS provider via Terraform variables");
-        cmd.arg("-var").arg(format!("provider_access_key={}", creds.access_key_id));
-        cmd.arg("-var").arg(format!("provider_secret_key={}", creds.secret_access_key));
-        cmd.arg("-var").arg(format!("provider_region={}", creds.region));
+        tracing::info!("Passing user credentials to AWS provider via environment variables");
+        cmd.env("TF_VAR_provider_access_key", &creds.access_key_id);
+        cmd.env("TF_VAR_provider_secret_key", &creds.secret_access_key);
+        cmd.env("TF_VAR_provider_region", &creds.region);
     }
 
     let output = cmd.output()
@@ -869,8 +871,8 @@ fn run_tofu_destroy(work_dir: &Path, resource_name: &str, credentials: Option<&A
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!("Tofu destroy failed: {}", stderr);
-        bail!("Tofu destroy failed: {}", stderr);
+        tracing::error!("Tofu destroy failed for {}", resource_name);
+        bail!("Infrastructure teardown failed");
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);

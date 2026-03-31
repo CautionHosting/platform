@@ -69,6 +69,14 @@ resource "aws_s3_bucket" "eif_storage" {
   }
 }
 
+resource "aws_s3_bucket_versioning" "eif_storage" {
+  bucket = aws_s3_bucket.eif_storage.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 resource "aws_s3_bucket_server_side_encryption_configuration" "eif_storage" {
   bucket = aws_s3_bucket.eif_storage.id
 

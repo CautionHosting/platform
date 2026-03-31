@@ -50,3 +50,8 @@ variable "aws_region" {
   default     = "us-west-2"
 }
 
+variable "resource_name" {
+  description = "Resource name for identification"
+  type        = string
+  default     = ""
+}

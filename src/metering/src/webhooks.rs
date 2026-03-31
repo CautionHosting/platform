@@ -58,8 +58,8 @@ pub async fn paddle_webhook_handler(
         Err(e) => {
             tracing::warn!("Failed to parse Paddle webhook: {}", e);
             return (
-                StatusCode::OK,
-                Json(serde_json::json!({"status": "ignored", "reason": "parse error"})),
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "malformed webhook payload"})),
             );
         }
     };
@@ -204,7 +204,15 @@ async fn handle_transaction_completed(
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
 
-        if total_cents > 0 {
+        if total_cents <= 0 {
+            tracing::error!(
+                "Auto top-up transaction {} has invalid total_cents: {}",
+                transaction_id, total_cents
+            );
+            anyhow::bail!("Auto top-up transaction has non-positive amount");
+        }
+
+        {
             tracing::info!("Auto top-up completed: depositing {} cents for user {}", total_cents, user_id);
 
             // Deposit credits to wallet

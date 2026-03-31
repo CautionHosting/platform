@@ -2313,7 +2313,7 @@ export default {
           eventCallback: async (event) => {
             if (event.name === 'checkout.completed') {
               const data = event.data;
-              console.log('Paddle checkout.completed data:', JSON.stringify(data, null, 2));
+              // Transaction data intentionally not logged
               // Notify our backend about the completed transaction
               try {
                 const payment = data.payment || {};
