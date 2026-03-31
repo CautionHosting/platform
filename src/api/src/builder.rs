@@ -301,10 +301,22 @@ pub async fn execute_remote_build(
         tx,
     ).await;
 
-    // 4. Terminate builder (best-effort, always do this)
+    // 4. Terminate builder (always do this, retry on failure)
     tracing::info!("Terminating builder instance {}", instance_id);
-    if let Err(e) = ec2.terminate_instances(&[instance_id.clone()]).await {
-        tracing::error!("Failed to terminate builder {}: {}", instance_id, e);
+    let mut terminate_attempts = 0;
+    loop {
+        terminate_attempts += 1;
+        match ec2.terminate_instances(&[instance_id.clone()]).await {
+            Ok(_) => break,
+            Err(e) => {
+                if terminate_attempts >= 3 {
+                    tracing::error!("Failed to terminate builder {} after {} attempts: {}. INSTANCE MAY BE LEAKED.", instance_id, terminate_attempts, e);
+                    break;
+                }
+                tracing::warn!("Failed to terminate builder {} (attempt {}): {}, retrying...", instance_id, terminate_attempts, e);
+                tokio::time::sleep(std::time::Duration::from_secs(2_u64.pow(terminate_attempts))).await;
+            }
+        }
     }
 
     // 5. Handle result

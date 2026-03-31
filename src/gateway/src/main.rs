@@ -58,8 +58,11 @@ async fn main() -> Result<()> {
 
     let config = Config::from_env().context("Failed to load configuration")?;
 
+    let max_db_connections: u32 = std::env::var("DB_MAX_CONNECTIONS")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(25);
+
     let pool = PgPoolOptions::new()
-        .max_connections(5)
+        .max_connections(max_db_connections)
         .connect(&config.database_url)
         .await
         .context("Failed to connect to database")?;

@@ -164,7 +164,10 @@ pub(crate) async fn suspend_fully_managed_org(state: &AppState, org_id: uuid::Uu
         return;
     };
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(format!("{}/internal/org/{}/suspend-managed", api_url, org_id))
         .header("x-internal-service-secret", internal_secret.as_str())

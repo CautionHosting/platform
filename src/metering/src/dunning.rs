@@ -216,7 +216,10 @@ async fn suspend_org(state: &AppState, org_id: uuid::Uuid) {
         return;
     };
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(format!("{}/internal/org/{}/suspend", api_url, org_id))
         .header("x-internal-service-secret", internal_secret.as_str())
@@ -272,7 +275,10 @@ async fn unsuspend_org(state: &AppState, org_id: uuid::Uuid) {
         return;
     };
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(format!("{}/internal/org/{}/unsuspend", api_url, org_id))
         .header("x-internal-service-secret", internal_secret.as_str())
@@ -309,7 +315,10 @@ pub(crate) async fn send_dunning_email(state: &AppState, org_id: uuid::Uuid, tem
 
     let email_service_url =
         std::env::var("EMAIL_SERVICE_URL").unwrap_or_else(|_| "http://email:8082".to_string());
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     for (email,) in &members {
         let email_request = serde_json::json!({

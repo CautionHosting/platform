@@ -306,7 +306,10 @@ async fn handle_transaction_completed(
                     // Trigger unsuspend
                     let api_url = std::env::var("API_URL").unwrap_or_else(|_| "http://api:8080".to_string());
                     let internal_secret = std::env::var("INTERNAL_SERVICE_SECRET").unwrap_or_default();
-                    let client = reqwest::Client::new();
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()
+                        .unwrap_or_else(|_| reqwest::Client::new());
                     let _ = client
                         .post(format!("{}/internal/org/{}/unsuspend", api_url, org_id))
                         .header("x-internal-service-secret", &internal_secret)
@@ -547,7 +550,10 @@ async fn send_invoice_email(
         }
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let response = client
         .post(format!("{}/send", email_service_url))
         .json(&email_request)
@@ -600,7 +606,10 @@ async fn send_payment_confirmation_email(
         }
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let _ = client
         .post(format!("{}/send", email_service_url))
         .json(&email_request)
@@ -642,7 +651,10 @@ async fn send_payment_failure_email(
         }
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let _ = client
         .post(format!("{}/send", email_service_url))
         .json(&email_request)

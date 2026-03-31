@@ -9,6 +9,35 @@ use tempfile::TempDir;
 use tokio::fs;
 use uuid::Uuid;
 
+/// Default timeout for tofu init/apply/destroy operations (10 minutes).
+const TOFU_TIMEOUT_SECS: u64 = 600;
+
+/// Run a command with a timeout. Kills the process if deadline expires.
+fn run_with_timeout(cmd: &mut Command, timeout_secs: u64) -> Result<std::process::Output> {
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to spawn command")?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().context("Failed to read output"),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!("Command timed out after {}s", timeout_secs);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            Err(e) => bail!("Failed to wait on command: {}", e),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AwsCredentials {
     pub access_key_id: String,
@@ -535,8 +564,8 @@ fn run_tofu_init(work_dir: &Path, credentials: Option<&AwsCredentials>) -> Resul
             .env("AWS_REGION", &creds.region);
     }
 
-    let output = cmd.output()
-        .context("Failed to execute tofu init")?;
+    let output = run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS)
+        .context("tofu init failed")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -583,8 +612,8 @@ fn run_tofu_apply_with_vars(work_dir: &Path, resource_name: &str, ports: &[u16],
             .env("AWS_REGION", &creds.region);
     }
 
-    let output = cmd.output()
-        .context("Failed to execute tofu apply")?;
+    let output = run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS)
+        .context("tofu apply failed")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -629,8 +658,8 @@ fn run_tofu_apply_with_provider_creds(
         cmd.env("TF_VAR_provider_region", &creds.region);
     }
 
-    let output = cmd.output()
-        .context("Failed to execute tofu apply")?;
+    let output = run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS)
+        .context("tofu apply failed")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -647,22 +676,23 @@ fn run_tofu_apply_with_provider_creds(
 fn get_tofu_outputs(work_dir: &Path) -> Result<DeploymentResult> {
     tracing::info!("Retrieving tofu outputs...");
     
-    let output = Command::new("tofu")
-        .args(&["output", "-json", "-no-color"])
-        .current_dir(work_dir)
-        .output()
-        .context("Failed to execute tofu output")?;
-    
+    let output = run_with_timeout(
+        Command::new("tofu")
+            .args(&["output", "-json", "-no-color"])
+            .current_dir(work_dir),
+        TOFU_TIMEOUT_SECS,
+    ).context("tofu output failed")?;
+
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::error!("Tofu output failed: {}", stderr);
         bail!("Failed to read infrastructure outputs");
     }
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let outputs: serde_json::Value = serde_json::from_str(&stdout)
         .context("Failed to parse tofu output JSON")?;
-    
+
     let instance_id = outputs["instance_id"]["value"]
         .as_str()
         .context("Missing instance_id in tofu output")?
@@ -704,11 +734,12 @@ struct ManagedOnPremTerraformOutputs {
 fn get_managed_onprem_tofu_outputs(work_dir: &Path) -> Result<ManagedOnPremTerraformOutputs> {
     tracing::info!("Retrieving managed on-prem tofu outputs...");
 
-    let output = Command::new("tofu")
-        .args(&["output", "-json", "-no-color"])
-        .current_dir(work_dir)
-        .output()
-        .context("Failed to execute tofu output")?;
+    let output = run_with_timeout(
+        Command::new("tofu")
+            .args(&["output", "-json", "-no-color"])
+            .current_dir(work_dir),
+        TOFU_TIMEOUT_SECS,
+    ).context("tofu output failed")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -866,8 +897,8 @@ fn run_tofu_destroy(work_dir: &Path, resource_name: &str, credentials: Option<&A
         cmd.env("TF_VAR_provider_region", &creds.region);
     }
 
-    let output = cmd.output()
-        .context("Failed to execute tofu destroy")?;
+    let output = run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS)
+        .context("tofu destroy failed")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
