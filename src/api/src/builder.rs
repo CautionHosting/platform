@@ -27,10 +27,14 @@ pub struct BuilderSizeSpec {
     pub ram_gb: u32,
 }
 
-/// Builder size configuration loaded from config.json.
+fn default_max_resources() -> u32 { 10 }
+
+/// Platform configuration loaded from config.json.
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct BuilderSizesConfig {
     pub builder_sizes: Vec<BuilderSizeSpec>,
+    #[serde(default = "default_max_resources")]
+    pub max_resources_per_org: u32,
 }
 
 impl BuilderSizesConfig {

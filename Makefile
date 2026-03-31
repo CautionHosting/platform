@@ -277,7 +277,7 @@ run-metering: network postgres
 		--network $(NETWORK) \
 		--env-file .env \
 		-e DATABASE_URL=$(DATABASE_URL) \
-		-e METERING_INTERVAL_SECS=300 \
+		-e METERING_INTERVAL_SECS=60 \
 		caution-metering
 	@echo "Metering service started (internal port 8083)"
 

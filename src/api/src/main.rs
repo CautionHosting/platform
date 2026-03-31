@@ -1421,9 +1421,9 @@ async fn deploy_logic(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
         .unwrap_or(0);
 
-        if balance < 500 {
+        if balance < 2500 {
             return Err((StatusCode::PAYMENT_REQUIRED,
-                format!("Minimum $5.00 in credits required to deploy (current balance: ${:.2}). \
+                format!("Minimum $25.00 in credits required to deploy (current balance: ${:.2}). \
                          Purchase credits at https://caution.dev/settings/billing",
                          balance as f64 / 100.0)));
         }
@@ -1445,6 +1445,25 @@ async fn deploy_logic(
         }
 
         tracing::info!("Billing gate passed: fully managed, balance_cents={}", balance);
+    }
+
+    // --- Resource limit check (both paths) ---
+    let active_resources: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compute_resources
+         WHERE organization_id = $1 AND state NOT IN ('terminated', 'destroyed')
+           AND id != $2"
+    )
+    .bind(req.org_id)
+    .bind(resource_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let max_resources = state.builder_sizes.max_resources_per_org as i64;
+    if active_resources + 1 > max_resources {
+        return Err((StatusCode::TOO_MANY_REQUESTS,
+            format!("Resource limit reached ({}/{}). Destroy unused resources or contact support.",
+                active_resources + 1, max_resources)));
     }
 
     if was_destroyed {

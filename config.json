@@ -1,4 +1,5 @@
 {
+  "max_resources_per_org": 10,
   "builder_sizes": [
     { "id": "small", "label": "Small", "instance_type": "c5.xlarge", "vcpus": 4, "ram_gb": 8 },
     { "id": "medium", "label": "Medium", "instance_type": "c5.2xlarge", "vcpus": 8, "ram_gb": 16 },
