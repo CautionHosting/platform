@@ -135,6 +135,14 @@ async fn main() -> Result<()> {
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
 
+    if enable_test_endpoints {
+        let env = std::env::var("ENVIRONMENT").unwrap_or_default();
+        if env == "production" {
+            eprintln!("FATAL: ENABLE_TEST_ENDPOINTS is set in a production environment. Refusing to start.");
+            std::process::exit(1);
+        }
+    }
+
     // Authenticated API routes — require INTERNAL_SERVICE_SECRET
     let mut api_routes = Router::new()
         .route("/api/resources/track", post(track_resource))

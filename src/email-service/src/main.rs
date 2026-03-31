@@ -797,6 +797,14 @@ async fn main() -> anyhow::Result<()> {
         .parse::<bool>()
         .unwrap_or(false);
 
+    if test_mode {
+        let env = std::env::var("ENVIRONMENT").unwrap_or_default();
+        if env == "production" {
+            eprintln!("FATAL: EMAIL_TEST_MODE is enabled in a production environment. Refusing to start.");
+            std::process::exit(1);
+        }
+    }
+
     let from_email = std::env::var("FROM_EMAIL").unwrap_or_else(|_| "noreply@localhost".to_string());
     let from_name = std::env::var("FROM_NAME").unwrap_or_else(|_| "Caution".to_string());
     let base_url =
