@@ -73,6 +73,32 @@ async fn run_collection_cycle(state: &AppState) -> Result<usize> {
 pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize> {
     tracing::info!("Running metering collection cycle");
 
+    // Reconcile: stop tracking resources that have been destroyed in compute_resources
+    let reconciled = sqlx::query(
+        r#"
+        UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW()
+        WHERE status = 'running'
+        AND resource_id IN (
+            SELECT id::text FROM compute_resources WHERE destroyed_at IS NOT NULL
+        )
+        "#,
+    )
+    .execute(&state.pool)
+    .await;
+
+    match reconciled {
+        Ok(result) if result.rows_affected() > 0 => {
+            tracing::warn!(
+                "Reconciliation: stopped {} orphaned tracked resources that were already destroyed",
+                result.rows_affected()
+            );
+        }
+        Err(e) => {
+            tracing::error!("Reconciliation query failed: {}", e);
+        }
+        _ => {}
+    }
+
     let resources = sqlx::query_as::<_, TrackedResource>(
         r#"
         SELECT resource_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at

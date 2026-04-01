@@ -1237,6 +1237,9 @@ async fn deploy_handler(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
 
     // Spawn the deploy logic in a separate task
+    let db_for_recovery = state.db.clone();
+    let app_id_for_recovery = req.app_id;
+    let org_id_for_recovery = req.org_id;
     tokio::spawn(async move {
         let result = deploy_logic(state, auth, req, tx.clone()).await;
 
@@ -1247,6 +1250,19 @@ async fn deploy_handler(
                 let _ = tx.send(Ok(bytes::Bytes::from(format!("{}\n", json)))).await;
             }
             Err((status, msg)) => {
+                // Reset state from Pending to Failed so the resource isn't stuck
+                if let Err(e) = sqlx::query(
+                    "UPDATE compute_resources SET state = $1 WHERE id = $2 AND organization_id = $3 AND state = $4"
+                )
+                .bind(types::ResourceState::Failed)
+                .bind(app_id_for_recovery)
+                .bind(org_id_for_recovery)
+                .bind(types::ResourceState::Pending)
+                .execute(&db_for_recovery)
+                .await {
+                    tracing::error!("Failed to reset resource state after deploy error: {}", e);
+                }
+
                 let _ = tx.send(Ok(milestone_error(&msg))).await;
                 let error_json = serde_json::json!({"error": msg, "status": status.as_u16()});
                 let _ = tx.send(Ok(bytes::Bytes::from(format!("{}\n", error_json)))).await;
@@ -1345,8 +1361,8 @@ async fn deploy_logic(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get resource type: {}", e)))?;
 
     tracing::info!("Looking up resource by id={}", req.app_id);
-    let existing_resource: Option<(Uuid, Option<String>, Option<serde_json::Value>, Option<DateTime<Utc>>)> = sqlx::query_as(
-        "SELECT id, resource_name, configuration, destroyed_at FROM compute_resources
+    let existing_resource: Option<(Uuid, Option<String>, Option<serde_json::Value>, Option<DateTime<Utc>>, types::ResourceState)> = sqlx::query_as(
+        "SELECT id, resource_name, configuration, destroyed_at, state FROM compute_resources
          WHERE id = $1 AND organization_id = $2"
     )
     .bind(req.app_id)
@@ -1359,7 +1375,11 @@ async fn deploy_logic(
     })?;
 
     let (resource_id, app_name, configuration, was_destroyed) = match &existing_resource {
-        Some((id, name_opt, config_opt, destroyed_at)) => {
+        Some((id, name_opt, config_opt, destroyed_at, state)) => {
+            // Reject if a deploy is already in progress
+            if *state == types::ResourceState::Pending {
+                return Err((StatusCode::CONFLICT, "A deployment is already in progress for this app. Please wait for it to complete.".to_string()));
+            }
             let name = name_opt.clone().unwrap_or_else(|| "unnamed".to_string());
             let config = config_opt.clone().unwrap_or_else(|| serde_json::json!({}));
             (*id, name, config, destroyed_at.is_some())
@@ -1466,6 +1486,7 @@ async fn deploy_logic(
                 active_resources + 1, max_resources)));
     }
 
+    // Atomically transition to Pending — rejects concurrent deploys via the check above
     if was_destroyed {
         tracing::info!("Reactivating previously destroyed resource {}", resource_id);
         sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1 WHERE id = $2 AND organization_id = $3")
@@ -1475,6 +1496,21 @@ async fn deploy_logic(
             .execute(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to reactivate resource: {}", e)))?;
+    } else {
+        // Mark as Pending so concurrent pushes are rejected
+        let updated = sqlx::query(
+            "UPDATE compute_resources SET state = $1 WHERE id = $2 AND organization_id = $3 AND state != $1"
+        )
+        .bind(types::ResourceState::Pending)
+        .bind(resource_id)
+        .bind(req.org_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update resource state: {}", e)))?;
+
+        if updated.rows_affected() == 0 {
+            return Err((StatusCode::CONFLICT, "A deployment is already in progress for this app. Please wait for it to complete.".to_string()));
+        }
     }
 
     tracing::info!("Deploying branch: {}", req.branch);

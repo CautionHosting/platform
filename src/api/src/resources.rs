@@ -483,6 +483,24 @@ pub async fn delete_resource(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Stop metering for the destroyed resource
+    let resource_id_str = resource_id.to_string();
+    match sqlx::query(
+        "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
+    )
+    .bind(&resource_id_str)
+    .execute(&state.db)
+    .await {
+        Ok(result) => {
+            if result.rows_affected() > 0 {
+                tracing::info!("Stopped metering for resource {}", resource_id);
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to stop metering for resource {}: {} — reconciliation loop will catch this", resource_id, e);
+        }
+    }
+
     tracing::info!("Resource {} terminated by user {} (git repo preserved for redeployment)", resource_id, auth.user_id);
 
     Ok(StatusCode::NO_CONTENT)
