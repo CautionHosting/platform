@@ -26,6 +26,8 @@ pub struct EnclaveManifest {
     pub bootproof_commit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub steve_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locksmith_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +86,7 @@ impl EnclaveManifest {
             enclaveos_commit: None,
             bootproof_commit: None,
             steve_commit: None,
+            locksmith_commit: None,
         }
     }
 
@@ -309,5 +312,55 @@ mod tests {
 
         assert_eq!(loaded.version, "1.0");
         assert_eq!(loaded.powered_by, "https://caution.co");
+    }
+
+    #[test]
+    fn test_manifest_locksmith_commit_none_by_default() {
+        let manifest = make_manifest(None, None, None, None);
+        assert!(manifest.locksmith_commit.is_none());
+        assert!(manifest.steve_commit.is_none());
+    }
+
+    #[test]
+    fn test_manifest_locksmith_commit_omitted_when_none() {
+        let manifest = make_manifest(None, None, None, None);
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(!json.contains("locksmith_commit"));
+    }
+
+    #[test]
+    fn test_manifest_locksmith_commit_present_when_set() {
+        let mut manifest = make_manifest(None, None, None, None);
+        manifest.locksmith_commit = Some("abc123".to_string());
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(json.contains("locksmith_commit"));
+        assert!(json.contains("abc123"));
+    }
+
+    #[test]
+    fn test_manifest_locksmith_commit_round_trip() {
+        let mut manifest = make_manifest(None, None, None, None);
+        manifest.locksmith_commit = Some("d16b74c6b3fd".to_string());
+        manifest.steve_commit = Some("ed38a190cd5d".to_string());
+
+        let json = serde_json::to_string_pretty(&manifest).unwrap();
+        let loaded: EnclaveManifest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.locksmith_commit, Some("d16b74c6b3fd".to_string()));
+        assert_eq!(loaded.steve_commit, Some("ed38a190cd5d".to_string()));
+    }
+
+    #[test]
+    fn test_manifest_deserializes_without_locksmith_commit() {
+        // Old manifests without locksmith_commit field should still deserialize
+        let json = r#"{
+            "version": "1.0",
+            "powered_by": "https://caution.co",
+            "enclave_source": {"type": "git_archive", "urls": ["https://example.com/a.tar.gz"], "commit": "abc"},
+            "framework_source": {"type": "git_archive", "url": "https://example.com/f.tar.gz"}
+        }"#;
+        let manifest: EnclaveManifest = serde_json::from_str(json).unwrap();
+        assert!(manifest.locksmith_commit.is_none());
+        assert!(manifest.steve_commit.is_none());
     }
 }

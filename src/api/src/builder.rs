@@ -138,6 +138,7 @@ pub struct BuildRequest {
     pub binary_path: Option<String>,
     pub ports: Vec<u16>,
     pub e2e: bool,
+    pub locksmith: bool,
     pub enclaveos_commit: String,
     pub builder_size: String,
     pub builder_instance_type: String,
@@ -150,6 +151,7 @@ pub fn compute_cache_key(
     enclaveos_commit: &str,
     procfile_content: &str,
     e2e: bool,
+    locksmith: bool,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(commit_sha.as_bytes());
@@ -159,6 +161,8 @@ pub fn compute_cache_key(
     hasher.update(procfile_content.as_bytes());
     hasher.update(b"|");
     hasher.update(if e2e { "e2e" } else { "no-e2e" }.as_bytes());
+    hasher.update(b"|");
+    hasher.update(if locksmith { "locksmith" } else { "no-locksmith" }.as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
@@ -552,17 +556,22 @@ fn process_template_blocks(content: &str, enabled_blocks: &[&str]) -> String {
 
 /// Render the Containerfile.eif and run.sh templates with the build parameters.
 fn render_templates(request: &BuildRequest) -> (String, String) {
-    let enabled_blocks: Vec<&str> = if request.e2e { vec!["STEVE"] } else { vec![] };
+    let mut enabled_blocks: Vec<&str> = vec![];
+    if request.e2e { enabled_blocks.push("STEVE"); }
+    if request.locksmith { enabled_blocks.push("LOCKSMITH"); }
 
     let bootproof_commit = std::env::var("BOOTPROOF_COMMIT")
         .unwrap_or_else(|_| "64dae0628e58b9f898b89f9b7a404b37e2f0ca9f".to_string());
     let steve_commit = std::env::var("STEVE_COMMIT")
         .unwrap_or_else(|_| "ed38a190cd5d7a8f452c854e41d00ec748e172bf".to_string());
+    let locksmith_commit = std::env::var("LOCKSMITH_COMMIT")
+        .unwrap_or_else(|_| "d16b74c6b3fd1d1006a5b00e4d9e21a4613947a9".to_string());
 
     // Render Containerfile.eif
     let containerfile = process_template_blocks(CONTAINERFILE_EIF_TEMPLATE, &enabled_blocks)
         .replace("{{BOOTPROOF_COMMIT}}", &bootproof_commit)
-        .replace("{{STEVE_COMMIT}}", &steve_commit);
+        .replace("{{STEVE_COMMIT}}", &steve_commit)
+        .replace("{{LOCKSMITH_COMMIT}}", &locksmith_commit);
 
     // Render run.sh
     let run_cmd = request.run_command.as_deref().unwrap_or("");
@@ -574,7 +583,7 @@ fn render_templates(request: &BuildRequest) -> (String, String) {
     };
 
     let custom_port_proxies: String = request.ports.iter()
-        .filter(|&&p| p != 8080 && p != 8081 && p != 8082)
+        .filter(|&&p| p != 8080 && p != 8081 && p != 8082 && p != 8084)
         .map(|p| format!("/bin/socat VSOCK-LISTEN:{p},reuseaddr,fork TCP:localhost:{p} &"))
         .collect::<Vec<_>>()
         .join("\n");
@@ -611,11 +620,7 @@ fn generate_builder_userdata(
     let (containerfile_eif, run_sh) = render_templates(request);
 
     let e2e_flag = if request.e2e { "true" } else { "false" };
-
-    let bootproof_commit = std::env::var("BOOTPROOF_COMMIT")
-        .unwrap_or_else(|_| "64dae0628e58b9f898b89f9b7a404b37e2f0ca9f".to_string());
-    let steve_commit = std::env::var("STEVE_COMMIT")
-        .unwrap_or_else(|_| "ed38a190cd5d7a8f452c854e41d00ec748e172bf".to_string());
+    let locksmith_flag = if request.locksmith { "true" } else { "false" };
 
     // Build manifest using the same EnclaveManifest struct as the inline build path
     let app_source = if request.app_sources.is_empty() {
@@ -657,6 +662,7 @@ ENCLAVEOS_COMMIT="{enclaveos_commit}"
 BUILD_CMD='{build_cmd}'
 BINARY_PATH="{binary_flag}"
 E2E="{e2e_flag}"
+LOCKSMITH="{locksmith_flag}"
 
 write_status() {{
     local phase="$1"
@@ -793,6 +799,7 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
         build_cmd = build_cmd,
         binary_flag = binary_flag,
         e2e_flag = e2e_flag,
+        locksmith_flag = locksmith_flag,
         run_sh = run_sh,
         containerfile_eif = containerfile_eif,
     )
@@ -842,37 +849,44 @@ mod tests {
 
     #[test]
     fn test_cache_key_deterministic() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false);
-        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", false);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false);
+        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false);
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 64); // SHA256 hex
     }
 
     #[test]
     fn test_cache_key_changes_with_commit() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false);
-        let key2 = compute_cache_key("def456", "enclave-v1", "run: /app", false);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false);
+        let key2 = compute_cache_key("def456", "enclave-v1", "run: /app", false, false);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_enclaveos() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false);
-        let key2 = compute_cache_key("abc123", "enclave-v2", "run: /app", false);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false);
+        let key2 = compute_cache_key("abc123", "enclave-v2", "run: /app", false, false);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_procfile() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false);
-        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /other", false);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false);
+        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /other", false, false);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_e2e() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false);
-        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", true);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false);
+        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", true, false);
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_cache_key_changes_with_locksmith() {
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false);
+        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, true);
         assert_ne!(key1, key2);
     }
 
@@ -986,6 +1000,7 @@ mod tests {
             binary_path: None,
             ports: vec![],
             e2e: false,
+            locksmith: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
@@ -1018,6 +1033,7 @@ mod tests {
             binary_path: None,
             ports: vec![],
             e2e: true,
+            locksmith: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
@@ -1028,6 +1044,60 @@ mod tests {
 
         assert!(containerfile.contains("steve-builder"), "Containerfile should contain steve-builder when e2e=true");
         assert!(run_sh.contains("steve"), "run.sh should contain steve when e2e=true");
+    }
+
+    #[test]
+    fn test_render_templates_locksmith_includes_locksmith() {
+        let request = BuildRequest {
+            org_id: Uuid::new_v4(),
+            app_name: "test-app".to_string(),
+            commit_sha: "abc123".to_string(),
+            branch: "main".to_string(),
+            source_s3_key: "builds/test/source.tar.gz".to_string(),
+            procfile_content: "run: /app\n".to_string(),
+            run_command: Some("/app".to_string()),
+            build_command: None,
+            binary_path: None,
+            ports: vec![],
+            e2e: false,
+            locksmith: true,
+            enclaveos_commit: "abc".to_string(),
+            builder_size: "small".to_string(),
+            builder_instance_type: "c5.xlarge".to_string(),
+            app_sources: vec![],
+        };
+
+        let (containerfile, run_sh) = render_templates(&request);
+
+        assert!(containerfile.contains("locksmith-builder"), "Containerfile should contain locksmith-builder when locksmith=true");
+        assert!(run_sh.contains("locksmithd"), "run.sh should contain locksmithd when locksmith=true");
+    }
+
+    #[test]
+    fn test_render_templates_no_locksmith_by_default() {
+        let request = BuildRequest {
+            org_id: Uuid::new_v4(),
+            app_name: "test-app".to_string(),
+            commit_sha: "abc123".to_string(),
+            branch: "main".to_string(),
+            source_s3_key: "builds/test/source.tar.gz".to_string(),
+            procfile_content: "run: /app\n".to_string(),
+            run_command: Some("/app".to_string()),
+            build_command: None,
+            binary_path: None,
+            ports: vec![],
+            e2e: false,
+            locksmith: false,
+            enclaveos_commit: "abc".to_string(),
+            builder_size: "small".to_string(),
+            builder_instance_type: "c5.xlarge".to_string(),
+            app_sources: vec![],
+        };
+
+        let (containerfile, run_sh) = render_templates(&request);
+
+        assert!(!containerfile.contains("locksmith-builder"), "Containerfile should not contain locksmith-builder when locksmith=false");
+        assert!(!run_sh.contains("locksmithd"), "run.sh should not contain locksmithd when locksmith=false");
     }
 
     #[test]
@@ -1044,6 +1114,7 @@ mod tests {
             binary_path: None,
             ports: vec![8080, 9090, 3000],
             e2e: false,
+            locksmith: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
@@ -1084,6 +1155,7 @@ mod tests {
             binary_path: None,
             ports: vec![],
             e2e: false,
+            locksmith: false,
             enclaveos_commit: "enclave-abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
@@ -1150,6 +1222,7 @@ mod tests {
             binary_path: None,
             ports: vec![],
             e2e: false,
+            locksmith: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),

@@ -13,6 +13,7 @@ use crate::manifest::EnclaveManifest;
 const DEFAULT_ENCLAVEOS_COMMIT: &str = "9582e25239430070667fdd0a6b64d887f1c308df";
 const DEFAULT_BOOTPROOF_COMMIT: &str = "64dae0628e58b9f898b89f9b7a404b37e2f0ca9f";
 const DEFAULT_STEVE_COMMIT: &str = "ed38a190cd5d7a8f452c854e41d00ec748e172bf";
+const DEFAULT_LOCKSMITH_COMMIT: &str = "d16b74c6b3fd1d1006a5b00e4d9e21a4613947a9";
 
 pub fn resolve_enclaveos_commit() -> String {
     std::env::var("ENCLAVEOS_COMMIT")
@@ -52,6 +53,7 @@ pub async fn stage_eif_components(
     manifest: Option<EnclaveManifest>,
     ports: &[u16],
     e2e: bool,
+    locksmith: bool,
     templates_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     let stage_dir = work_dir.join("eif-stage");
@@ -78,12 +80,17 @@ pub async fn stage_eif_components(
         .unwrap_or_else(|_| DEFAULT_BOOTPROOF_COMMIT.to_string());
     let steve_commit = std::env::var("STEVE_COMMIT")
         .unwrap_or_else(|_| DEFAULT_STEVE_COMMIT.to_string());
+    let locksmith_commit = std::env::var("LOCKSMITH_COMMIT")
+        .unwrap_or_else(|_| DEFAULT_LOCKSMITH_COMMIT.to_string());
 
     if let Some(mut manifest) = manifest {
         manifest.enclaveos_commit = Some(enclaveos_commit.clone());
         manifest.bootproof_commit = Some(bootproof_commit.clone());
         if e2e {
             manifest.steve_commit = Some(steve_commit.clone());
+        }
+        if locksmith {
+            manifest.locksmith_commit = Some(locksmith_commit.clone());
         }
         let manifest_path = stage_dir.join("manifest.json");
         manifest.write_to_file(&manifest_path).await
@@ -107,9 +114,9 @@ pub async fn stage_eif_components(
         "Containerfile.eif template not found at {}",
         containerfile_template.display());
 
-    let run_sh_content = render_run_sh_template(&run_sh_template, run_command, ports, e2e).await?;
+    let run_sh_content = render_run_sh_template(&run_sh_template, run_command, ports, e2e, locksmith).await?;
     let containerfile_content = render_containerfile_template(
-        &containerfile_template, e2e, &bootproof_commit, &steve_commit,
+        &containerfile_template, e2e, locksmith, &bootproof_commit, &steve_commit, &locksmith_commit,
     ).await?;
 
     let run_sh_path = stage_dir.join("run.sh");
@@ -158,11 +165,14 @@ async fn render_run_sh_template(
     run_command: Option<String>,
     ports: &[u16],
     e2e: bool,
+    locksmith: bool,
 ) -> Result<String> {
     let template = fs::read_to_string(template_path).await
         .context("Failed to read run.sh template")?;
 
-    let enabled_blocks: Vec<&str> = if e2e { vec!["STEVE"] } else { vec![] };
+    let mut enabled_blocks: Vec<&str> = vec![];
+    if e2e { enabled_blocks.push("STEVE"); }
+    if locksmith { enabled_blocks.push("LOCKSMITH"); }
     let processed = process_template_blocks(&template, &enabled_blocks);
 
     let user_cmd = if let Some(cmd) = run_command {
@@ -174,7 +184,7 @@ async fn render_run_sh_template(
 
     let custom_port_proxies: String = ports
         .iter()
-        .filter(|&&port| port != 8080 && port != 8081 && port != 8082)
+        .filter(|&&port| port != 8080 && port != 8081 && port != 8082 && port != 8084)
         .map(|port| format!("/bin/socat VSOCK-LISTEN:{},reuseaddr,fork TCP:localhost:{} &", port, port))
         .collect::<Vec<_>>()
         .join("\n");
@@ -195,18 +205,23 @@ async fn render_run_sh_template(
 async fn render_containerfile_template(
     template_path: &Path,
     e2e: bool,
+    locksmith: bool,
     bootproof_commit: &str,
     steve_commit: &str,
+    locksmith_commit: &str,
 ) -> Result<String> {
     let template = fs::read_to_string(template_path).await
         .context("Failed to read Containerfile.eif template")?;
 
-    let enabled_blocks: Vec<&str> = if e2e { vec!["STEVE"] } else { vec![] };
+    let mut enabled_blocks: Vec<&str> = vec![];
+    if e2e { enabled_blocks.push("STEVE"); }
+    if locksmith { enabled_blocks.push("LOCKSMITH"); }
     let processed = process_template_blocks(&template, &enabled_blocks);
 
     Ok(processed
         .replace("{{BOOTPROOF_COMMIT}}", bootproof_commit)
-        .replace("{{STEVE_COMMIT}}", steve_commit))
+        .replace("{{STEVE_COMMIT}}", steve_commit)
+        .replace("{{LOCKSMITH_COMMIT}}", locksmith_commit))
 }
 
 pub async fn build_eif_from_filesystems(
@@ -221,6 +236,7 @@ pub async fn build_eif_from_filesystems(
     ports: &[u16],
     no_cache: bool,
     e2e: bool,
+    locksmith: bool,
     templates_dir: Option<&Path>,
 ) -> Result<EifFile> {
     tracing::info!("Building EIF using transparent Containerfile approach");
@@ -229,7 +245,7 @@ pub async fn build_eif_from_filesystems(
         fs::create_dir_all(parent).await?;
     }
 
-    let stage_dir = stage_eif_components(user_fs_path, enclave_source_path, work_dir, run_command, manifest, ports, e2e, templates_dir).await?;
+    let stage_dir = stage_eif_components(user_fs_path, enclave_source_path, work_dir, run_command, manifest, ports, e2e, locksmith, templates_dir).await?;
 
     tracing::info!("Building EIF using Docker and Containerfile.eif");
     let output_dir = stage_dir.join("output");
@@ -451,5 +467,40 @@ mod tests {
         let content = "start\n# {A\na\n# }A\n# {B\nb\n# }B\nend\n";
         let result = process_template_blocks(content, &["A", "B"]);
         assert_eq!(result, "start\na\nb\nend\n");
+    }
+
+    #[test]
+    fn test_process_template_blocks_locksmith_enabled() {
+        let content = "before\n# {LOCKSMITH\nlocksmith content\n# }LOCKSMITH\nafter\n";
+        let result = process_template_blocks(content, &["LOCKSMITH"]);
+        assert_eq!(result, "before\nlocksmith content\nafter\n");
+    }
+
+    #[test]
+    fn test_process_template_blocks_locksmith_disabled() {
+        let content = "before\n# {LOCKSMITH\nlocksmith content\n# }LOCKSMITH\nafter\n";
+        let result = process_template_blocks(content, &[]);
+        assert_eq!(result, "before\nafter\n");
+    }
+
+    #[test]
+    fn test_process_template_blocks_steve_and_locksmith() {
+        let content = "start\n# {STEVE\nsteve\n# }STEVE\nmid\n# {LOCKSMITH\nlocksmith\n# }LOCKSMITH\nend\n";
+
+        // Both enabled
+        let result = process_template_blocks(content, &["STEVE", "LOCKSMITH"]);
+        assert_eq!(result, "start\nsteve\nmid\nlocksmith\nend\n");
+
+        // Only STEVE
+        let result = process_template_blocks(content, &["STEVE"]);
+        assert_eq!(result, "start\nsteve\nmid\nend\n");
+
+        // Only LOCKSMITH
+        let result = process_template_blocks(content, &["LOCKSMITH"]);
+        assert_eq!(result, "start\nmid\nlocksmith\nend\n");
+
+        // Neither
+        let result = process_template_blocks(content, &[]);
+        assert_eq!(result, "start\nmid\nend\n");
     }
 }

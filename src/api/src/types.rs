@@ -227,6 +227,10 @@ pub struct BuildConfig {
     /// Enable end-to-end encryption via STEVE proxy (default: false)
     #[serde(default)]
     pub e2e: bool,
+
+    /// Enable locksmith secret management (default: false)
+    #[serde(default)]
+    pub locksmith: bool,
 }
 
 impl Default for BuildConfig {
@@ -251,6 +255,7 @@ impl Default for BuildConfig {
             domain: None,
             managed_on_prem: None,
             e2e: false,
+            locksmith: false,
         }
     }
 }
@@ -271,6 +276,7 @@ impl BuildConfig {
         let mut debug = None;
         let mut no_cache = None;
         let mut e2e = None;
+        let mut locksmith = None;
         let mut ports: Vec<u16> = Vec::new();
         let mut http_port: Option<u16> = None;
         let mut ssh_keys: Vec<String> = Vec::new();
@@ -376,6 +382,9 @@ impl BuildConfig {
                     }
                     "e2e" => {
                         e2e = Some(value.to_lowercase() == "true");
+                    }
+                    "locksmith" => {
+                        locksmith = Some(value.to_lowercase() == "true");
                     }
                     "ports" => {
                         let mut parsed_ports: Vec<u16> = Vec::new();
@@ -491,6 +500,14 @@ impl BuildConfig {
             }
         }
 
+        // Port 8084 is reserved for locksmith when locksmith is enabled
+        if locksmith.unwrap_or(false) && ports.contains(&8084) {
+            return Err(format!(
+                "Port 8084 is reserved for locksmith (shard receiver). \
+                Your application should listen on a different port."
+            ));
+        }
+
         // Default http_port to the single port if only one is specified
         let http_port = match http_port {
             Some(hp) => {
@@ -550,6 +567,82 @@ impl BuildConfig {
             domain,
             managed_on_prem: managed_on_prem_config,
             e2e: e2e.unwrap_or(false),
+            locksmith: locksmith.unwrap_or(false),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_config_default_locksmith_false() {
+        let config = BuildConfig::default();
+        assert!(!config.locksmith);
+        assert!(!config.e2e);
+    }
+
+    #[test]
+    fn test_parse_locksmith_true() {
+        let procfile = "run: /app/server\nlocksmith: true\n";
+        let config = BuildConfig::from_procfile(procfile).unwrap();
+        assert!(config.locksmith);
+    }
+
+    #[test]
+    fn test_parse_locksmith_false() {
+        let procfile = "run: /app/server\nlocksmith: false\n";
+        let config = BuildConfig::from_procfile(procfile).unwrap();
+        assert!(!config.locksmith);
+    }
+
+    #[test]
+    fn test_parse_locksmith_absent_defaults_false() {
+        let procfile = "run: /app/server\n";
+        let config = BuildConfig::from_procfile(procfile).unwrap();
+        assert!(!config.locksmith);
+    }
+
+    #[test]
+    fn test_parse_locksmith_case_insensitive() {
+        let procfile = "run: /app/server\nlocksmith: True\n";
+        let config = BuildConfig::from_procfile(procfile).unwrap();
+        assert!(config.locksmith);
+
+        let procfile = "run: /app/server\nlocksmith: TRUE\n";
+        let config = BuildConfig::from_procfile(procfile).unwrap();
+        assert!(config.locksmith);
+    }
+
+    #[test]
+    fn test_parse_locksmith_and_e2e_together() {
+        let procfile = "run: /app/server\ne2e: true\nlocksmith: true\n";
+        let config = BuildConfig::from_procfile(procfile).unwrap();
+        assert!(config.e2e);
+        assert!(config.locksmith);
+    }
+
+    #[test]
+    fn test_parse_locksmith_with_ports() {
+        let procfile = "run: /app/server\nlocksmith: true\nports: 8083, 9090\n";
+        let config = BuildConfig::from_procfile(procfile).unwrap();
+        assert!(config.locksmith);
+        assert_eq!(config.ports, vec![8083, 9090]);
+    }
+
+    #[test]
+    fn test_locksmith_rejects_reserved_port_8084() {
+        let procfile = "run: /app/server\nlocksmith: true\nports: 8084\n";
+        let result = BuildConfig::from_procfile(procfile);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("8084"));
+    }
+
+    #[test]
+    fn test_port_8084_allowed_without_locksmith() {
+        let procfile = "run: /app/server\nlocksmith: false\nports: 8084\n";
+        let config = BuildConfig::from_procfile(procfile).unwrap();
+        assert!(config.ports.contains(&8084));
     }
 }

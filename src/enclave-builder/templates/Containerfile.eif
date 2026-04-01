@@ -43,6 +43,35 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
       && install -D -m 0755 /build-steve/target/${TARGET_ARCH}/release/steve /binaries/steve
 
 # }STEVE
+
+# {LOCKSMITH
+FROM pallet-rust AS locksmith-builder
+
+COPY --from=git . /
+COPY --from=ca-certificates . /
+COPY --from=curl . /
+
+ENV SOURCE_DATE_EPOCH=1
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
+ENV TARGET_ARCH="x86_64-unknown-linux-musl"
+
+WORKDIR /build-locksmith
+RUN git clone https://codeberg.org/caution/locksmith.git . && \
+    git checkout {{LOCKSMITH_COMMIT}}
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo fetch --locked --target $TARGET_ARCH
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build-locksmith/target \
+    cargo build --release --locked --target ${TARGET_ARCH} -p locksmith \
+      && install -D -m 0755 /build-locksmith/target/${TARGET_ARCH}/release/locksmithd /binaries/locksmithd \
+      && install -D -m 0755 /build-locksmith/target/${TARGET_ARCH}/release/locksmith-oneshot /binaries/locksmith-oneshot
+# }LOCKSMITH
+
 FROM pallet-rust AS bootproof-builder
 
 COPY --from=git . /
@@ -110,6 +139,10 @@ COPY --from=bootproof-builder /binaries/ /build/binaries/
 # {STEVE
 COPY --from=steve-builder /binaries/steve /build/binaries/steve
 # }STEVE
+# {LOCKSMITH
+COPY --from=locksmith-builder /binaries/locksmithd /build/binaries/locksmithd
+COPY --from=locksmith-builder /binaries/locksmith-oneshot /build/binaries/locksmith-oneshot
+# }LOCKSMITH
 
 COPY --from=linux-nitro /bzImage /build/kernel/bzImage
 COPY --from=linux-nitro /linux.config /build/kernel/linux.config
@@ -142,6 +175,13 @@ RUN cp /build/binaries/bootproofd /build/initramfs/bootproofd && \
 RUN cp /build/binaries/steve /build/initramfs/steve && \
     chmod +x /build/initramfs/steve
 # }STEVE
+# {LOCKSMITH
+RUN mkdir -p /build/initramfs/usr/bin && \
+    cp /build/binaries/locksmithd /build/initramfs/usr/bin/locksmithd && \
+    chmod +x /build/initramfs/usr/bin/locksmithd && \
+    cp /build/binaries/locksmith-oneshot /build/initramfs/usr/bin/locksmith-oneshot && \
+    chmod +x /build/initramfs/usr/bin/locksmith-oneshot
+# }LOCKSMITH
 
 RUN if [ -f /build/manifest.json ]; then \
         cp /build/manifest.json /build/initramfs/manifest.json; \

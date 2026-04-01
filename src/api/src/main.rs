@@ -1587,7 +1587,7 @@ async fn deploy_logic(
         let procfile_content = String::from_utf8_lossy(&procfile_output.stdout).to_string();
         let enclaveos_commit = enclave_builder::build::resolve_enclaveos_commit();
         let cache_key = builder::compute_cache_key(
-            &commit_sha, &enclaveos_commit, &procfile_content, build_config.e2e,
+            &commit_sha, &enclaveos_commit, &procfile_content, build_config.e2e, build_config.locksmith,
         );
 
         // Check cache first
@@ -1663,6 +1663,7 @@ async fn deploy_logic(
                 binary_path: build_config.binary.clone(),
                 ports: enclave_config.ports.clone(),
                 e2e: build_config.e2e,
+                locksmith: build_config.locksmith,
                 enclaveos_commit,
                 builder_size: resolved_size.id.clone(),
                 builder_instance_type: resolved_size.instance_type.clone(),
@@ -2060,6 +2061,7 @@ async fn deploy_logic(
                     None,
                     &enclave_config.ports,
                     build_config.e2e,
+                    build_config.locksmith,
                 )
                 .await
                 .map_err(|e| {
@@ -2080,6 +2082,7 @@ async fn deploy_logic(
                     None,
                     &enclave_config.ports,
                     build_config.e2e,
+                    build_config.locksmith,
                 )
                 .await
                 .map_err(|e| {

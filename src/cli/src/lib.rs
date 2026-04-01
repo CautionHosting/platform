@@ -389,6 +389,13 @@ enum SecretCommands {
         #[command(subcommand)]
         command: LabelCommands,
     },
+    #[command(about = "Send a shard to a running enclave's locksmith daemon")]
+    SendShard {
+        #[arg(long, help = "App ID or resource name (defaults to current deployment)")]
+        app: Option<String>,
+        #[arg(long, help = "Path to quorum bundle JSON file")]
+        bundle: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -957,6 +964,7 @@ build: docker build -t app .
 # ports: 8083
 # http_port: 8083
 # e2e: false
+# locksmith: false
 # debug: false
 # no_cache: false
 # ssh_keys: ssh-ed25519 AAAA...
@@ -3185,7 +3193,7 @@ build: docker build -t app .
 
         let mut loader = Loader::new("Building enclave image", LoaderStyle::Processing);
         let deployment = builder
-            .build_enclave_auto(&user_image, &binary_path, run_command, app_source_urls_opt, None, None, None, None, &ports, false)
+            .build_enclave_auto(&user_image, &binary_path, run_command, app_source_urls_opt, None, None, None, None, &ports, false, false)
             .await
             .context("Failed to build enclave")?;
         loader.stop();
@@ -3397,6 +3405,11 @@ build: docker build -t app .
             .unwrap_or(false);
         log_verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
+        let locksmith = self.read_procfile_field("locksmith")
+            .map(|v| v.to_lowercase() == "true")
+            .unwrap_or(false);
+        log_verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
+
         let deployment = if let Some(ref bin_path) = binary_path {
             log_verbose(self.verbose, &format!("Using build_enclave_auto with binary: {}", bin_path));
             builder.build_enclave_auto(
@@ -3410,6 +3423,7 @@ build: docker build -t app .
                 external_manifest,
                 &ports,
                 e2e,
+                locksmith,
             ).await
         } else {
             log_verbose(self.verbose, "Using build_enclave (no binary specified)");
@@ -3424,6 +3438,7 @@ build: docker build -t app .
                 external_manifest,
                 &ports,
                 e2e,
+                locksmith,
             ).await
         }.context("Failed to build enclave locally")?;
         loader.stop();
@@ -4906,6 +4921,92 @@ build: docker build -t app .
 
         Ok(())
     }
+
+    async fn secret_send_shard(&self, app: Option<String>, bundle_path: Option<PathBuf>) -> Result<()> {
+        // Resolve the app to get the enclave's public IP
+        let app_info = match app {
+            Some(id) => self.fetch_app(&id).await?,
+            None => self.get_current_app().await?,
+        };
+
+        let public_ip = app_info.public_ip
+            .context("App has no public IP. Is the enclave running?")?;
+
+        // Resolve the bundle file
+        let bundle_file = if let Some(path) = bundle_path {
+            path
+        } else {
+            // Check local paths first
+            let local_paths = [
+                PathBuf::from(".caution/secrets/bundle.json"),
+                PathBuf::from(".caution/quorum-bundle.json"),
+            ];
+            let found = local_paths.iter().find(|p| p.exists());
+
+            if let Some(path) = found {
+                path.clone()
+            } else {
+                // Try to pull from Caution API
+                eprintln!("No local bundle found, checking Caution...");
+                let config = self.ensure_authenticated().await?;
+                let response = self.client
+                    .get(format!("{}/api/quorum-bundles", self.base_url))
+                    .header("X-Session-ID", &config.session_id)
+                    .send()
+                    .await
+                    .context("Failed to fetch quorum bundles from Caution")?;
+
+                if !response.status().is_success() {
+                    bail!("No bundle found locally or on Caution. Create one with: caution secret new <keyring>");
+                }
+
+                let bundles: Vec<serde_json::Value> = response.json().await
+                    .context("Failed to parse bundles response")?;
+
+                if bundles.is_empty() {
+                    bail!("No bundle found locally or on Caution. Create one with: caution secret new <keyring>");
+                }
+
+                // Use the first bundle's data
+                let bundle_data = bundles[0].get("data")
+                    .context("Bundle has no data field")?;
+
+                let secrets_dir = PathBuf::from(".caution/secrets");
+                fs::create_dir_all(&secrets_dir)
+                    .context("Failed to create .caution/secrets/")?;
+                let path = secrets_dir.join("bundle.json");
+                let json = serde_json::to_string_pretty(bundle_data)?;
+                fs::write(&path, &json)
+                    .with_context(|| format!("Failed to write bundle to {}", path.display()))?;
+                eprintln!("Bundle saved to {}", path.display());
+                path
+            }
+        };
+
+        anyhow::ensure!(bundle_file.exists(), "Bundle file not found: {}", bundle_file.display());
+
+        let address = format!("{}:8084", public_ip);
+        eprintln!("Sending shard to enclave at {}...", address);
+
+        // Invoke locksmith binary to send the shard
+        let output = std::process::Command::new("locksmith")
+            .arg(&address)
+            .arg(&bundle_file)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .context(
+                "Failed to run locksmith binary. Install it with:\n  \
+                 cargo install --git https://codeberg.org/caution/locksmith locksmith"
+            )?;
+
+        if !output.success() {
+            bail!("locksmith exited with non-zero status");
+        }
+
+        Ok(())
+    }
 }
 
 struct AssertionResult {
@@ -5055,6 +5156,9 @@ pub async fn run() -> Result<()> {
                             client.secret_label_remove(id, keys).await?;
                         }
                     }
+                }
+                SecretCommands::SendShard { app, bundle } => {
+                    client.secret_send_shard(app, bundle).await?;
                 }
             }
         }

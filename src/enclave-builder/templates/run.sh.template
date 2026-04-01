@@ -59,8 +59,19 @@ echo "Starting VSOCK-to-TCP proxies..."
 /bin/socat VSOCK-LISTEN:8080,reuseaddr,fork TCP:localhost:8080 &
 /bin/socat VSOCK-LISTEN:8081,reuseaddr,fork TCP:localhost:8081 &
 /bin/socat VSOCK-LISTEN:8082,reuseaddr,fork TCP:localhost:8082 &
+# {LOCKSMITH
+/bin/socat VSOCK-LISTEN:8084,reuseaddr,fork TCP:localhost:8084 &
+# }LOCKSMITH
 {{CUSTOM_PORT_SECTION}}
 /bin/busybox sleep 2
+
+# {LOCKSMITH
+echo "Starting locksmithd (shard receiver + keyforkd)..."
+/usr/bin/locksmithd
+
+echo "Decrypting secrets via locksmith-oneshot..."
+source <(/usr/bin/locksmith-oneshot)
+# }LOCKSMITH
 
 echo "Starting user application..."
 cd /
