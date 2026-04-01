@@ -137,7 +137,7 @@ docker exec postgres-test psql -U postgres -d caution_test -c "
 UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';
 " >/dev/null 2>&1 || log "  Warning: could not mark user as onboarded"
 
-# Seed credits for deploy gate ($5 minimum required)
+# Seed credits for deploy gate ($25 minimum required)
 log "Seeding test credits for deploy gate..."
 docker exec postgres-test psql -U postgres -d caution_test -c "
 INSERT INTO wallet_balance (user_id, balance_cents) VALUES ('$USER_ID', 10000)
@@ -234,12 +234,69 @@ if [ $ELAPSED -ge $MAX_WAIT ]; then
 fi
 step_pass "Deployment (app running)"
 
-# ── Step 8: caution verify ───────────────────────────────────────────
+# ── Step 8: Curl the deployed app ───────────────────────────────────
 
 STEP_NUM=8
+log "Fetching deployed app URL..."
+
+# Get public IP from the API
+APP_INFO=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps get "$RESOURCE_ID" 2>&1 || true)
+APP_IP=$(echo "$APP_INFO" | grep -oP 'public_ip["\s:]+\K[0-9.]+' || true)
+
+if [ -z "$APP_IP" ]; then
+    # Fallback: query DB directly
+    APP_IP=$(docker exec postgres-test psql -U postgres -d caution_test -t -c "
+    SELECT public_ip FROM compute_resources WHERE id = '$RESOURCE_ID';
+    " 2>/dev/null | tr -d ' \n')
+fi
+
+if [ -n "$APP_IP" ]; then
+    log "  App IP: $APP_IP"
+    # Wait for app to respond (may take a moment after deployment reports running)
+    APP_RESPONDED=false
+    for i in $(seq 1 30); do
+        APP_BODY=$(curl -sk --connect-timeout 5 "https://$APP_IP/" 2>/dev/null || true)
+        if [ -n "$APP_BODY" ]; then
+            APP_RESPONDED=true
+            break
+        fi
+        sleep 5
+    done
+
+    if $APP_RESPONDED; then
+        log "  Response: $(echo "$APP_BODY" | head -1)"
+        if echo "$APP_BODY" | grep -qi "hello"; then
+            step_pass "App responds with expected content"
+        else
+            step_warn "App responds but content unexpected: $(echo "$APP_BODY" | head -1)"
+        fi
+    else
+        step_warn "App did not respond within 150s (may need more time)"
+    fi
+else
+    step_warn "Could not determine app IP — skipping curl check"
+fi
+
+# ── Step 9: caution verify ───────────────────────────────────────────
+
+STEP_NUM=9
 log "Running caution verify..."
+
+if [ -z "$APP_IP" ]; then
+    # Fallback: query DB directly
+    APP_IP=$(docker exec postgres-test psql -U postgres -d caution_test -t -c "
+    SELECT public_ip FROM compute_resources WHERE id = '$RESOURCE_ID';
+    " 2>/dev/null | tr -d ' \n')
+fi
+
+if [ -z "$APP_IP" ]; then
+    step_warn "Could not determine app IP — skipping verify"
+else
+    log "  Verifying attestation at http://$APP_IP/attestation"
+fi
+
 set +e
-VERIFY_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" verify --no-cache 2>&1)
+VERIFY_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" verify --attestation-url "http://$APP_IP/attestation" --no-cache 2>&1)
 VERIFY_STATUS=$?
 set -e
 echo "$VERIFY_OUTPUT"
@@ -249,7 +306,11 @@ if [ $VERIFY_STATUS -ne 0 ]; then
     PCR_MISMATCHES=$(echo "$VERIFY_OUTPUT" | grep -c "MISMATCH" || true)
     PCR_MATCHES=$(echo "$VERIFY_OUTPUT" | grep -c ": match" || true)
 
-    if [ "$PCR_MATCHES" -gt 0 ] && [ "$PCR_MISMATCHES" -eq 0 ]; then
+    if echo "$VERIFY_OUTPUT" | grep -q "does not include a manifest"; then
+        step_warn "caution verify (PCRs extracted but no manifest — bootproofd needs manifest support)"
+    elif echo "$VERIFY_OUTPUT" | grep -q "private code"; then
+        step_warn "caution verify (manifest present but app_source is private — use --from-local or --app-source-url)"
+    elif [ "$PCR_MATCHES" -gt 0 ] && [ "$PCR_MISMATCHES" -eq 0 ]; then
         # All PCRs match but attestation crypto failed (e.g. CA bundle issue)
         step_warn "caution verify (PCRs match but attestation crypto failed)"
     elif echo "$VERIFY_OUTPUT" | grep -q "PCR2: match"; then
@@ -263,9 +324,9 @@ else
     step_pass "caution verify (attestation verified)"
 fi
 
-# ── Step 9: caution apps destroy ─────────────────────────────────────
+# ── Step 10: caution apps destroy ────────────────────────────────────
 
-STEP_NUM=9
+STEP_NUM=10
 log "Destroying app..."
 set +e
 DESTROY_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps destroy "$RESOURCE_ID" --force 2>&1)

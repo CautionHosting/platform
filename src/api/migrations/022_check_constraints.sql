@@ -18,7 +18,7 @@ ALTER TABLE subscriptions
 -- subscription billing event status
 ALTER TABLE subscription_billing_events
     ADD CONSTRAINT chk_sub_billing_events_status
-    CHECK (status IN ('pending', 'paid', 'payment_failed'));
+    CHECK (status IN ('pending', 'paid', 'payment_failed', 'credits_covered'));
 
 -- tracked resources status
 ALTER TABLE tracked_resources

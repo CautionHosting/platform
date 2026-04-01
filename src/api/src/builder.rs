@@ -141,6 +141,7 @@ pub struct BuildRequest {
     pub enclaveos_commit: String,
     pub builder_size: String,
     pub builder_instance_type: String,
+    pub app_sources: Vec<String>,
 }
 
 /// Compute a cache key from all inputs that affect the EIF output.
@@ -611,6 +612,37 @@ fn generate_builder_userdata(
 
     let e2e_flag = if request.e2e { "true" } else { "false" };
 
+    let bootproof_commit = std::env::var("BOOTPROOF_COMMIT")
+        .unwrap_or_else(|_| "64dae0628e58b9f898b89f9b7a404b37e2f0ca9f".to_string());
+    let steve_commit = std::env::var("STEVE_COMMIT")
+        .unwrap_or_else(|_| "ed38a190cd5d7a8f452c854e41d00ec748e172bf".to_string());
+
+    // Build manifest using the same EnclaveManifest struct as the inline build path
+    let app_source = if request.app_sources.is_empty() {
+        None
+    } else {
+        Some(enclave_builder::AppSource {
+            urls: request.app_sources.clone(),
+            commit: request.commit_sha.clone(),
+            branch: Some(request.branch.clone()),
+        })
+    };
+    let manifest = enclave_builder::EnclaveManifest::new(
+        app_source,
+        enclave_builder::EnclaveSource::GitArchive {
+            urls: vec![format!("https://git.distrust.co/public/enclaveos/archive/{}.tar.gz", request.enclaveos_commit)],
+            commit: Some(request.enclaveos_commit.clone()),
+        },
+        enclave_builder::FrameworkSource::GitArchive {
+            url: enclave_builder::FRAMEWORK_SOURCE.to_string(),
+            commit: None,
+        },
+        request.binary_path.clone(),
+        request.run_command.clone(),
+        None,
+    );
+    let manifest_json = serde_json::to_string(&manifest).expect("manifest serialization cannot fail");
+
     format!(r##"#!/bin/bash
 set -euo pipefail
 
@@ -707,9 +739,9 @@ cat > /build/eif-stage/Containerfile.eif << 'CONTAINERFILE_EOF'
 {containerfile_eif}
 CONTAINERFILE_EOF
 
-# Write manifest
-cat > /build/eif-stage/manifest.json << MANIFEST_EOF
-{{"enclaveos_commit":"$ENCLAVEOS_COMMIT","app_commit":"$COMMIT_SHA"}}
+# Write manifest (must match EnclaveManifest struct for caution verify)
+cat > /build/eif-stage/manifest.json << 'MANIFEST_EOF'
+{manifest_json}
 MANIFEST_EOF
 
 # Build EIF
@@ -718,7 +750,7 @@ cd /build/eif-stage
 DOCKER_BUILDKIT=1 SOURCE_DATE_EPOCH=1 docker build \
     --progress=plain \
     --target output \
-    --output type=local,dest=/build/eif-stage/output \
+    --output type=local,rewrite-timestamp=true,dest=/build/eif-stage/output \
     -f Containerfile.eif \
     . 2>&1
 
@@ -916,6 +948,28 @@ mod tests {
         assert!(!config.is_valid("xlarge"));
     }
 
+    #[test]
+    fn test_max_resources_per_org_default() {
+        // Config without max_resources_per_org should default to 10
+        let config: BuilderSizesConfig = serde_json::from_str(r#"{
+            "builder_sizes": [
+                { "id": "small", "label": "Small", "instance_type": "c5.xlarge", "vcpus": 4, "ram_gb": 8 }
+            ]
+        }"#).unwrap();
+        assert_eq!(config.max_resources_per_org, 10);
+    }
+
+    #[test]
+    fn test_max_resources_per_org_explicit() {
+        let config: BuilderSizesConfig = serde_json::from_str(r#"{
+            "builder_sizes": [
+                { "id": "small", "label": "Small", "instance_type": "c5.xlarge", "vcpus": 4, "ram_gb": 8 }
+            ],
+            "max_resources_per_org": 5
+        }"#).unwrap();
+        assert_eq!(config.max_resources_per_org, 5);
+    }
+
     // --- render_templates ---
 
     #[test]
@@ -935,6 +989,7 @@ mod tests {
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
+            app_sources: vec![],
         };
 
         let (containerfile, run_sh) = render_templates(&request);
@@ -966,6 +1021,7 @@ mod tests {
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
+            app_sources: vec![],
         };
 
         let (containerfile, run_sh) = render_templates(&request);
@@ -991,6 +1047,7 @@ mod tests {
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
+            app_sources: vec![],
         };
 
         let (_containerfile, run_sh) = render_templates(&request);
@@ -1030,6 +1087,7 @@ mod tests {
             enclaveos_commit: "enclave-abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
+            app_sources: vec![],
         };
 
         let build_id = Uuid::new_v4();
@@ -1095,6 +1153,7 @@ mod tests {
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
+            app_sources: vec![],
         };
 
         let userdata = generate_builder_userdata(Uuid::new_v4(), &config, &request, "eifs/test.eif");

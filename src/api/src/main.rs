@@ -1450,8 +1450,8 @@ async fn deploy_logic(
     // --- Resource limit check (both paths) ---
     let active_resources: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM compute_resources
-         WHERE organization_id = $1 AND state NOT IN ('terminated', 'destroyed')
-           AND id != $2"
+         WHERE organization_id = $1 AND state NOT IN ('terminated', 'failed')
+           AND destroyed_at IS NULL AND id != $2"
     )
     .bind(req.org_id)
     .bind(resource_id)
@@ -1630,6 +1630,7 @@ async fn deploy_logic(
                 enclaveos_commit,
                 builder_size: resolved_size.id.clone(),
                 builder_instance_type: resolved_size.instance_type.clone(),
+                app_sources: build_config.app_sources.clone(),
             };
 
             let hourly_rate = state.pricing.instance_hourly_rate(&build_request.builder_instance_type);

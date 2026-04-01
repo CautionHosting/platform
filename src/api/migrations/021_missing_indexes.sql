@@ -15,5 +15,5 @@ CREATE INDEX IF NOT EXISTS idx_usage_records_user_recorded ON usage_records(user
 CREATE INDEX IF NOT EXISTS idx_invoices_created ON invoices(created_at);
 
 -- compute_resources: org + state for resource limit checks
-CREATE INDEX IF NOT EXISTS idx_resources_org_state ON compute_resources(organization_id, state)
-    WHERE state NOT IN ('terminated', 'destroyed');
+CREATE INDEX IF NOT EXISTS idx_resources_org_active ON compute_resources(organization_id)
+    WHERE state NOT IN ('terminated', 'failed') AND destroyed_at IS NULL;
