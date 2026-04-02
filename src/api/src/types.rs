@@ -476,7 +476,7 @@ impl BuildConfig {
             }
         }
 
-        // Ports 8080, 8081, 8082 are always reserved for internal enclave services
+        // Ports 8080, 8081, 8082, 8084 are always reserved for internal enclave services
         if ports.contains(&8080) {
             return Err(format!(
                 "Port 8080 is reserved for internal enclave services. \
@@ -495,9 +495,7 @@ impl BuildConfig {
                 Your application should listen on a different port."
             ));
         }
-
-        // Port 8084 is reserved for locksmith when locksmith is enabled
-        if locksmith.unwrap_or(false) && ports.contains(&8084) {
+        if ports.contains(&8084) {
             return Err(format!(
                 "Port 8084 is reserved for locksmith (shard receiver). \
                 Your application should listen on a different port."
@@ -652,17 +650,10 @@ mod tests {
     }
 
     #[test]
-    fn test_locksmith_rejects_reserved_port_8084() {
-        let procfile = "run: /app/server\nlocksmith: true\nports: 8084\n";
+    fn test_rejects_reserved_port_8084() {
+        let procfile = "run: /app/server\nports: 8084\n";
         let result = BuildConfig::from_procfile(procfile);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("8084"));
-    }
-
-    #[test]
-    fn test_port_8084_allowed_without_locksmith() {
-        let procfile = "run: /app/server\nlocksmith: false\nports: 8084\n";
-        let config = BuildConfig::from_procfile(procfile).unwrap();
-        assert!(config.ports.contains(&8084));
     }
 }

@@ -561,14 +561,12 @@ fn render_templates(request: &BuildRequest) -> anyhow::Result<(String, String)> 
         (8080, "internal enclave services"),
         (8081, "internal enclave services"),
         (8082, "bootproofd"),
+        (8084, "locksmith"),
     ];
     for &(port, service) in reserved {
         if request.ports.contains(&port) {
             anyhow::bail!("Port {} is reserved for {}", port, service);
         }
-    }
-    if request.locksmith && request.ports.contains(&8084) {
-        anyhow::bail!("Port 8084 is reserved for locksmith");
     }
 
     let mut enabled_blocks: Vec<&str> = vec![];
