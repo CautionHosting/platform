@@ -182,9 +182,23 @@ async fn render_run_sh_template(
         "echo \"ERROR: No run command specified in Procfile\"\nexit 1".to_string()
     };
 
+    let reserved: &[(u16, &str)] = &[
+        (8080, "internal enclave services"),
+        (8081, "internal enclave services"),
+        (8082, "bootproofd"),
+    ];
+    for &(port, service) in reserved {
+        if ports.contains(&port) {
+            anyhow::bail!("Port {} is reserved for {}", port, service);
+        }
+    }
+    if locksmith && ports.contains(&8084) {
+        anyhow::bail!("Port 8084 is reserved for locksmith");
+    }
+
     let custom_port_proxies: String = ports
         .iter()
-        .filter(|&&port| port != 8080 && port != 8081 && port != 8082 && port != 8084)
+        .filter(|&&port| port != 8080 && port != 8081 && port != 8082 && !(locksmith && port == 8084))
         .map(|port| format!("/bin/socat VSOCK-LISTEN:{},reuseaddr,fork TCP:localhost:{} &", port, port))
         .collect::<Vec<_>>()
         .join("\n");

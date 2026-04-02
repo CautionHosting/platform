@@ -3744,6 +3744,21 @@ build: docker build -t app .
                 println!("The deployed enclave matches the expected PCRs.");
                 println!("This means the code running in the enclave is exactly what you expect.");
                 println!("\nPowered by: Caution (https://caution.co)");
+
+                // Save trusted hashes for use by send-shard
+                let trusted = serde_json::json!({
+                    "pcr0": remote_pcrs.pcr0,
+                    "pcr1": remote_pcrs.pcr1,
+                    "pcr2": remote_pcrs.pcr2,
+                    "verified_at": chrono::Utc::now().to_rfc3339(),
+                });
+                let hashes_path = PathBuf::from(".caution/trusted_hashes.json");
+                if let Err(e) = fs::write(&hashes_path, serde_json::to_string_pretty(&trusted)?) {
+                    eprintln!("Warning: could not save trusted hashes: {}", e);
+                } else {
+                    println!("Trusted hashes saved to {}", hashes_path.display());
+                }
+
                 Ok(())
             }
             Err(e) => {
@@ -4988,7 +5003,6 @@ build: docker build -t app .
         let address = format!("{}:8084", public_ip);
         eprintln!("Sending shard to enclave at {}...", address);
 
-        // Invoke locksmith binary to send the shard
         let output = std::process::Command::new("locksmith")
             .arg(&address)
             .arg(&bundle_file)

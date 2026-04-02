@@ -476,28 +476,24 @@ impl BuildConfig {
             }
         }
 
-        // Port 8082 is always reserved for bootproofd
-        if ports.contains(&8082) {
+        // Ports 8080, 8081, 8082 are always reserved for internal enclave services
+        if ports.contains(&8080) {
             return Err(format!(
-                "Port 8082 is reserved for bootproofd."
+                "Port 8080 is reserved for internal enclave services. \
+                Your application should listen on port 8083."
             ));
         }
-
-        // Ports 8080 and 8081 are reserved for STEVE only when e2e encryption is enabled
-        if e2e.unwrap_or(false) {
-            if ports.contains(&8080) {
-                return Err(format!(
-                    "Port 8080 is reserved for STEVE (the encryption proxy). \
-                    Your application should listen on port 8083 instead, \
-                    which STEVE will forward decrypted requests to."
-                ));
-            }
-            if ports.contains(&8081) {
-                return Err(format!(
-                    "Port 8081 is reserved for internal enclave services. \
-                    Your application should listen on port 8083."
-                ));
-            }
+        if ports.contains(&8081) {
+            return Err(format!(
+                "Port 8081 is reserved for internal enclave services. \
+                Your application should listen on port 8083."
+            ));
+        }
+        if ports.contains(&8082) {
+            return Err(format!(
+                "Port 8082 is reserved for bootproofd. \
+                Your application should listen on a different port."
+            ));
         }
 
         // Port 8084 is reserved for locksmith when locksmith is enabled
@@ -629,6 +625,30 @@ mod tests {
         let config = BuildConfig::from_procfile(procfile).unwrap();
         assert!(config.locksmith);
         assert_eq!(config.ports, vec![8083, 9090]);
+    }
+
+    #[test]
+    fn test_rejects_reserved_port_8080() {
+        let procfile = "run: /app/server\nports: 8080\n";
+        let result = BuildConfig::from_procfile(procfile);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("8080"));
+    }
+
+    #[test]
+    fn test_rejects_reserved_port_8081() {
+        let procfile = "run: /app/server\nports: 8081\n";
+        let result = BuildConfig::from_procfile(procfile);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("8081"));
+    }
+
+    #[test]
+    fn test_rejects_reserved_port_8082() {
+        let procfile = "run: /app/server\nports: 8082\n";
+        let result = BuildConfig::from_procfile(procfile);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("8082"));
     }
 
     #[test]

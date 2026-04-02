@@ -266,7 +266,7 @@ pub async fn execute_remote_build(
     .context("Failed to insert eif_builds row")?;
 
     // 2. Generate user-data and launch EC2 instance
-    let user_data = generate_builder_userdata(build_id, config, request, &eif_s3_key);
+    let user_data = generate_builder_userdata(build_id, config, request, &eif_s3_key)?;
     let instance_id = match ec2.run_instances(&RunInstancesParams {
         image_id: config.ami_id.clone(),
         instance_type: instance_type.to_string(),
@@ -555,7 +555,22 @@ fn process_template_blocks(content: &str, enabled_blocks: &[&str]) -> String {
 }
 
 /// Render the Containerfile.eif and run.sh templates with the build parameters.
-fn render_templates(request: &BuildRequest) -> (String, String) {
+fn render_templates(request: &BuildRequest) -> anyhow::Result<(String, String)> {
+    // Validate reserved ports
+    let reserved: &[(u16, &str)] = &[
+        (8080, "internal enclave services"),
+        (8081, "internal enclave services"),
+        (8082, "bootproofd"),
+    ];
+    for &(port, service) in reserved {
+        if request.ports.contains(&port) {
+            anyhow::bail!("Port {} is reserved for {}", port, service);
+        }
+    }
+    if request.locksmith && request.ports.contains(&8084) {
+        anyhow::bail!("Port 8084 is reserved for locksmith");
+    }
+
     let mut enabled_blocks: Vec<&str> = vec![];
     if request.e2e { enabled_blocks.push("STEVE"); }
     if request.locksmith { enabled_blocks.push("LOCKSMITH"); }
@@ -583,7 +598,7 @@ fn render_templates(request: &BuildRequest) -> (String, String) {
     };
 
     let custom_port_proxies: String = request.ports.iter()
-        .filter(|&&p| p != 8080 && p != 8081 && p != 8082 && p != 8084)
+        .filter(|&&p| p != 8080 && p != 8081 && p != 8082 && !(request.locksmith && p == 8084))
         .map(|p| format!("/bin/socat VSOCK-LISTEN:{p},reuseaddr,fork TCP:localhost:{p} &"))
         .collect::<Vec<_>>()
         .join("\n");
@@ -598,7 +613,7 @@ fn render_templates(request: &BuildRequest) -> (String, String) {
         .replace("{{USER_CMD}}", &user_cmd)
         .replace("{{CUSTOM_PORT_SECTION}}", &custom_port_section);
 
-    (containerfile, run_sh)
+    Ok((containerfile, run_sh))
 }
 
 /// Generate the user-data shell script for the builder instance.
@@ -607,7 +622,7 @@ fn generate_builder_userdata(
     config: &BuilderConfig,
     request: &BuildRequest,
     eif_s3_key: &str,
-) -> String {
+) -> anyhow::Result<String> {
     let status_key = format!("builds/{}/status.json", build_id);
     let bucket = &config.eif_s3_bucket;
     let source_s3_key = &request.source_s3_key;
@@ -617,7 +632,7 @@ fn generate_builder_userdata(
     let binary_flag = request.binary_path.as_deref().unwrap_or("");
 
     // Render the enclave templates at generation time
-    let (containerfile_eif, run_sh) = render_templates(request);
+    let (containerfile_eif, run_sh) = render_templates(request)?;
 
     let e2e_flag = if request.e2e { "true" } else { "false" };
     let locksmith_flag = if request.locksmith { "true" } else { "false" };
@@ -648,7 +663,7 @@ fn generate_builder_userdata(
     );
     let manifest_json = serde_json::to_string(&manifest).expect("manifest serialization cannot fail");
 
-    format!(r##"#!/bin/bash
+    Ok(format!(r##"#!/bin/bash
 set -euo pipefail
 
 # --- Caution Dedicated Builder ---
@@ -802,7 +817,7 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
         locksmith_flag = locksmith_flag,
         run_sh = run_sh,
         containerfile_eif = containerfile_eif,
-    )
+    ))
 }
 
 /// Reap builder instances that have been running for too long.
@@ -1007,7 +1022,7 @@ mod tests {
             app_sources: vec![],
         };
 
-        let (containerfile, run_sh) = render_templates(&request);
+        let (containerfile, run_sh) = render_templates(&request).unwrap();
 
         // run.sh should contain the user command
         assert!(run_sh.contains("/usr/bin/myapp --port 8080"), "run.sh should contain user command");
@@ -1040,7 +1055,7 @@ mod tests {
             app_sources: vec![],
         };
 
-        let (containerfile, run_sh) = render_templates(&request);
+        let (containerfile, run_sh) = render_templates(&request).unwrap();
 
         assert!(containerfile.contains("steve-builder"), "Containerfile should contain steve-builder when e2e=true");
         assert!(run_sh.contains("steve"), "run.sh should contain steve when e2e=true");
@@ -1067,7 +1082,7 @@ mod tests {
             app_sources: vec![],
         };
 
-        let (containerfile, run_sh) = render_templates(&request);
+        let (containerfile, run_sh) = render_templates(&request).unwrap();
 
         assert!(containerfile.contains("locksmith-builder"), "Containerfile should contain locksmith-builder when locksmith=true");
         assert!(run_sh.contains("locksmithd"), "run.sh should contain locksmithd when locksmith=true");
@@ -1094,7 +1109,7 @@ mod tests {
             app_sources: vec![],
         };
 
-        let (containerfile, run_sh) = render_templates(&request);
+        let (containerfile, run_sh) = render_templates(&request).unwrap();
 
         assert!(!containerfile.contains("locksmith-builder"), "Containerfile should not contain locksmith-builder when locksmith=false");
         assert!(!run_sh.contains("locksmithd"), "run.sh should not contain locksmithd when locksmith=false");
@@ -1112,7 +1127,7 @@ mod tests {
             run_command: Some("/app".to_string()),
             build_command: None,
             binary_path: None,
-            ports: vec![8080, 9090, 3000],
+            ports: vec![8083, 9090, 3000],
             e2e: false,
             locksmith: false,
             enclaveos_commit: "abc".to_string(),
@@ -1121,10 +1136,10 @@ mod tests {
             app_sources: vec![],
         };
 
-        let (_containerfile, run_sh) = render_templates(&request);
+        let (_containerfile, run_sh) = render_templates(&request).unwrap();
 
-        // 8080 is a default port, should NOT appear in custom section
-        // 9090 and 3000 should appear as custom port proxies
+        // 8083, 9090, and 3000 should appear as custom port proxies
+        assert!(run_sh.contains("VSOCK-LISTEN:8083"), "should have proxy for port 8083");
         assert!(run_sh.contains("VSOCK-LISTEN:9090"), "should have proxy for port 9090");
         assert!(run_sh.contains("VSOCK-LISTEN:3000"), "should have proxy for port 3000");
     }
@@ -1163,7 +1178,7 @@ mod tests {
         };
 
         let build_id = Uuid::new_v4();
-        let userdata = generate_builder_userdata(build_id, &config, &request, "eifs/org/key.eif");
+        let userdata = generate_builder_userdata(build_id, &config, &request, "eifs/org/key.eif").unwrap();
 
         // Should be a valid bash script
         assert!(userdata.starts_with("#!/bin/bash"), "should start with shebang");
@@ -1229,7 +1244,7 @@ mod tests {
             app_sources: vec![],
         };
 
-        let userdata = generate_builder_userdata(Uuid::new_v4(), &config, &request, "eifs/test.eif");
+        let userdata = generate_builder_userdata(Uuid::new_v4(), &config, &request, "eifs/test.eif").unwrap();
 
         // AWS user-data limit is 16KB (before base64 encoding)
         // base64 expands by ~33%, so raw limit is effectively ~12KB to be safe
