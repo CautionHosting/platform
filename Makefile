@@ -298,7 +298,7 @@ run-frontend: network
 
 up: migrate
 	@echo "Building all images in parallel..."
-	@$(MAKE) -j4 build-api build-gateway build-email build-metering build-frontend
+	@$(MAKE) build-api build-gateway build-email build-metering build-frontend
 	@$(MAKE) run-email run-metering run-api run-frontend
 	@echo "Waiting for API to be ready..."
 	@sleep 2
@@ -315,7 +315,7 @@ up: migrate
 
 up-dev: migrate
 	@echo "Building all images in parallel (dev)..."
-	@$(MAKE) -j4 build-api-dev build-gateway-dev build-email-dev build-metering build-frontend
+	@$(MAKE) build-api-dev build-gateway-dev build-email-dev build-metering build-frontend
 	@$(MAKE) run-email run-metering run-api run-frontend
 	@echo "Waiting for API to be ready..."
 	@sleep 2

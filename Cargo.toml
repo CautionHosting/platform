@@ -4,10 +4,10 @@
 [workspace]
 members = [
     "src/api",
+    "src/cli",
     "src/gateway",
     "src/email-service",
     "src/enclave-builder",
-    "src/cli",
     "src/metering",
 ]
 resolver = "2"
@@ -76,3 +76,6 @@ tempfile = "3.8"
 
 # Directories
 dirs = "5"
+
+# OpenPGP — force RustCrypto backend across all crates (locksmith defaults to Nettle)
+sequoia-openpgp = { version = "1" }

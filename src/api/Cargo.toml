@@ -54,4 +54,4 @@ subtle = { workspace = true }
 dirs = { workspace = true }
 
 # GPG decryption for managed on-prem
-sequoia-openpgp = { version = "1.21", default-features = false, features = ["crypto-rust", "compression-deflate", "allow-experimental-crypto", "allow-variable-time-crypto"] }
+sequoia-openpgp = { workspace = true }

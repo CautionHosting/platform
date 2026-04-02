@@ -7,12 +7,18 @@ FROM stagex/core-libunwind@sha256:eb66122d8fc543f5e2f335bb1616f8c3a471604383e2c0
 FROM stagex/core-ca-certificates@sha256:d135f1189e9b232eb7316626bf7858534c5540b2fc53dced80a4c9a95f26493e AS ca-certificates
 FROM stagex/core-openssl@sha256:d6487f0cb15f4ee02b420c717cb9abd85d73043c0bb3a2c6ce07688b23c1df07 AS openssl
 FROM stagex/user-eudev@sha256:6eab1ad722f60d81886be6452ee47c229ae8aba0036a7e71f47f701f413888ae AS eudev
+FROM stagex/user-pcsc-lite@sha256:2e0bb1cbeb9dd97be4e0594bd712dc138ee2710668281d3faa1a18d99a50979d AS pcsc-lite
+FROM stagex/user-nettle@sha256:3b883ec8fb6781acff2517e7485d7e8f79f147f8fa2b3b644cb96da495af52e7 AS nettle
+FROM stagex/core-gmp@sha256:35f1f6f285efd438e7d985dc0538b7a5ca1a228e69f50d39de2bcafe830b4beb AS gmp
 FROM stagex/core-user-runtime@sha256:055ae534e1e01259449fb4e0226f035a7474674c7371a136298e8bdac65d90bb AS user-runtime
 
 FROM pallet-rust AS builder
 
 COPY --from=openssl . /
 COPY --from=eudev . /
+COPY --from=pcsc-lite . /
+COPY --from=nettle . /
+COPY --from=gmp . /
 
 ENV SOURCE_DATE_EPOCH=1
 ENV CARGO_HOME=/usr/local/cargo
@@ -20,6 +26,7 @@ ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig
 
 WORKDIR /build
 
+<<<<<<< Updated upstream
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo/config.toml ./.cargo/config.toml
 COPY src/cli/Cargo.toml ./src/cli/
@@ -38,12 +45,16 @@ RUN mkdir -p src/api/src src/gateway/src src/email-service/src src/enclave-build
 
 COPY src/cli/src ./src/cli/src
 COPY src/enclave-builder/src ./src/enclave-builder/src
+=======
+COPY . .
+>>>>>>> Stashed changes
 
 ENV RUST_BACKTRACE=1
 ENV RUSTFLAGS="-C codegen-units=1"
 ENV RUSTFLAGS="${RUSTFLAGS} -C target-feature=+crt-static"
 ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=-Wl,--build-id=none"
 ENV TARGET_ARCH="x86_64-unknown-linux-musl"
+ENV NETTLE_STATIC=1
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -55,7 +66,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cli-target,target=/build/target \
     --network=none \
     cargo build --release --frozen \
-      --bin caution \
+      -p cli \
       --target ${TARGET_ARCH} \
       && install -D -m 0755 /build/target/${TARGET_ARCH}/release/caution /usr/local/bin/caution
 

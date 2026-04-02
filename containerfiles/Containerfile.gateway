@@ -7,7 +7,9 @@ FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769f
 FROM stagex/core-zlib@sha256:06f5168e20d85d1eb1d19836cdf96addc069769b40f8f0f4a7a70b2f49fc18f8 AS zlib
 FROM stagex/core-user-runtime@sha256:055ae534e1e01259449fb4e0226f035a7474674c7371a136298e8bdac65d90bb AS user-runtime
 FROM stagex/user-docker-cli-buildx@sha256:e417fa8cc1665e51f4bf1c9f688e8b3b55097afdb1017f96642fd4ca73290519 AS docker-cli
-
+FROM stagex/user-pcsc-lite@sha256:2e0bb1cbeb9dd97be4e0594bd712dc138ee2710668281d3faa1a18d99a50979d AS pcsc-lite
+FROM stagex/user-nettle@sha256:3b883ec8fb6781acff2517e7485d7e8f79f147f8fa2b3b644cb96da495af52e7 AS nettle
+FROM stagex/core-gmp@sha256:35f1f6f285efd438e7d985dc0538b7a5ca1a228e69f50d39de2bcafe830b4beb AS gmp
 FROM gcc AS gitconfig-builder
 RUN mkdir -p /root && \
     echo '[safe]' > /root/.gitconfig && \
@@ -15,29 +17,16 @@ RUN mkdir -p /root && \
 
 FROM pallet-rust AS builder
 
+COPY --from=pcsc-lite . /
+COPY --from=nettle . /
+COPY --from=gmp . /
+
 ENV SOURCE_DATE_EPOCH=1
 ENV CARGO_HOME=/usr/local/cargo
 
 WORKDIR /build
 
-COPY Cargo.toml Cargo.lock ./
-COPY src/api/Cargo.toml ./src/api/
-COPY src/gateway/Cargo.toml ./src/gateway/
-COPY src/email-service/Cargo.toml ./src/email-service/
-COPY src/enclave-builder/Cargo.toml ./src/enclave-builder/
-COPY src/cli/Cargo.toml ./src/cli/
-COPY src/metering/Cargo.toml ./src/metering/
-
-RUN mkdir -p src/api/src src/email-service/src src/enclave-builder/src src/cli/src/bin src/metering/src && \
-    echo "fn main() {}" > src/api/src/main.rs && \
-    echo "fn main() {}" > src/email-service/src/main.rs && \
-    echo "pub fn dummy() {}" > src/enclave-builder/src/lib.rs && \
-    echo "fn main() {}" > src/cli/src/bin/caution.rs && \
-    echo "" > src/cli/src/lib.rs && \
-    echo "fn main() {}" > src/metering/src/main.rs
-
-COPY src/gateway/src ./src/gateway/src
-COPY src/enclave-builder/src ./src/enclave-builder/src
+COPY . .
 
 ENV RUST_BACKTRACE=1
 ENV TARGET_ARCH="x86_64-unknown-linux-musl"
@@ -53,15 +42,7 @@ ARG CARGO_PROFILE_DIR="release"
 ARG EXTRA_FEATURES=""
 
 ENV RUSTFLAGS="${EXTRA_RUSTFLAGS} -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,id=gateway-target,target=/build/target \
-    --network=none \
-    cargo build ${CARGO_BUILD_FLAGS} --frozen \
-      --target ${TARGET_ARCH} \
-      ${EXTRA_FEATURES:+--features ${EXTRA_FEATURES}} \
-      -p gateway
+ENV NETTLE_STATIC=1
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
