@@ -42,6 +42,10 @@ zeroize = "1"
 bootproof-sdk = { git = "https://git.distrust.co/public/bootproof.git" }
 coset = "0.3"
 
+# Locksmith (shard sending)
+locksmith = { git = "https://codeberg.org/caution/locksmith.git", default-features = false }
+keymaker-models = { git = "https://codeberg.org/caution/locksmith.git" }
+
 # Archive handling
 flate2 = "1.0"
 tar = "0.4"

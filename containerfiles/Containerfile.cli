@@ -21,6 +21,7 @@ ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig
 WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
+COPY .cargo/config.toml ./.cargo/config.toml
 COPY src/cli/Cargo.toml ./src/cli/
 COPY src/enclave-builder/Cargo.toml ./src/enclave-builder/
 COPY src/api/Cargo.toml ./src/api/

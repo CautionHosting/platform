@@ -1,0 +1,2 @@
+[registries.distrust]
+index = "https://git.distrust.co/public/_cargo-index.git"

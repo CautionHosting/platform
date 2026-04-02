@@ -5001,23 +5001,45 @@ build: docker build -t app .
 
         anyhow::ensure!(bundle_file.exists(), "Bundle file not found: {}", bundle_file.display());
 
-        let address = format!("{}:8084", public_ip);
-        eprintln!("Sending shard to enclave at {}...", address);
+        // Load trusted hashes from a prior `caution verify --save-pcrs`
+        let hashes_path = PathBuf::from(".caution/trusted_hashes.json");
+        let hashes_text = fs::read_to_string(&hashes_path).context(
+            "No trusted hashes found. Run `caution verify --save-pcrs` first to establish trusted PCR values."
+        )?;
+        let hashes: serde_json::Value = serde_json::from_str(&hashes_text)
+            .context("Failed to parse .caution/trusted_hashes.json")?;
 
-        let output = std::process::Command::new("locksmith")
-            .arg(&address)
-            .arg(&bundle_file)
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()
-            .context(
-                "Failed to run locksmith binary. Install it with:\n  \
-                 cargo install --git https://codeberg.org/caution/locksmith locksmith"
-            )?;
+        let pcrs = std::collections::HashMap::from([
+            (0u8, hex::decode(hashes["pcr0"].as_str().context("missing pcr0")?).context("invalid pcr0 hex")?),
+            (1u8, hex::decode(hashes["pcr1"].as_str().context("missing pcr1")?).context("invalid pcr1 hex")?),
+            (2u8, hex::decode(hashes["pcr2"].as_str().context("missing pcr2")?).context("invalid pcr2 hex")?),
+        ]);
 
-        if !output.success() {
-            bail!("locksmith exited with non-zero status");
+        if let Some(verified_at) = hashes["verified_at"].as_str() {
+            eprintln!("Using trusted hashes from {}", verified_at);
+        }
+
+        // Parse the quorum bundle
+        let bundle_text = fs::read_to_string(&bundle_file)
+            .with_context(|| format!("Failed to read bundle file: {}", bundle_file.display()))?;
+        let bundle: keymaker_models::generate_quorum::GenerateQuorumResponse =
+            serde_json::from_str(&bundle_text).context("Failed to parse bundle JSON")?;
+
+        let address_str = format!("{}:8084", public_ip);
+        eprintln!("Sending shard to enclave at {}...", address_str);
+        let address: std::net::SocketAddr = address_str.parse().context("Invalid address")?;
+
+        let status = locksmith::client::send_shard(address, pcrs, &bundle)
+            .await
+            .context("Failed to send shard to enclave")?;
+
+        match status {
+            locksmith::models::SendSignedEncryptedShardResponse::Accepted { remaining } => {
+                eprintln!("Shard accepted, {} remaining shards until reconstitution", remaining);
+            }
+            locksmith::models::SendSignedEncryptedShardResponse::Rejected { reason } => {
+                bail!("Shard rejected by enclave: {}", reason);
+            }
         }
 
         Ok(())
