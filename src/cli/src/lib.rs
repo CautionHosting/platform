@@ -232,6 +232,8 @@ enum Commands {
         pcrs: Option<String>,
         #[arg(long, help = "Force rebuild, ignore cache")]
         no_cache: bool,
+        #[arg(long, help = "Save verified PCR hashes to .caution/trusted_hashes.json for use by send-shard")]
+        save_pcrs: bool,
     },
     #[command(about = "Manage deployed applications")]
     Apps {
@@ -3496,7 +3498,7 @@ build: docker build -t app .
         }
     }
 
-    async fn verify(&self, attestation_url_opt: Option<String>, from_local: bool, app_source_url: Option<String>, pcrs_file: Option<String>, no_cache: bool) -> Result<()> {
+    async fn verify(&self, attestation_url_opt: Option<String>, from_local: bool, app_source_url: Option<String>, pcrs_file: Option<String>, no_cache: bool, save_pcrs: bool) -> Result<()> {
         println!("Verifying enclave attestation...");
         println!("Learn more: https://docs.caution.co/concepts/attestation/");
 
@@ -3745,17 +3747,16 @@ build: docker build -t app .
                 println!("This means the code running in the enclave is exactly what you expect.");
                 println!("\nPowered by: Caution (https://caution.co)");
 
-                // Save trusted hashes for use by send-shard
-                let trusted = serde_json::json!({
-                    "pcr0": remote_pcrs.pcr0,
-                    "pcr1": remote_pcrs.pcr1,
-                    "pcr2": remote_pcrs.pcr2,
-                    "verified_at": chrono::Utc::now().to_rfc3339(),
-                });
-                let hashes_path = PathBuf::from(".caution/trusted_hashes.json");
-                if let Err(e) = fs::write(&hashes_path, serde_json::to_string_pretty(&trusted)?) {
-                    eprintln!("Warning: could not save trusted hashes: {}", e);
-                } else {
+                if save_pcrs {
+                    let trusted = serde_json::json!({
+                        "pcr0": remote_pcrs.pcr0,
+                        "pcr1": remote_pcrs.pcr1,
+                        "pcr2": remote_pcrs.pcr2,
+                        "verified_at": chrono::Utc::now().to_rfc3339(),
+                    });
+                    let hashes_path = PathBuf::from(".caution/trusted_hashes.json");
+                    fs::write(&hashes_path, serde_json::to_string_pretty(&trusted)?)
+                        .with_context(|| format!("Failed to save trusted hashes to {}", hashes_path.display()))?;
                     println!("Trusted hashes saved to {}", hashes_path.display());
                 }
 
@@ -5083,8 +5084,8 @@ pub async fn run() -> Result<()> {
                 bail!("Please specify --managed-on-prem to tear down managed infrastructure");
             }
         }
-        Commands::Verify { attestation_url, from_local, app_source_url, pcrs, no_cache } => {
-            client.verify(attestation_url, from_local, app_source_url, pcrs, no_cache).await?;
+        Commands::Verify { attestation_url, from_local, app_source_url, pcrs, no_cache, save_pcrs } => {
+            client.verify(attestation_url, from_local, app_source_url, pcrs, no_cache, save_pcrs).await?;
         }
         Commands::Apps { command } => {
             match command {
