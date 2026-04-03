@@ -1473,7 +1473,7 @@ build: docker build -t app .
             user,
             pub_cred_params: pub_key_params,
             exclude_list: vec![],
-            user_verification_req: authenticator::ctap2::server::UserVerificationRequirement::Required,
+            user_verification_req: authenticator::ctap2::server::UserVerificationRequirement::Preferred,
             resident_key_req: authenticator::ctap2::server::ResidentKeyRequirement::Required,
             extensions: Default::default(),
             pin,
@@ -1923,7 +1923,7 @@ build: docker build -t app .
             origin: base_url.to_string(),
             relying_party_id: opts.rp_id.clone(),
             allow_list,
-            user_verification_req: authenticator::ctap2::server::UserVerificationRequirement::Required,
+            user_verification_req: authenticator::ctap2::server::UserVerificationRequirement::Preferred,
             user_presence_req: true,
             extensions: Default::default(),
             pin,
@@ -1997,7 +1997,18 @@ build: docker build -t app .
             if let Ok(result) = callback_rx.try_recv() {
                 loader.stop();
                 log_verbose(self.verbose, "Got assertion result");
-                let sign_result = result.context("Assertion failed")?;
+                let sign_result = result.map_err(|e| {
+                    let msg = format!("{:?}", e);
+                    if msg.contains("NoCredentials") {
+                        anyhow::anyhow!(
+                            "No passkey found on this device for this server.\n\
+                             If you haven't registered yet, run: caution register\n\
+                             If you registered with a different key, try that one instead."
+                        )
+                    } else {
+                        anyhow::anyhow!("Assertion failed: {}", e)
+                    }
+                })?;
 
                 let client_data_json = serde_json::json!({
                     "type": "webauthn.get",
