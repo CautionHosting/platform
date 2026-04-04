@@ -674,7 +674,7 @@ impl ApiClient {
 
     fn frontend_url(&self) -> String {
         std::env::var("FRONTEND_URL")
-            .unwrap_or_else(|_| "http://localhost:3000".to_string())
+            .unwrap_or_else(|_| self.base_url.clone())
     }
 
     fn save_config(&self, session_id: String, expires_at: String) -> Result<()> {
@@ -1182,8 +1182,7 @@ build: docker build -t app .
             Ok(settings) => {
                 if !settings.require_pin {
                     println!("\n⚠️  WARNING: PIN verification is disabled for your organization.");
-                    println!("   For production use, enable PIN requirement in Security settings:");
-                    println!("   {}/dashboard -> Security", self.frontend_url());
+                    println!("   For production use, enable PIN requirement.");
                 }
             }
             Err(e) => {
@@ -1276,8 +1275,7 @@ build: docker build -t app .
             Ok(settings) => {
                 if !settings.require_pin {
                     println!("\n⚠️  WARNING: PIN verification is disabled for your organization.");
-                    println!("   For production use, enable PIN requirement in Security settings:");
-                    println!("   {}/dashboard -> Security", self.frontend_url());
+                    println!("   For production use, enable PIN requirement.");
                 }
             }
             Err(e) => {
