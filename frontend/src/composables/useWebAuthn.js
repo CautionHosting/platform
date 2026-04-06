@@ -212,7 +212,7 @@ export function useWebAuthn() {
 
     try {
       // Step 1: Begin registration with alpha code
-      status.value = "Validating alpha code...";
+      status.value = "Validating access code...";
       const beginResponse = await fetch("/auth/register/begin", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

@@ -7,13 +7,9 @@
     platform-text="CLI available for Linux x86_64 today"
     @login="handleLogin"
   >
-    <template #extra-features>
-      <li>Software is in alpha and <strong>not production ready</strong></li>
-    </template>
-
     <template #access-text>
-      Click <strong>Log in</strong> on the right to continue. If you don't have
-      an account, get started with an alpha code <a href="/">here</a>.
+      Click <strong>Log in</strong> on the right to continue. New to Caution?
+      Create an account with an access code <a href="/">here</a>.
     </template>
 
     <template #right-panel>
@@ -32,9 +28,8 @@
         </button>
 
         <p class="login-prompt">
-          Need an account?
-          <a href="/" class="link-btn">Get started</a>
-          with an alpha code.
+          New to Caution?
+          <a href="/" class="link-btn">Create an account</a>.
         </p>
 
         <div class="login-messages">
