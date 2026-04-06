@@ -138,7 +138,7 @@ export function useWebAuthn() {
         console.error("WebAuthn error:", credError);
         if (credError.name === "NotAllowedError") {
           throw new Error(
-            "Authentication was blocked by your browser. Make sure you are using the same authenticator you registered with and tap it promptly. If you registered with a password manager, try using <strong>Chrome</strong> or <strong>Edge</strong> — Firefox has limited passkey support."
+            "Login failed. No matching credential was found. Make sure you are using the same authenticator you registered with. If you don't have an account yet, register first."
           );
         }
         throw credError;
@@ -252,18 +252,18 @@ export function useWebAuthn() {
         console.error("WebAuthn registration error:", credError);
         if (credError.name === "InvalidStateError") {
           throw new Error(
-            "This authenticator is already registered. If you already have an account, <a href=\"/login\">log in</a> instead."
+            "This authenticator is already registered. If you already have an account, log in instead."
           );
         }
         if (credError.name === "NotAllowedError") {
           const hasExcluded = publicKey.excludeCredentials && publicKey.excludeCredentials.length > 0;
           if (hasExcluded) {
             throw new Error(
-              "This authenticator may already be registered. If you already have an account, try <a href=\"/login\">logging in</a>. Otherwise, try a different authenticator or browser."
+              "This authenticator may already be registered. If you already have an account, try logging in. Otherwise, try a different authenticator or browser."
             );
           }
           throw new Error(
-            "Registration was blocked by your browser. Try using a <strong>hardware security key</strong> or your device's built-in authenticator. If you are using a password manager, try <strong>Chrome</strong> or <strong>Edge</strong> instead of Firefox."
+            "Registration was blocked by your browser. Try using a hardware security key or your device's built-in authenticator. If you are using a password manager, try Chrome or Edge instead of Firefox."
           );
         }
         throw credError;
