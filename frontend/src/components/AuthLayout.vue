@@ -23,11 +23,11 @@
       <div class="left-panel">
         <div class="left-content">
           <slot name="left-panel">
-            <h1 class="info-title">Caution Alpha</h1>
+            <h1 class="info-title">Caution Beta</h1>
             <p class="info">
-              Caution is in closed alpha for teams testing and deploying
-              reproducible enclaves. Early users get access to new capabilities,
-              help validate workflows, and shape the platform during development.
+              Caution is in closed beta for teams deploying reproducible
+              enclaves. Beta users get early access to new capabilities and
+              help shape the platform.
             </p>
             <h2 class="info">Overview</h2>
             <ul class="feature-list">
@@ -84,12 +84,11 @@
             <h2 class="info">Access</h2>
             <p class="info">
               <slot name="access-text">
-                Enter your alpha code on the right to continue. If you don't have a
-                code, request one at
+                Request a beta access code at
                 <a
                   href="mailto:info@caution.co?subject=Caution%20Early%20Access%20Inquiry&body=Hi%20Caution%20Team%2C%0A%0AI%20am%20interested%20in%20getting%20early%20access%20to%20Caution's%20managed%20services..."
                   >info@caution.co</a
-                >.
+                >. Enter it on the right to create an account with your security key.
               </slot>
             </p>
           </slot>

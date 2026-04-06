@@ -7,24 +7,17 @@
     platform-text="CLI available for Linux x86_64 today"
     @login="handleLogin"
   >
-    <template #extra-features>
-      <li>
-        Software is in alpha and <strong>not production ready</strong>
-      </li>
-    </template>
-
     <template #access-text>
-      Enter your alpha code on the right to continue. If you don't have a
-      code, request one at
+      Request a beta access code at
       <a
         href="mailto:info@caution.co?subject=Caution%20Early%20Access%20Inquiry&body=Hi%20Caution%20Team%2C%0A%0AI%20am%20interested%20in%20getting%20early%20access%20to%20Caution's%20managed%20services..."
         >info@caution.co</a
-      >.
+      >. Enter it on the right to create an account with your security key.
     </template>
 
     <template #right-panel>
       <div v-if="!authenticated" class="form-container">
-        <h2 class="form-title">Enter your alpha code</h2>
+        <h2 class="form-title">Create an account</h2>
 
         <div
           class="input-group"
@@ -35,7 +28,7 @@
           <input
             v-model="alphaCode"
             type="text"
-            placeholder="Enter alpha code"
+            placeholder="Enter access code"
             class="alpha-input"
             :disabled="loading"
             @keyup.enter="onRegister"
@@ -61,7 +54,7 @@
             v-if="validationError && !status && !error"
             class="validation-message"
           >
-            Please enter a valid alpha code to continue.
+            Please enter a valid beta code to continue.
           </div>
 
           <div v-if="status" class="status-message">
