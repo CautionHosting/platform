@@ -13,12 +13,10 @@
               <img src="/assets/caution-logo-white.svg" alt="Caution logo" />
             </a>
             <p class="footer-description">
-              Caution is the verifiable compute platform for deploying, proving,
-              and scaling confidential workloads anywhere.
+              Confidential compute you can verify, not trust.
             </p>
-            <p class="footer-description footer-description--mobile">
-              The verifiable compute platform for deploying, proving, and
-              scaling confidential workloads.
+            <p class="footer-description footer-description--short">
+              Confidential compute you can verify.
             </p>
           </div>
 
@@ -26,9 +24,10 @@
           <div class="footer-links">
             <div class="footer-column">
               <h3 class="footer-column-title">Platform</h3>
-              <a href="/login" class="footer-link">Log in</a>
               <a href="https://caution.co/platform-tour.html" class="footer-link">Platform demo</a>
-              <a href="https://caution.co/pricing.html" class="footer-link">Pricing</a>
+              <a href="https://caution.co/cloud/aws.html" class="footer-link">AWS Nitro</a>
+              <a href="/login" class="footer-link">Early access</a>
+              <a href="https://caution.co/faq.html" class="footer-link">FAQ</a>
             </div>
 
             <div class="footer-column">
@@ -41,21 +40,8 @@
               >
                 Documentation
               </a>
-              <a
-                href="https://codeberg.org/AmpereComputing/caution"
-                target="_blank"
-                rel="noopener noreferrer"
-                class="footer-link"
-              >
-                Source code
-              </a>
+              <a href="https://caution.co/pricing.html" class="footer-link">Pricing</a>
               <a href="https://caution.co/blog.html" class="footer-link">Blog</a>
-            </div>
-
-            <div class="footer-column">
-              <h3 class="footer-column-title">Company</h3>
-              <a href="https://caution.co/about.html" class="footer-link">About</a>
-              <a href="https://caution.co/contact.html" class="footer-link">Contact</a>
               <a
                 href="https://matrix.to/#/#caution:matrix.org"
                 target="_blank"
@@ -65,21 +51,32 @@
                 Community
               </a>
             </div>
+
+            <div class="footer-column">
+              <h3 class="footer-column-title">Company</h3>
+              <a href="https://caution.co/about.html" class="footer-link">About</a>
+              <a href="https://caution.co/contact.html" class="footer-link">Contact</a>
+            </div>
           </div>
         </div>
 
         <!-- Bottom: Copyright and Social -->
         <div class="footer-bottom">
           <p class="footer-copyright">
-            © 2025 Caution SEZC. All rights reserved.
+            &copy; 2026 Caution SEZC. All rights reserved.
           </p>
+          <nav class="footer-legal-links">
+            <a href="https://caution.co/privacy.html" class="footer-legal-link">Privacy</a>
+            <a href="https://caution.co/terms.html" class="footer-legal-link">Terms</a>
+            <a href="https://caution.co/legal/refunds.html" class="footer-legal-link">Refunds</a>
+          </nav>
           <div class="footer-social">
             <a
               href="https://codeberg.org/Caution/"
               target="_blank"
               rel="noopener noreferrer"
-              aria-label="Git repository"
-              title="Access source code"
+              aria-label="Git"
+              title="Access source code and documentation"
               class="footer-social-link"
             >
               <svg
@@ -95,11 +92,11 @@
               </svg>
             </a>
             <a
-              href="https://mastodon.social/@caution"
+              href="https://mstdn.social/@caution"
               target="_blank"
               rel="noopener noreferrer"
               aria-label="Mastodon"
-              title="Follow on Mastodon"
+              title="Follow us on Mastodon"
               class="footer-social-link"
             >
               <svg
