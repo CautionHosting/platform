@@ -39,18 +39,14 @@
             </button>
           </div>
 
-        </div>
+          <p class="tos-notice">
+            By creating an account, you agree to the
+            <a href="https://caution.co/terms.html" target="_blank" rel="noopener noreferrer">terms of service</a>
+            and
+            <a href="https://caution.co/privacy.html" target="_blank" rel="noopener noreferrer">privacy notice</a>.
+            <a href="/login" @click.prevent="handleLogin" class="link-btn">Already have an account?</a>
+          </p>
 
-        <div class="form-footer">
-          <p class="register-prompt">
-            Already have an account?
-            <a href="/login" @click.prevent="handleLogin" class="link-btn">Log in</a>.
-          </p>
-          <p class="form-footer-legal">
-            <a href="https://caution.co/terms.html" target="_blank" rel="noopener noreferrer">Terms of Service</a>
-            <span class="form-footer-dot">|</span>
-            <a href="https://caution.co/privacy.html" target="_blank" rel="noopener noreferrer">Privacy Notice</a>
-          </p>
         </div>
 
         <div class="messages-container">
