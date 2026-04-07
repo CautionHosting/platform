@@ -1670,11 +1670,9 @@ async fn deploy_logic(
                 app_sources: build_config.app_sources.clone(),
             };
 
-            let hourly_rate = state.pricing.instance_hourly_rate(&build_request.builder_instance_type);
-
             let build_result = builder::execute_remote_build(
                 &state.db, &ec2_client, &s3_client, builder_cfg, &build_request, &cache_key, &tx,
-                auth.user_id, hourly_rate,
+                auth.user_id,
             ).await.map_err(|e| {
                 tracing::error!("Dedicated builder failed: {:?}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("Build failed: {}", e))
@@ -2543,7 +2541,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     region: std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()),
                 };
                 let ec2 = crate::ec2::Ec2Client::new(&platform_creds);
-                builder::reap_orphaned_builders(&reaper_state.db, &ec2).await;
+                builder::reap_orphaned_builders(&reaper_state.db, &ec2, |itype| reaper_state.pricing.instance_hourly_rate(itype)).await;
             }
         });
         info!("Builder orphan reaper started (runs every 5 minutes)");

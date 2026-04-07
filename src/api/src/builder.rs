@@ -243,7 +243,6 @@ pub async fn execute_remote_build(
     cache_key: &str,
     tx: &tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
     user_id: Uuid,
-    hourly_rate_usd: f64,
 ) -> Result<BuildResult> {
     let build_id = Uuid::new_v4();
     let instance_type = request.builder_instance_type.as_str();
@@ -252,11 +251,12 @@ pub async fn execute_remote_build(
 
     // 1. Insert pending build row
     sqlx::query(
-        "INSERT INTO eif_builds (id, organization_id, commit_sha, procfile_hash, cache_key, builder_instance_type, status, started_at)
-         VALUES ($1, $2, $3, $4, $5, $6, 'pending', NOW())"
+        "INSERT INTO eif_builds (id, organization_id, user_id, commit_sha, procfile_hash, cache_key, builder_instance_type, status, started_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', NOW())"
     )
     .bind(build_id)
     .bind(request.org_id)
+    .bind(user_id)
     .bind(&request.commit_sha)
     .bind(&procfile_hash)
     .bind(cache_key)
@@ -296,6 +296,22 @@ pub async fn execute_remote_build(
         .execute(db)
         .await;
 
+    // Register builder with metering so the collection loop deducts credits in real-time
+    if let Err(e) = sqlx::query(
+        "INSERT INTO tracked_resources (resource_id, user_id, provider, instance_type, region, metadata, status, started_at, last_billed_at)
+         VALUES ($1, $2, 'aws', $3, $4, $5, 'running', NOW(), NOW())
+         ON CONFLICT (resource_id) DO UPDATE SET status = 'running', started_at = NOW(), last_billed_at = NOW()"
+    )
+    .bind(&instance_id)
+    .bind(user_id)
+    .bind(instance_type)
+    .bind(std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()))
+    .bind(serde_json::json!({"build_id": build_id.to_string(), "resource_type": "builder"}))
+    .execute(db)
+    .await {
+        tracing::error!("Failed to register builder {} with metering: {}", instance_id, e);
+    }
+
     // 3. Poll S3 for status updates
     let status_key = format!("builds/{}/status.json", build_id);
     let result = poll_build_status(
@@ -306,7 +322,17 @@ pub async fn execute_remote_build(
         tx,
     ).await;
 
-    // 4. Terminate builder (always do this, retry on failure)
+    // 4. Stop metering for the builder instance
+    if let Err(e) = sqlx::query(
+        "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
+    )
+    .bind(&instance_id)
+    .execute(db)
+    .await {
+        tracing::error!("Failed to stop metering for builder {}: {}", instance_id, e);
+    }
+
+    // 5. Terminate builder (always do this, retry on failure)
     tracing::info!("Terminating builder instance {}", instance_id);
     let mut terminate_attempts = 0;
     loop {
@@ -347,81 +373,8 @@ pub async fn execute_remote_build(
             .await
             .context("Failed to update eif_builds with result")?;
 
-            // 6. Bill the user for builder time
-            let started = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
-                "SELECT started_at FROM eif_builds WHERE id = $1"
-            )
-            .bind(build_id)
-            .fetch_one(db)
-            .await
-            .ok();
-
-            if let Some(started_at) = started {
-                let duration_secs = (chrono::Utc::now() - started_at).num_seconds().max(0) as f64;
-                let hours = duration_secs / 3600.0;
-                // Minimum 1 minute charge
-                let billable_hours = hours.max(1.0 / 60.0);
-                let cost_usd = billable_hours * hourly_rate_usd;
-                let cost_cents = (cost_usd * 100.0).round() as i64;
-
-                if cost_cents > 0 {
-                    if let Err(e) = async {
-                        let mut tx = db.begin().await?;
-
-                        sqlx::query(
-                            "INSERT INTO usage_records (user_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
-                             VALUES ($1, $2, 'aws', 'builder', $3, 'hours', $4, NOW(), $5)"
-                        )
-                        .bind(user_id)
-                        .bind(build_id)
-                        .bind(billable_hours)
-                        .bind(cost_usd)
-                        .bind(serde_json::json!({
-                            "instance_type": instance_type,
-                            "builder_size": &request.builder_size,
-                            "duration_secs": duration_secs as i64,
-                        }))
-                        .execute(&mut *tx)
-                        .await?;
-
-                        sqlx::query(
-                            "UPDATE wallet_balance SET balance_cents = balance_cents - $1 WHERE user_id = $2"
-                        )
-                        .bind(cost_cents)
-                        .bind(user_id)
-                        .execute(&mut *tx)
-                        .await?;
-
-                        let new_balance: i64 = sqlx::query_scalar(
-                            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
-                        )
-                        .bind(user_id)
-                        .fetch_one(&mut *tx)
-                        .await?;
-
-                        sqlx::query(
-                            "INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description)
-                             VALUES ($1, $2, $3, 'realtime_usage', $4)"
-                        )
-                        .bind(user_id)
-                        .bind(-cost_cents)
-                        .bind(new_balance)
-                        .bind(format!("Builder: {} ({:.1} min)", instance_type, duration_secs / 60.0))
-                        .execute(&mut *tx)
-                        .await?;
-
-                        tx.commit().await?;
-                        Ok::<_, anyhow::Error>(new_balance)
-                    }.await {
-                        tracing::error!("Failed to bill for build {}: {}", build_id, e);
-                    }
-
-                    tracing::info!(
-                        "Builder billing: user={}, build={}, type={}, {:.1}min, ${:.4} ({}c deducted)",
-                        user_id, build_id, instance_type, duration_secs / 60.0, cost_usd, cost_cents
-                    );
-                }
-            }
+            // Billing is handled by the metering collection loop via tracked_resources.
+            // The untrack call above triggers a final usage collection.
 
             Ok(build_result)
         }
@@ -820,9 +773,86 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
 
 /// Reap builder instances that have been running for too long.
 /// Called periodically from a background task.
-pub async fn reap_orphaned_builders(db: &PgPool, ec2: &Ec2Client) {
-    let rows = match sqlx::query_as::<_, (Uuid, Option<String>)>(
-        "SELECT id, builder_instance_id FROM eif_builds
+/// Bill a user for builder instance time. Used as a fallback by the orphan reaper
+/// when real-time metering via tracked_resources was not active for the build.
+async fn bill_builder_usage(
+    db: &PgPool,
+    build_id: Uuid,
+    user_id: Uuid,
+    instance_type: &str,
+    started_at: chrono::DateTime<chrono::Utc>,
+    hourly_rate_usd: f64,
+) {
+    let duration_secs = (chrono::Utc::now() - started_at).num_seconds().max(0) as f64;
+    let hours = duration_secs / 3600.0;
+    let billable_hours = hours.max(1.0 / 60.0); // minimum 1 minute charge
+    let cost_usd = billable_hours * hourly_rate_usd;
+    let cost_cents = (cost_usd * 100.0).round() as i64;
+
+    if cost_cents <= 0 {
+        return;
+    }
+
+    if let Err(e) = async {
+        let mut tx = db.begin().await?;
+
+        sqlx::query(
+            "INSERT INTO usage_records (user_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
+             VALUES ($1, $2, 'aws', 'builder', $3, 'hours', $4, NOW(), $5)"
+        )
+        .bind(user_id)
+        .bind(build_id)
+        .bind(billable_hours)
+        .bind(cost_usd)
+        .bind(serde_json::json!({
+            "instance_type": instance_type,
+            "duration_secs": duration_secs as i64,
+        }))
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "UPDATE wallet_balance SET balance_cents = balance_cents - $1 WHERE user_id = $2"
+        )
+        .bind(cost_cents)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let new_balance: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+        )
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description)
+             VALUES ($1, $2, $3, 'realtime_usage', $4)"
+        )
+        .bind(user_id)
+        .bind(-cost_cents)
+        .bind(new_balance)
+        .bind(format!("Builder: {} ({:.1} min)", instance_type, duration_secs / 60.0))
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok::<_, anyhow::Error>(())
+    }.await {
+        tracing::error!("Failed to bill for build {}: {}", build_id, e);
+        return;
+    }
+
+    tracing::info!(
+        "Builder billing: user={}, build={}, type={}, {:.1}min, ${:.4} ({}c deducted)",
+        user_id, build_id, instance_type, duration_secs / 60.0, cost_usd, cost_cents
+    );
+}
+
+pub async fn reap_orphaned_builders(db: &PgPool, ec2: &Ec2Client, instance_hourly_rate: impl Fn(&str) -> f64) {
+    let rows = match sqlx::query_as::<_, (Uuid, Option<String>, Option<Uuid>, Option<String>, Option<chrono::DateTime<chrono::Utc>>)>(
+        "SELECT id, builder_instance_id, user_id, builder_instance_type, started_at FROM eif_builds
          WHERE status IN ('pending', 'building')
          AND created_at < NOW() - INTERVAL '30 minutes'"
     )
@@ -835,10 +865,33 @@ pub async fn reap_orphaned_builders(db: &PgPool, ec2: &Ec2Client) {
         }
     };
 
-    for (build_id, instance_id) in rows {
+    for (build_id, instance_id, user_id, instance_type, started_at) in rows {
         tracing::warn!("Reaping orphaned build {} (instance: {:?})", build_id, instance_id);
 
         if let Some(ref iid) = instance_id {
+            // Check if this builder was tracked by the metering collection loop
+            let was_tracked: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM tracked_resources WHERE resource_id = $1)"
+            )
+            .bind(iid)
+            .fetch_one(db)
+            .await
+            .unwrap_or(false);
+
+            if was_tracked {
+                // Stop metering — the collection loop already billed for runtime
+                let _ = sqlx::query(
+                    "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
+                )
+                .bind(iid)
+                .execute(db)
+                .await;
+            } else if let (Some(uid), Some(ref itype), Some(started)) = (user_id, &instance_type, started_at) {
+                // Fallback: metering tracking failed, bill directly for the full duration
+                let hourly_rate = instance_hourly_rate(itype);
+                bill_builder_usage(db, build_id, uid, itype, started, hourly_rate).await;
+            }
+
             if let Err(e) = ec2.terminate_instances(&[iid.clone()]).await {
                 tracing::error!("Failed to terminate orphaned builder {}: {}", iid, e);
             }
