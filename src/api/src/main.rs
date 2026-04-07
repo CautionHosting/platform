@@ -1635,7 +1635,7 @@ async fn deploy_logic(
 
             let build_id = uuid::Uuid::new_v4();
             let source_s3_key = builder::upload_source_archive(
-                &s3_client, &builder_cfg.eif_s3_bucket, &git_dir, &commit_sha, build_id,
+                &s3_client, &builder_cfg.eif_s3_bucket, &git_dir, &commit_sha, build_id, req.org_id,
             ).await.map_err(|e| {
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to upload source archive: {}", e))
             })?;

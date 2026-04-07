@@ -44,7 +44,7 @@ resource "aws_security_group" "app" {
   tags = {
     Name         = "app-${var.resource_id}"
     ResourceId   = var.resource_id
-    OrgId        = var.org_id
+    org_id       = var.org_id
     ManagedBy    = "terraform"
   }
 }
@@ -71,7 +71,7 @@ resource "aws_instance" "app" {
   tags = {
     Name         = var.resource_id
     ResourceId   = var.resource_id
-    OrgId        = var.org_id
+    org_id       = var.org_id
     ManagedBy    = "terraform"
   }
 }
@@ -83,7 +83,7 @@ resource "aws_eip" "app" {
   tags = {
     Name         = "app-${var.resource_id}"
     ResourceId   = var.resource_id
-    OrgId        = var.org_id
+    org_id       = var.org_id
     ManagedBy    = "terraform"
   }
 }

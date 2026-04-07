@@ -948,6 +948,7 @@ async fn upload_eif_to_s3(eif_path: &str, org_id: &Uuid, resource_id: &Uuid, aws
         .put_object()
         .bucket(&bucket_name)
         .key(&s3_key)
+        .tagging(format!("org_id={}&resource_id={}", org_id, resource_id))
         .body(body)
         .send()
         .await
@@ -1311,7 +1312,7 @@ resource "aws_iam_role" "enclave" {{
   tags = {{
     Name         = "enclave-role-{resource_id}"
     ResourceId   = "{resource_id}"
-    OrgId        = "{org_id}"
+    org_id       = "{org_id}"
     ManagedBy    = "terraform"
   }}
 }}
@@ -1345,7 +1346,7 @@ resource "aws_iam_instance_profile" "enclave" {{
   tags = {{
     Name         = "enclave-profile-{resource_id}"
     ResourceId   = "{resource_id}"
-    OrgId        = "{org_id}"
+    org_id       = "{org_id}"
     ManagedBy    = "terraform"
   }}
 }}
@@ -1359,7 +1360,7 @@ resource "aws_vpc" "enclave" {{
   tags = {{
     Name         = "vpc-{resource_id}"
     ResourceId   = "{resource_id}"
-    OrgId        = "{org_id}"
+    org_id       = "{org_id}"
     ManagedBy    = "terraform"
   }}
 }}
@@ -1371,7 +1372,7 @@ resource "aws_internet_gateway" "enclave" {{
   tags = {{
     Name         = "igw-{resource_id}"
     ResourceId   = "{resource_id}"
-    OrgId        = "{org_id}"
+    org_id       = "{org_id}"
     ManagedBy    = "terraform"
   }}
 }}
@@ -1386,7 +1387,7 @@ resource "aws_subnet" "enclave" {{
   tags = {{
     Name         = "subnet-{resource_id}"
     ResourceId   = "{resource_id}"
-    OrgId        = "{org_id}"
+    org_id       = "{org_id}"
     ManagedBy    = "terraform"
   }}
 }}
@@ -1403,7 +1404,7 @@ resource "aws_route_table" "enclave" {{
   tags = {{
     Name         = "rt-{resource_id}"
     ResourceId   = "{resource_id}"
-    OrgId        = "{org_id}"
+    org_id       = "{org_id}"
     ManagedBy    = "terraform"
   }}
 }}
@@ -1474,7 +1475,7 @@ resource "aws_security_group" "enclave" {{
   tags = {{
     Name         = "enclave-{resource_id}"
     ResourceId   = "{resource_id}"
-    OrgId        = "{org_id}"
+    org_id       = "{org_id}"
     ManagedBy    = "terraform"
   }}
 }}
@@ -1519,7 +1520,7 @@ resource "aws_instance" "enclave" {{
   tags = {{
     Name         = "{resource_id}"
     ResourceId   = "{resource_id}"
-    OrgId        = "{org_id}"
+    org_id       = "{org_id}"
     ManagedBy    = "terraform"
     ConfigDomain = "{domain}"
   }}
@@ -1533,7 +1534,7 @@ resource "aws_eip" "enclave" {{
   tags = {{
     Name         = "enclave-{resource_id}"
     ResourceId   = "{resource_id}"
-    OrgId        = "{org_id}"
+    org_id       = "{org_id}"
     ManagedBy    = "terraform"
   }}
 }}
@@ -1723,7 +1724,7 @@ resource "aws_security_group" "enclave" {{
   tags = {{
     Name                  = "enclave-{resource_id}"
     ResourceId            = "{resource_id}"
-    OrgId                 = "{org_id}"
+    org_id                = "{org_id}"
     ManagedBy             = "terraform"
     (local.scope_tag_key) = local.deployment_tag
   }}
@@ -1775,7 +1776,7 @@ resource "aws_launch_template" "enclave" {{
     tags = {{
       Name                  = "{resource_id}"
       ResourceId            = "{resource_id}"
-      OrgId                 = "{org_id}"
+      org_id                = "{org_id}"
       ManagedBy             = "terraform"
       ConfigDomain          = "{domain}"
       (local.scope_tag_key) = local.deployment_tag
@@ -1794,7 +1795,7 @@ resource "aws_launch_template" "enclave" {{
   tags = {{
     Name                  = "lt-{resource_id}"
     ResourceId            = "{resource_id}"
-    OrgId                 = "{org_id}"
+    org_id                = "{org_id}"
     ManagedBy             = "terraform"
     (local.scope_tag_key) = local.deployment_tag
   }}
@@ -1806,7 +1807,7 @@ resource "aws_eip" "enclave" {{
   tags = {{
     Name                  = "enclave-{resource_id}"
     ResourceId            = "{resource_id}"
-    OrgId                 = "{org_id}"
+    org_id                = "{org_id}"
     ManagedBy             = "terraform"
     (local.scope_tag_key) = local.deployment_tag
   }}

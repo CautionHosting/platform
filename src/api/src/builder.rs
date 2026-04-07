@@ -200,6 +200,7 @@ pub async fn upload_source_archive(
     git_dir: &str,
     commit_sha: &str,
     build_id: Uuid,
+    org_id: Uuid,
 ) -> Result<String> {
     let s3_key = format!("builds/{}/source.tar.gz", build_id);
 
@@ -218,6 +219,7 @@ pub async fn upload_source_archive(
     s3.put_object()
         .bucket(bucket)
         .key(&s3_key)
+        .tagging(format!("org_id={}&build_id={}", org_id, build_id))
         .body(aws_sdk_s3::primitives::ByteStream::from(output.stdout))
         .send()
         .await
@@ -276,6 +278,7 @@ pub async fn execute_remote_build(
         subnet_id: config.subnet_id.clone(),
         tags: vec![
             ("Name".to_string(), format!("caution-builder-{}", &build_id.to_string()[..8])),
+            ("org_id".to_string(), request.org_id.to_string()),
             ("ManagedBy".to_string(), "caution-builder".to_string()),
             ("BuildId".to_string(), build_id.to_string()),
         ],
