@@ -36,8 +36,8 @@ export default {
     // Page metadata by route
     const pageMeta = {
       '/': {
-        title: 'Beta access • Caution',
-        description: 'Enter your access code to access Caution. Closed beta with support for verified enclave deployments on AWS Nitro.'
+        title: 'Create an account • Caution',
+        description: 'Create a Caution account with your security key. Closed beta with support for verified enclave deployments on AWS Nitro.'
       },
       '/login': {
         title: 'Log in to Caution',

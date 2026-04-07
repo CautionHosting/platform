@@ -8,53 +8,57 @@
     @login="handleLogin"
   >
     <template #access-text>
-      Request a beta access code at
+      Email
       <a
         href="mailto:info@caution.co?subject=Caution%20Early%20Access%20Inquiry&body=Hi%20Caution%20Team%2C%0A%0AI%20am%20interested%20in%20getting%20early%20access%20to%20Caution's%20managed%20services..."
         >info@caution.co</a
-      >. Enter it on the right to create an account with your security key.
+      > to request an access code.
     </template>
 
     <template #right-panel>
       <div v-if="!authenticated" class="form-container">
         <h2 class="form-title">Create an account</h2>
 
-        <div
-          class="input-group"
-          :class="{
-            'input-group--error': validationError && !status && !error,
-          }"
-        >
-          <input
-            v-model="alphaCode"
-            type="text"
-            placeholder="Enter access code"
-            class="alpha-input"
-            :disabled="loading"
-            @keyup.enter="onRegister"
-            @input="validationError = false"
-          />
-          <button
-            @click="onRegister"
-            :disabled="loading"
-            class="btn-dark btn"
-          >
-            {{ loading ? "Working..." : "Continue" }}
-          </button>
+        <div class="register-form">
+          <div class="register-field" :class="{ 'register-field--error': validationError && !status && !error }">
+            <input
+              v-model="alphaCode"
+              type="text"
+              placeholder="Enter access code"
+              class="register-input"
+              :disabled="loading"
+              @keyup.enter="onRegister"
+              @input="validationError = false"
+            />
+            <button
+              @click="onRegister"
+              :disabled="loading"
+              class="btn-dark btn"
+            >
+              {{ loading ? "Working..." : "Continue" }}
+            </button>
+          </div>
+
         </div>
-        <p class="register-prompt">
-          Already have an account?
-          <a href="/login" @click.prevent="handleLogin" class="link-btn"
-            >Log in</a
-          >.
-        </p>
+
+        <div class="form-footer">
+          <p class="register-prompt">
+            Already have an account?
+            <a href="/login" @click.prevent="handleLogin" class="link-btn">Log in</a>.
+          </p>
+          <p class="form-footer-legal">
+            <a href="https://caution.co/terms.html" target="_blank" rel="noopener noreferrer">Terms of Service</a>
+            <span class="form-footer-dot">|</span>
+            <a href="https://caution.co/privacy.html" target="_blank" rel="noopener noreferrer">Privacy Notice</a>
+          </p>
+        </div>
 
         <div class="messages-container">
           <div
             v-if="validationError && !status && !error"
             class="validation-message"
           >
-            Please enter a valid beta code to continue.
+            Please enter a valid access code to continue.
           </div>
 
           <div v-if="status" class="status-message">

@@ -23,21 +23,14 @@
       <div class="left-panel">
         <div class="left-content">
           <slot name="left-panel">
-            <h1 class="info-title">Caution Beta</h1>
+            <h1 class="info-title">Enclaves you can verify</h1>
             <p class="info">
-              Caution is in closed beta for teams deploying reproducible
-              enclaves. Beta users get early access to new capabilities and
-              help shape the platform.
+              Confidential compute platform for teams deploying enclaves they can verify, not trust. In closed beta.
             </p>
-            <h2 class="info">Overview</h2>
+            <h2 class="info">What's included</h2>
             <ul class="feature-list">
-              <li>
-                <a href="https://caution.co/platform-tour.html" target="_blank" rel="noopener noreferrer">
-                  Platform walkthrough video
-                </a>
-              </li>
               <li>Verified enclave deployments</li>
-              <li>Self-guided onboarding</li>
+              <li>Deploy in three commands</li>
               <li>
                 <span class="platform-item"
                   >AWS Nitro supported today
@@ -78,17 +71,22 @@
                     </span> </span
                 ></span>
               </li>
+              <li>
+                <a href="https://caution.co/platform-tour.html" target="_blank" rel="noopener noreferrer">
+                  Platform walkthrough video
+                </a>
+              </li>
               <slot name="extra-features"></slot>
             </ul>
 
-            <h2 class="info">Access</h2>
+            <h2 class="info">Get access</h2>
             <p class="info">
               <slot name="access-text">
-                Request a beta access code at
+                Email
                 <a
                   href="mailto:info@caution.co?subject=Caution%20Early%20Access%20Inquiry&body=Hi%20Caution%20Team%2C%0A%0AI%20am%20interested%20in%20getting%20early%20access%20to%20Caution's%20managed%20services..."
                   >info@caution.co</a
-                >. Enter it on the right to create an account with your security key.
+                > to request an access code.
               </slot>
             </p>
           </slot>
