@@ -32,6 +32,7 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 
-# AWS SDK for Cost Explorer
+# AWS SDK
 aws-config = "1.1"
 aws-sdk-costexplorer = "1.15"
+aws-sdk-cloudwatch = "1.15"

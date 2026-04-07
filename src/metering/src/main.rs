@@ -36,6 +36,7 @@ pub struct AppState {
     pub pool: sqlx::PgPool,
     pub paddle: paddle::PaddleClient,
     pub calculator: calculator::CostCalculator,
+    pub cloudwatch: aws_sdk_cloudwatch::Client,
     pub internal_service_secret: Option<String>,
 }
 
@@ -77,10 +78,14 @@ async fn main() -> Result<()> {
     let paddle = paddle::PaddleClient::new(paddle_api_url, paddle_api_key, paddle_webhook_secret);
     let calculator = calculator::CostCalculator::new(calculator::PricingRules::default());
 
+    let aws_config = aws_config::load_from_env().await;
+    let cloudwatch = aws_sdk_cloudwatch::Client::new(&aws_config);
+
     let state = Arc::new(AppState {
         pool,
         paddle,
         calculator,
+        cloudwatch,
         internal_service_secret,
     });
 

@@ -228,8 +228,107 @@ pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) 
         let (_applied, _remainder, _new_balance) = crate::credits::deduct_realtime_usage(
             &state.pool, resource.organization_id, cost_cents, resource_id, hours
         ).await?;
-        return Ok(true);
     }
 
-    Ok(false)
+    // Collect network egress via CloudWatch (best-effort, don't block compute billing)
+    if let Err(e) = collect_network_egress(state, &resource, last_billed, now).await {
+        tracing::warn!("Failed to collect network egress for {}: {}", resource_id, e);
+    }
+
+    Ok(cost_cents > 0)
+}
+
+/// Query CloudWatch for NetworkOut bytes and bill for egress.
+async fn collect_network_egress(
+    state: &AppState,
+    resource: &TrackedResource,
+    start: time::OffsetDateTime,
+    end: time::OffsetDateTime,
+) -> Result<()> {
+    use aws_sdk_cloudwatch::types::{Dimension, Statistic};
+
+    let seconds_elapsed = (end.unix_timestamp() - start.unix_timestamp()).max(60) as i32;
+
+    let result = state.cloudwatch
+        .get_metric_statistics()
+        .namespace("AWS/EC2")
+        .metric_name("NetworkOut")
+        .dimensions(
+            Dimension::builder()
+                .name("InstanceId")
+                .value(&resource.resource_id)
+                .build()
+        )
+        .start_time(aws_sdk_cloudwatch::primitives::DateTime::from_secs(start.unix_timestamp()))
+        .end_time(aws_sdk_cloudwatch::primitives::DateTime::from_secs(end.unix_timestamp()))
+        .period(seconds_elapsed)
+        .statistics(Statistic::Sum)
+        .send()
+        .await
+        .context("CloudWatch GetMetricStatistics failed")?;
+
+    let total_bytes: f64 = result.datapoints()
+        .iter()
+        .filter_map(|dp| dp.sum())
+        .sum();
+
+    if total_bytes < 1.0 {
+        return Ok(());
+    }
+
+    let gb = total_bytes / (1024.0 * 1024.0 * 1024.0);
+    let provider: Provider = resource.provider.parse().unwrap_or(Provider::Aws);
+
+    let usage = ResourceUsage {
+        organization_id: resource.organization_id,
+        user_id: resource.user_id,
+        resource_id: resource.resource_id.clone(),
+        provider,
+        resource_type: ResourceType::Network,
+        quantity: gb,
+        unit: UsageUnit::Gb,
+        timestamp: end,
+        metadata: serde_json::json!({
+            "direction": "egress",
+            "bytes": total_bytes as i64,
+            "instance_id": resource.resource_id,
+        }),
+    };
+
+    let cost = state.calculator.calculate_cost(&usage);
+    let cost_cents = (cost * 100.0).round() as i64;
+
+    if cost_cents <= 0 {
+        return Ok(());
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO usage_records (organization_id, user_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        "#,
+    )
+    .bind(usage.organization_id)
+    .bind(usage.user_id)
+    .bind(&usage.resource_id)
+    .bind(usage.provider.as_str())
+    .bind(usage.resource_type.as_str())
+    .bind(usage.quantity)
+    .bind(usage.unit.as_str())
+    .bind(cost)
+    .bind(end)
+    .bind(&usage.metadata)
+    .execute(&state.pool)
+    .await?;
+
+    crate::credits::deduct_realtime_usage(
+        &state.pool, resource.organization_id, cost_cents, &resource.resource_id, gb
+    ).await?;
+
+    tracing::info!(
+        "Network egress for {}: {:.4} GB, ${:.4}",
+        resource.resource_id, gb, cost
+    );
+
+    Ok(())
 }
