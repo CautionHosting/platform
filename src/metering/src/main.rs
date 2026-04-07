@@ -289,7 +289,9 @@ async fn internal_auth_middleware(
 #[derive(serde::Deserialize)]
 struct TrackResourceRequest {
     resource_id: String,
-    user_id: uuid::Uuid,
+    organization_id: uuid::Uuid,
+    #[serde(default)]
+    user_id: Option<uuid::Uuid>,
     provider: Provider,
     instance_type: Option<String>,
     region: Option<String>,
@@ -304,8 +306,8 @@ async fn track_resource(
 
     let result = sqlx::query(
         r#"
-        INSERT INTO tracked_resources (resource_id, user_id, provider, instance_type, region, metadata, status, started_at, last_billed_at)
-        VALUES ($1, $2, $3, $4, $5, $6, 'running', NOW(), NOW())
+        INSERT INTO tracked_resources (resource_id, organization_id, user_id, provider, instance_type, region, metadata, status, started_at, last_billed_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'running', NOW(), NOW())
         ON CONFLICT (resource_id) DO UPDATE SET
             status = 'running',
             started_at = COALESCE(tracked_resources.started_at, NOW()),
@@ -313,6 +315,7 @@ async fn track_resource(
         "#,
     )
     .bind(&req.resource_id)
+    .bind(req.organization_id)
     .bind(req.user_id)
     .bind(req.provider.as_str())
     .bind(&req.instance_type)
@@ -370,7 +373,7 @@ async fn list_tracked_resources(
 ) -> impl IntoResponse {
     let result = sqlx::query_as::<_, TrackedResource>(
         r#"
-        SELECT resource_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
+        SELECT resource_id, organization_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
         FROM tracked_resources
         WHERE status = 'running'
         ORDER BY started_at DESC
@@ -429,6 +432,7 @@ async fn get_user_usage(
 #[derive(serde::Deserialize)]
 struct TestSimulateUsageRequest {
     user_id: uuid::Uuid,
+    organization_id: Option<uuid::Uuid>,
     hours: Option<f64>,
     instance_type: Option<String>,
 }
@@ -445,7 +449,8 @@ async fn test_simulate_usage(
     let now = time::OffsetDateTime::now_utc();
 
     let usage = ResourceUsage {
-        user_id: req.user_id,
+        organization_id: req.organization_id.unwrap_or(req.user_id),
+        user_id: Some(req.user_id),
         resource_id: resource_id.clone(),
         provider: Provider::Aws,
         resource_type: ResourceType::Compute,
@@ -463,10 +468,11 @@ async fn test_simulate_usage(
     // Record locally
     let result = sqlx::query(
         r#"
-        INSERT INTO usage_records (user_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        INSERT INTO usage_records (organization_id, user_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         "#,
     )
+    .bind(usage.organization_id)
     .bind(usage.user_id)
     .bind(&usage.resource_id)
     .bind(usage.provider.as_str())
@@ -506,6 +512,8 @@ async fn test_simulate_usage(
 #[derive(serde::Deserialize)]
 struct TestSimulatePaddleTransactionRequest {
     user_id: uuid::Uuid,
+    #[serde(default)]
+    organization_id: Option<uuid::Uuid>,
     amount_cents: i64,
     #[serde(default)]
     event_type: Option<String>, // transaction.completed, transaction.billed, transaction.payment_failed
@@ -523,15 +531,16 @@ async fn test_simulate_paddle_transaction(
     let event_type = req.event_type.unwrap_or_else(|| "transaction.billed".to_string());
     let invoice_number = format!("TEST-{}", &transaction_id[9..17].to_uppercase());
 
-    // Ensure the user has a paddle_customer_id in billing_config
+    // Ensure the org has a paddle_customer_id in billing_config
+    let org_id = req.organization_id.unwrap_or(req.user_id);
     let customer_id = format!("ctm_test_{}", req.user_id);
     if let Err(e) = sqlx::query(
         r#"
-        UPDATE billing_config SET paddle_customer_id = $1 WHERE user_id = $2
+        UPDATE billing_config SET paddle_customer_id = $1 WHERE organization_id = $2
         "#,
     )
     .bind(&customer_id)
-    .bind(req.user_id)
+    .bind(org_id)
     .execute(&state.pool)
     .await {
         tracing::error!("Failed to update paddle_customer_id for test user {}: {}", req.user_id, e);
@@ -644,8 +653,7 @@ async fn sync_aws_costs(
 
     // Record each org's costs
     for (org_id, cost_data) in &org_costs {
-        // Try to parse org_id as UUID (it should be the user/org UUID)
-        let user_id: uuid::Uuid = match org_id.parse() {
+        let parsed_org_id: uuid::Uuid = match org_id.parse() {
             Ok(id) => id,
             Err(_) => {
                 tracing::warn!("Skipping non-UUID org_id: {}", org_id);
@@ -657,11 +665,11 @@ async fn sync_aws_costs(
         let now = time::OffsetDateTime::now_utc();
         let result = sqlx::query(
             r#"
-            INSERT INTO usage_records (user_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
+            INSERT INTO usage_records (organization_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
             VALUES ($1, $2, 'aws', 'aws_cost_explorer', $3, 'usd', $3, $4, $5)
             "#,
         )
-        .bind(user_id)
+        .bind(parsed_org_id)
         .bind(format!("aws-costs-{}-{}", start_date, end_date))
         .bind(cost_data.total_cost)
         .bind(now)

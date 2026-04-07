@@ -7,7 +7,8 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ResourceUsage {
-    pub user_id: Uuid,
+    pub organization_id: Uuid,
+    pub user_id: Option<Uuid>,
     pub resource_id: String,
     pub provider: Provider,
     pub resource_type: ResourceType,
@@ -99,7 +100,8 @@ impl UsageUnit {
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct TrackedResource {
     pub resource_id: String,
-    pub user_id: Uuid,
+    pub organization_id: Uuid,
+    pub user_id: Option<Uuid>,
     pub provider: String,
     pub instance_type: Option<String>,
     pub region: Option<String>,
@@ -113,7 +115,8 @@ pub struct TrackedResource {
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct UsageRecord {
     pub id: Uuid,
-    pub user_id: Uuid,
+    pub organization_id: Uuid,
+    pub user_id: Option<Uuid>,
     pub resource_id: String,
     pub provider: String,
     pub resource_type: String,

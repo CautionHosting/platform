@@ -8,23 +8,23 @@ use crate::AppState;
 use crate::dunning::send_dunning_email;
 use crate::paddle;
 
-/// After deducting credits, check if the user's balance requires action.
-pub(crate) async fn check_balance_thresholds(state: &AppState, user_id: uuid::Uuid) -> Result<()> {
+/// After deducting credits, check if the org's balance requires action.
+pub(crate) async fn check_balance_thresholds(state: &AppState, org_id: uuid::Uuid) -> Result<()> {
     let balance_cents: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+        "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
     )
-    .bind(user_id)
+    .bind(org_id)
     .fetch_optional(&state.pool)
     .await?
     .unwrap_or(0);
 
-    // Read billing config for auto-topup settings
+    // Read billing config for auto-topup settings (now keyed by organization_id)
     let config = sqlx::query(
         r#"SELECT auto_topup_enabled, auto_topup_amount_dollars,
                   low_balance_warned_at, last_auto_topup_at, paddle_customer_id
-           FROM billing_config WHERE user_id = $1"#
+           FROM billing_config WHERE organization_id = $1"#
     )
-    .bind(user_id)
+    .bind(org_id)
     .fetch_optional(&state.pool)
     .await?;
 
@@ -41,18 +41,6 @@ pub(crate) async fn check_balance_thresholds(state: &AppState, user_id: uuid::Uu
     let paddle_customer_id: Option<String> = config.as_ref()
         .and_then(|r| r.get("paddle_customer_id"));
 
-    // Look up user's org
-    let org_id: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT organization_id FROM organization_members WHERE user_id = $1 LIMIT 1"
-    )
-    .bind(user_id)
-    .fetch_optional(&state.pool)
-    .await?;
-
-    let Some(org_id) = org_id else {
-        return Ok(());
-    };
-
     let now = chrono::Utc::now();
 
     // Priority 1: Balance <= 0 → suspend fully-managed resources + trigger auto-topup if enabled
@@ -66,11 +54,11 @@ pub(crate) async fn check_balance_thresholds(state: &AppState, user_id: uuid::Uu
         .flatten();
 
         if already_suspended.is_none() {
-            tracing::warn!("User {} balance {} <= 0, suspending fully-managed resources", user_id, balance_cents);
+            tracing::warn!("Org {} balance {} <= 0, suspending fully-managed resources", org_id, balance_cents);
             suspend_fully_managed_org(state, org_id).await;
         }
 
-        // If auto-topup is enabled, trigger it so the user can auto-recover after suspension
+        // If auto-topup is enabled, trigger it so the org can auto-recover after suspension
         if auto_topup_enabled && auto_topup_dollars > 0 {
             let target_cents = (auto_topup_dollars as i64) * 100;
             let cooldown_ok = last_auto_topup_at
@@ -78,8 +66,8 @@ pub(crate) async fn check_balance_thresholds(state: &AppState, user_id: uuid::Uu
                 .unwrap_or(true);
             if cooldown_ok {
                 if let Some(customer_id) = paddle_customer_id.as_ref() {
-                    tracing::info!("Triggering auto-topup for suspended user {} to enable recovery", user_id);
-                    trigger_auto_topup(state, user_id, balance_cents, target_cents, customer_id).await;
+                    tracing::info!("Triggering auto-topup for suspended org {} to enable recovery", org_id);
+                    trigger_auto_topup(state, org_id, balance_cents, target_cents, customer_id).await;
                 }
             }
         }
@@ -97,7 +85,7 @@ pub(crate) async fn check_balance_thresholds(state: &AppState, user_id: uuid::Uu
                 .unwrap_or(true);
             if cooldown_ok {
                 if let Some(customer_id) = paddle_customer_id.as_ref() {
-                    trigger_auto_topup(state, user_id, balance_cents, target_cents, customer_id).await;
+                    trigger_auto_topup(state, org_id, balance_cents, target_cents, customer_id).await;
                 }
             }
         }
@@ -110,15 +98,15 @@ pub(crate) async fn check_balance_thresholds(state: &AppState, user_id: uuid::Uu
             .map(|t| (now - t).num_seconds() > 86400) // >24h
             .unwrap_or(true);
         if cooldown_ok {
-            tracing::info!("Low balance warning for user {} ({}c)", user_id, balance_cents);
+            tracing::info!("Low balance warning for org {} ({}c)", org_id, balance_cents);
 
             if let Err(e) = sqlx::query(
-                "UPDATE billing_config SET low_balance_warned_at = NOW() WHERE user_id = $1"
+                "UPDATE billing_config SET low_balance_warned_at = NOW() WHERE organization_id = $1"
             )
-            .bind(user_id)
+            .bind(org_id)
             .execute(&state.pool)
             .await {
-                tracing::error!("Failed to update low_balance_warned_at for user {}: {}", user_id, e);
+                tracing::error!("Failed to update low_balance_warned_at for org {}: {}", org_id, e);
             }
 
             send_dunning_email(state, org_id, "insufficient_balance", serde_json::json!({
@@ -196,7 +184,7 @@ pub(crate) async fn suspend_fully_managed_org(state: &AppState, org_id: uuid::Uu
 /// Trigger auto top-up by creating a Paddle transaction for `target - current_balance`.
 pub(crate) async fn trigger_auto_topup(
     state: &AppState,
-    user_id: uuid::Uuid,
+    org_id: uuid::Uuid,
     current_balance: i64,
     target_cents: i64,
     paddle_customer_id: &str,
@@ -207,18 +195,18 @@ pub(crate) async fn trigger_auto_topup(
     }
 
     tracing::info!(
-        "Auto top-up: user={}, current={}c, target={}c, charging={}c",
-        user_id, current_balance, target_cents, topup_cents
+        "Auto top-up: org={}, current={}c, target={}c, charging={}c",
+        org_id, current_balance, target_cents, topup_cents
     );
 
     // Optimistic: set last_auto_topup_at to prevent rapid-fire
     if let Err(e) = sqlx::query(
-        "UPDATE billing_config SET last_auto_topup_at = NOW() WHERE user_id = $1"
+        "UPDATE billing_config SET last_auto_topup_at = NOW() WHERE organization_id = $1"
     )
-    .bind(user_id)
+    .bind(org_id)
     .execute(&state.pool)
     .await {
-        tracing::error!("Failed to set last_auto_topup_at for user {}: {}", user_id, e);
+        tracing::error!("Failed to set last_auto_topup_at for org {}: {}", org_id, e);
     }
 
     let topup_dollars = topup_cents as f64 / 100.0;
@@ -234,51 +222,40 @@ pub(crate) async fn trigger_auto_topup(
     for attempt in 0..3 {
         if attempt > 0 {
             let delay = std::time::Duration::from_secs(1 << attempt); // 2s, 4s
-            tracing::info!("Auto top-up retry {} for user {} in {:?}", attempt + 1, user_id, delay);
+            tracing::info!("Auto top-up retry {} for org {} in {:?}", attempt + 1, org_id, delay);
             tokio::time::sleep(delay).await;
         }
 
         match state.paddle.create_transaction(paddle_customer_id, line_items.clone()).await {
             Ok(txn) => {
                 tracing::info!(
-                    "Created Paddle auto-topup transaction {} for user {} (${:.2})",
-                    txn.id, user_id, topup_dollars
+                    "Created Paddle auto-topup transaction {} for org {} (${:.2})",
+                    txn.id, org_id, topup_dollars
                 );
                 // Credits will be deposited when transaction.completed webhook fires
                 return;
             }
             Err(e) => {
-                tracing::warn!("Auto top-up attempt {} failed for user {}: {}", attempt + 1, user_id, e);
+                tracing::warn!("Auto top-up attempt {} failed for org {}: {}", attempt + 1, org_id, e);
                 last_err = Some(e);
             }
         }
     }
 
     // All retries exhausted — clear last_auto_topup_at so the next collection cycle can retry
-    tracing::error!("Auto top-up failed after 3 attempts for user {}: {}", user_id, last_err.unwrap());
+    tracing::error!("Auto top-up failed after 3 attempts for org {}: {}", org_id, last_err.unwrap());
     if let Err(e) = sqlx::query(
-        "UPDATE billing_config SET last_auto_topup_at = NULL WHERE user_id = $1"
+        "UPDATE billing_config SET last_auto_topup_at = NULL WHERE organization_id = $1"
     )
-    .bind(user_id)
+    .bind(org_id)
     .execute(&state.pool)
     .await {
-        tracing::error!("Failed to clear last_auto_topup_at for user {}: {}", user_id, e);
+        tracing::error!("Failed to clear last_auto_topup_at for org {}: {}", org_id, e);
     }
 
     // Send payment failure email
-    let org_id: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT organization_id FROM organization_members WHERE user_id = $1 LIMIT 1"
-    )
-    .bind(user_id)
-    .fetch_optional(&state.pool)
-    .await
-    .ok()
-    .flatten();
-
-    if let Some(org_id) = org_id {
-        send_dunning_email(state, org_id, "payment_failure", serde_json::json!({
-            "reason": "auto_topup_failed",
-            "update_payment_url": "https://caution.dev/settings/billing",
-        })).await;
-    }
+    send_dunning_email(state, org_id, "payment_failure", serde_json::json!({
+        "reason": "auto_topup_failed",
+        "update_payment_url": "https://caution.dev/settings/billing",
+    })).await;
 }

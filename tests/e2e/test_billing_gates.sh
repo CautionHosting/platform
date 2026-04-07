@@ -86,9 +86,9 @@ log() {
 set_balance() {
   local cents=$1
   docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-  INSERT INTO wallet_balance (user_id, balance_cents)
-  VALUES ('$USER_ID', $cents)
-  ON CONFLICT (user_id) DO UPDATE SET balance_cents = $cents;
+  INSERT INTO wallet_balance (organization_id, balance_cents)
+  VALUES ('$ORG_ID', $cents)
+  ON CONFLICT (organization_id) DO UPDATE SET balance_cents = $cents;
   " >/dev/null 2>&1
 }
 
@@ -218,7 +218,7 @@ log "Testing deploy with zero credits..."
 
 # Ensure no wallet balance exists
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-DELETE FROM wallet_balance WHERE user_id = '$USER_ID';
+DELETE FROM wallet_balance WHERE organization_id = '$ORG_ID';
 " >/dev/null 2>&1
 
 RESULT=$(attempt_deploy)

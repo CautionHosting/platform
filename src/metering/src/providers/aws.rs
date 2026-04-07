@@ -27,7 +27,7 @@ impl UsageProvider for AwsUsageProvider {
     async fn collect_usage(&self) -> Result<Vec<ResourceUsage>> {
         let resources = sqlx::query_as::<_, TrackedResource>(
             r#"
-            SELECT resource_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
+            SELECT resource_id, organization_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
             FROM tracked_resources
             WHERE provider = 'aws' AND status = 'running'
             "#,
@@ -50,6 +50,7 @@ impl UsageProvider for AwsUsageProvider {
             }
 
             usage_records.push(ResourceUsage {
+                organization_id: resource.organization_id,
                 user_id: resource.user_id,
                 resource_id: resource.resource_id.clone(),
                 provider: Provider::Aws,
@@ -70,7 +71,7 @@ impl UsageProvider for AwsUsageProvider {
     async fn get_resource_usage(&self, resource_id: &str) -> Result<Option<ResourceUsage>> {
         let resource = sqlx::query_as::<_, TrackedResource>(
             r#"
-            SELECT resource_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
+            SELECT resource_id, organization_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
             FROM tracked_resources
             WHERE resource_id = $1 AND provider = 'aws'
             "#,
@@ -91,6 +92,7 @@ impl UsageProvider for AwsUsageProvider {
         let hours = seconds_elapsed / 3600.0;
 
         Ok(Some(ResourceUsage {
+            organization_id: resource.organization_id,
             user_id: resource.user_id,
             resource_id: resource.resource_id,
             provider: Provider::Aws,
@@ -108,7 +110,7 @@ impl UsageProvider for AwsUsageProvider {
     async fn track_resource(
         &self,
         resource_id: &str,
-        user_id: Uuid,
+        organization_id: Uuid,
         metadata: serde_json::Value,
     ) -> Result<()> {
         let instance_type = metadata
@@ -122,7 +124,7 @@ impl UsageProvider for AwsUsageProvider {
 
         sqlx::query(
             r#"
-            INSERT INTO tracked_resources (resource_id, user_id, provider, instance_type, region, metadata, status, started_at, last_billed_at)
+            INSERT INTO tracked_resources (resource_id, organization_id, provider, instance_type, region, metadata, status, started_at, last_billed_at)
             VALUES ($1, $2, 'aws', $3, $4, $5, 'running', NOW(), NOW())
             ON CONFLICT (resource_id) DO UPDATE SET
                 status = 'running',
@@ -133,7 +135,7 @@ impl UsageProvider for AwsUsageProvider {
             "#,
         )
         .bind(resource_id)
-        .bind(user_id)
+        .bind(organization_id)
         .bind(&instance_type)
         .bind(&region)
         .bind(&metadata)

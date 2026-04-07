@@ -277,7 +277,8 @@ mod tests {
 
     fn make_usage(provider: Provider, resource_type: ResourceType, quantity: f64, metadata: serde_json::Value) -> ResourceUsage {
         ResourceUsage {
-            user_id: Uuid::new_v4(),
+            organization_id: Uuid::new_v4(),
+            user_id: Some(Uuid::new_v4()),
             resource_id: "test-resource".to_string(),
             provider,
             resource_type,

@@ -174,9 +174,17 @@ EOF
 # Mark user as onboarded + seed credits for deploy gate
 docker exec "$DB_HOST" psql -U postgres -d "$DB_NAME" -c "
 UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';
-INSERT INTO wallet_balance (user_id, balance_cents) VALUES ('$USER_ID', 10000)
-ON CONFLICT (user_id) DO UPDATE SET balance_cents = 10000;
 " || echo "WARNING: DB setup failed"
+
+ORG_ID=$(docker exec "$DB_HOST" psql -U postgres -d "$DB_NAME" -t -A -c "
+SELECT organization_id FROM organization_members WHERE user_id = '$USER_ID' LIMIT 1;
+" 2>/dev/null | head -1 | tr -d ' \n')
+log "  Org ID: $ORG_ID"
+
+docker exec "$DB_HOST" psql -U postgres -d "$DB_NAME" -c "
+INSERT INTO wallet_balance (organization_id, balance_cents) VALUES ('$ORG_ID', 10000)
+ON CONFLICT (organization_id) DO UPDATE SET balance_cents = 10000;
+" || echo "WARNING: wallet seed failed"
 
 # ── Step 3: Add SSH key ───────────────────────────────────────────────
 STEP_NUM=3

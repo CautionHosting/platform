@@ -228,16 +228,16 @@ TEST_DB_HOST="${TEST_DB_HOST:-postgres-test}"
 
 # Insert billing_config with paddle_customer_id
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO billing_config (user_id, billing_mode, paddle_customer_id, created_at)
-VALUES ('$USER_ID', 'postpaid', '$PADDLE_CUSTOMER_ID', NOW())
-ON CONFLICT (user_id) DO UPDATE SET
+INSERT INTO billing_config (organization_id, billing_mode, paddle_customer_id, created_at)
+VALUES ('$ORG_ID', 'postpaid', '$PADDLE_CUSTOMER_ID', NOW())
+ON CONFLICT (organization_id) DO UPDATE SET
     billing_mode = 'postpaid',
     paddle_customer_id = '$PADDLE_CUSTOMER_ID';
 " >/dev/null 2>&1
 
 # Verify it was created
 BILLING_CONFIG=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT paddle_customer_id FROM billing_config WHERE user_id = '$USER_ID';
+SELECT paddle_customer_id FROM billing_config WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 if [ "$BILLING_CONFIG" != "$PADDLE_CUSTOMER_ID" ]; then
@@ -264,6 +264,7 @@ for i in 0 1 2; do
         -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
         -d "{
             \"resource_id\": \"$RESOURCE_ID\",
+            \"organization_id\": \"$ORG_ID\",
             \"user_id\": \"$USER_ID\",
             \"provider\": \"aws\",
             \"instance_type\": \"$INSTANCE_TYPE\",
@@ -310,6 +311,7 @@ for day in $(seq 1 30); do
         -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
         -d "{
             \"user_id\": \"$USER_ID\",
+            \"organization_id\": \"$ORG_ID\",
             \"hours\": $HOURS,
             \"instance_type\": \"$INSTANCE_TYPE\"
         }")
@@ -350,7 +352,7 @@ log "  Total cost from DB: \$$TOTAL_DB_COST"
 
 # Also check directly in the database
 DB_RECORD_COUNT=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM usage_records WHERE user_id = '$USER_ID';
+SELECT COUNT(*) FROM usage_records WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 log "  Raw record count in DB: $DB_RECORD_COUNT"
@@ -375,6 +377,7 @@ BILLED_RESPONSE=$(curl -sf -X POST "$METERING_EXTERNAL_URL/test/simulate-paddle-
     -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
     -d "{
         \"user_id\": \"$USER_ID\",
+        \"organization_id\": \"$ORG_ID\",
         \"amount_cents\": $AMOUNT_CENTS,
         \"event_type\": \"transaction.billed\"
     }")
@@ -433,6 +436,7 @@ COMPLETED_RESPONSE=$(curl -sf -X POST "$METERING_EXTERNAL_URL/test/simulate-padd
     -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
     -d "{
         \"user_id\": \"$USER_ID\",
+        \"organization_id\": \"$ORG_ID\",
         \"amount_cents\": $AMOUNT_CENTS,
         \"event_type\": \"transaction.completed\",
         \"transaction_id\": \"$BILLED_TXN_ID\"
@@ -470,6 +474,7 @@ FAILED_RESPONSE=$(curl -sf -X POST "$METERING_EXTERNAL_URL/test/simulate-paddle-
     -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
     -d "{
         \"user_id\": \"$USER_ID\",
+        \"organization_id\": \"$ORG_ID\",
         \"amount_cents\": $AMOUNT_CENTS,
         \"event_type\": \"transaction.payment_failed\"
     }")
@@ -563,23 +568,23 @@ log "Testing prepaid credit purchase and wallet balance..."
 
 # Add credits to wallet
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO wallet_balance (user_id, balance_cents)
-VALUES ('$USER_ID', 5000)
-ON CONFLICT (user_id) DO UPDATE SET balance_cents = 5000;
+INSERT INTO wallet_balance (organization_id, balance_cents)
+VALUES ('$ORG_ID', 5000)
+ON CONFLICT (organization_id) DO UPDATE SET balance_cents = 5000;
 " >/dev/null 2>&1
 
 # Record ledger entry
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description)
-VALUES ('$USER_ID', 5000, 5000, 'purchase', 'Test credit purchase (\$50.00)');
+INSERT INTO credit_ledger (organization_id, user_id, delta_cents, balance_after, entry_type, description)
+VALUES ('$ORG_ID', '$USER_ID', 5000, 5000, 'purchase', 'Test credit purchase (\$50.00)');
 " >/dev/null 2>&1
 
 WALLET_BALANCE=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT balance_cents FROM wallet_balance WHERE user_id = '$USER_ID';
+SELECT balance_cents FROM wallet_balance WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 LEDGER_COUNT=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM credit_ledger WHERE user_id = '$USER_ID';
+SELECT COUNT(*) FROM credit_ledger WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 log "  Wallet balance: $WALLET_BALANCE cents (\$$(awk "BEGIN {printf \"%.2f\", $WALLET_BALANCE / 100}"))"
@@ -598,9 +603,9 @@ log "Testing credit deduction during usage billing..."
 
 # We need the org_id for billing config
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO billing_config (user_id, billing_mode, paddle_customer_id, created_at)
+INSERT INTO billing_config (organization_id, billing_mode, paddle_customer_id, created_at)
 VALUES ('$ORG_ID', 'postpaid', '$PADDLE_CUSTOMER_ID', NOW())
-ON CONFLICT (user_id) DO UPDATE SET paddle_customer_id = '$PADDLE_CUSTOMER_ID';
+ON CONFLICT (organization_id) DO UPDATE SET paddle_customer_id = '$PADDLE_CUSTOMER_ID';
 " >/dev/null 2>&1 || true
 
 # Simulate a billing cycle that should deduct credits
@@ -610,24 +615,24 @@ ON CONFLICT (user_id) DO UPDATE SET paddle_customer_id = '$PADDLE_CUSTOMER_ID';
 
 # First, record the balance before
 BALANCE_BEFORE=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = '$USER_ID';
+SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 # Simulate credit deduction by directly updating wallet (same logic as apply_credit_deduction)
 DEDUCTION_AMOUNT=2000  # $20 deduction
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE wallet_balance SET balance_cents = balance_cents - $DEDUCTION_AMOUNT WHERE user_id = '$USER_ID';
-INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description)
-VALUES ('$USER_ID', -$DEDUCTION_AMOUNT, (SELECT balance_cents FROM wallet_balance WHERE user_id = '$USER_ID'), 'billing_deduction', 'Monthly usage billing deduction');
+UPDATE wallet_balance SET balance_cents = balance_cents - $DEDUCTION_AMOUNT WHERE organization_id = '$ORG_ID';
+INSERT INTO credit_ledger (organization_id, user_id, delta_cents, balance_after, entry_type, description)
+VALUES ('$ORG_ID', '$USER_ID', -$DEDUCTION_AMOUNT, (SELECT balance_cents FROM wallet_balance WHERE organization_id = '$ORG_ID'), 'billing_deduction', 'Monthly usage billing deduction');
 " >/dev/null 2>&1
 
 BALANCE_AFTER=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT balance_cents FROM wallet_balance WHERE user_id = '$USER_ID';
+SELECT balance_cents FROM wallet_balance WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 EXPECTED_BALANCE=$((BALANCE_BEFORE - DEDUCTION_AMOUNT))
 DEDUCTION_LEDGER=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM credit_ledger WHERE user_id = '$USER_ID' AND entry_type = 'billing_deduction';
+SELECT COUNT(*) FROM credit_ledger WHERE organization_id = '$ORG_ID' AND entry_type = 'billing_deduction';
 " 2>/dev/null | tr -d ' \n')
 
 log "  Before: $BALANCE_BEFORE cents, After: $BALANCE_AFTER cents (deducted $DEDUCTION_AMOUNT)"
@@ -695,7 +700,7 @@ log "Testing subscription billing with partial credit offset..."
 
 # Current wallet balance should partially cover the $29.00 subscription
 CREDIT_BALANCE=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = '$USER_ID';
+SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 log "  Wallet balance before billing: $CREDIT_BALANCE cents"
@@ -714,10 +719,10 @@ log "  Remainder for Paddle: $REMAINDER cents"
 # Apply credit deduction
 if [ "$CREDITS_TO_APPLY" -gt 0 ]; then
     docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-    UPDATE wallet_balance SET balance_cents = balance_cents - $CREDITS_TO_APPLY WHERE user_id = '$USER_ID';
-    INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description)
-    VALUES ('$USER_ID', -$CREDITS_TO_APPLY,
-            (SELECT balance_cents FROM wallet_balance WHERE user_id = '$USER_ID'),
+    UPDATE wallet_balance SET balance_cents = balance_cents - $CREDITS_TO_APPLY WHERE organization_id = '$ORG_ID';
+    INSERT INTO credit_ledger (organization_id, user_id, delta_cents, balance_after, entry_type, description)
+    VALUES ('$ORG_ID', '$USER_ID', -$CREDITS_TO_APPLY,
+            (SELECT balance_cents FROM wallet_balance WHERE organization_id = '$ORG_ID'),
             'billing_deduction', 'Subscription renewal: starter (monthly)');
     " >/dev/null 2>&1 || true
 fi
@@ -755,7 +760,7 @@ WHERE id = '$SUB_ID';
 
 # Verify
 BALANCE_AFTER_SUB=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = '$USER_ID';
+SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 EVENT_COUNT=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
@@ -838,30 +843,30 @@ log "Verifying credit ledger audit trail..."
 
 LEDGER_ENTRIES=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
 SELECT entry_type, delta_cents, balance_after FROM credit_ledger
-WHERE user_id = '$USER_ID'
+WHERE organization_id = '$ORG_ID'
 ORDER BY created_at;
 " 2>/dev/null)
 
 TOTAL_ENTRIES=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM credit_ledger WHERE user_id = '$USER_ID';
+SELECT COUNT(*) FROM credit_ledger WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 # Verify ledger has both purchase and deduction entries
 HAS_PURCHASE=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM credit_ledger WHERE user_id = '$USER_ID' AND entry_type = 'purchase';
+SELECT COUNT(*) FROM credit_ledger WHERE organization_id = '$ORG_ID' AND entry_type = 'purchase';
 " 2>/dev/null | tr -d ' \n')
 
 HAS_DEDUCTION=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM credit_ledger WHERE user_id = '$USER_ID' AND entry_type = 'billing_deduction';
+SELECT COUNT(*) FROM credit_ledger WHERE organization_id = '$ORG_ID' AND entry_type = 'billing_deduction';
 " 2>/dev/null | tr -d ' \n')
 
 # Verify final wallet balance matches last ledger balance_after
 FINAL_WALLET=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT balance_cents FROM wallet_balance WHERE user_id = '$USER_ID';
+SELECT balance_cents FROM wallet_balance WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 LAST_LEDGER_BALANCE=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT balance_after FROM credit_ledger WHERE user_id = '$USER_ID' ORDER BY created_at DESC LIMIT 1;
+SELECT balance_after FROM credit_ledger WHERE organization_id = '$ORG_ID' ORDER BY created_at DESC LIMIT 1;
 " 2>/dev/null | tr -d ' \n')
 
 log "  Total ledger entries: $TOTAL_ENTRIES"
@@ -883,9 +888,9 @@ log "Testing deploy gate: \$25 minimum credits required..."
 
 # Set balance to $20 (2000 cents) — should fail
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO wallet_balance (user_id, balance_cents)
-VALUES ('$USER_ID', 2000)
-ON CONFLICT (user_id) DO UPDATE SET balance_cents = 2000;
+INSERT INTO wallet_balance (organization_id, balance_cents)
+VALUES ('$ORG_ID', 2000)
+ON CONFLICT (organization_id) DO UPDATE SET balance_cents = 2000;
 " >/dev/null 2>&1
 
 # Attempt deploy (we just check the billing gate, not a full deploy)
@@ -903,7 +908,7 @@ fi
 
 # Set balance to $25 (2500 cents) — should pass billing gate
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE wallet_balance SET balance_cents = 2500 WHERE user_id = '$USER_ID';
+UPDATE wallet_balance SET balance_cents = 2500 WHERE organization_id = '$ORG_ID';
 " >/dev/null 2>&1
 
 DEPLOY_RESPONSE_OK=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$GATEWAY_URL/deploy" \
@@ -926,7 +931,7 @@ log "Testing real-time credit deduction..."
 
 # Set known balance
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE wallet_balance SET balance_cents = 10000 WHERE user_id = '$USER_ID';
+UPDATE wallet_balance SET balance_cents = 10000 WHERE organization_id = '$ORG_ID';
 " >/dev/null 2>&1
 
 BALANCE_BEFORE_RT=10000
@@ -938,6 +943,7 @@ curl -sf -X POST "$METERING_EXTERNAL_URL/api/resources/track" \
     -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
     -d "{
         \"resource_id\": \"$RT_RESOURCE\",
+        \"organization_id\": \"$ORG_ID\",
         \"user_id\": \"$USER_ID\",
         \"provider\": \"aws\",
         \"instance_type\": \"m5.xlarge\",
@@ -957,11 +963,11 @@ log "  Collection response: $COLLECT_RESP"
 
 # Check wallet decreased
 BALANCE_AFTER_RT=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT balance_cents FROM wallet_balance WHERE user_id = '$USER_ID';
+SELECT balance_cents FROM wallet_balance WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 RT_LEDGER=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM credit_ledger WHERE user_id = '$USER_ID' AND entry_type = 'realtime_usage';
+SELECT COUNT(*) FROM credit_ledger WHERE organization_id = '$ORG_ID' AND entry_type = 'realtime_usage';
 " 2>/dev/null | tr -d ' \n')
 
 log "  Balance before: ${BALANCE_BEFORE_RT}c, after: ${BALANCE_AFTER_RT}c"
@@ -983,7 +989,7 @@ log "Testing credit exhaustion and suspension..."
 
 # Set wallet to 1 cent
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE wallet_balance SET balance_cents = 1 WHERE user_id = '$USER_ID';
+UPDATE wallet_balance SET balance_cents = 1 WHERE organization_id = '$ORG_ID';
 " >/dev/null 2>&1
 
 # Track an expensive resource
@@ -993,6 +999,7 @@ curl -sf -X POST "$METERING_EXTERNAL_URL/api/resources/track" \
     -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
     -d "{
         \"resource_id\": \"$EXHAUST_RESOURCE\",
+        \"organization_id\": \"$ORG_ID\",
         \"user_id\": \"$USER_ID\",
         \"provider\": \"aws\",
         \"instance_type\": \"m5.2xlarge\",
@@ -1023,7 +1030,7 @@ SELECT credit_suspended_at IS NOT NULL FROM organizations WHERE id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 EXHAUST_BALANCE=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT balance_cents FROM wallet_balance WHERE user_id = '$USER_ID';
+SELECT balance_cents FROM wallet_balance WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 log "  Balance after exhaustion: ${EXHAUST_BALANCE}c"
@@ -1044,9 +1051,9 @@ log "Testing unsuspend on credit deposit..."
 
 # Add credits back
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE wallet_balance SET balance_cents = 5000 WHERE user_id = '$USER_ID';
-INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description)
-VALUES ('$USER_ID', 5000, 5000, 'purchase', 'Test deposit to clear suspension');
+UPDATE wallet_balance SET balance_cents = 5000 WHERE organization_id = '$ORG_ID';
+INSERT INTO credit_ledger (organization_id, user_id, delta_cents, balance_after, entry_type, description)
+VALUES ('$ORG_ID', '$USER_ID', 5000, 5000, 'purchase', 'Test deposit to clear suspension');
 " >/dev/null 2>&1
 
 # Clear credit_suspended_at (simulating what the API does on credit purchase)
@@ -1074,15 +1081,15 @@ docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
 UPDATE billing_config SET
     auto_topup_enabled = true,
     auto_topup_amount_dollars = 50
-WHERE user_id = '$USER_ID';
+WHERE organization_id = '$ORG_ID';
 " >/dev/null 2>&1
 
 TOPUP_ENABLED=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT auto_topup_enabled FROM billing_config WHERE user_id = '$USER_ID';
+SELECT auto_topup_enabled FROM billing_config WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 TOPUP_AMOUNT=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT auto_topup_amount_dollars FROM billing_config WHERE user_id = '$USER_ID';
+SELECT auto_topup_amount_dollars FROM billing_config WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 log "  auto_topup_enabled: $TOPUP_ENABLED"
@@ -1096,7 +1103,7 @@ fi
 
 # Reset auto-topup for clean state
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE billing_config SET auto_topup_enabled = false WHERE user_id = '$USER_ID';
+UPDATE billing_config SET auto_topup_enabled = false WHERE organization_id = '$ORG_ID';
 " >/dev/null 2>&1
 
 # ── Step 24: Low balance warning ──────────────────────────────────────
@@ -1106,8 +1113,8 @@ log "Testing low balance warning..."
 
 # Set balance below $5 and no auto-topup
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE wallet_balance SET balance_cents = 300 WHERE user_id = '$USER_ID';
-UPDATE billing_config SET auto_topup_enabled = false, low_balance_warned_at = NULL WHERE user_id = '$USER_ID';
+UPDATE wallet_balance SET balance_cents = 300 WHERE organization_id = '$ORG_ID';
+UPDATE billing_config SET auto_topup_enabled = false, low_balance_warned_at = NULL WHERE organization_id = '$ORG_ID';
 " >/dev/null 2>&1
 
 # Track resource and trigger collection to invoke threshold check
@@ -1117,6 +1124,7 @@ curl -sf -X POST "$METERING_EXTERNAL_URL/api/resources/track" \
     -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
     -d "{
         \"resource_id\": \"$LB_RESOURCE\",
+        \"organization_id\": \"$ORG_ID\",
         \"user_id\": \"$USER_ID\",
         \"provider\": \"aws\",
         \"instance_type\": \"m5.xlarge\",
@@ -1134,7 +1142,7 @@ curl -sf "${METERING_AUTH[@]}" -X POST "$METERING_EXTERNAL_URL/api/collect" >/de
 sleep 1
 
 WARNED_AT=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT low_balance_warned_at IS NOT NULL FROM billing_config WHERE user_id = '$USER_ID';
+SELECT low_balance_warned_at IS NOT NULL FROM billing_config WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 log "  low_balance_warned_at set: $WARNED_AT"
@@ -1149,7 +1157,7 @@ curl -sf "${METERING_AUTH[@]}" -X POST "$METERING_EXTERNAL_URL/api/resources/$LB
 
 # Reset wallet for remaining tests
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE wallet_balance SET balance_cents = 5000 WHERE user_id = '$USER_ID';
+UPDATE wallet_balance SET balance_cents = 5000 WHERE organization_id = '$ORG_ID';
 " >/dev/null 2>&1
 
 # ── Step 25: Auto top-up API endpoint ─────────────────────────────────
@@ -1189,7 +1197,7 @@ fi
 
 # Clean up
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE billing_config SET auto_topup_enabled = false WHERE user_id = '$USER_ID';
+UPDATE billing_config SET auto_topup_enabled = false WHERE organization_id = '$ORG_ID';
 " >/dev/null 2>&1
 
 # ── Step 26: Webhook idempotency (DB constraint) ──────────────────────
@@ -1225,7 +1233,7 @@ log "Testing credit_suspended_at flag round-trip..."
 
 # Set org as credit-suspended
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE wallet_balance SET balance_cents = 10000 WHERE user_id = '$USER_ID';
+UPDATE wallet_balance SET balance_cents = 10000 WHERE organization_id = '$ORG_ID';
 UPDATE organizations SET credit_suspended_at = NOW() WHERE id = '$ORG_ID';
 " >/dev/null 2>&1
 
@@ -1261,7 +1269,7 @@ INSERT INTO credit_codes (code, amount_cents) VALUES ('$CREDIT_CODE', 1000);
 " >/dev/null 2>&1
 
 BALANCE_BEFORE=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = '$USER_ID';
+SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 REDEEM_RESPONSE=$(curl -s -X POST "$GATEWAY_URL/api/billing/credits/redeem" \
@@ -1326,7 +1334,7 @@ log "Testing per-org resource limit enforcement..."
 
 # Ensure balance is high enough to pass billing gate
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE wallet_balance SET balance_cents = 100000 WHERE user_id = '$USER_ID';
+UPDATE wallet_balance SET balance_cents = 100000 WHERE organization_id = '$ORG_ID';
 " >/dev/null 2>&1
 
 # Verify resource limit by inserting resources up to the cap and checking the count.
@@ -1394,6 +1402,7 @@ FIRST_DELIVERY=$(curl -sf -X POST "$METERING_EXTERNAL_URL/test/simulate-paddle-t
     -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
     -d "{
         \"user_id\": \"$USER_ID\",
+        \"organization_id\": \"$ORG_ID\",
         \"amount_cents\": 1000,
         \"event_type\": \"transaction.billed\",
         \"transaction_id\": \"$DUPE_TXN_ID\"
@@ -1441,14 +1450,14 @@ log "Testing auto top-up rejects zero/negative amount..."
 
 # Set up billing config with auto-topup enabled
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO billing_config (user_id, auto_topup_enabled, auto_topup_amount_dollars, paddle_customer_id)
-VALUES ('$USER_ID', true, 50, 'ctm_test_$USER_ID')
-ON CONFLICT (user_id) DO UPDATE SET auto_topup_enabled = true, auto_topup_amount_dollars = 50;
+INSERT INTO billing_config (organization_id, auto_topup_enabled, auto_topup_amount_dollars, paddle_customer_id)
+VALUES ('$ORG_ID', true, 50, 'ctm_test_$USER_ID')
+ON CONFLICT (organization_id) DO UPDATE SET auto_topup_enabled = true, auto_topup_amount_dollars = 50;
 " >/dev/null 2>&1
 
 # Record balance before
 BALANCE_BEFORE=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = '$USER_ID';
+SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 # Simulate a completed auto top-up with zero amount
@@ -1457,13 +1466,14 @@ ZERO_TOPUP=$(curl -sf -X POST "$METERING_EXTERNAL_URL/test/simulate-paddle-trans
     -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
     -d "{
         \"user_id\": \"$USER_ID\",
+        \"organization_id\": \"$ORG_ID\",
         \"amount_cents\": 0,
         \"event_type\": \"transaction.completed\"
     }" 2>/dev/null || echo '{"error":"rejected"}')
 
 # Balance should not have changed
 BALANCE_AFTER=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = '$USER_ID';
+SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 if [ "$BALANCE_BEFORE" = "$BALANCE_AFTER" ]; then
@@ -1483,7 +1493,7 @@ SELECT COUNT(*) FROM invoices WHERE user_id = '$USER_ID';
 log "  Invoices: $INVOICE_COUNT"
 
 USAGE_COUNT_FINAL=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM usage_records WHERE user_id = '$USER_ID';
+SELECT COUNT(*) FROM usage_records WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 log "  Usage records: $USAGE_COUNT_FINAL"
 
@@ -1493,12 +1503,12 @@ SELECT COUNT(*) FROM paddle_webhook_events;
 log "  Webhook events: $WEBHOOK_COUNT_FINAL"
 
 TRACKED_FINAL=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM tracked_resources WHERE user_id = '$USER_ID';
+SELECT COUNT(*) FROM tracked_resources WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 log "  Tracked resources: $TRACKED_FINAL"
 
 CREDIT_LEDGER_FINAL=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM credit_ledger WHERE user_id = '$USER_ID';
+SELECT COUNT(*) FROM credit_ledger WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 log "  Credit ledger entries: $CREDIT_LEDGER_FINAL"
 

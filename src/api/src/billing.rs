@@ -369,11 +369,11 @@ pub async fn get_paddle_client_token(
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
 
-    // Get the user's Paddle customer ID if one exists
+    // Get the org's Paddle customer ID if one exists
     let paddle_customer_id: Option<String> = sqlx::query_scalar(
-        "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
+        "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1"
     )
-    .bind(auth.user_id)
+    .bind(org_id)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -440,17 +440,17 @@ pub async fn paddle_transaction_completed(
             &state.paddle_api_url, api_key, &req.transaction_id
         ).await {
             if let Err(e) = sqlx::query(
-                "INSERT INTO billing_config (user_id, paddle_customer_id)
+                "INSERT INTO billing_config (organization_id, paddle_customer_id)
                  VALUES ($1, $2)
-                 ON CONFLICT (user_id) DO UPDATE SET paddle_customer_id = $2"
+                 ON CONFLICT (organization_id) DO UPDATE SET paddle_customer_id = $2"
             )
-            .bind(auth.user_id)
+            .bind(org_id)
             .bind(&customer_id)
             .execute(&state.db)
             .await {
-                tracing::error!("Failed to store paddle_customer_id for user {}: {}", auth.user_id, e);
+                tracing::error!("Failed to store paddle_customer_id for org {}: {}", org_id, e);
             } else {
-                tracing::info!("Stored paddle_customer_id {} for user {}", customer_id, auth.user_id);
+                tracing::info!("Stored paddle_customer_id {} for org {}", customer_id, org_id);
             }
         }
     }
@@ -496,10 +496,14 @@ pub async fn get_credit_balance(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
     let balance_cents: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+        "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
     )
-    .bind(auth.user_id)
+    .bind(org_id)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -593,18 +597,18 @@ pub async fn purchase_credits(
             return Err((StatusCode::BAD_REQUEST, "Transaction amount does not match package price".to_string()));
         }
 
-        // Verify transaction belongs to this user's Paddle customer
+        // Verify transaction belongs to this org's Paddle customer
         let txn_customer_id = verify_data["data"]["customer_id"].as_str().unwrap_or("");
-        let user_paddle_customer_id: Option<String> = sqlx::query_scalar(
-            "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
+        let org_paddle_customer_id: Option<String> = sqlx::query_scalar(
+            "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1"
         )
-        .bind(auth.user_id)
+        .bind(org_id)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
         .flatten();
 
-        if let Some(ref expected_cid) = user_paddle_customer_id {
+        if let Some(ref expected_cid) = org_paddle_customer_id {
             if txn_customer_id != expected_cid.as_str() {
                 tracing::warn!(
                     "Paddle transaction {} customer_id '{}' does not match user's customer_id '{}'",
@@ -613,7 +617,7 @@ pub async fn purchase_credits(
                 return Err((StatusCode::BAD_REQUEST, "Transaction does not belong to this account".to_string()));
             }
         } else {
-            tracing::warn!("User {} has no paddle_customer_id on file, cannot verify transaction ownership", auth.user_id);
+            tracing::warn!("Org {} has no paddle_customer_id on file, cannot verify transaction ownership", org_id);
             return Err((StatusCode::BAD_REQUEST, "No billing account on file".to_string()));
         }
 
@@ -625,9 +629,9 @@ pub async fn purchase_credits(
 
         // Try billing_config first, then resolve from an existing payment method transaction
         let mut paddle_customer_id: Option<String> = sqlx::query_scalar(
-            "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
+            "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1"
         )
-        .bind(auth.user_id)
+        .bind(org_id)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -651,15 +655,15 @@ pub async fn purchase_credits(
                 ).await {
                     // Cache it in billing_config for future use
                     if let Err(e) = sqlx::query(
-                        "INSERT INTO billing_config (user_id, paddle_customer_id)
+                        "INSERT INTO billing_config (organization_id, paddle_customer_id)
                          VALUES ($1, $2)
-                         ON CONFLICT (user_id) DO UPDATE SET paddle_customer_id = $2"
+                         ON CONFLICT (organization_id) DO UPDATE SET paddle_customer_id = $2"
                     )
-                    .bind(auth.user_id)
+                    .bind(org_id)
                     .bind(&cid)
                     .execute(&state.db)
                     .await {
-                        tracing::error!("Failed to cache paddle_customer_id for user {}: {}", auth.user_id, e);
+                        tracing::error!("Failed to cache paddle_customer_id for org {}: {}", org_id, e);
                     } else {
                         tracing::info!("Resolved and cached paddle_customer_id {} for org {}", cid, org_id);
                     }
@@ -724,9 +728,9 @@ pub async fn purchase_credits(
 
     if already_exists {
         let balance_cents: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
         )
-        .bind(auth.user_id)
+        .bind(org_id)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -749,6 +753,7 @@ pub async fn purchase_credits(
 
     let new_balance = apply_credit(
         &state.db,
+        org_id,
         auth.user_id,
         pkg.credit_cents,
         "purchase",
@@ -758,8 +763,8 @@ pub async fn purchase_credits(
     ).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to apply credit: {}", e)))?;
 
     tracing::info!(
-        "Credit purchase: user={}, txn={}, +{} cents, new_balance={}",
-        auth.user_id, transaction_id, pkg.credit_cents, new_balance
+        "Credit purchase: org={}, user={}, txn={}, +{} cents, new_balance={}",
+        org_id, auth.user_id, transaction_id, pkg.credit_cents, new_balance
     );
 
     // Check if org was credit-suspended and unsuspend if balance is now positive
@@ -803,14 +808,18 @@ pub async fn get_credit_ledger(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
     let rows: Vec<(Uuid, i64, i64, String, String, Option<String>, DateTime<Utc>)> = sqlx::query_as(
         "SELECT id, delta_cents, balance_after, entry_type, description, paddle_transaction_id, created_at
          FROM credit_ledger
-         WHERE user_id = $1
+         WHERE organization_id = $1
          ORDER BY created_at DESC
          LIMIT 50"
     )
-    .bind(auth.user_id)
+    .bind(org_id)
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
@@ -835,6 +844,10 @@ pub async fn redeem_credit_code(
     Extension(auth): Extension<AuthContext>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
     let code = body.get("code")
         .and_then(|v| v.as_str())
         .ok_or((StatusCode::BAD_REQUEST, "Missing 'code' field".to_string()))?
@@ -872,21 +885,22 @@ pub async fn redeem_credit_code(
 
     // Apply credits within the same transaction so redemption + credit are atomic
     let new_balance: i64 = sqlx::query_scalar(
-        "INSERT INTO wallet_balance (user_id, balance_cents)
+        "INSERT INTO wallet_balance (organization_id, balance_cents)
          VALUES ($1, $2)
-         ON CONFLICT (user_id) DO UPDATE SET balance_cents = wallet_balance.balance_cents + $2
+         ON CONFLICT (organization_id) DO UPDATE SET balance_cents = wallet_balance.balance_cents + $2
          RETURNING balance_cents"
     )
-    .bind(auth.user_id)
+    .bind(org_id)
     .bind(amount_cents)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to apply credit: {}", e)))?;
 
     sqlx::query(
-        "INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description)
-         VALUES ($1, $2, $3, 'code_redemption', 'Redeemed credit code')"
+        "INSERT INTO credit_ledger (organization_id, user_id, delta_cents, balance_after, entry_type, description)
+         VALUES ($1, $2, $3, $4, 'code_redemption', 'Redeemed credit code')"
     )
+    .bind(org_id)
     .bind(auth.user_id)
     .bind(amount_cents)
     .bind(new_balance)
@@ -913,6 +927,7 @@ pub async fn redeem_credit_code(
 /// Returns the new balance.
 pub async fn apply_credit(
     db: &PgPool,
+    org_id: Uuid,
     user_id: Uuid,
     delta_cents: i64,
     entry_type: &str,
@@ -923,21 +938,22 @@ pub async fn apply_credit(
     let mut tx = db.begin().await.map_err(|e| format!("Failed to begin transaction: {}", e))?;
 
     let new_balance: i64 = sqlx::query_scalar(
-        "INSERT INTO wallet_balance (user_id, balance_cents)
+        "INSERT INTO wallet_balance (organization_id, balance_cents)
          VALUES ($1, $2)
-         ON CONFLICT (user_id) DO UPDATE SET balance_cents = wallet_balance.balance_cents + $2
+         ON CONFLICT (organization_id) DO UPDATE SET balance_cents = wallet_balance.balance_cents + $2
          RETURNING balance_cents"
     )
-    .bind(user_id)
+    .bind(org_id)
     .bind(delta_cents)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| format!("Failed to upsert wallet_balance: {}", e))?;
 
     sqlx::query(
-        "INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description, paddle_transaction_id, invoice_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)"
+        "INSERT INTO credit_ledger (organization_id, user_id, delta_cents, balance_after, entry_type, description, paddle_transaction_id, invoice_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
     )
+    .bind(org_id)
     .bind(user_id)
     .bind(delta_cents)
     .bind(new_balance)
@@ -966,10 +982,14 @@ pub async fn get_auto_topup(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
     let row = sqlx::query(
-        "SELECT auto_topup_enabled, auto_topup_amount_dollars FROM billing_config WHERE user_id = $1"
+        "SELECT auto_topup_enabled, auto_topup_amount_dollars FROM billing_config WHERE organization_id = $1"
     )
-    .bind(auth.user_id)
+    .bind(org_id)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
@@ -1002,12 +1022,12 @@ pub async fn put_auto_topup(
             "Auto top-up target must be at least $10".to_string()));
     }
 
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
     // Verify user has an active payment method (required for auto-topup)
     if req.enabled {
-        let org_id = get_user_primary_org(&state.db, auth.user_id)
-            .await
-            .map_err(|e| (e, "Failed to get organization".to_string()))?;
-
         let payment_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM payment_methods WHERE organization_id = $1 AND is_active = true"
         )
@@ -1023,13 +1043,13 @@ pub async fn put_auto_topup(
     }
 
     sqlx::query(
-        "INSERT INTO billing_config (user_id, auto_topup_enabled, auto_topup_amount_dollars)
+        "INSERT INTO billing_config (organization_id, auto_topup_enabled, auto_topup_amount_dollars)
          VALUES ($1, $2, $3)
-         ON CONFLICT (user_id) DO UPDATE SET
+         ON CONFLICT (organization_id) DO UPDATE SET
              auto_topup_enabled = $2,
              auto_topup_amount_dollars = $3"
     )
-    .bind(auth.user_id)
+    .bind(org_id)
     .bind(req.enabled)
     .bind(req.amount_dollars)
     .execute(&state.db)

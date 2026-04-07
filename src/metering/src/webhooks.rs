@@ -179,15 +179,15 @@ async fn handle_transaction_completed(
         customer_id
     );
 
-    // Find the user by paddle_customer_id
-    let user_row = sqlx::query(
-        "SELECT user_id FROM billing_config WHERE paddle_customer_id = $1",
+    // Find the org by paddle_customer_id (billing_config is keyed by organization_id)
+    let org_row = sqlx::query(
+        "SELECT organization_id FROM billing_config WHERE paddle_customer_id = $1",
     )
     .bind(customer_id)
     .fetch_optional(&state.pool)
     .await?;
 
-    let Some(user_row) = user_row else {
+    let Some(org_row) = org_row else {
         tracing::warn!(
             "No billing_config found for paddle_customer_id: {}",
             customer_id
@@ -195,7 +195,7 @@ async fn handle_transaction_completed(
         return Ok(());
     };
 
-    let user_id: uuid::Uuid = user_row.get("user_id");
+    let org_id: uuid::Uuid = org_row.get("organization_id");
 
     // Update invoice status to paid
     sqlx::query(
@@ -219,8 +219,17 @@ async fn handle_transaction_completed(
         tracing::error!("Failed to mark billing event as paid for txn {}: {}", transaction_id, e);
     }
 
-    // Send confirmation email
-    send_payment_confirmation_email(state, user_id, transaction_id).await?;
+    // Send confirmation email (find a user in the org for the email)
+    let user_id: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1"
+    )
+    .bind(org_id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    if let Some(user_id) = user_id {
+        send_payment_confirmation_email(state, user_id, transaction_id).await?;
+    }
 
     // Check if this was an auto top-up transaction — deposit credits and unsuspend if needed
     let line_items = payload.data["details"]["line_items"].as_array();
@@ -247,27 +256,27 @@ async fn handle_transaction_completed(
         }
 
         {
-            tracing::info!("Auto top-up completed: depositing {} cents for user {}", total_cents, user_id);
+            tracing::info!("Auto top-up completed: depositing {} cents for org {}", total_cents, org_id);
 
-            // Deposit credits to wallet
+            // Deposit credits to wallet (wallet_balance keyed by organization_id)
             let mut tx = state.pool.begin().await?;
 
             let new_balance: i64 = sqlx::query_scalar(
-                "INSERT INTO wallet_balance (user_id, balance_cents)
+                "INSERT INTO wallet_balance (organization_id, balance_cents)
                  VALUES ($1, $2)
-                 ON CONFLICT (user_id) DO UPDATE SET balance_cents = wallet_balance.balance_cents + $2
+                 ON CONFLICT (organization_id) DO UPDATE SET balance_cents = wallet_balance.balance_cents + $2
                  RETURNING balance_cents"
             )
-            .bind(user_id)
+            .bind(org_id)
             .bind(total_cents)
             .fetch_one(&mut *tx)
             .await?;
 
             sqlx::query(
-                "INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description, paddle_transaction_id)
+                "INSERT INTO credit_ledger (organization_id, delta_cents, balance_after, entry_type, description, paddle_transaction_id)
                  VALUES ($1, $2, $3, 'auto_topup', $4, $5)"
             )
-            .bind(user_id)
+            .bind(org_id)
             .bind(total_cents)
             .bind(new_balance)
             .bind(format!("Auto top-up: ${:.2}", total_cents as f64 / 100.0))
@@ -277,33 +286,33 @@ async fn handle_transaction_completed(
 
             tx.commit().await?;
 
-            tracing::info!("Auto top-up credited: user={}, +{}c, new_balance={}", user_id, total_cents, new_balance);
+            tracing::info!("Auto top-up credited: org={}, +{}c, new_balance={}", org_id, total_cents, new_balance);
 
             // Check if org was credit-suspended and unsuspend
-            let org_id: Option<uuid::Uuid> = sqlx::query_scalar(
-                "SELECT organization_id FROM organization_members WHERE user_id = $1 LIMIT 1"
+            let suspended: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+                "SELECT credit_suspended_at FROM organizations WHERE id = $1"
             )
-            .bind(user_id)
+            .bind(org_id)
             .fetch_optional(&state.pool)
-            .await?;
+            .await?
+            .flatten();
 
-            if let Some(org_id) = org_id {
-                let suspended: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-                    "SELECT credit_suspended_at FROM organizations WHERE id = $1"
+            if suspended.is_some() {
+                tracing::info!("Clearing credit suspension for org {} after auto top-up", org_id);
+                sqlx::query("UPDATE organizations SET credit_suspended_at = NULL WHERE id = $1")
+                    .bind(org_id)
+                    .execute(&state.pool)
+                    .await?;
+
+                // Trigger unsuspend — need a user_id for internal auth header
+                let unsuspend_user_id: Option<uuid::Uuid> = sqlx::query_scalar(
+                    "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1"
                 )
                 .bind(org_id)
                 .fetch_optional(&state.pool)
-                .await?
-                .flatten();
+                .await?;
 
-                if suspended.is_some() {
-                    tracing::info!("Clearing credit suspension for org {} after auto top-up", org_id);
-                    sqlx::query("UPDATE organizations SET credit_suspended_at = NULL WHERE id = $1")
-                        .bind(org_id)
-                        .execute(&state.pool)
-                        .await?;
-
-                    // Trigger unsuspend
+                if let Some(uid) = unsuspend_user_id {
                     let api_url = std::env::var("API_URL").unwrap_or_else(|_| "http://api:8080".to_string());
                     let internal_secret = std::env::var("INTERNAL_SERVICE_SECRET").unwrap_or_default();
                     let client = reqwest::Client::builder()
@@ -313,7 +322,7 @@ async fn handle_transaction_completed(
                     let _ = client
                         .post(format!("{}/internal/org/{}/unsuspend", api_url, org_id))
                         .header("x-internal-service-secret", &internal_secret)
-                        .header("x-authenticated-user-id", user_id.to_string())
+                        .header("x-authenticated-user-id", uid.to_string())
                         .send()
                         .await;
                 }
@@ -359,7 +368,7 @@ async fn handle_transaction_billed(
 
     // Find the user
     let user_row = sqlx::query(
-        "SELECT user_id FROM billing_config WHERE paddle_customer_id = $1",
+        "SELECT organization_id FROM billing_config WHERE paddle_customer_id = $1",
     )
     .bind(customer_id)
     .fetch_optional(&state.pool)
@@ -373,26 +382,35 @@ async fn handle_transaction_billed(
         return Ok(());
     };
 
-    let user_id: uuid::Uuid = user_row.get("user_id");
+    let org_id: uuid::Uuid = user_row.get("organization_id");
+
+    // Resolve actual user_id for invoice (invoices table still uses user_id FK)
+    let invoice_user_id: uuid::Uuid = sqlx::query_scalar(
+        "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1"
+    )
+    .bind(org_id)
+    .fetch_one(&state.pool)
+    .await?;
 
     // Record the invoice
     sqlx::query(
         r#"
         INSERT INTO invoices (
-            paddle_transaction_id, user_id, invoice_number,
+            paddle_transaction_id, user_id, organization_id, invoice_number,
             amount_cents, tax_amount_cents, currency,
             status, payment_status, billing_provider, created_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, 'finalized', 'pending', 'paddle', NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'finalized', 'pending', 'paddle', NOW())
         ON CONFLICT (paddle_transaction_id) DO UPDATE SET
             status = 'finalized',
             payment_status = 'pending',
-            amount_cents = $4,
-            tax_amount_cents = $5
+            amount_cents = $5,
+            tax_amount_cents = $6
         "#,
     )
     .bind(transaction_id)
-    .bind(user_id)
+    .bind(invoice_user_id)
+    .bind(org_id)
     .bind(invoice_number)
     .bind(total)
     .bind(tax)
@@ -401,7 +419,7 @@ async fn handle_transaction_billed(
     .await?;
 
     // Send invoice email
-    send_invoice_email(state, user_id, transaction_id, total, invoice_number).await?;
+    send_invoice_email(state, invoice_user_id, transaction_id, total, invoice_number).await?;
 
     Ok(())
 }
@@ -426,7 +444,7 @@ async fn handle_payment_failed(
 
     // Find the user
     let user_row = sqlx::query(
-        "SELECT user_id FROM billing_config WHERE paddle_customer_id = $1",
+        "SELECT organization_id FROM billing_config WHERE paddle_customer_id = $1",
     )
     .bind(customer_id)
     .fetch_optional(&state.pool)
@@ -436,7 +454,16 @@ async fn handle_payment_failed(
         return Ok(());
     };
 
-    let user_id: uuid::Uuid = user_row.get("user_id");
+    let org_id: uuid::Uuid = user_row.get("organization_id");
+
+    // Resolve user for email notifications
+    let user_id: uuid::Uuid = sqlx::query_scalar(
+        "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1"
+    )
+    .bind(org_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or(org_id);
 
     // Update invoice status
     sqlx::query(

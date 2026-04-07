@@ -101,7 +101,7 @@ pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize
 
     let resources = sqlx::query_as::<_, TrackedResource>(
         r#"
-        SELECT resource_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
+        SELECT resource_id, organization_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
         FROM tracked_resources
         WHERE status = 'running'
         "#,
@@ -110,13 +110,13 @@ pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize
     .await?;
 
     let mut collected = 0;
-    let mut users_with_deductions = HashSet::new();
+    let mut orgs_with_deductions = HashSet::new();
 
     for resource in &resources {
         match collect_resource_usage(state, &resource.resource_id).await {
             Ok(true) => {
                 collected += 1;
-                users_with_deductions.insert(resource.user_id);
+                orgs_with_deductions.insert(resource.organization_id);
             }
             Ok(false) => {
                 collected += 1;
@@ -127,10 +127,10 @@ pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize
         }
     }
 
-    // After all resources processed: check balance thresholds per user
-    for user_id in users_with_deductions {
-        if let Err(e) = check_balance_thresholds(state, user_id).await {
-            tracing::error!("Failed to check balance thresholds for {}: {}", user_id, e);
+    // After all resources processed: check balance thresholds per org
+    for org_id in orgs_with_deductions {
+        if let Err(e) = check_balance_thresholds(state, org_id).await {
+            tracing::error!("Failed to check balance thresholds for {}: {}", org_id, e);
         }
     }
 
@@ -144,7 +144,7 @@ pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize
 pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) -> Result<bool> {
     let resource = sqlx::query_as::<_, TrackedResource>(
         r#"
-        SELECT resource_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
+        SELECT resource_id, organization_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
         FROM tracked_resources
         WHERE resource_id = $1
         "#,
@@ -171,6 +171,7 @@ pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) 
     let provider: Provider = resource.provider.parse().unwrap_or(Provider::Aws);
 
     let usage = ResourceUsage {
+        organization_id: resource.organization_id,
         user_id: resource.user_id,
         resource_id: resource.resource_id.clone(),
         provider,
@@ -191,10 +192,11 @@ pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) 
 
     sqlx::query(
         r#"
-        INSERT INTO usage_records (user_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        INSERT INTO usage_records (organization_id, user_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         "#,
     )
+    .bind(usage.organization_id)
     .bind(usage.user_id)
     .bind(&usage.resource_id)
     .bind(usage.provider.as_str())
@@ -220,11 +222,11 @@ pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) 
         resource_id, hours, cost
     );
 
-    // Real-time credit deduction
+    // Real-time credit deduction (wallet_balance keyed by organization_id)
     let cost_cents = (cost * 100.0).round() as i64;
     if cost_cents > 0 {
         let (_applied, _remainder, _new_balance) = crate::credits::deduct_realtime_usage(
-            &state.pool, resource.user_id, cost_cents, resource_id, hours
+            &state.pool, resource.organization_id, cost_cents, resource_id, hours
         ).await?;
         return Ok(true);
     }

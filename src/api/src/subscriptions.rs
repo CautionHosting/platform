@@ -211,9 +211,9 @@ pub async fn subscribe(
 
     // Read credit balance (non-binding — final deduction is atomic inside the transaction below)
     let balance_cents: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+        "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
     )
-    .bind(auth.user_id)
+    .bind(org_id)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -228,9 +228,9 @@ pub async fn subscribe(
 
     if estimated_remainder > 0 {
         let paddle_customer_id: Option<String> = sqlx::query_scalar(
-            "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
+            "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1"
         )
-        .bind(auth.user_id)
+        .bind(org_id)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -314,9 +314,9 @@ pub async fn subscribe(
     // Atomically lock and deduct credits within the transaction
     // Re-read balance with FOR UPDATE to prevent TOCTOU race
     let locked_balance: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1 FOR UPDATE"
+        "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1 FOR UPDATE"
     )
-    .bind(auth.user_id)
+    .bind(org_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -333,27 +333,27 @@ pub async fn subscribe(
 
     if credits_to_apply > 0 {
         sqlx::query(
-            "UPDATE wallet_balance SET balance_cents = balance_cents - $1 WHERE user_id = $2 AND balance_cents >= $1"
+            "UPDATE wallet_balance SET balance_cents = balance_cents - $1 WHERE organization_id = $2 AND balance_cents >= $1"
         )
         .bind(credits_to_apply)
-        .bind(auth.user_id)
+        .bind(org_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to deduct credits: {}", e)))?;
 
         let new_balance: i64 = sqlx::query_scalar(
-            "SELECT balance_cents FROM wallet_balance WHERE user_id = $1"
+            "SELECT balance_cents FROM wallet_balance WHERE organization_id = $1"
         )
-        .bind(auth.user_id)
+        .bind(org_id)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
         sqlx::query(
-            "INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description)
+            "INSERT INTO credit_ledger (organization_id, delta_cents, balance_after, entry_type, description)
              VALUES ($1, $2, $3, 'billing_deduction', $4)"
         )
-        .bind(auth.user_id)
+        .bind(org_id)
         .bind(-credits_to_apply)
         .bind(new_balance)
         .bind(format!("Subscription: {} {}", tier_name, req.billing_period))
@@ -471,9 +471,9 @@ pub async fn change_subscription_tier(
     if net_charge > 0 {
         // Check credit balance for estimated coverage
         let balance: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
         )
-        .bind(auth.user_id)
+        .bind(org_id)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -484,9 +484,9 @@ pub async fn change_subscription_tier(
 
         if remainder > 0 {
             let paddle_customer_id: Option<String> = sqlx::query_scalar(
-                "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
+                "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1"
             )
-            .bind(auth.user_id)
+            .bind(org_id)
             .fetch_optional(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -551,9 +551,9 @@ pub async fn change_subscription_tier(
     if net_charge > 0 {
         // Upgrade: deduct credits
         let locked_balance: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1 FOR UPDATE"
+            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1 FOR UPDATE"
         )
-        .bind(auth.user_id)
+        .bind(org_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -568,27 +568,27 @@ pub async fn change_subscription_tier(
 
         if credits_to_apply > 0 {
             sqlx::query(
-                "UPDATE wallet_balance SET balance_cents = balance_cents - $1 WHERE user_id = $2 AND balance_cents >= $1"
+                "UPDATE wallet_balance SET balance_cents = balance_cents - $1 WHERE organization_id = $2 AND balance_cents >= $1"
             )
             .bind(credits_to_apply)
-            .bind(auth.user_id)
+            .bind(org_id)
             .execute(&mut *tx)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to deduct credits: {}", e)))?;
 
             let new_balance: i64 = sqlx::query_scalar(
-                "SELECT balance_cents FROM wallet_balance WHERE user_id = $1"
+                "SELECT balance_cents FROM wallet_balance WHERE organization_id = $1"
             )
-            .bind(auth.user_id)
+            .bind(org_id)
             .fetch_one(&mut *tx)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
             sqlx::query(
-                "INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description)
-                 VALUES ($1, $2, $3, 'billing_deduction', $4)"
+                "INSERT INTO credit_ledger (organization_id, delta_cents, balance_after, entry_type, description)
+                 Values ($1, $2, $3, 'billing_deduction', $4)"
             )
-            .bind(auth.user_id)
+            .bind(org_id)
             .bind(-credits_to_apply)
             .bind(new_balance)
             .bind(format!("Tier upgrade proration: {} → {}", old_tier_id, req.tier_id))
@@ -600,29 +600,29 @@ pub async fn change_subscription_tier(
         // Downgrade: refund the difference as credits
         let refund_cents = -net_charge;
         sqlx::query(
-            "INSERT INTO wallet_balance (user_id, balance_cents)
+            "INSERT INTO wallet_balance (organization_id, balance_cents)
              VALUES ($1, $2)
-             ON CONFLICT (user_id) DO UPDATE SET balance_cents = wallet_balance.balance_cents + $2"
+             ON CONFLICT (organization_id) DO UPDATE SET balance_cents = wallet_balance.balance_cents + $2"
         )
-        .bind(auth.user_id)
+        .bind(org_id)
         .bind(refund_cents)
         .execute(&mut *tx)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to refund credits: {}", e)))?;
 
         let new_balance: i64 = sqlx::query_scalar(
-            "SELECT balance_cents FROM wallet_balance WHERE user_id = $1"
+            "SELECT balance_cents FROM wallet_balance WHERE organization_id = $1"
         )
-        .bind(auth.user_id)
+        .bind(org_id)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
         sqlx::query(
-            "INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description)
+            "INSERT INTO credit_ledger (organization_id, delta_cents, balance_after, entry_type, description)
              VALUES ($1, $2, $3, 'proration_refund', $4)"
         )
-        .bind(auth.user_id)
+        .bind(org_id)
         .bind(refund_cents)
         .bind(new_balance)
         .bind(format!("Tier downgrade proration: {} → {}", old_tier_id, req.tier_id))
@@ -706,9 +706,9 @@ pub async fn add_subscription_capacity(
     let mut paddle_charged = false;
     if prorated_charge > 0 {
         let balance: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
         )
-        .bind(auth.user_id)
+        .bind(org_id)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -720,9 +720,9 @@ pub async fn add_subscription_capacity(
         if remainder > 0 {
             // Charge via Paddle — must succeed before we update capacity
             let paddle_customer_id: Option<String> = sqlx::query_scalar(
-                "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
+                "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1"
             )
-            .bind(auth.user_id)
+            .bind(org_id)
             .fetch_optional(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -791,9 +791,9 @@ pub async fn add_subscription_capacity(
 
     // Atomically lock and deduct credits within the transaction
     let locked_balance: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1 FOR UPDATE"
+        "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1 FOR UPDATE"
     )
-    .bind(auth.user_id)
+    .bind(org_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -808,27 +808,27 @@ pub async fn add_subscription_capacity(
 
     if credits_applied > 0 {
         sqlx::query(
-            "UPDATE wallet_balance SET balance_cents = balance_cents - $1 WHERE user_id = $2 AND balance_cents >= $1"
+            "UPDATE wallet_balance SET balance_cents = balance_cents - $1 WHERE organization_id = $2 AND balance_cents >= $1"
         )
         .bind(credits_applied)
-        .bind(auth.user_id)
+        .bind(org_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to deduct credits: {}", e)))?;
 
         let new_balance: i64 = sqlx::query_scalar(
-            "SELECT balance_cents FROM wallet_balance WHERE user_id = $1"
+            "SELECT balance_cents FROM wallet_balance WHERE organization_id = $1"
         )
-        .bind(auth.user_id)
+        .bind(org_id)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
         sqlx::query(
-            "INSERT INTO credit_ledger (user_id, delta_cents, balance_after, entry_type, description)
+            "INSERT INTO credit_ledger (organization_id, delta_cents, balance_after, entry_type, description)
              VALUES ($1, $2, $3, 'billing_deduction', 'Subscription capacity addon (prorated)')"
         )
-        .bind(auth.user_id)
+        .bind(org_id)
         .bind(-credits_applied)
         .bind(new_balance)
         .execute(&mut *tx)

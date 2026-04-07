@@ -137,11 +137,17 @@ docker exec postgres-test psql -U postgres -d caution_test -c "
 UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';
 " >/dev/null 2>&1 || log "  Warning: could not mark user as onboarded"
 
+# Get org ID for the test user
+ORG_ID=$(docker exec postgres-test psql -U postgres -d caution_test -t -A -c "
+SELECT organization_id FROM organization_members WHERE user_id = '$USER_ID' LIMIT 1;
+" 2>/dev/null | head -1 | tr -d ' \n')
+log "  Org ID: $ORG_ID"
+
 # Seed credits for deploy gate ($25 minimum required)
 log "Seeding test credits for deploy gate..."
 docker exec postgres-test psql -U postgres -d caution_test -c "
-INSERT INTO wallet_balance (user_id, balance_cents) VALUES ('$USER_ID', 10000)
-ON CONFLICT (user_id) DO UPDATE SET balance_cents = 10000;
+INSERT INTO wallet_balance (organization_id, balance_cents) VALUES ('$ORG_ID', 10000)
+ON CONFLICT (organization_id) DO UPDATE SET balance_cents = 10000;
 " >/dev/null 2>&1 || log "  Warning: could not seed credits (wallet_balance table may not exist)"
 
 # ── Step 3: Add SSH Key ──────────────────────────────────────────────

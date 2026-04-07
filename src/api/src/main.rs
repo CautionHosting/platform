@@ -1431,11 +1431,11 @@ async fn deploy_logic(
 
         tracing::info!("Billing gate passed: managed on-prem app {}/{}, sub={}", current_apps + 1, max_apps, sub_id);
     } else {
-        // Fully managed: require >= $5 (500 cents) in wallet credits
+        // Fully managed: require >= $25 in wallet credits (org-level)
         let balance: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
         )
-        .bind(auth.user_id)
+        .bind(req.org_id)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
@@ -1615,12 +1615,12 @@ async fn deploy_logic(
                 .await;
             let s3_client = aws_sdk_s3::Client::new(&s3_config);
 
-            // Pre-build balance check: refuse if user can't cover minimum build cost (~$0.30 for 1 min)
+            // Pre-build balance check: refuse if org can't cover minimum build cost (~$0.30 for 1 min)
             let min_build_cost_cents: i64 = 50; // $0.50 minimum balance required
             let balance: i64 = sqlx::query_scalar(
-                "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
+                "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
             )
-            .bind(auth.user_id)
+            .bind(req.org_id)
             .fetch_optional(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)))?

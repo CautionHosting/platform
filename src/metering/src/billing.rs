@@ -100,12 +100,12 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
 
     let now = time::OffsetDateTime::now_utc();
 
-    for (org_id, cost_data) in &org_costs {
+    for (org_id_str, cost_data) in &org_costs {
         // Parse org_id as UUID
-        let user_id: uuid::Uuid = match org_id.parse() {
+        let org_id: uuid::Uuid = match org_id_str.parse() {
             Ok(id) => id,
             Err(_) => {
-                tracing::warn!("Skipping non-UUID org_id: {}", org_id);
+                tracing::warn!("Skipping non-UUID org_id: {}", org_id_str);
                 continue;
             }
         };
@@ -126,11 +126,11 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
         // Record the monthly usage
         let result = sqlx::query(
             r#"
-            INSERT INTO usage_records (user_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
+            INSERT INTO usage_records (organization_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
             VALUES ($1, $2, 'aws', 'monthly_total', $3, 'usd', $3, $4, $5)
             "#,
         )
-        .bind(user_id)
+        .bind(org_id)
         .bind(format!("monthly-{}", start_date))
         .bind(cost_data.total_cost)
         .bind(now)
@@ -153,11 +153,11 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
         let total_cost_cents = (cost_data.total_cost * 100.0).round() as i64;
         let billing_period = format!("{} to {}", start_date, end_date);
 
-        // Skip credit deduction for users with tracked resources — they are billed in real-time
+        // Skip credit deduction for orgs with tracked resources — they are billed in real-time
         let has_tracked: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM tracked_resources WHERE user_id = $1)"
+            "SELECT EXISTS(SELECT 1 FROM tracked_resources WHERE organization_id = $1)"
         )
-        .bind(user_id)
+        .bind(org_id)
         .fetch_one(&state.pool)
         .await
         .unwrap_or(false);
@@ -173,7 +173,7 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
         // Check and deduct prepaid credits before creating Paddle transaction
         let (credits_applied, remainder_cents) = credits::apply_credit_deduction(
             &state.pool,
-            user_id,
+            org_id,
             total_cost_cents,
             &format!("Monthly billing: {}", billing_period),
             None,
@@ -193,7 +193,7 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
 
         if remainder_cents == 0 {
             // Fully covered by credits — record a credits-covered invoice, skip Paddle
-            let invoice_number = format!("INV-CR-{}-{}", &org_id[..8], start_date);
+            let invoice_number = format!("INV-CR-{}-{}", &org_id.to_string()[..8], start_date);
             if let Err(e) = sqlx::query(
                 r#"
                 INSERT INTO invoices (
@@ -204,7 +204,7 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
                 VALUES ($1, $2, $3, 'USD', 'finalized', 'credits_applied', 'credits', NOW(), NOW())
                 "#,
             )
-            .bind(user_id)
+            .bind(org_id)
             .bind(&invoice_number)
             .bind(total_cost_cents)
             .execute(&state.pool)
@@ -222,7 +222,7 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
         // Create Paddle transaction for the remainder
         let remainder_cost = remainder_cents as f64 / 100.0;
         let line_items = paddle::PaddleClient::line_items_from_cost_data(
-            org_id,
+            org_id_str,
             remainder_cost,
             &billing_period,
             &serde_json::json!(cost_data.costs_by_service),
@@ -233,24 +233,11 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
             continue;
         }
 
-        // Resolve the actual user_id from the org for billing_config lookup
-        let billing_user_id: Option<uuid::Uuid> = sqlx::query_scalar(
-            "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1"
-        )
-        .bind(user_id)
-        .fetch_optional(&state.pool)
-        .await?;
-
-        let Some(billing_user_id) = billing_user_id else {
-            tracing::warn!("No user found for org {}, skipping Paddle charge", org_id);
-            continue;
-        };
-
-        // Look up the user's Paddle customer ID
+        // Look up the org's Paddle customer ID (billing_config is now keyed by organization_id)
         let paddle_customer = sqlx::query(
-            "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1",
+            "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1",
         )
-        .bind(billing_user_id)
+        .bind(org_id)
         .fetch_optional(&state.pool)
         .await?;
 
@@ -276,7 +263,7 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
                         "#,
                     )
                     .bind(&txn.id)
-                    .bind(user_id)
+                    .bind(org_id)
                     .bind(format!("INV-{}", &txn.id[4..]))
                     .bind(remainder_cents)
                     .execute(&state.pool)
@@ -351,10 +338,10 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
         let now = chrono::Utc::now();
         let period_end = calculate_subscription_period_end(now, &billing_period);
 
-        // Deduct credits first
+        // Deduct credits first (wallet_balance is keyed by organization_id)
         let (credits_applied, remainder_cents) = credits::apply_credit_deduction(
             &state.pool,
-            user_id,
+            org_id,
             total_charge,
             &format!("Subscription renewal: {} ({})", tier, billing_period),
             None,
@@ -369,11 +356,11 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
         let mut event_status = if remainder_cents == 0 { "credits_covered" } else { "pending" };
 
         if remainder_cents > 0 {
-            // Look up Paddle customer ID (billing_config is keyed by user_id, not org_id)
+            // Look up Paddle customer ID (billing_config is keyed by organization_id)
             let paddle_customer_id: Option<String> = sqlx::query(
-                "SELECT paddle_customer_id FROM billing_config WHERE user_id = $1"
+                "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1"
             )
-            .bind(user_id)
+            .bind(org_id)
             .fetch_optional(&state.pool)
             .await?
             .and_then(|row| row.get::<Option<String>, _>("paddle_customer_id"));
@@ -406,7 +393,7 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                             "#,
                         )
                         .bind(&txn.id)
-                        .bind(&user_id)
+                        .bind(&org_id)
                         .bind(format!("INV-SUB-{}", &txn.id[4..]))
                         .bind(remainder_cents)
                         .execute(&state.pool)
@@ -447,7 +434,7 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                 VALUES ($1, $2, $3, 'USD', 'finalized', 'credits_applied', 'credits', NOW(), NOW())
                 "#,
             )
-            .bind(&user_id)
+            .bind(&org_id)
             .bind(&invoice_number)
             .bind(total_charge)
             .execute(&state.pool)
@@ -467,7 +454,7 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
             "#,
         )
         .bind(&sub_id)
-        .bind(&user_id)
+        .bind(&org_id)
         .bind(period_end)
         .bind(&tier)
         .bind(base_price)

@@ -49,8 +49,7 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
         r#"
         SELECT DISTINCT o.id
         FROM organizations o
-        JOIN organization_members om ON om.organization_id = o.id
-        JOIN wallet_balance wb ON wb.user_id = om.user_id
+        JOIN wallet_balance wb ON wb.organization_id = o.id
         WHERE wb.balance_cents < 0
           AND o.payment_failed_at IS NULL
           AND NOT EXISTS (
@@ -181,9 +180,8 @@ async fn check_payment_resolved(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Resu
     let has_balance: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS(
-            SELECT 1 FROM organization_members om
-            JOIN wallet_balance wb ON wb.user_id = om.user_id
-            WHERE om.organization_id = $1 AND wb.balance_cents >= 0
+            SELECT 1 FROM wallet_balance wb
+            WHERE wb.organization_id = $1 AND wb.balance_cents >= 0
         )
         "#
     )
