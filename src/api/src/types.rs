@@ -47,6 +47,7 @@ impl UserRole {
 #[sqlx(type_name = "resource_state", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum ResourceState {
+    Initialized,
     Pending,
     Running,
     Stopped,
@@ -57,6 +58,7 @@ pub enum ResourceState {
 impl ResourceState {
     pub fn as_str(&self) -> &'static str {
         match self {
+            ResourceState::Initialized => "initialized",
             ResourceState::Pending => "pending",
             ResourceState::Running => "running",
             ResourceState::Stopped => "stopped",
@@ -476,7 +478,7 @@ impl BuildConfig {
             }
         }
 
-        // Ports 8080, 8081, 8082, 8084 are always reserved for internal enclave services
+        // Ports 8080, 8081, 8082, 8084 are reserved for internal enclave services
         if ports.contains(&8080) {
             return Err(format!(
                 "Port 8080 is reserved for internal enclave services. \

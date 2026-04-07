@@ -509,7 +509,6 @@ fn process_template_blocks(content: &str, enabled_blocks: &[&str]) -> String {
 
 /// Render the Containerfile.eif and run.sh templates with the build parameters.
 fn render_templates(request: &BuildRequest) -> anyhow::Result<(String, String)> {
-    // Validate reserved ports
     let reserved: &[(u16, &str)] = &[
         (8080, "internal enclave services"),
         (8081, "internal enclave services"),
@@ -549,7 +548,7 @@ fn render_templates(request: &BuildRequest) -> anyhow::Result<(String, String)> 
     };
 
     let custom_port_proxies: String = request.ports.iter()
-        .filter(|&&p| p != 8080 && p != 8081 && p != 8082 && !(request.locksmith && p == 8084))
+        .filter(|&&p| p != 8080 && p != 8081 && p != 8082 && p != 8084)
         .map(|p| format!("/bin/socat VSOCK-LISTEN:{p},reuseaddr,fork TCP:localhost:{p} &"))
         .collect::<Vec<_>>()
         .join("\n");

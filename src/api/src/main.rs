@@ -1107,7 +1107,7 @@ async fn create_managed_onprem_resource(
         .bind(resource_type_id)
         .bind(&provider_resource_id)
         .bind(&resource_slug)
-        .bind(types::ResourceState::Pending)
+        .bind(types::ResourceState::Initialized)
         .bind(&configuration)
         .bind(auth.user_id)
         .fetch_one(&state.db)

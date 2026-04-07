@@ -552,7 +552,7 @@ output "url" {{
 }
 
 fn run_tofu_init(work_dir: &Path, credentials: Option<&AwsCredentials>) -> Result<()> {
-    tracing::info!("Running tofu init...");
+    tracing::info!("Running tofu init in {}...", work_dir.display());
 
     let mut cmd = Command::new("tofu");
     cmd.args(&["init", "-no-color", "-upgrade=false", "-reconfigure"])
@@ -569,7 +569,8 @@ fn run_tofu_init(work_dir: &Path, credentials: Option<&AwsCredentials>) -> Resul
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!("Tofu init failed: {}", stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        tracing::error!("Tofu init failed (exit code {:?}):\nstderr: {}\nstdout: {}", output.status.code(), stderr, stdout);
         bail!("Infrastructure initialization failed");
     }
 
@@ -584,7 +585,7 @@ fn run_tofu_apply(work_dir: &Path, resource_name: &str, credentials: Option<&Aws
 }
 
 fn run_tofu_apply_with_vars(work_dir: &Path, resource_name: &str, ports: &[u16], http_port: Option<u16>, credentials: Option<&AwsCredentials>) -> Result<()> {
-    tracing::info!("Running tofu apply for {}...", resource_name);
+    tracing::info!("Running tofu apply for {} in {} (ports={:?}, http_port={:?})...", resource_name, work_dir.display(), ports, http_port);
 
     let mut args = vec!["apply", "-auto-approve", "-no-color"];
 
@@ -617,8 +618,9 @@ fn run_tofu_apply_with_vars(work_dir: &Path, resource_name: &str, ports: &[u16],
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!("Tofu apply failed for {}: {}", resource_name, stderr);
-        bail!("Infrastructure provisioning failed");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        tracing::error!("Tofu apply failed for {} (exit code {:?}):\nstderr: {}\nstdout: {}", resource_name, output.status.code(), stderr, stdout);
+        bail!("Failed to run tofu apply");
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -634,7 +636,7 @@ fn run_tofu_apply_with_provider_creds(
     http_port: Option<u16>,
     credentials: Option<&AwsCredentials>,
 ) -> Result<()> {
-    tracing::info!("Running tofu apply for {}...", resource_name);
+    tracing::info!("Running tofu apply for {} in {} (ports={:?}, http_port={:?})...", resource_name, work_dir.display(), ports, http_port);
 
     let mut cmd = Command::new("tofu");
     cmd.arg("apply")
@@ -663,8 +665,9 @@ fn run_tofu_apply_with_provider_creds(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!("Tofu apply failed for {}", resource_name);
-        bail!("Infrastructure provisioning failed");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        tracing::error!("Tofu apply failed for {} (exit code {:?}):\nstderr: {}\nstdout: {}", resource_name, output.status.code(), stderr, stdout);
+        bail!("Failed to run tofu apply");
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -902,7 +905,8 @@ fn run_tofu_destroy(work_dir: &Path, resource_name: &str, credentials: Option<&A
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!("Tofu destroy failed for {}", resource_name);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        tracing::error!("Tofu destroy failed for {} (exit code {:?}):\nstderr: {}\nstdout: {}", resource_name, output.status.code(), stderr, stdout);
         bail!("Infrastructure teardown failed");
     }
 
