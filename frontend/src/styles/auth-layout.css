@@ -739,7 +739,8 @@ p.info a:hover,
   height: clamp(1.05rem, 2vw, 1.175rem);
   color: rgba(255, 255, 255, 0.975);
   transition: color 0.2s ease;
-  margin-top: 0.3rem;
+  position: relative;
+  top: 2px;
 }
 
 .tooltip-trigger:hover .info-icon {
@@ -1254,7 +1255,7 @@ p.info a:hover,
 
 .footer-column-title {
   color: rgba(255, 255, 255, 0.9);
-  font-size: 1rem;
+  font-size: 0.95rem;
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -1447,7 +1448,7 @@ p.info a:hover,
   .feature-list li,
   .register-prompt,
   .link-btn {
-    font-size: clamp(1.1rem, 1vw, 1.175rem);
+    font-size: clamp(1rem, 1vw, 1.175rem);
   }
 }
 
@@ -1708,7 +1709,7 @@ p.info a:hover,
   }
 
   .footer-column-title {
-    font-size: 0.95rem;
+    font-size: 0.9rem;
   }
 }
 
