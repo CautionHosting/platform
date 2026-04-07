@@ -811,13 +811,26 @@ async fn bill_builder_usage(
         .execute(&mut *tx)
         .await?;
 
-        sqlx::query(
-            "UPDATE wallet_balance SET balance_cents = balance_cents - $1 WHERE user_id = $2"
+        // Deduct up to available balance (can't go negative due to CHECK constraint)
+        let current_balance: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
         )
-        .bind(cost_cents)
         .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or(0);
+
+        let actual_deduction = cost_cents.min(current_balance);
+
+        if actual_deduction > 0 {
+            sqlx::query(
+                "UPDATE wallet_balance SET balance_cents = balance_cents - $1 WHERE user_id = $2"
+            )
+            .bind(actual_deduction)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        }
 
         let new_balance: i64 = sqlx::query_scalar(
             "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE user_id = $1"
@@ -831,7 +844,7 @@ async fn bill_builder_usage(
              VALUES ($1, $2, $3, 'realtime_usage', $4)"
         )
         .bind(user_id)
-        .bind(-cost_cents)
+        .bind(-actual_deduction)
         .bind(new_balance)
         .bind(format!("Builder: {} ({:.1} min)", instance_type, duration_secs / 60.0))
         .execute(&mut *tx)
