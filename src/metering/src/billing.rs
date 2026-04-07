@@ -153,22 +153,39 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
         let total_cost_cents = (cost_data.total_cost * 100.0).round() as i64;
         let billing_period = format!("{} to {}", start_date, end_date);
 
-        // Skip credit deduction for orgs with tracked resources — they are billed in real-time
-        let has_tracked: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM tracked_resources WHERE organization_id = $1)"
+        // Subtract costs already billed in real-time (compute + builder) to avoid double-billing.
+        // Non-compute costs (S3 storage, EIPs, data transfer) are NOT metered in real-time
+        // and must be charged here via the monthly billing cycle.
+        let realtime_billed_cents: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM((cost_usd * 100)::bigint), 0) FROM usage_records
+             WHERE organization_id = $1
+               AND resource_type IN ('compute', 'builder')
+               AND recorded_at >= $2::date
+               AND recorded_at < $3::date"
         )
         .bind(org_id)
+        .bind(&start_date)
+        .bind(&end_date)
         .fetch_one(&state.pool)
         .await
-        .unwrap_or(false);
+        .unwrap_or(0);
 
-        if has_tracked {
+        let remaining_cost_cents = (total_cost_cents - realtime_billed_cents).max(0);
+
+        if remaining_cost_cents == 0 {
             tracing::info!(
-                "Skipping monthly credit deduction for org {} — billed in real-time via tracked resources",
-                org_id
+                "Org {} monthly costs (${:.2}) fully covered by real-time metering (${:.2})",
+                org_id, total_cost_cents as f64 / 100.0, realtime_billed_cents as f64 / 100.0
             );
             continue;
         }
+
+        tracing::info!(
+            "Org {} monthly: total=${:.2}, real-time metered=${:.2}, remaining to bill=${:.2} (S3/EIP/network)",
+            org_id, total_cost_cents as f64 / 100.0, realtime_billed_cents as f64 / 100.0, remaining_cost_cents as f64 / 100.0
+        );
+
+        let total_cost_cents = remaining_cost_cents;
 
         // Check and deduct prepaid credits before creating Paddle transaction
         let (credits_applied, remainder_cents) = credits::apply_credit_deduction(
