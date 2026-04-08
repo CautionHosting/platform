@@ -229,6 +229,7 @@ resource "aws_iam_policy" "platform_deploy" {
         Action = [
           "s3:GetObject",
           "s3:PutObject",
+          "s3:PutObjectTagging",
           "s3:ListBucket",
           "s3:DeleteObject",
         ]
@@ -357,6 +358,7 @@ resource "aws_iam_role_policy" "builder_s3" {
       Action = [
         "s3:GetObject",
         "s3:PutObject",
+        "s3:PutObjectTagging",
         "s3:ListBucket",
       ]
       Resource = [

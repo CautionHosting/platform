@@ -501,7 +501,7 @@ run-metering-test: network
 
 up-test: down migrate-test
 	@echo "Building test images (e2e-testing-unsafe mode)..."
-	@$(MAKE) -j3 build-api-dev build-email-dev build-frontend
+	@$(MAKE) build-api-dev build-email-dev build-frontend
 	@$(MAKE) build-gateway-e2e
 	@$(MAKE) run-email-test run-api-test run-frontend-test
 	@echo "Waiting for API to be ready..."
@@ -517,7 +517,7 @@ up-test: down migrate-test
 
 up-test-billing: down-test-billing migrate-test
 	@echo "Building test images for billing e2e..."
-	@$(MAKE) -j4 build-api-dev build-email-dev build-metering build-frontend
+	@$(MAKE) build-api-dev build-email-dev build-metering build-frontend
 	@$(MAKE) build-gateway-e2e
 	@$(MAKE) run-email-test run-metering-test run-api-test run-frontend-test
 	@echo "Waiting for API to be ready..."
@@ -583,7 +583,6 @@ setup-builder:
 	SUBNET=$$(terraform output -raw builder_subnet_id) && \
 	PROFILE=$$(terraform output -raw builder_instance_profile) && \
 	cd .. && \
-	grep -q "^BUILDER_ENABLED" .env 2>/dev/null && sed -i "s/^BUILDER_ENABLED=.*/BUILDER_ENABLED=true/" .env || echo "BUILDER_ENABLED=true" >> .env && \
 	grep -q "^BUILDER_AMI_ID" .env 2>/dev/null && sed -i "s/^BUILDER_AMI_ID=.*/BUILDER_AMI_ID=$$AMI/" .env || echo "BUILDER_AMI_ID=$$AMI" >> .env && \
 	grep -q "^BUILDER_SECURITY_GROUP_ID" .env 2>/dev/null && sed -i "s/^BUILDER_SECURITY_GROUP_ID=.*/BUILDER_SECURITY_GROUP_ID=$$SG/" .env || echo "BUILDER_SECURITY_GROUP_ID=$$SG" >> .env && \
 	grep -q "^BUILDER_SUBNET_ID" .env 2>/dev/null && sed -i "s/^BUILDER_SUBNET_ID=.*/BUILDER_SUBNET_ID=$$SUBNET/" .env || echo "BUILDER_SUBNET_ID=$$SUBNET" >> .env && \

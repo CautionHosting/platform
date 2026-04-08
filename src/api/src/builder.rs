@@ -82,25 +82,16 @@ pub struct BuilderConfig {
 }
 
 impl BuilderConfig {
-    /// Load from environment variables. Returns None if BUILDER_ENABLED is not set to "true".
-    pub fn from_env() -> Option<Self> {
-        let enabled = std::env::var("BUILDER_ENABLED")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
-
-        if !enabled {
-            return None;
-        }
-
-        Some(Self {
+    pub fn from_env() -> Result<Self> {
+        Ok(Self {
             ami_id: std::env::var("BUILDER_AMI_ID")
-                .expect("BUILDER_AMI_ID required when BUILDER_ENABLED=true"),
+                .context("BUILDER_AMI_ID required")?,
             security_group_id: std::env::var("BUILDER_SECURITY_GROUP_ID")
-                .expect("BUILDER_SECURITY_GROUP_ID required when BUILDER_ENABLED=true"),
+                .context("BUILDER_SECURITY_GROUP_ID required")?,
             subnet_id: std::env::var("BUILDER_SUBNET_ID")
-                .expect("BUILDER_SUBNET_ID required when BUILDER_ENABLED=true"),
+                .context("BUILDER_SUBNET_ID required")?,
             instance_profile: std::env::var("BUILDER_INSTANCE_PROFILE")
-                .expect("BUILDER_INSTANCE_PROFILE required when BUILDER_ENABLED=true"),
+                .context("BUILDER_INSTANCE_PROFILE required")?,
             timeout_secs: std::env::var("BUILDER_TIMEOUT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())

@@ -288,7 +288,7 @@
         </div>
 
         <!-- Builder Configuration -->
-        <div v-if="builderConfig.builder_enabled" class="app-detail-section app-detail-section--fullwidth app-detail-section--borderless">
+        <div class="app-detail-section app-detail-section--fullwidth app-detail-section--borderless">
           <h3 class="app-detail-section-title">Build instance</h3>
           <p class="app-detail-helper-text">Select the dedicated builder size for this app. Larger builders compile faster.</p>
           <div class="builder-size-options">
@@ -1654,7 +1654,7 @@ export default {
     const copiedAppId = ref(null);
     const copiedField = ref(null);
     const appSearchQuery = ref('');
-    const builderConfig = ref({ builder_enabled: false, builder_size: 'small', options: [] });
+    const builderConfig = ref({ builder_size: 'small', options: [] });
 
     const filteredApps = computed(() => {
       if (!appSearchQuery.value.trim()) {

@@ -5,7 +5,7 @@
 # Integration test for the dedicated EC2 builder feature.
 #
 # Requires:
-#   - make up-test with BUILDER_ENABLED=true and BUILDER_* env vars set
+#   - make up-test with BUILDER_* env vars set
 #   - Real AWS credentials with EC2 + S3 permissions
 #   - Builder IAM role, instance profile, security group, and subnet configured
 #
@@ -47,12 +47,6 @@ mkdir -p "$LOG_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 # --- Preflight checks ---
-if [ -z "${BUILDER_ENABLED:-}" ] || [ "$BUILDER_ENABLED" != "true" ]; then
-    echo "ERROR: BUILDER_ENABLED must be set to 'true' for this test"
-    echo "Set BUILDER_ENABLED=true and all BUILDER_* env vars in .env"
-    exit 1
-fi
-
 for var in BUILDER_AMI_ID BUILDER_SECURITY_GROUP_ID BUILDER_SUBNET_ID BUILDER_INSTANCE_PROFILE; do
     if [ -z "${!var:-}" ]; then
         echo "ERROR: $var must be set for this test"
@@ -111,6 +105,10 @@ step_fail() {
 step_warn() {
     STEP_RESULTS+=("[WARN] Step $STEP_NUM: $1")
     echo "[WARN] Step $STEP_NUM: $1"
+}
+
+log() {
+    echo "[builder-e2e] $*"
 }
 
 query_db() {
@@ -176,16 +174,6 @@ docker exec "$DB_HOST" psql -U postgres -d "$DB_NAME" -c "
 UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';
 " || echo "WARNING: DB setup failed"
 
-ORG_ID=$(docker exec "$DB_HOST" psql -U postgres -d "$DB_NAME" -t -A -c "
-SELECT organization_id FROM organization_members WHERE user_id = '$USER_ID' LIMIT 1;
-" 2>/dev/null | head -1 | tr -d ' \n')
-log "  Org ID: $ORG_ID"
-
-docker exec "$DB_HOST" psql -U postgres -d "$DB_NAME" -c "
-INSERT INTO wallet_balance (organization_id, balance_cents) VALUES ('$ORG_ID', 10000)
-ON CONFLICT (organization_id) DO UPDATE SET balance_cents = 10000;
-" || echo "WARNING: wallet seed failed"
-
 # ── Step 3: Add SSH key ───────────────────────────────────────────────
 STEP_NUM=3
 echo "── Step $STEP_NUM: Add SSH key ──"
@@ -225,9 +213,33 @@ fi
 
 echo "Resource ID: $RESOURCE_ID"
 
+ORG_ID=$(docker exec "$DB_HOST" psql -U postgres -d "$DB_NAME" -t -A -c "
+SELECT organization_id FROM organization_members WHERE user_id = '$USER_ID' LIMIT 1;
+" 2>/dev/null | head -1 | tr -d ' \n')
+
+if [ -z "$ORG_ID" ]; then
+    step_fail "Failed to resolve organization after app init"
+    exit 1
+fi
+
+log "  Org ID: $ORG_ID"
+
+docker exec "$DB_HOST" psql -U postgres -d "$DB_NAME" -c "
+INSERT INTO wallet_balance (organization_id, balance_cents) VALUES ('$ORG_ID', 10000)
+ON CONFLICT (organization_id) DO UPDATE SET balance_cents = 10000;
+" >/dev/null 2>&1 || {
+    step_fail "Failed to seed credits"
+    exit 1
+}
+
 # Push triggers the deploy
 export GIT_SSH_COMMAND="ssh -i $SSH_KEY_PATH -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p ${SSH_PORT:-2222}"
-git push caution main 2>&1 || true
+PUSH_OUTPUT=$(git push caution main 2>&1) || {
+    echo "$PUSH_OUTPUT"
+    step_fail "git push failed"
+    exit 1
+}
+echo "$PUSH_OUTPUT"
 
 # Wait for deploy to start
 sleep 5

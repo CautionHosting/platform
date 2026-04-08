@@ -18,7 +18,6 @@ use tracing::info;
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
-use enclave_builder::{BuildConfig as DockerBuildConfig, build_user_image};
 
 mod provisioning;
 mod deployment;
@@ -163,7 +162,7 @@ pub(crate) struct AppState {
     pub(crate) paddle_api_url: String,
     pub(crate) paddle_api_key: Option<String>,
     pub(crate) pricing: PricingConfig,
-    pub(crate) builder_config: Option<builder::BuilderConfig>,
+    pub(crate) builder_config: builder::BuilderConfig,
     pub(crate) builder_sizes: builder::BuilderSizesConfig,
 }
 
@@ -387,102 +386,6 @@ async fn get_commit_sha(app_name: &str, branch: &str, data_dir: &str) -> Result<
 
     let commit_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok(commit_sha)
-}
-
-async fn build_image_from_repo(
-    app_name: &str,
-    build_config: &types::BuildConfig,
-    image_name: &str,
-    branch: &str,
-    data_dir: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    use tokio::fs;
-    use tokio::process::Command;
-
-    let repo_path = format!("{}/git-repos/{}.git", data_dir, app_name);
-    let work_dir = format!("{}/build/{}-build", data_dir, app_name);
-
-    tracing::info!("Cloning repository from {} to {} (branch: {})", repo_path, work_dir, branch);
-
-    fs::create_dir_all(format!("{}/build", data_dir)).await?;
-
-    let _ = fs::remove_dir_all(&work_dir).await;
-
-    let _ = Command::new("git")
-        .args(&["config", "--global", "--add", "safe.directory", &repo_path])
-        .output()
-        .await;
-
-    let output = Command::new("git")
-        .args(&["clone", "--branch", branch, &repo_path, &work_dir])
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Git clone failed: {}", stderr).into());
-    }
-
-    tracing::info!("Successfully cloned repository (branch: {})", branch);
-
-    let commit_output = Command::new("git")
-        .args(&["rev-parse", "HEAD"])
-        .current_dir(&work_dir)
-        .output()
-        .await?;
-
-    let commit_sha = if commit_output.status.success() {
-        String::from_utf8_lossy(&commit_output.stdout).trim().to_string()
-    } else {
-        "unknown".to_string()
-    };
-
-    tracing::info!("Building commit: {}", commit_sha);
-
-    // Use shared build logic from enclave-builder
-    let docker_config = DockerBuildConfig {
-        build_command: build_config.build.clone(),
-        containerfile: build_config.containerfile.clone(),
-        oci_tarball: build_config.oci_tarball.clone(),
-        no_cache: build_config.no_cache,
-    };
-
-    let work_dir_path = std::path::PathBuf::from(&work_dir);
-
-    // Build the Docker image (now async)
-    build_user_image(&work_dir_path, image_name, &docker_config)
-        .await
-        .map_err(|e| format!("Build failed: {}", e))?;
-
-    tracing::info!("Image built and tagged as {}", image_name);
-
-    Ok(commit_sha)
-}
-
-async fn export_image_to_tarball(
-    image_name: &str,
-    tarball_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use tokio::process::Command;
-    use tokio::fs;
-
-    tracing::info!("Exporting image {} to {}", image_name, tarball_path);
-
-    if let Some(parent) = std::path::Path::new(tarball_path).parent() {
-        fs::create_dir_all(parent).await?;
-    }
-
-    let output = Command::new("docker")
-        .args(&["save", "-o", tarball_path, image_name])
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Docker save failed: {}", stderr).into());
-    }
-
-    Ok(())
 }
 
 async fn create_ami_from_image(
@@ -1179,11 +1082,9 @@ async fn get_builder_config(
 
     let config = config.ok_or((StatusCode::NOT_FOUND, "Resource not found".to_string()))?;
     let builder_size = config.get("builder_size").and_then(|v| v.as_str()).unwrap_or("small");
-    let builder_enabled = state.builder_config.is_some();
 
     Ok(Json(serde_json::json!({
         "builder_size": builder_size,
-        "builder_enabled": builder_enabled,
         "options": state.builder_sizes.builder_sizes,
     })))
 }
@@ -1580,10 +1481,9 @@ async fn deploy_logic(
     };
 
     // --- Dedicated builder path ---
-    // If BUILDER_ENABLED=true, offload the build to an ephemeral EC2 instance.
-    // The builder handles Docker image build + EIF build + S3 upload.
-    // The result is an S3 key pointing to the cached EIF.
-    let builder_eif_s3_key: Option<String> = if let Some(ref builder_cfg) = state.builder_config {
+    // Builds are always offloaded to an ephemeral EC2 builder instance.
+    let builder_cfg = &state.builder_config;
+    let builder_eif_s3_key = {
         let procfile_content = String::from_utf8_lossy(&procfile_output.stdout).to_string();
         let enclaveos_commit = enclave_builder::build::resolve_enclaveos_commit();
         let cache_key = builder::compute_cache_key(
@@ -1601,7 +1501,7 @@ async fn deploy_logic(
         if let Some(cached) = cached_result {
             let _ = tx.send(Ok(milestone("Using cached build..."))).await;
             tracing::info!("Builder cache HIT: cache_key={}, s3_key={}", cache_key, cached.eif_s3_key);
-            Some(cached.eif_s3_key)
+            cached.eif_s3_key
         } else {
             let _ = tx.send(Ok(milestone("Starting build on dedicated instance..."))).await;
 
@@ -1678,459 +1578,30 @@ async fn deploy_logic(
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("Build failed: {}", e))
             })?;
 
-            Some(build_result.eif_s3_key)
-        }
-    } else {
-        None
-    };
-
-    // If builder produced an EIF, construct eif_config and skip inline build entirely
-    let (eif_path, eif_hash, eif_config, eif_size_bytes): (String, String, serde_json::Value, u64) = if let Some(ref s3_key) = builder_eif_s3_key {
-        let bucket = state.builder_config.as_ref().map(|c| c.eif_s3_bucket.as_str()).unwrap_or("");
-        let path = format!("s3://{}/{}", bucket, s3_key);
-        // Look up the build metadata from DB
-        let (hash, size) = sqlx::query_as::<_, (String, i64)>(
-            "SELECT eif_sha256, eif_size_bytes FROM eif_builds WHERE eif_s3_key = $1 AND status = 'completed' LIMIT 1"
-        )
-        .bind(s3_key)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)))?
-        .unwrap_or_else(|| {
-            tracing::warn!("Could not find eif_builds metadata for s3_key={}, using defaults", s3_key);
-            ("unknown".to_string(), 0)
-        });
-
-        tracing::info!("Using builder EIF: s3_key={}, hash={}", s3_key, hash);
-
-        let config = serde_json::json!({
-            "eif_path": path,
-            "eif_hash": hash,
-            "eif_s3_key": s3_key,
-            "eif_size_bytes": size,
-            "commit_sha": commit_sha,
-            "run_command": build_config.run,
-            "domain": build_config.domain,
-            "memory_mb": enclave_config.memory_mb,
-            "cpus": enclave_config.cpus,
-            "debug": enclave_config.debug,
-            "ports": enclave_config.ports,
-            "http_port": enclave_config.http_port,
-        });
-
-        (path, hash, config, size as u64)
-    } else {
-
-    // --- Inline build path (original behavior, used when builder is disabled) ---
-    let cache_dir = format!("{}/build/{}", state.data_dir, req.org_id);
-    let cache_dir_str = cache_dir.clone();
-    tokio::fs::create_dir_all(&cache_dir).await.map_err(|e| {
-        tracing::error!("Failed to create cache directory: {:?}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create cache directory: {}", e))
-    })?;
-
-    let image_tarball = format!("{}/{}-{}.tar", cache_dir_str, app_id_str, commit_sha);
-    let tarball_exists = tokio::fs::metadata(&image_tarball).await.is_ok() && !build_config.no_cache;
-
-    let image_name = format!("caution-{}:{}", app_id_str, &commit_sha[..12]);
-
-    if build_config.no_cache {
-        tracing::info!("Cache disabled (no_cache=true), forcing rebuild");
-    }
-
-    let _ = tx.send(Ok(milestone("Building Docker image..."))).await;
-
-    if tarball_exists {
-        tracing::info!("Cache HIT: Using cached tarball for commit {}", commit_sha);
-
-        tracing::info!("Loading cached image into Docker: {}", image_name);
-        let load_output = Command::new("docker")
-            .args(&["load", "-i", &image_tarball])
-            .output()
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to load cached image: {:?}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load cached image: {}", e))
-            })?;
-
-        if !load_output.status.success() {
-            let stderr = String::from_utf8_lossy(&load_output.stderr);
-            tracing::error!("Docker load failed: {}", stderr);
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load cached image: {}", stderr)));
-        }
-
-        let load_stdout = String::from_utf8_lossy(&load_output.stdout);
-        tracing::info!("Cached image loaded successfully. Docker load output: {}", load_stdout);
-
-        let inspect_output = Command::new("docker")
-            .args(&["inspect", "--type=image", &image_name])
-            .output()
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to inspect image: {:?}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to inspect image: {}", e))
-            })?;
-
-        if !inspect_output.status.success() {
-            tracing::warn!("Loaded cached image doesn't have expected tag {}, attempting to parse and tag", image_name);
-
-            if let Some(loaded_line) = load_stdout.lines().find(|l| l.contains("Loaded image")) {
-                let loaded_image = if loaded_line.contains("Loaded image ID:") {
-                    loaded_line.split("Loaded image ID:").nth(1).map(|s| s.trim().to_string())
-                } else if loaded_line.contains("Loaded image:") {
-                    loaded_line.split("Loaded image:").nth(1).map(|s| s.trim().to_string())
-                } else {
-                    None
-                };
-
-                if let Some(loaded_img) = loaded_image {
-                    tracing::info!("Tagging loaded image {} as {}", loaded_img, image_name);
-
-                    let tag_output = Command::new("docker")
-                        .args(&["tag", &loaded_img, &image_name])
-                        .output()
-                        .await
-                        .map_err(|e| {
-                            tracing::error!("Failed to tag cached image: {:?}", e);
-                            (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to tag cached image: {}", e))
-                        })?;
-
-                    if !tag_output.status.success() {
-                        let stderr = String::from_utf8_lossy(&tag_output.stderr);
-                        tracing::error!("Failed to tag cached image: {}", stderr);
-                        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to tag cached image: {}", stderr)));
-                    }
-
-                    tracing::info!("Successfully tagged cached image as {}", image_name);
-                } else {
-                    tracing::error!("Could not parse loaded image name from: {}", loaded_line);
-                    return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to parse loaded image name".to_string()));
-                }
-            } else {
-                tracing::error!("Docker load output didn't contain 'Loaded image' line");
-                return Err((StatusCode::INTERNAL_SERVER_ERROR, "Invalid docker load output".to_string()));
-            }
-        } else {
-            tracing::info!("Cached image already has correct tag: {}", image_name);
-        }
-    } else {
-        tracing::info!("Cache MISS: Building Docker image for commit {}", commit_sha);
-
-        let build_commit_sha = match build_image_from_repo(&app_id_str, &build_config, &image_name, &req.branch, &state.data_dir).await {
-            Ok(sha) => {
-                tracing::info!("Successfully built image: {} (commit: {})", image_name, sha);
-                sha
-            }
-            Err(e) => {
-                tracing::error!("Failed to build image: {:?}", e);
-                return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Image build failed: {}", e)));
-            }
-        };
-
-        if build_commit_sha != commit_sha {
-            tracing::warn!("Commit SHA mismatch: expected {}, got {}", commit_sha, build_commit_sha);
-        }
-
-        tracing::info!("Exporting image to tarball: {}", image_tarball);
-        match export_image_to_tarball(&image_name, &image_tarball).await {
-            Ok(()) => {
-                tracing::info!("Exported image to: {}", image_tarball);
-            }
-            Err(e) => {
-                tracing::error!("Failed to export image: {:?}", e);
-                return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Image export failed: {}", e)));
-            }
-        }
-    }
-
-    let _ = tx.send(Ok(milestone("Building enclave image..."))).await;
-
-    tracing::info!("Building Nitro Enclave EIF for commit {}", commit_sha);
-
-    let containerfile = if let Some(cf) = build_config.containerfile.clone() {
-        cf
-    } else if build_config.build.is_none() {
-        let containerfile_check = Command::new("git")
-            .args(&["--git-dir", &git_dir, "show", &format!("{}:Containerfile", commit_sha)])
-            .output()
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to check for Containerfile: {}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("Git command failed: {}", e))
-            })?;
-
-        if containerfile_check.status.success() {
-            "Containerfile".to_string()
-        } else {
-            let dockerfile_check = Command::new("git")
-                .args(&["--git-dir", &git_dir, "show", &format!("{}:Dockerfile", commit_sha)])
-                .output()
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to check for Dockerfile: {}", e);
-                    (StatusCode::INTERNAL_SERVER_ERROR, format!("Git command failed: {}", e))
-                })?;
-
-            if dockerfile_check.status.success() {
-                "Dockerfile".to_string()
-            } else {
-                tracing::error!("No Containerfile or Dockerfile found at commit {}", commit_sha);
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "No Containerfile or Dockerfile found in repository root".to_string(),
-                ));
-            }
-        }
-    } else {
-        "Dockerfile".to_string()
-    };
-
-    let work_dir = format!("{}/build/work-{}-{}", state.data_dir, app_id_str, commit_sha);
-    if build_config.no_cache {
-        if let Err(e) = tokio::fs::remove_dir_all(&work_dir).await {
-            tracing::debug!("Could not remove work_dir (may not exist): {}", e);
-        }
-    }
-    tokio::fs::create_dir_all(&work_dir).await.map_err(|e| {
-        tracing::error!("Failed to create work directory: {}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create work directory: {}", e))
-    })?;
-
-    let mut git_archive = Command::new("git")
-        .args(["--git-dir", &git_dir, "archive", &commit_sha])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            tracing::error!("Failed to spawn git archive: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Repository extraction failed".to_string())
-        })?;
-
-    let git_stdout = git_archive.stdout.take().expect("piped stdout")
-        .into_owned_fd().map_err(|e| {
-            tracing::error!("Failed to get git stdout fd: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Repository extraction failed".to_string())
-        })?;
-
-    let tar_output = Command::new("tar")
-        .args(["-xC", &work_dir])
-        .stdin(git_stdout)
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to run tar extract: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Repository extraction failed".to_string())
-        })?;
-
-    let git_status = git_archive.wait().await.map_err(|e| {
-        tracing::error!("Failed to wait for git archive: {}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Repository extraction failed".to_string())
-    })?;
-
-    if !git_status.success() {
-        tracing::error!("git archive failed with status {}", git_status);
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to extract repository".to_string()));
-    }
-
-    if !tar_output.status.success() {
-        let stderr = String::from_utf8_lossy(&tar_output.stderr);
-        tracing::error!("tar extract failed: {}", stderr);
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to extract repository".to_string()));
-    }
-
-    let _containerfile_path = format!("{}/{}", work_dir, containerfile);
-
-    // --- Billing gate: vCPU check (post-Procfile parse, managed on-prem only) ---
-    if is_managed_onprem {
-        let sub_vcpus: Option<(i32,)> = sqlx::query_as(
-            "SELECT max_vcpus FROM subscriptions
-             WHERE organization_id = $1 AND status IN ('active', 'past_due') LIMIT 1"
-        )
-        .bind(req.org_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-
-        if let Some((max_vcpus,)) = sub_vcpus {
-            let used_vcpus: i64 = sqlx::query_scalar(
-                "SELECT COALESCE(SUM((cr.configuration->>'vcpus')::int), 0)
-                 FROM compute_resources cr
-                 JOIN cloud_credentials cc ON cc.resource_id = cr.id
-                 WHERE cr.organization_id = $1 AND cc.managed_on_prem = true
-                   AND cr.state = 'running' AND cr.id != $2"
-            )
-            .bind(req.org_id)
-            .bind(resource_id)
-            .fetch_one(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-
-            let requested_vcpus = enclave_config.cpus as i64;
-            if used_vcpus + requested_vcpus > max_vcpus as i64 {
-                return Err((StatusCode::PAYMENT_REQUIRED,
-                    format!("vCPU limit would be exceeded ({}+{}/{}). Upgrade your plan or add capacity in Settings at https://caution.dev",
-                        used_vcpus, requested_vcpus, max_vcpus)));
-            }
-            tracing::info!("vCPU gate passed: {}+{}/{}", used_vcpus, requested_vcpus, max_vcpus);
-        }
-    }
-
-    let prebuilt_eif_path = format!("{}/nitro.eif", work_dir);
-    let prebuilt_pcrs_path = format!("{}/nitro.pcrs", work_dir);
-
-    let cached_eif_path = format!("{}/{}-{}.eif", cache_dir_str, app_id_str, commit_sha);
-    let cached_pcrs_path = format!("{}/{}-{}.pcrs", cache_dir_str, app_id_str, commit_sha);
-    let eif_cache_exists = tokio::fs::metadata(&cached_eif_path).await.is_ok() && !build_config.no_cache;
-
-    let eif_result = if eif_cache_exists {
-        tracing::info!("EIF Cache HIT: Using cached EIF for commit {}", commit_sha);
-
-        let eif_data = tokio::fs::read(&cached_eif_path).await.map_err(|e| {
-            tracing::error!("Failed to read cached EIF: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read cached EIF: {}", e))
-        })?;
-
-        let eif_size_bytes = eif_data.len() as u64;
-
-        use sha2::{Sha256, Digest};
-        let mut hasher = Sha256::new();
-        hasher.update(&eif_data);
-        let eif_hash = format!("{:x}", hasher.finalize());
-
-        tracing::info!("Cached EIF loaded: {} bytes, hash: {}", eif_size_bytes, eif_hash);
-
-        types::EIFBuildResult {
-            eif_path: cached_eif_path.clone(),
-            pcrs_path: cached_pcrs_path.clone(),
-            eif_hash,
-            eif_size_bytes,
-        }
-    } else {
-        tracing::info!("Building EIF using enclave-builder from Docker image: caution-{}:latest", app_id_str);
-
-        let enclave_source = if !build_config.enclave_sources.is_empty() {
-            build_config.enclave_sources[0].clone()
-        } else {
-            enclave_builder::enclave_source_url(&enclave_builder::build::resolve_enclaveos_commit())
-        };
-        tracing::info!("Using enclave source: {}", enclave_source);
-
-        let builder = enclave_builder::EnclaveBuilder::new(
-            "unused-template",
-            "local",
-            &enclave_source,
-            "unused",
-            enclave_builder::FRAMEWORK_SOURCE,
-        )
-            .map_err(|e| {
-                tracing::error!("Failed to create enclave builder: {:?}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to initialize enclave builder: {}", e))
-            })?
-            .with_work_dir(std::path::PathBuf::from(&work_dir))
-            .with_no_cache(build_config.no_cache);
-
-        let user_image = enclave_builder::UserImage {
-            reference: format!("caution-{}:{}", app_id_str, &commit_sha[..12]),
-        };
-        tracing::info!("Using Docker image for enclave build: {}", user_image.reference);
-
-        let run_command = build_config.run.clone();
-        if let Some(ref cmd) = run_command {
-            tracing::info!("Using run command from Procfile: {}", cmd);
-        } else {
-            tracing::info!("No run command specified, using auto-detection");
-        }
-
-        let app_source_urls: Vec<String> = build_config.app_sources.clone();
-        tracing::info!("Using {} app source URL(s): {:?}", app_source_urls.len(), app_source_urls);
-
-        let deployment = if let Some(ref binary_path) = build_config.binary {
-            tracing::info!("Using static binary extraction mode: {}", binary_path);
-            builder
-                .build_enclave_auto(
-                    &user_image,
-                    binary_path,
-                    run_command,
-                    Some(app_source_urls),
-                    Some(req.branch.clone()),
-                    Some(commit_sha.clone()),
-                    build_config.metadata.clone(),
-                    None,
-                    &enclave_config.ports,
-                    build_config.e2e,
-                    build_config.locksmith,
-                )
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to build enclave: {:?}", e);
-                    (StatusCode::INTERNAL_SERVER_ERROR, format!("Enclave build failed: {}", e))
-                })?
-        } else {
-            tracing::info!("Using full filesystem extraction mode (no binary specified)");
-            builder
-                .build_enclave(
-                    &user_image,
-                    None,
-                    run_command,
-                    Some(build_config.app_sources.clone()),
-                    Some(req.branch.clone()),
-                    Some(commit_sha.clone()),
-                    build_config.metadata.clone(),
-                    None,
-                    &enclave_config.ports,
-                    build_config.e2e,
-                    build_config.locksmith,
-                )
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to build enclave: {:?}", e);
-                    (StatusCode::INTERNAL_SERVER_ERROR, format!("Enclave build failed: {}", e))
-                })?
-        };
-
-        tracing::info!(
-            "EIF built successfully: path={}, size={} bytes, hash={}",
-            deployment.eif.path.display(),
-            deployment.eif.size,
-            deployment.eif.sha256
-        );
-        tracing::info!(
-            "PCR values: PCR0={}, PCR1={}, PCR2={}",
-            deployment.pcrs.pcr0,
-            deployment.pcrs.pcr1,
-            deployment.pcrs.pcr2
-        );
-
-        let built_eif_path = deployment.eif.path.to_string_lossy().to_string();
-        let built_pcrs_path = deployment.eif.path.with_extension("pcrs").to_string_lossy().to_string();
-
-        tracing::info!("Caching EIF to: {}", cached_eif_path);
-        if let Err(e) = tokio::fs::copy(&built_eif_path, &cached_eif_path).await {
-            tracing::warn!("Failed to cache EIF (non-fatal): {:?}", e);
-        }
-        if let Err(e) = tokio::fs::copy(&built_pcrs_path, &cached_pcrs_path).await {
-            tracing::warn!("Failed to cache PCRs (non-fatal): {:?}", e);
-        }
-
-        types::EIFBuildResult {
-            eif_path: cached_eif_path.clone(),
-            pcrs_path: cached_pcrs_path.clone(),
-            eif_hash: deployment.eif.sha256,
-            eif_size_bytes: deployment.eif.size,
+            build_result.eif_s3_key
         }
     };
 
-    let eif_path = eif_result.eif_path.clone();
-    let eif_hash = eif_result.eif_hash.clone();
+    let eif_path = format!("s3://{}/{}", builder_cfg.eif_s3_bucket, builder_eif_s3_key);
+    let (eif_hash, eif_size_bytes_db) = sqlx::query_as::<_, (String, i64)>(
+        "SELECT eif_sha256, eif_size_bytes FROM eif_builds WHERE eif_s3_key = $1 AND status = 'completed' LIMIT 1"
+    )
+    .bind(&builder_eif_s3_key)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)))?
+    .unwrap_or_else(|| {
+        tracing::warn!("Could not find eif_builds metadata for s3_key={}, using defaults", builder_eif_s3_key);
+        ("unknown".to_string(), 0)
+    });
 
-    tracing::info!("Storing EIF metadata: path={}, hash={}", eif_path, eif_hash);
+    tracing::info!("Using builder EIF: s3_key={}, hash={}", builder_eif_s3_key, eif_hash);
 
-    let config = serde_json::json!({
+    let eif_config = serde_json::json!({
         "eif_path": eif_path,
         "eif_hash": eif_hash,
-        "pcrs_path": eif_result.pcrs_path,
-        "eif_size_bytes": eif_result.eif_size_bytes,
+        "eif_s3_key": builder_eif_s3_key,
+        "eif_size_bytes": eif_size_bytes_db,
         "commit_sha": commit_sha,
         "run_command": build_config.run,
         "domain": build_config.domain,
@@ -2140,9 +1611,7 @@ async fn deploy_logic(
         "ports": enclave_config.ports,
         "http_port": enclave_config.http_port,
     });
-
-    (eif_path, eif_hash, config, eif_result.eif_size_bytes)
-    }; // end if/else builder vs inline
+    let eif_size_bytes = eif_size_bytes_db as u64;
 
     let memory_bytes = (enclave_config.memory_mb as u64) * 1024 * 1024;
     if eif_size_bytes > memory_bytes {
@@ -2262,7 +1731,7 @@ async fn deploy_logic(
         aws_account_id: aws_account_id.clone(),
         role_arn: role_arn_opt.clone(),
         eif_path: eif_path.clone(),
-        eif_s3_key: builder_eif_s3_key.clone(),
+        eif_s3_key: Some(builder_eif_s3_key.clone()),
         memory_mb: enclave_config.memory_mb,
         cpu_count: enclave_config.cpus,
         disk_gb: build_config.disk_gb,
@@ -2428,10 +1897,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pricing = PricingConfig::load();
     let builder_sizes = builder::BuilderSizesConfig::load()?;
 
-    let builder_config = builder::BuilderConfig::from_env();
-    if builder_config.is_some() {
-        info!("Dedicated builder enabled");
-    }
+    let builder_config = builder::BuilderConfig::from_env()?;
+    info!("Dedicated builder enabled");
 
     let state = Arc::new(AppState {
         db: pool,
@@ -2530,22 +1997,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/onboarding/verify", get(onboarding::verify_email));
 
     // Background task: reap orphaned builder instances
-    if state.builder_config.is_some() {
-        let reaper_state = state.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
-                let platform_creds = crate::deployment::AwsCredentials {
-                    access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
-                    secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),
-                    region: std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()),
-                };
-                let ec2 = crate::ec2::Ec2Client::new(&platform_creds);
-                builder::reap_orphaned_builders(&reaper_state.db, &ec2, |itype| reaper_state.pricing.instance_hourly_rate(itype)).await;
-            }
-        });
-        info!("Builder orphan reaper started (runs every 5 minutes)");
-    }
+    let reaper_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            let platform_creds = crate::deployment::AwsCredentials {
+                access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
+                secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),
+                region: std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()),
+            };
+            let ec2 = crate::ec2::Ec2Client::new(&platform_creds);
+            builder::reap_orphaned_builders(&reaper_state.db, &ec2, |itype| reaper_state.pricing.instance_hourly_rate(itype)).await;
+        }
+    });
+    info!("Builder orphan reaper started (runs every 5 minutes)");
 
     let app = Router::new()
         .merge(onboarding_routes)
