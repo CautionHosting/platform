@@ -6,8 +6,7 @@
 use anyhow::{Context, Result};
 use aws_sdk_costexplorer::{
     types::{
-        DateInterval, Expression, Granularity, GroupDefinition, GroupDefinitionType,
-        TagValues,
+        DateInterval, Expression, Granularity, GroupDefinition, GroupDefinitionType, TagValues,
     },
     Client,
 };
@@ -75,12 +74,7 @@ impl CostExplorerClient {
 
         // Build filter for this org's tag
         let tag_filter = Expression::builder()
-            .tags(
-                TagValues::builder()
-                    .key(ORG_TAG_KEY)
-                    .values(org_id)
-                    .build(),
-            )
+            .tags(TagValues::builder().key(ORG_TAG_KEY).values(org_id).build())
             .build();
 
         // Query Cost Explorer grouped by service
@@ -164,12 +158,7 @@ impl CostExplorerClient {
         end_date: &str,
     ) -> Result<Vec<DailyCost>> {
         let tag_filter = Expression::builder()
-            .tags(
-                TagValues::builder()
-                    .key(ORG_TAG_KEY)
-                    .values(org_id)
-                    .build(),
-            )
+            .tags(TagValues::builder().key(ORG_TAG_KEY).values(org_id).build())
             .build();
 
         let response = self
@@ -311,8 +300,7 @@ impl CostExplorerClient {
 /// Helper to get current billing period dates (first of current month to today)
 pub fn current_billing_period() -> (String, String) {
     let now = time::OffsetDateTime::now_utc();
-    let start = time::Date::from_calendar_date(now.year(), now.month(), 1)
-        .expect("valid date");
+    let start = time::Date::from_calendar_date(now.year(), now.month(), 1).expect("valid date");
     let end = now.date();
 
     (
@@ -324,22 +312,16 @@ pub fn current_billing_period() -> (String, String) {
 /// Helper to get previous month's billing period
 pub fn previous_month_billing_period() -> (String, String) {
     let now = time::OffsetDateTime::now_utc();
-    let first_of_current = time::Date::from_calendar_date(now.year(), now.month(), 1)
-        .expect("valid date");
+    let first_of_current =
+        time::Date::from_calendar_date(now.year(), now.month(), 1).expect("valid date");
 
     // Go back one day to get into previous month, then get first of that month
     let last_of_prev = first_of_current - time::Duration::days(1);
-    let first_of_prev = time::Date::from_calendar_date(
-        last_of_prev.year(),
-        last_of_prev.month(),
-        1,
-    )
-    .expect("valid date");
+    let first_of_prev =
+        time::Date::from_calendar_date(last_of_prev.year(), last_of_prev.month(), 1)
+            .expect("valid date");
 
-    (
-        first_of_prev.to_string(),
-        first_of_current.to_string(),
-    )
+    (first_of_prev.to_string(), first_of_current.to_string())
 }
 
 #[cfg(test)]

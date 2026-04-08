@@ -201,7 +201,9 @@ impl PricingRate {
 
         // Check instance type if specified in the rate
         if let Some(ref rate_instance_type) = self.instance_type {
-            if let Some(usage_instance_type) = usage.metadata.get("instance_type").and_then(|v| v.as_str()) {
+            if let Some(usage_instance_type) =
+                usage.metadata.get("instance_type").and_then(|v| v.as_str())
+            {
                 if rate_instance_type != usage_instance_type {
                     return false;
                 }
@@ -275,7 +277,12 @@ mod tests {
     use time::OffsetDateTime;
     use uuid::Uuid;
 
-    fn make_usage(provider: Provider, resource_type: ResourceType, quantity: f64, metadata: serde_json::Value) -> ResourceUsage {
+    fn make_usage(
+        provider: Provider,
+        resource_type: ResourceType,
+        quantity: f64,
+        metadata: serde_json::Value,
+    ) -> ResourceUsage {
         ResourceUsage {
             organization_id: Uuid::new_v4(),
             user_id: Some(Uuid::new_v4()),
@@ -526,10 +533,20 @@ mod tests {
             rate_per_unit: 0.20,
         };
 
-        let aws_usage = make_usage(Provider::Aws, ResourceType::Compute, 1.0, serde_json::json!({}));
+        let aws_usage = make_usage(
+            Provider::Aws,
+            ResourceType::Compute,
+            1.0,
+            serde_json::json!({}),
+        );
         assert!(rate.matches(&aws_usage));
 
-        let gcp_usage = make_usage(Provider::Gcp, ResourceType::Compute, 1.0, serde_json::json!({}));
+        let gcp_usage = make_usage(
+            Provider::Gcp,
+            ResourceType::Compute,
+            1.0,
+            serde_json::json!({}),
+        );
         assert!(!rate.matches(&gcp_usage));
     }
 

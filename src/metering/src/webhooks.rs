@@ -83,7 +83,10 @@ pub async fn paddle_webhook_handler(
         Ok(tx) => tx,
         Err(e) => {
             tracing::error!("Failed to begin transaction: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "internal error"})));
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            );
         }
     };
 
@@ -93,7 +96,10 @@ pub async fn paddle_webhook_handler(
         .await
     {
         tracing::error!("Failed to acquire advisory lock: {}", e);
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "internal error"})));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        );
     }
 
     // Idempotency check (serialized by advisory lock)
@@ -133,7 +139,10 @@ pub async fn paddle_webhook_handler(
     // The lock serialization ensures only one handler runs; the committed row prevents retries.
     if let Err(e) = tx.commit().await {
         tracing::error!("Failed to commit idempotency record: {}", e);
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "internal error"})));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        );
     }
 
     // Dispatch by event type
@@ -148,7 +157,11 @@ pub async fn paddle_webhook_handler(
     };
 
     if let Err(e) = result {
-        tracing::error!("Failed to handle Paddle webhook {}: {}", payload.event_type, e);
+        tracing::error!(
+            "Failed to handle Paddle webhook {}: {}",
+            payload.event_type,
+            e
+        );
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
@@ -166,12 +179,8 @@ async fn handle_transaction_completed(
     state: &AppState,
     payload: &PaddleWebhookPayload,
 ) -> anyhow::Result<()> {
-    let transaction_id = payload.data["id"]
-        .as_str()
-        .unwrap_or_default();
-    let customer_id = payload.data["customer_id"]
-        .as_str()
-        .unwrap_or_default();
+    let transaction_id = payload.data["id"].as_str().unwrap_or_default();
+    let customer_id = payload.data["customer_id"].as_str().unwrap_or_default();
 
     tracing::info!(
         "Transaction completed: {} for customer {}",
@@ -180,12 +189,11 @@ async fn handle_transaction_completed(
     );
 
     // Find the org by paddle_customer_id (billing_config is keyed by organization_id)
-    let org_row = sqlx::query(
-        "SELECT organization_id FROM billing_config WHERE paddle_customer_id = $1",
-    )
-    .bind(customer_id)
-    .fetch_optional(&state.pool)
-    .await?;
+    let org_row =
+        sqlx::query("SELECT organization_id FROM billing_config WHERE paddle_customer_id = $1")
+            .bind(customer_id)
+            .fetch_optional(&state.pool)
+            .await?;
 
     let Some(org_row) = org_row else {
         tracing::warn!(
@@ -211,17 +219,22 @@ async fn handle_transaction_completed(
 
     // Also mark any subscription billing event as paid
     if let Err(e) = sqlx::query(
-        "UPDATE subscription_billing_events SET status = 'paid' WHERE paddle_transaction_id = $1"
+        "UPDATE subscription_billing_events SET status = 'paid' WHERE paddle_transaction_id = $1",
     )
     .bind(transaction_id)
     .execute(&state.pool)
-    .await {
-        tracing::error!("Failed to mark billing event as paid for txn {}: {}", transaction_id, e);
+    .await
+    {
+        tracing::error!(
+            "Failed to mark billing event as paid for txn {}: {}",
+            transaction_id,
+            e
+        );
     }
 
     // Send confirmation email (find a user in the org for the email)
     let user_id: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1"
+        "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1",
     )
     .bind(org_id)
     .fetch_optional(&state.pool)
@@ -234,11 +247,14 @@ async fn handle_transaction_completed(
     // Check if this was an auto top-up transaction — deposit credits and unsuspend if needed
     let line_items = payload.data["details"]["line_items"].as_array();
     let is_auto_topup = line_items
-        .map(|items| items.iter().any(|item| {
-            item["description"].as_str()
-                .map(|d| d.starts_with("Auto top-up"))
-                .unwrap_or(false)
-        }))
+        .map(|items| {
+            items.iter().any(|item| {
+                item["description"]
+                    .as_str()
+                    .map(|d| d.starts_with("Auto top-up"))
+                    .unwrap_or(false)
+            })
+        })
         .unwrap_or(false);
 
     if is_auto_topup {
@@ -250,13 +266,18 @@ async fn handle_transaction_completed(
         if total_cents <= 0 {
             tracing::error!(
                 "Auto top-up transaction {} has invalid total_cents: {}",
-                transaction_id, total_cents
+                transaction_id,
+                total_cents
             );
             anyhow::bail!("Auto top-up transaction has non-positive amount");
         }
 
         {
-            tracing::info!("Auto top-up completed: depositing {} cents for org {}", total_cents, org_id);
+            tracing::info!(
+                "Auto top-up completed: depositing {} cents for org {}",
+                total_cents,
+                org_id
+            );
 
             // Deposit credits to wallet (wallet_balance keyed by organization_id)
             let mut tx = state.pool.begin().await?;
@@ -286,19 +307,26 @@ async fn handle_transaction_completed(
 
             tx.commit().await?;
 
-            tracing::info!("Auto top-up credited: org={}, +{}c, new_balance={}", org_id, total_cents, new_balance);
+            tracing::info!(
+                "Auto top-up credited: org={}, +{}c, new_balance={}",
+                org_id,
+                total_cents,
+                new_balance
+            );
 
             // Check if org was credit-suspended and unsuspend
-            let suspended: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-                "SELECT credit_suspended_at FROM organizations WHERE id = $1"
-            )
-            .bind(org_id)
-            .fetch_optional(&state.pool)
-            .await?
-            .flatten();
+            let suspended: Option<chrono::DateTime<chrono::Utc>> =
+                sqlx::query_scalar("SELECT credit_suspended_at FROM organizations WHERE id = $1")
+                    .bind(org_id)
+                    .fetch_optional(&state.pool)
+                    .await?
+                    .flatten();
 
             if suspended.is_some() {
-                tracing::info!("Clearing credit suspension for org {} after auto top-up", org_id);
+                tracing::info!(
+                    "Clearing credit suspension for org {} after auto top-up",
+                    org_id
+                );
                 sqlx::query("UPDATE organizations SET credit_suspended_at = NULL WHERE id = $1")
                     .bind(org_id)
                     .execute(&state.pool)
@@ -306,22 +334,25 @@ async fn handle_transaction_completed(
 
                 // Trigger unsuspend — need a user_id for internal auth header
                 let unsuspend_user_id: Option<uuid::Uuid> = sqlx::query_scalar(
-                    "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1"
+                    "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1",
                 )
                 .bind(org_id)
                 .fetch_optional(&state.pool)
                 .await?;
 
                 if let Some(uid) = unsuspend_user_id {
-                    let api_url = std::env::var("API_URL").unwrap_or_else(|_| "http://api:8080".to_string());
-                    let internal_secret = std::env::var("INTERNAL_SERVICE_SECRET").unwrap_or_default();
+                    let api_url =
+                        std::env::var("API_URL").unwrap_or_else(|_| "http://api:8080".to_string());
                     let client = reqwest::Client::builder()
                         .timeout(std::time::Duration::from_secs(30))
                         .build()
                         .unwrap_or_else(|_| reqwest::Client::new());
                     let _ = client
                         .post(format!("{}/internal/org/{}/unsuspend", api_url, org_id))
-                        .header("x-internal-service-secret", &internal_secret)
+                        .header(
+                            "x-internal-service-secret",
+                            state.internal_service_secret.as_str(),
+                        )
                         .header("x-authenticated-user-id", uid.to_string())
                         .send()
                         .await;
@@ -338,12 +369,8 @@ async fn handle_transaction_billed(
     state: &AppState,
     payload: &PaddleWebhookPayload,
 ) -> anyhow::Result<()> {
-    let transaction_id = payload.data["id"]
-        .as_str()
-        .unwrap_or_default();
-    let customer_id = payload.data["customer_id"]
-        .as_str()
-        .unwrap_or_default();
+    let transaction_id = payload.data["id"].as_str().unwrap_or_default();
+    let customer_id = payload.data["customer_id"].as_str().unwrap_or_default();
     let total = payload.data["details"]["totals"]["total"]
         .as_str()
         .and_then(|s| s.parse::<i64>().ok())
@@ -352,12 +379,8 @@ async fn handle_transaction_billed(
         .as_str()
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(0);
-    let currency = payload.data["currency_code"]
-        .as_str()
-        .unwrap_or("USD");
-    let invoice_number = payload.data["invoice_number"]
-        .as_str()
-        .unwrap_or("");
+    let currency = payload.data["currency_code"].as_str().unwrap_or("USD");
+    let invoice_number = payload.data["invoice_number"].as_str().unwrap_or("");
 
     tracing::info!(
         "Transaction billed: {} ({} cents) for customer {}",
@@ -367,12 +390,11 @@ async fn handle_transaction_billed(
     );
 
     // Find the user
-    let user_row = sqlx::query(
-        "SELECT organization_id FROM billing_config WHERE paddle_customer_id = $1",
-    )
-    .bind(customer_id)
-    .fetch_optional(&state.pool)
-    .await?;
+    let user_row =
+        sqlx::query("SELECT organization_id FROM billing_config WHERE paddle_customer_id = $1")
+            .bind(customer_id)
+            .fetch_optional(&state.pool)
+            .await?;
 
     let Some(user_row) = user_row else {
         tracing::warn!(
@@ -386,7 +408,7 @@ async fn handle_transaction_billed(
 
     // Resolve actual user_id for invoice (invoices table still uses user_id FK)
     let invoice_user_id: uuid::Uuid = sqlx::query_scalar(
-        "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1"
+        "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1",
     )
     .bind(org_id)
     .fetch_one(&state.pool)
@@ -419,7 +441,14 @@ async fn handle_transaction_billed(
     .await?;
 
     // Send invoice email
-    send_invoice_email(state, invoice_user_id, transaction_id, total, invoice_number).await?;
+    send_invoice_email(
+        state,
+        invoice_user_id,
+        transaction_id,
+        total,
+        invoice_number,
+    )
+    .await?;
 
     Ok(())
 }
@@ -429,12 +458,8 @@ async fn handle_payment_failed(
     state: &AppState,
     payload: &PaddleWebhookPayload,
 ) -> anyhow::Result<()> {
-    let transaction_id = payload.data["id"]
-        .as_str()
-        .unwrap_or_default();
-    let customer_id = payload.data["customer_id"]
-        .as_str()
-        .unwrap_or_default();
+    let transaction_id = payload.data["id"].as_str().unwrap_or_default();
+    let customer_id = payload.data["customer_id"].as_str().unwrap_or_default();
 
     tracing::warn!(
         "Transaction payment failed: {} for customer {}",
@@ -443,12 +468,11 @@ async fn handle_payment_failed(
     );
 
     // Find the user
-    let user_row = sqlx::query(
-        "SELECT organization_id FROM billing_config WHERE paddle_customer_id = $1",
-    )
-    .bind(customer_id)
-    .fetch_optional(&state.pool)
-    .await?;
+    let user_row =
+        sqlx::query("SELECT organization_id FROM billing_config WHERE paddle_customer_id = $1")
+            .bind(customer_id)
+            .fetch_optional(&state.pool)
+            .await?;
 
     let Some(user_row) = user_row else {
         return Ok(());
@@ -458,7 +482,7 @@ async fn handle_payment_failed(
 
     // Resolve user for email notifications
     let user_id: uuid::Uuid = sqlx::query_scalar(
-        "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1"
+        "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1",
     )
     .bind(org_id)
     .fetch_one(&state.pool)
@@ -485,8 +509,13 @@ async fn handle_payment_failed(
     )
     .bind(transaction_id)
     .execute(&state.pool)
-    .await {
-        tracing::error!("Failed to mark subscription as past_due for txn {}: {}", transaction_id, e);
+    .await
+    {
+        tracing::error!(
+            "Failed to mark subscription as past_due for txn {}: {}",
+            transaction_id,
+            e
+        );
     }
 
     // Mark the billing event as failed
@@ -521,8 +550,13 @@ pub async fn handle_paddle_transaction_test(
     .bind(&payload.event_type)
     .bind(serde_json::to_value(&payload).unwrap_or_default())
     .execute(&state.pool)
-    .await {
-        tracing::error!("Failed to record test webhook event {}: {}", payload.event_id, e);
+    .await
+    {
+        tracing::error!(
+            "Failed to record test webhook event {}: {}",
+            payload.event_id,
+            e
+        );
     }
 
     match payload.event_type.as_str() {
@@ -557,7 +591,10 @@ async fn send_invoice_email(
     let email: Option<String> = user.get("email");
 
     let Some(email) = email else {
-        tracing::warn!("User {} has no email address, skipping invoice email", user_id);
+        tracing::warn!(
+            "User {} has no email address, skipping invoice email",
+            user_id
+        );
         return Ok(());
     };
 
@@ -618,7 +655,10 @@ async fn send_payment_confirmation_email(
 
     let email: Option<String> = user.get("email");
     let Some(email) = email else {
-        tracing::warn!("User {} has no email, skipping payment confirmation", user_id);
+        tracing::warn!(
+            "User {} has no email, skipping payment confirmation",
+            user_id
+        );
         return Ok(());
     };
 
@@ -662,7 +702,10 @@ async fn send_payment_failure_email(
 
     let email: Option<String> = user.get("email");
     let Some(email) = email else {
-        tracing::warn!("User {} has no email, skipping payment failure email", user_id);
+        tracing::warn!(
+            "User {} has no email, skipping payment failure email",
+            user_id
+        );
         return Ok(());
     };
 
@@ -746,7 +789,10 @@ mod tests {
 
         let payload: PaddleWebhookPayload = serde_json::from_value(json).unwrap();
         assert_eq!(payload.event_type, "transaction.billed");
-        assert_eq!(payload.data["invoice_number"].as_str().unwrap(), "INV-2025-001");
+        assert_eq!(
+            payload.data["invoice_number"].as_str().unwrap(),
+            "INV-2025-001"
+        );
     }
 
     #[test]

@@ -37,7 +37,22 @@ pub struct AppState {
     pub paddle: paddle::PaddleClient,
     pub calculator: calculator::CostCalculator,
     pub cloudwatch: aws_sdk_cloudwatch::Client,
-    pub internal_service_secret: Option<String>,
+    pub internal_service_secret: String,
+}
+
+fn load_internal_service_secret() -> Result<String> {
+    std::env::var("INTERNAL_SERVICE_SECRET")
+        .ok()
+        .map(|secret| secret.trim().to_string())
+        .filter(|secret| !secret.is_empty())
+        .context("INTERNAL_SERVICE_SECRET must be set for the metering service")
+}
+
+fn has_valid_internal_service_secret(
+    configured_secret: &str,
+    provided_secret: Option<&str>,
+) -> bool {
+    matches!(provided_secret, Some(secret) if secret == configured_secret)
 }
 
 #[tokio::main]
@@ -51,8 +66,7 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let database_url = std::env::var("DATABASE_URL")
-        .context("DATABASE_URL must be set")?;
+    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
 
     let paddle_api_url = std::env::var("PADDLE_API_URL").unwrap_or_default();
     let paddle_api_key = std::env::var("PADDLE_API_KEY").unwrap_or_default();
@@ -70,10 +84,7 @@ async fn main() -> Result<()> {
 
     tracing::info!("Connected to database");
 
-    let internal_service_secret = std::env::var("INTERNAL_SERVICE_SECRET").ok().filter(|s| !s.is_empty());
-    if internal_service_secret.is_none() {
-        tracing::warn!("INTERNAL_SERVICE_SECRET not set — metering API routes are unauthenticated");
-    }
+    let internal_service_secret = load_internal_service_secret()?;
 
     let paddle = paddle::PaddleClient::new(paddle_api_url, paddle_api_key, paddle_webhook_secret);
     let calculator = calculator::CostCalculator::new(calculator::PricingRules::default());
@@ -98,9 +109,10 @@ async fn main() -> Result<()> {
 
     tokio::spawn(async move {
         loop {
-            let result = std::panic::AssertUnwindSafe(
-                collection::run_collection_loop(collection_state.clone(), collection_interval_secs)
-            );
+            let result = std::panic::AssertUnwindSafe(collection::run_collection_loop(
+                collection_state.clone(),
+                collection_interval_secs,
+            ));
             if let Err(e) = futures::FutureExt::catch_unwind(result).await {
                 tracing::error!("Collection loop panicked: {:?}. Restarting in 60s...", e);
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
@@ -112,11 +124,14 @@ async fn main() -> Result<()> {
     let billing_state = state.clone();
     tokio::spawn(async move {
         loop {
-            let result = std::panic::AssertUnwindSafe(
-                billing::run_monthly_billing_loop(billing_state.clone())
-            );
+            let result = std::panic::AssertUnwindSafe(billing::run_monthly_billing_loop(
+                billing_state.clone(),
+            ));
             if let Err(e) = futures::FutureExt::catch_unwind(result).await {
-                tracing::error!("Monthly billing loop panicked: {:?}. Restarting in 60s...", e);
+                tracing::error!(
+                    "Monthly billing loop panicked: {:?}. Restarting in 60s...",
+                    e
+                );
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             }
         }
@@ -126,9 +141,8 @@ async fn main() -> Result<()> {
     let dunning_state = state.clone();
     tokio::spawn(async move {
         loop {
-            let result = std::panic::AssertUnwindSafe(
-                dunning::run_dunning_loop(dunning_state.clone())
-            );
+            let result =
+                std::panic::AssertUnwindSafe(dunning::run_dunning_loop(dunning_state.clone()));
             if let Err(e) = futures::FutureExt::catch_unwind(result).await {
                 tracing::error!("Dunning loop panicked: {:?}. Restarting in 60s...", e);
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
@@ -148,10 +162,13 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Authenticated API routes — require INTERNAL_SERVICE_SECRET
+    // Authenticated API routes — require a valid INTERNAL_SERVICE_SECRET header
     let mut api_routes = Router::new()
         .route("/api/resources/track", post(track_resource))
-        .route("/api/resources/{resource_id}/untrack", post(untrack_resource))
+        .route(
+            "/api/resources/{resource_id}/untrack",
+            post(untrack_resource),
+        )
         .route("/api/resources", get(list_tracked_resources))
         .route("/api/usage/{user_id}", get(get_user_usage))
         .route("/api/collect", post(collection::trigger_collection))
@@ -160,20 +177,31 @@ async fn main() -> Result<()> {
         .route("/api/aws/costs/{org_id}", get(get_aws_org_costs))
         .route("/api/aws/costs", get(get_all_aws_costs))
         // Monthly billing
-        .route("/api/billing/monthly", post(billing::trigger_monthly_billing))
+        .route(
+            "/api/billing/monthly",
+            post(billing::trigger_monthly_billing),
+        )
         // User-facing billing dashboard
-        .route("/api/billing/estimate/{org_id}", get(billing::get_billing_estimate));
+        .route(
+            "/api/billing/estimate/{org_id}",
+            get(billing::get_billing_estimate),
+        );
 
     // Test endpoints: only available when ENABLE_TEST_ENDPOINTS=true
     if enable_test_endpoints {
         tracing::warn!("Test endpoints enabled — do NOT use in production");
         api_routes = api_routes
             .route("/test/simulate-usage", post(test_simulate_usage))
-            .route("/test/simulate-paddle-transaction", post(test_simulate_paddle_transaction));
+            .route(
+                "/test/simulate-paddle-transaction",
+                post(test_simulate_paddle_transaction),
+            );
     }
 
-    let api_routes = api_routes
-        .layer(middleware::from_fn_with_state(state.clone(), internal_auth_middleware));
+    let api_routes = api_routes.layer(middleware::from_fn_with_state(
+        state.clone(),
+        internal_auth_middleware,
+    ));
 
     // Webhook rate limiter: 30 requests per minute per IP
     let webhook_limiter = RateLimiter::new(30, std::time::Duration::from_secs(60));
@@ -181,7 +209,10 @@ async fn main() -> Result<()> {
     // Public routes — no auth required (health check, webhooks have their own signature verification)
     let webhook_routes = Router::new()
         .route("/webhooks/paddle", post(webhooks::paddle_webhook_handler))
-        .layer(middleware::from_fn_with_state(webhook_limiter, webhook_rate_limit_middleware));
+        .layer(middleware::from_fn_with_state(
+            webhook_limiter,
+            webhook_rate_limit_middleware,
+        ));
 
     let public_routes = Router::new()
         .route("/health", get(health_check))
@@ -233,7 +264,9 @@ impl RateLimiter {
         // Evict stale entries to prevent unbounded growth
         if map.len() > self.max_entries {
             map.retain(|_, entries| {
-                entries.last().map_or(false, |t| now.duration_since(*t) < self.window)
+                entries
+                    .last()
+                    .map_or(false, |t| now.duration_since(*t) < self.window)
             });
         }
 
@@ -253,7 +286,8 @@ async fn webhook_rate_limit_middleware(
     req: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let ip = req.headers()
+    let ip = req
+        .headers()
         .get("x-forwarded-for")
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.split(',').last())
@@ -269,25 +303,76 @@ async fn webhook_rate_limit_middleware(
 }
 
 /// Internal service auth middleware — checks x-internal-service-secret header.
-/// If INTERNAL_SERVICE_SECRET is not configured, allows all requests (dev mode).
 async fn internal_auth_middleware(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     request: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let Some(ref configured_secret) = state.internal_service_secret else {
-        // No secret configured — allow (dev mode, already warned at startup)
-        return next.run(request).await;
-    };
-
     let provided = headers
         .get("x-internal-service-secret")
         .and_then(|h| h.to_str().ok());
 
-    match provided {
-        Some(s) if s == configured_secret.as_str() => next.run(request).await,
-        _ => (StatusCode::UNAUTHORIZED, "Invalid or missing internal service secret").into_response(),
+    if has_valid_internal_service_secret(&state.internal_service_secret, provided) {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::UNAUTHORIZED,
+            "Invalid or missing internal service secret",
+        )
+            .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{has_valid_internal_service_secret, load_internal_service_secret};
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn load_internal_service_secret_accepts_non_empty_value() {
+        let _guard = env_lock().lock().expect("env lock");
+        unsafe {
+            std::env::set_var("INTERNAL_SERVICE_SECRET", "super-secret");
+        }
+        let secret = load_internal_service_secret().expect("secret should load");
+        assert_eq!(secret, "super-secret");
+    }
+
+    #[test]
+    fn load_internal_service_secret_rejects_missing_value() {
+        let _guard = env_lock().lock().expect("env lock");
+        unsafe {
+            std::env::remove_var("INTERNAL_SERVICE_SECRET");
+        }
+        let err = load_internal_service_secret().expect_err("missing secret should fail");
+        assert!(err
+            .to_string()
+            .contains("INTERNAL_SERVICE_SECRET must be set"));
+    }
+
+    #[test]
+    fn load_internal_service_secret_rejects_empty_value() {
+        let _guard = env_lock().lock().expect("env lock");
+        unsafe {
+            std::env::set_var("INTERNAL_SERVICE_SECRET", "   ");
+        }
+        let err = load_internal_service_secret().expect_err("empty secret should fail");
+        assert!(err
+            .to_string()
+            .contains("INTERNAL_SERVICE_SECRET must be set"));
+    }
+
+    #[test]
+    fn has_valid_internal_service_secret_requires_exact_match() {
+        assert!(has_valid_internal_service_secret("secret", Some("secret")));
+        assert!(!has_valid_internal_service_secret("secret", Some("wrong")));
+        assert!(!has_valid_internal_service_secret("secret", None));
     }
 }
 
@@ -332,11 +417,17 @@ async fn track_resource(
     match result {
         Ok(_) => {
             tracing::info!("Now tracking resource: {}", req.resource_id);
-            (StatusCode::OK, Json(serde_json::json!({"status": "tracking"})))
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "tracking"})),
+            )
         }
         Err(e) => {
             tracing::error!("Failed to track resource: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
         }
     }
 }
@@ -364,18 +455,22 @@ async fn untrack_resource(
     match result {
         Ok(_) => {
             tracing::info!("Stopped tracking resource: {}", resource_id);
-            (StatusCode::OK, Json(serde_json::json!({"status": "stopped"})))
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "stopped"})),
+            )
         }
         Err(e) => {
             tracing::error!("Failed to untrack resource: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()})))
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
         }
     }
 }
 
-async fn list_tracked_resources(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn list_tracked_resources(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let result = sqlx::query_as::<_, TrackedResource>(
         r#"
         SELECT resource_id, organization_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
@@ -388,8 +483,14 @@ async fn list_tracked_resources(
     .await;
 
     match result {
-        Ok(resources) => (StatusCode::OK, Json(serde_json::json!({"resources": resources}))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))),
+        Ok(resources) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"resources": resources})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
     }
 }
 
@@ -416,17 +517,23 @@ async fn get_user_usage(
 
     match result {
         Ok(rows) => {
-            let usage: Vec<serde_json::Value> = rows.iter().map(|row| {
-                serde_json::json!({
-                    "provider": row.get::<String, _>("provider"),
-                    "resource_type": row.get::<String, _>("resource_type"),
-                    "total_quantity": row.get::<Option<f64>, _>("total_quantity"),
-                    "total_cost": row.get::<Option<f64>, _>("total_cost"),
+            let usage: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "provider": row.get::<String, _>("provider"),
+                        "resource_type": row.get::<String, _>("resource_type"),
+                        "total_quantity": row.get::<Option<f64>, _>("total_quantity"),
+                        "total_cost": row.get::<Option<f64>, _>("total_cost"),
+                    })
                 })
-            }).collect();
+                .collect();
             (StatusCode::OK, Json(serde_json::json!({"usage": usage})))
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
     }
 }
 
@@ -494,23 +601,30 @@ async fn test_simulate_usage(
         Ok(_) => {
             tracing::info!(
                 "TEST: Simulated {} hours of {} usage for user {}, cost: ${:.4}",
-                hours, instance_type, req.user_id, cost
+                hours,
+                instance_type,
+                req.user_id,
+                cost
             );
 
-            (StatusCode::OK, Json(serde_json::json!({
-                "status": "success",
-                "resource_id": resource_id,
-                "hours": hours,
-                "instance_type": instance_type,
-                "cost_usd": cost,
-                "message": "Usage recorded locally. Paddle transaction will be created at billing cycle end."
-            })))
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "success",
+                    "resource_id": resource_id,
+                    "hours": hours,
+                    "instance_type": instance_type,
+                    "cost_usd": cost,
+                    "message": "Usage recorded locally. Paddle transaction will be created at billing cycle end."
+                })),
+            )
         }
-        Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
                 "error": e.to_string()
-            })))
-        }
+            })),
+        ),
     }
 }
 
@@ -531,9 +645,12 @@ async fn test_simulate_paddle_transaction(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TestSimulatePaddleTransactionRequest>,
 ) -> impl IntoResponse {
-    let transaction_id = req.transaction_id
+    let transaction_id = req
+        .transaction_id
         .unwrap_or_else(|| format!("txn_test_{}", uuid::Uuid::new_v4()));
-    let event_type = req.event_type.unwrap_or_else(|| "transaction.billed".to_string());
+    let event_type = req
+        .event_type
+        .unwrap_or_else(|| "transaction.billed".to_string());
     let invoice_number = format!("TEST-{}", &transaction_id[9..17].to_uppercase());
 
     // Ensure the org has a paddle_customer_id in billing_config
@@ -547,8 +664,13 @@ async fn test_simulate_paddle_transaction(
     .bind(&customer_id)
     .bind(org_id)
     .execute(&state.pool)
-    .await {
-        tracing::error!("Failed to update paddle_customer_id for test user {}: {}", req.user_id, e);
+    .await
+    {
+        tracing::error!(
+            "Failed to update paddle_customer_id for test user {}: {}",
+            req.user_id,
+            e
+        );
     }
 
     // Build a fake Paddle webhook payload
@@ -743,7 +865,10 @@ async fn get_aws_org_costs(
         }
     };
 
-    match ce_client.get_org_costs(&org_id, &start_date, &end_date).await {
+    match ce_client
+        .get_org_costs(&org_id, &start_date, &end_date)
+        .await
+    {
         Ok(cost_data) => (StatusCode::OK, Json(serde_json::json!(cost_data))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

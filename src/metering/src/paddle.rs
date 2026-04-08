@@ -113,7 +113,11 @@ impl PaddleClient {
                 }
             }
 
-            anyhow::bail!("Paddle API error creating customer: {} - {}", status, body_text);
+            anyhow::bail!(
+                "Paddle API error creating customer: {} - {}",
+                status,
+                body_text
+            );
         }
 
         let resp: serde_json::Value = response.json().await?;
@@ -325,8 +329,7 @@ mod tests {
 
         // Compute the expected signature
         let signed_payload = format!("{}:{}", timestamp, String::from_utf8_lossy(body));
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(signed_payload.as_bytes());
         let sig_hex = hex::encode(mac.finalize().into_bytes());
 
@@ -413,18 +416,12 @@ mod tests {
 
         // Should return stub data without making HTTP calls
         let customer = client
-            .create_customer(
-                uuid::Uuid::new_v4(),
-                "test@example.com",
-                Some("Test"),
-            )
+            .create_customer(uuid::Uuid::new_v4(), "test@example.com", Some("Test"))
             .await;
         assert!(customer.is_ok());
         assert!(customer.unwrap().id.starts_with("ctm_stub_"));
 
-        let transaction = client
-            .create_transaction("ctm_123", vec![])
-            .await;
+        let transaction = client.create_transaction("ctm_123", vec![]).await;
         assert!(transaction.is_ok());
         assert!(transaction.unwrap().id.starts_with("txn_stub_"));
 
@@ -447,7 +444,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_customer_sandbox() {
-        let Some(client) = sandbox_client() else { return };
+        let Some(client) = sandbox_client() else {
+            return;
+        };
 
         let customer = client
             .create_customer(
@@ -467,7 +466,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_transaction_sandbox() {
-        let Some(client) = sandbox_client() else { return };
+        let Some(client) = sandbox_client() else {
+            return;
+        };
 
         let customer = client
             .create_customer(
@@ -500,7 +501,9 @@ mod tests {
     /// Full lifecycle: create customer → create transaction → retrieve transaction
     #[tokio::test]
     async fn test_full_billing_lifecycle_sandbox() {
-        let Some(client) = sandbox_client() else { return };
+        let Some(client) = sandbox_client() else {
+            return;
+        };
 
         // 1. Create customer
         let customer = client
@@ -549,7 +552,9 @@ mod tests {
     /// Verify that creating a customer with the same email returns a 409 or handles gracefully
     #[tokio::test]
     async fn test_duplicate_customer_sandbox() {
-        let Some(client) = sandbox_client() else { return };
+        let Some(client) = sandbox_client() else {
+            return;
+        };
 
         let email = format!("sandbox-dup-{}@example.com", uuid::Uuid::new_v4());
 
@@ -574,7 +579,9 @@ mod tests {
             Err(e) => {
                 let err_msg = e.to_string();
                 assert!(
-                    err_msg.contains("409") || err_msg.contains("conflict") || err_msg.contains("already exists"),
+                    err_msg.contains("409")
+                        || err_msg.contains("conflict")
+                        || err_msg.contains("already exists"),
                     "Expected a conflict error, got: {}",
                     err_msg
                 );

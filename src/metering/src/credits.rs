@@ -38,7 +38,7 @@ pub async fn apply_credit_deduction(
     let new_balance: i64 = sqlx::query_scalar(
         "UPDATE wallet_balance SET balance_cents = balance_cents - $2
          WHERE organization_id = $1
-         RETURNING balance_cents"
+         RETURNING balance_cents",
     )
     .bind(organization_id)
     .bind(credits_to_apply)
@@ -61,7 +61,10 @@ pub async fn apply_credit_deduction(
 
     tracing::info!(
         "Credit deduction: org={}, applied={} cents, remainder={} cents, new_balance={}",
-        organization_id, credits_to_apply, remainder, new_balance
+        organization_id,
+        credits_to_apply,
+        remainder,
+        new_balance
     );
 
     Ok((credits_to_apply, remainder))
@@ -100,7 +103,7 @@ pub async fn deduct_realtime_usage(
     let new_balance: i64 = sqlx::query_scalar(
         "UPDATE wallet_balance SET balance_cents = balance_cents - $2
          WHERE organization_id = $1
-         RETURNING balance_cents"
+         RETURNING balance_cents",
     )
     .bind(organization_id)
     .bind(credits_to_apply)
@@ -127,7 +130,11 @@ pub async fn deduct_realtime_usage(
 
     tracing::info!(
         "Realtime deduction: org={}, resource={}, applied={} cents, remainder={}, new_balance={}",
-        organization_id, resource_id, credits_to_apply, remainder, new_balance
+        organization_id,
+        resource_id,
+        credits_to_apply,
+        remainder,
+        new_balance
     );
 
     Ok((credits_to_apply, remainder, new_balance))

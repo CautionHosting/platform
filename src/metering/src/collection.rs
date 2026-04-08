@@ -5,16 +5,11 @@ use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
-use crate::AppState;
-use crate::types::*;
 use crate::balance::check_balance_thresholds;
+use crate::types::*;
+use crate::AppState;
 
 // Advisory lock IDs for distributed coordination
 pub(crate) const LOCK_COLLECTION: i64 = 1001;
@@ -38,14 +33,18 @@ pub(crate) async fn advisory_unlock(pool: &sqlx::PgPool, lock_id: i64) {
         .await;
 }
 
-pub async fn trigger_collection(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn trigger_collection(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Bypass advisory lock for explicitly triggered collections — the lock only
     // prevents duplicate background loop runs, not manual API invocations.
     match run_collection_cycle_inner(&state).await {
-        Ok(count) => (StatusCode::OK, Json(serde_json::json!({"collected": count}))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))),
+        Ok(count) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"collected": count})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
     }
 }
 
@@ -122,7 +121,11 @@ pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize
                 collected += 1;
             }
             Err(e) => {
-                tracing::error!("Failed to collect usage for {}: {}", resource.resource_id, e);
+                tracing::error!(
+                    "Failed to collect usage for {}: {}",
+                    resource.resource_id,
+                    e
+                );
             }
         }
     }
@@ -219,20 +222,31 @@ pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) 
 
     tracing::debug!(
         "Recorded usage for {}: {:.4} hours, ${:.4}",
-        resource_id, hours, cost
+        resource_id,
+        hours,
+        cost
     );
 
     // Real-time credit deduction (wallet_balance keyed by organization_id)
     let cost_cents = (cost * 100.0).round() as i64;
     if cost_cents > 0 {
         let (_applied, _remainder, _new_balance) = crate::credits::deduct_realtime_usage(
-            &state.pool, resource.organization_id, cost_cents, resource_id, hours
-        ).await?;
+            &state.pool,
+            resource.organization_id,
+            cost_cents,
+            resource_id,
+            hours,
+        )
+        .await?;
     }
 
     // Collect network egress via CloudWatch (best-effort, don't block compute billing)
     if let Err(e) = collect_network_egress(state, &resource, last_billed, now).await {
-        tracing::warn!("Failed to collect network egress for {}: {}", resource_id, e);
+        tracing::warn!(
+            "Failed to collect network egress for {}: {}",
+            resource_id,
+            e
+        );
     }
 
     Ok(cost_cents > 0)
@@ -249,7 +263,8 @@ async fn collect_network_egress(
 
     let seconds_elapsed = (end.unix_timestamp() - start.unix_timestamp()).max(60) as i32;
 
-    let result = state.cloudwatch
+    let result = state
+        .cloudwatch
         .get_metric_statistics()
         .namespace("AWS/EC2")
         .metric_name("NetworkOut")
@@ -257,20 +272,21 @@ async fn collect_network_egress(
             Dimension::builder()
                 .name("InstanceId")
                 .value(&resource.resource_id)
-                .build()
+                .build(),
         )
-        .start_time(aws_sdk_cloudwatch::primitives::DateTime::from_secs(start.unix_timestamp()))
-        .end_time(aws_sdk_cloudwatch::primitives::DateTime::from_secs(end.unix_timestamp()))
+        .start_time(aws_sdk_cloudwatch::primitives::DateTime::from_secs(
+            start.unix_timestamp(),
+        ))
+        .end_time(aws_sdk_cloudwatch::primitives::DateTime::from_secs(
+            end.unix_timestamp(),
+        ))
         .period(seconds_elapsed)
         .statistics(Statistic::Sum)
         .send()
         .await
         .context("CloudWatch GetMetricStatistics failed")?;
 
-    let total_bytes: f64 = result.datapoints()
-        .iter()
-        .filter_map(|dp| dp.sum())
-        .sum();
+    let total_bytes: f64 = result.datapoints().iter().filter_map(|dp| dp.sum()).sum();
 
     if total_bytes < 1.0 {
         return Ok(());
@@ -322,12 +338,19 @@ async fn collect_network_egress(
     .await?;
 
     crate::credits::deduct_realtime_usage(
-        &state.pool, resource.organization_id, cost_cents, &resource.resource_id, gb
-    ).await?;
+        &state.pool,
+        resource.organization_id,
+        cost_cents,
+        &resource.resource_id,
+        gb,
+    )
+    .await?;
 
     tracing::info!(
         "Network egress for {}: {:.4} GB, ${:.4}",
-        resource.resource_id, gb, cost
+        resource.resource_id,
+        gb,
+        cost
     );
 
     Ok(())

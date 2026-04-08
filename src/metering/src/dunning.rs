@@ -62,7 +62,10 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
     .await?;
 
     for (org_id,) in &negative_balance_orgs {
-        tracing::info!("Marking org {} as payment-failed (negative balance, no payment method)", org_id);
+        tracing::info!(
+            "Marking org {} as payment-failed (negative balance, no payment method)",
+            org_id
+        );
         sqlx::query(
             "UPDATE organizations SET payment_failed_at = NOW(), dunning_stage = 'none' WHERE id = $1"
         )
@@ -93,7 +96,9 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
 
     for (org_id, failed_at, stage) in &delinquent_orgs {
         // Check if the org has resolved payment (subscription back to active, or balance >= 0 with payment method)
-        let is_resolved = check_payment_resolved(&state.pool, *org_id).await.unwrap_or(false);
+        let is_resolved = check_payment_resolved(&state.pool, *org_id)
+            .await
+            .unwrap_or(false);
 
         if is_resolved {
             tracing::info!("Org {} has resolved payment, clearing dunning", org_id);
@@ -117,30 +122,50 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
         match stage.as_str() {
             "none" => {
                 // Day 0: send initial payment failure email
-                send_dunning_email(&state, *org_id, "payment_failure", serde_json::json!({
-                    "update_payment_url": "https://caution.dev/settings/billing",
-                })).await;
+                send_dunning_email(
+                    &state,
+                    *org_id,
+                    "payment_failure",
+                    serde_json::json!({
+                        "update_payment_url": "https://caution.dev/settings/billing",
+                    }),
+                )
+                .await;
 
-                sqlx::query("UPDATE organizations SET dunning_stage = 'warning_sent' WHERE id = $1")
-                    .bind(org_id)
-                    .execute(&state.pool)
-                    .await?;
+                sqlx::query(
+                    "UPDATE organizations SET dunning_stage = 'warning_sent' WHERE id = $1",
+                )
+                .bind(org_id)
+                .execute(&state.pool)
+                .await?;
             }
             "warning_sent" if days_overdue >= 3 => {
                 // Day 3: send suspension warning
-                send_dunning_email(&state, *org_id, "suspension_warning", serde_json::json!({
-                    "days_remaining": 4,
-                    "amount": "your outstanding balance",
-                })).await;
+                send_dunning_email(
+                    &state,
+                    *org_id,
+                    "suspension_warning",
+                    serde_json::json!({
+                        "days_remaining": 4,
+                        "amount": "your outstanding balance",
+                    }),
+                )
+                .await;
 
-                sqlx::query("UPDATE organizations SET dunning_stage = 'reminder_sent' WHERE id = $1")
-                    .bind(org_id)
-                    .execute(&state.pool)
-                    .await?;
+                sqlx::query(
+                    "UPDATE organizations SET dunning_stage = 'reminder_sent' WHERE id = $1",
+                )
+                .bind(org_id)
+                .execute(&state.pool)
+                .await?;
             }
             "reminder_sent" if days_overdue >= 7 => {
                 // Day 7: suspend resources
-                tracing::warn!("Org {} overdue for {} days, suspending resources", org_id, days_overdue);
+                tracing::warn!(
+                    "Org {} overdue for {} days, suspending resources",
+                    org_id,
+                    days_overdue
+                );
                 suspend_org(&state, *org_id).await;
             }
             _ => {}
@@ -183,7 +208,7 @@ async fn check_payment_resolved(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Resu
             SELECT 1 FROM wallet_balance wb
             WHERE wb.organization_id = $1 AND wb.balance_cents >= 0
         )
-        "#
+        "#,
     )
     .bind(org_id)
     .fetch_one(pool)
@@ -195,13 +220,9 @@ async fn check_payment_resolved(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Resu
 /// Call the API service to suspend all running resources for an org.
 async fn suspend_org(state: &AppState, org_id: uuid::Uuid) {
     let api_url = std::env::var("API_URL").unwrap_or_else(|_| "http://api:8080".to_string());
-    let Some(ref internal_secret) = state.internal_service_secret else {
-        tracing::error!("INTERNAL_SERVICE_SECRET not configured — cannot call API to suspend org {}", org_id);
-        return;
-    };
     // We need a user_id for internal auth — use any org member
     let user_id: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1"
+        "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1",
     )
     .bind(org_id)
     .fetch_optional(&state.pool)
@@ -220,7 +241,10 @@ async fn suspend_org(state: &AppState, org_id: uuid::Uuid) {
         .unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(format!("{}/internal/org/{}/suspend", api_url, org_id))
-        .header("x-internal-service-secret", internal_secret.as_str())
+        .header(
+            "x-internal-service-secret",
+            state.internal_service_secret.as_str(),
+        )
         .header("x-authenticated-user-id", user_id.to_string())
         .send()
         .await;
@@ -237,10 +261,16 @@ async fn suspend_org(state: &AppState, org_id: uuid::Uuid) {
             .await
             .unwrap_or(0);
 
-            send_dunning_email(state, org_id, "suspension_notice", serde_json::json!({
-                "amount": "your outstanding balance",
-                "app_count": app_count,
-            })).await;
+            send_dunning_email(
+                state,
+                org_id,
+                "suspension_notice",
+                serde_json::json!({
+                    "amount": "your outstanding balance",
+                    "app_count": app_count,
+                }),
+            )
+            .await;
         }
         Ok(r) => {
             tracing::error!("API returned {} when suspending org {}", r.status(), org_id);
@@ -254,13 +284,9 @@ async fn suspend_org(state: &AppState, org_id: uuid::Uuid) {
 /// Call the API service to unsuspend (restart) stopped resources for an org.
 async fn unsuspend_org(state: &AppState, org_id: uuid::Uuid) {
     let api_url = std::env::var("API_URL").unwrap_or_else(|_| "http://api:8080".to_string());
-    let Some(ref internal_secret) = state.internal_service_secret else {
-        tracing::error!("INTERNAL_SERVICE_SECRET not configured — cannot call API to unsuspend org {}", org_id);
-        return;
-    };
 
     let user_id: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1"
+        "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1",
     )
     .bind(org_id)
     .fetch_optional(&state.pool)
@@ -279,7 +305,10 @@ async fn unsuspend_org(state: &AppState, org_id: uuid::Uuid) {
         .unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .post(format!("{}/internal/org/{}/unsuspend", api_url, org_id))
-        .header("x-internal-service-secret", internal_secret.as_str())
+        .header(
+            "x-internal-service-secret",
+            state.internal_service_secret.as_str(),
+        )
         .header("x-authenticated-user-id", user_id.to_string())
         .send()
         .await;
@@ -289,7 +318,11 @@ async fn unsuspend_org(state: &AppState, org_id: uuid::Uuid) {
             tracing::info!("Successfully unsuspended org {}", org_id);
         }
         Ok(r) => {
-            tracing::error!("API returned {} when unsuspending org {}", r.status(), org_id);
+            tracing::error!(
+                "API returned {} when unsuspending org {}",
+                r.status(),
+                org_id
+            );
         }
         Err(e) => {
             tracing::error!("Failed to call API to unsuspend org {}: {}", org_id, e);
@@ -298,7 +331,12 @@ async fn unsuspend_org(state: &AppState, org_id: uuid::Uuid) {
 }
 
 /// Send a dunning email to all members of an org.
-pub(crate) async fn send_dunning_email(state: &AppState, org_id: uuid::Uuid, template: &str, data: serde_json::Value) {
+pub(crate) async fn send_dunning_email(
+    state: &AppState,
+    org_id: uuid::Uuid,
+    template: &str,
+    data: serde_json::Value,
+) {
     let members: Vec<(String,)> = sqlx::query_as(
         r#"
         SELECT u.email FROM users u

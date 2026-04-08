@@ -11,8 +11,10 @@ use axum::{
 use sqlx::Row;
 use std::sync::Arc;
 
+use crate::collection::{
+    advisory_unlock, try_advisory_lock, LOCK_MONTHLY_BILLING, LOCK_SUBSCRIPTION_BILLING,
+};
 use crate::AppState;
-use crate::collection::{try_advisory_lock, advisory_unlock, LOCK_MONTHLY_BILLING, LOCK_SUBSCRIPTION_BILLING};
 use crate::{cost_explorer, credits, paddle};
 
 /// Monthly billing loop - runs daily, triggers billing on the last day of each month
@@ -111,7 +113,11 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
         };
 
         if cost_data.total_cost < 0.01 {
-            tracing::debug!("Skipping org {} with negligible cost: ${:.4}", org_id, cost_data.total_cost);
+            tracing::debug!(
+                "Skipping org {} with negligible cost: ${:.4}",
+                org_id,
+                cost_data.total_cost
+            );
             continue;
         }
 
@@ -161,7 +167,7 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
              WHERE organization_id = $1
                AND resource_type IN ('compute', 'builder')
                AND recorded_at >= $2::date
-               AND recorded_at < $3::date"
+               AND recorded_at < $3::date",
         )
         .bind(org_id)
         .bind(&start_date)
@@ -175,7 +181,9 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
         if remaining_cost_cents == 0 {
             tracing::info!(
                 "Org {} monthly costs (${:.2}) fully covered by real-time metering (${:.2})",
-                org_id, total_cost_cents as f64 / 100.0, realtime_billed_cents as f64 / 100.0
+                org_id,
+                total_cost_cents as f64 / 100.0,
+                realtime_billed_cents as f64 / 100.0
             );
             continue;
         }
@@ -197,14 +205,20 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
         )
         .await
         .unwrap_or_else(|e| {
-            tracing::error!("Credit deduction failed for {}: {}, falling back to full charge", org_id, e);
+            tracing::error!(
+                "Credit deduction failed for {}: {}, falling back to full charge",
+                org_id,
+                e
+            );
             (0, total_cost_cents)
         });
 
         if credits_applied > 0 {
             tracing::info!(
                 "Applied {} cents in credits for org {} (remainder: {} cents)",
-                credits_applied, org_id, remainder_cents
+                credits_applied,
+                org_id,
+                remainder_cents
             );
         }
 
@@ -225,13 +239,19 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
             .bind(&invoice_number)
             .bind(total_cost_cents)
             .execute(&state.pool)
-            .await {
-                tracing::error!("Failed to insert credits-covered invoice for org {}: {}", org_id, e);
+            .await
+            {
+                tracing::error!(
+                    "Failed to insert credits-covered invoice for org {}: {}",
+                    org_id,
+                    e
+                );
             }
 
             tracing::info!(
                 "Org {} billing fully covered by credits (${:.2})",
-                org_id, total_cost_cents as f64 / 100.0
+                org_id,
+                total_cost_cents as f64 / 100.0
             );
             continue;
         }
@@ -246,27 +266,36 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
         );
 
         if line_items.is_empty() {
-            tracing::debug!("No billable items for org {}, skipping Paddle transaction", org_id);
+            tracing::debug!(
+                "No billable items for org {}, skipping Paddle transaction",
+                org_id
+            );
             continue;
         }
 
         // Look up the org's Paddle customer ID (billing_config is now keyed by organization_id)
-        let paddle_customer = sqlx::query(
-            "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1",
-        )
-        .bind(org_id)
-        .fetch_optional(&state.pool)
-        .await?;
+        let paddle_customer =
+            sqlx::query("SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1")
+                .bind(org_id)
+                .fetch_optional(&state.pool)
+                .await?;
 
-        let paddle_customer_id: Option<String> = paddle_customer
-            .and_then(|row| row.get::<Option<String>, _>("paddle_customer_id"));
+        let paddle_customer_id: Option<String> =
+            paddle_customer.and_then(|row| row.get::<Option<String>, _>("paddle_customer_id"));
 
         if let Some(customer_id) = paddle_customer_id {
-            match state.paddle.create_transaction(&customer_id, line_items).await {
+            match state
+                .paddle
+                .create_transaction(&customer_id, line_items)
+                .await
+            {
                 Ok(txn) => {
                     tracing::info!(
                         "Created Paddle transaction {} for org {} (${:.2}, after ${:.2} credits)",
-                        txn.id, org_id, remainder_cost, credits_applied as f64 / 100.0
+                        txn.id,
+                        org_id,
+                        remainder_cost,
+                        credits_applied as f64 / 100.0
                     );
                     // Record the invoice locally with paddle_transaction_id
                     if let Err(e) = sqlx::query(
@@ -284,12 +313,21 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
                     .bind(format!("INV-{}", &txn.id[4..]))
                     .bind(remainder_cents)
                     .execute(&state.pool)
-                    .await {
-                        tracing::error!("Failed to insert paddle invoice for org {}: {}", org_id, e);
+                    .await
+                    {
+                        tracing::error!(
+                            "Failed to insert paddle invoice for org {}: {}",
+                            org_id,
+                            e
+                        );
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Failed to create Paddle transaction for org {}: {}", org_id, e);
+                    tracing::error!(
+                        "Failed to create Paddle transaction for org {}: {}",
+                        org_id,
+                        e
+                    );
                 }
             }
         } else {
@@ -343,10 +381,12 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
         let cancel_at_end: bool = row.get("cancel_at_period_end");
         // If flagged for cancellation, cancel now
         if cancel_at_end {
-            sqlx::query("UPDATE subscriptions SET status = 'canceled', updated_at = NOW() WHERE id = $1")
-                .bind(&sub_id)
-                .execute(&state.pool)
-                .await?;
+            sqlx::query(
+                "UPDATE subscriptions SET status = 'canceled', updated_at = NOW() WHERE id = $1",
+            )
+            .bind(&sub_id)
+            .execute(&state.pool)
+            .await?;
             tracing::info!("Subscription {} canceled at period end", sub_id);
             continue;
         }
@@ -370,12 +410,16 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
         });
 
         let mut paddle_txn_id: Option<String> = None;
-        let mut event_status = if remainder_cents == 0 { "credits_covered" } else { "pending" };
+        let mut event_status = if remainder_cents == 0 {
+            "credits_covered"
+        } else {
+            "pending"
+        };
 
         if remainder_cents > 0 {
             // Look up Paddle customer ID (billing_config is keyed by organization_id)
             let paddle_customer_id: Option<String> = sqlx::query(
-                "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1"
+                "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1",
             )
             .bind(org_id)
             .fetch_optional(&state.pool)
@@ -390,7 +434,11 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                     unit_price_currency: "USD".to_string(),
                 }];
 
-                match state.paddle.create_transaction(&customer_id, line_items).await {
+                match state
+                    .paddle
+                    .create_transaction(&customer_id, line_items)
+                    .await
+                {
                     Ok(txn) => {
                         tracing::info!(
                             "Created Paddle transaction {} for sub {} renewal (${:.2}, credits ${:.2})",
@@ -414,8 +462,13 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                         .bind(format!("INV-SUB-{}", &txn.id[4..]))
                         .bind(remainder_cents)
                         .execute(&state.pool)
-                        .await {
-                            tracing::error!("Failed to insert sub invoice for sub {}: {}", sub_id, e);
+                        .await
+                        {
+                            tracing::error!(
+                                "Failed to insert sub invoice for sub {}: {}",
+                                sub_id,
+                                e
+                            );
                         }
                     }
                     Err(e) => {
@@ -495,12 +548,13 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                  next_billing_at = $1,
                  last_billed_at = NOW(),
                  updated_at = NOW()
-                 WHERE id = $2"
+                 WHERE id = $2",
             )
             .bind(period_end)
             .bind(&sub_id)
             .execute(&state.pool)
-            .await {
+            .await
+            {
                 tracing::error!("Failed to advance billing period for sub {}: {}", sub_id, e);
             }
         }
@@ -509,13 +563,16 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn calculate_subscription_period_end(start: chrono::DateTime<chrono::Utc>, billing_period: &str) -> chrono::DateTime<chrono::Utc> {
+pub(crate) fn calculate_subscription_period_end(
+    start: chrono::DateTime<chrono::Utc>,
+    billing_period: &str,
+) -> chrono::DateTime<chrono::Utc> {
     use chrono::{Datelike, NaiveDate};
 
     let add_months = match billing_period {
         "yearly" => 12,
-        "2year"  => 24,
-        _        => 1,
+        "2year" => 24,
+        _ => 1,
     };
 
     let total_months = start.month0() as i32 + add_months;
@@ -525,7 +582,11 @@ pub(crate) fn calculate_subscription_period_end(start: chrono::DateTime<chrono::
     // Clamp day to last day of target month to avoid panics (e.g. Jan 31 -> Feb 28)
     let last_day_of_target = NaiveDate::from_ymd_opt(
         target_year,
-        if target_month == 12 { 1 } else { target_month + 1 },
+        if target_month == 12 {
+            1
+        } else {
+            target_month + 1
+        },
         1,
     )
     .unwrap_or_else(|| NaiveDate::from_ymd_opt(target_year + 1, 1, 1).unwrap())
@@ -537,17 +598,18 @@ pub(crate) fn calculate_subscription_period_end(start: chrono::DateTime<chrono::
 
     start
         .date_naive()
-        .with_year(target_year).unwrap_or(start.date_naive())
-        .with_month(target_month).unwrap_or(start.date_naive())
-        .with_day(day).unwrap_or(start.date_naive())
+        .with_year(target_year)
+        .unwrap_or(start.date_naive())
+        .with_month(target_month)
+        .unwrap_or(start.date_naive())
+        .with_day(day)
+        .unwrap_or(start.date_naive())
         .and_time(start.time())
         .and_utc()
 }
 
 /// Manually trigger monthly billing (for testing or catch-up)
-pub async fn trigger_monthly_billing(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn trigger_monthly_billing(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     tracing::info!("Manually triggering monthly billing cycle");
 
     match run_monthly_billing_cycle(&state).await {
@@ -577,9 +639,7 @@ pub async fn trigger_monthly_billing(
 // =============================================================================
 
 /// Get billing estimate for an org - current spend + projected end-of-month
-pub async fn get_billing_estimate(
-    Path(org_id): Path<String>,
-) -> impl IntoResponse {
+pub async fn get_billing_estimate(Path(org_id): Path<String>) -> impl IntoResponse {
     let now = time::OffsetDateTime::now_utc();
     let today = now.date();
 
@@ -587,8 +647,8 @@ pub async fn get_billing_estimate(
     let (start_date, end_date) = cost_explorer::current_billing_period();
 
     // Calculate days elapsed and remaining
-    let first_of_month = time::Date::from_calendar_date(today.year(), today.month(), 1)
-        .expect("valid date");
+    let first_of_month =
+        time::Date::from_calendar_date(today.year(), today.month(), 1).expect("valid date");
     let days_elapsed = (today - first_of_month).whole_days() + 1; // +1 to include today
     let days_in_month = days_in_month(today.year(), today.month());
     let days_remaining = days_in_month - days_elapsed as u8;
@@ -604,7 +664,10 @@ pub async fn get_billing_estimate(
         }
     };
 
-    let cost_data = match ce_client.get_org_costs(&org_id, &start_date, &end_date).await {
+    let cost_data = match ce_client
+        .get_org_costs(&org_id, &start_date, &end_date)
+        .await
+    {
         Ok(data) => data,
         Err(e) => {
             return (
@@ -630,7 +693,11 @@ pub async fn get_billing_estimate(
     let projected_total = (projected_total * 100.0).round() / 100.0;
 
     // Determine spend trend (compare to previous period if available)
-    let spend_trend = if daily_average > 0.0 { "active" } else { "idle" };
+    let spend_trend = if daily_average > 0.0 {
+        "active"
+    } else {
+        "idle"
+    };
 
     (
         StatusCode::OK,
@@ -676,10 +743,9 @@ fn days_in_month(year: i32, month: time::Month) -> u8 {
         year
     };
 
-    let first_of_next = time::Date::from_calendar_date(next_year, next_month, 1)
-        .expect("valid date");
-    let first_of_current = time::Date::from_calendar_date(year, month, 1)
-        .expect("valid date");
+    let first_of_next =
+        time::Date::from_calendar_date(next_year, next_month, 1).expect("valid date");
+    let first_of_current = time::Date::from_calendar_date(year, month, 1).expect("valid date");
 
     (first_of_next - first_of_current).whole_days() as u8
 }
