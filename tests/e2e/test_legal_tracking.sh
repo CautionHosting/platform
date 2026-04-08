@@ -6,14 +6,13 @@
 # Requires: make up-test (builds with e2e-testing feature)
 #
 # Tests:
-#   1. Signup creates two legal event rows
-#   2. Active legal version lookup works
-#   3. Only one active row per document type (unique constraint)
-#   4. User status API returns legal state
-#   5. User is current after signup
-#   6. User is outdated after new TOS version activated
-#   7. User is outdated after new privacy notice version activated
-#   8. Pre-tracking user gets requires_action=false
+#   1. Seed data has one active version per document type
+#   2. Only one active row per document type (unique constraint)
+#   3. User status API returns legal state
+#   4. Pre-tracking user gets requires_action=false
+#   5. Outdated TOS triggers requires_action=true
+#   6. Outdated privacy notice triggers requires_action=true
+#   7. Re-acceptance endpoint clears requires_action
 
 set -euo pipefail
 
@@ -34,10 +33,15 @@ cleanup() {
     echo ""
     echo "=== Cleanup ==="
 
-    # Restore legal_documents to original state
+    # Remove test document versions and restore originals
     docker exec "$DB_CONTAINER" psql -U postgres -d "$DB_NAME" -c "
-        DELETE FROM legal_documents WHERE version != '2026-04-08';
-        UPDATE legal_documents SET is_active = true;
+        BEGIN;
+        UPDATE legal_documents SET is_active = false WHERE version = '2099-06-01';
+        UPDATE legal_documents SET is_active = true WHERE version = '$SEED_TOS_VERSION' AND document_type = 'terms_of_service';
+        UPDATE legal_documents SET is_active = true WHERE version = '$SEED_PN_VERSION' AND document_type = 'privacy_notice';
+        DELETE FROM user_legal_events WHERE document_version = '2099-06-01';
+        DELETE FROM legal_documents WHERE version = '2099-06-01';
+        COMMIT;
     " >/dev/null 2>&1 || true
 
     echo ""
@@ -79,7 +83,11 @@ db_query() {
     docker exec "$DB_CONTAINER" psql -U postgres -d "$DB_NAME" -t -A -c "$1"
 }
 
-# ── Step 1: Wait for services ──────────────────────────────────────
+# Seed version placeholders (set in step 1)
+SEED_TOS_VERSION=""
+SEED_PN_VERSION=""
+
+# ── Step 1: Wait for services and read seed versions ───────────────
 
 STEP_NUM=1
 log "Waiting for gateway..."
@@ -93,25 +101,20 @@ for i in $(seq 1 30); do
     fi
     sleep 1
 done
-step_pass "Gateway health check"
 
-# ── Step 2: Verify seed data ───────────────────────────────────────
+SEED_TOS_VERSION=$(db_query "SELECT version FROM legal_documents WHERE document_type = 'terms_of_service' AND is_active = true;")
+SEED_PN_VERSION=$(db_query "SELECT version FROM legal_documents WHERE document_type = 'privacy_notice' AND is_active = true;")
 
-STEP_NUM=2
-log "Checking legal_documents seed data..."
-
-ACTIVE_TOS=$(db_query "SELECT version FROM legal_documents WHERE document_type = 'terms_of_service' AND is_active = true;")
-ACTIVE_PN=$(db_query "SELECT version FROM legal_documents WHERE document_type = 'privacy_notice' AND is_active = true;")
-
-if [[ "$ACTIVE_TOS" == "2026-04-08" && "$ACTIVE_PN" == "2026-04-08" ]]; then
-    step_pass "Seed data: active TOS=$ACTIVE_TOS, PN=$ACTIVE_PN"
+if [[ -n "$SEED_TOS_VERSION" && -n "$SEED_PN_VERSION" ]]; then
+    step_pass "Seed data: TOS=$SEED_TOS_VERSION, PN=$SEED_PN_VERSION"
 else
-    step_fail "Seed data: expected 2026-04-08 for both, got TOS=$ACTIVE_TOS PN=$ACTIVE_PN"
+    step_fail "Seed data: missing active versions (TOS='$SEED_TOS_VERSION' PN='$SEED_PN_VERSION')"
+    exit 1
 fi
 
-# ── Step 3: Unique constraint on active documents ──────────────────
+# ── Step 2: Unique constraint on active documents ──────────────────
 
-STEP_NUM=3
+STEP_NUM=2
 log "Testing unique active constraint..."
 
 INSERT_RESULT=$(db_query "
@@ -123,17 +126,14 @@ if echo "$INSERT_RESULT" | grep -qi "unique\|duplicate\|violates"; then
     step_pass "Unique active constraint rejected duplicate active TOS"
 else
     step_fail "Unique active constraint did not reject duplicate active TOS"
-    # Clean up if it somehow got inserted
     db_query "DELETE FROM legal_documents WHERE version = '2099-01-01';" >/dev/null 2>&1 || true
 fi
 
-# ── Step 4: Create test user and check legal events ────────────────
+# ── Step 3: User status API returns legal state ────────────────────
 
-STEP_NUM=4
-log "Creating test user via e2e-login..."
-LOGIN_RESPONSE=$(curl -sf -X POST "$GATEWAY_URL/auth/e2e-login" \
-    -H "Content-Type: application/json")
-
+STEP_NUM=3
+log "Creating test user..."
+LOGIN_RESPONSE=$(curl -sf -X POST "$GATEWAY_URL/auth/e2e-login" -H "Content-Type: application/json")
 SESSION_ID=$(echo "$LOGIN_RESPONSE" | jq -r '.session_id')
 USER_ID=$(echo "$LOGIN_RESPONSE" | jq -r '.user_id')
 
@@ -142,144 +142,129 @@ if [ -z "$SESSION_ID" ] || [ "$SESSION_ID" = "null" ]; then
     exit 1
 fi
 
-log "Test user: $USER_ID"
-
-# Mark as onboarded so API doesn't return 402
 db_query "UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';" >/dev/null
 
-# Check legal event rows
-EVENT_COUNT=$(db_query "SELECT COUNT(*) FROM user_legal_events WHERE user_id = '$USER_ID';")
-
-if [ "$EVENT_COUNT" -eq 2 ]; then
-    step_pass "Signup created 2 legal event rows"
-else
-    # E2E users may not have legal events (they bypass normal registration).
-    # This is expected — verify the status endpoint handles it gracefully.
-    log "E2E user has $EVENT_COUNT legal events (e2e-login bypasses normal registration)"
-    step_pass "E2E user created ($EVENT_COUNT legal events — expected for test users)"
-fi
-
-# ── Step 5: User status API returns legal state ────────────────────
-
-STEP_NUM=5
-log "Checking /api/user/status response..."
-
-STATUS_RESPONSE=$(curl -sf "$GATEWAY_URL/api/user/status" \
-    -H "X-Session-ID: $SESSION_ID")
-
+STATUS_RESPONSE=$(curl -sf "$GATEWAY_URL/api/user/status" -H "X-Session-ID: $SESSION_ID")
 HAS_LEGAL=$(echo "$STATUS_RESPONSE" | jq 'has("legal")')
-if [ "$HAS_LEGAL" != "true" ]; then
-    step_fail "Status response missing 'legal' field: $STATUS_RESPONSE"
-else
-    TOS_ACTIVE=$(echo "$STATUS_RESPONSE" | jq -r '.legal.terms_of_service.active_version')
-    PN_ACTIVE=$(echo "$STATUS_RESPONSE" | jq -r '.legal.privacy_notice.active_version')
-    TOS_ACTION=$(echo "$STATUS_RESPONSE" | jq -r '.legal.terms_of_service.requires_action')
-    PN_ACTION=$(echo "$STATUS_RESPONSE" | jq -r '.legal.privacy_notice.requires_action')
+TOS_ACTIVE=$(echo "$STATUS_RESPONSE" | jq -r '.legal.terms_of_service.active_version')
+PN_ACTIVE=$(echo "$STATUS_RESPONSE" | jq -r '.legal.privacy_notice.active_version')
 
-    if [[ "$TOS_ACTIVE" == "2026-04-08" && "$PN_ACTIVE" == "2026-04-08" ]]; then
-        log "Active versions: TOS=$TOS_ACTIVE, PN=$PN_ACTIVE"
-        log "Requires action: TOS=$TOS_ACTION, PN=$PN_ACTION"
-        step_pass "Status API returns legal state with correct active versions"
-    else
-        step_fail "Status API returned unexpected active versions: TOS=$TOS_ACTIVE PN=$PN_ACTIVE"
-    fi
+if [[ "$HAS_LEGAL" == "true" && "$TOS_ACTIVE" == "$SEED_TOS_VERSION" && "$PN_ACTIVE" == "$SEED_PN_VERSION" ]]; then
+    step_pass "Status API returns legal state with correct active versions"
+else
+    step_fail "Status API: has_legal=$HAS_LEGAL TOS=$TOS_ACTIVE PN=$PN_ACTIVE"
 fi
 
-# ── Step 6: User with no legal events gets requires_action=false ───
+# ── Step 4: Pre-tracking user gets requires_action=false ───────────
 
-STEP_NUM=6
-log "Testing pre-tracking user behavior..."
+STEP_NUM=4
+log "Testing pre-tracking user..."
 
-# Create a second test user (no legal events)
-LOGIN2=$(curl -sf -X POST "$GATEWAY_URL/auth/e2e-login" -H "Content-Type: application/json")
-SESSION2=$(echo "$LOGIN2" | jq -r '.session_id')
-USER2=$(echo "$LOGIN2" | jq -r '.user_id')
-db_query "UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER2';" >/dev/null
+# E2E users have no legal events (bypass normal registration)
+TOS_ACTION=$(echo "$STATUS_RESPONSE" | jq -r '.legal.terms_of_service.requires_action')
+PN_ACTION=$(echo "$STATUS_RESPONSE" | jq -r '.legal.privacy_notice.requires_action')
 
-STATUS2=$(curl -sf "$GATEWAY_URL/api/user/status" -H "X-Session-ID: $SESSION2")
-TOS_ACTION2=$(echo "$STATUS2" | jq -r '.legal.terms_of_service.requires_action')
-PN_ACTION2=$(echo "$STATUS2" | jq -r '.legal.privacy_notice.requires_action')
-
-if [[ "$TOS_ACTION2" == "false" && "$PN_ACTION2" == "false" ]]; then
+if [[ "$TOS_ACTION" == "false" && "$PN_ACTION" == "false" ]]; then
     step_pass "Pre-tracking user: requires_action=false for both"
 else
-    step_fail "Pre-tracking user: expected requires_action=false, got TOS=$TOS_ACTION2 PN=$PN_ACTION2"
+    step_fail "Pre-tracking user: TOS=$TOS_ACTION PN=$PN_ACTION"
 fi
 
-# ── Step 7: Outdated TOS triggers requires_action ─────────────────
+# ── Step 5: Outdated TOS triggers requires_action ─────────────────
 
-STEP_NUM=7
+STEP_NUM=5
 log "Testing outdated TOS detection..."
 
-# Insert legal events for user so they have a tracked version
+# Give user a baseline acceptance
 db_query "
     INSERT INTO user_legal_events (user_id, document_type, document_version, event_type, event_source)
     VALUES
-        ('$USER2', 'terms_of_service', '2026-04-08', 'accepted', 'signup'),
-        ('$USER2', 'privacy_notice', '2026-04-08', 'acknowledged', 'signup');
+        ('$USER_ID', 'terms_of_service', '$SEED_TOS_VERSION', 'accepted', 'signup'),
+        ('$USER_ID', 'privacy_notice', '$SEED_PN_VERSION', 'acknowledged', 'signup');
 " >/dev/null
 
 # Add and activate a new TOS version
 db_query "
     INSERT INTO legal_documents (document_type, version, url, effective_at, is_active, requires_blocking_reacceptance)
-    VALUES ('terms_of_service', '2026-06-01', 'https://caution.co/terms-v2.html', '2026-06-01', false, true);
+    VALUES ('terms_of_service', '2099-06-01', 'https://caution.co/terms-v2.html', '2099-06-01', false, true);
 " >/dev/null
 
 db_query "
     BEGIN;
     UPDATE legal_documents SET is_active = false WHERE document_type = 'terms_of_service' AND is_active = true;
-    UPDATE legal_documents SET is_active = true WHERE document_type = 'terms_of_service' AND version = '2026-06-01';
+    UPDATE legal_documents SET is_active = true WHERE document_type = 'terms_of_service' AND version = '2099-06-01';
     COMMIT;
 " >/dev/null
 
-STATUS3=$(curl -sf "$GATEWAY_URL/api/user/status" -H "X-Session-ID: $SESSION2")
+STATUS3=$(curl -sf "$GATEWAY_URL/api/user/status" -H "X-Session-ID: $SESSION_ID")
 TOS_ACTION3=$(echo "$STATUS3" | jq -r '.legal.terms_of_service.requires_action')
 TOS_ACTIVE3=$(echo "$STATUS3" | jq -r '.legal.terms_of_service.active_version')
 TOS_USER3=$(echo "$STATUS3" | jq -r '.legal.terms_of_service.latest_user_version')
 PN_ACTION3=$(echo "$STATUS3" | jq -r '.legal.privacy_notice.requires_action')
 
-if [[ "$TOS_ACTION3" == "true" && "$TOS_ACTIVE3" == "2026-06-01" && "$TOS_USER3" == "2026-04-08" && "$PN_ACTION3" == "false" ]]; then
+if [[ "$TOS_ACTION3" == "true" && "$TOS_ACTIVE3" == "2099-06-01" && "$TOS_USER3" == "$SEED_TOS_VERSION" && "$PN_ACTION3" == "false" ]]; then
     step_pass "Outdated TOS: requires_action=true, PN unchanged"
 else
-    step_fail "Outdated TOS: TOS_action=$TOS_ACTION3 active=$TOS_ACTIVE3 user=$TOS_USER3 PN_action=$PN_ACTION3"
+    step_fail "Outdated TOS: action=$TOS_ACTION3 active=$TOS_ACTIVE3 user=$TOS_USER3 PN=$PN_ACTION3"
 fi
 
-# ── Step 8: Outdated privacy notice triggers requires_action ──────
+# ── Step 6: Outdated privacy notice triggers requires_action ──────
 
-STEP_NUM=8
+STEP_NUM=6
 log "Testing outdated privacy notice detection..."
 
-# Restore TOS to original
+# Restore TOS
 db_query "
     BEGIN;
     UPDATE legal_documents SET is_active = false WHERE document_type = 'terms_of_service' AND is_active = true;
-    UPDATE legal_documents SET is_active = true WHERE document_type = 'terms_of_service' AND version = '2026-04-08';
+    UPDATE legal_documents SET is_active = true WHERE document_type = 'terms_of_service' AND version = '$SEED_TOS_VERSION';
     COMMIT;
 " >/dev/null
 
 # Add and activate a new privacy notice version
 db_query "
     INSERT INTO legal_documents (document_type, version, url, effective_at, is_active, requires_acknowledgment)
-    VALUES ('privacy_notice', '2026-06-01', 'https://caution.co/privacy-v2.html', '2026-06-01', false, true);
+    VALUES ('privacy_notice', '2099-06-01', 'https://caution.co/privacy-v2.html', '2099-06-01', false, true);
 " >/dev/null
 
 db_query "
     BEGIN;
     UPDATE legal_documents SET is_active = false WHERE document_type = 'privacy_notice' AND is_active = true;
-    UPDATE legal_documents SET is_active = true WHERE document_type = 'privacy_notice' AND version = '2026-06-01';
+    UPDATE legal_documents SET is_active = true WHERE document_type = 'privacy_notice' AND version = '2099-06-01';
     COMMIT;
 " >/dev/null
 
-STATUS4=$(curl -sf "$GATEWAY_URL/api/user/status" -H "X-Session-ID: $SESSION2")
+STATUS4=$(curl -sf "$GATEWAY_URL/api/user/status" -H "X-Session-ID: $SESSION_ID")
 PN_ACTION4=$(echo "$STATUS4" | jq -r '.legal.privacy_notice.requires_action')
 PN_ACTIVE4=$(echo "$STATUS4" | jq -r '.legal.privacy_notice.active_version')
 PN_USER4=$(echo "$STATUS4" | jq -r '.legal.privacy_notice.latest_user_version')
 TOS_ACTION4=$(echo "$STATUS4" | jq -r '.legal.terms_of_service.requires_action')
 
-if [[ "$PN_ACTION4" == "true" && "$PN_ACTIVE4" == "2026-06-01" && "$PN_USER4" == "2026-04-08" && "$TOS_ACTION4" == "false" ]]; then
+if [[ "$PN_ACTION4" == "true" && "$PN_ACTIVE4" == "2099-06-01" && "$PN_USER4" == "$SEED_PN_VERSION" && "$TOS_ACTION4" == "false" ]]; then
     step_pass "Outdated privacy notice: requires_action=true, TOS unchanged"
 else
-    step_fail "Outdated PN: PN_action=$PN_ACTION4 active=$PN_ACTIVE4 user=$PN_USER4 TOS_action=$TOS_ACTION4"
+    step_fail "Outdated PN: action=$PN_ACTION4 active=$PN_ACTIVE4 user=$PN_USER4 TOS=$TOS_ACTION4"
+fi
+
+# ── Step 7: Re-acceptance clears requires_action ──────────────────
+
+STEP_NUM=7
+log "Testing re-acceptance endpoint..."
+
+# Privacy notice is still outdated from step 6
+ACCEPT_RESPONSE=$(curl -sf -X POST "$GATEWAY_URL/api/legal/accept" \
+    -H "X-Session-ID: $SESSION_ID" \
+    -H "Content-Type: application/json" \
+    -d '{"document_type": "privacy_notice"}')
+
+ACCEPT_SUCCESS=$(echo "$ACCEPT_RESPONSE" | jq -r '.success')
+ACCEPT_VERSION=$(echo "$ACCEPT_RESPONSE" | jq -r '.version')
+PN_ACTION5=$(echo "$ACCEPT_RESPONSE" | jq -r '.legal.privacy_notice.requires_action')
+
+if [[ "$ACCEPT_SUCCESS" == "true" && "$ACCEPT_VERSION" == "2099-06-01" && "$PN_ACTION5" == "false" ]]; then
+    step_pass "Re-acceptance: privacy notice accepted, requires_action cleared"
+else
+    step_fail "Re-acceptance: success=$ACCEPT_SUCCESS version=$ACCEPT_VERSION action=$PN_ACTION5"
 fi
 
 log "All legal tracking tests complete."
