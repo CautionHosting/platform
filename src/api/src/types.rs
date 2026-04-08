@@ -262,6 +262,33 @@ impl Default for BuildConfig {
     }
 }
 
+fn validate_domain(domain: &str) -> Result<(), String> {
+    if domain.is_empty() || domain.len() > 253 {
+        return Err("domain must be between 1 and 253 characters".to_string());
+    }
+    if !domain.contains('.') {
+        return Err("domain must be a fully-qualified hostname".to_string());
+    }
+    if domain.starts_with('.') || domain.ends_with('.') {
+        return Err("domain must not start or end with '.'".to_string());
+    }
+    for label in domain.split('.') {
+        if label.is_empty() {
+            return Err("domain must not contain empty labels".to_string());
+        }
+        if label.len() > 63 {
+            return Err("domain labels must be 63 characters or fewer".to_string());
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err("domain labels must not start or end with '-'".to_string());
+        }
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Err("domain contains invalid characters".to_string());
+        }
+    }
+    Ok(())
+}
+
 impl BuildConfig {
     pub fn from_procfile(content: &str) -> Result<Self, String> {
         let mut containerfile = None;
@@ -436,6 +463,7 @@ impl BuildConfig {
                     }
                     "domain" => {
                         if !value.is_empty() {
+                            validate_domain(&value)?;
                             domain = Some(value);
                             tracing::info!("Parsed domain from Procfile: {}", domain.as_ref().unwrap());
                         }
@@ -657,5 +685,36 @@ mod tests {
         let result = BuildConfig::from_procfile(procfile);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("8084"));
+    }
+
+    #[test]
+    fn test_parse_valid_domain() {
+        let procfile = "run: /app/server\ndomain: api.example.com\n";
+        let config = BuildConfig::from_procfile(procfile).unwrap();
+        assert_eq!(config.domain.as_deref(), Some("api.example.com"));
+    }
+
+    #[test]
+    fn test_rejects_domain_with_invalid_characters() {
+        let procfile = "run: /app/server\ndomain: evil\"${x}\n";
+        let result = BuildConfig::from_procfile(procfile);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid characters"));
+    }
+
+    #[test]
+    fn test_rejects_domain_without_dot() {
+        let procfile = "run: /app/server\ndomain: localhost\n";
+        let result = BuildConfig::from_procfile(procfile);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("fully-qualified hostname"));
+    }
+
+    #[test]
+    fn test_rejects_domain_with_empty_label() {
+        let procfile = "run: /app/server\ndomain: example..com\n";
+        let result = BuildConfig::from_procfile(procfile);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty labels"));
     }
 }
