@@ -224,18 +224,33 @@ resource "aws_iam_policy" "platform_deploy" {
         Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:instance-profile/enclave-*"
       },
       {
-        Sid    = "S3EIF"
+        Sid    = "S3EIFList"
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket",
+        ]
+        Resource = aws_s3_bucket.eif_storage.arn
+        Condition = {
+          StringLike = {
+            "s3:prefix" = [
+              "builds/*",
+              "eifs/*",
+            ]
+          }
+        }
+      },
+      {
+        Sid    = "S3EIFObjects"
         Effect = "Allow"
         Action = [
           "s3:GetObject",
           "s3:PutObject",
           "s3:PutObjectTagging",
-          "s3:ListBucket",
           "s3:DeleteObject",
         ]
         Resource = [
-          aws_s3_bucket.eif_storage.arn,
-          "${aws_s3_bucket.eif_storage.arn}/*",
+          "${aws_s3_bucket.eif_storage.arn}/builds/*",
+          "${aws_s3_bucket.eif_storage.arn}/eifs/*",
         ]
       },
       {
@@ -353,19 +368,36 @@ resource "aws_iam_role_policy" "builder_s3" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:PutObjectTagging",
-        "s3:ListBucket",
-      ]
-      Resource = [
-        aws_s3_bucket.eif_storage.arn,
-        "${aws_s3_bucket.eif_storage.arn}/*",
-      ]
-    }]
+    Statement = [
+      {
+        Sid    = "BuilderS3List"
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket",
+        ]
+        Resource = aws_s3_bucket.eif_storage.arn
+        Condition = {
+          StringLike = {
+            "s3:prefix" = [
+              "builds/*",
+              "eifs/*",
+            ]
+          }
+        }
+      },
+      {
+        Sid    = "BuilderS3Objects"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+        ]
+        Resource = [
+          "${aws_s3_bucket.eif_storage.arn}/builds/*",
+          "${aws_s3_bucket.eif_storage.arn}/eifs/*",
+        ]
+      },
+    ]
   })
 }
 
