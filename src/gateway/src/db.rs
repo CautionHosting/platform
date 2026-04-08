@@ -10,8 +10,24 @@ use uuid::Uuid;
 
 use crate::types::DbSession;
 
-pub async fn create_user(pool: &PgPool, fido2_user_handle: &[u8], alpha_code_id: Uuid) -> Result<Uuid> {
+pub struct SignupLegalContext {
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+}
+
+/// Creates a user and records legal consent events in a single transaction.
+/// If either the user creation or legal event recording fails, the entire
+/// transaction rolls back — no account exists without consent records.
+pub async fn create_user(
+    pool: &PgPool,
+    fido2_user_handle: &[u8],
+    alpha_code_id: Uuid,
+    legal: &SignupLegalContext,
+) -> Result<Uuid> {
     let username = generate_user_identifier();
+
+    let mut tx = pool.begin().await
+        .context("Failed to begin transaction")?;
 
     let user_id: Uuid = sqlx::query_scalar(
         "INSERT INTO users (fido2_user_handle, username, email, beta_code_id)
@@ -21,7 +37,7 @@ pub async fn create_user(pool: &PgPool, fido2_user_handle: &[u8], alpha_code_id:
     .bind(fido2_user_handle)
     .bind(&username)
     .bind(alpha_code_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
         tracing::error!("Database error creating user: {:?}", e);
@@ -29,6 +45,45 @@ pub async fn create_user(pool: &PgPool, fido2_user_handle: &[u8], alpha_code_id:
         tracing::error!("fido2_user_handle (hex): {}", hex::encode(fido2_user_handle));
         anyhow::anyhow!("Failed to create user: {}", e)
     })?;
+
+    // Record TOS acceptance and privacy notice acknowledgment.
+    // Uses the currently active version of each document.
+    for (doc_type, event_type) in [
+        ("terms_of_service", "accepted"),
+        ("privacy_notice", "acknowledged"),
+    ] {
+        let version: String = sqlx::query_scalar(
+            "SELECT version FROM legal_documents
+             WHERE document_type = $1 AND is_active = true
+             ORDER BY effective_at DESC
+             LIMIT 1"
+        )
+        .bind(doc_type)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("Failed to query active legal document version")?
+        .ok_or_else(|| anyhow::anyhow!("No active {} document found", doc_type))?;
+
+        sqlx::query(
+            "INSERT INTO user_legal_events (
+                user_id, document_type, document_version,
+                event_type, event_source, occurred_at,
+                ip_address, user_agent
+            ) VALUES ($1, $2, $3, $4, 'signup', NOW(), $5::inet, $6)"
+        )
+        .bind(user_id)
+        .bind(doc_type)
+        .bind(&version)
+        .bind(event_type)
+        .bind(&legal.ip_address)
+        .bind(&legal.user_agent)
+        .execute(&mut *tx)
+        .await
+        .context(format!("Failed to record {} legal event", doc_type))?;
+    }
+
+    tx.commit().await
+        .context("Failed to commit user creation transaction")?;
 
     Ok(user_id)
 }

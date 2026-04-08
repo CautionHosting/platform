@@ -6,7 +6,7 @@ export
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-onprem test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-legal test-e2e-onprem test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -545,6 +545,14 @@ test-e2e:
 	@$(MAKE) up-test
 	@echo "Running e2e tests..."
 	@bash tests/e2e/test_happy_path.sh; \
+	status=$$?; \
+	$(MAKE) down-test; \
+	exit $$status
+
+test-e2e-legal:
+	@$(MAKE) up-test
+	@echo "Running legal tracking e2e tests..."
+	@bash tests/e2e/test_legal_tracking.sh; \
 	status=$$?; \
 	$(MAKE) down-test; \
 	exit $$status

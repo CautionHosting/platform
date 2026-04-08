@@ -331,6 +331,8 @@ fn build_auth_cookies(session_id: &str, csrf_token: &str, max_age_hours: i64, se
 
 pub async fn finish_register_handler(
     State(state): State<AppState>,
+    connect_info: ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<serde_json::Value>,
 ) -> Result<Response, RegisterError> {
     let session_key = req.get("session")
@@ -369,7 +371,14 @@ pub async fn finish_register_handler(
     let user_unique_id = Uuid::parse_str(&session_key)
         .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to parse user ID: {}", e)))?;
 
-    let user_id = db::create_user(&state.db, &user_unique_id.as_bytes()[..], pending.alpha_code_id)
+    let legal = db::SignupLegalContext {
+        ip_address: Some(connect_info.0.ip().to_string()),
+        user_agent: headers.get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()),
+    };
+
+    let user_id = db::create_user(&state.db, &user_unique_id.as_bytes()[..], pending.alpha_code_id, &legal)
         .await
         .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to create user: {}", e)))?;
 

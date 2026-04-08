@@ -40,10 +40,12 @@
           </div>
 
           <p class="tos-notice">
-            By creating an account, you agree to the
+            By creating an account, you agree to the Caution 
             <a href="https://caution.co/terms.html" target="_blank" rel="noopener noreferrer">terms of service</a>
             and
             <a href="https://caution.co/privacy.html" target="_blank" rel="noopener noreferrer">privacy notice</a>.
+          </p>
+          <p class="tos-notice">
             <a href="/login" @click.prevent="handleLogin" class="link-btn">Already have an account?</a>
           </p>
 
