@@ -196,7 +196,7 @@ export default {
         rawResponse.value = jsonResponse
         if (jsonResponse.error) throw new Error(jsonResponse.error)
 
-        const attestationB64 = jsonResponse.attestation_document
+        const attestationB64 = jsonResponse.document
         if (!attestationB64) throw new Error('No attestation document')
 
         const attestationBytes = Uint8Array.from(atob(attestationB64), c => c.charCodeAt(0))
