@@ -591,6 +591,12 @@ setup-builder:
 	fi
 	@cd infra-bootstrap && \
 	TF_ARGS="" && \
+	if [ -n "$(TERRAFORM_STATE_BUCKET)" ]; then \
+		TF_ARGS="$$TF_ARGS -var=state_bucket_name=$(TERRAFORM_STATE_BUCKET)"; \
+	fi && \
+	if [ -n "$(EIF_S3_BUCKET)" ]; then \
+		TF_ARGS="$$TF_ARGS -var=eif_bucket_name=$(EIF_S3_BUCKET)"; \
+	fi && \
 	if [ -n "$(BUILDER_SUBNET_ID)" ]; then \
 		TF_ARGS="$$TF_ARGS -var=builder_subnet_id=$(BUILDER_SUBNET_ID)"; \
 	fi && \
