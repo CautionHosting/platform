@@ -93,6 +93,30 @@ terraform apply \
   -var="eif_bucket_name=caution-eif-storage-123456789012"
 ```
 
+### Dedicated builder network options
+
+By default, bootstrap looks for the default VPC and uses the first public subnet in it for dedicated builders.
+
+For production, you can point the builder resources at an existing subnet instead:
+
+```bash
+terraform apply \
+  -var="state_bucket_name=caution-terraform-state-123456789012" \
+  -var="eif_bucket_name=caution-eif-storage-123456789012" \
+  -var="builder_subnet_id=subnet-0123456789abcdef0"
+```
+
+Bootstrap will derive the subnet's VPC automatically. You can also pass `builder_vpc_id` if you want the configuration to state that choice explicitly.
+
+From the repository root, `make setup-builder` accepts the same values via environment variables:
+
+```bash
+BUILDER_SUBNET_ID=subnet-0123456789abcdef0 \
+make setup-builder
+```
+
+The builder subnet should already have the outbound connectivity your builders need, typically via a NAT gateway or equivalent internet egress path.
+
 ## 3. Configure the platform
 
 Go back to the root of the project and set up the `.env` file using the credentials from the bootstrap output:

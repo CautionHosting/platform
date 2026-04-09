@@ -585,8 +585,20 @@ test-e2e-billing-gates:
 
 setup-builder:
 	@echo "Bootstrapping dedicated builder infrastructure via infra-bootstrap..."
+	@if [ -n "$(BUILDER_VPC_ID)" ] && [ -z "$(BUILDER_SUBNET_ID)" ]; then \
+		echo "ERROR: Set both BUILDER_VPC_ID and BUILDER_SUBNET_ID, or neither."; \
+		exit 1; \
+	fi
 	@cd infra-bootstrap && \
-	terraform apply -auto-approve
+	TF_ARGS="" && \
+	if [ -n "$(BUILDER_SUBNET_ID)" ]; then \
+		TF_ARGS="$$TF_ARGS -var=builder_subnet_id=$(BUILDER_SUBNET_ID)"; \
+	fi && \
+	if [ -n "$(BUILDER_VPC_ID)" ]; then \
+		TF_ARGS="$$TF_ARGS -var=builder_vpc_id=$(BUILDER_VPC_ID)"; \
+	fi && \
+	terraform init && \
+	terraform apply -auto-approve $$TF_ARGS
 	@cd infra-bootstrap && \
 	AMI=$$(terraform output -raw builder_ami_id) && \
 	SG=$$(terraform output -raw builder_security_group_id) && \

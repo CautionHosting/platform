@@ -185,9 +185,9 @@ resource "aws_iam_policy" "platform_deploy" {
         Resource = "*"
       },
       {
-        Sid    = "STS"
-        Effect = "Allow"
-        Action = ["sts:GetCallerIdentity"]
+        Sid      = "STS"
+        Effect   = "Allow"
+        Action   = ["sts:GetCallerIdentity"]
         Resource = "*"
       },
       {
@@ -289,20 +289,34 @@ resource "aws_iam_user_policy_attachment" "platform" {
 
 # --- Dedicated Builder: IAM Role + Instance Profile + Security Group ---
 
+locals {
+  use_explicit_builder_network = var.builder_subnet_id != null
+  builder_vpc_id               = local.use_explicit_builder_network ? coalesce(var.builder_vpc_id, data.aws_subnet.explicit_builder[0].vpc_id) : data.aws_vpc.default[0].id
+  builder_subnet_id            = local.use_explicit_builder_network ? data.aws_subnet.explicit_builder[0].id : data.aws_subnets.public[0].ids[0]
+}
+
 data "aws_vpc" "default" {
+  count   = local.use_explicit_builder_network ? 0 : 1
   default = true
 }
 
 data "aws_subnets" "public" {
+  count = local.use_explicit_builder_network ? 0 : 1
+
   filter {
     name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
+    values = [data.aws_vpc.default[0].id]
   }
 
   filter {
     name   = "map-public-ip-on-launch"
     values = ["true"]
   }
+}
+
+data "aws_subnet" "explicit_builder" {
+  count = local.use_explicit_builder_network ? 1 : 0
+  id    = var.builder_subnet_id
 }
 
 data "aws_ami" "al2023" {
@@ -328,7 +342,7 @@ data "aws_ami" "al2023" {
 resource "aws_security_group" "builder" {
   name_prefix = "caution-builder-"
   description = "Caution dedicated builder instances (egress only)"
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = local.builder_vpc_id
 
   egress {
     from_port   = 0
@@ -483,28 +497,34 @@ output "builder_security_group_id" {
   value       = aws_security_group.builder.id
 }
 
+output "builder_vpc_id" {
+  description = "Builder VPC ID selected by bootstrap"
+  value       = local.builder_vpc_id
+}
+
 output "builder_instance_profile" {
   description = "Builder instance profile name — put in .env as BUILDER_INSTANCE_PROFILE"
   value       = aws_iam_instance_profile.builder.name
 }
 
 output "builder_subnet_id" {
-  description = "Default VPC public subnet for builders — put in .env as BUILDER_SUBNET_ID"
-  value       = data.aws_subnets.public.ids[0]
+  description = "Builder subnet ID selected by bootstrap — put in .env as BUILDER_SUBNET_ID"
+  value       = local.builder_subnet_id
 }
 
 output "configuration_summary" {
   description = "Summary of created resources"
   value = {
-    s3_state_bucket  = aws_s3_bucket.terraform_state.id
-    s3_eif_bucket    = aws_s3_bucket.eif_storage.id
-    dynamodb_table   = aws_dynamodb_table.terraform_state_lock.id
-    iam_user         = aws_iam_user.platform.name
-    account_id       = data.aws_caller_identity.current.account_id
-    region           = var.aws_region
-    builder_ami      = data.aws_ami.al2023.id
-    builder_sg       = aws_security_group.builder.id
-    builder_profile  = aws_iam_instance_profile.builder.name
-    builder_subnet   = data.aws_subnets.public.ids[0]
+    s3_state_bucket = aws_s3_bucket.terraform_state.id
+    s3_eif_bucket   = aws_s3_bucket.eif_storage.id
+    dynamodb_table  = aws_dynamodb_table.terraform_state_lock.id
+    iam_user        = aws_iam_user.platform.name
+    account_id      = data.aws_caller_identity.current.account_id
+    region          = var.aws_region
+    builder_ami     = data.aws_ami.al2023.id
+    builder_vpc     = local.builder_vpc_id
+    builder_sg      = aws_security_group.builder.id
+    builder_profile = aws_iam_instance_profile.builder.name
+    builder_subnet  = local.builder_subnet_id
   }
 }

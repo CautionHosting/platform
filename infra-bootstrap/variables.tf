@@ -40,3 +40,29 @@ variable "service_user_name" {
   type        = string
   default     = "caution-platform"
 }
+
+variable "builder_vpc_id" {
+  description = "Optional VPC ID for builder subnet validation. If omitted, bootstrap derives the VPC from builder_subnet_id."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = (
+      var.builder_vpc_id == null ||
+      (
+        trimspace(var.builder_vpc_id) != "" &&
+        var.builder_subnet_id != null &&
+        trimspace(var.builder_subnet_id) != ""
+      )
+    )
+    error_message = "builder_vpc_id can only be set when builder_subnet_id is also set."
+  }
+}
+
+variable "builder_subnet_id" {
+  description = "Existing subnet ID to use for dedicated builders. If unset, bootstrap falls back to the default VPC and its first public subnet."
+  type        = string
+  default     = null
+  nullable    = true
+}
