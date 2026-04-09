@@ -54,9 +54,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,id=api-target,target=/build/target \
     --network=none \
     cargo build ${CARGO_BUILD_FLAGS} --frozen \
-      --bin api \
+      -p api --bin api \
+      -p enclave-builder --bin remote-build-helper \
       --target ${TARGET_ARCH} \
-      && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/api /usr/local/bin/api
+      && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/api /usr/local/bin/api \
+      && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/remote-build-helper /usr/local/bin/remote-build-helper
 
 FROM scratch AS runtime
 COPY --from=user-runtime . /
@@ -79,6 +81,7 @@ COPY --from=linux-nitro /nsm.ko /usr/share/nitro/nsm.ko
 COPY --from=cpio . /
 COPY --from=socat . /
 COPY --from=builder /usr/local/bin/api /usr/local/bin/api
+COPY --from=builder /usr/local/bin/remote-build-helper /usr/local/bin/remote-build-helper
 
 COPY terraform /app/terraform
 COPY src/enclave-builder/templates /app/templates

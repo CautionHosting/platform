@@ -542,17 +542,19 @@ test-unit:
 	cargo test --workspace
 
 test-e2e:
+	@$(MAKE) build-cli
 	@$(MAKE) up-test
 	@echo "Running e2e tests..."
-	@bash tests/e2e/test_happy_path.sh; \
+	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_happy_path.sh; \
 	status=$$?; \
 	$(MAKE) down-test; \
 	exit $$status
 
 test-e2e-onprem:
+	@$(MAKE) build-cli
 	@$(MAKE) up-test
 	@echo "Running managed on-prem e2e tests..."
-	@bash tests/e2e/test_managed_on_prem.sh; \
+	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_managed_on_prem.sh; \
 	status=$$?; \
 	$(MAKE) down-test; \
 	exit $$status
@@ -593,8 +595,9 @@ test-e2e-builder:
 	@echo "Reading builder config from infra-bootstrap state..."
 	@cd infra-bootstrap && terraform output builder_ami_id > /dev/null 2>&1 || \
 		(echo "ERROR: Builder infrastructure not found. Run 'make setup-builder' first." && exit 1)
+	@$(MAKE) build-cli
 	@$(MAKE) up-test
-	@bash tests/e2e/test_dedicated_builder.sh; \
+	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_dedicated_builder.sh; \
 	status=$$?; \
 	$(MAKE) down-test; \
 	exit $$status

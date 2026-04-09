@@ -56,37 +56,11 @@ impl std::fmt::Debug for AwsCredentials {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeploymentRequest {
-    pub org_id: Uuid,
-    pub resource_id: Uuid,
-    pub resource_name: String,
-    pub aws_account_id: String,
-    pub role_arn: Option<String>,
-    pub ami_id: String,
-    pub app_port: u16,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentResult {
     pub instance_id: String,
     pub public_ip: String,
     pub url: String,
     pub instance_type: Option<String>,
-}
-
-pub async fn deploy_app(request: DeploymentRequest) -> Result<DeploymentResult> {
-    tracing::info!(
-        "Starting Terraform deployment for resource {} ({})",
-        request.resource_id,
-        request.resource_name
-    );
-
-    let config = TerraformConfig::default();
-
-    provision_ec2_app(
-        &request,
-        &config,
-    ).await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -264,50 +238,13 @@ struct TerraformConfig {
 impl Default for TerraformConfig {
     fn default() -> Self {
         Self {
-            module_path: PathBuf::from("terraform/modules/aws/ec2-app"),
+            module_path: PathBuf::from("terraform/modules/aws/nitro-enclave"),
             s3_bucket: std::env::var("TERRAFORM_STATE_BUCKET")
                 .unwrap_or_else(|_| "caution-terraform-state".to_string()),
             aws_region: std::env::var("AWS_REGION")
                 .unwrap_or_else(|_| "us-west-2".to_string()),
         }
     }
-}
-
-async fn provision_ec2_app(
-    request: &DeploymentRequest,
-    config: &TerraformConfig,
-) -> Result<DeploymentResult> {
-    tracing::info!("Starting Terraform EC2 provisioning for resource: {}", request.resource_name);
-
-    let temp_dir = TempDir::new()
-        .context("Failed to create temporary directory")?;
-    let work_dir = temp_dir.path();
-
-    copy_module_directory(&config.module_path, work_dir).await
-        .context("Failed to copy module directory")?;
-
-    generate_backend_config(work_dir, request.org_id, request.resource_id, &config.s3_bucket).await
-        .context("Failed to generate backend config")?;
-
-    generate_deployment_main_tf(work_dir, request).await
-        .context("Failed to generate root.tf")?;
-
-    run_tofu_init(work_dir, None)
-        .context("Failed to run tofu init")?;
-
-    run_tofu_apply(work_dir, &request.resource_name, None)
-        .context("Failed to run tofu apply")?;
-    
-    let result = get_tofu_outputs(work_dir)
-        .context("Failed to get tofu outputs")?;
-    
-    tracing::info!(
-        "Successfully provisioned EC2 for resource {} at {}",
-        request.resource_name,
-        result.public_ip
-    );
-    
-    Ok(result)
 }
 
 async fn destroy_ec2_app(
@@ -403,40 +340,6 @@ provider "aws" {{
     Ok(())
 }
 
-async fn copy_module_directory(source: &Path, dest: &Path) -> Result<()> {
-    use tokio::fs;
-    
-    let modules_dir = dest.join("modules");
-    fs::create_dir_all(&modules_dir).await
-        .context("Failed to create modules directory")?;
-    
-    copy_dir_recursive(source, &modules_dir.join("ec2-app")).await
-        .context("Failed to copy module files")?;
-    
-    Ok(())
-}
-
-async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    use tokio::fs;
-    
-    fs::create_dir_all(dst).await?;
-    
-    let mut entries = fs::read_dir(src).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        let file_name = entry.file_name();
-        let dst_path = dst.join(&file_name);
-        
-        if path.is_dir() {
-            Box::pin(copy_dir_recursive(&path, &dst_path)).await?;
-        } else {
-            fs::copy(&path, &dst_path).await?;
-        }
-    }
-    
-    Ok(())
-}
-
 async fn generate_backend_config(
     work_dir: &Path,
     org_id: Uuid,
@@ -459,94 +362,6 @@ async fn generate_backend_config(
     let backend_path = work_dir.join("backend.tf");
     fs::write(&backend_path, backend_content).await
         .context("Failed to write backend.tf")?;
-    
-    Ok(())
-}
-
-async fn generate_deployment_main_tf(
-    work_dir: &Path,
-    request: &DeploymentRequest,
-) -> Result<()> {
-    let aws_region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string());
-
-    let main_content = format!(
-        r#"# Auto-generated deployment configuration for {}
-
-terraform {{
-  required_version = ">= 1.0"
-  
-  required_providers {{
-    aws = {{
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }}
-  }}
-}}
-
-provider "aws" {{
-  region = "{}"
-}}
-
-# Get default VPC (MVP)
-data "aws_vpc" "default" {{
-  default = true
-}}
-
-# Get default subnets
-data "aws_subnets" "default" {{
-  filter {{
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
-  }}
-  
-  filter {{
-    name   = "default-for-az"
-    values = ["true"]
-  }}
-}}
-
-module "app" {{
-  source = "./modules/ec2-app"
-
-  org_id        = "{}"
-  resource_id   = "{}"
-  ami_id        = "{}"
-  app_port      = {}
-  aws_region    = "{}"
-
-  # Use default VPC for MVP
-  vpc_id    = data.aws_vpc.default.id
-  subnet_id = data.aws_subnets.default.ids[0]
-}}
-
-# Expose module outputs at root level
-output "instance_id" {{
-  description = "EC2 instance ID"
-  value       = module.app.instance_id
-}}
-
-output "public_ip" {{
-  description = "Public IP address"
-  value       = module.app.public_ip
-}}
-
-output "url" {{
-  description = "Application URL"
-  value       = module.app.url
-}}
-"#,
-        request.resource_name,
-        aws_region,
-        request.org_id,
-        request.resource_id,
-        request.ami_id,
-        request.app_port,
-        aws_region
-    );
-    
-    let main_path = work_dir.join("root.tf");
-    fs::write(&main_path, main_content).await
-        .context("Failed to write root.tf")?;
     
     Ok(())
 }
@@ -576,55 +391,6 @@ fn run_tofu_init(work_dir: &Path, credentials: Option<&AwsCredentials>) -> Resul
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     tracing::debug!("Tofu init output: {}", stdout);
-
-    Ok(())
-}
-
-fn run_tofu_apply(work_dir: &Path, resource_name: &str, credentials: Option<&AwsCredentials>) -> Result<()> {
-    run_tofu_apply_with_vars(work_dir, resource_name, &[], None, credentials)
-}
-
-fn run_tofu_apply_with_vars(work_dir: &Path, resource_name: &str, ports: &[u16], http_port: Option<u16>, credentials: Option<&AwsCredentials>) -> Result<()> {
-    tracing::info!("Running tofu apply for {} in {} (ports={:?}, http_port={:?})...", resource_name, work_dir.display(), ports, http_port);
-
-    let mut args = vec!["apply", "-auto-approve", "-no-color"];
-
-    let ports_var = if !ports.is_empty() {
-        let ports_str: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
-        format!("ports=[{}]", ports_str.join(","))
-    } else {
-        "ports=[]".to_string()
-    };
-
-    args.push("-var");
-    let ports_var_ref: &str = &ports_var;
-
-    let http_port_var = format!("http_port={}", http_port.unwrap_or(0));
-
-    let mut cmd = Command::new("tofu");
-    cmd.args(&args)
-        .arg(ports_var_ref)
-        .arg("-var").arg(&http_port_var)
-        .current_dir(work_dir);
-
-    if let Some(creds) = credentials {
-        cmd.env("AWS_ACCESS_KEY_ID", &creds.access_key_id)
-            .env("AWS_SECRET_ACCESS_KEY", &creds.secret_access_key)
-            .env("AWS_REGION", &creds.region);
-    }
-
-    let output = run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS)
-        .context("tofu apply failed")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        tracing::error!("Tofu apply failed for {} (exit code {:?}):\nstderr: {}\nstdout: {}", resource_name, output.status.code(), stderr, stdout);
-        bail!("Failed to run tofu apply");
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    tracing::debug!("Tofu apply output: {}", stdout);
 
     Ok(())
 }

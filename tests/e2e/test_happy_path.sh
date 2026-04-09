@@ -18,6 +18,7 @@
 set -euo pipefail
 
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
+API_URL="${API_URL:-http://127.0.0.1:8080}"
 CAUTION_BIN="${CAUTION_BIN:-caution}"
 DEMO_REPO="${DEMO_REPO:-https://codeberg.org/caution/demo-hello-world-enclave.git}"
 WORK_DIR=$(mktemp -d)
@@ -137,10 +138,18 @@ docker exec postgres-test psql -U postgres -d caution_test -c "
 UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';
 " >/dev/null 2>&1 || log "  Warning: could not mark user as onboarded"
 
+# Trigger API-side account provisioning now that onboarding flags are set
+curl -sf "$API_URL/resources" -H "X-Session-ID: $SESSION_ID" >/dev/null 2>&1 || log "  Warning: could not trigger org provisioning"
+
 # Get org ID for the test user
-ORG_ID=$(docker exec postgres-test psql -U postgres -d caution_test -t -A -c "
+ORG_ID=""
+for i in $(seq 1 10); do
+    ORG_ID=$(docker exec postgres-test psql -U postgres -d caution_test -t -A -c "
 SELECT organization_id FROM organization_members WHERE user_id = '$USER_ID' LIMIT 1;
 " 2>/dev/null | head -1 | tr -d ' \n')
+    [ -n "$ORG_ID" ] && break
+    sleep 1
+done
 log "  Org ID: $ORG_ID"
 
 # Seed credits for deploy gate ($25 minimum required)

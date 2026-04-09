@@ -10,12 +10,12 @@
 use anyhow::{Context, Result, bail};
 use sha2::{Sha256, Digest};
 use sqlx::PgPool;
+use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::ec2::{Ec2Client, RunInstancesParams};
 
-const CONTAINERFILE_EIF_TEMPLATE: &str = include_str!("../../enclave-builder/templates/Containerfile.eif");
-const RUN_SH_TEMPLATE: &str = include_str!("../../enclave-builder/templates/run.sh.template");
+const REMOTE_BUILDER_HELPER: &str = "remote-build-helper";
 
 /// Specification for a builder instance size, loaded from config.json.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -220,6 +220,56 @@ pub async fn upload_source_archive(
     Ok(s3_key)
 }
 
+fn resolve_remote_builder_helper_path() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("REMOTE_BUILDER_HELPER_PATH") {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            return Ok(path);
+        }
+        bail!("REMOTE_BUILDER_HELPER_PATH does not exist: {}", path.display());
+    }
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            let sibling = parent.join(REMOTE_BUILDER_HELPER);
+            if sibling.exists() {
+                return Ok(sibling);
+            }
+        }
+    }
+
+    let default_path = PathBuf::from(format!("/usr/local/bin/{}", REMOTE_BUILDER_HELPER));
+    if default_path.exists() {
+        return Ok(default_path);
+    }
+
+    bail!("Could not locate {}", REMOTE_BUILDER_HELPER)
+}
+
+async fn upload_remote_builder_helper(
+    s3: &aws_sdk_s3::Client,
+    bucket: &str,
+    build_id: Uuid,
+    org_id: Uuid,
+) -> Result<String> {
+    let helper_path = resolve_remote_builder_helper_path()?;
+    let helper_bytes = std::fs::read(&helper_path)
+        .with_context(|| format!("Failed to read {}", helper_path.display()))?;
+    let s3_key = format!("builds/{}/{}", build_id, REMOTE_BUILDER_HELPER);
+
+    s3.put_object()
+        .bucket(bucket)
+        .key(&s3_key)
+        .tagging(format!("org_id={}&build_id={}", org_id, build_id))
+        .body(aws_sdk_s3::primitives::ByteStream::from(helper_bytes))
+        .send()
+        .await
+        .context("Failed to upload remote builder helper to S3")?;
+
+    tracing::info!("Remote builder helper uploaded to s3://{}/{}", bucket, s3_key);
+    Ok(s3_key)
+}
+
 /// Execute a build on a dedicated EC2 instance.
 ///
 /// 1. Insert a pending build row
@@ -259,7 +309,17 @@ pub async fn execute_remote_build(
     .context("Failed to insert eif_builds row")?;
 
     // 2. Generate user-data and launch EC2 instance
-    let user_data = generate_builder_userdata(build_id, config, request, &eif_s3_key)?;
+    let helper_s3_key = upload_remote_builder_helper(s3, &config.eif_s3_bucket, build_id, request.org_id).await
+        .context("Failed to stage remote builder helper")?;
+    let framework_commit = resolve_framework_commit(enclave_builder::FRAMEWORK_SOURCE).await;
+    let user_data = generate_builder_userdata(
+        build_id,
+        config,
+        request,
+        &eif_s3_key,
+        &helper_s3_key,
+        framework_commit,
+    )?;
     let instance_id = match ec2.run_instances(&RunInstancesParams {
         image_id: config.ami_id.clone(),
         instance_type: instance_type.to_string(),
@@ -471,53 +531,36 @@ async fn poll_build_status(
     }
 }
 
-/// Process template blocks — strips `# {BLOCK` / `# }BLOCK` sections
-/// unless the block name is in `enabled_blocks`.
-/// Same logic as `enclave-builder/src/build.rs::process_template_blocks`.
-fn process_template_blocks(content: &str, enabled_blocks: &[&str]) -> String {
-    let mut result = Vec::new();
-    let mut skip = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some(block_name) = trimmed.strip_prefix("# {") {
-            let block_name = block_name.trim();
-            if !enabled_blocks.contains(&block_name) {
-                skip = true;
-            }
-            continue;
-        }
-        if trimmed.starts_with("# }") {
-            skip = false;
-            continue;
-        }
-        if !skip {
-            result.push(line);
-        }
+/// Generate the user-data shell script for the builder instance.
+async fn resolve_framework_commit(framework_source: &str) -> Option<String> {
+    let archive_pos = framework_source.find("/archive/")?;
+    let base_url = &framework_source[..archive_pos];
+    let git_url = format!("{}.git", base_url);
+    let after_archive = &framework_source[archive_pos + 9..];
+    let ref_name = after_archive
+        .trim_end_matches(".tar.gz")
+        .trim_end_matches(".tar");
+    if ref_name.is_empty() {
+        return None;
     }
-    let mut output = result.join("\n");
-    if content.ends_with('\n') {
-        output.push('\n');
-    }
-    output
+    enclave_builder::resolve_ref_to_commit(&git_url, ref_name).await
 }
 
-/// Render the Containerfile.eif and run.sh templates with the build parameters.
-fn render_templates(request: &BuildRequest) -> anyhow::Result<(String, String)> {
-    let reserved: &[(u16, &str)] = &[
-        (8080, "internal enclave services"),
-        (8081, "internal enclave services"),
-        (8082, "bootproofd"),
-        (8084, "locksmith"),
-    ];
-    for &(port, service) in reserved {
-        if request.ports.contains(&port) {
-            anyhow::bail!("Port {} is reserved for {}", port, service);
-        }
-    }
+fn generate_builder_userdata(
+    build_id: Uuid,
+    config: &BuilderConfig,
+    request: &BuildRequest,
+    eif_s3_key: &str,
+    helper_s3_key: &str,
+    framework_commit: Option<String>,
+) -> anyhow::Result<String> {
+    let status_key = format!("builds/{}/status.json", build_id);
+    let bucket = &config.eif_s3_bucket;
+    let source_s3_key = &request.source_s3_key;
+    let ports_csv = request.ports.iter().map(u16::to_string).collect::<Vec<_>>().join(",");
 
-    let mut enabled_blocks: Vec<&str> = vec![];
-    if request.e2e { enabled_blocks.push("STEVE"); }
-    if request.locksmith { enabled_blocks.push("LOCKSMITH"); }
+    let build_cmd_raw = request.build_command.as_deref().unwrap_or("docker build -t app-image .");
+    let build_cmd = build_cmd_raw.replace('\'', "'\\''");
 
     let bootproof_commit = std::env::var("BOOTPROOF_COMMIT")
         .unwrap_or_else(|_| "64dae0628e58b9f898b89f9b7a404b37e2f0ca9f".to_string());
@@ -525,58 +568,6 @@ fn render_templates(request: &BuildRequest) -> anyhow::Result<(String, String)> 
         .unwrap_or_else(|_| "ed38a190cd5d7a8f452c854e41d00ec748e172bf".to_string());
     let locksmith_commit = std::env::var("LOCKSMITH_COMMIT")
         .unwrap_or_else(|_| "d16b74c6b3fd1d1006a5b00e4d9e21a4613947a9".to_string());
-
-    // Render Containerfile.eif
-    let containerfile = process_template_blocks(CONTAINERFILE_EIF_TEMPLATE, &enabled_blocks)
-        .replace("{{BOOTPROOF_COMMIT}}", &bootproof_commit)
-        .replace("{{STEVE_COMMIT}}", &steve_commit)
-        .replace("{{LOCKSMITH_COMMIT}}", &locksmith_commit);
-
-    // Render run.sh
-    let run_cmd = request.run_command.as_deref().unwrap_or("");
-    let user_cmd = if run_cmd.is_empty() {
-        "echo \"ERROR: No run command specified\"\nexit 1".to_string()
-    } else {
-        let escaped = run_cmd.replace('\'', "'\\''");
-        format!("exec sh -c '{}'", escaped)
-    };
-
-    let custom_port_proxies: String = request.ports.iter()
-        .filter(|&&p| p != 8080 && p != 8081 && p != 8082 && p != 8084)
-        .map(|p| format!("/bin/socat VSOCK-LISTEN:{p},reuseaddr,fork TCP:localhost:{p} &"))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let custom_port_section = if custom_port_proxies.is_empty() {
-        String::new()
-    } else {
-        format!("\necho \"Starting custom port proxies...\"\n{}\n", custom_port_proxies)
-    };
-
-    let run_sh = process_template_blocks(RUN_SH_TEMPLATE, &enabled_blocks)
-        .replace("{{USER_CMD}}", &user_cmd)
-        .replace("{{CUSTOM_PORT_SECTION}}", &custom_port_section);
-
-    Ok((containerfile, run_sh))
-}
-
-/// Generate the user-data shell script for the builder instance.
-fn generate_builder_userdata(
-    build_id: Uuid,
-    config: &BuilderConfig,
-    request: &BuildRequest,
-    eif_s3_key: &str,
-) -> anyhow::Result<String> {
-    let status_key = format!("builds/{}/status.json", build_id);
-    let bucket = &config.eif_s3_bucket;
-    let source_s3_key = &request.source_s3_key;
-
-    let build_cmd_raw = request.build_command.as_deref().unwrap_or("docker build -t app-image .");
-    let build_cmd = build_cmd_raw.replace('\'', "'\\''");
-    let binary_flag = request.binary_path.as_deref().unwrap_or("");
-
-    // Render the enclave templates at generation time
-    let (containerfile_eif, run_sh) = render_templates(request)?;
 
     let e2e_flag = if request.e2e { "true" } else { "false" };
     let locksmith_flag = if request.locksmith { "true" } else { "false" };
@@ -591,7 +582,7 @@ fn generate_builder_userdata(
             branch: Some(request.branch.clone()),
         })
     };
-    let manifest = enclave_builder::EnclaveManifest::new(
+    let mut manifest = enclave_builder::EnclaveManifest::new(
         app_source,
         enclave_builder::EnclaveSource::GitArchive {
             urls: vec![format!("https://git.distrust.co/public/enclaveos/archive/{}.tar.gz", request.enclaveos_commit)],
@@ -599,12 +590,20 @@ fn generate_builder_userdata(
         },
         enclave_builder::FrameworkSource::GitArchive {
             url: enclave_builder::FRAMEWORK_SOURCE.to_string(),
-            commit: None,
+            commit: framework_commit,
         },
         request.binary_path.clone(),
         request.run_command.clone(),
         None,
     );
+    manifest.enclaveos_commit = Some(request.enclaveos_commit.clone());
+    manifest.bootproof_commit = Some(bootproof_commit);
+    if request.e2e {
+        manifest.steve_commit = Some(steve_commit);
+    }
+    if request.locksmith {
+        manifest.locksmith_commit = Some(locksmith_commit);
+    }
     let manifest_json = serde_json::to_string(&manifest).expect("manifest serialization cannot fail");
 
     Ok(format!(r##"#!/bin/bash
@@ -616,10 +615,11 @@ S3_BUCKET="{bucket}"
 STATUS_KEY="{status_key}"
 EIF_S3_KEY="{eif_s3_key}"
 SOURCE_S3_KEY="{source_s3_key}"
+HELPER_S3_KEY="{helper_s3_key}"
 COMMIT_SHA="{commit_sha}"
 ENCLAVEOS_COMMIT="{enclaveos_commit}"
 BUILD_CMD='{build_cmd}'
-BINARY_PATH="{binary_flag}"
+PORTS="{ports_csv}"
 E2E="{e2e_flag}"
 LOCKSMITH="{locksmith_flag}"
 
@@ -653,6 +653,10 @@ mkdir -p /build/repo
 aws s3 cp "s3://$S3_BUCKET/$SOURCE_S3_KEY" /build/source.tar.gz
 tar -xzf /build/source.tar.gz -C /build/repo
 
+echo "Downloading remote build helper..."
+aws s3 cp "s3://$S3_BUCKET/$HELPER_S3_KEY" /usr/local/bin/remote-build-helper
+chmod +x /usr/local/bin/remote-build-helper
+
 # Build Docker image
 echo "Building Docker image..."
 cd /build/repo
@@ -662,65 +666,25 @@ BUILT_IMAGE=$(docker images -q --no-trunc | head -1)
 docker tag "$BUILT_IMAGE" app-image 2>/dev/null || true
 write_status "docker_built"
 
-# Extract user filesystem
-echo "Extracting user filesystem..."
-mkdir -p /build/user-fs
-CONTAINER_ID=$(docker create app-image)
-docker export "$CONTAINER_ID" | tar -xf - -C /build/user-fs
-docker rm "$CONTAINER_ID"
-
-if [ -n "$BINARY_PATH" ] && [ -f "/build/user-fs$BINARY_PATH" ]; then
-    echo "Binary-only mode: extracting $BINARY_PATH"
-    mkdir -p /build/binary-fs/$(dirname "$BINARY_PATH")
-    cp "/build/user-fs$BINARY_PATH" "/build/binary-fs$BINARY_PATH"
-    if [ -f /build/user-fs/etc/ssl/certs/ca-certificates.crt ]; then
-        mkdir -p /build/binary-fs/etc/ssl/certs
-        cp /build/user-fs/etc/ssl/certs/ca-certificates.crt /build/binary-fs/etc/ssl/certs/
-    fi
-    rm -rf /build/user-fs
-    mv /build/binary-fs /build/user-fs
-fi
-
-# Download enclave OS source
-echo "Downloading enclave OS source..."
-mkdir -p /build/enclave-src
-curl -fsSL "https://git.distrust.co/public/enclaveos/archive/$ENCLAVEOS_COMMIT.tar.gz" | tar -xzf - -C /build/enclave-src --strip-components=1
-
-# Stage EIF build
-echo "Staging EIF build..."
-mkdir -p /build/eif-stage/app /build/eif-stage/enclave /build/eif-stage/output
-
-cp -r /build/user-fs/* /build/eif-stage/app/ 2>/dev/null || true
-cp -r /build/enclave-src/* /build/eif-stage/enclave/ 2>/dev/null || true
-
-# Write run.sh (rendered from template)
-cat > /build/eif-stage/run.sh << 'RUNSH_EOF'
-{run_sh}
-RUNSH_EOF
-chmod +x /build/eif-stage/run.sh
-
-# Write Containerfile.eif (rendered from template)
-cat > /build/eif-stage/Containerfile.eif << 'CONTAINERFILE_EOF'
-{containerfile_eif}
-CONTAINERFILE_EOF
-
-# Write manifest (must match EnclaveManifest struct for caution verify)
-cat > /build/eif-stage/manifest.json << 'MANIFEST_EOF'
+# Write manifest for remote-build-helper
+cat > /build/manifest.json << 'MANIFEST_EOF'
 {manifest_json}
 MANIFEST_EOF
 
-# Build EIF
-echo "Building EIF..."
-cd /build/eif-stage
-DOCKER_BUILDKIT=1 SOURCE_DATE_EPOCH=1 docker build \
-    --progress=plain \
-    --target output \
-    --output type=local,rewrite-timestamp=true,dest=/build/eif-stage/output \
-    -f Containerfile.eif \
-    . 2>&1
+echo "Building EIF via remote-build-helper..."
+mkdir -p /build/output
+CAUTION_IMAGE_REF="app-image" \
+CAUTION_MANIFEST_PATH="/build/manifest.json" \
+CAUTION_WORK_DIR="/build/remote-helper-work" \
+CAUTION_OUTPUT_EIF="/build/output/enclave.eif" \
+CAUTION_OUTPUT_PCRS="/build/output/enclave.pcrs" \
+CAUTION_PORTS="$PORTS" \
+CAUTION_E2E="$E2E" \
+CAUTION_LOCKSMITH="$LOCKSMITH" \
+/usr/local/bin/remote-build-helper 2>&1
 
-EIF_PATH="/build/eif-stage/output/enclave.eif"
-PCRS_PATH="/build/eif-stage/output/enclave.pcrs"
+EIF_PATH="/build/output/enclave.eif"
+PCRS_PATH="/build/output/enclave.pcrs"
 
 if [ ! -f "$EIF_PATH" ]; then
     fail "EIF file not found after build"
@@ -753,14 +717,14 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
         status_key = status_key,
         eif_s3_key = eif_s3_key,
         source_s3_key = source_s3_key,
+        helper_s3_key = helper_s3_key,
         commit_sha = request.commit_sha,
         enclaveos_commit = request.enclaveos_commit,
         build_cmd = build_cmd,
-        binary_flag = binary_flag,
+        ports_csv = ports_csv,
         e2e_flag = e2e_flag,
         locksmith_flag = locksmith_flag,
-        run_sh = run_sh,
-        containerfile_eif = containerfile_eif,
+        manifest_json = manifest_json,
     ))
 }
 
@@ -962,29 +926,6 @@ mod tests {
         assert_ne!(key1, key2);
     }
 
-    // --- process_template_blocks ---
-
-    #[test]
-    fn test_process_blocks_strips_disabled() {
-        let input = "line1\n# {STEVE\nsteve line\n# }STEVE\nline2\n";
-        let result = process_template_blocks(input, &[]);
-        assert_eq!(result, "line1\nline2\n");
-    }
-
-    #[test]
-    fn test_process_blocks_keeps_enabled() {
-        let input = "line1\n# {STEVE\nsteve line\n# }STEVE\nline2\n";
-        let result = process_template_blocks(input, &["STEVE"]);
-        assert_eq!(result, "line1\nsteve line\nline2\n");
-    }
-
-    #[test]
-    fn test_process_blocks_no_blocks() {
-        let input = "line1\nline2\n";
-        let result = process_template_blocks(input, &[]);
-        assert_eq!(result, "line1\nline2\n");
-    }
-
     // --- BuilderSizesConfig ---
 
     fn test_config() -> BuilderSizesConfig {
@@ -1056,151 +997,6 @@ mod tests {
         assert_eq!(config.max_resources_per_org, 5);
     }
 
-    // --- render_templates ---
-
-    #[test]
-    fn test_render_templates_produces_run_sh_with_user_cmd() {
-        let request = BuildRequest {
-            org_id: Uuid::new_v4(),
-            app_name: "test-app".to_string(),
-            commit_sha: "abc123".to_string(),
-            branch: "main".to_string(),
-            source_s3_key: "builds/test/source.tar.gz".to_string(),
-            procfile_content: "run: /app\n".to_string(),
-            run_command: Some("/usr/bin/myapp --port 8080".to_string()),
-            build_command: None,
-            binary_path: None,
-            ports: vec![],
-            e2e: false,
-            locksmith: false,
-            enclaveos_commit: "abc".to_string(),
-            builder_size: "small".to_string(),
-            builder_instance_type: "c5.xlarge".to_string(),
-            app_sources: vec![],
-        };
-
-        let (containerfile, run_sh) = render_templates(&request).unwrap();
-
-        // run.sh should contain the user command
-        assert!(run_sh.contains("/usr/bin/myapp --port 8080"), "run.sh should contain user command");
-        // run.sh should NOT contain STEVE when e2e=false
-        assert!(!run_sh.contains("steve"), "run.sh should not contain steve when e2e=false");
-        // Containerfile should contain eif_build
-        assert!(containerfile.contains("eif_build"), "Containerfile should contain eif_build command");
-        // Containerfile should NOT contain STEVE blocks
-        assert!(!containerfile.contains("steve-builder"), "Containerfile should not contain steve-builder when e2e=false");
-    }
-
-    #[test]
-    fn test_render_templates_e2e_includes_steve() {
-        let request = BuildRequest {
-            org_id: Uuid::new_v4(),
-            app_name: "test-app".to_string(),
-            commit_sha: "abc123".to_string(),
-            branch: "main".to_string(),
-            source_s3_key: "builds/test/source.tar.gz".to_string(),
-            procfile_content: "run: /app\n".to_string(),
-            run_command: Some("/app".to_string()),
-            build_command: None,
-            binary_path: None,
-            ports: vec![],
-            e2e: true,
-            locksmith: false,
-            enclaveos_commit: "abc".to_string(),
-            builder_size: "small".to_string(),
-            builder_instance_type: "c5.xlarge".to_string(),
-            app_sources: vec![],
-        };
-
-        let (containerfile, run_sh) = render_templates(&request).unwrap();
-
-        assert!(containerfile.contains("steve-builder"), "Containerfile should contain steve-builder when e2e=true");
-        assert!(run_sh.contains("steve"), "run.sh should contain steve when e2e=true");
-    }
-
-    #[test]
-    fn test_render_templates_locksmith_includes_locksmith() {
-        let request = BuildRequest {
-            org_id: Uuid::new_v4(),
-            app_name: "test-app".to_string(),
-            commit_sha: "abc123".to_string(),
-            branch: "main".to_string(),
-            source_s3_key: "builds/test/source.tar.gz".to_string(),
-            procfile_content: "run: /app\n".to_string(),
-            run_command: Some("/app".to_string()),
-            build_command: None,
-            binary_path: None,
-            ports: vec![],
-            e2e: false,
-            locksmith: true,
-            enclaveos_commit: "abc".to_string(),
-            builder_size: "small".to_string(),
-            builder_instance_type: "c5.xlarge".to_string(),
-            app_sources: vec![],
-        };
-
-        let (containerfile, run_sh) = render_templates(&request).unwrap();
-
-        assert!(containerfile.contains("locksmith-builder"), "Containerfile should contain locksmith-builder when locksmith=true");
-        assert!(run_sh.contains("locksmithd"), "run.sh should contain locksmithd when locksmith=true");
-    }
-
-    #[test]
-    fn test_render_templates_no_locksmith_by_default() {
-        let request = BuildRequest {
-            org_id: Uuid::new_v4(),
-            app_name: "test-app".to_string(),
-            commit_sha: "abc123".to_string(),
-            branch: "main".to_string(),
-            source_s3_key: "builds/test/source.tar.gz".to_string(),
-            procfile_content: "run: /app\n".to_string(),
-            run_command: Some("/app".to_string()),
-            build_command: None,
-            binary_path: None,
-            ports: vec![],
-            e2e: false,
-            locksmith: false,
-            enclaveos_commit: "abc".to_string(),
-            builder_size: "small".to_string(),
-            builder_instance_type: "c5.xlarge".to_string(),
-            app_sources: vec![],
-        };
-
-        let (containerfile, run_sh) = render_templates(&request).unwrap();
-
-        assert!(!containerfile.contains("locksmith-builder"), "Containerfile should not contain locksmith-builder when locksmith=false");
-        assert!(!run_sh.contains("locksmithd"), "run.sh should not contain locksmithd when locksmith=false");
-    }
-
-    #[test]
-    fn test_render_templates_custom_ports() {
-        let request = BuildRequest {
-            org_id: Uuid::new_v4(),
-            app_name: "test-app".to_string(),
-            commit_sha: "abc123".to_string(),
-            branch: "main".to_string(),
-            source_s3_key: "builds/test/source.tar.gz".to_string(),
-            procfile_content: "run: /app\n".to_string(),
-            run_command: Some("/app".to_string()),
-            build_command: None,
-            binary_path: None,
-            ports: vec![8083, 9090, 3000],
-            e2e: false,
-            locksmith: false,
-            enclaveos_commit: "abc".to_string(),
-            builder_size: "small".to_string(),
-            builder_instance_type: "c5.xlarge".to_string(),
-            app_sources: vec![],
-        };
-
-        let (_containerfile, run_sh) = render_templates(&request).unwrap();
-
-        // 8083, 9090, and 3000 should appear as custom port proxies
-        assert!(run_sh.contains("VSOCK-LISTEN:8083"), "should have proxy for port 8083");
-        assert!(run_sh.contains("VSOCK-LISTEN:9090"), "should have proxy for port 9090");
-        assert!(run_sh.contains("VSOCK-LISTEN:3000"), "should have proxy for port 3000");
-    }
-
     // --- generate_builder_userdata ---
 
     #[test]
@@ -1235,7 +1031,14 @@ mod tests {
         };
 
         let build_id = Uuid::new_v4();
-        let userdata = generate_builder_userdata(build_id, &config, &request, "eifs/org/key.eif").unwrap();
+        let userdata = generate_builder_userdata(
+            build_id,
+            &config,
+            &request,
+            "eifs/org/key.eif",
+            "builds/test-id/remote-build-helper",
+            None,
+        ).unwrap();
 
         // Should be a valid bash script
         assert!(userdata.starts_with("#!/bin/bash"), "should start with shebang");
@@ -1252,9 +1055,9 @@ mod tests {
         // Should contain docker build
         assert!(userdata.contains("docker build -t app-image"), "should build docker image");
 
-        // Should contain EIF build
-        assert!(userdata.contains("Containerfile.eif"), "should build EIF via Containerfile");
-        assert!(userdata.contains("docker build"), "should use docker build for EIF");
+        // Should invoke the shared remote-build-helper path
+        assert!(userdata.contains("remote-build-helper"), "should use remote build helper");
+        assert!(userdata.contains("CAUTION_MANIFEST_PATH"), "should pass manifest to helper");
 
         // Should upload EIF to S3
         assert!(userdata.contains("eifs/org/key.eif"), "should upload to correct S3 key");
@@ -1263,11 +1066,8 @@ mod tests {
         assert!(userdata.contains("write_status"), "should write status to S3");
         assert!(userdata.contains("\"completed\""), "should write completed status");
 
-        // Should contain the rendered Containerfile.eif template (embedded)
-        assert!(userdata.contains("eif_build"), "should contain embedded Containerfile.eif with eif_build command");
-
-        // Should contain rendered run.sh
-        assert!(userdata.contains("Caution Enclave Startup"), "should contain embedded run.sh");
+        // Should download the helper from S3
+        assert!(userdata.contains("builds/test-id/remote-build-helper"), "should download helper binary");
     }
 
     #[test]
@@ -1301,7 +1101,14 @@ mod tests {
             app_sources: vec![],
         };
 
-        let userdata = generate_builder_userdata(Uuid::new_v4(), &config, &request, "eifs/test.eif").unwrap();
+        let userdata = generate_builder_userdata(
+            Uuid::new_v4(),
+            &config,
+            &request,
+            "eifs/test.eif",
+            "builds/test/remote-build-helper",
+            None,
+        ).unwrap();
 
         // AWS user-data limit is 16KB (before base64 encoding)
         // base64 expands by ~33%, so raw limit is effectively ~12KB to be safe

@@ -3871,14 +3871,14 @@ build: docker build -t app .
                 build_command,
                 containerfile,
                 oci_tarball,
-                no_cache: false,
+                no_cache,
             }
         } else {
             BuildConfig {
                 build_command: None,
                 containerfile: None,
                 oci_tarball: None,
-                no_cache: false,
+                no_cache,
             }
         };
 

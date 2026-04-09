@@ -75,22 +75,36 @@ pub async fn stage_eif_components(
     tracing::info!("Staging enclave source from: {}", enclave_source_path.display());
     copy_dir_recursive(enclave_source_path, &enclave_dir).await?;
 
-    let enclaveos_commit = resolve_enclaveos_commit();
-    let bootproof_commit = std::env::var("BOOTPROOF_COMMIT")
-        .unwrap_or_else(|_| DEFAULT_BOOTPROOF_COMMIT.to_string());
-    let steve_commit = std::env::var("STEVE_COMMIT")
-        .unwrap_or_else(|_| DEFAULT_STEVE_COMMIT.to_string());
-    let locksmith_commit = std::env::var("LOCKSMITH_COMMIT")
-        .unwrap_or_else(|_| DEFAULT_LOCKSMITH_COMMIT.to_string());
+    let enclaveos_commit = manifest.as_ref()
+        .and_then(|m| m.enclaveos_commit.clone())
+        .unwrap_or_else(resolve_enclaveos_commit);
+    let bootproof_commit = manifest.as_ref()
+        .and_then(|m| m.bootproof_commit.clone())
+        .unwrap_or_else(|| {
+            std::env::var("BOOTPROOF_COMMIT")
+                .unwrap_or_else(|_| DEFAULT_BOOTPROOF_COMMIT.to_string())
+        });
+    let steve_commit = manifest.as_ref()
+        .and_then(|m| m.steve_commit.clone())
+        .unwrap_or_else(|| {
+            std::env::var("STEVE_COMMIT")
+                .unwrap_or_else(|_| DEFAULT_STEVE_COMMIT.to_string())
+        });
+    let locksmith_commit = manifest.as_ref()
+        .and_then(|m| m.locksmith_commit.clone())
+        .unwrap_or_else(|| {
+            std::env::var("LOCKSMITH_COMMIT")
+                .unwrap_or_else(|_| DEFAULT_LOCKSMITH_COMMIT.to_string())
+        });
 
     if let Some(mut manifest) = manifest {
-        manifest.enclaveos_commit = Some(enclaveos_commit.clone());
-        manifest.bootproof_commit = Some(bootproof_commit.clone());
+        manifest.enclaveos_commit.get_or_insert(enclaveos_commit.clone());
+        manifest.bootproof_commit.get_or_insert(bootproof_commit.clone());
         if e2e {
-            manifest.steve_commit = Some(steve_commit.clone());
+            manifest.steve_commit.get_or_insert(steve_commit.clone());
         }
         if locksmith {
-            manifest.locksmith_commit = Some(locksmith_commit.clone());
+            manifest.locksmith_commit.get_or_insert(locksmith_commit.clone());
         }
         let manifest_path = stage_dir.join("manifest.json");
         manifest.write_to_file(&manifest_path).await

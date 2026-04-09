@@ -103,14 +103,6 @@ impl AWSResourceType {
             AWSResourceType::S3Bucket => "s3-bucket",
         }
     }
-
-    pub fn terraform_module_path(&self) -> &'static str {
-        match self {
-            AWSResourceType::EC2Instance => "terraform/modules/aws/ec2-app",
-            AWSResourceType::RDSInstance => "terraform/modules/aws/rds",
-            AWSResourceType::S3Bucket => "terraform/modules/aws/s3",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
