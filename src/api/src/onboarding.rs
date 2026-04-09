@@ -9,18 +9,20 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, FromRow};
+use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{AppState, AuthContext};
 use crate::validation::validate_email;
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize)]
 pub struct UserStatus {
     pub email_verified: bool,
     pub payment_method_added: bool,
     pub onboarding_complete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legal: Option<crate::legal::UserLegalStatus>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,10 +82,21 @@ pub async fn get_user_status(
     let payment_method_added = is_alpha_user || payment_method_added_at.is_some();
     let onboarding_complete = email_verified && payment_method_added;
 
+    // Legal status is best-effort in the status endpoint — if the legal_documents
+    // table doesn't exist yet (migration not run), return None rather than failing auth checks.
+    let legal = match crate::legal::get_user_legal_status(&state.db, auth.user_id).await {
+        Ok(status) => Some(status),
+        Err(e) => {
+            tracing::warn!("Failed to fetch legal status: {:?}", e);
+            None
+        }
+    };
+
     Ok(Json(UserStatus {
         email_verified,
         payment_method_added,
         onboarding_complete,
+        legal,
     }))
 }
 

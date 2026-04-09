@@ -53,11 +53,20 @@ Commands:
   list-credentials       List all cloud credentials
   list-alpha-codes       List alpha/beta codes
 
+  Legal:
+  list-legal-docs        List all legal document versions
+  add-legal-doc          Add a new legal document version (interactive)
+  activate-legal-doc     Activate a legal document version
+                         (deactivates prior active version of same type)
+  user-legal-status <id> Show legal status for a user
+
 Examples:
   ./utils/admin list-orgs
   ./utils/admin show-org 123e4567-e89b-12d3-a456-426614174000
   ./utils/admin list-apps
   ./utils/admin apps-by-code abc123def456
+  ./utils/admin add-legal-doc
+  ./utils/admin activate-legal-doc 123e4567-e89b-12d3-a456-426614174000
 EOF
 }
 
@@ -275,6 +284,161 @@ cmd_apps_by_user() {
     "
 }
 
+cmd_list_legal_docs() {
+    echo "=== Legal Documents ==="
+    psql_pretty -c "
+        SELECT
+            id,
+            document_type,
+            version,
+            is_active,
+            requires_blocking_reacceptance as blocking,
+            requires_acknowledgment as ack,
+            effective_at::date as effective,
+            url
+        FROM legal_documents
+        ORDER BY document_type, effective_at DESC;
+    "
+}
+
+cmd_add_legal_doc() {
+    echo "Add new legal document version"
+    echo ""
+
+    read -rp "Document type (terms_of_service / privacy_notice): " doc_type
+    if [[ "$doc_type" != "terms_of_service" && "$doc_type" != "privacy_notice" ]]; then
+        echo "Error: document_type must be 'terms_of_service' or 'privacy_notice'"
+        exit 1
+    fi
+
+    read -rp "Version (e.g. 2026-06-01): " version
+    read -rp "URL: " url
+    read -rp "Effective date (YYYY-MM-DD): " effective_at
+    read -rp "Requires blocking reacceptance? (y/n): " blocking
+    read -rp "Requires acknowledgment? (y/n): " ack
+    read -rp "Summary JSON (optional, press enter to skip): " summary
+
+    local blocking_bool="false"
+    [[ "$blocking" == "y" ]] && blocking_bool="true"
+    local ack_bool="false"
+    [[ "$ack" == "y" ]] && ack_bool="true"
+
+    local summary_val="NULL"
+    if [[ -n "$summary" ]]; then
+        summary_val="'$summary'::jsonb"
+    fi
+
+    echo ""
+    echo "Will insert:"
+    echo "  type:       $doc_type"
+    echo "  version:    $version"
+    echo "  url:        $url"
+    echo "  effective:  $effective_at"
+    echo "  blocking:   $blocking_bool"
+    echo "  ack:        $ack_bool"
+    echo "  is_active:  false (use activate-legal-doc to activate)"
+    echo ""
+    read -rp "Confirm? (y/n): " confirm
+    [[ "$confirm" != "y" ]] && { echo "Aborted."; exit 0; }
+
+    psql_cmd -c "
+        INSERT INTO legal_documents (document_type, version, url, effective_at,
+            is_active, requires_blocking_reacceptance, requires_acknowledgment, summary_json)
+        VALUES ('$doc_type', '$version', '$url', '$effective_at',
+            false, $blocking_bool, $ack_bool, $summary_val);
+    "
+    echo "Document added (inactive). Use 'activate-legal-doc' to make it active."
+}
+
+cmd_activate_legal_doc() {
+    local doc_id="$1"
+    validate_uuid "$doc_id"
+
+    # Show what we're about to activate
+    echo "=== Document to activate ==="
+    psql_pretty -c "
+        SELECT id, document_type, version, is_active, effective_at::date
+        FROM legal_documents WHERE id = '$doc_id';
+    "
+
+    local doc_type
+    doc_type=$(psql_cmd -c "SELECT document_type FROM legal_documents WHERE id = '$doc_id';")
+    if [[ -z "$doc_type" ]]; then
+        echo "Error: Document not found"
+        exit 1
+    fi
+
+    # Show currently active version of this type
+    echo "=== Currently active $doc_type ==="
+    psql_pretty -c "
+        SELECT id, version, effective_at::date
+        FROM legal_documents
+        WHERE document_type = '$doc_type' AND is_active = true;
+    "
+
+    echo ""
+    echo "This will deactivate the current active $doc_type and activate the new version."
+    read -rp "Confirm? (y/n): " confirm
+    [[ "$confirm" != "y" ]] && { echo "Aborted."; exit 0; }
+
+    psql_cmd -c "
+        BEGIN;
+        UPDATE legal_documents SET is_active = false
+            WHERE document_type = '$doc_type' AND is_active = true;
+        UPDATE legal_documents SET is_active = true
+            WHERE id = '$doc_id';
+        COMMIT;
+    "
+    echo "Done. New active $doc_type version activated."
+}
+
+cmd_user_legal_status() {
+    local user_id="$1"
+    validate_uuid "$user_id"
+
+    echo "=== User ==="
+    psql_pretty -c "
+        SELECT id, username, created_at::date as created
+        FROM users WHERE id = '$user_id';
+    "
+
+    echo ""
+    echo "=== Legal Events ==="
+    psql_pretty -c "
+        SELECT document_type, document_version, event_type, event_source,
+               occurred_at, ip_address
+        FROM user_legal_events
+        WHERE user_id = '$user_id'
+        ORDER BY occurred_at DESC;
+    "
+
+    echo ""
+    echo "=== Current Status ==="
+    psql_pretty -c "
+        SELECT
+            ld.document_type,
+            ld.version as active_version,
+            ule.document_version as user_version,
+            ule.event_type as last_event,
+            CASE
+                WHEN ule.document_version IS NULL THEN 'no record'
+                WHEN ld.version = ule.document_version THEN 'current'
+                ELSE 'outdated'
+            END as status
+        FROM legal_documents ld
+        LEFT JOIN LATERAL (
+            SELECT document_version, event_type
+            FROM user_legal_events
+            WHERE user_id = '$user_id'
+              AND document_type = ld.document_type
+            ORDER BY occurred_at DESC
+            LIMIT 1
+        ) ule ON true
+        WHERE ld.is_active = true
+        ORDER BY ld.document_type;
+    "
+}
+
 main() {
     local cmd="${1:-help}"
     shift || true
@@ -317,6 +481,20 @@ main() {
         apps-by-user)
             [[ $# -lt 1 ]] && { echo "Error: Missing user ID"; exit 1; }
             cmd_apps_by_user "$1"
+            ;;
+        list-legal-docs)
+            cmd_list_legal_docs
+            ;;
+        add-legal-doc)
+            cmd_add_legal_doc
+            ;;
+        activate-legal-doc)
+            [[ $# -lt 1 ]] && { echo "Error: Missing document ID"; exit 1; }
+            cmd_activate_legal_doc "$1"
+            ;;
+        user-legal-status)
+            [[ $# -lt 1 ]] && { echo "Error: Missing user ID"; exit 1; }
+            cmd_user_legal_status "$1"
             ;;
         *)
             echo "Unknown command: $cmd"

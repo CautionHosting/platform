@@ -33,6 +33,7 @@ mod cryptographic_bundles;
 mod gpg;
 mod middleware;
 mod users;
+mod legal;
 mod organizations;
 mod resources;
 mod billing;
@@ -1674,6 +1675,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let onboarding_routes = Router::new()
         .route("/user/status", get(onboarding::get_user_status))
         .route("/onboarding/send-verification", post(onboarding::send_verification_email))
+        .route("/legal/accept", post(legal::accept_legal_document))
         .layer(axum::middleware::from_fn_with_state(state.clone(), middleware::auth_middleware));
 
     let resource_routes = Router::new()

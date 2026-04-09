@@ -191,21 +191,63 @@ pub async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RegisterError {
+    #[error("This access code is invalid or has already been used.")]
+    InvalidAccessCode,
+    #[error("Registration challenge has expired. Please try again.")]
+    ChallengeExpired,
+    #[error("No matching registration state found. Please start over.")]
+    NoRegistrationState,
+    #[error("This security key is already registered. Each key can only be registered once.")]
+    CredentialAlreadyRegistered,
+    #[error("Too many pending registrations. Please try again later.")]
+    TooManyPending,
+    #[error("{0}")]
+    Internal(#[source] anyhow::Error),
+}
+
+impl IntoResponse for RegisterError {
+    fn into_response(self) -> Response {
+        let (status, message) = match self {
+            Self::InvalidAccessCode => {
+                (StatusCode::BAD_REQUEST, self.to_string())
+            }
+            Self::ChallengeExpired | Self::NoRegistrationState => {
+                (StatusCode::GONE, self.to_string())
+            }
+            Self::CredentialAlreadyRegistered => {
+                (StatusCode::CONFLICT, self.to_string())
+            }
+            Self::TooManyPending => {
+                (StatusCode::TOO_MANY_REQUESTS, self.to_string())
+            }
+            Self::Internal(ref err) => {
+                tracing::error!(?err, "Registration error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "An internal error occurred".into())
+            }
+        };
+        (status, message).into_response()
+    }
+}
+
 pub async fn begin_register_handler(
     State(state): State<AppState>,
     Json(req): Json<crate::types::RegisterBeginRequest>,
-) -> Result<Json<RegisterBeginResponse>, AppError> {
+) -> Result<Json<RegisterBeginResponse>, RegisterError> {
     tracing::debug!("Registration started with alpha code");
 
     let alpha_code_id = db::validate_alpha_code(&state.db, &req.alpha_code)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("This alpha code is invalid or has already been used."))?;
+        .await
+        .map_err(|e| RegisterError::Internal(e))?
+        .ok_or(RegisterError::InvalidAccessCode)?;
 
     tracing::debug!("Alpha code validated: id={}", alpha_code_id);
 
     // Fetch ALL existing credential IDs to pass as excludeCredentials
     // This prevents the same authenticator from registering multiple accounts
-    let existing_cred_ids = db::get_all_credential_ids(&state.db).await?;
+    let existing_cred_ids = db::get_all_credential_ids(&state.db).await
+        .map_err(|e| RegisterError::Internal(e))?;
     let exclude_credentials: Vec<CredentialID> = existing_cred_ids
         .into_iter()
         .map(CredentialID::from)
@@ -226,7 +268,7 @@ pub async fn begin_register_handler(
             None,
             None,
         )
-        .map_err(|e| anyhow::anyhow!("Failed to start registration: {}", e))?;
+        .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to start registration: {}", e)))?;
 
     // Override authenticator selection to be maximally compatible:
     // - UV Preferred: authenticators that support PIN/biometric will use it, but won't block
@@ -253,7 +295,7 @@ pub async fn begin_register_handler(
     {
         let mut reg_states = state.reg_states.write().await;
         if reg_states.len() >= MAX_PENDING_CHALLENGES {
-            return Err(anyhow::anyhow!("Too many pending registrations").into());
+            return Err(RegisterError::TooManyPending);
         }
         reg_states.insert(state_key.clone(), pending);
     }
@@ -289,57 +331,65 @@ fn build_auth_cookies(session_id: &str, csrf_token: &str, max_age_hours: i64, se
 
 pub async fn finish_register_handler(
     State(state): State<AppState>,
+    connect_info: ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<serde_json::Value>,
-) -> Result<Response, AppError> {
+) -> Result<Response, RegisterError> {
     let session_key = req.get("session")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Missing session field"))?
+        .ok_or(RegisterError::NoRegistrationState)?
         .to_string();
 
     let pending = state.reg_states.read().await
         .get(&session_key)
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("No matching registration state found"))?;
+        .ok_or(RegisterError::NoRegistrationState)?;
 
     // Check if the registration challenge has expired
     if time::OffsetDateTime::now_utc() > pending.expires_at {
         state.reg_states.write().await.remove(&session_key);
-        return Err(anyhow::anyhow!("Registration challenge has expired").into());
+        return Err(RegisterError::ChallengeExpired);
     }
 
     let reg_response: RegisterPublicKeyCredential = serde_json::from_value(req.clone())
-        .map_err(|e| anyhow::anyhow!("Failed to parse registration response: {}", e))?;
+        .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to parse registration response: {}", e)))?;
 
     let seckey = state
         .webauthn
         .finish_securitykey_registration(&reg_response, &pending.reg_state)
-        .map_err(|e| anyhow::anyhow!("Failed to finish registration: {}", e))?;
+        .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to finish registration: {}", e)))?;
 
     let credential_id = seckey.cred_id().clone();
-    if db::credential_exists(&state.db, &credential_id).await? {
+    if db::credential_exists(&state.db, &credential_id).await
+        .map_err(|e| RegisterError::Internal(e))? {
         tracing::warn!("Registration rejected - credential already registered");
-        return Err(anyhow::anyhow!(
-            "This security key is already registered. Each key can only be registered once."
-        ).into());
+        return Err(RegisterError::CredentialAlreadyRegistered);
     }
 
     state.reg_states.write().await.remove(&session_key);
 
     let user_unique_id = Uuid::parse_str(&session_key)
-        .map_err(|e| anyhow::anyhow!("Failed to parse user ID: {}", e))?;
+        .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to parse user ID: {}", e)))?;
 
-    let user_id = db::create_user(&state.db, &user_unique_id.as_bytes()[..], pending.alpha_code_id)
+    let legal = db::SignupLegalContext {
+        ip_address: Some(connect_info.0.ip().to_string()),
+        user_agent: headers.get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string()),
+    };
+
+    let user_id = db::create_user(&state.db, &user_unique_id.as_bytes()[..], pending.alpha_code_id, &legal)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create user: {}", e))?;
+        .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to create user: {}", e)))?;
 
     db::redeem_alpha_code(&state.db, pending.alpha_code_id)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to redeem alpha code: {}", e))?;
+        .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to redeem alpha code: {}", e)))?;
 
     tracing::debug!("User registered and alpha code redeemed");
 
     let passkey_json = serde_json::to_vec(&seckey)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize credential: {}", e))?;
+        .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to serialize credential: {}", e)))?;
 
     db::save_fido2_credential(
         &state.db,
@@ -352,7 +402,8 @@ pub async fn finish_register_handler(
         None,
         None,
     )
-    .await?;
+    .await
+    .map_err(|e| RegisterError::Internal(e))?;
 
     let credential_id_hex = hex::encode(&credential_id);
 
@@ -360,7 +411,9 @@ pub async fn finish_register_handler(
     let csrf_token = crate::csrf::derive_csrf_token(&session_id, &state.csrf_secret);
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
-    db::create_auth_session(&state.db, &session_id, &credential_id, expires_at).await?;
+    db::create_auth_session(&state.db, &session_id, &credential_id, expires_at)
+        .await
+        .map_err(|e| RegisterError::Internal(e))?;
 
     tracing::debug!("Registration complete with automatic session creation (expires in {} hours)", state.session_timeout_hours);
 
@@ -376,7 +429,7 @@ pub async fn finish_register_handler(
     let (session_cookie, csrf_cookie) = build_auth_cookies(&session_id, &csrf_token, state.session_timeout_hours, secure);
 
     let body = serde_json::to_string(&response_body)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))?;
+        .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to serialize response: {}", e)))?;
 
     // Use HeaderMap with append to properly set multiple Set-Cookie headers
     let mut headers = HeaderMap::new();
