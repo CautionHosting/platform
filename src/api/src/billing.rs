@@ -390,11 +390,86 @@ pub async fn get_paddle_client_token(
 pub struct PaddleTransactionCompletedRequest {
     transaction_id: String,
     #[serde(default)]
-    payment_method_id: Option<String>,
-    #[serde(default)]
     card_last4: Option<String>,
     #[serde(default)]
     card_brand: Option<String>,
+}
+
+fn is_completed_paddle_transaction_status(status: &str) -> bool {
+    matches!(status, "completed" | "paid" | "billed")
+}
+
+fn extract_paddle_payment_method_id(txn: &serde_json::Value) -> Option<String> {
+    txn["data"]["payments"]
+        .as_array()
+        .and_then(|payments| {
+            payments.iter().find_map(|payment| {
+                payment["payment_method_id"]
+                    .as_str()
+                    .or_else(|| payment["stored_payment_method_id"].as_str())
+                    .map(|id| id.to_string())
+            })
+        })
+}
+
+fn transaction_contains_price_id(txn: &serde_json::Value, expected_price_id: &str) -> bool {
+    let matches_price = |item: &serde_json::Value| {
+        item["price_id"].as_str() == Some(expected_price_id)
+            || item["price"]["id"].as_str() == Some(expected_price_id)
+    };
+
+    txn["data"]["items"]
+        .as_array()
+        .map(|items| items.iter().any(matches_price))
+        .unwrap_or(false)
+        || txn["data"]["details"]["line_items"]
+            .as_array()
+            .map(|items| items.iter().any(matches_price))
+            .unwrap_or(false)
+}
+
+fn validate_paddle_setup_transaction(
+    txn: &serde_json::Value,
+    expected_setup_price_id: &str,
+    expected_customer_id: Option<&str>,
+    expected_customer_email: Option<&str>,
+) -> Result<(String, Option<String>), String> {
+    let status = txn["data"]["status"].as_str().unwrap_or("");
+    if !is_completed_paddle_transaction_status(status) {
+        return Err(format!("Transaction not completed (status: {})", status));
+    }
+
+    if txn["data"]["collection_mode"].as_str().unwrap_or("") != "automatic" {
+        return Err("Transaction is not an automatic checkout".to_string());
+    }
+
+    if !transaction_contains_price_id(txn, expected_setup_price_id) {
+        return Err("Transaction does not match the configured setup price".to_string());
+    }
+
+    let customer_id = txn["data"]["customer_id"]
+        .as_str()
+        .ok_or_else(|| "Transaction has no customer_id".to_string())?;
+
+    if let Some(expected_customer_id) = expected_customer_id {
+        if customer_id != expected_customer_id {
+            return Err("Transaction does not belong to this account".to_string());
+        }
+    } else {
+        let expected_customer_email = expected_customer_email
+            .ok_or_else(|| "No billing customer or verified email on file".to_string())?;
+        let txn_customer_email = txn["data"]["customer"]["email"]
+            .as_str()
+            .ok_or_else(|| "Transaction customer email is unavailable".to_string())?;
+        if !txn_customer_email.eq_ignore_ascii_case(expected_customer_email) {
+            return Err("Transaction does not belong to this account".to_string());
+        }
+    }
+
+    Ok((
+        customer_id.to_string(),
+        extract_paddle_payment_method_id(txn),
+    ))
 }
 
 /// Frontend callback after Paddle checkout completion — records payment method reference locally
@@ -406,6 +481,47 @@ pub async fn paddle_transaction_completed(
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let paddle_api_key = state.paddle_api_key.as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "Paddle API not configured".to_string()))?;
+    let setup_price_id = state.paddle_setup_price_id.as_ref()
+        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "Paddle setup price not configured".to_string()))?;
+
+    let existing_paddle_customer_id: Option<String> = sqlx::query_scalar(
+        "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1"
+    )
+    .bind(org_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+    .flatten();
+
+    let user_email: Option<String> = if existing_paddle_customer_id.is_none() {
+        sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+            .bind(auth.user_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
+            .flatten()
+    } else {
+        None
+    };
+
+    let txn = fetch_paddle_transaction(
+        &state.paddle_api_url,
+        paddle_api_key,
+        &req.transaction_id,
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to verify transaction: {}", e)))?;
+
+    let (customer_id, paddle_payment_method_id) = validate_paddle_setup_transaction(
+        &txn,
+        setup_price_id,
+        existing_paddle_customer_id.as_deref(),
+        user_email.as_deref(),
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     // Check if the org already has any active payment methods
     let existing_count: i64 = sqlx::query_scalar(
@@ -426,7 +542,7 @@ pub async fn paddle_transaction_completed(
     .bind(Uuid::new_v4())
     .bind(org_id)
     .bind(&req.transaction_id)
-    .bind(&req.payment_method_id)
+    .bind(&paddle_payment_method_id)
     .bind(&req.card_last4)
     .bind(&req.card_brand)
     .bind(is_primary)
@@ -434,25 +550,18 @@ pub async fn paddle_transaction_completed(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
-    // Look up the Paddle customer ID from this transaction and store it
-    if let Some(ref api_key) = state.paddle_api_key {
-        if let Ok(customer_id) = fetch_paddle_customer_id_from_txn(
-            &state.paddle_api_url, api_key, &req.transaction_id
-        ).await {
-            if let Err(e) = sqlx::query(
-                "INSERT INTO billing_config (organization_id, paddle_customer_id)
-                 VALUES ($1, $2)
-                 ON CONFLICT (organization_id) DO UPDATE SET paddle_customer_id = $2"
-            )
-            .bind(org_id)
-            .bind(&customer_id)
-            .execute(&state.db)
-            .await {
-                tracing::error!("Failed to store paddle_customer_id for org {}: {}", org_id, e);
-            } else {
-                tracing::info!("Stored paddle_customer_id {} for org {}", customer_id, org_id);
-            }
-        }
+    if let Err(e) = sqlx::query(
+        "INSERT INTO billing_config (organization_id, paddle_customer_id)
+         VALUES ($1, $2)
+         ON CONFLICT (organization_id) DO UPDATE SET paddle_customer_id = $2"
+    )
+    .bind(org_id)
+    .bind(&customer_id)
+    .execute(&state.db)
+    .await {
+        tracing::error!("Failed to store paddle_customer_id for org {}: {}", org_id, e);
+    } else {
+        tracing::info!("Stored paddle_customer_id {} for org {}", customer_id, org_id);
     }
 
     tracing::info!(
@@ -466,15 +575,15 @@ pub async fn paddle_transaction_completed(
     })))
 }
 
-/// Fetch the customer_id from a Paddle transaction
-pub async fn fetch_paddle_customer_id_from_txn(
+async fn fetch_paddle_transaction(
     api_url: &str,
     api_key: &str,
     transaction_id: &str,
-) -> Result<String, String> {
+) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("{}/transactions/{}", api_url, transaction_id))
+        .query(&[("include", "customer")])
         .header("Authorization", format!("Bearer {}", api_key))
         .send()
         .await
@@ -484,8 +593,17 @@ pub async fn fetch_paddle_customer_id_from_txn(
         return Err(format!("Paddle API returned {}", resp.status()));
     }
 
-    let body: serde_json::Value = resp.json().await
-        .map_err(|e| format!("Parse error: {}", e))?;
+    resp.json().await
+        .map_err(|e| format!("Parse error: {}", e))
+}
+
+/// Fetch the customer_id from a Paddle transaction
+pub async fn fetch_paddle_customer_id_from_txn(
+    api_url: &str,
+    api_key: &str,
+    transaction_id: &str,
+) -> Result<String, String> {
+    let body = fetch_paddle_transaction(api_url, api_key, transaction_id).await?;
 
     body["data"]["customer_id"].as_str()
         .map(|s| s.to_string())
@@ -1060,4 +1178,134 @@ pub async fn put_auto_topup(
         "enabled": req.enabled,
         "amount_dollars": req.amount_dollars,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        extract_paddle_payment_method_id,
+        transaction_contains_price_id,
+        validate_paddle_setup_transaction,
+    };
+
+    fn sample_transaction() -> serde_json::Value {
+        serde_json::json!({
+            "data": {
+                "status": "completed",
+                "collection_mode": "automatic",
+                "customer_id": "ctm_123",
+                "customer": {
+                    "email": "user@example.com"
+                },
+                "items": [
+                    {
+                        "price": {
+                            "id": "pri_setup"
+                        }
+                    }
+                ],
+                "details": {
+                    "line_items": []
+                },
+                "payments": [
+                    {
+                        "payment_method_id": "paymtd_123"
+                    }
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn extracts_payment_method_id_from_transaction() {
+        let txn = sample_transaction();
+        assert_eq!(
+            extract_paddle_payment_method_id(&txn).as_deref(),
+            Some("paymtd_123")
+        );
+    }
+
+    #[test]
+    fn finds_setup_price_in_transaction_items() {
+        let txn = sample_transaction();
+        assert!(transaction_contains_price_id(&txn, "pri_setup"));
+        assert!(!transaction_contains_price_id(&txn, "pri_other"));
+    }
+
+    #[test]
+    fn accepts_matching_existing_customer() {
+        let txn = sample_transaction();
+        let (customer_id, payment_method_id) = validate_paddle_setup_transaction(
+            &txn,
+            "pri_setup",
+            Some("ctm_123"),
+            None,
+        )
+        .expect("transaction should validate");
+
+        assert_eq!(customer_id, "ctm_123");
+        assert_eq!(payment_method_id.as_deref(), Some("paymtd_123"));
+    }
+
+    #[test]
+    fn accepts_first_time_setup_with_matching_email() {
+        let txn = sample_transaction();
+        let (customer_id, _) = validate_paddle_setup_transaction(
+            &txn,
+            "pri_setup",
+            None,
+            Some("USER@example.com"),
+        )
+        .expect("transaction should validate");
+
+        assert_eq!(customer_id, "ctm_123");
+    }
+
+    #[test]
+    fn rejects_transaction_for_different_customer() {
+        let txn = sample_transaction();
+        let err = validate_paddle_setup_transaction(
+            &txn,
+            "pri_setup",
+            Some("ctm_other"),
+            None,
+        )
+        .expect_err("transaction should be rejected");
+
+        assert!(err.contains("does not belong to this account"));
+    }
+
+    #[test]
+    fn rejects_transaction_without_setup_price() {
+        let txn = serde_json::json!({
+            "data": {
+                "status": "completed",
+                "collection_mode": "automatic",
+                "customer_id": "ctm_123",
+                "customer": {
+                    "email": "user@example.com"
+                },
+                "items": [
+                    {
+                        "price": {
+                            "id": "pri_other"
+                        }
+                    }
+                ],
+                "details": {
+                    "line_items": []
+                },
+                "payments": []
+            }
+        });
+        let err = validate_paddle_setup_transaction(
+            &txn,
+            "pri_setup",
+            None,
+            Some("user@example.com"),
+        )
+        .expect_err("transaction should be rejected");
+
+        assert!(err.contains("setup price"));
+    }
 }
