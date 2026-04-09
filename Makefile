@@ -597,6 +597,9 @@ setup-builder:
 	if [ -n "$(BUILDER_VPC_ID)" ]; then \
 		TF_ARGS="$$TF_ARGS -var=builder_vpc_id=$(BUILDER_VPC_ID)"; \
 	fi && \
+	if [ -n "$(AWS_PROFILE)" ]; then \
+		unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; \
+	fi && \
 	terraform init && \
 	terraform apply -auto-approve $$TF_ARGS
 	@cd infra-bootstrap && \
