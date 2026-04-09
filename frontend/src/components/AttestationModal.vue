@@ -177,6 +177,7 @@ export default {
 
       try {
         const nonce = crypto.getRandomValues(new Uint8Array(32))
+        const nonceB64 = btoa(String.fromCharCode(...nonce))
         addCheck('nonce', `Challenge nonce: ${bytesToHex(nonce)}`, 'success')
 
         addCheck('request', 'Requesting attestation...', 'pending')
@@ -185,7 +186,7 @@ export default {
           headers: {
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({ nonce: Array.from(nonce) })
+          body: JSON.stringify({ nonce: nonceB64 })
         })
 
         if (!response.ok) throw new Error(`Request failed: ${response.status}`)
