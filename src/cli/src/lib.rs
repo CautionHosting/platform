@@ -2855,6 +2855,16 @@ build: docker build -t app .
         // Authenticate with Caution
         let auth_config = self.ensure_authenticated().await?;
 
+        let create_cmd = if PathBuf::from("Procfile").exists() {
+            self.read_procfile()?
+        } else if PathBuf::from("Containerfile").exists() {
+            "docker build -f Containerfile -t app .".to_string()
+        } else if PathBuf::from("Dockerfile").exists() {
+            "docker build -f Dockerfile -t app .".to_string()
+        } else {
+            "echo 'Please configure your Procfile'".to_string()
+        };
+
         // Create app on Caution
         println!("\nCreating app on Caution...");
         let mut loader = Loader::new("Creating app", LoaderStyle::Processing);
@@ -2862,7 +2872,7 @@ build: docker build -t app .
         // Create the app first
         let create_body = serde_json::json!({
             "name": app_name,
-            "cmd": "echo 'Please configure your Procfile'"
+            "cmd": create_cmd
         });
 
         let create_response = self.client

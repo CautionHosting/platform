@@ -119,12 +119,24 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
 
     if let Some(ref managed_onprem) = request.managed_onprem {
         tracing::info!("Using managed on-prem deployment flow");
-        let eif_s3_path = upload_eif_to_customer_bucket(
-            &request.eif_path,
-            &request.resource_id,
-            &managed_onprem.eif_bucket,
-            request.credentials.as_ref().context("Credentials required for managed on-prem")?,
-        ).await.context("Failed to upload EIF to customer bucket")?;
+        let customer_creds = request.credentials.as_ref()
+            .context("Credentials required for managed on-prem")?;
+        let eif_s3_path = if let Some(ref s3_key) = request.eif_s3_key {
+            upload_eif_from_platform_s3_to_customer_bucket(
+                s3_key,
+                &request.resource_id,
+                &managed_onprem.eif_bucket,
+                customer_creds,
+                &request.aws_account_id,
+            ).await
+        } else {
+            upload_eif_to_customer_bucket(
+                &request.eif_path,
+                &request.resource_id,
+                &managed_onprem.eif_bucket,
+                customer_creds,
+            ).await
+        }.context("Failed to upload EIF to customer bucket")?;
         provision_managed_onprem(&request, &eif_s3_path, &config).await
     } else if let Some(ref s3_key) = request.eif_s3_key {
         // EIF already in S3 (uploaded by dedicated builder)
@@ -799,6 +811,70 @@ async fn upload_eif_to_customer_bucket(
     }
 
     Err(last_err.unwrap()).context("Failed to upload EIF to customer bucket after retries")
+}
+
+async fn upload_eif_from_platform_s3_to_customer_bucket(
+    source_s3_key: &str,
+    resource_id: &Uuid,
+    bucket_name: &str,
+    credentials: &AwsCredentials,
+    aws_account_id: &str,
+) -> Result<String> {
+    tracing::info!(
+        "Copying EIF from platform bucket to customer bucket: source_key={}, bucket={}",
+        source_s3_key,
+        bucket_name
+    );
+
+    let source_bucket = std::env::var("EIF_S3_BUCKET")
+        .unwrap_or_else(|_| format!("caution-eif-storage-{}", aws_account_id));
+    let platform_config = aws_config::load_from_env().await;
+    let platform_client = aws_sdk_s3::Client::new(&platform_config);
+
+    let source_obj = platform_client
+        .get_object()
+        .bucket(&source_bucket)
+        .key(source_s3_key)
+        .send()
+        .await
+        .context("Failed to download EIF from platform bucket")?;
+
+    let data = source_obj
+        .body
+        .collect()
+        .await
+        .context("Failed to read EIF from platform bucket")?;
+
+    let s3_key = format!("{}.eif", resource_id);
+
+    let creds = aws_sdk_s3::config::Credentials::new(
+        &credentials.access_key_id,
+        &credentials.secret_access_key,
+        None,
+        None,
+        "caution-managed-onprem",
+    );
+
+    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_config::Region::new(credentials.region.clone()))
+        .credentials_provider(creds)
+        .load()
+        .await;
+
+    let client = aws_sdk_s3::Client::new(&config);
+
+    client
+        .put_object()
+        .bucket(bucket_name)
+        .key(&s3_key)
+        .body(data.into_bytes().into())
+        .send()
+        .await
+        .context("Failed to upload EIF to customer bucket")?;
+
+    let s3_path = format!("s3://{}/{}", bucket_name, s3_key);
+    tracing::info!("EIF copied successfully to customer bucket: {}", s3_path);
+    Ok(s3_path)
 }
 
 async fn provision_nitro_enclave(

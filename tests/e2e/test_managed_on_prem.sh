@@ -23,12 +23,16 @@
 set -euo pipefail
 
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
+API_URL="${API_URL:-http://127.0.0.1:8080}"
 CAUTION_BIN="${CAUTION_BIN:-caution}"
 DEMO_REPO="${DEMO_REPO:-https://codeberg.org/caution/demo-hello-world-enclave.git}"
+ONPREM_TEST_REGION="${ONPREM_TEST_REGION:-us-east-1}"
 WORK_DIR=$(mktemp -d)
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/api-cli"
 SSH_KEY_PATH="$WORK_DIR/test_key"
 RESOURCE_ID=""
+ORG_ID=""
+PROVISIONER_DEPLOYMENT_ID=""
 APP_NAME=""
 LOG_DIR="tests/e2e/logs"
 LOG_FILE="$LOG_DIR/e2e-onprem-$(date +%Y%m%d-%H%M%S).log"
@@ -49,6 +53,9 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 if [ -n "${ONPREM_AWS_ACCESS_KEY_ID:-}" ] && [ -n "${ONPREM_AWS_SECRET_ACCESS_KEY:-}" ]; then
     export AWS_ACCESS_KEY_ID="$ONPREM_AWS_ACCESS_KEY_ID"
     export AWS_SECRET_ACCESS_KEY="$ONPREM_AWS_SECRET_ACCESS_KEY"
+    if [ -n "${ONPREM_AWS_SESSION_TOKEN:-}" ]; then
+        export AWS_SESSION_TOKEN="$ONPREM_AWS_SESSION_TOKEN"
+    fi
     echo "[e2e-onprem] Using ONPREM_AWS_* credentials for provisioner"
 elif [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
     if [ ! -f "${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials}" ]; then
@@ -80,6 +87,15 @@ cleanup() {
     if [ -n "$RESOURCE_ID" ]; then
         echo "Running managed on-prem teardown for $RESOURCE_ID..."
         "$CAUTION_BIN" -u "$GATEWAY_URL" teardown --managed-on-prem --force 2>/dev/null || true
+    elif [ -n "$PROVISIONER_DEPLOYMENT_ID" ]; then
+        echo "Running provisioner teardown for deployment $PROVISIONER_DEPLOYMENT_ID..."
+        docker run --rm \
+            -e "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" \
+            -e "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" \
+            -e "AWS_REGION=$ONPREM_TEST_REGION" \
+            -e "TEARDOWN=true" \
+            -e "DEPLOYMENT_ID=$PROVISIONER_DEPLOYMENT_ID" \
+            codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest 2>/dev/null || true
     fi
 
     # Remove temp work dir
@@ -172,6 +188,51 @@ cat > "$CONFIG_DIR/config.json" <<EOF
 EOF
 step_pass "E2E login (user: $USER_ID)"
 
+# Mark test user as onboarded so API onboarding middleware doesn't block requests (402)
+log "Marking test user as onboarded..."
+docker exec postgres-test psql -U postgres -d caution_test -c "
+UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';
+" >/dev/null 2>&1 || log "  Warning: could not mark user as onboarded"
+
+# Trigger API-side account provisioning now that onboarding flags are set
+curl -sf "$API_URL/resources" -H "X-Session-ID: $SESSION_ID" >/dev/null 2>&1 || log "  Warning: could not trigger org provisioning"
+
+# Get org ID for the test user
+for i in $(seq 1 10); do
+    ORG_ID=$(docker exec postgres-test psql -U postgres -d caution_test -t -A -c "
+SELECT organization_id FROM organization_members WHERE user_id = '$USER_ID' LIMIT 1;
+" 2>/dev/null | head -1 | tr -d ' \n')
+    [ -n "$ORG_ID" ] && break
+    sleep 1
+done
+log "  Org ID: $ORG_ID"
+
+# Seed credits for deploy gate ($25 minimum required)
+log "Seeding test credits for deploy gate..."
+docker exec postgres-test psql -U postgres -d caution_test -c "
+INSERT INTO wallet_balance (organization_id, balance_cents) VALUES ('$ORG_ID', 10000)
+ON CONFLICT (organization_id) DO UPDATE SET balance_cents = 10000;
+" >/dev/null 2>&1 || log "  Warning: could not seed credits (wallet_balance table may not exist)"
+
+# Seed active subscription for managed on-prem deploy gate
+log "Seeding active subscription for managed on-prem deploy gate..."
+docker exec postgres-test psql -U postgres -d caution_test -c "
+DELETE FROM subscription_billing_events WHERE user_id = '$USER_ID';
+DELETE FROM subscriptions WHERE user_id = '$USER_ID';
+INSERT INTO subscriptions (
+    user_id, organization_id, tier, billing_period,
+    max_vcpus, max_apps, price_cents_per_cycle, status,
+    started_at, current_period_start, current_period_end,
+    next_billing_at, created_at, updated_at
+)
+VALUES (
+    '$USER_ID', '$ORG_ID', 'starter', 'monthly',
+    4, 2, 2900, 'active',
+    NOW(), NOW(), NOW() + interval '30 days',
+    NOW() + interval '30 days', NOW(), NOW()
+);
+" >/dev/null 2>&1 || log "  Warning: could not seed subscription"
+
 # ── Step 3: Add SSH Key ──────────────────────────────────────────────
 
 STEP_NUM=3
@@ -208,11 +269,12 @@ step_pass "Clone demo app"
 
 STEP_NUM=5
 APP_NAME="e2e-onprem-$(date +%s)"
-log "Running caution init --managed-on-prem --region us-east-1 --name $APP_NAME..."
+log "Running caution init --managed-on-prem --region $ONPREM_TEST_REGION --name $APP_NAME..."
 set +e
-INIT_OUTPUT=$(echo y | "$CAUTION_BIN" -u "$GATEWAY_URL" init --managed-on-prem --region us-east-1 --name "$APP_NAME" 2>&1)
+INIT_OUTPUT=$(echo y | "$CAUTION_BIN" -u "$GATEWAY_URL" init --managed-on-prem --region "$ONPREM_TEST_REGION" --name "$APP_NAME" 2>&1)
 INIT_STATUS=$?
 set -e
+PROVISIONER_DEPLOYMENT_ID=$(echo "$INIT_OUTPUT" | grep -oE 'Deployment ID: [a-f0-9]+' | tail -1 | awk '{print $3}')
 
 if [ $INIT_STATUS -ne 0 ]; then
     echo "$INIT_OUTPUT"

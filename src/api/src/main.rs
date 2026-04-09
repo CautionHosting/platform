@@ -695,7 +695,8 @@ async fn create_managed_onprem_resource(
             .ok_or((StatusCode::NOT_FOUND, format!("Resource {} not found", existing_resource_id)))?;
 
         sqlx::query(
-            "UPDATE compute_resources SET configuration = $1, updated_at = NOW()
+            "UPDATE compute_resources
+             SET configuration = COALESCE(configuration, '{}'::jsonb) || $1::jsonb, updated_at = NOW()
              WHERE id = $2 AND organization_id = $3"
         )
         .bind(&configuration)
