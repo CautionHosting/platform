@@ -2,24 +2,24 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
-    extract::{State, Path, ConnectInfo},
-    http::{StatusCode, header, HeaderMap, HeaderValue},
+    extract::{ConnectInfo, Extension, Path, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use axum_extra::extract::cookie::{Cookie, SameSite};
+use serde::{Deserialize, Serialize};
+use time::Duration;
 use uuid::Uuid;
 use webauthn_rs::prelude::*;
 use webauthn_rs_proto::{ResidentKeyRequirement, UserVerificationPolicy};
-use time::Duration;
-use serde::{Serialize, Deserialize};
 
 /// Maximum number of pending challenges per store to prevent OOM from abuse
 const MAX_PENDING_CHALLENGES: usize = 10_000;
 
-use base64::Engine as _;
 use crate::db;
 use crate::types::*;
+use base64::Engine as _;
 
 pub struct AppError(anyhow::Error);
 
@@ -54,27 +54,70 @@ pub enum LoginError {
     #[error("your organization requires PIN verification")]
     PinRequired,
     #[error("failed to parse pubkey credential")]
-    ParsePubkeyCredential { #[source] source: serde_json::Error },
+    ParsePubkeyCredential {
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("could not find user ID for: {provided_bytes:?}")]
-    DbGetUserIdByCredential { provided_bytes: Vec<u8>, #[source] source: anyhow::Error },
+    DbGetUserIdByCredential {
+        provided_bytes: Vec<u8>,
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("could not get public key for user {user_id}")]
-    DbGetPublicKeyForCredential { user_id: Uuid, #[source] source: anyhow::Error },
+    DbGetPublicKeyForCredential {
+        user_id: Uuid,
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("could not find PIN verification info for user {user_id}")]
-    DbUserPinRequired { user_id: Uuid, #[source] source: sqlx::Error },
+    DbUserPinRequired {
+        user_id: Uuid,
+        #[source]
+        source: sqlx::Error,
+    },
     #[error("could not update fido2 credentials for user {user_id}")]
-    DbUpdateFido2Credential { user_id: Uuid, #[source] source: anyhow::Error },
+    DbUpdateFido2Credential {
+        user_id: Uuid,
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("could not create auth session for user {user_id}")]
-    DbCreateAuthSession { user_id: Uuid, #[source] source: anyhow::Error },
+    DbCreateAuthSession {
+        user_id: Uuid,
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("could not complete QR login token for user {user_id}")]
-    DbCompleteQrLoginToken { user_id: Uuid, #[source] source: anyhow::Error },
+    DbCompleteQrLoginToken {
+        user_id: Uuid,
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("could not get security key for user {user_id}")]
-    ParseSecurityKey { user_id: Uuid, #[source] source: serde_json::Error },
+    ParseSecurityKey {
+        user_id: Uuid,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("security key authentication could not be finalized for user {user_id}")]
-    FinishSecurityKeyAuthentication { user_id: Uuid, #[source] source: WebauthnError },
+    FinishSecurityKeyAuthentication {
+        user_id: Uuid,
+        #[source]
+        source: WebauthnError,
+    },
     #[error("could not serialize security credential result for user {user_id}")]
-    SerializeSecurityKey { user_id: Uuid, #[source] source: serde_json::Error },
+    SerializeSecurityKey {
+        user_id: Uuid,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("could not serialize login finish response")]
-    SerializeLoginFinishResponse { user_id: Uuid, #[source] source: serde_json::Error },
+    SerializeLoginFinishResponse {
+        user_id: Uuid,
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 impl IntoResponse for LoginError {
@@ -83,15 +126,16 @@ impl IntoResponse for LoginError {
             Self::InvalidSession(_) | Self::ChallengeExpired => {
                 (StatusCode::UNAUTHORIZED, self.to_string())
             }
-            Self::PinRequired => {
-                (StatusCode::FORBIDDEN, self.to_string())
-            }
+            Self::PinRequired => (StatusCode::FORBIDDEN, self.to_string()),
             Self::ParsePubkeyCredential { source: _ } => {
                 (StatusCode::BAD_REQUEST, self.to_string())
             }
             _ => {
                 tracing::error!(?self, "Login error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "an internal error occurred".into())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "an internal error occurred".into(),
+                )
             }
         };
         (status, message).into_response()
@@ -109,19 +153,40 @@ pub enum QrLoginError {
     #[error("QR login token already claimed")]
     AlreadyClaimed,
     #[error("could not create QR login token")]
-    DbCreateToken { #[source] source: anyhow::Error },
+    DbCreateToken {
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("could not query QR login token")]
-    DbGetToken { #[source] source: anyhow::Error },
+    DbGetToken {
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("could not claim QR login token")]
-    DbClaimToken { #[source] source: anyhow::Error },
+    DbClaimToken {
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("could not query auth session")]
-    DbGetSession { #[source] source: anyhow::Error },
+    DbGetSession {
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("could not fetch credentials")]
-    DbGetCredentials { #[source] source: anyhow::Error },
+    DbGetCredentials {
+        #[source]
+        source: anyhow::Error,
+    },
     #[error("could not deserialize credential")]
-    DeserializeCredential { #[source] source: serde_json::Error },
+    DeserializeCredential {
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("could not start authentication challenge")]
-    StartAuthentication { #[source] source: WebauthnError },
+    StartAuthentication {
+        #[source]
+        source: WebauthnError,
+    },
 }
 
 impl IntoResponse for QrLoginError {
@@ -134,7 +199,10 @@ impl IntoResponse for QrLoginError {
             }
             _ => {
                 tracing::error!(?self, "QR login error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "an internal error occurred".into())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "an internal error occurred".into(),
+                )
             }
         };
         (status, message).into_response()
@@ -166,7 +234,10 @@ impl IntoResponse for SignRequestError {
             }
             Self::Internal(ref e) => {
                 tracing::error!("Sign request error: {:?}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, "an internal error occurred".into())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "an internal error occurred".into(),
+                )
             }
         };
         (status, message).into_response()
@@ -210,25 +281,352 @@ pub enum RegisterError {
 impl IntoResponse for RegisterError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            Self::InvalidAccessCode => {
-                (StatusCode::BAD_REQUEST, self.to_string())
-            }
+            Self::InvalidAccessCode => (StatusCode::BAD_REQUEST, self.to_string()),
             Self::ChallengeExpired | Self::NoRegistrationState => {
                 (StatusCode::GONE, self.to_string())
             }
-            Self::CredentialAlreadyRegistered => {
-                (StatusCode::CONFLICT, self.to_string())
-            }
-            Self::TooManyPending => {
-                (StatusCode::TOO_MANY_REQUESTS, self.to_string())
-            }
+            Self::CredentialAlreadyRegistered => (StatusCode::CONFLICT, self.to_string()),
+            Self::TooManyPending => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
             Self::Internal(ref err) => {
                 tracing::error!(?err, "Registration error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "An internal error occurred".into())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "An internal error occurred".into(),
+                )
             }
         };
         (status, message).into_response()
     }
+}
+
+#[derive(Debug, Serialize)]
+pub struct PasskeySummary {
+    pub id: Uuid,
+    pub name: Option<String>,
+    pub credential_id: String,
+    pub kind: String,
+    pub transports: Vec<String>,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+    pub is_current_session: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PasskeyFinishResponse {
+    pub status: String,
+    pub credential_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PasskeyBeginRequest {
+    pub name: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PasskeyError {
+    #[error("No matching passkey registration state found. Please start over.")]
+    NoRegistrationState,
+    #[error("Passkey registration challenge has expired. Please try again.")]
+    ChallengeExpired,
+    #[error("This passkey is already registered.")]
+    CredentialAlreadyRegistered,
+    #[error("Too many pending passkey registrations. Please try again later.")]
+    TooManyPending,
+    #[error("Passkey not found.")]
+    CredentialNotFound,
+    #[error("You must keep at least one passkey on your account.")]
+    LastCredential,
+    #[error("{0}")]
+    BadRequest(String),
+    #[error("{0}")]
+    Forbidden(String),
+    #[error(transparent)]
+    Auth(#[from] SignRequestError),
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
+impl IntoResponse for PasskeyError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Auth(err) => err.into_response(),
+            Self::NoRegistrationState => (StatusCode::GONE, self.to_string()).into_response(),
+            Self::ChallengeExpired => (StatusCode::GONE, self.to_string()).into_response(),
+            Self::CredentialAlreadyRegistered => {
+                (StatusCode::CONFLICT, self.to_string()).into_response()
+            }
+            Self::TooManyPending => {
+                (StatusCode::TOO_MANY_REQUESTS, self.to_string()).into_response()
+            }
+            Self::CredentialNotFound => (StatusCode::NOT_FOUND, self.to_string()).into_response(),
+            Self::LastCredential => {
+                (StatusCode::CONFLICT, self.to_string()).into_response()
+            }
+            Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message).into_response(),
+            Self::Forbidden(message) => (StatusCode::FORBIDDEN, message).into_response(),
+            Self::Internal(err) => {
+                tracing::error!(?err, "Passkey management error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "An internal error occurred",
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
+fn parse_transports(transport: Option<&serde_json::Value>) -> Vec<String> {
+    transport
+        .and_then(|value| value.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn passkey_kind_from_transports(transports: &[String]) -> &'static str {
+    if transports.is_empty() {
+        "Authenticator"
+    } else if transports.iter().any(|transport| transport == "internal") {
+        "Passkey"
+    } else {
+        "Security key"
+    }
+}
+
+fn get_session_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("X-Session-ID")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string())
+        .or_else(|| crate::csrf::get_cookie(headers, "caution_session"))
+}
+
+pub async fn list_passkeys_handler(
+    State(state): State<AppState>,
+    Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<PasskeySummary>>, PasskeyError> {
+    let current_session_credential = if let Some(session_id) = get_session_id_from_headers(&headers)
+    {
+        db::validate_auth_session(&state.db, &session_id).await?
+    } else {
+        None
+    };
+
+    let mut credentials = db::list_user_credentials(&state.db, user_id).await?;
+
+    if let Some(current) = current_session_credential.as_deref() {
+        let has_current = credentials
+            .iter()
+            .any(|credential| credential.credential_id.as_slice() == current);
+
+        if !has_current {
+            if let Some(current_credential) =
+                db::get_user_credential_by_credential_id(&state.db, user_id, current).await?
+            {
+                credentials.push(current_credential);
+            }
+        }
+
+        credentials.sort_by(|a, b| {
+            let a_current = a.credential_id.as_slice() == current;
+            let b_current = b.credential_id.as_slice() == current;
+            b_current
+                .cmp(&a_current)
+                .then_with(|| b.created_at.cmp(&a.created_at))
+        });
+    }
+
+    let passkeys = credentials
+        .into_iter()
+        .map(|credential| {
+            let transports = parse_transports(credential.transport.as_ref());
+            PasskeySummary {
+                id: credential.id,
+                name: credential.name,
+                credential_id: hex::encode(&credential.credential_id),
+                kind: passkey_kind_from_transports(&transports).to_string(),
+                transports,
+                created_at: credential.created_at.to_string(),
+                last_used_at: credential.last_used_at.map(|value| value.to_string()),
+                is_current_session: current_session_credential
+                    .as_deref()
+                    .map(|current| current == credential.credential_id.as_slice())
+                    .unwrap_or(false),
+            }
+        })
+        .collect();
+
+    Ok(Json(passkeys))
+}
+
+pub async fn begin_add_passkey_handler(
+    State(state): State<AppState>,
+    Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
+    Json(req): Json<PasskeyBeginRequest>,
+) -> Result<Json<RegisterBeginResponse>, PasskeyError> {
+    let name = req
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            crate::validation::validate_passkey_name(value)
+                .map_err(|e| PasskeyError::BadRequest(e.to_string()))?;
+            Ok::<String, PasskeyError>(value.to_string())
+        })
+        .transpose()?;
+
+    let registration_user = db::get_registration_user(&state.db, user_id).await?;
+    let user_handle = registration_user
+        .fido2_user_handle
+        .ok_or_else(|| anyhow::anyhow!("User is missing a WebAuthn handle"))?;
+    let user_unique_id = Uuid::from_slice(&user_handle)
+        .map_err(|e| anyhow::anyhow!("Failed to parse FIDO2 user handle: {}", e))?;
+
+    let existing_cred_ids = db::get_all_credential_ids(&state.db).await?;
+    let exclude_credentials: Vec<CredentialID> = existing_cred_ids
+        .into_iter()
+        .map(CredentialID::from)
+        .collect();
+
+    let (mut ccr, reg_state) = state
+        .webauthn
+        .start_securitykey_registration(
+            user_unique_id,
+            &registration_user.username,
+            &registration_user.username,
+            Some(exclude_credentials).filter(|v| !v.is_empty()),
+            None,
+            None,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to start passkey registration: {}", e))?;
+
+    if let Some(ref mut auth_sel) = ccr.public_key.authenticator_selection {
+        auth_sel.user_verification = UserVerificationPolicy::Preferred;
+        auth_sel.resident_key = Some(ResidentKeyRequirement::Preferred);
+    }
+    ccr.public_key.extensions = None;
+
+    let state_key = Uuid::new_v4().to_string();
+    let pending = PendingPasskeyRegistration {
+        reg_state,
+        user_id,
+        name,
+        expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(2),
+    };
+
+    {
+        let mut reg_states = state.passkey_reg_states.write().await;
+        if reg_states.len() >= MAX_PENDING_CHALLENGES {
+            return Err(PasskeyError::TooManyPending);
+        }
+        reg_states.insert(state_key.clone(), pending);
+    }
+
+    Ok(Json(RegisterBeginResponse {
+        challenge: ccr,
+        session: state_key,
+    }))
+}
+
+pub async fn finish_add_passkey_handler(
+    State(state): State<AppState>,
+    Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<PasskeyFinishResponse>, PasskeyError> {
+    let session_key = req
+        .get("session")
+        .and_then(|v| v.as_str())
+        .ok_or(PasskeyError::NoRegistrationState)?
+        .to_string();
+
+    let pending = state
+        .passkey_reg_states
+        .write()
+        .await
+        .remove(&session_key)
+        .ok_or(PasskeyError::NoRegistrationState)?;
+
+    if time::OffsetDateTime::now_utc() > pending.expires_at {
+        return Err(PasskeyError::ChallengeExpired);
+    }
+
+    if pending.user_id != user_id {
+        return Err(PasskeyError::Forbidden(
+            "Passkey registration does not belong to this session.".to_string(),
+        ));
+    }
+
+    let reg_response: RegisterPublicKeyCredential =
+        serde_json::from_value(req.clone()).map_err(|e| {
+            PasskeyError::BadRequest(format!("Failed to parse registration response: {}", e))
+        })?;
+
+    let seckey = state
+        .webauthn
+        .finish_securitykey_registration(&reg_response, &pending.reg_state)
+        .map_err(|e| anyhow::anyhow!("Failed to finish passkey registration: {}", e))?;
+
+    let credential_id = seckey.cred_id().clone();
+    if db::credential_exists(&state.db, &credential_id).await? {
+        return Err(PasskeyError::CredentialAlreadyRegistered);
+    }
+
+    let passkey_json = serde_json::to_vec(&seckey)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize credential: {}", e))?;
+    let transports = req
+        .get("transports")
+        .cloned()
+        .filter(|value| value.is_array());
+
+    db::save_fido2_credential(
+        &state.db,
+        &credential_id,
+        user_id,
+        &passkey_json,
+        pending.name.as_deref(),
+        Some("none"),
+        None,
+        0,
+        transports,
+        None,
+    )
+    .await?;
+
+    Ok(Json(PasskeyFinishResponse {
+        status: "success".to_string(),
+        credential_id: hex::encode(&credential_id),
+    }))
+}
+
+pub async fn delete_passkey_handler(
+    State(state): State<AppState>,
+    Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
+    headers: HeaderMap,
+    Path(passkey_id): Path<Uuid>,
+) -> Result<StatusCode, PasskeyError> {
+    authenticate_session(&state, &headers).await?;
+    let credentials = db::list_user_credentials(&state.db, user_id).await?;
+    if !credentials.iter().any(|credential| credential.id == passkey_id) {
+        return Err(PasskeyError::CredentialNotFound);
+    }
+
+    if credentials.len() <= 1 {
+        return Err(PasskeyError::LastCredential);
+    }
+
+    let deleted = db::delete_user_credential(&state.db, user_id, passkey_id).await?;
+    if deleted == 0 {
+        return Err(PasskeyError::CredentialNotFound);
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn begin_register_handler(
@@ -246,14 +644,18 @@ pub async fn begin_register_handler(
 
     // Fetch ALL existing credential IDs to pass as excludeCredentials
     // This prevents the same authenticator from registering multiple accounts
-    let existing_cred_ids = db::get_all_credential_ids(&state.db).await
+    let existing_cred_ids = db::get_all_credential_ids(&state.db)
+        .await
         .map_err(|e| RegisterError::Internal(e))?;
     let exclude_credentials: Vec<CredentialID> = existing_cred_ids
         .into_iter()
         .map(CredentialID::from)
         .collect();
 
-    tracing::debug!("Excluding {} existing credentials from registration", exclude_credentials.len());
+    tracing::debug!(
+        "Excluding {} existing credentials from registration",
+        exclude_credentials.len()
+    );
 
     let user_unique_id = Uuid::new_v4();
     let user_name = format!("user_{}", user_unique_id);
@@ -268,7 +670,9 @@ pub async fn begin_register_handler(
             None,
             None,
         )
-        .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to start registration: {}", e)))?;
+        .map_err(|e| {
+            RegisterError::Internal(anyhow::anyhow!("Failed to start registration: {}", e))
+        })?;
 
     // Override authenticator selection to be maximally compatible:
     // - UV Preferred: authenticators that support PIN/biometric will use it, but won't block
@@ -284,7 +688,10 @@ pub async fn begin_register_handler(
     }
     ccr.public_key.extensions = None;
 
-    tracing::debug!("Registration challenge created for RP {}", ccr.public_key.rp.id);
+    tracing::debug!(
+        "Registration challenge created for RP {}",
+        ccr.public_key.rp.id
+    );
 
     let state_key = user_unique_id.to_string();
     let pending = crate::types::PendingRegistration {
@@ -307,7 +714,12 @@ pub async fn begin_register_handler(
 }
 
 /// Build auth cookies for session and CSRF protection
-fn build_auth_cookies(session_id: &str, csrf_token: &str, max_age_hours: i64, secure: bool) -> (String, String) {
+fn build_auth_cookies(
+    session_id: &str,
+    csrf_token: &str,
+    max_age_hours: i64,
+    secure: bool,
+) -> (String, String) {
     // Session cookie: HTTP-only, Secure, SameSite=Strict
     let session_cookie = Cookie::build(("caution_session", session_id.to_string()))
         .path("/")
@@ -335,12 +747,16 @@ pub async fn finish_register_handler(
     headers: HeaderMap,
     Json(req): Json<serde_json::Value>,
 ) -> Result<Response, RegisterError> {
-    let session_key = req.get("session")
+    let session_key = req
+        .get("session")
         .and_then(|v| v.as_str())
         .ok_or(RegisterError::NoRegistrationState)?
         .to_string();
 
-    let pending = state.reg_states.read().await
+    let pending = state
+        .reg_states
+        .read()
+        .await
         .get(&session_key)
         .cloned()
         .ok_or(RegisterError::NoRegistrationState)?;
@@ -351,17 +767,26 @@ pub async fn finish_register_handler(
         return Err(RegisterError::ChallengeExpired);
     }
 
-    let reg_response: RegisterPublicKeyCredential = serde_json::from_value(req.clone())
-        .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to parse registration response: {}", e)))?;
+    let reg_response: RegisterPublicKeyCredential =
+        serde_json::from_value(req.clone()).map_err(|e| {
+            RegisterError::Internal(anyhow::anyhow!(
+                "Failed to parse registration response: {}",
+                e
+            ))
+        })?;
 
     let seckey = state
         .webauthn
         .finish_securitykey_registration(&reg_response, &pending.reg_state)
-        .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to finish registration: {}", e)))?;
+        .map_err(|e| {
+            RegisterError::Internal(anyhow::anyhow!("Failed to finish registration: {}", e))
+        })?;
 
     let credential_id = seckey.cred_id().clone();
-    if db::credential_exists(&state.db, &credential_id).await
-        .map_err(|e| RegisterError::Internal(e))? {
+    if db::credential_exists(&state.db, &credential_id)
+        .await
+        .map_err(|e| RegisterError::Internal(e))?
+    {
         tracing::warn!("Registration rejected - credential already registered");
         return Err(RegisterError::CredentialAlreadyRegistered);
     }
@@ -373,29 +798,39 @@ pub async fn finish_register_handler(
 
     let legal = db::SignupLegalContext {
         ip_address: Some(connect_info.0.ip().to_string()),
-        user_agent: headers.get(header::USER_AGENT)
+        user_agent: headers
+            .get(header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string()),
     };
 
-    let user_id = db::create_user(&state.db, &user_unique_id.as_bytes()[..], pending.alpha_code_id, &legal)
-        .await
-        .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to create user: {}", e)))?;
+    let user_id = db::create_user(
+        &state.db,
+        &user_unique_id.as_bytes()[..],
+        pending.alpha_code_id,
+        &legal,
+    )
+    .await
+    .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to create user: {}", e)))?;
 
     db::redeem_alpha_code(&state.db, pending.alpha_code_id)
         .await
-        .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to redeem alpha code: {}", e)))?;
+        .map_err(|e| {
+            RegisterError::Internal(anyhow::anyhow!("Failed to redeem alpha code: {}", e))
+        })?;
 
     tracing::debug!("User registered and alpha code redeemed");
 
-    let passkey_json = serde_json::to_vec(&seckey)
-        .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to serialize credential: {}", e)))?;
+    let passkey_json = serde_json::to_vec(&seckey).map_err(|e| {
+        RegisterError::Internal(anyhow::anyhow!("Failed to serialize credential: {}", e))
+    })?;
 
     db::save_fido2_credential(
         &state.db,
         &credential_id,
         user_id,
         &passkey_json,
+        None,
         Some("none"),
         None,
         0,
@@ -415,7 +850,10 @@ pub async fn finish_register_handler(
         .await
         .map_err(|e| RegisterError::Internal(e))?;
 
-    tracing::debug!("Registration complete with automatic session creation (expires in {} hours)", state.session_timeout_hours);
+    tracing::debug!(
+        "Registration complete with automatic session creation (expires in {} hours)",
+        state.session_timeout_hours
+    );
 
     // Build the response (session_id is in Set-Cookie header, not body)
     let response_body = RegisterFinishResponse {
@@ -425,17 +863,34 @@ pub async fn finish_register_handler(
     };
 
     // Check if we're in production (HTTPS) - use secure cookies
-    let secure = std::env::var("ENVIRONMENT").map(|e| e != "development").unwrap_or(true);
-    let (session_cookie, csrf_cookie) = build_auth_cookies(&session_id, &csrf_token, state.session_timeout_hours, secure);
+    let secure = std::env::var("ENVIRONMENT")
+        .map(|e| e != "development")
+        .unwrap_or(true);
+    let (session_cookie, csrf_cookie) = build_auth_cookies(
+        &session_id,
+        &csrf_token,
+        state.session_timeout_hours,
+        secure,
+    );
 
-    let body = serde_json::to_string(&response_body)
-        .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to serialize response: {}", e)))?;
+    let body = serde_json::to_string(&response_body).map_err(|e| {
+        RegisterError::Internal(anyhow::anyhow!("Failed to serialize response: {}", e))
+    })?;
 
     // Use HeaderMap with append to properly set multiple Set-Cookie headers
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    headers.append(header::SET_COOKIE, HeaderValue::from_str(&session_cookie).unwrap());
-    headers.append(header::SET_COOKIE, HeaderValue::from_str(&csrf_cookie).unwrap());
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&session_cookie).unwrap(),
+    );
+    headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&csrf_cookie).unwrap(),
+    );
 
     Ok((StatusCode::OK, headers, body).into_response())
 }
@@ -443,8 +898,8 @@ pub async fn finish_register_handler(
 pub async fn begin_login_handler(
     State(state): State<AppState>,
 ) -> Result<Json<LoginBeginResponse>, AppError> {
-
-    let all_public_keys = db::get_all_credential_public_keys(&state.db).await
+    let all_public_keys = db::get_all_credential_public_keys(&state.db)
+        .await
         .map_err(|e| {
             tracing::error!("Failed to fetch credentials from DB: {:?}", e);
             anyhow::anyhow!("Failed to fetch credentials: {}", e)
@@ -454,16 +909,18 @@ pub async fn begin_login_handler(
 
     let mut allow_credentials = Vec::new();
     for (i, cred_bytes) in all_public_keys.iter().enumerate() {
-        let seckey: SecurityKey = serde_json::from_slice(cred_bytes)
-            .map_err(|e| {
-                tracing::error!("Failed to deserialize credential {}", i);
-                anyhow::anyhow!("Failed to deserialize credential: {}", e)
-            })?;
+        let seckey: SecurityKey = serde_json::from_slice(cred_bytes).map_err(|e| {
+            tracing::error!("Failed to deserialize credential {}", i);
+            anyhow::anyhow!("Failed to deserialize credential: {}", e)
+        })?;
 
         allow_credentials.push(seckey);
     }
 
-    tracing::debug!("Starting authentication challenge with {} credentials", allow_credentials.len());
+    tracing::debug!(
+        "Starting authentication challenge with {} credentials",
+        allow_credentials.len()
+    );
 
     // Use securitykey auth which allows flexible UV policy (unlike passkey which requires UV)
     let (mut rcr, auth_state) = state
@@ -507,12 +964,16 @@ pub async fn finish_login_handler(
     State(state): State<AppState>,
     Json(req): Json<serde_json::Value>,
 ) -> Result<Response, LoginError> {
-    let session_key = req.get("session")
+    let session_key = req
+        .get("session")
         .and_then(|v| v.as_str())
         .ok_or_else(|| LoginError::InvalidSession("missing session field".into()))?
         .to_string();
 
-    let pending = state.auth_states.read().await
+    let pending = state
+        .auth_states
+        .read()
+        .await
         .get(&session_key)
         .cloned()
         .ok_or_else(|| LoginError::InvalidSession(session_key.clone()))?;
@@ -542,10 +1003,7 @@ pub async fn finish_login_handler(
 
     let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
         .await
-        .map_err(|source| LoginError::DbGetPublicKeyForCredential {
-            user_id,
-            source,
-        })?;
+        .map_err(|source| LoginError::DbGetPublicKeyForCredential { user_id, source })?;
     let mut seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
         .map_err(|source| LoginError::ParseSecurityKey { user_id, source })?;
 
@@ -554,24 +1012,22 @@ pub async fn finish_login_handler(
     let auth_result = state
         .webauthn
         .finish_securitykey_authentication(&auth_response, &auth_state)
-        .map_err(|source| {
-            LoginError::FinishSecurityKeyAuthentication {
-                user_id,
-                source,
-            }
-        })?;
+        .map_err(|source| LoginError::FinishSecurityKeyAuthentication { user_id, source })?;
 
-    tracing::debug!(user_verified = auth_result.user_verified(), "Authentication successful");
+    tracing::debug!(
+        user_verified = auth_result.user_verified(),
+        "Authentication successful"
+    );
 
     // Check if user's org requires PIN verification.
     let requires_pin = db::user_requires_pin(&state.db, user_id)
         .await
-        .map_err(|source| LoginError::DbUserPinRequired {
-            user_id,
-            source,
-        })?;
+        .map_err(|source| LoginError::DbUserPinRequired { user_id, source })?;
     if requires_pin && !auth_result.user_verified() {
-        tracing::warn!("User {} login rejected: org requires PIN but user_verified=false", user_id);
+        tracing::warn!(
+            "User {} login rejected: org requires PIN but user_verified=false",
+            user_id
+        );
         return Err(LoginError::PinRequired);
     }
 
@@ -604,7 +1060,10 @@ pub async fn finish_login_handler(
         .map_err(|source| LoginError::DbCreateAuthSession { user_id, source })?;
 
     let credential_id_hex = hex::encode(&credential_id_bytes);
-    tracing::debug!("Login complete (session expires in {} hours)", state.session_timeout_hours);
+    tracing::debug!(
+        "Login complete (session expires in {} hours)",
+        state.session_timeout_hours
+    );
 
     // Build the response (session_id is in Set-Cookie header, not body)
     let response_body = LoginFinishResponse {
@@ -613,17 +1072,33 @@ pub async fn finish_login_handler(
     };
 
     // Check if we're in production (HTTPS) - use secure cookies
-    let secure = std::env::var("ENVIRONMENT").map(|e| e != "development").unwrap_or(true);
-    let (session_cookie, csrf_cookie) = build_auth_cookies(&session_id, &csrf_token, state.session_timeout_hours, secure);
+    let secure = std::env::var("ENVIRONMENT")
+        .map(|e| e != "development")
+        .unwrap_or(true);
+    let (session_cookie, csrf_cookie) = build_auth_cookies(
+        &session_id,
+        &csrf_token,
+        state.session_timeout_hours,
+        secure,
+    );
 
     let body = serde_json::to_string(&response_body)
         .map_err(|source| LoginError::SerializeLoginFinishResponse { user_id, source })?;
 
     // Use HeaderMap with append to properly set multiple Set-Cookie headers
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    headers.append(header::SET_COOKIE, HeaderValue::from_str(&session_cookie).unwrap());
-    headers.append(header::SET_COOKIE, HeaderValue::from_str(&csrf_cookie).unwrap());
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&session_cookie).unwrap(),
+    );
+    headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&csrf_cookie).unwrap(),
+    );
 
     Ok((StatusCode::OK, headers, body).into_response())
 }
@@ -659,7 +1134,11 @@ pub async fn add_ssh_key_handler(
     crate::validation::validate_ssh_public_key(&req.public_key)
         .map_err(|e| anyhow::anyhow!("Invalid SSH public key: {}", e))?;
 
-    let key_type = req.public_key.trim().split_whitespace().next()
+    let key_type = req
+        .public_key
+        .trim()
+        .split_whitespace()
+        .next()
         .ok_or_else(|| anyhow::anyhow!("Failed to parse key type"))?;
 
     let key_id = crate::db::add_ssh_key(
@@ -674,7 +1153,7 @@ pub async fn add_ssh_key_handler(
     let fingerprint = crate::db::generate_ssh_fingerprint(&req.public_key)?;
 
     tracing::debug!("SSH key added");
-    
+
     Ok(Json(AddSshKeyResponse {
         id: key_id,
         fingerprint,
@@ -692,7 +1171,7 @@ pub async fn list_ssh_keys_handler(
         .ok_or_else(|| anyhow::anyhow!("Missing or invalid user ID"))?;
 
     let keys = crate::db::list_ssh_keys(&state.db, user_id).await?;
-    
+
     Ok(Json(ListSshKeysResponse { keys }))
 }
 
@@ -737,13 +1216,16 @@ async fn create_sign_challenge(
     let cred_bytes = db::get_credential_public_key(&state.db, credential_id)
         .await
         .map_err(|e| SignRequestError::Internal(e.to_string()))?;
-    let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
-        .map_err(|e| SignRequestError::Internal(format!("Failed to deserialize credential: {}", e)))?;
+    let seckey: SecurityKey = serde_json::from_slice(&cred_bytes).map_err(|e| {
+        SignRequestError::Internal(format!("Failed to deserialize credential: {}", e))
+    })?;
 
     let (mut rcr, auth_state) = state
         .webauthn
         .start_securitykey_authentication(&[seckey])
-        .map_err(|e| SignRequestError::Internal(format!("Failed to start signing challenge: {}", e)))?;
+        .map_err(|e| {
+            SignRequestError::Internal(format!("Failed to start signing challenge: {}", e))
+        })?;
 
     if requires_pin {
         rcr.public_key.user_verification = UserVerificationPolicy::Required;
@@ -764,7 +1246,9 @@ async fn create_sign_challenge(
     {
         let mut sign_challenges = state.sign_challenges.write().await;
         if sign_challenges.len() >= MAX_PENDING_CHALLENGES {
-            return Err(SignRequestError::Internal("Too many pending sign challenges".to_string()));
+            return Err(SignRequestError::Internal(
+                "Too many pending sign challenges".to_string(),
+            ));
         }
         sign_challenges.insert(challenge_id.clone(), pending);
     }
@@ -827,9 +1311,14 @@ pub async fn begin_sign_request_handler(
     let credential_id = authenticate_session(&state, &headers).await?;
 
     let (rcr, challenge_id) = create_sign_challenge(
-        &state, &credential_id,
-        req.method, req.path, req.body_hash, 2,
-    ).await?;
+        &state,
+        &credential_id,
+        req.method,
+        req.path,
+        req.body_hash,
+        2,
+    )
+    .await?;
 
     Ok(Json(crate::types::SignChallengeResponse {
         challenge: rcr,
@@ -959,8 +1448,10 @@ pub async fn qr_login_authenticate_handler(
     }
 
     match QrStatus::from_db(&row.status) {
-        Some(QrStatus::Pending) => {},
-        Some(QrStatus::Authenticated) | Some(QrStatus::Completed) => return Err(QrLoginError::AlreadyClaimed),
+        Some(QrStatus::Pending) => {}
+        Some(QrStatus::Authenticated) | Some(QrStatus::Completed) => {
+            return Err(QrLoginError::AlreadyClaimed)
+        }
         _ => return Err(QrLoginError::UnexpectedState(row.status)),
     }
 
@@ -1000,7 +1491,9 @@ pub async fn qr_login_authenticate_handler(
     {
         let mut auth_states = state.auth_states.write().await;
         if auth_states.len() >= MAX_PENDING_CHALLENGES {
-            return Err(QrLoginError::UnexpectedState("Too many pending challenges".to_string()));
+            return Err(QrLoginError::UnexpectedState(
+                "Too many pending challenges".to_string(),
+            ));
         }
         auth_states.insert(session_key.clone(), pending);
     }
@@ -1026,17 +1519,26 @@ pub async fn qr_login_authenticate_finish_handler(
         .ok_or_else(|| LoginError::InvalidSession("invalid QR login token".into()))?;
 
     match QrStatus::from_db(&row.status) {
-        Some(QrStatus::Authenticated) => {},
+        Some(QrStatus::Authenticated) => {}
         other => {
-            tracing::warn!("QR login finish called with unexpected token status: {:?} (token: {})", other, token);
-            return Err(LoginError::InvalidSession(format!("QR login token in unexpected state: {}", row.status)));
+            tracing::warn!(
+                "QR login finish called with unexpected token status: {:?} (token: {})",
+                other,
+                token
+            );
+            return Err(LoginError::InvalidSession(format!(
+                "QR login token in unexpected state: {}",
+                row.status
+            )));
         }
     }
 
     if row.auth_challenge_key.as_deref() != Some(&session_key) {
         tracing::warn!(
             "QR login finish session key mismatch: expected {:?}, got {:?} (token: {})",
-            row.auth_challenge_key, session_key, token
+            row.auth_challenge_key,
+            session_key,
+            token
         );
         return Err(LoginError::InvalidSession("session key mismatch".into()));
     }
@@ -1044,7 +1546,8 @@ pub async fn qr_login_authenticate_finish_handler(
     // Take the pending auth state (single write guard for get + remove)
     let pending = {
         let mut auth_states = state.auth_states.write().await;
-        auth_states.remove(&session_key)
+        auth_states
+            .remove(&session_key)
             .ok_or_else(|| LoginError::InvalidSession(session_key.clone()))?
     };
 
@@ -1054,8 +1557,9 @@ pub async fn qr_login_authenticate_finish_handler(
 
     let auth_state = pending.auth_state;
 
-    let auth_response: webauthn_rs::prelude::PublicKeyCredential = serde_json::from_value(req.credential)
-        .map_err(|source| LoginError::ParsePubkeyCredential { source })?;
+    let auth_response: webauthn_rs::prelude::PublicKeyCredential =
+        serde_json::from_value(req.credential)
+            .map_err(|source| LoginError::ParsePubkeyCredential { source })?;
 
     let credential_id_bytes = auth_response.raw_id.as_ref().to_vec();
 
@@ -1090,9 +1594,14 @@ pub async fn qr_login_authenticate_finish_handler(
         if let Some(true) = update_result {
             let updated_key_json = serde_json::to_vec(&seckey)
                 .map_err(|source| LoginError::SerializeSecurityKey { user_id, source })?;
-            db::update_fido2_credential(&state.db, &credential_id_bytes, &updated_key_json, auth_result.counter())
-                .await
-                .map_err(|source| LoginError::DbUpdateFido2Credential { user_id, source })?;
+            db::update_fido2_credential(
+                &state.db,
+                &credential_id_bytes,
+                &updated_key_json,
+                auth_result.counter(),
+            )
+            .await
+            .map_err(|source| LoginError::DbUpdateFido2Credential { user_id, source })?;
         }
     }
 
@@ -1139,7 +1648,10 @@ impl IntoResponse for QrSignError {
             Self::UnexpectedState(_) => (StatusCode::CONFLICT, self.to_string()),
             Self::Internal(_) => {
                 tracing::error!(?self, "QR sign error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "an internal error occurred".into())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "an internal error occurred".into(),
+                )
             }
         };
         (status, message).into_response()
@@ -1160,9 +1672,14 @@ pub async fn qr_sign_begin_handler(
     let credential_id = authenticate_session(&state, &headers).await?;
 
     let (rcr, challenge_id) = create_sign_challenge(
-        &state, &credential_id,
-        req.method.clone(), req.path.clone(), req.body_hash.clone(), 3,
-    ).await?;
+        &state,
+        &credential_id,
+        req.method.clone(),
+        req.path.clone(),
+        req.body_hash.clone(),
+        3,
+    )
+    .await?;
 
     let token = db::generate_session_id();
     let expires_at = time::OffsetDateTime::now_utc() + Duration::minutes(3);
@@ -1172,10 +1689,19 @@ pub async fn qr_sign_begin_handler(
         .map_err(|e| SignRequestError::Internal(format!("Failed to serialize challenge: {}", e)))?;
 
     db::create_qr_sign_token(
-        &state.db, &token, &challenge_id, &challenge_json,
-        &req.method, &req.path, &req.body, &req.body_hash,
-        Some(&ip_address), expires_at,
-    ).await.map_err(|e| SignRequestError::Internal(e.to_string()))?;
+        &state.db,
+        &token,
+        &challenge_id,
+        &challenge_json,
+        &req.method,
+        &req.path,
+        &req.body,
+        &req.body_hash,
+        Some(&ip_address),
+        expires_at,
+    )
+    .await
+    .map_err(|e| SignRequestError::Internal(e.to_string()))?;
 
     let url = format!("{}/qr-sign?token={}", get_rp_origin(), token);
 
@@ -1243,7 +1769,7 @@ pub async fn qr_sign_authenticate_handler(
     }
 
     match QrStatus::from_db(&row.status) {
-        Some(QrStatus::Pending) => {},
+        Some(QrStatus::Pending) => {}
         other => return Err(QrSignError::UnexpectedState(format!("{:?}", other))),
     }
 
@@ -1255,8 +1781,10 @@ pub async fn qr_sign_authenticate_handler(
         return Err(QrSignError::UnexpectedState("already claimed".into()));
     }
 
-    let challenge: webauthn_rs_proto::RequestChallengeResponse = serde_json::from_str(&row.challenge_json)
-        .map_err(|e| QrSignError::Internal(format!("Failed to deserialize challenge: {}", e)))?;
+    let challenge: webauthn_rs_proto::RequestChallengeResponse =
+        serde_json::from_str(&row.challenge_json).map_err(|e| {
+            QrSignError::Internal(format!("Failed to deserialize challenge: {}", e))
+        })?;
 
     Ok(Json(crate::types::QrSignAuthenticateResponse {
         challenge,
@@ -1278,7 +1806,7 @@ pub async fn qr_sign_authenticate_finish_handler(
     }
 
     match QrStatus::from_db(&row.status) {
-        Some(QrStatus::Authenticated) => {},
+        Some(QrStatus::Authenticated) => {}
         other => return Err(QrSignError::UnexpectedState(format!("{:?}", other))),
     }
 
@@ -1300,9 +1828,7 @@ pub async fn qr_sign_authenticate_finish_handler(
 }
 
 #[cfg(feature = "e2e-testing-unsafe")]
-pub async fn e2e_login_handler(
-    State(state): State<AppState>,
-) -> Result<Response, AppError> {
+pub async fn e2e_login_handler(State(state): State<AppState>) -> Result<Response, AppError> {
     tracing::warn!("E2E login: creating test user (this endpoint only exists in e2e builds)");
 
     let (user_id, credential_id) = db::create_e2e_user(&state.db).await?;
@@ -1341,16 +1867,32 @@ pub async fn logout_handler(
     }
 
     // Build response with cleared cookies (clear even on error so client is logged out)
-    let secure = std::env::var("ENVIRONMENT").map(|e| e != "development").unwrap_or(true);
+    let secure = std::env::var("ENVIRONMENT")
+        .map(|e| e != "development")
+        .unwrap_or(true);
     let (session_cookie, csrf_cookie) = build_logout_cookies(secure);
 
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    headers.append(header::SET_COOKIE, HeaderValue::from_str(&session_cookie).unwrap());
-    headers.append(header::SET_COOKIE, HeaderValue::from_str(&csrf_cookie).unwrap());
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&session_cookie).unwrap(),
+    );
+    headers.append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&csrf_cookie).unwrap(),
+    );
 
     if deletion_failed {
-        Ok((StatusCode::INTERNAL_SERVER_ERROR, headers, r#"{"error":"Failed to delete session"}"#).into_response())
+        Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            headers,
+            r#"{"error":"Failed to delete session"}"#,
+        )
+            .into_response())
     } else {
         Ok((StatusCode::OK, headers, r#"{"status":"logged_out"}"#).into_response())
     }

@@ -2,13 +2,29 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use anyhow::{Context, Result};
-use sqlx::PgPool;
-use rand::Rng;
-use time::OffsetDateTime;
 use base64::Engine;
+use rand::Rng;
+use sqlx::PgPool;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::types::DbSession;
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RegistrationUser {
+    pub username: String,
+    pub fido2_user_handle: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct UserCredentialRecord {
+    pub id: Uuid,
+    pub name: Option<String>,
+    pub credential_id: Vec<u8>,
+    pub transport: Option<serde_json::Value>,
+    pub created_at: OffsetDateTime,
+    pub last_used_at: Option<OffsetDateTime>,
+}
 
 pub struct SignupLegalContext {
     pub ip_address: Option<String>,
@@ -26,13 +42,12 @@ pub async fn create_user(
 ) -> Result<Uuid> {
     let username = generate_user_identifier();
 
-    let mut tx = pool.begin().await
-        .context("Failed to begin transaction")?;
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
     let user_id: Uuid = sqlx::query_scalar(
         "INSERT INTO users (fido2_user_handle, username, email, beta_code_id)
          VALUES ($1, $2, NULL, $3)
-         RETURNING id"
+         RETURNING id",
     )
     .bind(fido2_user_handle)
     .bind(&username)
@@ -42,7 +57,10 @@ pub async fn create_user(
     .map_err(|e| {
         tracing::error!("Database error creating user: {:?}", e);
         tracing::error!("Username attempted: {}", username);
-        tracing::error!("fido2_user_handle (hex): {}", hex::encode(fido2_user_handle));
+        tracing::error!(
+            "fido2_user_handle (hex): {}",
+            hex::encode(fido2_user_handle)
+        );
         anyhow::anyhow!("Failed to create user: {}", e)
     })?;
 
@@ -56,7 +74,7 @@ pub async fn create_user(
             "SELECT version FROM legal_documents
              WHERE document_type = $1 AND is_active = true
              ORDER BY effective_at DESC
-             LIMIT 1"
+             LIMIT 1",
         )
         .bind(doc_type)
         .fetch_optional(&mut *tx)
@@ -69,7 +87,7 @@ pub async fn create_user(
                 user_id, document_type, document_version,
                 event_type, event_source, occurred_at,
                 ip_address, user_agent
-            ) VALUES ($1, $2, $3, $4, 'signup', NOW(), $5::inet, $6)"
+            ) VALUES ($1, $2, $3, $4, 'signup', NOW(), $5::inet, $6)",
         )
         .bind(user_id)
         .bind(doc_type)
@@ -82,7 +100,8 @@ pub async fn create_user(
         .context(format!("Failed to record {} legal event", doc_type))?;
     }
 
-    tx.commit().await
+    tx.commit()
+        .await
         .context("Failed to commit user creation transaction")?;
 
     Ok(user_id)
@@ -93,7 +112,7 @@ pub async fn validate_alpha_code(pool: &PgPool, code: &str) -> Result<Option<Uui
         "SELECT id FROM beta_codes
          WHERE code = $1
            AND used_at IS NULL
-           AND (expires_at IS NULL OR expires_at > NOW())"
+           AND (expires_at IS NULL OR expires_at > NOW())",
     )
     .bind(code)
     .fetch_optional(pool)
@@ -108,7 +127,7 @@ pub async fn redeem_alpha_code(pool: &PgPool, code_id: Uuid) -> Result<bool> {
         "UPDATE beta_codes
          SET used_at = NOW()
          WHERE id = $1
-           AND used_at IS NULL"
+           AND used_at IS NULL",
     )
     .bind(code_id)
     .execute(pool)
@@ -119,15 +138,25 @@ pub async fn redeem_alpha_code(pool: &PgPool, code_id: Uuid) -> Result<bool> {
 }
 
 pub async fn get_user_id_by_fido2_handle(pool: &PgPool, fido2_user_handle: &[u8]) -> Result<Uuid> {
-    let user_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM users WHERE fido2_user_handle = $1"
-    )
-    .bind(fido2_user_handle)
-    .fetch_optional(pool)
-    .await
-    .context("Failed to get user ID")?;
-    
+    let user_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM users WHERE fido2_user_handle = $1")
+            .bind(fido2_user_handle)
+            .fetch_optional(pool)
+            .await
+            .context("Failed to get user ID")?;
+
     user_id.ok_or_else(|| anyhow::anyhow!("User not found for handle"))
+}
+
+pub async fn get_registration_user(pool: &PgPool, user_id: Uuid) -> Result<RegistrationUser> {
+    let user: Option<RegistrationUser> =
+        sqlx::query_as("SELECT username, fido2_user_handle FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await
+            .context("Failed to get registration user")?;
+
+    user.ok_or_else(|| anyhow::anyhow!("User not found"))
 }
 
 fn generate_user_identifier() -> String {
@@ -141,6 +170,7 @@ pub async fn save_fido2_credential(
     credential_id: &[u8],
     user_id: Uuid,
     public_key: &[u8],
+    name: Option<&str>,
     attestation_type: Option<&str>,
     aaguid: Option<&[u8]>,
     sign_count: u32,
@@ -152,6 +182,7 @@ pub async fn save_fido2_credential(
             credential_id,
             user_id,
             public_key,
+            name,
             attestation_type,
             aaguid,
             sign_count,
@@ -159,11 +190,12 @@ pub async fn save_fido2_credential(
             flags,
             created_at,
             updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())"
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())",
     )
     .bind(credential_id)
     .bind(user_id)
     .bind(public_key)
+    .bind(name)
     .bind(attestation_type)
     .bind(aaguid)
     .bind(sign_count as i64)
@@ -172,101 +204,167 @@ pub async fn save_fido2_credential(
     .execute(pool)
     .await
     .context("Failed to save credential")?;
-    
+
     Ok(())
 }
 
 pub async fn credential_exists(pool: &PgPool, credential_id: &[u8]) -> Result<bool> {
     let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM fido2_credentials WHERE credential_id = $1)"
+        "SELECT EXISTS(SELECT 1 FROM fido2_credentials WHERE credential_id = $1)",
     )
     .bind(credential_id)
     .fetch_one(pool)
     .await
     .context("Failed to check credential existence")?;
-    
+
     Ok(exists)
 }
 
 pub async fn get_all_credential_public_keys(pool: &PgPool) -> Result<Vec<Vec<u8>>> {
-    let keys: Vec<Vec<u8>> = sqlx::query_scalar(
-        "SELECT public_key FROM fido2_credentials"
-    )
-    .fetch_all(pool)
-    .await
-    .context("Failed to fetch credential public keys")?;
+    let keys: Vec<Vec<u8>> = sqlx::query_scalar("SELECT public_key FROM fido2_credentials")
+        .fetch_all(pool)
+        .await
+        .context("Failed to fetch credential public keys")?;
 
     Ok(keys)
 }
 
 pub async fn get_credential_public_key(pool: &PgPool, credential_id: &[u8]) -> Result<Vec<u8>> {
-    let public_key: Option<Vec<u8>> = sqlx::query_scalar(
-        "SELECT public_key FROM fido2_credentials WHERE credential_id = $1"
-    )
-    .bind(credential_id)
-    .fetch_optional(pool)
-    .await
-    .context("Failed to get credential")?;
-    
+    let public_key: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT public_key FROM fido2_credentials WHERE credential_id = $1")
+            .bind(credential_id)
+            .fetch_optional(pool)
+            .await
+            .context("Failed to get credential")?;
+
     public_key.ok_or_else(|| anyhow::anyhow!("Credential not found"))
 }
 
 pub async fn get_user_id_by_credential(pool: &PgPool, credential_id: &[u8]) -> Result<Uuid> {
-    let user_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT user_id FROM fido2_credentials WHERE credential_id = $1"
-    )
-    .bind(credential_id)
-    .fetch_optional(pool)
-    .await
-    .context("Failed to get user ID")?;
-    
+    let user_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT user_id FROM fido2_credentials WHERE credential_id = $1")
+            .bind(credential_id)
+            .fetch_optional(pool)
+            .await
+            .context("Failed to get user ID")?;
+
     user_id.ok_or_else(|| anyhow::anyhow!("Credential not found"))
 }
 
 pub async fn get_all_credential_ids(pool: &PgPool) -> Result<Vec<Vec<u8>>> {
-    let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
-        "SELECT credential_id FROM fido2_credentials ORDER BY created_at DESC"
-    )
-    .fetch_all(pool)
-    .await
-    .context("Failed to query credentials")?;
+    let rows: Vec<(Vec<u8>,)> =
+        sqlx::query_as("SELECT credential_id FROM fido2_credentials ORDER BY created_at DESC")
+            .fetch_all(pool)
+            .await
+            .context("Failed to query credentials")?;
 
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
 pub async fn get_all_passkeys(pool: &PgPool) -> Result<Vec<Vec<u8>>> {
-    let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
-        "SELECT public_key FROM fido2_credentials ORDER BY created_at DESC"
-    )
-    .fetch_all(pool)
-    .await
-    .context("Failed to query passkeys")?;
+    let rows: Vec<(Vec<u8>,)> =
+        sqlx::query_as("SELECT public_key FROM fido2_credentials ORDER BY created_at DESC")
+            .fetch_all(pool)
+            .await
+            .context("Failed to query passkeys")?;
 
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
 pub async fn get_credential_ids_by_user_id(pool: &PgPool, user_id: Uuid) -> Result<Vec<Vec<u8>>> {
     let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
-        "SELECT credential_id FROM fido2_credentials WHERE user_id = $1 ORDER BY created_at DESC"
+        "SELECT credential_id FROM fido2_credentials WHERE user_id = $1 ORDER BY created_at DESC",
     )
     .bind(user_id)
     .fetch_all(pool)
     .await
     .context("Failed to query credentials")?;
-    
+
     Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+pub async fn list_user_credentials(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Vec<UserCredentialRecord>> {
+    let rows: Vec<UserCredentialRecord> = sqlx::query_as(
+        r#"
+        SELECT
+            c.id,
+            c.name,
+            c.credential_id,
+            c.transport,
+            c.created_at,
+            MAX(s.last_used_at) AS last_used_at
+        FROM fido2_credentials c
+        LEFT JOIN auth_sessions s ON s.credential_id = c.credential_id
+        WHERE c.user_id = $1
+        GROUP BY c.id, c.name, c.credential_id, c.transport, c.created_at
+        ORDER BY c.created_at DESC
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to list user credentials")?;
+
+    Ok(rows)
+}
+
+pub async fn get_user_credential_by_credential_id(
+    pool: &PgPool,
+    user_id: Uuid,
+    credential_id: &[u8],
+) -> Result<Option<UserCredentialRecord>> {
+    let row: Option<UserCredentialRecord> = sqlx::query_as(
+        r#"
+        SELECT
+            c.id,
+            c.name,
+            c.credential_id,
+            c.transport,
+            c.created_at,
+            MAX(s.last_used_at) AS last_used_at
+        FROM fido2_credentials c
+        LEFT JOIN auth_sessions s ON s.credential_id = c.credential_id
+        WHERE c.user_id = $1 AND c.credential_id = $2
+        GROUP BY c.id, c.name, c.credential_id, c.transport, c.created_at
+        "#,
+    )
+    .bind(user_id)
+    .bind(credential_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to fetch user credential")?;
+
+    Ok(row)
+}
+
+pub async fn delete_user_credential(
+    pool: &PgPool,
+    user_id: Uuid,
+    credential_row_id: Uuid,
+) -> Result<u64> {
+    let result = sqlx::query("DELETE FROM fido2_credentials WHERE id = $1 AND user_id = $2")
+        .bind(credential_row_id)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .context("Failed to delete credential")?;
+
+    Ok(result.rows_affected())
 }
 
 pub async fn update_sign_count(pool: &PgPool, credential_id: &[u8], sign_count: u32) -> Result<()> {
     sqlx::query(
-        "UPDATE fido2_credentials SET sign_count = $1, updated_at = NOW() WHERE credential_id = $2"
+        "UPDATE fido2_credentials SET sign_count = $1, updated_at = NOW() WHERE credential_id = $2",
     )
     .bind(sign_count as i64)
     .bind(credential_id)
     .execute(pool)
     .await
     .context("Failed to update sign count")?;
-    
+
     Ok(())
 }
 
@@ -279,7 +377,7 @@ pub async fn update_fido2_credential(
     sqlx::query(
         "UPDATE fido2_credentials 
          SET public_key = $1, sign_count = $2, updated_at = NOW() 
-         WHERE credential_id = $3"
+         WHERE credential_id = $3",
     )
     .bind(public_key)
     .bind(sign_count as i64)
@@ -287,7 +385,7 @@ pub async fn update_fido2_credential(
     .execute(pool)
     .await
     .context("Failed to update credential")?;
-    
+
     Ok(())
 }
 
@@ -315,7 +413,7 @@ pub async fn validate_auth_session(pool: &PgPool, session_id: &str) -> Result<Op
     let session: Option<DbSession> = sqlx::query_as(
         "SELECT session_id, credential_id, expires_at, created_at, last_used_at
          FROM auth_sessions
-         WHERE session_id = $1"
+         WHERE session_id = $1",
     )
     .bind(session_id)
     .fetch_optional(pool)
@@ -330,12 +428,12 @@ pub async fn validate_auth_session(pool: &PgPool, session_id: &str) -> Result<Op
         return Ok(None);
     }
 
-    if let Err(e) = sqlx::query(
-        "UPDATE auth_sessions SET last_used_at = NOW() WHERE session_id = $1"
-    )
-    .bind(session_id)
-    .execute(pool)
-    .await {
+    if let Err(e) =
+        sqlx::query("UPDATE auth_sessions SET last_used_at = NOW() WHERE session_id = $1")
+            .bind(session_id)
+            .execute(pool)
+            .await
+    {
         tracing::warn!("Failed to update last_used_at for session: {}", e);
     }
 
@@ -348,15 +446,24 @@ pub async fn delete_auth_session(pool: &PgPool, session_id: &str) -> Result<()> 
         .execute(pool)
         .await
         .context("Failed to delete session")?;
-    
+
     Ok(())
 }
 
 pub async fn run_cleanups(pool: &PgPool) {
     let tasks: &[(&str, &str)] = &[
-        ("expired sessions", "DELETE FROM auth_sessions WHERE expires_at < NOW()"),
-        ("expired QR login tokens", "DELETE FROM qr_login_tokens WHERE expires_at < NOW() - INTERVAL '5 minutes'"),
-        ("expired QR sign tokens", "DELETE FROM qr_sign_tokens WHERE expires_at < NOW() - INTERVAL '5 minutes'"),
+        (
+            "expired sessions",
+            "DELETE FROM auth_sessions WHERE expires_at < NOW()",
+        ),
+        (
+            "expired QR login tokens",
+            "DELETE FROM qr_login_tokens WHERE expires_at < NOW() - INTERVAL '5 minutes'",
+        ),
+        (
+            "expired QR sign tokens",
+            "DELETE FROM qr_sign_tokens WHERE expires_at < NOW() - INTERVAL '5 minutes'",
+        ),
     ];
 
     for (name, query) in tasks {
@@ -377,7 +484,7 @@ pub fn generate_session_id() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes)
 }
 
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 pub async fn add_ssh_key(
     pool: &PgPool,
@@ -391,7 +498,7 @@ pub async fn add_ssh_key(
     let key_id: Uuid = sqlx::query_scalar(
         "INSERT INTO ssh_keys (user_id, public_key, fingerprint, key_type, name)
          VALUES ($1, $2, $3, $4, $5)
-         RETURNING id"
+         RETURNING id",
     )
     .bind(user_id)
     .bind(public_key)
@@ -408,14 +515,13 @@ pub async fn add_ssh_key(
 pub async fn get_user_by_ssh_key(pool: &PgPool, public_key: &str) -> Result<Option<Uuid>> {
     let fingerprint = generate_ssh_fingerprint(public_key)?;
 
-    let user_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT user_id FROM ssh_keys WHERE fingerprint = $1"
-    )
-    .bind(&fingerprint)
-    .fetch_optional(pool)
-    .await
-    .context("Failed to get user by SSH key")?;
-    
+    let user_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT user_id FROM ssh_keys WHERE fingerprint = $1")
+            .bind(&fingerprint)
+            .fetch_optional(pool)
+            .await
+            .context("Failed to get user by SSH key")?;
+
     Ok(user_id)
 }
 
@@ -424,7 +530,7 @@ pub async fn list_ssh_keys(pool: &PgPool, user_id: Uuid) -> Result<Vec<SshKeyInf
         "SELECT id, fingerprint, key_type, name, public_key, created_at, last_used_at
          FROM ssh_keys
          WHERE user_id = $1
-         ORDER BY created_at DESC"
+         ORDER BY created_at DESC",
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -435,39 +541,34 @@ pub async fn list_ssh_keys(pool: &PgPool, user_id: Uuid) -> Result<Vec<SshKeyInf
 }
 
 pub async fn delete_ssh_key(pool: &PgPool, user_id: Uuid, fingerprint: &str) -> Result<bool> {
-    let result = sqlx::query(
-        "DELETE FROM ssh_keys WHERE user_id = $1 AND fingerprint = $2"
-    )
-    .bind(user_id)
-    .bind(fingerprint)
-    .execute(pool)
-    .await
-    .context("Failed to delete SSH key")?;
+    let result = sqlx::query("DELETE FROM ssh_keys WHERE user_id = $1 AND fingerprint = $2")
+        .bind(user_id)
+        .bind(fingerprint)
+        .execute(pool)
+        .await
+        .context("Failed to delete SSH key")?;
 
     Ok(result.rows_affected() > 0)
 }
 
 pub async fn update_ssh_key_last_used(pool: &PgPool, fingerprint: &str) -> Result<()> {
-    sqlx::query(
-        "UPDATE ssh_keys SET last_used_at = NOW() WHERE fingerprint = $1"
-    )
-    .bind(fingerprint)
-    .execute(pool)
-    .await
-    .context("Failed to update SSH key last_used_at")?;
+    sqlx::query("UPDATE ssh_keys SET last_used_at = NOW() WHERE fingerprint = $1")
+        .bind(fingerprint)
+        .execute(pool)
+        .await
+        .context("Failed to update SSH key last_used_at")?;
 
     Ok(())
 }
 
 /// Check if an SSH key fingerprint exists for any user
 pub async fn ssh_key_exists(pool: &PgPool, fingerprint: &str) -> Result<bool> {
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM ssh_keys WHERE fingerprint = $1)"
-    )
-    .bind(fingerprint)
-    .fetch_one(pool)
-    .await
-    .context("Failed to check SSH key existence")?;
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM ssh_keys WHERE fingerprint = $1)")
+            .bind(fingerprint)
+            .fetch_one(pool)
+            .await
+            .context("Failed to check SSH key existence")?;
 
     Ok(exists)
 }
@@ -490,7 +591,7 @@ pub async fn get_user_for_app_by_ssh_key(
          WHERE sk.fingerprint = $1
            AND om.organization_id = (
                SELECT organization_id FROM compute_resources WHERE id = $2
-           )"
+           )",
     )
     .bind(fingerprint)
     .bind(app_uuid)
@@ -511,7 +612,8 @@ pub fn generate_ssh_fingerprint(public_key: &str) -> Result<String> {
 
     // Decode the base64 key data first, then hash the decoded bytes
     // This matches OpenSSH's fingerprint format: SHA256:<base64_of_sha256_of_decoded_key>
-    let decoded = base64::engine::general_purpose::STANDARD.decode(key_data)
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(key_data)
         .map_err(|_| anyhow::anyhow!("Invalid SSH key: base64 decode failed"))?;
 
     let mut hasher = Sha256::new();
@@ -541,7 +643,7 @@ pub async fn create_qr_login_token(
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO qr_login_tokens (token, status, ip_address, expires_at)
-         VALUES ($1, 'pending', $2, $3)"
+         VALUES ($1, 'pending', $2, $3)",
     )
     .bind(token)
     .bind(ip_address)
@@ -553,7 +655,10 @@ pub async fn create_qr_login_token(
     Ok(())
 }
 
-pub async fn get_qr_login_token(pool: &PgPool, token: &str) -> Result<Option<crate::types::DbQrLoginToken>> {
+pub async fn get_qr_login_token(
+    pool: &PgPool,
+    token: &str,
+) -> Result<Option<crate::types::DbQrLoginToken>> {
     let row: Option<crate::types::DbQrLoginToken> = sqlx::query_as(
         "SELECT token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at
          FROM qr_login_tokens
@@ -576,7 +681,7 @@ pub async fn claim_qr_login_token(
     let result = sqlx::query(
         "UPDATE qr_login_tokens
          SET status = 'authenticated', auth_challenge_key = $2, browser_ip_address = $3
-         WHERE token = $1 AND status = 'pending' AND expires_at > NOW()"
+         WHERE token = $1 AND status = 'pending' AND expires_at > NOW()",
     )
     .bind(token)
     .bind(auth_challenge_key)
@@ -588,15 +693,11 @@ pub async fn claim_qr_login_token(
     Ok(result.rows_affected() == 1)
 }
 
-pub async fn complete_qr_login_token(
-    pool: &PgPool,
-    token: &str,
-    session_id: &str,
-) -> Result<bool> {
+pub async fn complete_qr_login_token(pool: &PgPool, token: &str, session_id: &str) -> Result<bool> {
     let result = sqlx::query(
         "UPDATE qr_login_tokens
          SET status = 'completed', session_id = $2
-         WHERE token = $1 AND status = 'authenticated'"
+         WHERE token = $1 AND status = 'authenticated'",
     )
     .bind(token)
     .bind(session_id)
@@ -606,7 +707,6 @@ pub async fn complete_qr_login_token(
 
     Ok(result.rows_affected() == 1)
 }
-
 
 // QR Sign token functions
 
@@ -642,7 +742,10 @@ pub async fn create_qr_sign_token(
     Ok(())
 }
 
-pub async fn get_qr_sign_token(pool: &PgPool, token: &str) -> Result<Option<crate::types::DbQrSignToken>> {
+pub async fn get_qr_sign_token(
+    pool: &PgPool,
+    token: &str,
+) -> Result<Option<crate::types::DbQrSignToken>> {
     let row: Option<crate::types::DbQrSignToken> = sqlx::query_as(
         "SELECT token, status, challenge_id, challenge_json, method, path, body, body_hash, fido2_response, ip_address, browser_ip_address, expires_at, created_at
          FROM qr_sign_tokens
@@ -664,7 +767,7 @@ pub async fn claim_qr_sign_token(
     let result = sqlx::query(
         "UPDATE qr_sign_tokens
          SET status = 'authenticated', browser_ip_address = $2
-         WHERE token = $1 AND status = 'pending' AND expires_at > NOW()"
+         WHERE token = $1 AND status = 'pending' AND expires_at > NOW()",
     )
     .bind(token)
     .bind(browser_ip)
@@ -683,7 +786,7 @@ pub async fn complete_qr_sign_token(
     let result = sqlx::query(
         "UPDATE qr_sign_tokens
          SET status = 'completed', fido2_response = $2
-         WHERE token = $1 AND status = 'authenticated'"
+         WHERE token = $1 AND status = 'authenticated'",
     )
     .bind(token)
     .bind(fido2_response)
@@ -694,10 +797,13 @@ pub async fn complete_qr_sign_token(
     Ok(result.rows_affected() == 1)
 }
 
-pub async fn get_auth_session(pool: &PgPool, session_id: &str) -> Result<Option<crate::types::DbSession>> {
+pub async fn get_auth_session(
+    pool: &PgPool,
+    session_id: &str,
+) -> Result<Option<crate::types::DbSession>> {
     let session = sqlx::query_as(
         "SELECT session_id, credential_id, expires_at, created_at, last_used_at
-         FROM auth_sessions WHERE session_id = $1"
+         FROM auth_sessions WHERE session_id = $1",
     )
     .bind(session_id)
     .fetch_optional(pool)
@@ -717,7 +823,7 @@ pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>)> {
     let user_id: Uuid = sqlx::query_scalar(
         "INSERT INTO users (fido2_user_handle, username, email, beta_code_id)
          VALUES ($1, $2, NULL, NULL)
-         RETURNING id"
+         RETURNING id",
     )
     .bind(&user_handle[..])
     .bind(&username)
@@ -728,9 +834,9 @@ pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>)> {
     // Insert a dummy credential row so session validation joins work
     sqlx::query(
         "INSERT INTO fido2_credentials (
-            credential_id, user_id, public_key, attestation_type,
+            credential_id, user_id, public_key, name, attestation_type,
             sign_count, created_at, updated_at
-        ) VALUES ($1, $2, $3, 'e2e', 0, NOW(), NOW())"
+        ) VALUES ($1, $2, $3, NULL, 'e2e', 0, NOW(), NOW())",
     )
     .bind(&credential_id_vec)
     .bind(user_id)
@@ -754,7 +860,7 @@ pub async fn user_requires_pin(pool: &PgPool, user_id: Uuid) -> Result<bool, sql
             WHERE om.user_id = $1
               AND (o.settings->>'require_pin')::boolean = true
         )
-        "#
+        "#,
     )
     .bind(user_id)
     .fetch_one(pool)

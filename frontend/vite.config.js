@@ -30,6 +30,12 @@ export default defineConfig({
         secure: false,
         cookieDomainRewrite: ''
       },
+      '/passkeys': {
+        target: proxyTarget,
+        changeOrigin: true,
+        secure: false,
+        cookieDomainRewrite: ''
+      },
       '/health': {
         target: proxyTarget,
         changeOrigin: true,

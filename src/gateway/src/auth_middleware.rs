@@ -4,12 +4,12 @@
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::{HeaderValue, StatusCode, Method},
+    http::{HeaderValue, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use sha2::{Sha256, Digest};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use sha2::{Digest, Sha256};
 use std::panic::Location;
 use webauthn_rs::prelude::*;
 
@@ -50,7 +50,12 @@ impl CsrfValidationError {
 ///
 /// `using_header_auth` indicates whether the request was authenticated via X-Session-ID header (CLI).
 /// CSRF validation is only required for cookie-based auth (browser).
-fn validate_csrf(req: &Request, session_id: &str, using_header_auth: bool, csrf_secret: &str) -> Result<(), CsrfValidationError> {
+fn validate_csrf(
+    req: &Request,
+    session_id: &str,
+    using_header_auth: bool,
+    csrf_secret: &str,
+) -> Result<(), CsrfValidationError> {
     use CsrfValidationErrorKind as ErrorKind;
 
     // Only validate CSRF for state-changing methods
@@ -124,11 +129,13 @@ pub async fn fido2_auth_middleware(
         .await
         .map_err(|e| {
             tracing::error!("Session validation error: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Session validation failed").into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Session validation failed",
+            )
+                .into_response()
         })?
-        .ok_or_else(|| {
-            (StatusCode::UNAUTHORIZED, "Invalid or expired session").into_response()
-        })?;
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Invalid or expired session").into_response())?;
 
     // Now that session is validated, check CSRF for cookie-based auth
     validate_csrf(&req, &session_id, using_header_auth, &state.csrf_secret).map_err(|e| {
@@ -175,18 +182,25 @@ pub async fn fido2_sign_middleware(
     #[allow(unreachable_code)]
     let path = req.uri().path();
     let method = req.method();
-    let requires_signature =
-        (path.contains("/organizations/") && path.ends_with("/settings")
-            && (method == "PATCH" || method == "PUT"))
-        || (path.starts_with("/ssh-keys") && (method == "POST" || method == "DELETE"));
+    let requires_signature = (path.contains("/organizations/")
+        && path.ends_with("/settings")
+        && (method == "PATCH" || method == "PUT"))
+        || (path.starts_with("/ssh-keys") && (method == "POST" || method == "DELETE"))
+        || (path == "/passkeys/register/begin" && method == "POST")
+        || (path.starts_with("/passkeys/") && method == "DELETE");
 
     let challenge_id = match req.headers().get("X-Fido2-Challenge-Id") {
-        Some(h) => h.to_str().map_err(|_| {
-            (StatusCode::BAD_REQUEST, "Invalid challenge ID header").into_response()
-        })?.to_string(),
+        Some(h) => h
+            .to_str()
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid challenge ID header").into_response())?
+            .to_string(),
         None => {
             if requires_signature {
-                return Err((StatusCode::FORBIDDEN, "This operation requires signature verification").into_response());
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "This operation requires signature verification",
+                )
+                    .into_response());
             }
             return Ok(next.run(req).await);
         }
@@ -201,11 +215,15 @@ pub async fn fido2_sign_middleware(
         })?;
 
     let auth_response_json = URL_SAFE_NO_PAD.decode(auth_response_b64).map_err(|_| {
-        (StatusCode::BAD_REQUEST, "Invalid base64 in X-Fido2-Response").into_response()
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid base64 in X-Fido2-Response",
+        )
+            .into_response()
     })?;
 
-    let auth_response: PublicKeyCredential = serde_json::from_slice(&auth_response_json)
-        .map_err(|e| {
+    let auth_response: PublicKeyCredential =
+        serde_json::from_slice(&auth_response_json).map_err(|e| {
             tracing::error!("Failed to parse FIDO response: {}", e);
             (StatusCode::BAD_REQUEST, "Invalid FIDO response format").into_response()
         })?;
@@ -234,9 +252,16 @@ pub async fn fido2_sign_middleware(
     if pending.method != method || pending.path != path {
         tracing::error!(
             "Request mismatch: expected {} {} but got {} {}",
-            pending.method, pending.path, method, path
+            pending.method,
+            pending.path,
+            method,
+            path
         );
-        return Err((StatusCode::FORBIDDEN, "Request does not match signed challenge").into_response());
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Request does not match signed challenge",
+        )
+            .into_response());
     }
 
     let (parts, body) = req.into_parts();
@@ -246,7 +271,11 @@ pub async fn fido2_sign_middleware(
 
     let body_hash = hex::encode(Sha256::digest(&body_bytes));
     if pending.body_hash != body_hash {
-        tracing::error!("Body hash mismatch: expected {} got {}", pending.body_hash, body_hash);
+        tracing::error!(
+            "Body hash mismatch: expected {} got {}",
+            pending.body_hash,
+            body_hash
+        );
         return Err((StatusCode::FORBIDDEN, "Body does not match signed hash").into_response());
     }
 
@@ -258,14 +287,26 @@ pub async fn fido2_sign_middleware(
     let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get credential {}: {}", hex::encode(&credential_id_bytes), e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to verify signature").into_response()
+            tracing::error!(
+                "Failed to get credential {}: {}",
+                hex::encode(&credential_id_bytes),
+                e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to verify signature",
+            )
+                .into_response()
         })?;
 
     // Use SecurityKey for flexible UV policy (Passkey enforces UV=Required)
     let _seckey: SecurityKey = serde_json::from_slice(&cred_bytes).map_err(|e| {
         tracing::error!("Failed to deserialize credential: {}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to verify signature").into_response()
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to verify signature",
+        )
+            .into_response()
     })?;
 
     state
@@ -288,11 +329,10 @@ pub async fn fido2_sign_middleware(
         "X-Authenticated-User-ID",
         HeaderValue::from_str(&pending.user_id.to_string()).unwrap(),
     );
-    req.headers_mut().insert(
-        "X-Fido2-Signed",
-        HeaderValue::from_static("true"),
-    );
-    req.extensions_mut().insert(AuthenticatedUserId(pending.user_id));
+    req.headers_mut()
+        .insert("X-Fido2-Signed", HeaderValue::from_static("true"));
+    req.extensions_mut()
+        .insert(AuthenticatedUserId(pending.user_id));
 
     Ok(next.run(req).await)
 }

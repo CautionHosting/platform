@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 const APP_NAME_MIN_LEN: usize = 3;
 const APP_NAME_MAX_LEN: usize = 63;
 const APP_NAME_PATTERN: &str = r"^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$";
+const PASSKEY_NAME_MAX_LEN: usize = 80;
 
 static APP_NAME_REGEX: OnceLock<Regex> = OnceLock::new();
 
@@ -96,6 +97,27 @@ pub fn validate_ssh_public_key(public_key: &str) -> Result<()> {
             }
         }
         Err(_) => bail!("SSH public key data is not valid base64"),
+    }
+
+    Ok(())
+}
+
+pub fn validate_passkey_name(name: &str) -> Result<()> {
+    let trimmed = name.trim();
+
+    if trimmed.is_empty() {
+        bail!("Passkey name cannot be empty");
+    }
+
+    if trimmed.len() > PASSKEY_NAME_MAX_LEN {
+        bail!(
+            "Passkey name must be at most {} characters",
+            PASSKEY_NAME_MAX_LEN
+        );
+    }
+
+    if trimmed.chars().any(|c| c.is_control()) {
+        bail!("Passkey name cannot contain control characters");
     }
 
     Ok(())
@@ -225,5 +247,15 @@ mod tests {
         assert!(!is_valid_base64(""));
         assert!(!is_valid_base64("abc!"));
         assert!(!is_valid_base64("abc def"));
+    }
+
+    #[test]
+    fn test_validate_passkey_name() {
+        assert!(validate_passkey_name("MacBook Touch ID").is_ok());
+        assert!(validate_passkey_name("YubiKey NFC").is_ok());
+        assert!(validate_passkey_name("").is_err());
+        assert!(validate_passkey_name("   ").is_err());
+        assert!(validate_passkey_name(&"a".repeat(81)).is_err());
+        assert!(validate_passkey_name("bad\nname").is_err());
     }
 }

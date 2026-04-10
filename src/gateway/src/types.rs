@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use serde::{Deserialize, Serialize};
-use webauthn_rs::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::collections::HashMap;
 use uuid::Uuid;
+use webauthn_rs::prelude::*;
 
 /// Extension type set by auth middleware to communicate the authenticated user ID
 /// to downstream handlers. Using extensions instead of headers prevents spoofing
@@ -19,6 +19,15 @@ pub struct AuthenticatedUserId(pub Uuid);
 pub struct PendingRegistration {
     pub reg_state: SecurityKeyRegistration,
     pub alpha_code_id: Uuid,
+    pub expires_at: time::OffsetDateTime,
+}
+
+/// Registration state for adding an additional passkey to an existing account.
+#[derive(Clone)]
+pub struct PendingPasskeyRegistration {
+    pub reg_state: SecurityKeyRegistration,
+    pub user_id: Uuid,
+    pub name: Option<String>,
     pub expires_at: time::OffsetDateTime,
 }
 
@@ -36,6 +45,7 @@ pub struct AppState {
     pub api_service_url: String,
     pub metering_service_url: String,
     pub reg_states: Arc<RwLock<HashMap<String, PendingRegistration>>>,
+    pub passkey_reg_states: Arc<RwLock<HashMap<String, PendingPasskeyRegistration>>>,
     pub auth_states: Arc<RwLock<HashMap<String, PendingAuthentication>>>,
     pub sign_challenges: Arc<RwLock<HashMap<String, PendingSignChallenge>>>,
     pub session_timeout_hours: i64,

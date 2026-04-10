@@ -4,34 +4,30 @@
 use anyhow::{Context, Result};
 use axum::{
     middleware,
-    routing::{get, post, delete},
+    routing::{delete, get, post},
     Router,
 };
+use russh_keys::key::KeyPair;
 use sqlx::postgres::PgPoolOptions;
-use tower_http::{
-    cors::CorsLayer,
-    limit::RequestBodyLimitLayer,
-    services::ServeDir,
-};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use webauthn_rs::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::collections::HashMap;
-use russh_keys::key::KeyPair;
+use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, services::ServeDir};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use webauthn_rs::prelude::*;
 
+mod auth_middleware;
 mod config;
 mod csrf;
 mod db;
 mod handlers;
-mod auth_middleware;
 mod proxy;
-mod types;
-mod ssh_server;
-mod validation;
 mod rate_limit;
 mod request_id;
 mod security_headers;
+mod ssh_server;
+mod types;
+mod validation;
 
 use config::Config;
 use types::AppState;
@@ -59,7 +55,9 @@ async fn main() -> Result<()> {
     let config = Config::from_env().context("Failed to load configuration")?;
 
     let max_db_connections: u32 = std::env::var("DB_MAX_CONNECTIONS")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(25);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(25);
 
     let pool = PgPoolOptions::new()
         .max_connections(max_db_connections)
@@ -79,7 +77,9 @@ async fn main() -> Result<()> {
         anyhow::bail!("No valid RP origins configured");
     }
 
-    let is_production = std::env::var("ENVIRONMENT").map(|e| e == "production").unwrap_or(false);
+    let is_production = std::env::var("ENVIRONMENT")
+        .map(|e| e == "production")
+        .unwrap_or(false);
     if is_production {
         for origin in &origins {
             if origin.scheme() == "http" && origin.host_str() != Some("localhost") {
@@ -92,8 +92,8 @@ async fn main() -> Result<()> {
     }
 
     let rp_id = &config.rp_id;
-    let mut builder = WebauthnBuilder::new(rp_id, &origins[0])
-        .context("Failed to create WebAuthn builder")?;
+    let mut builder =
+        WebauthnBuilder::new(rp_id, &origins[0]).context("Failed to create WebAuthn builder")?;
 
     for origin in origins.iter().skip(1) {
         builder = builder.append_allowed_origin(origin);
@@ -116,7 +116,9 @@ async fn main() -> Result<()> {
     if internal_service_secret.is_some() {
         tracing::info!("Internal service authentication enabled");
     } else {
-        tracing::warn!("INTERNAL_SERVICE_SECRET not set - internal service authentication disabled");
+        tracing::warn!(
+            "INTERNAL_SERVICE_SECRET not set - internal service authentication disabled"
+        );
     }
 
     let state = AppState {
@@ -125,6 +127,7 @@ async fn main() -> Result<()> {
         api_service_url: config.api_service_url.clone(),
         metering_service_url: config.metering_service_url.clone(),
         reg_states: Arc::new(RwLock::new(HashMap::new())),
+        passkey_reg_states: Arc::new(RwLock::new(HashMap::new())),
         auth_states: Arc::new(RwLock::new(HashMap::new())),
         sign_challenges: Arc::new(RwLock::new(HashMap::new())),
         session_timeout_hours: config.session_timeout_hours,
@@ -166,20 +169,50 @@ async fn main() -> Result<()> {
         ]);
 
     let mut auth_routes = Router::new()
-        .route("/auth/register/begin", post(handlers::begin_register_handler))
-        .route("/auth/register/finish", post(handlers::finish_register_handler))
+        .route(
+            "/auth/register/begin",
+            post(handlers::begin_register_handler),
+        )
+        .route(
+            "/auth/register/finish",
+            post(handlers::finish_register_handler),
+        )
         .route("/auth/login/begin", post(handlers::begin_login_handler))
         .route("/auth/login/finish", post(handlers::finish_login_handler))
         .route("/auth/logout", post(handlers::logout_handler))
-        .route("/auth/qr-login/begin", post(handlers::qr_login_begin_handler))
-        .route("/auth/qr-login/status", get(handlers::qr_login_status_handler))
-        .route("/auth/qr-login/authenticate", post(handlers::qr_login_authenticate_handler))
-        .route("/auth/qr-login/authenticate/finish", post(handlers::qr_login_authenticate_finish_handler))
-        .route("/auth/sign-request", post(handlers::begin_sign_request_handler))
+        .route(
+            "/auth/qr-login/begin",
+            post(handlers::qr_login_begin_handler),
+        )
+        .route(
+            "/auth/qr-login/status",
+            get(handlers::qr_login_status_handler),
+        )
+        .route(
+            "/auth/qr-login/authenticate",
+            post(handlers::qr_login_authenticate_handler),
+        )
+        .route(
+            "/auth/qr-login/authenticate/finish",
+            post(handlers::qr_login_authenticate_finish_handler),
+        )
+        .route(
+            "/auth/sign-request",
+            post(handlers::begin_sign_request_handler),
+        )
         .route("/auth/qr-sign/begin", post(handlers::qr_sign_begin_handler))
-        .route("/auth/qr-sign/status", get(handlers::qr_sign_status_handler))
-        .route("/auth/qr-sign/authenticate", post(handlers::qr_sign_authenticate_handler))
-        .route("/auth/qr-sign/authenticate/finish", post(handlers::qr_sign_authenticate_finish_handler));
+        .route(
+            "/auth/qr-sign/status",
+            get(handlers::qr_sign_status_handler),
+        )
+        .route(
+            "/auth/qr-sign/authenticate",
+            post(handlers::qr_sign_authenticate_handler),
+        )
+        .route(
+            "/auth/qr-sign/authenticate/finish",
+            post(handlers::qr_sign_authenticate_finish_handler),
+        );
 
     #[cfg(feature = "e2e-testing-unsafe")]
     {
@@ -201,11 +234,30 @@ async fn main() -> Result<()> {
         .layer(cors.clone());
 
     let protected = Router::new()
+        .route("/passkeys", get(handlers::list_passkeys_handler))
+        .route(
+            "/passkeys/register/begin",
+            post(handlers::begin_add_passkey_handler),
+        )
+        .route(
+            "/passkeys/register/finish",
+            post(handlers::finish_add_passkey_handler),
+        )
+        .route("/passkeys/{id}", delete(handlers::delete_passkey_handler))
         .route("/ssh-keys", post(handlers::add_ssh_key_handler))
         .route("/ssh-keys", get(handlers::list_ssh_keys_handler))
-        .route("/ssh-keys/{fingerprint}", delete(handlers::delete_ssh_key_handler))
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware::fido2_auth_middleware))
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware::fido2_sign_middleware))
+        .route(
+            "/ssh-keys/{fingerprint}",
+            delete(handlers::delete_ssh_key_handler),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware::fido2_auth_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware::fido2_sign_middleware,
+        ))
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
         .with_state(state.clone())
         .layer(cors.clone());
@@ -219,17 +271,22 @@ async fn main() -> Result<()> {
 
     let api_proxy = Router::new()
         .fallback(proxy::proxy_handler)
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware::fido2_auth_middleware))
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware::fido2_sign_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware::fido2_auth_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware::fido2_sign_middleware,
+        ))
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
         .with_state(state.clone())
         .layer(cors.clone());
 
-    let frontend_dir = std::env::var("FRONTEND_DIR")
-        .unwrap_or_else(|_| "/app/frontend".to_string());
+    let frontend_dir =
+        std::env::var("FRONTEND_DIR").unwrap_or_else(|_| "/app/frontend".to_string());
 
-    let frontend_service = ServeDir::new(&frontend_dir)
-        .append_index_html_on_directories(true);
+    let frontend_service = ServeDir::new(&frontend_dir).append_index_html_on_directories(true);
 
     // Webhook proxy to metering service (no auth required — Paddle verifies via signature)
     let webhook_proxy = Router::new()
@@ -245,7 +302,9 @@ async fn main() -> Result<()> {
         .fallback_service(frontend_service)
         .layer(cors)
         .layer(middleware::from_fn(request_id::request_id_middleware))
-        .layer(middleware::from_fn(security_headers::security_headers_middleware));
+        .layer(middleware::from_fn(
+            security_headers::security_headers_middleware,
+        ));
 
     let cleanup_pool = pool.clone();
     tokio::spawn(async move {
@@ -275,6 +334,20 @@ async fn main() -> Result<()> {
                 }
             }
 
+            // Clean up expired passkey registration states
+            {
+                let mut reg_states = cleanup_state.passkey_reg_states.write().await;
+                let before_count = reg_states.len();
+                reg_states.retain(|_, pending| pending.expires_at > now);
+                let removed = before_count - reg_states.len();
+                if removed > 0 {
+                    tracing::debug!(
+                        "Cleaned up {} expired passkey registration challenges",
+                        removed
+                    );
+                }
+            }
+
             // Clean up expired authentication states
             {
                 let mut auth_states = cleanup_state.auth_states.write().await;
@@ -296,7 +369,6 @@ async fn main() -> Result<()> {
                     tracing::debug!("Cleaned up {} expired sign challenges", removed);
                 }
             }
-
         }
     });
 
@@ -306,7 +378,16 @@ async fn main() -> Result<()> {
     let ssh_bind_addr = format!("0.0.0.0:{}", config.ssh_port);
     let ssh_internal_service_secret = internal_service_secret.clone();
     tokio::spawn(async move {
-        if let Err(e) = ssh_server::run_ssh_server(ssh_pool, ssh_api_url, ssh_data_dir, ssh_internal_service_secret, host_key, &ssh_bind_addr).await {
+        if let Err(e) = ssh_server::run_ssh_server(
+            ssh_pool,
+            ssh_api_url,
+            ssh_data_dir,
+            ssh_internal_service_secret,
+            host_key,
+            &ssh_bind_addr,
+        )
+        .await
+        {
             tracing::error!("SSH server error: {:?}", e);
         }
     });
@@ -332,10 +413,8 @@ async fn main() -> Result<()> {
 
 async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
-    let mut sigterm = tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::terminate(),
-    )
-    .expect("failed to register SIGTERM handler");
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to register SIGTERM handler");
     tokio::select! {
         _ = ctrl_c => tracing::info!("Received SIGINT, shutting down"),
         _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down"),
@@ -360,8 +439,7 @@ fn load_or_generate_host_key(path: &str) -> Result<KeyPair> {
     } else {
         tracing::info!("Generating new SSH host key");
 
-        let key = KeyPair::generate_ed25519()
-            .context("Failed to generate Ed25519 key")?;
+        let key = KeyPair::generate_ed25519().context("Failed to generate Ed25519 key")?;
 
         if let Some(parent) = key_path.parent() {
             fs::create_dir_all(parent)

@@ -905,41 +905,124 @@ make build-cli
 
     <!-- Security Tab -->
     <div v-if="activeTab === 'security'" class="content-card content-card--dashboard-tab">
-      <div class="content-header">
-        <div class="content-header-text">
-          <h2 class="content-header-title">Security settings</h2>
-          <p class="content-header-description">
-            Configure authentication requirements for your organization.
-          </p>
-        </div>
-      </div>
+      <div class="security-auth-panel">
+        <div class="security-settings security-settings--inline">
+          <div v-if="loadingOrgSettings" class="list-item-empty">Loading security settings...</div>
+          <div v-else>
+            <div class="security-setting-item">
+              <div class="security-setting-info">
+                <h3 class="security-setting-title">Require PIN/biometric for authentication</h3>
+                <p class="security-setting-description">
+                  When enabled, users must verify their identity with a PIN or biometric (fingerprint, face)
+                  when logging in or signing sensitive operations. This provides stronger security but may
+                  not be supported by all passkeys.
+                </p>
+              </div>
+              <div class="security-setting-control">
+                <label class="toggle-switch">
+                  <input
+                    type="checkbox"
+                    :checked="orgSettings.require_pin"
+                    @change="toggleRequirePin"
+                    :disabled="updatingOrgSettings"
+                  />
+                  <span class="toggle-slider"></span>
+                </label>
+              </div>
+            </div>
 
-      <div v-if="loadingOrgSettings" class="list-item-empty">Loading security settings...</div>
-      <div v-else class="security-settings">
-        <div class="security-setting-item">
-          <div class="security-setting-info">
-            <h3 class="security-setting-title">Require PIN/biometric for authentication</h3>
-            <p class="security-setting-description">
-              When enabled, users must verify their identity with a PIN or biometric (fingerprint, face)
-              when logging in or signing sensitive operations. This provides stronger security but may
-              not be supported by all passkeys.
-            </p>
-          </div>
-          <div class="security-setting-control">
-            <label class="toggle-switch">
-              <input
-                type="checkbox"
-                :checked="orgSettings.require_pin"
-                @change="toggleRequirePin"
-                :disabled="updatingOrgSettings"
-              />
-              <span class="toggle-slider"></span>
-            </label>
+            <div v-if="orgSettingsError" class="message message--error">
+              {{ orgSettingsError }}
+            </div>
           </div>
         </div>
 
-        <div v-if="orgSettingsError" class="message message--error">
-          {{ orgSettingsError }}
+        <div class="security-passkeys">
+          <div v-if="passkeyFlowStage" class="passkey-flow-card" role="status" aria-live="polite">
+            <div class="passkey-flow-steps">
+              <div
+                class="passkey-flow-step"
+                :class="{
+                  'passkey-flow-step--active': passkeyFlowStage === 'approve',
+                  'passkey-flow-step--done': passkeyFlowStage === 'register'
+                }"
+              >
+                <span class="passkey-flow-step-number">1</span>
+                <div class="passkey-flow-step-copy">
+                  <strong>Approve with current authenticator</strong>
+                  <span>Use the same authenticator you used to sign in.</span>
+                </div>
+              </div>
+              <div
+                class="passkey-flow-step"
+                :class="{ 'passkey-flow-step--active': passkeyFlowStage === 'register' }"
+              >
+                <span class="passkey-flow-step-number">2</span>
+                <div class="passkey-flow-step-copy">
+                  <strong>Register the new authenticator</strong>
+                  <span>Only tap the new key after step 1 succeeds.</span>
+                </div>
+              </div>
+            </div>
+            <p class="passkey-flow-message">{{ passkeyFlowMessage }}</p>
+          </div>
+
+          <div v-if="loadingPasskeys" class="list-item-empty">Loading authenticators...</div>
+          <div v-else-if="passkeys.length === 0" class="list-item-empty">
+            No authenticators found for this account.
+          </div>
+          <div v-else class="passkey-list">
+            <div v-for="passkey in passkeys" :key="passkey.id" class="passkey-item">
+              <div class="passkey-info">
+                <div class="passkey-header">
+                  <div>
+                    <div class="passkey-title">{{ formatPasskeyTitle(passkey) }}</div>
+                  </div>
+                  <div class="passkey-badges">
+                    <span class="passkey-badge">{{ passkey.kind }}</span>
+                    <span v-if="passkey.is_current_session" class="passkey-badge passkey-badge--current">
+                      Current session
+                    </span>
+                  </div>
+                </div>
+
+                <div class="passkey-meta">
+                  <span>Added {{ formatDate(passkey.created_at) }}</span>
+                  <span v-if="passkey.last_used_at">Last used {{ formatLastUsed(passkey.last_used_at) }}</span>
+                  <span v-else>Not used recently</span>
+                  <span v-if="formatPasskeyTransports(passkey.transports)">
+                    {{ formatPasskeyTransports(passkey.transports) }}
+                  </span>
+                </div>
+              </div>
+
+              <button
+                class="btn-danger btn-small"
+                @click="deletePasskey(passkey)"
+                :disabled="removingPasskey === passkey.id || passkeys.length <= 1"
+              >
+                <svg v-if="removingPasskey === passkey.id" class="spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10" stroke-opacity="0.25"/>
+                  <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/>
+                </svg>
+                {{ removingPasskey === passkey.id ? "Removing..." : "Remove" }}
+              </button>
+            </div>
+          </div>
+
+          <div class="passkey-add-action">
+            <button
+              class="btn-primary btn-small"
+              @click="addPasskey"
+              :disabled="addingPasskey"
+            >
+              <svg v-if="addingPasskey" class="spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10" stroke-opacity="0.25"/>
+                <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/>
+              </svg>
+              {{ addPasskeyButtonLabel }}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -1792,6 +1875,26 @@ export default {
     const updatingOrgSettings = ref(false);
     const orgSettingsError = ref(null);
     const currentOrgId = ref(null);
+    const passkeys = ref([]);
+    const loadingPasskeys = ref(true);
+    const addingPasskey = ref(false);
+    const removingPasskey = ref(null);
+    const passkeyFlowStage = ref(null);
+    const addPasskeyButtonLabel = computed(() => {
+      if (!addingPasskey.value) return "Add passkey";
+      if (passkeyFlowStage.value === "approve") return "Approve current authenticator...";
+      if (passkeyFlowStage.value === "register") return "Register new authenticator...";
+      return "Working...";
+    });
+    const passkeyFlowMessage = computed(() => {
+      if (passkeyFlowStage.value === "approve") {
+        return "Browser prompt 1 of 2: approve this account change with the authenticator you are already signed in with.";
+      }
+      if (passkeyFlowStage.value === "register") {
+        return "Browser prompt 2 of 2: now tap, insert, or use the new authenticator you want to add.";
+      }
+      return "";
+    });
 
     const loadOrgSettings = async () => {
       // only display loading text if we have no org settings
@@ -1830,6 +1933,271 @@ export default {
         orgSettingsError.value = err.message || "Failed to load security settings";
       } finally {
         loadingOrgSettings.value = false;
+      }
+    };
+
+    const readResponseError = async (response, fallback) => {
+      const text = await response.text().catch(() => "");
+      if (!text) return fallback;
+      try {
+        const parsed = JSON.parse(text);
+        return parsed.error || parsed.message || text;
+      } catch {
+        return text;
+      }
+    };
+
+    const buildSignedHeaders = async (method, path, body = "") => {
+      const bodyHash = await sha256Hex(body);
+      const challengeRes = await authFetch("/auth/sign-request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          method,
+          path,
+          body_hash: bodyHash,
+        }),
+      });
+
+      if (!challengeRes.ok) {
+        throw new Error(await readResponseError(challengeRes, "Failed to authenticate request"));
+      }
+
+      const { publicKey, challenge_id } = await challengeRes.json();
+
+      publicKey.challenge = base64UrlToArrayBuffer(publicKey.challenge);
+      if (publicKey.allowCredentials) {
+        publicKey.allowCredentials = publicKey.allowCredentials.map((cred) => ({
+          ...cred,
+          id: base64UrlToArrayBuffer(cred.id),
+        }));
+      }
+
+      const credential = await navigator.credentials.get({ publicKey });
+      const credentialResponse = {
+        id: credential.id,
+        rawId: arrayBufferToBase64Url(credential.rawId),
+        type: credential.type,
+        response: {
+          authenticatorData: arrayBufferToBase64Url(
+            credential.response.authenticatorData
+          ),
+          clientDataJSON: arrayBufferToBase64Url(
+            credential.response.clientDataJSON
+          ),
+          signature: arrayBufferToBase64Url(credential.response.signature),
+          userHandle: credential.response.userHandle
+            ? arrayBufferToBase64Url(credential.response.userHandle)
+            : null,
+        },
+      };
+
+      const fido2Response = btoa(JSON.stringify(credentialResponse))
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=/g, "");
+
+      return {
+        "X-Fido2-Challenge-Id": challenge_id,
+        "X-Fido2-Response": fido2Response,
+      };
+    };
+
+    const loadPasskeys = async () => {
+      loadingPasskeys.value = true;
+
+      try {
+        const response = await authFetch("/passkeys");
+
+        if (response.ok) {
+          passkeys.value = await response.json();
+        } else if (response.status === 401) {
+          window.location.href = "/login";
+        } else {
+          passkeys.value = [];
+          showToast(await readResponseError(response, "Failed to load authenticators"), "error");
+        }
+      } catch (err) {
+        passkeys.value = [];
+        showToast("Failed to connect to server", "error");
+      } finally {
+        loadingPasskeys.value = false;
+      }
+    };
+
+    const transportLabel = (transport) => {
+      const labels = {
+        internal: "Device",
+        hybrid: "Phone",
+        usb: "USB",
+        nfc: "NFC",
+        ble: "Bluetooth",
+      };
+      return labels[transport] || transport;
+    };
+
+    const formatPasskeyTransports = (transports = []) => {
+      if (!transports.length) return "";
+      return transports.map(transportLabel).join(" · ");
+    };
+
+    const truncatePasskeyId = (credentialId) => {
+      if (!credentialId) return "";
+      if (credentialId.length <= 18) return credentialId;
+      return `${credentialId.slice(0, 10)}...${credentialId.slice(-6)}`;
+    };
+
+    const formatPasskeyTitle = (passkey) => {
+      const suffix = passkey.credential_id ? truncatePasskeyId(passkey.credential_id) : "";
+      return suffix ? `${passkey.kind} ${suffix}` : passkey.kind;
+    };
+
+    const addPasskey = async () => {
+      if (!window.PublicKeyCredential) {
+        showToast("This browser does not support passkeys", "error");
+        return;
+      }
+
+      addingPasskey.value = true;
+      passkeyFlowStage.value = "approve";
+
+      try {
+        const beginBody = "{}";
+        let signedHeaders;
+        try {
+          signedHeaders = await buildSignedHeaders("POST", "/passkeys/register/begin", beginBody);
+        } catch (signErr) {
+          if (signErr.name === "NotAllowedError") {
+            return;
+          }
+          throw signErr;
+        }
+        const beginResponse = await authFetch("/passkeys/register/begin", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...signedHeaders,
+          },
+          body: beginBody,
+        });
+
+        if (!beginResponse.ok) {
+          throw new Error(await readResponseError(beginResponse, "Failed to start passkey registration"));
+        }
+
+        const beginData = await beginResponse.json();
+        const publicKey = beginData.publicKey;
+        publicKey.challenge = base64UrlToArrayBuffer(publicKey.challenge);
+        publicKey.user.id = base64UrlToArrayBuffer(publicKey.user.id);
+        passkeyFlowStage.value = "register";
+
+        if (publicKey.excludeCredentials) {
+          publicKey.excludeCredentials = publicKey.excludeCredentials.map((cred) => ({
+            type: cred.type,
+            id: base64UrlToArrayBuffer(cred.id),
+            ...(cred.transports && cred.transports.length > 0
+              ? { transports: cred.transports }
+              : {}),
+          }));
+        }
+
+        let credential;
+        try {
+          credential = await navigator.credentials.create({ publicKey });
+        } catch (credError) {
+          const duplicateHint = `${credError.name || ""} ${credError.message || ""}`.toLowerCase();
+          if (
+            credError.name === "InvalidStateError" ||
+            duplicateHint.includes("already registered") ||
+            duplicateHint.includes("excluded credential") ||
+            duplicateHint.includes("credential is excluded")
+          ) {
+            throw new Error("This authenticator is already registered with an account on this platform.");
+          }
+          if (credError.name === "NotAllowedError") {
+            return;
+          }
+          throw credError;
+        }
+
+        if (!credential) {
+          throw new Error("No authenticator response received.");
+        }
+
+        const finishResponse = await authFetch("/passkeys/register/finish", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            id: credential.id,
+            rawId: arrayBufferToBase64Url(credential.rawId),
+            type: credential.type,
+            response: {
+              attestationObject: arrayBufferToBase64Url(
+                credential.response.attestationObject
+              ),
+              clientDataJSON: arrayBufferToBase64Url(
+                credential.response.clientDataJSON
+              ),
+            },
+            session: beginData.session,
+            transports: typeof credential.response.getTransports === "function"
+              ? credential.response.getTransports()
+              : [],
+          }),
+        });
+
+        if (!finishResponse.ok) {
+          throw new Error(await readResponseError(finishResponse, "Failed to add authenticator"));
+        }
+
+        await loadPasskeys();
+        showToast("Authenticator added");
+      } catch (err) {
+        showToast(err.message || "Failed to add authenticator", "error");
+      } finally {
+        addingPasskey.value = false;
+        passkeyFlowStage.value = null;
+      }
+    };
+
+    const deletePasskey = async (passkey) => {
+      if (passkeys.value.length <= 1) {
+        showToast("Keep at least one authenticator on your account", "error");
+        return;
+      }
+      if (!confirm(`Remove ${formatPasskeyTitle(passkey)}?`)) {
+        return;
+      }
+
+      removingPasskey.value = passkey.id;
+
+      try {
+        const deletePath = `/passkeys/${passkey.id}`;
+        const signedHeaders = await buildSignedHeaders("DELETE", deletePath, "");
+        const response = await authFetch(deletePath, {
+          method: "DELETE",
+          headers: signedHeaders,
+        });
+
+        if (response.ok || response.status === 204) {
+          if (passkey.is_current_session) {
+            showToast("Authenticator removed. Sign in again to continue.");
+            window.location.href = "/login";
+            return;
+          }
+          await loadPasskeys();
+          showToast("Authenticator removed");
+        } else {
+          showToast(await readResponseError(response, "Failed to remove authenticator"), "error");
+        }
+      } catch (err) {
+        if (err.name === "NotAllowedError") {
+          showToast("Authenticator approval was cancelled or timed out", "error");
+        } else {
+          showToast(err.message || "Failed to remove authenticator", "error");
+        }
+      } finally {
+        removingPasskey.value = null;
       }
     };
 
@@ -3174,6 +3542,7 @@ export default {
     };
 
     const handleTabChange = (newTab) => {
+      const previousTab = activeTab.value;
       activeTab.value = newTab;
       if (newTab === "apps") {
         setupStep.value = 0;
@@ -3187,6 +3556,9 @@ export default {
         newPublicKey.value = "";
         error.value = null;
         loadKeys();
+      } else if (newTab === "security") {
+        loadPasskeys();
+        loadOrgSettings();
       } else if (newTab === "credentials") {
         loadCredentials();
       } else if (newTab === "keys") {
@@ -3205,7 +3577,7 @@ export default {
       }
 
       // Stop polling when leaving settings tab
-      if (activeTab.value === "settings" && newTab !== "settings") {
+      if (previousTab === "settings" && newTab !== "settings") {
         stopBalancePolling();
       }
     };
@@ -3232,6 +3604,17 @@ export default {
         const [year, ordinal, hour = 0, min = 0, sec = 0] = dateValue;
         const date = new Date(Date.UTC(year, 0, ordinal, hour, min, sec));
         return date;
+      }
+      // Handle Rust time::OffsetDateTime string output like:
+      // 2026-04-10 18:10:27.062269084 +00:00:00
+      if (typeof dateValue === 'string') {
+        const rustTimeMatch = dateValue.match(
+          /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}(?:\.\d+)?) ([+-]\d{2}:\d{2})(?::\d{2})$/
+        );
+        if (rustTimeMatch) {
+          const [, datePart, timePart, offsetPart] = rustTimeMatch;
+          return new Date(`${datePart}T${timePart}${offsetPart}`);
+        }
       }
       // Handle string dates - if no timezone specified, assume UTC
       if (typeof dateValue === 'string' && !dateValue.includes('Z') && !dateValue.includes('+')) {
@@ -3467,6 +3850,9 @@ export default {
         loadKeys();
       } else if (activeTab.value === "credentials") {
         loadCredentials();
+      } else if (activeTab.value === "security") {
+        loadPasskeys();
+        loadOrgSettings();
       } else if (activeTab.value === "keys") {
         loadBundles();
       } else if (activeTab.value === "security") {
@@ -3484,7 +3870,7 @@ export default {
       window.addEventListener("keydown", handleKeyDown);
       document.addEventListener("visibilitychange", handleVisibilityChange);
 
-      await Promise.all([loadApps(), loadKeys(), loadCredentials(), loadBundles(), loadOrgSettings()]);
+      await Promise.all([loadApps(), loadKeys(), loadCredentials(), loadBundles(), loadOrgSettings(), loadPasskeys()]);
     });
 
     onUnmounted(() => {
@@ -3587,6 +3973,18 @@ export default {
       addCredential,
       deleteCredential,
       setDefaultCredential,
+      passkeys,
+      loadingPasskeys,
+      addingPasskey,
+      passkeyFlowStage,
+      addPasskeyButtonLabel,
+      passkeyFlowMessage,
+      removingPasskey,
+      addPasskey,
+      deletePasskey,
+      formatPasskeyTitle,
+      formatPasskeyTransports,
+      truncatePasskeyId,
       orgSettings,
       loadingOrgSettings,
       updatingOrgSettings,
@@ -5113,6 +5511,185 @@ export default {
   background: #f9fafb;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
+}
+
+.security-auth-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.security-settings--inline {
+  margin-top: 0;
+}
+
+.security-passkeys {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.passkey-flow-card {
+  margin-bottom: 0;
+  padding: 16px 18px;
+  border: 1px solid #d1d5db;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.passkey-flow-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.passkey-flow-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid transparent;
+}
+
+.passkey-flow-step--active {
+  border-color: #111827;
+  background: #ffffff;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
+}
+
+.passkey-flow-step--done {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.passkey-flow-step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: #e5e7eb;
+  color: #111827;
+  font-size: 13px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.passkey-flow-step--active .passkey-flow-step-number {
+  background: #111827;
+  color: #ffffff;
+}
+
+.passkey-flow-step--done .passkey-flow-step-number {
+  background: #16a34a;
+  color: #ffffff;
+}
+
+.passkey-flow-step-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 13px;
+  color: #4b5563;
+}
+
+.passkey-flow-step-copy strong {
+  color: #111827;
+  font-size: 14px;
+}
+
+.passkey-flow-message {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: #4b5563;
+}
+
+.passkey-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.passkey-add-action {
+  margin-top: 0;
+}
+
+.passkey-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 20px;
+  padding: 18px 20px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+}
+
+.passkey-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.passkey-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.passkey-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.passkey-badges {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.passkey-badge {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #e5e7eb;
+  color: #374151;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.passkey-badge--current {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.passkey-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+  font-size: 13px;
+  color: #6b7280;
+}
+
+@media (max-width: 700px) {
+  .passkey-item,
+  .passkey-header {
+    flex-direction: column;
+  }
+
+  .passkey-flow-card {
+    padding: 14px;
+  }
+
+  .passkey-badges {
+    justify-content: flex-start;
+  }
 }
 
 /* Billing Styles */
