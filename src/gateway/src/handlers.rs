@@ -308,12 +308,12 @@ pub async fn begin_register_handler(
 
 /// Build auth cookies for session and CSRF protection
 fn build_auth_cookies(session_id: &str, csrf_token: &str, max_age_hours: i64, secure: bool) -> (String, String) {
-    // Session cookie: HTTP-only, Secure, SameSite=Lax
+    // Session cookie: HTTP-only, Secure, SameSite=Strict
     let session_cookie = Cookie::build(("caution_session", session_id.to_string()))
         .path("/")
         .http_only(true)
         .secure(secure)
-        .same_site(SameSite::Lax)
+        .same_site(SameSite::Strict)
         .max_age(cookie::time::Duration::hours(max_age_hours))
         .build();
 
@@ -844,7 +844,7 @@ fn build_logout_cookies(secure: bool) -> (String, String) {
         .path("/")
         .http_only(true)
         .secure(secure)
-        .same_site(SameSite::Lax)
+        .same_site(SameSite::Strict)
         .max_age(cookie::time::Duration::ZERO)
         .build();
 
