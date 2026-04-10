@@ -2141,8 +2141,8 @@ export default {
       // Margin for verifiable compute (55% markup)
       const marginPercent = 55;
 
-      const runningApps = apps.value.filter(app => app.state === 'running');
-      const items = runningApps.map(app => {
+      // const runningApps = apps.value.filter(app => app.state === 'running');
+      const items = apps.map(app => {
         const hoursRunning = app.created_at
           ? Math.ceil((Date.now() - new Date(app.created_at).getTime()) / (1000 * 60 * 60))
           : 0;
