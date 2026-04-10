@@ -33,6 +33,14 @@ export default {
 
     const currentRoute = ref(window.location.pathname)
 
+    const replaceRoute = (path, hash = window.location.hash) => {
+      const normalizedHash = hash && hash !== '#' ? hash : ''
+      const nextUrl = `${path}${normalizedHash}`
+      if (`${window.location.pathname}${window.location.hash}` === nextUrl) return
+      window.history.replaceState({}, '', nextUrl)
+      currentRoute.value = path
+    }
+
     // Page metadata by route
     const pageMeta = {
       '/': {
@@ -89,19 +97,24 @@ export default {
       const path = currentRoute.value || window.location.pathname
 
       // Update page metadata
-      updatePageMeta(path)
+      updatePageMeta(path === '/' && isAuthenticated.value ? '/dashboard' : path)
 
       if (path === '/') {
-        // Register page (alpha code entry)
-        return 'Register'
+        if (!authChecked.value) return null
+        return isAuthenticated.value ? 'Dashboard' : 'Register'
       } else if (path === '/login') {
+        if (!authChecked.value) return null
+        if (isAuthenticated.value) {
+          replaceRoute('/')
+          return 'Dashboard'
+        }
         // Login page (WebAuthn authentication)
         return 'AuthLogin'
       } else if (path === '/onboarding') {
         // Protected route - show nothing until auth check completes
         if (!authChecked.value) return null
         if (!isAuthenticated.value) {
-          window.location.href = '/'
+          replaceRoute('/')
           return 'Register'
         }
         return 'Onboarding'
@@ -109,9 +122,10 @@ export default {
         // Protected route - show nothing until auth check completes
         if (!authChecked.value) return null
         if (!isAuthenticated.value) {
-          window.location.href = '/'
+          replaceRoute('/')
           return 'Register'
         }
+        replaceRoute('/', window.location.hash)
         return 'Dashboard'
       } else if (path === '/qr-login') {
         // Public route - QR code CLI login (no auth required)
@@ -123,8 +137,8 @@ export default {
       }
 
       // Unknown path - redirect to home
-      window.location.href = '/'
-      return 'Register'
+      replaceRoute('/')
+      return isAuthenticated.value ? 'Dashboard' : 'Register'
     })
 
     onMounted(() => {

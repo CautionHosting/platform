@@ -847,24 +847,8 @@ make build-cli
 
       <!-- Show list when not adding a key -->
       <template v-else>
-        <!-- Header with title and Add button -->
-        <div class="content-header">
-          <div class="content-header-text">
-            <h2 class="content-header-title">SSH keys</h2>
-            <p class="content-header-description">
-              SSH keys for pushing code via Git. Remove any you don't recognize.
-            </p>
-          </div>
-          <button
-            class="btn-primary"
-            @click="showAddKeyForm = true"
-          >
-            Add SSH key
-          </button>
-        </div>
-
         <!-- SSH Keys List -->
-        <div class="items-list">
+        <div class="items-list ssh-keys-list">
           <div v-if="loadingKeys" class="list-item-empty">Loading SSH keys...</div>
           <div v-else-if="sshKeys.length === 0" class="list-item-empty">
             No SSH keys yet. Add one to deploy via Git.
@@ -898,6 +882,14 @@ make build-cli
                 {{ deletingKey === key.fingerprint ? "Deleting..." : "Delete" }}
               </button>
             </div>
+          </div>
+          <div class="passkey-add-action ssh-keys-action">
+            <button
+              class="btn-primary btn-small"
+              @click="showAddKeyForm = true"
+            >
+              Add SSH key
+            </button>
           </div>
         </div>
       </template>
@@ -1679,6 +1671,24 @@ export default {
     AttestationModal,
   },
   setup() {
+    const DASHBOARD_TAB_HASHES = {
+      apps: "",
+      ssh: "ssh",
+      keys: "keys",
+      security: "security",
+      settings: "settings",
+      credentials: "credentials",
+      guide: "guide",
+    };
+    const DASHBOARD_HASH_TO_TAB = Object.entries(DASHBOARD_TAB_HASHES).reduce(
+      (acc, [tab, hash]) => {
+        if (hash) {
+          acc[hash] = tab;
+        }
+        return acc;
+      },
+      {}
+    );
     const error = ref(null);
     const activeTab = ref("apps");
     const setupStep = ref(0);
@@ -2004,7 +2014,9 @@ export default {
     };
 
     const loadPasskeys = async () => {
-      loadingPasskeys.value = true;
+      if (passkeys.value.length === 0) {
+        loadingPasskeys.value = true;
+      }
 
       try {
         const response = await authFetch("/passkeys");
@@ -3541,9 +3553,25 @@ export default {
       }
     };
 
-    const handleTabChange = (newTab) => {
-      const previousTab = activeTab.value;
-      activeTab.value = newTab;
+    const getTabFromLocation = () => {
+      const hash = window.location.hash.replace(/^#/, "");
+      return DASHBOARD_HASH_TO_TAB[hash] || "apps";
+    };
+
+    const syncDashboardLocation = (tab, { replace = false } = {}) => {
+      if (window.location.pathname !== "/" && window.location.pathname !== "/dashboard") return;
+
+      const hash = DASHBOARD_TAB_HASHES[tab] ?? "";
+      const nextUrl = hash ? `/#${hash}` : "/";
+      const currentUrl = `${window.location.pathname}${window.location.hash}`;
+
+      if (currentUrl === nextUrl) return;
+
+      const method = replace ? "replaceState" : "pushState";
+      window.history[method]({}, "", nextUrl);
+    };
+
+    const loadTabData = (newTab, previousTab) => {
       if (newTab === "apps") {
         setupStep.value = 0;
         selectedApp.value = null;
@@ -3579,6 +3607,31 @@ export default {
       // Stop polling when leaving settings tab
       if (previousTab === "settings" && newTab !== "settings") {
         stopBalancePolling();
+      }
+    };
+
+    const handleTabChange = (newTab, options = {}) => {
+      const normalizedTab = Object.prototype.hasOwnProperty.call(DASHBOARD_TAB_HASHES, newTab)
+        ? newTab
+        : "apps";
+      const previousTab = activeTab.value;
+
+      if (previousTab === normalizedTab) {
+        if (options.syncHistory !== false) {
+          syncDashboardLocation(normalizedTab, {
+            replace: options.replaceHistory === true,
+          });
+        }
+        return;
+      }
+
+      activeTab.value = normalizedTab;
+      loadTabData(normalizedTab, previousTab);
+
+      if (options.syncHistory !== false) {
+        syncDashboardLocation(normalizedTab, {
+          replace: options.replaceHistory === true,
+        });
       }
     };
 
@@ -3723,7 +3776,7 @@ export default {
     };
 
     const startGuide = () => {
-      activeTab.value = "guide";
+      handleTabChange("guide");
       setupStep.value = 1;
     };
 
@@ -3855,8 +3908,6 @@ export default {
         loadOrgSettings();
       } else if (activeTab.value === "keys") {
         loadBundles();
-      } else if (activeTab.value === "security") {
-	loadOrgSettings();
       } else if (activeTab.value === "settings") {
         loadCreditBalance();
         loadBilling();
@@ -3865,17 +3916,43 @@ export default {
       }
     };
 
+    const handleHistoryNavigation = () => {
+      handleTabChange(getTabFromLocation(), { syncHistory: false });
+    };
+
     onMounted(async () => {
+      const initialTab = getTabFromLocation();
+      activeTab.value = initialTab;
+
       // Add keyboard event listener
       window.addEventListener("keydown", handleKeyDown);
       document.addEventListener("visibilitychange", handleVisibilityChange);
+      window.addEventListener("popstate", handleHistoryNavigation);
+      window.addEventListener("hashchange", handleHistoryNavigation);
 
       await Promise.all([loadApps(), loadKeys(), loadCredentials(), loadBundles(), loadOrgSettings(), loadPasskeys()]);
+
+      if (initialTab === "settings") {
+        loadUserEmail();
+        loadBilling();
+        loadInvoices();
+        loadPaymentMethods();
+        loadCreditBalance();
+        loadCreditPackages();
+        loadAutoTopup();
+        loadSubscription();
+        loadSubscriptionTiers();
+        startBalancePolling();
+      }
+
+      syncDashboardLocation(initialTab, { replace: true });
     });
 
     onUnmounted(() => {
       window.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("popstate", handleHistoryNavigation);
+      window.removeEventListener("hashchange", handleHistoryNavigation);
       stopBalancePolling();
     });
 
@@ -4070,13 +4147,14 @@ export default {
 <style scoped>
 /* Guide intro/starter screen */
 .guide-intro {
-  height: 500px;
+  min-height: calc(100vh - 220px);
   display: flex;
   flex-direction: column;
 }
 
 .content-card--dashboard-tab {
-  height: 500px;
+  min-height: calc(100vh - 220px);
+  height: auto;
   display: flex;
   flex-direction: column;
 }
@@ -4088,6 +4166,16 @@ export default {
 
 .content-card--dashboard-tab .list-item-empty {
   min-height: 100%;
+}
+
+.content-card--dashboard-tab .ssh-keys-list {
+  flex: 0 1 auto;
+  margin-top: 0;
+  min-height: 0;
+}
+
+.content-card--dashboard-tab .ssh-keys-list .list-item-empty {
+  min-height: 180px;
 }
 
 .guide-intro-content {
@@ -5615,6 +5703,11 @@ export default {
 
 .passkey-add-action {
   margin-top: 0;
+}
+
+.ssh-keys-action {
+  margin-top: 16px;
+  align-self: flex-start;
 }
 
 .passkey-item {

@@ -113,7 +113,7 @@ export default {
     }
 
     const goToDashboard = () => {
-      window.location.href = '/dashboard'
+      window.location.href = '/'
     }
 
     return { step, email, emailSent, loading, error, submitEmail, goToDashboard }

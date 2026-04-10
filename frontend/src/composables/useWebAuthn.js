@@ -71,7 +71,7 @@ export function useWebAuthn() {
 
       if (response.ok) {
         authenticated.value = true;
-        window.location.href = "/dashboard";
+        window.location.href = "/";
         return true;
       } else {
         error.value = "Invalid session. Please authenticate using the CLI.";
@@ -190,7 +190,7 @@ export function useWebAuthn() {
 
       // Redirect to dashboard (session is now in HTTP-only cookie)
       setTimeout(() => {
-        window.location.href = "/dashboard";
+        window.location.href = "/";
       }, 1000);
     } catch (err) {
       error.value = err.message || "Login failed. Please try again.";
@@ -308,7 +308,7 @@ export function useWebAuthn() {
 
       // Redirect to dashboard (session is now in HTTP-only cookie)
       setTimeout(() => {
-        window.location.href = "/dashboard";
+        window.location.href = "/";
       }, 1000);
 
       return { success: true };
