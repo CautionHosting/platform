@@ -505,7 +505,7 @@ async fn poll_build_status(
                         "failed" => "Build failed",
                         _ => &status.phase,
                     };
-                    let _ = tx.send(Ok(bytes::Bytes::from(format!("data: {}\n\n", msg)))).await;
+                    let _ = tx.send(Ok(bytes::Bytes::from(format!("STEP:{}\n", msg)))).await;
                     last_phase = status.phase.clone();
                 }
 
