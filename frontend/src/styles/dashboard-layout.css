@@ -129,19 +129,22 @@
 }
 
 /* ==========================================================================
-   ALPHA BANNER
+   DEVELOPMENT BANNER
    ========================================================================== */
 
-.alpha-banner {
+.development-banner {
   background: #0f0f0f;
   color: rgba(255, 255, 255, 0.85);
   padding: 10px 20px;
   font-size: 1rem;
   font-weight: 400;
   letter-spacing: 0.01em;
-  display: flex;
-  align-items: center;
-  gap: 16px;
+}
+
+.development-banner-content {
+  max-width: 1550px;
+  margin: 0 auto;
+  text-align: center;
 }
 
 /* ==========================================================================
@@ -179,32 +182,20 @@
   margin: 0;
 }
 
-.alpha-banner-text {
-  flex: 1;
-  text-align: center;
-}
-
-.alpha-banner-close {
+.development-banner-link {
   background: transparent;
   border: none;
-  color: rgba(255, 255, 255, 0.7);
+  padding: 0;
+  margin: 0 4px;
+  color: white;
+  font: inherit;
+  text-decoration: underline;
   cursor: pointer;
-  padding: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
-  transition: all 0.2s ease;
-  flex-shrink: 0;
+  transition: opacity 0.15s ease;
 }
 
-.alpha-banner-close:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.95);
-}
-
-.alpha-banner-close:active {
-  background: rgba(255, 255, 255, 0.15);
+.development-banner-link:hover {
+  opacity: 0.8;
 }
 
 /* ==========================================================================
@@ -233,7 +224,7 @@
 }
 
 .sidebar-logo img {
-  height: 32px;
+  height: 28px;
   width: auto;
   opacity: 0.85;
 }
@@ -242,10 +233,11 @@
   opacity: 1;
 }
 
-.header-nav {
+.header-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: flex-end;
+  width: 220px;
   margin-left: auto;
 }
 
@@ -275,6 +267,33 @@
   flex: 1;
   text-align: center;
   line-height: 1;
+}
+
+.header-logout-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: #666;
+  font-family: inherit;
+  font-size: 1rem;
+  font-weight: 450;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.header-logout-button:hover {
+  color: var(--color-pink);
+}
+
+.header-logout-icon {
+  width: 18px;
+  height: 18px;
+  color: currentColor;
+  transform: translateY(3px);
+  transition: color 0.15s ease;
 }
 
 /* ==========================================================================
@@ -333,10 +352,6 @@
   color: #333;
 }
 
-.nav-item:hover:not(.active) .nav-icon {
-  filter: brightness(0) saturate(100%) invert(40%) sepia(0%) saturate(0%) hue-rotate(0deg) brightness(90%) contrast(90%);
-}
-
 .nav-item.active {
   background: #0f0f0f;
   color: white;
@@ -352,8 +367,17 @@
   transition: filter 0.15s ease;
 }
 
+.nav-item:hover:not(.active) .nav-icon {
+  filter: brightness(0) saturate(100%) invert(40%) sepia(0%) saturate(0%) hue-rotate(0deg) brightness(90%) contrast(90%);
+}
+
 .nav-item.active .nav-icon {
   filter: none;
+}
+
+.nav-item:focus-visible {
+  outline: 2px solid rgba(240, 72, 181, 0.32);
+  outline-offset: 3px;
 }
 
 /* ==========================================================================
@@ -466,6 +490,29 @@
   color: rgba(102, 102, 102, 0.875);
   margin: 0;
   line-height: 1.5;
+}
+
+.content-header-description code {
+  display: inline-block;
+  vertical-align: baseline;
+  line-height: 1.2;
+  background: var(--color-grey-light);
+  color: #333;
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-size: 0.9em;
+  font-weight: 400;
+  font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
+}
+
+.list-item-empty code {
+  background: var(--color-grey-light);
+  color: #333;
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-size: clamp(0.85rem, 2vw, 1rem);
+  font-weight: 400;
+  font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
 }
 
 .content-header--with-search {
@@ -604,7 +651,7 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 24px 40px;
+  padding: 96px 40px 24px 40px;
   margin-top: auto;
   max-width: 1550px;
   width: 100%;
@@ -851,6 +898,11 @@
   align-items: center;
   justify-content: center;
   flex: 1;
+}
+
+.list-item-empty-copy {
+  margin: 0;
+  line-height: 1.5;
 }
 
 .item-info {

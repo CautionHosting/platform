@@ -6,6 +6,7 @@
     :title="pageTitle"
     :active-tab="activeTab"
     :show-title="false"
+    :show-development-warning="!orgSettings.require_pin && !loadingOrgSettings"
     @tab-change="handleTabChange"
     @logout="logout"
   >
@@ -18,22 +19,6 @@
         <p>Your credentials are encrypted and stored securely.</p>
       </div>
     </template>
-
-    <!-- Security Warning Banner (non-dismissible) -->
-    <div v-if="!orgSettings.require_pin && !loadingOrgSettings" class="security-warning-banner">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-        <path d="M12 8v4"/>
-        <circle cx="12" cy="16" r="1"/>
-      </svg>
-      <span>
-        <strong>Development mode:</strong> PIN verification is disabled.
-        <button class="security-warning-link" @click="handleTabChange('security')">
-          Enable PIN requirement
-        </button>
-        for production use.
-      </span>
-    </div>
 
     <!-- Applications Tab -->
     <template v-if="activeTab === 'apps'">
@@ -352,7 +337,7 @@
       <div v-else-if="apps.length > 0" class="content-card">
         <div class="content-header content-header--with-search">
           <div class="content-header-text">
-            <h2 class="content-header-title">Your applications</h2>
+            <h2 class="content-header-title">Applications</h2>
             <p class="content-header-description">
               Applications running in secure enclaves.
             </p>
@@ -807,7 +792,7 @@ make build-cli
     </template>
 
     <!-- SSH Keys Tab -->
-    <div v-if="activeTab === 'ssh'" class="content-card">
+    <div v-if="activeTab === 'ssh'" class="content-card content-card--dashboard-tab">
       <!-- Show form when adding a key -->
       <template v-if="showAddKeyForm">
         <h3 class="form-section-title">Add new SSH key</h3>
@@ -865,7 +850,7 @@ make build-cli
         <!-- Header with title and Add button -->
         <div class="content-header">
           <div class="content-header-text">
-            <h2 class="content-header-title">Your SSH keys</h2>
+            <h2 class="content-header-title">SSH keys</h2>
             <p class="content-header-description">
               SSH keys for pushing code via Git. Remove any you don't recognize.
             </p>
@@ -919,7 +904,7 @@ make build-cli
     </div>
 
     <!-- Security Tab -->
-    <div v-if="activeTab === 'security'" class="content-card">
+    <div v-if="activeTab === 'security'" class="content-card content-card--dashboard-tab">
       <div class="content-header">
         <div class="content-header-text">
           <h2 class="content-header-title">Security settings</h2>
@@ -960,10 +945,10 @@ make build-cli
     </div>
 
     <!-- Key Services Tab -->
-    <div v-if="activeTab === 'keys'" class="content-card">
+    <div v-if="activeTab === 'keys'" class="content-card content-card--dashboard-tab">
       <div class="content-header">
         <div class="content-header-text">
-          <h2 class="content-header-title">Quorum bundles</h2>
+          <h2 class="content-header-title">Key services</h2>
           <p class="content-header-description">
             Manage quorum bundles created via <code>caution secret new</code>.
           </p>
@@ -972,8 +957,10 @@ make build-cli
 
       <div class="items-list">
         <div v-if="loadingBundles" class="loading">Loading bundles...</div>
-        <div v-else-if="quorumBundles.length === 0" class="empty-state">
-          No quorum bundles yet. Use <code>caution secret new</code> to create one.
+        <div v-else-if="quorumBundles.length === 0" class="list-item-empty">
+          <p class="list-item-empty-copy">
+            No quorum bundles yet. Use <code>caution secret new</code> to create one.
+          </p>
         </div>
         <div v-else>
           <div v-for="bundle in quorumBundles" :key="bundle.id" class="bundle-card">
@@ -3690,6 +3677,21 @@ export default {
   flex-direction: column;
 }
 
+.content-card--dashboard-tab {
+  height: 500px;
+  display: flex;
+  flex-direction: column;
+}
+
+.content-card--dashboard-tab .items-list {
+  flex: 1;
+  min-height: 0;
+}
+
+.content-card--dashboard-tab .list-item-empty {
+  min-height: 100%;
+}
+
 .guide-intro-content {
   text-align: center;
   flex: 1;
@@ -5326,6 +5328,7 @@ export default {
 }
 
 .security-setting-description {
+  max-width: 750px;
   font-size: 14px;
   color: #6b7280;
   margin: 0;
