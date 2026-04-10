@@ -80,7 +80,7 @@ pub async fn get_billing_usage(
                 configuration->>'domain' as domain, billing_tag, configuration,
                 created_at, updated_at
          FROM compute_resources
-         WHERE organization_id = $1 AND state = 'running'
+         WHERE organization_id = $1
          ORDER BY created_at DESC"
     )
     .bind(org_id)

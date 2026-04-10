@@ -169,7 +169,7 @@ pub async fn list_resources(
                 region, public_ip, configuration->>'domain' as domain,
                 billing_tag, configuration, created_at, updated_at
          FROM compute_resources
-         WHERE organization_id = $1 AND destroyed_at IS NULL"
+         WHERE organization_id = $1"
     )
     .bind(org_id)
     .fetch_all(&state.db)
