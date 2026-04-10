@@ -1807,7 +1807,10 @@ export default {
     const currentOrgId = ref(null);
 
     const loadOrgSettings = async () => {
-      loadingOrgSettings.value = true;
+      // only display loading text if we have no org settings
+      if (Object.keys(orgSettings.value).length == 0) {
+        loadingOrgSettings.value = true;
+      }
       orgSettingsError.value = null;
 
       try {
@@ -1993,7 +1996,10 @@ export default {
     });
 
     const loadApps = async () => {
-      loadingApps.value = true;
+      // only display loading text if we have no apps
+      if (apps.value.length === 0) {
+        loadingApps.value = true;
+      }
 
       try {
         const response = await authFetch("/api/resources");
@@ -2054,7 +2060,10 @@ export default {
     };
 
     const loadKeys = async () => {
-      loadingKeys.value = true;
+      // only display loading text if we have no ssh keys
+      if (sshKeys.value.length === 0) {
+        loadingKeys.value = true;
+      }
 
       try {
         const response = await authFetch("/ssh-keys");
@@ -2078,7 +2087,10 @@ export default {
     };
 
     const loadBilling = async () => {
-      loadingBilling.value = true;
+      // only display loading text if we have no billing data
+      if (billingData.value.items.length === 0) {
+        loadingBilling.value = true;
+      }
 
       try {
         const response = await authFetch("/api/billing/usage");
@@ -2177,7 +2189,11 @@ export default {
     const calculateAppMonthlyCost = getAppEstimatedMonthlyCost;
 
     const loadInvoices = async () => {
-      loadingInvoices.value = true;
+      // only display loading text if we have no invoices
+      if (invoices.value.length === 0) {
+        loadingInvoices.value = true;
+      }
+
       try {
         const response = await authFetch("/api/billing/invoices");
 
@@ -2871,7 +2887,10 @@ export default {
     };
 
     const loadCredentials = async () => {
-      loadingCreds.value = true;
+      // only display loading text if we have no credentials
+      if (credentials.value.length === 0) {
+        loadingCreds.value = true;
+      }
 
       try {
         const response = await authFetch("/api/credentials");
@@ -2892,7 +2911,10 @@ export default {
     };
 
     const loadBundles = async () => {
-      loadingBundles.value = true;
+      // only display loading text if we have no bundles
+      if (quorumBundles.value.length === 0) {
+        loadingBundles.value = true;
+      }
 
       try {
         const response = await authFetch("/api/quorum-bundles");
@@ -3460,6 +3482,8 @@ export default {
         loadCredentials();
       } else if (activeTab.value === "keys") {
         loadBundles();
+      } else if (activeTab.value === "security") {
+	loadOrgSettings();
       } else if (activeTab.value === "settings") {
         loadCreditBalance();
         loadBilling();
