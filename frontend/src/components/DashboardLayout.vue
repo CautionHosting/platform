@@ -3,18 +3,16 @@
 
 <template>
   <div class="dashboard-page">
-    <!-- Alpha Banner (dismissible) -->
-    <div v-if="showAlphaBanner" class="alpha-banner">
-      <span class="alpha-banner-text">
-        The software is currently in early alpha and is not production ready. You
-        may encounter breaking changes and evolving features.
-      </span>
-      <button class="alpha-banner-close" @click="dismissBanner" aria-label="Close banner">
-        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M18 6 6 18"/>
-          <path d="m6 6 12 12"/>
-        </svg>
-      </button>
+    <div v-if="showDevelopmentWarning" class="development-banner">
+      <div class="development-banner-content">
+        <span>
+          <strong>Development mode:</strong> PIN verification is disabled.
+          <button class="development-banner-link" @click="$emit('tab-change', 'security')">
+            Enable PIN requirement
+          </button>
+          for production use.
+        </span>
+      </div>
     </div>
 
     <!-- Top Header Row -->
@@ -23,9 +21,26 @@
         <img src="/assets/caution-logo-black.svg" alt="Caution" />
       </button>
       <h2 v-if="showTitle" class="page-title">{{ title }}</h2>
-      <div class="header-nav">
-        <span class="alpha-label">SOFTWARE IN ALPHA</span>
-        <span class="alpha-label alpha-label-warning">NOT PRODUCTION READY</span>
+      <div class="header-actions">
+        <button class="header-logout-button" @click="$emit('logout')">
+          <svg
+            class="header-logout-icon"
+            xmlns="http://www.w3.org/2000/svg"
+            width="24"
+            height="24"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M12 2v10" />
+            <path d="M18.4 6.6a9 9 0 1 1-12.77.04" />
+          </svg>
+          <span>Log out</span>
+        </button>
       </div>
     </div>
 
@@ -130,15 +145,6 @@
             <span>Quick start guide</span>
           </button>
           -->
-
-          <button class="nav-item nav-item--logout" @click="$emit('logout')">
-            <img
-              src="/assets/icons/log_out--inact.svg"
-              alt=""
-              class="nav-icon"
-            />
-            <span>Log out</span>
-          </button>
         </nav>
       </aside>
 
@@ -156,9 +162,21 @@
     <!-- Footer -->
     <footer class="dashboard-footer">
       <div class="footer-left">
-        &copy; 2025 Caution SEZC. All rights reserved.
+        {{ copyrightLabel }}
       </div>
       <div class="footer-right">
+        <a
+          href="https://caution.co/terms.html"
+          target="_blank"
+          rel="noopener noreferrer"
+          >Terms</a
+        >
+        <a
+          href="https://caution.co/privacy.html"
+          target="_blank"
+          rel="noopener noreferrer"
+          >Privacy</a
+        >
         <a
           href="https://docs.caution.co/"
           target="_blank"
@@ -181,7 +199,7 @@
 </template>
 
 <script>
-import { ref } from "vue";
+import { computed } from "vue";
 
 export default {
   name: "DashboardLayout",
@@ -198,23 +216,19 @@ export default {
       type: Boolean,
       default: false,
     },
+    showDevelopmentWarning: {
+      type: Boolean,
+      default: false,
+    },
   },
   emits: ["tab-change", "logout"],
   setup() {
-    const showAlphaBanner = ref(true);
-
-    const dismissBanner = () => {
-      showAlphaBanner.value = false;
-    };
-
-    const openAlphaNotes = () => {
-      window.open("https://caution.co/alpha-notes.html", "_blank");
-    };
+    const copyrightLabel = computed(() => {
+      return `© ${new Date().getFullYear()} Caution SEZC. All rights reserved.`;
+    });
 
     return {
-      showAlphaBanner,
-      dismissBanner,
-      openAlphaNotes,
+      copyrightLabel,
     };
   },
 };
