@@ -1161,6 +1161,35 @@ make build-cli
 
       <!-- Email Section -->
       <div class="billing-section">
+        <h3 class="billing-section-title">Legal</h3>
+        <div class="legal-settings-card">
+          <div class="legal-settings-row">
+            <div class="legal-settings-copy">
+              <div class="legal-settings-name">Terms of Service</div>
+              <div class="legal-settings-meta">
+                <span>{{ getLegalStatusLabel(legalStatus?.terms_of_service) }}</span>
+              </div>
+            </div>
+            <a href="https://caution.co/terms.html" target="_blank" rel="noopener noreferrer" class="legal-settings-link">
+              <span>Review document</span>
+            </a>
+          </div>
+          <div class="legal-settings-row">
+            <div class="legal-settings-copy">
+              <div class="legal-settings-name">Privacy Notice</div>
+              <div class="legal-settings-meta">
+                <span>{{ getLegalStatusLabel(legalStatus?.privacy_notice) }}</span>
+              </div>
+            </div>
+            <a href="https://caution.co/privacy.html" target="_blank" rel="noopener noreferrer" class="legal-settings-link">
+              <span>Review document</span>
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <!-- Email Section -->
+      <div class="billing-section">
         <h3 class="billing-section-title">Email</h3>
         <div class="email-settings">
           <div v-if="!editingEmail" class="email-display">
@@ -1666,11 +1695,17 @@ function base64UrlToArrayBuffer(base64url) {
 
 export default {
   name: "Dashboard",
+  props: {
+    legalBlocked: {
+      type: Boolean,
+      default: false,
+    },
+  },
   components: {
     DashboardLayout,
     AttestationModal,
   },
-  setup() {
+  setup(props) {
     const DASHBOARD_TAB_HASHES = {
       apps: "",
       ssh: "ssh",
@@ -2345,6 +2380,7 @@ export default {
     // Email settings
     const userEmail = ref('');
     const emailVerified = ref(null);
+    const legalStatus = ref(null);
     const editingEmail = ref(false);
     const emailInput = ref('');
     const savingEmail = ref(false);
@@ -2594,6 +2630,7 @@ export default {
         if (statusRes.ok) {
           const status = await statusRes.json();
           emailVerified.value = status.email_verified;
+          legalStatus.value = status.legal || null;
         }
       } catch (err) {
         // ignore
@@ -3626,6 +3663,9 @@ export default {
       }
 
       activeTab.value = normalizedTab;
+      if (props.legalBlocked) {
+        return;
+      }
       loadTabData(normalizedTab, previousTab);
 
       if (options.syncHistory !== false) {
@@ -3896,7 +3936,7 @@ export default {
 
     // Refresh active tab data when browser tab regains focus
     const handleVisibilityChange = () => {
-      if (document.hidden) return;
+      if (document.hidden || props.legalBlocked) return;
       if (activeTab.value === "apps") {
         loadApps();
       } else if (activeTab.value === "ssh") {
@@ -3918,6 +3958,18 @@ export default {
 
     const handleHistoryNavigation = () => {
       handleTabChange(getTabFromLocation(), { syncHistory: false });
+    };
+
+    const getLegalStatusLabel = (documentStatus) => {
+      if (documentStatus?.latest_user_accepted_at) {
+        return `Accepted ${formatDateTimeFull(documentStatus.latest_user_accepted_at)}`;
+      }
+
+      if (documentStatus?.requires_action) {
+        return 'Acceptance required';
+      }
+
+      return 'Acceptance recorded before tracking';
     };
 
     onMounted(async () => {
@@ -3955,6 +4007,38 @@ export default {
       window.removeEventListener("hashchange", handleHistoryNavigation);
       stopBalancePolling();
     });
+
+    watch(
+      () => props.legalBlocked,
+      (isBlocked, wasBlocked) => {
+        if (isBlocked || !wasBlocked) {
+          return;
+        }
+
+        if (activeTab.value === "apps") {
+          loadApps();
+        } else if (activeTab.value === "ssh") {
+          loadKeys();
+        } else if (activeTab.value === "credentials") {
+          loadCredentials();
+        } else if (activeTab.value === "keys") {
+          loadBundles();
+        } else if (activeTab.value === "settings") {
+          loadUserEmail();
+          loadBilling();
+          loadInvoices();
+          loadPaymentMethods();
+          loadCreditBalance();
+          loadCreditPackages();
+          loadAutoTopup();
+          loadSubscription();
+          loadSubscriptionTiers();
+          startBalancePolling();
+        }
+
+        loadOrgSettings();
+      }
+    );
 
     // Keep selectedApp in sync when apps list is refreshed
     watch(apps, (newApps) => {
@@ -4113,6 +4197,7 @@ export default {
       reactivateSubscription,
       userEmail,
       emailVerified,
+      legalStatus,
       editingEmail,
       emailInput,
       savingEmail,
@@ -4126,6 +4211,7 @@ export default {
       formatDate,
       formatDateTime,
       formatDateTimeFull,
+      getLegalStatusLabel,
       formatDateOnly,
       formatTimeOnly,
       formatTimeWithTimezone,
@@ -6451,6 +6537,57 @@ export default {
 }
 
 /* Email settings */
+.legal-settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+}
+
+.legal-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+
+.legal-settings-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.legal-settings-name {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #111827;
+}
+
+.legal-settings-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  font-size: 0.82rem;
+  color: #6b7280;
+}
+
+.legal-settings-link {
+  color: #111827;
+  font-size: 0.9rem;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.legal-settings-link:hover {
+  color: var(--color-pink);
+}
+
 .email-settings {
   padding: 0.5rem 0;
 }

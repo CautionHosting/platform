@@ -3,7 +3,19 @@
 
 <template>
   <div id="app">
-    <component v-if="currentView" :is="currentView" />
+    <component
+      v-if="currentView"
+      :is="currentView"
+      :legal-blocked="showLegalModal"
+    />
+    <LegalAcceptanceModal
+      v-if="showLegalModal"
+      :legal="userStatus.legal"
+      :loading-document-type="legalActionLoading"
+      :error="legalActionError"
+      @accept-all="acceptAllLegalDocuments"
+      @logout="logout"
+    />
   </div>
 </template>
 
@@ -14,7 +26,8 @@ import Register from './views/Login.vue'
 import AuthLogin from './views/AuthLogin.vue'
 import Dashboard from './views/Dashboard.vue'
 import QrLogin from './views/QrLogin.vue'
-import { getCsrfToken } from './composables/useWebAuthn.js'
+import LegalAcceptanceModal from './components/LegalAcceptanceModal.vue'
+import { authFetch, getCsrfToken } from './composables/useWebAuthn.js'
 
 export default {
   name: 'App',
@@ -23,13 +36,17 @@ export default {
     Register,
     AuthLogin,
     Dashboard,
-    QrLogin
+    QrLogin,
+    LegalAcceptanceModal
   },
   setup() {
     // Session is now stored in HTTP-only cookie, not URL
     // We track authentication state here, but actual auth is via cookie
     const isAuthenticated = ref(false)
     const authChecked = ref(false)
+    const userStatus = ref(null)
+    const legalActionLoading = ref(null)
+    const legalActionError = ref('')
 
     const currentRoute = ref(window.location.pathname)
 
@@ -82,14 +99,76 @@ export default {
     // Check authentication status via API call (session in HTTP-only cookie)
     const checkAuth = async () => {
       try {
-        const response = await fetch('/api/user/status', {
-          credentials: 'include',
-        })
+        const response = await authFetch('/api/user/status')
         isAuthenticated.value = response.ok
+        userStatus.value = response.ok ? await response.json() : null
       } catch {
         isAuthenticated.value = false
+        userStatus.value = null
       }
       authChecked.value = true
+    }
+
+    const showLegalModal = computed(() => {
+      if (!isAuthenticated.value || !userStatus.value?.legal) {
+        return false
+      }
+
+      return Object.values(userStatus.value.legal).some((document) => document?.requires_action)
+    })
+
+    const acceptLegalDocument = async (documentType) => {
+      legalActionLoading.value = documentType
+      legalActionError.value = ''
+
+      try {
+        const response = await authFetch('/api/legal/accept', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ document_type: documentType }),
+        })
+
+        if (!response.ok) {
+          const errorText = await response.text()
+          throw new Error(errorText || 'Failed to save legal acceptance')
+        }
+
+        const data = await response.json()
+        userStatus.value = {
+          ...(userStatus.value || {}),
+          legal: data.legal,
+        }
+      } catch (err) {
+        legalActionError.value = err.message || 'Failed to save legal acceptance'
+      } finally {
+        legalActionLoading.value = null
+      }
+    }
+
+    const acceptAllLegalDocuments = async () => {
+      const documentsToAccept = Object.entries(userStatus.value?.legal || {})
+        .filter(([, document]) => document?.requires_action)
+        .map(([documentType]) => documentType)
+
+      for (const documentType of documentsToAccept) {
+        await acceptLegalDocument(documentType)
+        if (legalActionError.value) {
+          return
+        }
+      }
+    }
+
+    const logout = async () => {
+      try {
+        const response = await authFetch('/auth/logout', { method: 'POST' })
+        if (!response.ok) {
+          legalActionError.value = 'Logout failed. Please try again.'
+          return
+        }
+        window.location.href = '/login'
+      } catch {
+        legalActionError.value = 'Could not reach the server. Please try again.'
+      }
     }
 
     // Simple client-side routing
@@ -154,6 +233,12 @@ export default {
     return {
       currentView,
       isAuthenticated,
+      userStatus,
+      showLegalModal,
+      legalActionLoading,
+      legalActionError,
+      acceptAllLegalDocuments,
+      logout,
       getCsrfToken
     }
   }

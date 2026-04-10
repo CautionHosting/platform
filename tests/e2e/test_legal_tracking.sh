@@ -86,6 +86,8 @@ db_query() {
 # Seed version placeholders (set in step 1)
 SEED_TOS_VERSION=""
 SEED_PN_VERSION=""
+SEED_TOS_ID=""
+SEED_PN_ID=""
 
 # ── Step 1: Wait for services and read seed versions ───────────────
 
@@ -104,11 +106,13 @@ done
 
 SEED_TOS_VERSION=$(db_query "SELECT version FROM legal_documents WHERE document_type = 'terms_of_service' AND is_active = true;")
 SEED_PN_VERSION=$(db_query "SELECT version FROM legal_documents WHERE document_type = 'privacy_notice' AND is_active = true;")
+SEED_TOS_ID=$(db_query "SELECT id FROM legal_documents WHERE document_type = 'terms_of_service' AND is_active = true;")
+SEED_PN_ID=$(db_query "SELECT id FROM legal_documents WHERE document_type = 'privacy_notice' AND is_active = true;")
 
-if [[ -n "$SEED_TOS_VERSION" && -n "$SEED_PN_VERSION" ]]; then
+if [[ -n "$SEED_TOS_VERSION" && -n "$SEED_PN_VERSION" && -n "$SEED_TOS_ID" && -n "$SEED_PN_ID" ]]; then
     step_pass "Seed data: TOS=$SEED_TOS_VERSION, PN=$SEED_PN_VERSION"
 else
-    step_fail "Seed data: missing active versions (TOS='$SEED_TOS_VERSION' PN='$SEED_PN_VERSION')"
+    step_fail "Seed data: missing active documents (TOS='$SEED_TOS_VERSION' PN='$SEED_PN_VERSION')"
     exit 1
 fi
 
@@ -118,8 +122,10 @@ STEP_NUM=2
 log "Testing unique active constraint..."
 
 INSERT_RESULT=$(db_query "
-    INSERT INTO legal_documents (document_type, version, url, effective_at, is_active)
-    VALUES ('terms_of_service', '2099-01-01', 'https://example.com', '2099-01-01', true);
+    INSERT INTO legal_documents (document_type, version, url, effective_at, is_active, source_commit_sha, source_path, content_sha256)
+    VALUES ('terms_of_service', '2099-01-01', 'https://example.com', '2099-01-01', true,
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'terms.md',
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
 " 2>&1 || true)
 
 if echo "$INSERT_RESULT" | grep -qi "unique\|duplicate\|violates"; then
@@ -177,16 +183,23 @@ log "Testing outdated TOS detection..."
 
 # Give user a baseline acceptance
 db_query "
-    INSERT INTO user_legal_events (user_id, document_type, document_version, event_type, event_source)
+    INSERT INTO user_legal_events (user_id, legal_document_id, document_type, document_version, event_type, event_source)
     VALUES
-        ('$USER_ID', 'terms_of_service', '$SEED_TOS_VERSION', 'accepted', 'signup'),
-        ('$USER_ID', 'privacy_notice', '$SEED_PN_VERSION', 'acknowledged', 'signup');
+        ('$USER_ID', '$SEED_TOS_ID', 'terms_of_service', '$SEED_TOS_VERSION', 'accepted', 'signup'),
+        ('$USER_ID', '$SEED_PN_ID', 'privacy_notice', '$SEED_PN_VERSION', 'acknowledged', 'signup');
 " >/dev/null
 
 # Add and activate a new TOS version
 db_query "
-    INSERT INTO legal_documents (document_type, version, url, effective_at, is_active, requires_blocking_reacceptance)
-    VALUES ('terms_of_service', '2099-06-01', 'https://caution.co/terms-v2.html', '2099-06-01', false, true);
+    INSERT INTO legal_documents (
+        document_type, version, url, effective_at, is_active, requires_blocking_reacceptance,
+        source_commit_sha, source_path, content_sha256
+    )
+    VALUES (
+        'terms_of_service', '2099-06-01', 'https://caution.co/terms-v2.html', '2099-06-01', false, true,
+        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'terms.md',
+        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+    );
 " >/dev/null
 
 db_query "
@@ -223,8 +236,15 @@ db_query "
 
 # Add and activate a new privacy notice version
 db_query "
-    INSERT INTO legal_documents (document_type, version, url, effective_at, is_active, requires_acknowledgment)
-    VALUES ('privacy_notice', '2099-06-01', 'https://caution.co/privacy-v2.html', '2099-06-01', false, true);
+    INSERT INTO legal_documents (
+        document_type, version, url, effective_at, is_active, requires_acknowledgment,
+        source_commit_sha, source_path, content_sha256
+    )
+    VALUES (
+        'privacy_notice', '2099-06-01', 'https://caution.co/privacy-v2.html', '2099-06-01', false, true,
+        'cccccccccccccccccccccccccccccccccccccccc', 'privacy.md',
+        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+    );
 " >/dev/null
 
 db_query "

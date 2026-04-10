@@ -7,17 +7,30 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{FromRow, PgPool};
 use std::sync::Arc;
 use uuid::Uuid;
+use chrono::{DateTime, Utc};
 
 use crate::{AppState, AuthContext};
+
+#[derive(Debug, Clone, FromRow)]
+struct LegalDocumentIdentity {
+    id: Uuid,
+    version: String,
+    source_commit_sha: Option<String>,
+    source_path: Option<String>,
+    occurred_at: Option<DateTime<Utc>>,
+}
 
 #[derive(Debug, Serialize)]
 pub struct LegalDocumentStatus {
     pub active_version: Option<String>,
     pub latest_user_version: Option<String>,
+    pub latest_user_accepted_at: Option<DateTime<Utc>>,
     pub requires_action: bool,
+    pub source_commit_sha: Option<String>,
+    pub source_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -26,10 +39,21 @@ pub struct UserLegalStatus {
     pub privacy_notice: LegalDocumentStatus,
 }
 
+fn expected_event_type(document_type: &str) -> Option<&'static str> {
+    match document_type {
+        "terms_of_service" => Some("accepted"),
+        "privacy_notice" => Some("acknowledged"),
+        _ => None,
+    }
+}
+
 /// Get the active version for a document type, or None if no active version exists.
-async fn get_active_version(pool: &PgPool, document_type: &str) -> Result<Option<String>, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT version FROM legal_documents
+async fn get_active_document(
+    pool: &PgPool,
+    document_type: &str,
+) -> Result<Option<LegalDocumentIdentity>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, version, source_commit_sha, source_path, NULL::timestamptz AS occurred_at FROM legal_documents
          WHERE document_type = $1 AND is_active = true"
     )
     .bind(document_type)
@@ -40,14 +64,20 @@ async fn get_active_version(pool: &PgPool, document_type: &str) -> Result<Option
 /// Get the latest version a user accepted/acknowledged for a document type.
 /// For terms_of_service, looks for 'accepted' events.
 /// For privacy_notice, looks for 'acknowledged' events.
-async fn get_latest_user_version(
+async fn get_latest_user_document(
     pool: &PgPool,
     user_id: Uuid,
     document_type: &str,
     event_type: &str,
-) -> Result<Option<String>, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT document_version FROM user_legal_events
+) -> Result<Option<LegalDocumentIdentity>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT
+            legal_document_id AS id,
+            document_version AS version,
+            NULL::TEXT AS source_commit_sha,
+            NULL::TEXT AS source_path,
+            occurred_at
+         FROM user_legal_events
          WHERE user_id = $1
            AND document_type = $2
            AND event_type = $3
@@ -63,12 +93,18 @@ async fn get_latest_user_version(
 
 /// Compute legal status for a single document type.
 fn compute_document_status(
-    active_version: Option<String>,
-    latest_user_version: Option<String>,
+    active_document: Option<LegalDocumentIdentity>,
+    latest_user_document: Option<LegalDocumentIdentity>,
 ) -> LegalDocumentStatus {
-    let requires_action = match (&active_version, &latest_user_version) {
-        // Active version exists, user has a record: compare versions
-        (Some(active), Some(user_ver)) => active != user_ver,
+    let active_version = active_document.as_ref().map(|doc| doc.version.clone());
+    let latest_user_version = latest_user_document.as_ref().map(|doc| doc.version.clone());
+    let latest_user_accepted_at = latest_user_document.as_ref().and_then(|doc| doc.occurred_at);
+    let source_commit_sha = active_document.as_ref().and_then(|doc| doc.source_commit_sha.clone());
+    let source_path = active_document.as_ref().and_then(|doc| doc.source_path.clone());
+
+    let requires_action = match (&active_document, &latest_user_document) {
+        // Compare exact legal document rows, not just display versions.
+        (Some(active), Some(user_doc)) => active.id != user_doc.id,
         // Active version exists, user has no record: user predates tracking,
         // do not retroactively gate
         (Some(_), None) => false,
@@ -79,22 +115,60 @@ fn compute_document_status(
     LegalDocumentStatus {
         active_version,
         latest_user_version,
+        latest_user_accepted_at,
         requires_action,
+        source_commit_sha,
+        source_path,
     }
 }
 
 /// Get the full legal status for a user across all document types.
 pub async fn get_user_legal_status(pool: &PgPool, user_id: Uuid) -> Result<UserLegalStatus, sqlx::Error> {
-    let tos_active = get_active_version(pool, "terms_of_service").await?;
-    let pn_active = get_active_version(pool, "privacy_notice").await?;
+    let tos_active = get_active_document(pool, "terms_of_service").await?;
+    let pn_active = get_active_document(pool, "privacy_notice").await?;
 
-    let tos_user = get_latest_user_version(pool, user_id, "terms_of_service", "accepted").await?;
-    let pn_user = get_latest_user_version(pool, user_id, "privacy_notice", "acknowledged").await?;
+    let tos_user = get_latest_user_document(pool, user_id, "terms_of_service", "accepted").await?;
+    let pn_user = get_latest_user_document(pool, user_id, "privacy_notice", "acknowledged").await?;
 
     Ok(UserLegalStatus {
         terms_of_service: compute_document_status(tos_active, tos_user),
         privacy_notice: compute_document_status(pn_active, pn_user),
     })
+}
+
+pub async fn get_blocking_document_requiring_acceptance(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    let blocking_document_types: Vec<String> = sqlx::query_scalar(
+        "SELECT document_type
+         FROM legal_documents
+         WHERE is_active = true
+           AND requires_blocking_reacceptance = true
+         ORDER BY CASE document_type
+            WHEN 'terms_of_service' THEN 0
+            WHEN 'privacy_notice' THEN 1
+            ELSE 2
+         END"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for document_type in blocking_document_types {
+        let Some(event_type) = expected_event_type(&document_type) else {
+            continue;
+        };
+
+        let active_document = get_active_document(pool, &document_type).await?;
+        let latest_user_document =
+            get_latest_user_document(pool, user_id, &document_type, event_type).await?;
+
+        if compute_document_status(active_document, latest_user_document).requires_action {
+            return Ok(Some(document_type));
+        }
+    }
+
+    Ok(None)
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,35 +193,38 @@ pub async fn accept_legal_document(
     headers: HeaderMap,
     Json(payload): Json<AcceptLegalRequest>,
 ) -> Result<Json<AcceptLegalResponse>, (StatusCode, String)> {
-    let event_type = match payload.document_type.as_str() {
-        "terms_of_service" => "accepted",
-        "privacy_notice" => "acknowledged",
-        _ => return Err((
+    let event_type = expected_event_type(payload.document_type.as_str()).ok_or_else(|| {
+        (
             StatusCode::BAD_REQUEST,
-            format!("Invalid document_type: '{}'. Must be 'terms_of_service' or 'privacy_notice'", payload.document_type),
-        )),
-    };
+            format!(
+                "Invalid document_type: '{}'. Must be 'terms_of_service' or 'privacy_notice'",
+                payload.document_type
+            ),
+        )
+    })?;
 
-    let active_version: Option<String> = get_active_version(&state.db, &payload.document_type)
+    let active_document = get_active_document(&state.db, &payload.document_type)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get active legal version: {:?}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, "Failed to query legal documents".to_string())
         })?;
 
-    let version = active_version.ok_or_else(|| {
+    let active_document = active_document.ok_or_else(|| {
         (StatusCode::NOT_FOUND, format!("No active {} document found", payload.document_type))
     })?;
+    let version = active_document.version.clone();
 
     let session_id = headers.get("x-session-id").and_then(|v| v.to_str().ok());
 
     sqlx::query(
         "INSERT INTO user_legal_events (
-            user_id, document_type, document_version,
+            user_id, legal_document_id, document_type, document_version,
             event_type, event_source, occurred_at, session_id
-        ) VALUES ($1, $2, $3, $4, $5, NOW(), $6)"
+        ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)"
     )
     .bind(auth.user_id)
+    .bind(active_document.id)
     .bind(&payload.document_type)
     .bind(&version)
     .bind(event_type)
@@ -188,8 +265,20 @@ mod tests {
     #[test]
     fn test_current_user_requires_no_action() {
         let status = compute_document_status(
-            Some("2026-04-08".to_string()),
-            Some("2026-04-08".to_string()),
+            Some(LegalDocumentIdentity {
+                id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+                version: "2026-04-08".to_string(),
+                source_commit_sha: None,
+                source_path: None,
+                occurred_at: None,
+            }),
+            Some(LegalDocumentIdentity {
+                id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+                version: "2026-04-08".to_string(),
+                source_commit_sha: None,
+                source_path: None,
+                occurred_at: None,
+            }),
         );
         assert!(!status.requires_action);
         assert_eq!(status.active_version.as_deref(), Some("2026-04-08"));
@@ -199,8 +288,20 @@ mod tests {
     #[test]
     fn test_outdated_user_requires_action() {
         let status = compute_document_status(
-            Some("2026-06-01".to_string()),
-            Some("2026-04-08".to_string()),
+            Some(LegalDocumentIdentity {
+                id: Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
+                version: "2026-06-01".to_string(),
+                source_commit_sha: None,
+                source_path: None,
+                occurred_at: None,
+            }),
+            Some(LegalDocumentIdentity {
+                id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+                version: "2026-04-08".to_string(),
+                source_commit_sha: None,
+                source_path: None,
+                occurred_at: None,
+            }),
         );
         assert!(status.requires_action);
         assert_eq!(status.active_version.as_deref(), Some("2026-06-01"));
@@ -211,7 +312,13 @@ mod tests {
     fn test_pre_tracking_user_no_action() {
         // User has no legal event rows (predates tracking)
         let status = compute_document_status(
-            Some("2026-04-08".to_string()),
+            Some(LegalDocumentIdentity {
+                id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+                version: "2026-04-08".to_string(),
+                source_commit_sha: None,
+                source_path: None,
+                occurred_at: None,
+            }),
             None,
         );
         assert!(!status.requires_action);
@@ -232,7 +339,13 @@ mod tests {
         // with no replacement. Should not require action.
         let status = compute_document_status(
             None,
-            Some("2026-04-08".to_string()),
+            Some(LegalDocumentIdentity {
+                id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+                version: "2026-04-08".to_string(),
+                source_commit_sha: None,
+                source_path: None,
+                occurred_at: None,
+            }),
         );
         assert!(!status.requires_action);
     }
