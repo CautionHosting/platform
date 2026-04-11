@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
+    Json,
     extract::{Extension, State, Request},
     http::{StatusCode, HeaderMap},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
+use serde::Serialize;
 use sqlx::PgPool;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
@@ -109,6 +111,46 @@ pub async fn onboarding_middleware(
     next: Next,
 ) -> Result<Response, StatusCode> {
     ensure_user_has_org(&state.db, auth.user_id).await?;
+
+    request.extensions_mut().insert(auth);
+    Ok(next.run(request).await)
+}
+
+#[derive(Serialize)]
+struct LegalAcceptanceRequiredBody {
+    code: &'static str,
+    document_type: String,
+    message: &'static str,
+}
+
+pub async fn legal_middleware(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, Response> {
+    let blocking_document = crate::legal::get_blocking_document_requiring_acceptance(&state.db, auth.user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to evaluate legal enforcement for user {}: {:?}", auth.user_id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to evaluate legal acceptance requirements".to_string(),
+            )
+                .into_response()
+        })?;
+
+    if let Some(document_type) = blocking_document {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(LegalAcceptanceRequiredBody {
+                code: "legal_acceptance_required",
+                document_type,
+                message: "You must accept the current legal document before continuing.",
+            }),
+        )
+            .into_response());
+    }
 
     request.extensions_mut().insert(auth);
     Ok(next.run(request).await)

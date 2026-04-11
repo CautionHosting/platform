@@ -553,7 +553,14 @@ test-e2e:
 test-e2e-legal:
 	@$(MAKE) up-test
 	@echo "Running legal tracking e2e tests..."
-	@bash tests/e2e/test_legal_tracking.sh; \
+	@DB_CONTAINER=$(TEST_DB_HOST) \
+	DB_NAME=$(TEST_DB_NAME) \
+	DB_HOST=$(TEST_DB_HOST) \
+	DB_PORT=5432 \
+	DB_USER=$(DB_USER) \
+	DB_PASSWORD=$(DB_PASSWORD) \
+	DATABASE_URL=$(TEST_DATABASE_URL) \
+	bash tests/e2e/test_legal_tracking.sh; \
 	status=$$?; \
 	$(MAKE) down-test; \
 	exit $$status

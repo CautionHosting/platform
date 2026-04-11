@@ -56,6 +56,9 @@ Commands:
   Legal:
   list-legal-docs        List all legal document versions
   add-legal-doc          Add a new legal document version (interactive)
+  add-legal-doc-from-website.sh
+                         Helper script to create a legal document row from a
+                         caution/website repo path and commit
   activate-legal-doc     Activate a legal document version
                          (deactivates prior active version of same type)
   user-legal-status <id> Show legal status for a user
@@ -295,6 +298,8 @@ cmd_list_legal_docs() {
             requires_blocking_reacceptance as blocking,
             requires_acknowledgment as ack,
             effective_at::date as effective,
+            source_path,
+            left(source_commit_sha, 12) as commit,
             url
         FROM legal_documents
         ORDER BY document_type, effective_at DESC;
@@ -314,6 +319,9 @@ cmd_add_legal_doc() {
     read -rp "Version (e.g. 2026-06-01): " version
     read -rp "URL: " url
     read -rp "Effective date (YYYY-MM-DD): " effective_at
+    read -rp "Source path in caution/website (e.g. terms.md): " source_path
+    read -rp "Source commit SHA: " source_commit_sha
+    read -rp "Content SHA-256: " content_sha256
     read -rp "Requires blocking reacceptance? (y/n): " blocking
     read -rp "Requires acknowledgment? (y/n): " ack
     read -rp "Summary JSON (optional, press enter to skip): " summary
@@ -334,6 +342,8 @@ cmd_add_legal_doc() {
     echo "  version:    $version"
     echo "  url:        $url"
     echo "  effective:  $effective_at"
+    echo "  source:     $source_path @ $source_commit_sha"
+    echo "  content:    $content_sha256"
     echo "  blocking:   $blocking_bool"
     echo "  ack:        $ack_bool"
     echo "  is_active:  false (use activate-legal-doc to activate)"
@@ -343,9 +353,11 @@ cmd_add_legal_doc() {
 
     psql_cmd -c "
         INSERT INTO legal_documents (document_type, version, url, effective_at,
-            is_active, requires_blocking_reacceptance, requires_acknowledgment, summary_json)
+            is_active, requires_blocking_reacceptance, requires_acknowledgment,
+            source_path, source_commit_sha, content_sha256, summary_json)
         VALUES ('$doc_type', '$version', '$url', '$effective_at',
-            false, $blocking_bool, $ack_bool, $summary_val);
+            false, $blocking_bool, $ack_bool,
+            '$source_path', '$source_commit_sha', '$content_sha256', $summary_val);
     "
     echo "Document added (inactive). Use 'activate-legal-doc' to make it active."
 }
@@ -418,16 +430,17 @@ cmd_user_legal_status() {
         SELECT
             ld.document_type,
             ld.version as active_version,
+            left(ld.source_commit_sha, 12) as active_commit,
             ule.document_version as user_version,
             ule.event_type as last_event,
             CASE
                 WHEN ule.document_version IS NULL THEN 'no record'
-                WHEN ld.version = ule.document_version THEN 'current'
+                WHEN ule.legal_document_id = ld.id THEN 'current'
                 ELSE 'outdated'
             END as status
         FROM legal_documents ld
         LEFT JOIN LATERAL (
-            SELECT document_version, event_type
+            SELECT legal_document_id, document_version, event_type
             FROM user_legal_events
             WHERE user_id = '$user_id'
               AND document_type = ld.document_type

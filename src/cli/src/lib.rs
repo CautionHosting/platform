@@ -621,6 +621,13 @@ struct Organization {
     id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct LegalAcceptanceRequiredError {
+    code: String,
+    document_type: String,
+    message: Option<String>,
+}
+
 struct ApiClient {
     base_url: String,
     client: reqwest::Client,
@@ -675,6 +682,51 @@ impl ApiClient {
     fn frontend_url(&self) -> String {
         std::env::var("FRONTEND_URL")
             .unwrap_or_else(|_| self.base_url.clone())
+    }
+
+    fn legal_document_label(document_type: &str) -> &'static str {
+        match document_type {
+            "terms_of_service" => "Terms of Service",
+            "privacy_notice" => "Privacy Notice",
+            _ => "legal document",
+        }
+    }
+
+    fn legal_acceptance_message(&self, document_type: &str) -> String {
+        let frontend_url = self.frontend_url().trim_end_matches('/').to_string();
+        let document_label = Self::legal_document_label(document_type);
+
+        format!(
+            "You need to accept updated legal documents before continuing.\nRequired: {}\nOpen the Caution web app and accept the update:\n  {}/dashboard",
+            document_label,
+            frontend_url
+        )
+    }
+
+    async fn api_error_message(&self, response: reqwest::Response) -> String {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+
+        if status == reqwest::StatusCode::FORBIDDEN {
+            if let Ok(payload) = serde_json::from_str::<LegalAcceptanceRequiredError>(&body) {
+                if payload.code == "legal_acceptance_required" {
+                    let mut message = self.legal_acceptance_message(&payload.document_type);
+                    if let Some(server_message) = payload.message {
+                        if !server_message.trim().is_empty() {
+                            message.push_str("\n\n");
+                            message.push_str(server_message.trim());
+                        }
+                    }
+                    return message;
+                }
+            }
+        }
+
+        if body.trim().is_empty() {
+            format!("HTTP {}", status)
+        } else {
+            body
+        }
     }
 
     fn save_config(&self, session_id: String, expires_at: String) -> Result<()> {
@@ -1327,7 +1379,8 @@ build: docker build -t app .
             .await?;
 
         if !response.status().is_success() {
-            bail!("Failed to get user status: {}", response.status());
+            let error = self.api_error_message(response).await;
+            bail!("Failed to get user status: {}", error);
         }
 
         let status: UserStatus = response.json().await?;
@@ -1343,7 +1396,8 @@ build: docker build -t app .
             .await?;
 
         if !orgs_response.status().is_success() {
-            bail!("Failed to get organizations: {}", orgs_response.status());
+            let error = self.api_error_message(orgs_response).await;
+            bail!("Failed to get organizations: {}", error);
         }
 
         let orgs: Vec<Organization> = orgs_response.json().await?;
@@ -1359,7 +1413,8 @@ build: docker build -t app .
             .await?;
 
         if !settings_response.status().is_success() {
-            bail!("Failed to get security settings: {}", settings_response.status());
+            let error = self.api_error_message(settings_response).await;
+            bail!("Failed to get security settings: {}", error);
         }
 
         let settings: OrgSettings = settings_response.json().await?;
@@ -2077,7 +2132,7 @@ build: docker build -t app .
 
         if !response.status().is_success() {
             let status = response.status();
-            let error = response.text().await?;
+            let error = self.api_error_message(response).await;
             loader.stop();
 
             if error.contains("initialize") || error.contains("provisioning") || error.contains("AWS account") {
@@ -2157,7 +2212,8 @@ build: docker build -t app .
             }
             Ok(())
         } else {
-            bail!("Failed to list apps: {}", response.status())
+            let error = self.api_error_message(response).await;
+            bail!("Failed to list apps: {}", error)
         }
     }
 
@@ -2174,7 +2230,8 @@ build: docker build -t app .
             let app: App = response.json().await?;
             Ok(app)
         } else {
-            bail!("Failed to get app: {}", response.status())
+            let error = self.api_error_message(response).await;
+            bail!("Failed to get app: {}", error)
         }
     }
 
@@ -2292,7 +2349,7 @@ build: docker build -t app .
             Ok(())
         } else {
             let status = response.status();
-            let error = response.text().await?;
+            let error = self.api_error_message(response).await;
             loader.stop();
             bail!("Failed to destroy app (status {}): {}", status, error)
         }
@@ -2330,7 +2387,7 @@ build: docker build -t app .
             Ok(())
         } else {
             let status = response.status();
-            let error = response.text().await?;
+            let error = self.api_error_message(response).await;
             bail!("Failed to rename app (status {}): {}", status, error)
         }
     }
@@ -2412,7 +2469,7 @@ build: docker build -t app .
 
         if !response.status().is_success() {
             let status = response.status();
-            let error = response.text().await?;
+            let error = self.api_error_message(response).await;
             loader.stop();
 
             if error.contains("initialize") || error.contains("provisioning") || error.contains("AWS account") {
@@ -4226,7 +4283,7 @@ build: docker build -t app .
         let response = self.signed_post(session_id, "/ssh-keys", &body).await?;
 
         if !response.status().is_success() {
-            let error = response.text().await?;
+            let error = self.api_error_message(response).await;
             if error.contains("insert SSH key") || error.contains("duplicate") || error.contains("23505") {
                 bail!("Key already exists");
             }
@@ -4245,7 +4302,7 @@ build: docker build -t app .
             .await?;
 
         if !response.status().is_success() {
-            let error = response.text().await?;
+            let error = self.api_error_message(response).await;
             bail!("Failed to remove key: {}", error);
         }
 
@@ -4618,7 +4675,7 @@ build: docker build -t app .
             }
             Ok(())
         } else {
-            let error_text = response.text().await.unwrap_or_default();
+            let error_text = self.api_error_message(response).await;
             bail!("Failed to add credential: {}", error_text)
         }
     }
@@ -4657,7 +4714,8 @@ build: docker build -t app .
             }
             Ok(())
         } else {
-            bail!("Failed to list credentials: {}", response.status())
+            let error = self.api_error_message(response).await;
+            bail!("Failed to list credentials: {}", error)
         }
     }
 
@@ -4674,7 +4732,11 @@ build: docker build -t app .
             .await?;
 
         if !response.status().is_success() {
-            bail!("Credential '{}' not found", id);
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                bail!("Credential '{}' not found", id);
+            }
+            let error = self.api_error_message(response).await;
+            bail!("Failed to fetch credential '{}': {}", id, error);
         }
 
         let cred: serde_json::Value = response.json().await?;
@@ -4708,7 +4770,8 @@ build: docker build -t app .
             println!("Credential '{}' removed", name);
             Ok(())
         } else {
-            bail!("Failed to remove credential: {}", response.status())
+            let error = self.api_error_message(response).await;
+            bail!("Failed to remove credential: {}", error)
         }
     }
 
@@ -4730,7 +4793,8 @@ build: docker build -t app .
         } else if response.status() == reqwest::StatusCode::NOT_FOUND {
             bail!("Credential '{}' not found", id)
         } else {
-            bail!("Failed to set default: {}", response.status())
+            let error = self.api_error_message(response).await;
+            bail!("Failed to set default: {}", error)
         }
     }
 
@@ -4826,7 +4890,7 @@ build: docker build -t app .
                 }
             } else {
                 let status = response.status();
-                let error = response.text().await?;
+                let error = self.api_error_message(response).await;
                 bail!("Failed to store quorum bundle ({}): {}", status, error);
             }
         }
@@ -4853,7 +4917,7 @@ build: docker build -t app .
             eprintln!("Quorum bundle renamed to \"{}\"", name);
         } else {
             let status = response.status();
-            let error = response.text().await?;
+            let error = self.api_error_message(response).await;
             bail!("Failed to rename quorum bundle ({}): {}", status, error);
         }
 
@@ -4873,7 +4937,7 @@ build: docker build -t app .
 
         if !response.status().is_success() {
             let status = response.status();
-            let error = response.text().await?;
+            let error = self.api_error_message(response).await;
             bail!("Failed to fetch quorum bundle ({}): {}", status, error);
         }
 
@@ -4903,7 +4967,7 @@ build: docker build -t app .
             eprintln!("Labels updated successfully");
         } else {
             let status = response.status();
-            let error = response.text().await?;
+            let error = self.api_error_message(response).await;
             bail!("Failed to update labels ({}): {}", status, error);
         }
 
@@ -4923,7 +4987,7 @@ build: docker build -t app .
 
         if !response.status().is_success() {
             let status = response.status();
-            let error = response.text().await?;
+            let error = self.api_error_message(response).await;
             bail!("Failed to fetch quorum bundle ({}): {}", status, error);
         }
 
@@ -4950,7 +5014,7 @@ build: docker build -t app .
             eprintln!("Labels removed successfully");
         } else {
             let status = response.status();
-            let error = response.text().await?;
+            let error = self.api_error_message(response).await;
             bail!("Failed to remove labels ({}): {}", status, error);
         }
 

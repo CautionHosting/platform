@@ -1741,6 +1741,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/billing/subscription/cancel", post(subscriptions::cancel_subscription))
         .route("/billing/subscription/reactivate", post(subscriptions::reactivate_subscription))
         .layer(axum::middleware::from_fn_with_state(state.clone(), middleware::onboarding_middleware))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), middleware::legal_middleware))
         .layer(axum::middleware::from_fn_with_state(state.clone(), middleware::auth_middleware));
 
     let internal_routes = Router::new()

@@ -70,8 +70,8 @@ pub async fn create_user(
         ("terms_of_service", "accepted"),
         ("privacy_notice", "acknowledged"),
     ] {
-        let version: String = sqlx::query_scalar(
-            "SELECT version FROM legal_documents
+        let (legal_document_id, version): (Uuid, String) = sqlx::query_as(
+            "SELECT id, version FROM legal_documents
              WHERE document_type = $1 AND is_active = true
              ORDER BY effective_at DESC
              LIMIT 1",
@@ -84,12 +84,13 @@ pub async fn create_user(
 
         sqlx::query(
             "INSERT INTO user_legal_events (
-                user_id, document_type, document_version,
+                user_id, legal_document_id, document_type, document_version,
                 event_type, event_source, occurred_at,
                 ip_address, user_agent
-            ) VALUES ($1, $2, $3, $4, 'signup', NOW(), $5::inet, $6)",
+            ) VALUES ($1, $2, $3, $4, $5, 'signup', NOW(), $6::inet, $7)"
         )
         .bind(user_id)
+        .bind(legal_document_id)
         .bind(doc_type)
         .bind(&version)
         .bind(event_type)
