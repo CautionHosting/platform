@@ -1079,15 +1079,31 @@ provider "aws" {{
   region     = var.provider_region != "" ? var.provider_region : "{region}"
   access_key = var.provider_access_key != "" ? var.provider_access_key : null
   secret_key = var.provider_secret_key != "" ? var.provider_secret_key : null
+
+  default_tags {{
+    tags = {{
+      org_id    = "{org_id}"
+      ManagedBy = "caution+tofu"
+    }}
+  }}
 }}"#,
-            region = aws_region
+            region = aws_region,
+            org_id = request.org_id,
         )
     } else {
         format!(
             r#"provider "aws" {{
   region = "{region}"
+
+  default_tags {{
+    tags = {{
+      org_id    = "{org_id}"
+      ManagedBy = "caution+tofu"
+    }}
+  }}
 }}"#,
-            region = aws_region
+            region = aws_region,
+            org_id = request.org_id,
         )
     };
 
@@ -1154,8 +1170,6 @@ resource "aws_iam_role" "enclave" {{
   tags = {{
     Name         = "enclave-role-{resource_id}"
     ResourceId   = "{resource_id}"
-    org_id       = "{org_id}"
-    ManagedBy    = "terraform"
   }}
 }}
 
@@ -1188,8 +1202,6 @@ resource "aws_iam_instance_profile" "enclave" {{
   tags = {{
     Name         = "enclave-profile-{resource_id}"
     ResourceId   = "{resource_id}"
-    org_id       = "{org_id}"
-    ManagedBy    = "terraform"
   }}
 }}
 
@@ -1202,8 +1214,6 @@ resource "aws_vpc" "enclave" {{
   tags = {{
     Name         = "vpc-{resource_id}"
     ResourceId   = "{resource_id}"
-    org_id       = "{org_id}"
-    ManagedBy    = "terraform"
   }}
 }}
 
@@ -1214,8 +1224,6 @@ resource "aws_internet_gateway" "enclave" {{
   tags = {{
     Name         = "igw-{resource_id}"
     ResourceId   = "{resource_id}"
-    org_id       = "{org_id}"
-    ManagedBy    = "terraform"
   }}
 }}
 
@@ -1229,8 +1237,6 @@ resource "aws_subnet" "enclave" {{
   tags = {{
     Name         = "subnet-{resource_id}"
     ResourceId   = "{resource_id}"
-    org_id       = "{org_id}"
-    ManagedBy    = "terraform"
   }}
 }}
 
@@ -1246,8 +1252,6 @@ resource "aws_route_table" "enclave" {{
   tags = {{
     Name         = "rt-{resource_id}"
     ResourceId   = "{resource_id}"
-    org_id       = "{org_id}"
-    ManagedBy    = "terraform"
   }}
 }}
 
@@ -1317,8 +1321,6 @@ resource "aws_security_group" "enclave" {{
   tags = {{
     Name         = "enclave-{resource_id}"
     ResourceId   = "{resource_id}"
-    org_id       = "{org_id}"
-    ManagedBy    = "terraform"
   }}
 }}
 
@@ -1362,8 +1364,6 @@ resource "aws_instance" "enclave" {{
   tags = {{
     Name         = "{resource_id}"
     ResourceId   = "{resource_id}"
-    org_id       = "{org_id}"
-    ManagedBy    = "terraform"
     ConfigDomain = "{domain}"
   }}
 }}
@@ -1376,8 +1376,6 @@ resource "aws_eip" "enclave" {{
   tags = {{
     Name         = "enclave-{resource_id}"
     ResourceId   = "{resource_id}"
-    org_id       = "{org_id}"
-    ManagedBy    = "terraform"
   }}
 }}
 
@@ -1483,6 +1481,13 @@ provider "aws" {{
   region     = var.provider_region != "" ? var.provider_region : "{region}"
   access_key = var.provider_access_key != "" ? var.provider_access_key : null
   secret_key = var.provider_secret_key != "" ? var.provider_secret_key : null
+
+  default_tags {{
+    tags = {{
+      org_id    = "{org_id}"
+      ManagedBy = "caution+tofu"
+    }}
+  }}
 }}
 
 variable "ports" {{
@@ -1566,8 +1571,6 @@ resource "aws_security_group" "enclave" {{
   tags = {{
     Name                  = "enclave-{resource_id}"
     ResourceId            = "{resource_id}"
-    org_id                = "{org_id}"
-    ManagedBy             = "terraform"
     (local.scope_tag_key) = local.deployment_tag
   }}
 }}
@@ -1618,8 +1621,6 @@ resource "aws_launch_template" "enclave" {{
     tags = {{
       Name                  = "{resource_id}"
       ResourceId            = "{resource_id}"
-      org_id                = "{org_id}"
-      ManagedBy             = "terraform"
       ConfigDomain          = "{domain}"
       (local.scope_tag_key) = local.deployment_tag
     }}
@@ -1637,8 +1638,6 @@ resource "aws_launch_template" "enclave" {{
   tags = {{
     Name                  = "lt-{resource_id}"
     ResourceId            = "{resource_id}"
-    org_id                = "{org_id}"
-    ManagedBy             = "terraform"
     (local.scope_tag_key) = local.deployment_tag
   }}
 }}
@@ -1649,8 +1648,6 @@ resource "aws_eip" "enclave" {{
   tags = {{
     Name                  = "enclave-{resource_id}"
     ResourceId            = "{resource_id}"
-    org_id                = "{org_id}"
-    ManagedBy             = "terraform"
     (local.scope_tag_key) = local.deployment_tag
   }}
 }}
