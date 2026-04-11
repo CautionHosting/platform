@@ -212,7 +212,7 @@ db_query "
 STATUS3=$(curl -sf "$GATEWAY_URL/api/user/status" -H "X-Session-ID: $SESSION_ID")
 TOS_ACTION3=$(echo "$STATUS3" | jq -r '.legal.terms_of_service.requires_action')
 TOS_ACTIVE3=$(echo "$STATUS3" | jq -r '.legal.terms_of_service.active_version')
-TOS_USER3=$(echo "$STATUS3" | jq -r '.legal.terms_of_service.latest_user_version')
+TOS_USER3=$(echo "$STATUS3" | jq -r '.legal.terms_of_service.accepted_version')
 PN_ACTION3=$(echo "$STATUS3" | jq -r '.legal.privacy_notice.requires_action')
 
 if [[ "$TOS_ACTION3" == "true" && "$TOS_ACTIVE3" == "2099-06-01" && "$TOS_USER3" == "$SEED_TOS_VERSION" && "$PN_ACTION3" == "false" ]]; then
@@ -257,7 +257,7 @@ db_query "
 STATUS4=$(curl -sf "$GATEWAY_URL/api/user/status" -H "X-Session-ID: $SESSION_ID")
 PN_ACTION4=$(echo "$STATUS4" | jq -r '.legal.privacy_notice.requires_action')
 PN_ACTIVE4=$(echo "$STATUS4" | jq -r '.legal.privacy_notice.active_version')
-PN_USER4=$(echo "$STATUS4" | jq -r '.legal.privacy_notice.latest_user_version')
+PN_USER4=$(echo "$STATUS4" | jq -r '.legal.privacy_notice.accepted_version')
 TOS_ACTION4=$(echo "$STATUS4" | jq -r '.legal.terms_of_service.requires_action')
 
 if [[ "$PN_ACTION4" == "true" && "$PN_ACTIVE4" == "2099-06-01" && "$PN_USER4" == "$SEED_PN_VERSION" && "$TOS_ACTION4" == "false" ]]; then

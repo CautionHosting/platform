@@ -44,6 +44,8 @@ Options:
 Defaults:
   terms_of_service => blocking=true, ack=false
   privacy_notice   => blocking=false, ack=true
+
+Requires local commands: git, psql, sed, awk, and a SHA-256 tool.
 EOF
 }
 

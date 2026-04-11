@@ -847,6 +847,21 @@ make build-cli
 
       <!-- Show list when not adding a key -->
       <template v-else>
+        <div class="content-header">
+          <div class="content-header-text">
+            <h2 class="content-header-title">SSH keys</h2>
+            <p class="content-header-description">
+              SSH keys for pushing code via Git. Remove any you don't recognize.
+            </p>
+          </div>
+          <button
+            class="btn-primary"
+            @click="showAddKeyForm = true"
+          >
+            Add SSH key
+          </button>
+        </div>
+
         <!-- SSH Keys List -->
         <div class="items-list ssh-keys-list">
           <div v-if="loadingKeys" class="list-item-empty">Loading SSH keys...</div>
@@ -883,20 +898,32 @@ make build-cli
               </button>
             </div>
           </div>
-          <div class="passkey-add-action ssh-keys-action">
-            <button
-              class="btn-primary btn-small"
-              @click="showAddKeyForm = true"
-            >
-              Add SSH key
-            </button>
-          </div>
         </div>
       </template>
     </div>
 
     <!-- Security Tab -->
     <div v-if="activeTab === 'security'" class="content-card content-card--dashboard-tab">
+      <div class="content-header">
+        <div class="content-header-text">
+          <h2 class="content-header-title">Security settings</h2>
+          <p class="content-header-description">
+            Configure authentication requirements for your organization.
+          </p>
+        </div>
+        <button
+          class="btn-primary"
+          @click="addPasskey"
+          :disabled="addingPasskey"
+        >
+          <svg v-if="addingPasskey" class="spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10" stroke-opacity="0.25"/>
+            <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/>
+          </svg>
+          {{ addPasskeyButtonLabel }}
+        </button>
+      </div>
+
       <div class="security-auth-panel">
         <div class="security-settings security-settings--inline">
           <div v-if="loadingOrgSettings" class="list-item-empty">Loading security settings...</div>
@@ -1002,19 +1029,6 @@ make build-cli
             </div>
           </div>
 
-          <div class="passkey-add-action">
-            <button
-              class="btn-primary btn-small"
-              @click="addPasskey"
-              :disabled="addingPasskey"
-            >
-              <svg v-if="addingPasskey" class="spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10" stroke-opacity="0.25"/>
-                <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/>
-              </svg>
-              {{ addPasskeyButtonLabel }}
-            </button>
-          </div>
         </div>
       </div>
     </div>
@@ -1171,7 +1185,12 @@ make build-cli
               </div>
             </div>
             <a href="https://caution.co/terms.html" target="_blank" rel="noopener noreferrer" class="legal-settings-link">
-              <span>Review document</span>
+              <span>Review</span>
+              <svg class="legal-settings-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M15 3h6v6"/>
+                <path d="M10 14 21 3"/>
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+              </svg>
             </a>
           </div>
           <div class="legal-settings-row">
@@ -1182,7 +1201,12 @@ make build-cli
               </div>
             </div>
             <a href="https://caution.co/privacy.html" target="_blank" rel="noopener noreferrer" class="legal-settings-link">
-              <span>Review document</span>
+              <span>Review</span>
+              <svg class="legal-settings-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M15 3h6v6"/>
+                <path d="M10 14 21 3"/>
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+              </svg>
             </a>
           </div>
         </div>
@@ -3961,8 +3985,8 @@ export default {
     };
 
     const getLegalStatusLabel = (documentStatus) => {
-      if (documentStatus?.latest_user_accepted_at) {
-        return `Accepted ${formatDateTimeFull(documentStatus.latest_user_accepted_at)}`;
+      if (documentStatus?.accepted_at) {
+        return `Accepted on ${formatDateTimeFull(documentStatus.accepted_at)}`;
       }
 
       if (documentStatus?.requires_action) {
@@ -4233,14 +4257,13 @@ export default {
 <style scoped>
 /* Guide intro/starter screen */
 .guide-intro {
-  min-height: calc(100vh - 220px);
+  min-height: 500px;
   display: flex;
   flex-direction: column;
 }
 
 .content-card--dashboard-tab {
-  min-height: calc(100vh - 220px);
-  height: auto;
+  min-height: 500px;
   display: flex;
   flex-direction: column;
 }
@@ -4252,16 +4275,6 @@ export default {
 
 .content-card--dashboard-tab .list-item-empty {
   min-height: 100%;
-}
-
-.content-card--dashboard-tab .ssh-keys-list {
-  flex: 0 1 auto;
-  margin-top: 0;
-  min-height: 0;
-}
-
-.content-card--dashboard-tab .ssh-keys-list .list-item-empty {
-  min-height: 180px;
 }
 
 .guide-intro-content {
@@ -6577,6 +6590,9 @@ export default {
 }
 
 .legal-settings-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
   color: #111827;
   font-size: 0.9rem;
   font-weight: 500;
@@ -6586,6 +6602,17 @@ export default {
 
 .legal-settings-link:hover {
   color: var(--color-pink);
+}
+
+.legal-settings-link-icon {
+  width: 0.95rem;
+  height: 0.95rem;
+  opacity: 0.95;
+  transition: opacity 0.2s ease;
+}
+
+.legal-settings-link:hover .legal-settings-link-icon {
+  opacity: 1;
 }
 
 .email-settings {

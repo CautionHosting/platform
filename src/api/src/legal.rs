@@ -18,19 +18,15 @@ use crate::{AppState, AuthContext};
 struct LegalDocumentIdentity {
     id: Uuid,
     version: String,
-    source_commit_sha: Option<String>,
-    source_path: Option<String>,
     occurred_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct LegalDocumentStatus {
     pub active_version: Option<String>,
-    pub latest_user_version: Option<String>,
-    pub latest_user_accepted_at: Option<DateTime<Utc>>,
+    pub accepted_version: Option<String>,
+    pub accepted_at: Option<DateTime<Utc>>,
     pub requires_action: bool,
-    pub source_commit_sha: Option<String>,
-    pub source_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -53,7 +49,7 @@ async fn get_active_document(
     document_type: &str,
 ) -> Result<Option<LegalDocumentIdentity>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, version, source_commit_sha, source_path, NULL::timestamptz AS occurred_at FROM legal_documents
+        "SELECT id, version, NULL::timestamptz AS occurred_at FROM legal_documents
          WHERE document_type = $1 AND is_active = true"
     )
     .bind(document_type)
@@ -61,10 +57,10 @@ async fn get_active_document(
     .await
 }
 
-/// Get the latest version a user accepted/acknowledged for a document type.
-/// For terms_of_service, looks for 'accepted' events.
-/// For privacy_notice, looks for 'acknowledged' events.
-async fn get_latest_user_document(
+/// Get the user's most recent accepted/acknowledged document for a document type.
+/// This is derived from append-only user_legal_events by document_type + event_type,
+/// ordered by occurred_at descending.
+async fn get_latest_user_document_by_type(
     pool: &PgPool,
     user_id: Uuid,
     document_type: &str,
@@ -74,8 +70,6 @@ async fn get_latest_user_document(
         "SELECT
             legal_document_id AS id,
             document_version AS version,
-            NULL::TEXT AS source_commit_sha,
-            NULL::TEXT AS source_path,
             occurred_at
          FROM user_legal_events
          WHERE user_id = $1
@@ -97,10 +91,8 @@ fn compute_document_status(
     latest_user_document: Option<LegalDocumentIdentity>,
 ) -> LegalDocumentStatus {
     let active_version = active_document.as_ref().map(|doc| doc.version.clone());
-    let latest_user_version = latest_user_document.as_ref().map(|doc| doc.version.clone());
-    let latest_user_accepted_at = latest_user_document.as_ref().and_then(|doc| doc.occurred_at);
-    let source_commit_sha = active_document.as_ref().and_then(|doc| doc.source_commit_sha.clone());
-    let source_path = active_document.as_ref().and_then(|doc| doc.source_path.clone());
+    let accepted_version = latest_user_document.as_ref().map(|doc| doc.version.clone());
+    let accepted_at = latest_user_document.as_ref().and_then(|doc| doc.occurred_at);
 
     let requires_action = match (&active_document, &latest_user_document) {
         // Compare exact legal document rows, not just display versions.
@@ -114,11 +106,9 @@ fn compute_document_status(
 
     LegalDocumentStatus {
         active_version,
-        latest_user_version,
-        latest_user_accepted_at,
+        accepted_version,
+        accepted_at,
         requires_action,
-        source_commit_sha,
-        source_path,
     }
 }
 
@@ -127,8 +117,10 @@ pub async fn get_user_legal_status(pool: &PgPool, user_id: Uuid) -> Result<UserL
     let tos_active = get_active_document(pool, "terms_of_service").await?;
     let pn_active = get_active_document(pool, "privacy_notice").await?;
 
-    let tos_user = get_latest_user_document(pool, user_id, "terms_of_service", "accepted").await?;
-    let pn_user = get_latest_user_document(pool, user_id, "privacy_notice", "acknowledged").await?;
+    let tos_user =
+        get_latest_user_document_by_type(pool, user_id, "terms_of_service", "accepted").await?;
+    let pn_user =
+        get_latest_user_document_by_type(pool, user_id, "privacy_notice", "acknowledged").await?;
 
     Ok(UserLegalStatus {
         terms_of_service: compute_document_status(tos_active, tos_user),
@@ -140,32 +132,32 @@ pub async fn get_blocking_document_requiring_acceptance(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<Option<String>, sqlx::Error> {
-    let blocking_document_types: Vec<String> = sqlx::query_scalar(
-        "SELECT document_type
+    let legal = get_user_legal_status(pool, user_id).await?;
+
+    let tos_blocking: bool = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(requires_blocking_reacceptance::int), 0)::bool
          FROM legal_documents
-         WHERE is_active = true
-           AND requires_blocking_reacceptance = true
-         ORDER BY CASE document_type
-            WHEN 'terms_of_service' THEN 0
-            WHEN 'privacy_notice' THEN 1
-            ELSE 2
-         END"
+         WHERE document_type = 'terms_of_service'
+           AND is_active = true"
     )
-    .fetch_all(pool)
+    .fetch_one(pool)
     .await?;
 
-    for document_type in blocking_document_types {
-        let Some(event_type) = expected_event_type(&document_type) else {
-            continue;
-        };
+    if tos_blocking && legal.terms_of_service.requires_action {
+        return Ok(Some("terms_of_service".to_string()));
+    }
 
-        let active_document = get_active_document(pool, &document_type).await?;
-        let latest_user_document =
-            get_latest_user_document(pool, user_id, &document_type, event_type).await?;
+    let pn_blocking: bool = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(requires_blocking_reacceptance::int), 0)::bool
+         FROM legal_documents
+         WHERE document_type = 'privacy_notice'
+           AND is_active = true"
+    )
+    .fetch_one(pool)
+    .await?;
 
-        if compute_document_status(active_document, latest_user_document).requires_action {
-            return Ok(Some(document_type));
-        }
+    if pn_blocking && legal.privacy_notice.requires_action {
+        return Ok(Some("privacy_notice".to_string()));
     }
 
     Ok(None)
@@ -268,21 +260,17 @@ mod tests {
             Some(LegalDocumentIdentity {
                 id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
                 version: "2026-04-08".to_string(),
-                source_commit_sha: None,
-                source_path: None,
                 occurred_at: None,
             }),
             Some(LegalDocumentIdentity {
                 id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
                 version: "2026-04-08".to_string(),
-                source_commit_sha: None,
-                source_path: None,
                 occurred_at: None,
             }),
         );
         assert!(!status.requires_action);
         assert_eq!(status.active_version.as_deref(), Some("2026-04-08"));
-        assert_eq!(status.latest_user_version.as_deref(), Some("2026-04-08"));
+        assert_eq!(status.accepted_version.as_deref(), Some("2026-04-08"));
     }
 
     #[test]
@@ -291,21 +279,17 @@ mod tests {
             Some(LegalDocumentIdentity {
                 id: Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
                 version: "2026-06-01".to_string(),
-                source_commit_sha: None,
-                source_path: None,
                 occurred_at: None,
             }),
             Some(LegalDocumentIdentity {
                 id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
                 version: "2026-04-08".to_string(),
-                source_commit_sha: None,
-                source_path: None,
                 occurred_at: None,
             }),
         );
         assert!(status.requires_action);
         assert_eq!(status.active_version.as_deref(), Some("2026-06-01"));
-        assert_eq!(status.latest_user_version.as_deref(), Some("2026-04-08"));
+        assert_eq!(status.accepted_version.as_deref(), Some("2026-04-08"));
     }
 
     #[test]
@@ -315,15 +299,13 @@ mod tests {
             Some(LegalDocumentIdentity {
                 id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
                 version: "2026-04-08".to_string(),
-                source_commit_sha: None,
-                source_path: None,
                 occurred_at: None,
             }),
             None,
         );
         assert!(!status.requires_action);
         assert_eq!(status.active_version.as_deref(), Some("2026-04-08"));
-        assert_eq!(status.latest_user_version, None);
+        assert_eq!(status.accepted_version, None);
     }
 
     #[test]
@@ -342,8 +324,6 @@ mod tests {
             Some(LegalDocumentIdentity {
                 id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
                 version: "2026-04-08".to_string(),
-                source_commit_sha: None,
-                source_path: None,
                 occurred_at: None,
             }),
         );
