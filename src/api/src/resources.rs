@@ -485,19 +485,26 @@ pub async fn delete_resource(
 
     // Stop metering for the destroyed resource
     let resource_id_str = resource_id.to_string();
-    match sqlx::query(
-        "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
+    match crate::metering::stop_tracked_resource(
+        state.internal_service_secret.as_deref(),
+        &resource_id_str,
     )
-    .bind(&resource_id_str)
-    .execute(&state.db)
     .await {
-        Ok(result) => {
-            if result.rows_affected() > 0 {
-                tracing::info!("Stopped metering for resource {}", resource_id);
-            }
+        Ok(()) => {
+            tracing::info!("Stopped metering for resource {}", resource_id);
         }
         Err(e) => {
-            tracing::error!("Failed to stop metering for resource {}: {} — reconciliation loop will catch this", resource_id, e);
+            tracing::error!(
+                "Failed to stop metering for resource {} via metering service: {}",
+                resource_id,
+                e
+            );
+            let _ = sqlx::query(
+                "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
+            )
+            .bind(&resource_id_str)
+            .execute(&state.db)
+            .await;
         }
     }
 

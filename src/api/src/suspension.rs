@@ -6,7 +6,7 @@ use axum::{
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{AppState, ec2, deployment, cloud_credentials};
+use crate::{AppState, ec2, deployment, cloud_credentials, metering};
 
 /// Helper: call the internal unsuspend endpoint (used after credit purchase/auto-topup).
 pub async fn call_internal_unsuspend(state: &AppState, org_id: Uuid) -> Result<(), String> {
@@ -87,6 +87,20 @@ pub async fn suspend_managed_resources(
             .await {
             tracing::error!("Failed to mark resource {} as stopped: {}", resource_id, e);
         }
+
+        if let Err(e) = metering::stop_tracked_resource(
+            state.internal_service_secret.as_deref(),
+            &resource_id.to_string(),
+        )
+        .await {
+            tracing::error!("Failed to stop metering for resource {}: {}", resource_id, e);
+            let _ = sqlx::query(
+                "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
+            )
+            .bind(resource_id.to_string())
+            .execute(&state.db)
+            .await;
+        }
         stopped += 1;
     }
 
@@ -154,6 +168,20 @@ pub async fn suspend_org_resources(
             .await {
             tracing::error!("Failed to mark resource {} as stopped: {}", resource_id, e);
         }
+
+        if let Err(e) = metering::stop_tracked_resource(
+            state.internal_service_secret.as_deref(),
+            &resource_id.to_string(),
+        )
+        .await {
+            tracing::error!("Failed to stop metering for resource {}: {}", resource_id, e);
+            let _ = sqlx::query(
+                "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
+            )
+            .bind(resource_id.to_string())
+            .execute(&state.db)
+            .await;
+        }
         stopped += 1;
     }
 
@@ -182,8 +210,8 @@ pub async fn unsuspend_org_resources(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     tracing::info!("Unsuspending resources for org {}", org_id);
 
-    let resources: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, resource_name FROM compute_resources
+    let resources: Vec<(Uuid, String, String, Option<String>, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT id, resource_name, provider_resource_id, region, configuration FROM compute_resources
          WHERE organization_id = $1 AND state = 'stopped'"
     )
     .bind(org_id)
@@ -194,7 +222,7 @@ pub async fn unsuspend_org_resources(
     let mut started = 0u32;
     let mut errors = Vec::new();
 
-    for (resource_id, resource_name) in &resources {
+    for (resource_id, resource_name, provider_resource_id, region, configuration) in &resources {
         let aws_creds = get_aws_credentials_for_resource(&state, org_id, *resource_id).await;
 
         if let Some(creds) = aws_creds {
@@ -228,6 +256,30 @@ pub async fn unsuspend_org_resources(
             .execute(&state.db)
             .await {
             tracing::error!("Failed to mark resource {} as running: {}", resource_id, e);
+        }
+
+        let instance_type = configuration
+            .as_ref()
+            .and_then(|config| config.get("instance_type"))
+            .and_then(|value| value.as_str());
+        let metadata = serde_json::json!({
+            "resource_kind": "compute_resource",
+            "compute_resource_id": resource_id.to_string(),
+            "instance_id": provider_resource_id,
+            "resource_name": resource_name,
+        });
+        if let Err(e) = metering::upsert_tracked_resource(
+            &state,
+            &resource_id.to_string(),
+            org_id,
+            None,
+            "aws",
+            instance_type,
+            region.as_deref(),
+            &metadata,
+        )
+        .await {
+            tracing::error!("Failed to resume metering for resource {}: {}", resource_id, e);
         }
         started += 1;
     }

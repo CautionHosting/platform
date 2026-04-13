@@ -127,11 +127,21 @@ impl UsageProvider for AwsUsageProvider {
             INSERT INTO tracked_resources (resource_id, organization_id, provider, instance_type, region, metadata, status, started_at, last_billed_at)
             VALUES ($1, $2, 'aws', $3, $4, $5, 'running', NOW(), NOW())
             ON CONFLICT (resource_id) DO UPDATE SET
+                organization_id = EXCLUDED.organization_id,
                 status = 'running',
+                provider = EXCLUDED.provider,
                 instance_type = COALESCE($3, tracked_resources.instance_type),
                 region = COALESCE($4, tracked_resources.region),
                 metadata = $5,
-                started_at = COALESCE(tracked_resources.started_at, NOW())
+                started_at = CASE
+                    WHEN tracked_resources.status = 'running' THEN tracked_resources.started_at
+                    ELSE NOW()
+                END,
+                stopped_at = NULL,
+                last_billed_at = CASE
+                    WHEN tracked_resources.status = 'running' THEN tracked_resources.last_billed_at
+                    ELSE NOW()
+                END
             "#,
         )
         .bind(resource_id)

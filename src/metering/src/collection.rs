@@ -78,7 +78,9 @@ pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize
         UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW()
         WHERE status = 'running'
         AND resource_id IN (
-            SELECT id::text FROM compute_resources WHERE destroyed_at IS NOT NULL
+            SELECT id::text
+            FROM compute_resources
+            WHERE destroyed_at IS NOT NULL OR state != 'running'
         )
         "#,
     )
@@ -261,6 +263,12 @@ async fn collect_network_egress(
 ) -> Result<()> {
     use aws_sdk_cloudwatch::types::{Dimension, Statistic};
 
+    let cloudwatch_instance_id = resource
+        .metadata
+        .get("instance_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or(&resource.resource_id);
+
     let seconds_elapsed = (end.unix_timestamp() - start.unix_timestamp()).max(60) as i32;
 
     let result = state
@@ -271,7 +279,7 @@ async fn collect_network_egress(
         .dimensions(
             Dimension::builder()
                 .name("InstanceId")
-                .value(&resource.resource_id)
+                .value(cloudwatch_instance_id)
                 .build(),
         )
         .start_time(aws_sdk_cloudwatch::primitives::DateTime::from_secs(
@@ -307,7 +315,7 @@ async fn collect_network_egress(
         metadata: serde_json::json!({
             "direction": "egress",
             "bytes": total_bytes as i64,
-            "instance_id": resource.resource_id,
+            "instance_id": cloudwatch_instance_id,
         }),
     };
 

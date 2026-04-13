@@ -388,14 +388,23 @@ pub async fn subscribe(
     // Record invoice
     let invoice_number = format!("INV-SUB-{}", &sub_id.0.to_string()[..8]);
     sqlx::query(
-        "INSERT INTO invoices (paddle_transaction_id, user_id, invoice_number, amount_cents, currency, status, payment_status, billing_provider, created_at)
-         VALUES ($1, $2, $3, $4, 'USD', 'finalized', $5, $6, NOW())"
+        "INSERT INTO invoices (paddle_transaction_id, user_id, organization_id, invoice_number, amount_cents, currency, status, payment_status, billing_provider, created_at)
+         VALUES ($1, $2, $3, $4, $5, 'USD', 'finalized', $6, $7, NOW())"
     )
     .bind(&paddle_txn_id)
     .bind(auth.user_id)
+    .bind(org_id)
     .bind(&invoice_number)
-    .bind(total_charge)
-    .bind(if remainder_cents == 0 { "credits_applied" } else { "paid" })
+    .bind(if remainder_cents == 0 {
+        total_charge
+    } else {
+        remainder_cents
+    })
+    .bind(if remainder_cents == 0 {
+        "credits_applied"
+    } else {
+        "pending"
+    })
     .bind(if remainder_cents == 0 { "credits" } else { "paddle" })
     .execute(&mut *tx)
     .await

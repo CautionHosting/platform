@@ -40,6 +40,7 @@ mod billing;
 mod subscriptions;
 mod suspension;
 mod builder;
+mod metering;
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct PricingConfig {
@@ -1540,6 +1541,29 @@ async fn deploy_logic(
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update resource: {}", e)))?;
+
+    crate::metering::upsert_tracked_resource(
+        &state,
+        &resource_id.to_string(),
+        req.org_id,
+        Some(auth.user_id),
+        "aws",
+        deployment_result.instance_type.as_deref(),
+        Some(&deployed_region),
+        &serde_json::json!({
+            "resource_kind": "compute_resource",
+            "compute_resource_id": resource_id.to_string(),
+            "instance_id": deployment_result.instance_id,
+            "resource_name": app_name,
+        }),
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Deployment succeeded but metering registration failed: {}", e),
+        )
+    })?;
 
     tracing::info!(
         "EIF deployment complete: resource_id={}, instance_id={}, public_ip={}, instance_type={:?}",

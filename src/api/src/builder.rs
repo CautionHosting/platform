@@ -376,14 +376,20 @@ pub async fn execute_remote_build(
         tx,
     ).await;
 
-    // 4. Stop metering for the builder instance
-    if let Err(e) = sqlx::query(
-        "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
+    // 4. Stop metering for the builder instance and force a final usage slice.
+    let internal_service_secret = std::env::var("INTERNAL_SERVICE_SECRET").ok();
+    if let Err(e) = crate::metering::stop_tracked_resource(
+        internal_service_secret.as_deref(),
+        &instance_id,
     )
-    .bind(&instance_id)
-    .execute(db)
     .await {
         tracing::error!("Failed to stop metering for builder {}: {}", instance_id, e);
+        let _ = sqlx::query(
+            "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
+        )
+        .bind(&instance_id)
+        .execute(db)
+        .await;
     }
 
     // 5. Terminate builder (always do this, retry on failure)
@@ -428,7 +434,6 @@ pub async fn execute_remote_build(
             .context("Failed to update eif_builds with result")?;
 
             // Billing is handled by the metering collection loop via tracked_resources.
-            // The untrack call above triggers a final usage collection.
 
             Ok(build_result)
         }

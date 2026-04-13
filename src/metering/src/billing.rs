@@ -8,18 +8,21 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use sqlx::Row;
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::sync::Arc;
 
 use crate::collection::{
     advisory_unlock, try_advisory_lock, LOCK_MONTHLY_BILLING, LOCK_SUBSCRIPTION_BILLING,
 };
 use crate::AppState;
-use crate::{cost_explorer, credits, paddle};
+use crate::{cost_explorer, paddle};
 
-/// Monthly billing loop - runs daily, triggers billing on the last day of each month
+/// Monthly billing loop.
+///
+/// Subscription renewals are processed every hour. The AWS month-end catch-up
+/// should only run during the first few days of a month because it bills the
+/// month that just closed.
 pub async fn run_monthly_billing_loop(state: Arc<AppState>) {
-    // Check once per hour
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
 
     loop {
@@ -30,40 +33,69 @@ pub async fn run_monthly_billing_loop(state: Arc<AppState>) {
             tracing::error!("Subscription billing failed: {}", e);
         }
 
-        let now = time::OffsetDateTime::now_utc();
-        let today = now.date();
-        let current_month = today.month();
-
-        // Check if it's the last day of the month (or first few days of next month as fallback)
-        let is_last_day = is_last_day_of_month(today);
-        let is_first_of_month = today.day() <= 3; // Fallback: run in first 3 days if we missed month-end
-
-        // Check database for whether we've already billed this month (survives restarts)
-        let year_month = format!("{}-{:02}", now.year(), current_month as u8);
-        let already_billed: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM usage_records WHERE resource_id LIKE 'monthly-%' AND recorded_at >= $1::timestamptz)"
-        )
-        .bind(format!("{}-01T00:00:00Z", year_month))
-        .fetch_one(&state.pool)
-        .await
-        .unwrap_or(false);
-
-        if (is_last_day || (is_first_of_month && !already_billed)) && !already_billed {
-            tracing::info!("Running monthly billing cycle for {}", current_month);
+        let today = time::OffsetDateTime::now_utc().date();
+        if today.day() <= 3 {
+            tracing::info!("Running monthly billing catch-up for the prior month");
 
             if let Err(e) = run_monthly_billing_cycle(&state).await {
                 tracing::error!("Monthly billing cycle failed: {}", e);
             } else {
-                tracing::info!("Monthly billing cycle completed for {}", current_month);
+                tracing::info!("Monthly billing cycle completed");
             }
         }
     }
 }
 
-/// Check if today is the last day of the month
-fn is_last_day_of_month(date: time::Date) -> bool {
-    let next_day = date + time::Duration::days(1);
-    next_day.month() != date.month()
+async fn billing_user_for_org(pool: &PgPool, organization_id: uuid::Uuid) -> Result<uuid::Uuid> {
+    sqlx::query_scalar(
+        "SELECT user_id
+         FROM organization_members
+         WHERE organization_id = $1
+         ORDER BY joined_at ASC NULLS LAST, user_id ASC
+         LIMIT 1",
+    )
+    .bind(organization_id)
+    .fetch_optional(pool)
+    .await?
+    .context("Organization has no members for billing")
+}
+
+async fn apply_locked_credit_deduction(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: uuid::Uuid,
+    credits_to_apply: i64,
+    description: &str,
+    invoice_id: Option<uuid::Uuid>,
+) -> Result<i64> {
+    if credits_to_apply <= 0 {
+        return Ok(0);
+    }
+
+    let new_balance: i64 = sqlx::query_scalar(
+        "UPDATE wallet_balance
+         SET balance_cents = balance_cents - $2, updated_at = NOW()
+         WHERE organization_id = $1 AND balance_cents >= $2
+         RETURNING balance_cents",
+    )
+    .bind(organization_id)
+    .bind(credits_to_apply)
+    .fetch_optional(&mut **tx)
+    .await?
+    .context("Insufficient locked balance for credit deduction")?;
+
+    sqlx::query(
+        "INSERT INTO credit_ledger (organization_id, delta_cents, balance_after, entry_type, description, invoice_id)
+         VALUES ($1, $2, $3, 'billing_deduction', $4, $5)",
+    )
+    .bind(organization_id)
+    .bind(-credits_to_apply)
+    .bind(new_balance)
+    .bind(description)
+    .bind(invoice_id)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(new_balance)
 }
 
 /// Run the monthly billing cycle
@@ -78,8 +110,8 @@ async fn run_monthly_billing_cycle(state: &AppState) -> Result<()> {
 }
 
 async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
-    // Get previous month's date range (bill for the month that just ended)
     let (start_date, end_date) = cost_explorer::previous_month_billing_period();
+    let billing_period = format!("{} to {}", start_date, end_date);
 
     tracing::info!(
         "Fetching AWS costs for billing period {} to {}",
@@ -87,12 +119,10 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
         end_date
     );
 
-    // Create Cost Explorer client
     let ce_client = cost_explorer::CostExplorerClient::new()
         .await
         .context("Failed to create Cost Explorer client")?;
 
-    // Get costs for all orgs
     let org_costs = ce_client
         .get_all_org_costs(&start_date, &end_date)
         .await
@@ -100,10 +130,7 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
 
     tracing::info!("Found costs for {} organizations", org_costs.len());
 
-    let now = time::OffsetDateTime::now_utc();
-
     for (org_id_str, cost_data) in &org_costs {
-        // Parse org_id as UUID
         let org_id: uuid::Uuid = match org_id_str.parse() {
             Ok(id) => id,
             Err(_) => {
@@ -121,53 +148,37 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
             continue;
         }
 
-        tracing::info!(
-            "Billing org {} for ${:.2} (period: {} to {})",
-            org_id,
-            cost_data.total_cost,
-            start_date,
-            end_date
-        );
-
-        // Record the monthly usage
-        let result = sqlx::query(
-            r#"
-            INSERT INTO usage_records (organization_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
-            VALUES ($1, $2, 'aws', 'monthly_total', $3, 'usd', $3, $4, $5)
-            "#,
+        let monthly_usage_resource_id = format!("monthly-{}-{}", org_id, start_date);
+        let already_recorded: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM usage_records
+                WHERE resource_id = $1
+                  AND resource_type = 'monthly_total'
+            )",
         )
-        .bind(org_id)
-        .bind(format!("monthly-{}", start_date))
-        .bind(cost_data.total_cost)
-        .bind(now)
-        .bind(serde_json::json!({
-            "source": "aws_cost_explorer",
-            "billing_period": {
-                "start": start_date,
-                "end": end_date,
-            },
-            "services": cost_data.costs_by_service,
-        }))
-        .execute(&state.pool)
-        .await;
+        .bind(&monthly_usage_resource_id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(false);
 
-        if let Err(e) = result {
-            tracing::error!("Failed to record monthly usage for {}: {}", org_id, e);
+        if already_recorded {
+            tracing::info!(
+                "Skipping org {} for {} — monthly catch-up already recorded",
+                org_id,
+                billing_period
+            );
             continue;
         }
 
         let total_cost_cents = (cost_data.total_cost * 100.0).round() as i64;
-        let billing_period = format!("{} to {}", start_date, end_date);
-
-        // Subtract costs already billed in real-time (compute + builder) to avoid double-billing.
-        // Non-compute costs (S3 storage, EIPs, data transfer) are NOT metered in real-time
-        // and must be charged here via the monthly billing cycle.
         let realtime_billed_cents: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM((cost_usd * 100)::bigint), 0) FROM usage_records
+            "SELECT COALESCE(SUM(-delta_cents), 0)
+             FROM credit_ledger
              WHERE organization_id = $1
-               AND resource_type IN ('compute', 'builder')
-               AND recorded_at >= $2::date
-               AND recorded_at < $3::date",
+               AND entry_type = 'realtime_usage'
+               AND created_at >= $2::date
+               AND created_at < $3::date",
         )
         .bind(org_id)
         .bind(&start_date)
@@ -185,154 +196,228 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
                 total_cost_cents as f64 / 100.0,
                 realtime_billed_cents as f64 / 100.0
             );
-            continue;
-        }
 
-        tracing::info!(
-            "Org {} monthly: total=${:.2}, real-time metered=${:.2}, remaining to bill=${:.2} (S3/EIP/network)",
-            org_id, total_cost_cents as f64 / 100.0, realtime_billed_cents as f64 / 100.0, remaining_cost_cents as f64 / 100.0
-        );
-
-        let total_cost_cents = remaining_cost_cents;
-
-        // Check and deduct prepaid credits before creating Paddle transaction
-        let (credits_applied, remainder_cents) = credits::apply_credit_deduction(
-            &state.pool,
-            org_id,
-            total_cost_cents,
-            &format!("Monthly billing: {}", billing_period),
-            None,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!(
-                "Credit deduction failed for {}: {}, falling back to full charge",
-                org_id,
-                e
-            );
-            (0, total_cost_cents)
-        });
-
-        if credits_applied > 0 {
-            tracing::info!(
-                "Applied {} cents in credits for org {} (remainder: {} cents)",
-                credits_applied,
-                org_id,
-                remainder_cents
-            );
-        }
-
-        if remainder_cents == 0 {
-            // Fully covered by credits — record a credits-covered invoice, skip Paddle
-            let invoice_number = format!("INV-CR-{}-{}", &org_id.to_string()[..8], start_date);
             if let Err(e) = sqlx::query(
                 r#"
-                INSERT INTO invoices (
-                    user_id, invoice_number,
-                    amount_cents, currency, status, payment_status,
-                    billing_provider, created_at, paid_at
+                INSERT INTO usage_records (
+                    organization_id, user_id, resource_id, provider, resource_type,
+                    quantity, unit, cost_usd, recorded_at, metadata
                 )
-                VALUES ($1, $2, $3, 'USD', 'finalized', 'credits_applied', 'credits', NOW(), NOW())
+                VALUES ($1, $2, $3, 'aws', 'monthly_total', 0, 'usd', 0, NOW(), $4)
                 "#,
             )
             .bind(org_id)
-            .bind(&invoice_number)
-            .bind(total_cost_cents)
+            .bind(billing_user_for_org(&state.pool, org_id).await.ok())
+            .bind(&monthly_usage_resource_id)
+            .bind(serde_json::json!({
+                "source": "aws_cost_explorer",
+                "billing_period": {
+                    "start": start_date,
+                    "end": end_date,
+                },
+                "services": cost_data.costs_by_service,
+                "billing_status": "covered_by_realtime",
+                "total_aws_cost_cents": total_cost_cents,
+                "realtime_billed_cents": realtime_billed_cents,
+                "remaining_cost_cents": 0,
+            }))
             .execute(&state.pool)
             .await
             {
                 tracing::error!(
-                    "Failed to insert credits-covered invoice for org {}: {}",
+                    "Failed to record realtime-covered monthly usage marker for {}: {}",
                     org_id,
                     e
                 );
             }
 
-            tracing::info!(
-                "Org {} billing fully covered by credits (${:.2})",
-                org_id,
-                total_cost_cents as f64 / 100.0
-            );
             continue;
         }
 
-        // Create Paddle transaction for the remainder
-        let remainder_cost = remainder_cents as f64 / 100.0;
+        tracing::info!(
+            "Org {} monthly: total=${:.2}, real-time metered=${:.2}, remaining to bill=${:.2} (S3/EIP/network)",
+            org_id,
+            total_cost_cents as f64 / 100.0,
+            realtime_billed_cents as f64 / 100.0,
+            remaining_cost_cents as f64 / 100.0
+        );
+
+        let invoice_user_id = match billing_user_for_org(&state.pool, org_id).await {
+            Ok(user_id) => user_id,
+            Err(e) => {
+                tracing::error!("Org {} has no billable user: {}", org_id, e);
+                continue;
+            }
+        };
+
+        let mut tx = state.pool.begin().await?;
+        let locked_balance: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(balance_cents, 0)
+             FROM wallet_balance
+             WHERE organization_id = $1
+             FOR UPDATE",
+        )
+        .bind(org_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(0);
+
+        let credits_applied = locked_balance.min(remaining_cost_cents);
+        let remainder_cents = remaining_cost_cents - credits_applied;
+        let mut paddle_transaction_id: Option<String> = None;
+
         let line_items = paddle::PaddleClient::line_items_from_cost_data(
             org_id_str,
-            remainder_cost,
+            remainder_cents as f64 / 100.0,
             &billing_period,
             &serde_json::json!(cost_data.costs_by_service),
         );
 
-        if line_items.is_empty() {
-            tracing::debug!(
-                "No billable items for org {}, skipping Paddle transaction",
-                org_id
-            );
-            continue;
-        }
+        if remainder_cents > 0 {
+            if line_items.is_empty() {
+                tracing::warn!(
+                    "Monthly catch-up for org {} has {} cents remaining but no billable line items",
+                    org_id,
+                    remainder_cents
+                );
+                tx.rollback().await?;
+                continue;
+            }
 
-        // Look up the org's Paddle customer ID (billing_config is now keyed by organization_id)
-        let paddle_customer =
-            sqlx::query("SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1")
-                .bind(org_id)
-                .fetch_optional(&state.pool)
-                .await?;
+            let paddle_customer_id: Option<String> = sqlx::query_scalar(
+                "SELECT paddle_customer_id
+                 FROM billing_config
+                 WHERE organization_id = $1",
+            )
+            .bind(org_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .flatten();
 
-        let paddle_customer_id: Option<String> =
-            paddle_customer.and_then(|row| row.get::<Option<String>, _>("paddle_customer_id"));
+            let Some(customer_id) = paddle_customer_id else {
+                tracing::warn!(
+                    "Org {} has {} cents due for {} but no paddle_customer_id",
+                    org_id,
+                    remainder_cents,
+                    billing_period
+                );
+                tx.rollback().await?;
+                continue;
+            };
 
-        if let Some(customer_id) = paddle_customer_id {
-            match state
-                .paddle
-                .create_transaction(&customer_id, line_items)
-                .await
-            {
+            match state.paddle.create_transaction(&customer_id, line_items).await {
                 Ok(txn) => {
                     tracing::info!(
-                        "Created Paddle transaction {} for org {} (${:.2}, after ${:.2} credits)",
+                        "Created Paddle transaction {} for org {} (${:.2}, credits ${:.2})",
                         txn.id,
                         org_id,
-                        remainder_cost,
+                        remainder_cents as f64 / 100.0,
                         credits_applied as f64 / 100.0
                     );
-                    // Record the invoice locally with paddle_transaction_id
-                    if let Err(e) = sqlx::query(
-                        r#"
-                        INSERT INTO invoices (
-                            paddle_transaction_id, user_id, invoice_number,
-                            amount_cents, currency, status, payment_status,
-                            billing_provider, created_at
-                        )
-                        VALUES ($1, $2, $3, $4, 'USD', 'finalized', 'pending', 'paddle', NOW())
-                        "#,
-                    )
-                    .bind(&txn.id)
-                    .bind(org_id)
-                    .bind(format!("INV-{}", &txn.id[4..]))
-                    .bind(remainder_cents)
-                    .execute(&state.pool)
-                    .await
-                    {
-                        tracing::error!(
-                            "Failed to insert paddle invoice for org {}: {}",
-                            org_id,
-                            e
-                        );
-                    }
+                    paddle_transaction_id = Some(txn.id);
                 }
                 Err(e) => {
                     tracing::error!(
-                        "Failed to create Paddle transaction for org {}: {}",
+                        "Failed to create Paddle transaction for org {} monthly catch-up: {}",
                         org_id,
                         e
                     );
+                    tx.rollback().await?;
+                    continue;
                 }
             }
-        } else {
-            tracing::warn!("Org {} has no paddle_customer_id, skipping billing", org_id);
         }
+
+        let invoice_number = paddle_transaction_id
+            .as_ref()
+            .map(|txn_id| format!("INV-{}", &txn_id[4..]))
+            .unwrap_or_else(|| format!("INV-CR-{}-{}", &org_id.to_string()[..8], start_date));
+
+        let invoice_id: uuid::Uuid = if let Some(txn_id) = paddle_transaction_id.as_ref() {
+            sqlx::query_scalar(
+                r#"
+                INSERT INTO invoices (
+                    paddle_transaction_id, user_id, organization_id, invoice_number,
+                    amount_cents, currency, status, payment_status,
+                    billing_provider, created_at
+                )
+                VALUES ($1, $2, $3, $4, $5, 'USD', 'finalized', 'pending', 'paddle', NOW())
+                RETURNING id
+                "#,
+            )
+            .bind(txn_id)
+            .bind(invoice_user_id)
+            .bind(org_id)
+            .bind(&invoice_number)
+            .bind(remainder_cents)
+            .fetch_one(&mut *tx)
+            .await?
+        } else {
+            sqlx::query_scalar(
+                r#"
+                INSERT INTO invoices (
+                    user_id, organization_id, invoice_number,
+                    amount_cents, currency, status, payment_status,
+                    billing_provider, created_at, paid_at
+                )
+                VALUES ($1, $2, $3, $4, 'USD', 'finalized', 'credits_applied', 'credits', NOW(), NOW())
+                RETURNING id
+                "#,
+            )
+            .bind(invoice_user_id)
+            .bind(org_id)
+            .bind(&invoice_number)
+            .bind(remaining_cost_cents)
+            .fetch_one(&mut *tx)
+            .await?
+        };
+
+        apply_locked_credit_deduction(
+            &mut tx,
+            org_id,
+            credits_applied,
+            &format!("Monthly billing: {}", billing_period),
+            Some(invoice_id),
+        )
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO usage_records (
+                organization_id, user_id, resource_id, provider, resource_type,
+                quantity, unit, cost_usd, recorded_at, metadata
+            )
+            VALUES ($1, $2, $3, 'aws', 'monthly_total', $4, 'usd', $4, NOW(), $5)
+            "#,
+        )
+        .bind(org_id)
+        .bind(Some(invoice_user_id))
+        .bind(&monthly_usage_resource_id)
+        .bind(remaining_cost_cents as f64 / 100.0)
+        .bind(serde_json::json!({
+            "source": "aws_cost_explorer",
+            "billing_period": {
+                "start": start_date,
+                "end": end_date,
+            },
+            "services": cost_data.costs_by_service,
+            "billing_status": if paddle_transaction_id.is_some() {
+                "pending_paddle_collection"
+            } else {
+                "credits_applied"
+            },
+            "total_aws_cost_cents": total_cost_cents,
+            "realtime_billed_cents": realtime_billed_cents,
+            "remaining_cost_cents": remaining_cost_cents,
+            "credits_applied_cents": credits_applied,
+            "charged_amount_cents": remainder_cents,
+            "invoice_id": invoice_id,
+            "paddle_transaction_id": paddle_transaction_id,
+        }))
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
     }
 
     tracing::info!("Monthly billing cycle complete — Paddle will collect payments");
@@ -355,8 +440,9 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
     let due_subs = sqlx::query(
         r#"
         SELECT id, user_id, organization_id, tier, billing_period,
+               current_period_start, current_period_end,
                price_cents_per_cycle, extra_block_price_cents_per_cycle,
-               cancel_at_period_end, status
+               cancel_at_period_end
         FROM subscriptions
         WHERE status IN ('active', 'past_due') AND next_billing_at <= NOW()
         "#,
@@ -376,10 +462,12 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
         let org_id: uuid::Uuid = row.get("organization_id");
         let tier: String = row.get("tier");
         let billing_period: String = row.get("billing_period");
+        let current_period_start: chrono::DateTime<chrono::Utc> = row.get("current_period_start");
+        let current_period_end: chrono::DateTime<chrono::Utc> = row.get("current_period_end");
         let base_price: i64 = row.get("price_cents_per_cycle");
         let extra_price: i64 = row.get("extra_block_price_cents_per_cycle");
         let cancel_at_end: bool = row.get("cancel_at_period_end");
-        // If flagged for cancellation, cancel now
+
         if cancel_at_end {
             sqlx::query(
                 "UPDATE subscriptions SET status = 'canceled', updated_at = NOW() WHERE id = $1",
@@ -392,140 +480,207 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
         }
 
         let total_charge = base_price + extra_price;
-        let now = chrono::Utc::now();
-        let period_end = calculate_subscription_period_end(now, &billing_period);
+        let next_period_end = calculate_subscription_period_end(current_period_end, &billing_period);
 
-        // Deduct credits first (wallet_balance is keyed by organization_id)
-        let (credits_applied, remainder_cents) = credits::apply_credit_deduction(
-            &state.pool,
-            org_id,
-            total_charge,
-            &format!("Subscription renewal: {} ({})", tier, billing_period),
-            None,
+        let mut tx = state.pool.begin().await?;
+        let locked_balance: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(balance_cents, 0)
+             FROM wallet_balance
+             WHERE organization_id = $1
+             FOR UPDATE",
         )
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!("Credit deduction failed for sub {}: {}", sub_id, e);
-            (0, total_charge)
-        });
+        .bind(org_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(0);
 
+        let credits_applied = locked_balance.min(total_charge);
+        let remainder_cents = total_charge - credits_applied;
         let mut paddle_txn_id: Option<String> = None;
-        let mut event_status = if remainder_cents == 0 {
-            "credits_covered"
-        } else {
-            "pending"
-        };
 
         if remainder_cents > 0 {
-            // Look up Paddle customer ID (billing_config is keyed by organization_id)
-            let paddle_customer_id: Option<String> = sqlx::query(
-                "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1",
+            let paddle_customer_id: Option<String> = sqlx::query_scalar(
+                "SELECT paddle_customer_id
+                 FROM billing_config
+                 WHERE organization_id = $1",
             )
             .bind(org_id)
-            .fetch_optional(&state.pool)
+            .fetch_optional(&mut *tx)
             .await?
-            .and_then(|row| row.get::<Option<String>, _>("paddle_customer_id"));
+            .flatten();
 
-            if let Some(customer_id) = paddle_customer_id {
-                let line_items = vec![paddle::LineItem {
-                    description: format!("{} subscription renewal ({})", tier, billing_period),
-                    quantity: 1,
-                    unit_price_amount: remainder_cents.to_string(),
-                    unit_price_currency: "USD".to_string(),
-                }];
-
-                match state
-                    .paddle
-                    .create_transaction(&customer_id, line_items)
-                    .await
-                {
-                    Ok(txn) => {
-                        tracing::info!(
-                            "Created Paddle transaction {} for sub {} renewal (${:.2}, credits ${:.2})",
-                            txn.id, sub_id, remainder_cents as f64 / 100.0, credits_applied as f64 / 100.0
-                        );
-                        paddle_txn_id = Some(txn.id.clone());
-
-                        // Record invoice
-                        if let Err(e) = sqlx::query(
-                            r#"
-                            INSERT INTO invoices (
-                                paddle_transaction_id, user_id, invoice_number,
-                                amount_cents, currency, status, payment_status,
-                                billing_provider, created_at
-                            )
-                            VALUES ($1, $2, $3, $4, 'USD', 'finalized', 'pending', 'paddle', NOW())
-                            "#,
-                        )
-                        .bind(&txn.id)
-                        .bind(&org_id)
-                        .bind(format!("INV-SUB-{}", &txn.id[4..]))
-                        .bind(remainder_cents)
-                        .execute(&state.pool)
-                        .await
-                        {
-                            tracing::error!(
-                                "Failed to insert sub invoice for sub {}: {}",
-                                sub_id,
-                                e
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Paddle charge failed for sub {}: {}", sub_id, e);
-                        event_status = "payment_failed";
-                        // Mark subscription as past_due
-                        if let Err(e) = sqlx::query("UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE id = $1")
-                            .bind(&sub_id)
-                            .execute(&state.pool)
-                            .await {
-                            tracing::error!("Failed to mark sub {} as past_due: {}", sub_id, e);
-                        }
-                    }
-                }
-            } else {
-                tracing::warn!("Sub {} org {} has no paddle_customer_id", sub_id, org_id);
-                event_status = "payment_failed";
-                if let Err(e) = sqlx::query("UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE id = $1")
-                    .bind(&sub_id)
-                    .execute(&state.pool)
-                    .await {
-                    tracing::error!("Failed to mark sub {} as past_due: {}", sub_id, e);
-                }
-            }
-        } else {
-            // Fully credit-covered: record credit-only invoice
-            let invoice_number = format!("INV-SUB-CR-{}", &sub_id.to_string()[..8]);
-            if let Err(e) = sqlx::query(
-                r#"
-                INSERT INTO invoices (
-                    user_id, invoice_number, amount_cents, currency, status, payment_status, billing_provider, created_at, paid_at
+            let Some(customer_id) = paddle_customer_id else {
+                tx.rollback().await?;
+                sqlx::query(
+                    "UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE id = $1",
                 )
-                VALUES ($1, $2, $3, 'USD', 'finalized', 'credits_applied', 'credits', NOW(), NOW())
-                "#,
-            )
-            .bind(&org_id)
-            .bind(&invoice_number)
-            .bind(total_charge)
-            .execute(&state.pool)
-            .await {
-                tracing::error!("Failed to insert credit-covered sub invoice for sub {}: {}", sub_id, e);
+                .bind(sub_id)
+                .execute(&state.pool)
+                .await?;
+
+                sqlx::query(
+                    r#"
+                    INSERT INTO subscription_billing_events
+                    (subscription_id, user_id, billing_period_start, billing_period_end, tier,
+                     base_amount_cents, addon_amount_cents, total_amount_cents, credits_applied_cents,
+                     charged_amount_cents, paddle_transaction_id, invoice_id, status)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, NULL, NULL, 'payment_failed')
+                    ON CONFLICT (subscription_id, billing_period_start)
+                    DO UPDATE SET status = 'payment_failed'
+                    "#,
+                )
+                .bind(sub_id)
+                .bind(user_id)
+                .bind(current_period_start)
+                .bind(current_period_end)
+                .bind(&tier)
+                .bind(base_price)
+                .bind(extra_price)
+                .bind(total_charge)
+                .execute(&state.pool)
+                .await?;
+
+                tracing::warn!(
+                    "Sub {} org {} has no paddle_customer_id; marked past_due",
+                    sub_id,
+                    org_id
+                );
+                continue;
+            };
+
+            let line_items = vec![paddle::LineItem {
+                description: format!("{} subscription renewal ({})", tier, billing_period),
+                quantity: 1,
+                unit_price_amount: remainder_cents.to_string(),
+                unit_price_currency: "USD".to_string(),
+            }];
+
+            match state.paddle.create_transaction(&customer_id, line_items).await {
+                Ok(txn) => {
+                    tracing::info!(
+                        "Created Paddle transaction {} for sub {} renewal (${:.2}, credits ${:.2})",
+                        txn.id,
+                        sub_id,
+                        remainder_cents as f64 / 100.0,
+                        credits_applied as f64 / 100.0
+                    );
+                    paddle_txn_id = Some(txn.id);
+                }
+                Err(e) => {
+                    tx.rollback().await?;
+                    sqlx::query(
+                        "UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE id = $1",
+                    )
+                    .bind(sub_id)
+                    .execute(&state.pool)
+                    .await?;
+
+                    sqlx::query(
+                        r#"
+                        INSERT INTO subscription_billing_events
+                        (subscription_id, user_id, billing_period_start, billing_period_end, tier,
+                         base_amount_cents, addon_amount_cents, total_amount_cents, credits_applied_cents,
+                         charged_amount_cents, paddle_transaction_id, invoice_id, status)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, NULL, NULL, 'payment_failed')
+                        ON CONFLICT (subscription_id, billing_period_start)
+                        DO UPDATE SET status = 'payment_failed'
+                        "#,
+                    )
+                    .bind(sub_id)
+                    .bind(user_id)
+                    .bind(current_period_start)
+                    .bind(current_period_end)
+                    .bind(&tier)
+                    .bind(base_price)
+                    .bind(extra_price)
+                    .bind(total_charge)
+                    .execute(&state.pool)
+                    .await?;
+
+                    tracing::error!("Paddle charge failed for sub {}: {}", sub_id, e);
+                    continue;
+                }
             }
         }
 
-        // Record billing event
-        if let Err(e) = sqlx::query(
+        let invoice_number = paddle_txn_id
+            .as_ref()
+            .map(|txn_id| format!("INV-SUB-{}", &txn_id[4..]))
+            .unwrap_or_else(|| {
+                format!(
+                    "INV-SUB-CR-{}-{}",
+                    &sub_id.to_string()[..8],
+                    current_period_start.format("%Y%m%d%H%M%S")
+                )
+            });
+
+        let invoice_id: uuid::Uuid = if let Some(txn_id) = paddle_txn_id.as_ref() {
+            sqlx::query_scalar(
+                r#"
+                INSERT INTO invoices (
+                    paddle_transaction_id, user_id, organization_id, invoice_number,
+                    amount_cents, currency, status, payment_status,
+                    billing_provider, created_at
+                )
+                VALUES ($1, $2, $3, $4, $5, 'USD', 'finalized', 'pending', 'paddle', NOW())
+                RETURNING id
+                "#,
+            )
+            .bind(txn_id)
+            .bind(user_id)
+            .bind(org_id)
+            .bind(&invoice_number)
+            .bind(remainder_cents)
+            .fetch_one(&mut *tx)
+            .await?
+        } else {
+            sqlx::query_scalar(
+                r#"
+                INSERT INTO invoices (
+                    user_id, organization_id, invoice_number,
+                    amount_cents, currency, status, payment_status,
+                    billing_provider, created_at, paid_at
+                )
+                VALUES ($1, $2, $3, $4, 'USD', 'finalized', 'credits_applied', 'credits', NOW(), NOW())
+                RETURNING id
+                "#,
+            )
+            .bind(user_id)
+            .bind(org_id)
+            .bind(&invoice_number)
+            .bind(total_charge)
+            .fetch_one(&mut *tx)
+            .await?
+        };
+
+        apply_locked_credit_deduction(
+            &mut tx,
+            org_id,
+            credits_applied,
+            &format!("Subscription renewal: {} ({})", tier, billing_period),
+            Some(invoice_id),
+        )
+        .await?;
+
+        let event_status = if paddle_txn_id.is_some() {
+            "pending"
+        } else {
+            "credits_covered"
+        };
+
+        sqlx::query(
             r#"
             INSERT INTO subscription_billing_events
             (subscription_id, user_id, billing_period_start, billing_period_end, tier,
-             base_amount_cents, addon_amount_cents, total_amount_cents, credits_applied_cents, charged_amount_cents,
-             paddle_transaction_id, status)
-            VALUES ($1, $2, NOW(), $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             base_amount_cents, addon_amount_cents, total_amount_cents, credits_applied_cents,
+             charged_amount_cents, paddle_transaction_id, invoice_id, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             "#,
         )
-        .bind(&sub_id)
-        .bind(&org_id)
-        .bind(period_end)
+        .bind(sub_id)
+        .bind(user_id)
+        .bind(current_period_start)
+        .bind(current_period_end)
         .bind(&tier)
         .bind(base_price)
         .bind(extra_price)
@@ -533,31 +688,27 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
         .bind(credits_applied)
         .bind(remainder_cents)
         .bind(&paddle_txn_id)
+        .bind(invoice_id)
         .bind(event_status)
-        .execute(&state.pool)
-        .await {
-            tracing::error!("Failed to record billing event for sub {}: {}", sub_id, e);
-        }
+        .execute(&mut *tx)
+        .await?;
 
-        // Advance period (only if charge wasn't a total failure)
-        if event_status != "payment_failed" {
-            if let Err(e) = sqlx::query(
-                "UPDATE subscriptions SET
-                 current_period_start = current_period_end,
-                 current_period_end = $1,
-                 next_billing_at = $1,
-                 last_billed_at = NOW(),
-                 updated_at = NOW()
-                 WHERE id = $2",
-            )
-            .bind(period_end)
-            .bind(&sub_id)
-            .execute(&state.pool)
-            .await
-            {
-                tracing::error!("Failed to advance billing period for sub {}: {}", sub_id, e);
-            }
-        }
+        sqlx::query(
+            "UPDATE subscriptions SET
+             current_period_start = current_period_end,
+             current_period_end = $1,
+             next_billing_at = $1,
+             last_billed_at = NOW(),
+             status = 'active',
+             updated_at = NOW()
+             WHERE id = $2",
+        )
+        .bind(next_period_end)
+        .bind(sub_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
     }
 
     Ok(())

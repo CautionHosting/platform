@@ -399,9 +399,22 @@ async fn track_resource(
         INSERT INTO tracked_resources (resource_id, organization_id, user_id, provider, instance_type, region, metadata, status, started_at, last_billed_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, 'running', NOW(), NOW())
         ON CONFLICT (resource_id) DO UPDATE SET
+            organization_id = EXCLUDED.organization_id,
+            user_id = COALESCE(EXCLUDED.user_id, tracked_resources.user_id),
+            provider = EXCLUDED.provider,
+            instance_type = COALESCE(EXCLUDED.instance_type, tracked_resources.instance_type),
+            region = COALESCE(EXCLUDED.region, tracked_resources.region),
+            metadata = EXCLUDED.metadata,
             status = 'running',
-            started_at = COALESCE(tracked_resources.started_at, NOW()),
-            last_billed_at = COALESCE(tracked_resources.last_billed_at, NOW())
+            started_at = CASE
+                WHEN tracked_resources.status = 'running' THEN tracked_resources.started_at
+                ELSE NOW()
+            END,
+            stopped_at = NULL,
+            last_billed_at = CASE
+                WHEN tracked_resources.status = 'running' THEN tracked_resources.last_billed_at
+                ELSE NOW()
+            END
         "#,
     )
     .bind(&req.resource_id)
