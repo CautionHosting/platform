@@ -273,7 +273,7 @@ pub async fn unsuspend_org_resources(
             provider_resource_id,
             org_id,
             None,
-            Some(*resource_id),
+            *resource_id,
             "aws",
             instance_type,
             region.as_deref(),

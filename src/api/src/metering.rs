@@ -12,7 +12,7 @@ pub async fn upsert_tracked_resource(
     resource_id: &str,
     organization_id: Uuid,
     user_id: Option<Uuid>,
-    application_id: Option<Uuid>,
+    application_id: Uuid,
     provider: &str,
     instance_type: Option<&str>,
     region: Option<&str>,
@@ -28,7 +28,7 @@ pub async fn upsert_tracked_resource(
         ON CONFLICT (resource_id) DO UPDATE SET
             organization_id = EXCLUDED.organization_id,
             user_id = COALESCE(EXCLUDED.user_id, tracked_resources.user_id),
-            application_id = COALESCE(EXCLUDED.application_id, tracked_resources.application_id),
+            application_id = EXCLUDED.application_id,
             provider = EXCLUDED.provider,
             instance_type = COALESCE(EXCLUDED.instance_type, tracked_resources.instance_type),
             region = COALESCE(EXCLUDED.region, tracked_resources.region),

@@ -366,12 +366,13 @@ pub async fn execute_remote_build(
 
     // Register builder with metering so the collection loop deducts credits in real-time
     if let Err(e) = sqlx::query(
-        "INSERT INTO tracked_resources (resource_id, organization_id, provider, instance_type, region, metadata, status, started_at, last_billed_at)
-         VALUES ($1, $2, 'aws', $3, $4, $5, 'running', NOW(), NOW())
-         ON CONFLICT (resource_id) DO UPDATE SET status = 'running', started_at = NOW(), last_billed_at = NOW()"
+        "INSERT INTO tracked_resources (resource_id, organization_id, application_id, provider, instance_type, region, metadata, status, started_at, last_billed_at)
+         VALUES ($1, $2, $3, 'aws', $4, $5, $6, 'running', NOW(), NOW())
+         ON CONFLICT (resource_id) DO UPDATE SET application_id = EXCLUDED.application_id, status = 'running', started_at = NOW(), last_billed_at = NOW()"
     )
     .bind(&instance_id)
     .bind(request.org_id)
+    .bind(request.app_id)
     .bind(instance_type)
     .bind(std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()))
     .bind(serde_json::json!({"build_id": build_id.to_string(), "resource_type": "builder"}))

@@ -1552,7 +1552,7 @@ async fn deploy_logic(
         &deployment_result.instance_id,
         req.org_id,
         Some(auth.user_id),
-        Some(resource_id),
+        resource_id,
         "aws",
         deployment_result.instance_type.as_deref(),
         Some(&deployed_region),
@@ -1567,7 +1567,7 @@ async fn deploy_logic(
     .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Deployment succeeded but metering registration failed: {}", e),
+            format!("Deployment succeeded but metering registration failed: {:#}", e),
         )
     })?;
 
