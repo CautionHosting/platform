@@ -12,6 +12,7 @@ pub async fn upsert_tracked_resource(
     resource_id: &str,
     organization_id: Uuid,
     user_id: Option<Uuid>,
+    application_id: Option<Uuid>,
     provider: &str,
     instance_type: Option<&str>,
     region: Option<&str>,
@@ -20,13 +21,14 @@ pub async fn upsert_tracked_resource(
     sqlx::query(
         r#"
         INSERT INTO tracked_resources (
-            resource_id, organization_id, user_id, provider, instance_type, region,
+            resource_id, organization_id, user_id, application_id, provider, instance_type, region,
             metadata, status, started_at, last_billed_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'running', NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'running', NOW(), NOW())
         ON CONFLICT (resource_id) DO UPDATE SET
             organization_id = EXCLUDED.organization_id,
             user_id = COALESCE(EXCLUDED.user_id, tracked_resources.user_id),
+            application_id = COALESCE(EXCLUDED.application_id, tracked_resources.application_id),
             provider = EXCLUDED.provider,
             instance_type = COALESCE(EXCLUDED.instance_type, tracked_resources.instance_type),
             region = COALESCE(EXCLUDED.region, tracked_resources.region),
@@ -46,6 +48,7 @@ pub async fn upsert_tracked_resource(
     .bind(resource_id)
     .bind(organization_id)
     .bind(user_id)
+    .bind(application_id)
     .bind(provider)
     .bind(instance_type)
     .bind(region)

@@ -1549,9 +1549,10 @@ async fn deploy_logic(
 
     crate::metering::upsert_tracked_resource(
         &state,
-        &resource_id.to_string(),
+        &deployment_result.instance_id,
         req.org_id,
         Some(auth.user_id),
+        Some(resource_id),
         "aws",
         deployment_result.instance_type.as_deref(),
         Some(&deployed_region),

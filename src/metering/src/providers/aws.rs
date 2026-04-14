@@ -27,7 +27,7 @@ impl UsageProvider for AwsUsageProvider {
     async fn collect_usage(&self) -> Result<Vec<ResourceUsage>> {
         let resources = sqlx::query_as::<_, TrackedResource>(
             r#"
-            SELECT resource_id, organization_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
+            SELECT resource_id, organization_id, user_id, application_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
             FROM tracked_resources
             WHERE provider = 'aws' AND status = 'running'
             "#,
@@ -61,6 +61,7 @@ impl UsageProvider for AwsUsageProvider {
                 metadata: serde_json::json!({
                     "instance_type": resource.instance_type,
                     "region": resource.region,
+                    "application_id": resource.application_id.map(|id| id.to_string()),
                 }),
             });
         }
@@ -71,7 +72,7 @@ impl UsageProvider for AwsUsageProvider {
     async fn get_resource_usage(&self, resource_id: &str) -> Result<Option<ResourceUsage>> {
         let resource = sqlx::query_as::<_, TrackedResource>(
             r#"
-            SELECT resource_id, organization_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
+            SELECT resource_id, organization_id, user_id, application_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
             FROM tracked_resources
             WHERE resource_id = $1 AND provider = 'aws'
             "#,
@@ -103,6 +104,7 @@ impl UsageProvider for AwsUsageProvider {
             metadata: serde_json::json!({
                 "instance_type": resource.instance_type,
                 "region": resource.region,
+                "application_id": resource.application_id.map(|id| id.to_string()),
             }),
         }))
     }
@@ -113,6 +115,11 @@ impl UsageProvider for AwsUsageProvider {
         organization_id: Uuid,
         metadata: serde_json::Value,
     ) -> Result<()> {
+        let application_id = metadata
+            .get("application_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok());
+        let tracked_application_id = application_id.clone();
         let instance_type = metadata
             .get("instance_type")
             .and_then(|v| v.as_str())
@@ -124,15 +131,16 @@ impl UsageProvider for AwsUsageProvider {
 
         sqlx::query(
             r#"
-            INSERT INTO tracked_resources (resource_id, organization_id, provider, instance_type, region, metadata, status, started_at, last_billed_at)
-            VALUES ($1, $2, 'aws', $3, $4, $5, 'running', NOW(), NOW())
+            INSERT INTO tracked_resources (resource_id, organization_id, application_id, provider, instance_type, region, metadata, status, started_at, last_billed_at)
+            VALUES ($1, $2, $3, 'aws', $4, $5, $6, 'running', NOW(), NOW())
             ON CONFLICT (resource_id) DO UPDATE SET
                 organization_id = EXCLUDED.organization_id,
+                application_id = COALESCE(EXCLUDED.application_id, tracked_resources.application_id),
                 status = 'running',
                 provider = EXCLUDED.provider,
-                instance_type = COALESCE($3, tracked_resources.instance_type),
-                region = COALESCE($4, tracked_resources.region),
-                metadata = $5,
+                instance_type = COALESCE($4, tracked_resources.instance_type),
+                region = COALESCE($5, tracked_resources.region),
+                metadata = $6,
                 started_at = CASE
                     WHEN tracked_resources.status = 'running' THEN tracked_resources.started_at
                     ELSE NOW()
@@ -146,6 +154,7 @@ impl UsageProvider for AwsUsageProvider {
         )
         .bind(resource_id)
         .bind(organization_id)
+        .bind(application_id)
         .bind(&instance_type)
         .bind(&region)
         .bind(&metadata)

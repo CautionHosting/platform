@@ -754,6 +754,7 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
 async fn bill_builder_usage(
     db: &PgPool,
     build_id: Uuid,
+    instance_id: &str,
     org_id: Uuid,
     instance_type: &str,
     started_at: chrono::DateTime<chrono::Utc>,
@@ -777,10 +778,11 @@ async fn bill_builder_usage(
              VALUES ($1, $2, 'aws', 'compute', $3, 'hours', $4, NOW(), $5)"
         )
         .bind(org_id)
-        .bind(build_id)
+        .bind(instance_id)
         .bind(billable_hours)
         .bind(cost_usd)
         .bind(serde_json::json!({
+            "build_id": build_id.to_string(),
             "instance_type": instance_type,
             "duration_secs": duration_secs as i64,
         }))
@@ -878,7 +880,7 @@ pub async fn reap_orphaned_builders(db: &PgPool, ec2: &Ec2Client, instance_hourl
             } else if let (Some(ref itype), Some(started)) = (&instance_type, started_at) {
                 // Fallback: metering tracking failed, bill directly for the full duration
                 let hourly_rate = instance_hourly_rate(itype);
-                bill_builder_usage(db, build_id, org_id, itype, started, hourly_rate).await;
+                bill_builder_usage(db, build_id, iid, org_id, itype, started, hourly_rate).await;
             }
 
             if let Err(e) = ec2.terminate_instances(&[iid.clone()]).await {

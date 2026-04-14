@@ -36,8 +36,8 @@ pub async fn suspend_managed_resources(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     tracing::info!("Suspending fully-managed resources for org {} (credit exhaustion)", org_id);
 
-    let resources: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT cr.id, cr.resource_name FROM compute_resources cr
+    let resources: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT cr.id, cr.resource_name, cr.provider_resource_id FROM compute_resources cr
          WHERE cr.organization_id = $1 AND cr.state = 'running'
            AND NOT EXISTS (
                SELECT 1 FROM cloud_credentials cc
@@ -52,7 +52,7 @@ pub async fn suspend_managed_resources(
     let mut stopped = 0u32;
     let mut errors = Vec::new();
 
-    for (resource_id, resource_name) in &resources {
+    for (resource_id, resource_name, provider_resource_id) in &resources {
         let aws_creds = get_aws_credentials_for_resource(&state, org_id, *resource_id).await;
 
         if let Some(creds) = aws_creds {
@@ -90,14 +90,14 @@ pub async fn suspend_managed_resources(
 
         if let Err(e) = metering::stop_tracked_resource(
             state.internal_service_secret.as_deref(),
-            &resource_id.to_string(),
+            provider_resource_id,
         )
         .await {
             tracing::error!("Failed to stop metering for resource {}: {}", resource_id, e);
             let _ = sqlx::query(
                 "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
             )
-            .bind(resource_id.to_string())
+            .bind(provider_resource_id)
             .execute(&state.db)
             .await;
         }
@@ -119,8 +119,8 @@ pub async fn suspend_org_resources(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     tracing::info!("Suspending all running resources for org {}", org_id);
 
-    let resources: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT id, resource_name FROM compute_resources
+    let resources: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT id, resource_name, provider_resource_id FROM compute_resources
          WHERE organization_id = $1 AND state = 'running'"
     )
     .bind(org_id)
@@ -131,7 +131,7 @@ pub async fn suspend_org_resources(
     let mut stopped = 0u32;
     let mut errors = Vec::new();
 
-    for (resource_id, resource_name) in &resources {
+    for (resource_id, resource_name, provider_resource_id) in &resources {
         // Get AWS credentials for this resource
         let aws_creds = get_aws_credentials_for_resource(&state, org_id, *resource_id).await;
 
@@ -171,14 +171,14 @@ pub async fn suspend_org_resources(
 
         if let Err(e) = metering::stop_tracked_resource(
             state.internal_service_secret.as_deref(),
-            &resource_id.to_string(),
+            provider_resource_id,
         )
         .await {
             tracing::error!("Failed to stop metering for resource {}: {}", resource_id, e);
             let _ = sqlx::query(
                 "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
             )
-            .bind(resource_id.to_string())
+            .bind(provider_resource_id)
             .execute(&state.db)
             .await;
         }
@@ -270,9 +270,10 @@ pub async fn unsuspend_org_resources(
         });
         if let Err(e) = metering::upsert_tracked_resource(
             &state,
-            &resource_id.to_string(),
+            provider_resource_id,
             org_id,
             None,
+            Some(*resource_id),
             "aws",
             instance_type,
             region.as_deref(),

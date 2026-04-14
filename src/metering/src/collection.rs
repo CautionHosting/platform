@@ -75,13 +75,16 @@ pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize
     // Reconcile: stop tracking resources that have been destroyed in compute_resources
     let reconciled = sqlx::query(
         r#"
-        UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW()
-        WHERE status = 'running'
-        AND resource_id IN (
-            SELECT id::text
-            FROM compute_resources
-            WHERE destroyed_at IS NOT NULL OR state != 'running'
-        )
+        UPDATE tracked_resources tr
+        SET status = 'stopped', stopped_at = NOW()
+        WHERE tr.status = 'running'
+          AND tr.application_id IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM compute_resources cr
+              WHERE cr.id = tr.application_id
+                AND (cr.destroyed_at IS NOT NULL OR cr.state != 'running')
+          )
         "#,
     )
     .execute(&state.pool)
@@ -102,7 +105,7 @@ pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize
 
     let resources = sqlx::query_as::<_, TrackedResource>(
         r#"
-        SELECT resource_id, organization_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
+        SELECT resource_id, organization_id, user_id, application_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
         FROM tracked_resources
         WHERE status = 'running'
         "#,
@@ -149,7 +152,7 @@ pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize
 pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) -> Result<bool> {
     let resource = sqlx::query_as::<_, TrackedResource>(
         r#"
-        SELECT resource_id, organization_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
+        SELECT resource_id, organization_id, user_id, application_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
         FROM tracked_resources
         WHERE resource_id = $1
         "#,
@@ -187,6 +190,8 @@ pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) 
         metadata: serde_json::json!({
             "instance_type": resource.instance_type,
             "region": resource.region,
+            "application_id": resource.application_id.map(|id| id.to_string()),
+            "resource_name": resource.metadata.get("resource_name").cloned(),
         }),
     };
 
@@ -316,6 +321,8 @@ async fn collect_network_egress(
             "direction": "egress",
             "bytes": total_bytes as i64,
             "instance_id": cloudwatch_instance_id,
+            "application_id": resource.application_id.map(|id| id.to_string()),
+            "resource_name": resource.metadata.get("resource_name").cloned(),
         }),
     };
 

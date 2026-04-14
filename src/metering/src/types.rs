@@ -102,6 +102,7 @@ pub struct TrackedResource {
     pub resource_id: String,
     pub organization_id: Uuid,
     pub user_id: Option<Uuid>,
+    pub application_id: Option<Uuid>,
     pub provider: String,
     pub instance_type: Option<String>,
     pub region: Option<String>,

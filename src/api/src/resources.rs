@@ -410,8 +410,8 @@ pub async fn delete_resource(
     tracing::info!("delete_resource called: resource_id={}, user_id={}, force={}", resource_id, auth.user_id, query.force);
 
     tracing::debug!("Querying resource access for user {} on resource {}", auth.user_id, resource_id);
-    let resource: Option<(Uuid, Uuid, String, Option<String>)> = sqlx::query_as(
-        "SELECT cr.id, cr.organization_id, cr.resource_name, pa.role_arn
+    let resource: Option<(Uuid, Uuid, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT cr.id, cr.organization_id, cr.resource_name, pa.role_arn, cr.provider_resource_id
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
          INNER JOIN provider_accounts pa ON cr.provider_account_id = pa.id
@@ -426,7 +426,7 @@ pub async fn delete_resource(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let Some((_, org_id, resource_name, _role_arn_opt)) = resource else {
+    let Some((_, org_id, resource_name, _role_arn_opt, tracked_resource_id)) = resource else {
         tracing::warn!("Resource {} not found or user {} has no access", resource_id, auth.user_id);
         return Err(StatusCode::NOT_FOUND);
     };
@@ -484,10 +484,9 @@ pub async fn delete_resource(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Stop metering for the destroyed resource
-    let resource_id_str = resource_id.to_string();
     match crate::metering::stop_tracked_resource(
         state.internal_service_secret.as_deref(),
-        &resource_id_str,
+        &tracked_resource_id,
     )
     .await {
         Ok(()) => {
@@ -502,7 +501,7 @@ pub async fn delete_resource(
             let _ = sqlx::query(
                 "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
             )
-            .bind(&resource_id_str)
+            .bind(&tracked_resource_id)
             .execute(&state.db)
             .await;
         }

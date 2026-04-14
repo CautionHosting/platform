@@ -382,6 +382,8 @@ struct TrackResourceRequest {
     organization_id: uuid::Uuid,
     #[serde(default)]
     user_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    application_id: Option<uuid::Uuid>,
     provider: Provider,
     instance_type: Option<String>,
     region: Option<String>,
@@ -396,11 +398,12 @@ async fn track_resource(
 
     let result = sqlx::query(
         r#"
-        INSERT INTO tracked_resources (resource_id, organization_id, user_id, provider, instance_type, region, metadata, status, started_at, last_billed_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'running', NOW(), NOW())
+        INSERT INTO tracked_resources (resource_id, organization_id, user_id, application_id, provider, instance_type, region, metadata, status, started_at, last_billed_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'running', NOW(), NOW())
         ON CONFLICT (resource_id) DO UPDATE SET
             organization_id = EXCLUDED.organization_id,
             user_id = COALESCE(EXCLUDED.user_id, tracked_resources.user_id),
+            application_id = COALESCE(EXCLUDED.application_id, tracked_resources.application_id),
             provider = EXCLUDED.provider,
             instance_type = COALESCE(EXCLUDED.instance_type, tracked_resources.instance_type),
             region = COALESCE(EXCLUDED.region, tracked_resources.region),
@@ -420,6 +423,7 @@ async fn track_resource(
     .bind(&req.resource_id)
     .bind(req.organization_id)
     .bind(req.user_id)
+    .bind(req.application_id)
     .bind(req.provider.as_str())
     .bind(&req.instance_type)
     .bind(&req.region)
@@ -486,7 +490,7 @@ async fn untrack_resource(
 async fn list_tracked_resources(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let result = sqlx::query_as::<_, TrackedResource>(
         r#"
-        SELECT resource_id, organization_id, user_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
+        SELECT resource_id, organization_id, user_id, application_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
         FROM tracked_resources
         WHERE status = 'running'
         ORDER BY started_at DESC
