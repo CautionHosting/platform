@@ -107,12 +107,28 @@ pub(crate) struct CreditPackagePricing {
     pub(crate) bonus_percent: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AppliedPricing {
+    pub(crate) base_unit_cost_usd: f64,
+    pub(crate) margin_percent: f64,
+}
+
+impl AppliedPricing {
+    pub(crate) fn unit_cost_usd(self) -> f64 {
+        self.base_unit_cost_usd * (1.0 + self.margin_percent / 100.0)
+    }
+
+    pub(crate) fn total_cost_usd(self, quantity: f64) -> f64 {
+        quantity * self.unit_cost_usd()
+    }
+}
+
 impl PricingConfig {
-    pub(crate) fn instance_pricing(&self, instance_type: &str) -> Option<(f64, f64, f64)> {
-        let base = billing::base_instance_rate(instance_type)?;
-        let margin_percent = self.compute_margin_percent;
-        let hourly_rate = base * (1.0 + margin_percent / 100.0);
-        Some((base, margin_percent, hourly_rate))
+    pub(crate) fn instance_pricing(&self, instance_type: &str) -> Option<AppliedPricing> {
+        Some(AppliedPricing {
+            base_unit_cost_usd: billing::base_instance_rate(instance_type)?,
+            margin_percent: self.compute_margin_percent,
+        })
     }
 
     pub(crate) fn load() -> anyhow::Result<Self> {

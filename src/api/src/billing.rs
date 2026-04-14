@@ -88,9 +88,6 @@ pub async fn get_billing_usage(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
-    // Verifiable compute margin (from prices.json, default 0%)
-    let margin_percent = state.pricing.compute_margin_percent;
-
     let now = chrono::Utc::now();
 
     // Calculate billing period (first of current month to end of month)
@@ -127,7 +124,7 @@ pub async fn get_billing_usage(
             .and_then(|v: &serde_json::Value| v.as_str())
             .unwrap_or("default");
 
-        let Some(base_rate) = base_instance_rate(instance_type) else {
+        let Some(pricing) = state.pricing.instance_pricing(instance_type) else {
             items.push(serde_json::json!({
                 "id": resource.id,
                 "resource_id": resource.provider_resource_id,
@@ -146,12 +143,12 @@ pub async fn get_billing_usage(
             );
             continue;
         };
-        let hourly_rate = base_rate * (1.0 + margin_percent / 100.0);
-        let cost_this_period = hours_this_period.max(0.0) * hourly_rate;
+        let hourly_rate = pricing.unit_cost_usd();
+        let cost_this_period = pricing.total_cost_usd(hours_this_period.max(0.0));
 
         // Project: assume resource runs for the rest of the month
         let remaining_hours = hours_in_month - hours_elapsed_in_period;
-        let projected_cost = cost_this_period + (remaining_hours.max(0.0) * hourly_rate);
+        let projected_cost = cost_this_period + pricing.total_cost_usd(remaining_hours.max(0.0));
 
         total_cost += cost_this_period;
         total_projected += projected_cost;
@@ -164,7 +161,7 @@ pub async fn get_billing_usage(
             "instance_type": instance_type,
             "quantity": hours_this_period.max(0.0),
             "unit": "hours",
-            "base_rate": format!("{:.3}", base_rate),
+            "base_rate": format!("{:.3}", pricing.base_unit_cost_usd),
             "rate": format!("{:.2}", hourly_rate),
             "cost": cost_this_period,
             "projected_cost": projected_cost,

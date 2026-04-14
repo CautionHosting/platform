@@ -201,9 +201,9 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
                 r#"
                 INSERT INTO usage_records (
                     organization_id, user_id, application_id, resource_id, provider, resource_type,
-                    quantity, unit, cost_usd, base_unit_cost_usd, margin_percent, unit_cost_usd, recorded_at, metadata
+                    quantity, unit, base_unit_cost_usd, margin_percent, recorded_at, metadata
                 )
-                VALUES ($1, $2, NULL, $3, 'aws', 'monthly_total', 0, 'usd', 0, 0, 0, 0, NOW(), $4)
+                VALUES ($1, $2, NULL, $3, 'aws', 'monthly_total', 0, 'usd', 0, 0, NOW(), $4)
                 "#,
             )
             .bind(org_id)
@@ -385,9 +385,9 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
             r#"
             INSERT INTO usage_records (
                 organization_id, user_id, application_id, resource_id, provider, resource_type,
-                quantity, unit, cost_usd, base_unit_cost_usd, margin_percent, unit_cost_usd, recorded_at, metadata
+                quantity, unit, base_unit_cost_usd, margin_percent, recorded_at, metadata
             )
-            VALUES ($1, $2, NULL, $3, 'aws', 'monthly_total', $4, 'usd', $4, 1, 0, 1, NOW(), $5)
+            VALUES ($1, $2, NULL, $3, 'aws', 'monthly_total', $4, 'usd', 1, 0, NOW(), $5)
             "#,
         )
         .bind(org_id)

@@ -204,7 +204,7 @@ pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) 
                 resource.resource_id, resource.provider
             )
         })?;
-    let cost = pricing.total_cost_usd;
+    let cost = pricing.total_cost_usd(usage.quantity);
 
     // Record usage and advance last_billed_at atomically to prevent double-counting
     let mut tx = state.pool.begin().await?;
@@ -213,9 +213,9 @@ pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) 
         r#"
         INSERT INTO usage_records (
             organization_id, user_id, application_id, resource_id, provider, resource_type,
-            quantity, unit, cost_usd, base_unit_cost_usd, margin_percent, unit_cost_usd, recorded_at, metadata
+            quantity, unit, base_unit_cost_usd, margin_percent, recorded_at, metadata
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
     )
     .bind(usage.organization_id)
@@ -226,10 +226,8 @@ pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) 
     .bind(usage.resource_type.as_str())
     .bind(usage.quantity)
     .bind(usage.unit.as_str())
-    .bind(cost)
     .bind(pricing.base_unit_cost_usd)
     .bind(pricing.margin_percent)
-    .bind(pricing.unit_cost_usd)
     .bind(now)
     .bind(&usage.metadata)
     .execute(&mut *tx)
@@ -351,7 +349,7 @@ async fn collect_network_egress(
                 resource.resource_id, resource.provider
             )
         })?;
-    let cost = pricing.total_cost_usd;
+    let cost = pricing.total_cost_usd(usage.quantity);
     let cost_cents = (cost * 100.0).round() as i64;
 
     if cost_cents <= 0 {
@@ -362,9 +360,9 @@ async fn collect_network_egress(
         r#"
         INSERT INTO usage_records (
             organization_id, user_id, application_id, resource_id, provider, resource_type,
-            quantity, unit, cost_usd, base_unit_cost_usd, margin_percent, unit_cost_usd, recorded_at, metadata
+            quantity, unit, base_unit_cost_usd, margin_percent, recorded_at, metadata
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
     )
     .bind(usage.organization_id)
@@ -375,10 +373,8 @@ async fn collect_network_egress(
     .bind(usage.resource_type.as_str())
     .bind(usage.quantity)
     .bind(usage.unit.as_str())
-    .bind(cost)
     .bind(pricing.base_unit_cost_usd)
     .bind(pricing.margin_percent)
-    .bind(pricing.unit_cost_usd)
     .bind(end)
     .bind(&usage.metadata)
     .execute(&state.pool)

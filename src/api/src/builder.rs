@@ -13,7 +13,7 @@ use sqlx::PgPool;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-use crate::ec2::{Ec2Client, RunInstancesParams};
+use crate::{AppliedPricing, ec2::{Ec2Client, RunInstancesParams}};
 
 const REMOTE_BUILDER_HELPER: &str = "remote-build-helper";
 
@@ -760,14 +760,12 @@ async fn bill_builder_usage(
     app_id: Option<Uuid>,
     instance_type: &str,
     started_at: chrono::DateTime<chrono::Utc>,
-    base_unit_cost_usd: f64,
-    margin_percent: f64,
-    hourly_rate_usd: f64,
+    pricing: AppliedPricing,
 ) {
     let duration_secs = (chrono::Utc::now() - started_at).num_seconds().max(0) as f64;
     let hours = duration_secs / 3600.0;
     let billable_hours = hours.max(1.0 / 60.0); // minimum 1 minute charge
-    let cost_usd = billable_hours * hourly_rate_usd;
+    let cost_usd = pricing.total_cost_usd(billable_hours);
     let cost_cents = (cost_usd * 100.0).round() as i64;
 
     if cost_cents <= 0 {
@@ -780,18 +778,16 @@ async fn bill_builder_usage(
         sqlx::query(
             "INSERT INTO usage_records (
                 organization_id, application_id, resource_id, provider, resource_type,
-                quantity, unit, cost_usd, base_unit_cost_usd, margin_percent, unit_cost_usd, recorded_at, metadata
+                quantity, unit, base_unit_cost_usd, margin_percent, recorded_at, metadata
              )
-             VALUES ($1, $2, $3, 'aws', 'compute', $4, 'hours', $5, $6, $7, $8, NOW(), $9)"
+             VALUES ($1, $2, $3, 'aws', 'compute', $4, 'hours', $5, $6, NOW(), $7)"
         )
         .bind(org_id)
         .bind(app_id)
         .bind(instance_id)
         .bind(billable_hours)
-        .bind(cost_usd)
-        .bind(base_unit_cost_usd)
-        .bind(margin_percent)
-        .bind(hourly_rate_usd)
+        .bind(pricing.base_unit_cost_usd)
+        .bind(pricing.margin_percent)
         .bind(serde_json::json!({
             "build_id": build_id.to_string(),
             "application_id": app_id.map(|id| id.to_string()),
@@ -856,7 +852,7 @@ async fn bill_builder_usage(
 pub async fn reap_orphaned_builders(
     db: &PgPool,
     ec2: &Ec2Client,
-    instance_pricing: impl Fn(&str) -> Option<(f64, f64, f64)>,
+    instance_pricing: impl Fn(&str) -> Option<AppliedPricing>,
 ) {
     let rows = match sqlx::query_as::<_, (Uuid, Option<String>, Uuid, Option<Uuid>, Option<String>, Option<chrono::DateTime<chrono::Utc>>)>(
         "SELECT id, builder_instance_id, organization_id, app_id, builder_instance_type, started_at FROM eif_builds
@@ -895,7 +891,7 @@ pub async fn reap_orphaned_builders(
                 .await;
             } else if let (Some(ref itype), Some(started)) = (&instance_type, started_at) {
                 // Fallback: metering tracking failed, bill directly for the full duration
-                if let Some((base_rate, margin_percent, hourly_rate)) = instance_pricing(itype) {
+                if let Some(pricing) = instance_pricing(itype) {
                     bill_builder_usage(
                         db,
                         build_id,
@@ -904,9 +900,7 @@ pub async fn reap_orphaned_builders(
                         app_id,
                         itype,
                         started,
-                        base_rate,
-                        margin_percent,
-                        hourly_rate,
+                        pricing,
                     )
                     .await;
                 } else {

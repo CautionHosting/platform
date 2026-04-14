@@ -10,11 +10,19 @@ pub struct CostCalculator {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct CalculatedCost {
+pub struct PricingBreakdown {
     pub base_unit_cost_usd: f64,
     pub margin_percent: f64,
-    pub unit_cost_usd: f64,
-    pub total_cost_usd: f64,
+}
+
+impl PricingBreakdown {
+    pub fn unit_cost_usd(self) -> f64 {
+        self.base_unit_cost_usd * (1.0 + self.margin_percent / 100.0)
+    }
+
+    pub fn total_cost_usd(self, quantity: f64) -> f64 {
+        quantity * self.unit_cost_usd()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -239,21 +247,17 @@ impl CostCalculator {
         Self { pricing }
     }
 
-    pub fn calculate_pricing(&self, usage: &ResourceUsage) -> Option<CalculatedCost> {
+    pub fn calculate_pricing(&self, usage: &ResourceUsage) -> Option<PricingBreakdown> {
         let base_rate = self.find_rate(usage)?;
-        let unit_cost_usd = base_rate * (1.0 + self.pricing.margin_percent / 100.0);
-        let total_cost_usd = (usage.quantity * unit_cost_usd * 100.0).round() / 100.0;
-
-        Some(CalculatedCost {
+        Some(PricingBreakdown {
             base_unit_cost_usd: base_rate,
             margin_percent: self.pricing.margin_percent,
-            unit_cost_usd,
-            total_cost_usd,
         })
     }
 
     pub fn calculate_cost(&self, usage: &ResourceUsage) -> Option<f64> {
-        self.calculate_pricing(usage).map(|pricing| pricing.total_cost_usd)
+        self.calculate_pricing(usage)
+            .map(|pricing| pricing.total_cost_usd(usage.quantity))
     }
 
     fn find_rate(&self, usage: &ResourceUsage) -> Option<f64> {
@@ -362,8 +366,8 @@ mod tests {
 
         assert!((pricing.base_unit_cost_usd - 0.192).abs() < 0.000001);
         assert!((pricing.margin_percent - 75.0).abs() < 0.000001);
-        assert!((pricing.unit_cost_usd - 0.336).abs() < 0.000001);
-        assert!((pricing.total_cost_usd - 0.672).abs() < 0.000001);
+        assert!((pricing.unit_cost_usd() - 0.336).abs() < 0.000001);
+        assert!((pricing.total_cost_usd(usage.quantity) - 0.672).abs() < 0.000001);
     }
 
     #[test]

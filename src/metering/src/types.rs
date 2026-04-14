@@ -124,10 +124,8 @@ pub struct UsageRecord {
     pub resource_type: String,
     pub quantity: f64,
     pub unit: String,
-    pub cost_usd: f64,
     pub base_unit_cost_usd: Option<f64>,
     pub margin_percent: Option<f64>,
-    pub unit_cost_usd: Option<f64>,
     pub recorded_at: time::OffsetDateTime,
     pub metadata: serde_json::Value,
 }

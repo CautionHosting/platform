@@ -517,15 +517,16 @@ async fn get_user_usage(
 ) -> impl IntoResponse {
     let result = sqlx::query(
         r#"
-        SELECT
+        SELECT DISTINCT
             provider,
             resource_type,
-            SUM(quantity)::float8 as total_quantity,
-            SUM(cost_usd)::float8 as total_cost
+            quantity,
+            base_unit_cost_usd,
+            margin_percent,
         FROM usage_records
         WHERE user_id = $1
         AND recorded_at >= NOW() - INTERVAL '30 days'
-        GROUP BY provider, resource_type
+	GROUP BY provider, resource_type
         "#,
     )
     .bind(user_id)
@@ -534,14 +535,33 @@ async fn get_user_usage(
 
     match result {
         Ok(rows) => {
-            let usage: Vec<serde_json::Value> = rows
-                .iter()
-                .map(|row| {
+            let mut usage_map = std::collections::BTreeMap::<(String, String), (f64, f64)>::new();
+
+            for row in &rows {
+                let provider = row.get::<String, _>("provider");
+                let resource_type = row.get::<String, _>("resource_type");
+                let quantity = row.get::<f64, _>("quantity");
+                let base_unit_cost_usd = row.get::<f64, _>("base_unit_cost_usd");
+                let margin_percent = row.get::<f64, _>("margin_percent");
+                let total_cost = crate::calculator::PricingBreakdown {
+                    base_unit_cost_usd,
+                    margin_percent,
+                }
+                .total_cost_usd(quantity);
+
+                let entry = usage_map.entry((provider, resource_type)).or_insert((0.0, 0.0));
+                entry.0 += quantity;
+                entry.1 += total_cost;
+            }
+
+            let usage: Vec<serde_json::Value> = usage_map
+                .into_iter()
+                .map(|((provider, resource_type), (total_quantity, total_cost))| {
                     serde_json::json!({
-                        "provider": row.get::<String, _>("provider"),
-                        "resource_type": row.get::<String, _>("resource_type"),
-                        "total_quantity": row.get::<Option<f64>, _>("total_quantity"),
-                        "total_cost": row.get::<Option<f64>, _>("total_cost"),
+                        "provider": provider,
+                        "resource_type": resource_type,
+                        "total_quantity": total_quantity,
+                        "total_cost": total_cost,
                     })
                 })
                 .collect();
@@ -600,16 +620,16 @@ async fn test_simulate_usage(
             })),
         );
     };
-    let cost = pricing.total_cost_usd;
+    let cost = pricing.total_cost_usd(usage.quantity);
 
     // Record locally
     let result = sqlx::query(
         r#"
         INSERT INTO usage_records (
             organization_id, user_id, application_id, resource_id, provider, resource_type,
-            quantity, unit, cost_usd, base_unit_cost_usd, margin_percent, unit_cost_usd, recorded_at, metadata
+            quantity, unit, base_unit_cost_usd, margin_percent, recorded_at, metadata
         )
-        VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         "#,
     )
     .bind(usage.organization_id)
@@ -619,10 +639,8 @@ async fn test_simulate_usage(
     .bind(usage.resource_type.as_str())
     .bind(usage.quantity)
     .bind(usage.unit.as_str())
-    .bind(cost)
     .bind(pricing.base_unit_cost_usd)
     .bind(pricing.margin_percent)
-    .bind(pricing.unit_cost_usd)
     .bind(now)
     .bind(&usage.metadata)
     .execute(&state.pool)
@@ -825,9 +843,9 @@ async fn sync_aws_costs(
             r#"
             INSERT INTO usage_records (
                 organization_id, application_id, resource_id, provider, resource_type,
-                quantity, unit, cost_usd, base_unit_cost_usd, margin_percent, unit_cost_usd, recorded_at, metadata
+                quantity, unit, base_unit_cost_usd, margin_percent, recorded_at, metadata
             )
-            VALUES ($1, NULL, $2, 'aws', 'aws_cost_explorer', $3, 'usd', $3, 1, 0, 1, $4, $5)
+            VALUES ($1, NULL, $2, 'aws', 'aws_cost_explorer', $3, 'usd', 1, 0, $4, $5)
             "#,
         )
         .bind(parsed_org_id)
