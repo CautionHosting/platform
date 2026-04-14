@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
     let internal_service_secret = load_internal_service_secret()?;
 
     let paddle = paddle::PaddleClient::new(paddle_api_url, paddle_api_key, paddle_webhook_secret);
-    let calculator = calculator::CostCalculator::new(calculator::PricingRules::default());
+    let calculator = calculator::CostCalculator::new(calculator::PricingRules::load()?);
 
     let aws_config = aws_config::load_from_env().await;
     let cloudwatch = aws_sdk_cloudwatch::Client::new(&aws_config);
@@ -592,13 +592,24 @@ async fn test_simulate_usage(
         }),
     };
 
-    let cost = state.calculator.calculate_cost(&usage);
+    let Some(pricing) = state.calculator.calculate_pricing(&usage) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("No pricing configured for resource type {} with metadata {}", usage.resource_type.as_str(), usage.metadata)
+            })),
+        );
+    };
+    let cost = pricing.total_cost_usd;
 
     // Record locally
     let result = sqlx::query(
         r#"
-        INSERT INTO usage_records (organization_id, user_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        INSERT INTO usage_records (
+            organization_id, user_id, application_id, resource_id, provider, resource_type,
+            quantity, unit, cost_usd, base_unit_cost_usd, margin_percent, unit_cost_usd, recorded_at, metadata
+        )
+        VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         "#,
     )
     .bind(usage.organization_id)
@@ -609,6 +620,9 @@ async fn test_simulate_usage(
     .bind(usage.quantity)
     .bind(usage.unit.as_str())
     .bind(cost)
+    .bind(pricing.base_unit_cost_usd)
+    .bind(pricing.margin_percent)
+    .bind(pricing.unit_cost_usd)
     .bind(now)
     .bind(&usage.metadata)
     .execute(&state.pool)
@@ -809,8 +823,11 @@ async fn sync_aws_costs(
         let now = time::OffsetDateTime::now_utc();
         let result = sqlx::query(
             r#"
-            INSERT INTO usage_records (organization_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
-            VALUES ($1, $2, 'aws', 'aws_cost_explorer', $3, 'usd', $3, $4, $5)
+            INSERT INTO usage_records (
+                organization_id, application_id, resource_id, provider, resource_type,
+                quantity, unit, cost_usd, base_unit_cost_usd, margin_percent, unit_cost_usd, recorded_at, metadata
+            )
+            VALUES ($1, NULL, $2, 'aws', 'aws_cost_explorer', $3, 'usd', $3, 1, 0, 1, $4, $5)
             "#,
         )
         .bind(parsed_org_id)

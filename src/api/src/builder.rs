@@ -757,8 +757,11 @@ async fn bill_builder_usage(
     build_id: Uuid,
     instance_id: &str,
     org_id: Uuid,
+    app_id: Option<Uuid>,
     instance_type: &str,
     started_at: chrono::DateTime<chrono::Utc>,
+    base_unit_cost_usd: f64,
+    margin_percent: f64,
     hourly_rate_usd: f64,
 ) {
     let duration_secs = (chrono::Utc::now() - started_at).num_seconds().max(0) as f64;
@@ -775,15 +778,23 @@ async fn bill_builder_usage(
         let mut tx = db.begin().await?;
 
         sqlx::query(
-            "INSERT INTO usage_records (organization_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
-             VALUES ($1, $2, 'aws', 'compute', $3, 'hours', $4, NOW(), $5)"
+            "INSERT INTO usage_records (
+                organization_id, application_id, resource_id, provider, resource_type,
+                quantity, unit, cost_usd, base_unit_cost_usd, margin_percent, unit_cost_usd, recorded_at, metadata
+             )
+             VALUES ($1, $2, $3, 'aws', 'compute', $4, 'hours', $5, $6, $7, $8, NOW(), $9)"
         )
         .bind(org_id)
+        .bind(app_id)
         .bind(instance_id)
         .bind(billable_hours)
         .bind(cost_usd)
+        .bind(base_unit_cost_usd)
+        .bind(margin_percent)
+        .bind(hourly_rate_usd)
         .bind(serde_json::json!({
             "build_id": build_id.to_string(),
+            "application_id": app_id.map(|id| id.to_string()),
             "instance_type": instance_type,
             "duration_secs": duration_secs as i64,
         }))
@@ -842,9 +853,13 @@ async fn bill_builder_usage(
     );
 }
 
-pub async fn reap_orphaned_builders(db: &PgPool, ec2: &Ec2Client, instance_hourly_rate: impl Fn(&str) -> f64) {
-    let rows = match sqlx::query_as::<_, (Uuid, Option<String>, Uuid, Option<String>, Option<chrono::DateTime<chrono::Utc>>)>(
-        "SELECT id, builder_instance_id, organization_id, builder_instance_type, started_at FROM eif_builds
+pub async fn reap_orphaned_builders(
+    db: &PgPool,
+    ec2: &Ec2Client,
+    instance_pricing: impl Fn(&str) -> Option<(f64, f64, f64)>,
+) {
+    let rows = match sqlx::query_as::<_, (Uuid, Option<String>, Uuid, Option<Uuid>, Option<String>, Option<chrono::DateTime<chrono::Utc>>)>(
+        "SELECT id, builder_instance_id, organization_id, app_id, builder_instance_type, started_at FROM eif_builds
          WHERE status IN ('pending', 'building')
          AND created_at < NOW() - INTERVAL '30 minutes'"
     )
@@ -857,7 +872,7 @@ pub async fn reap_orphaned_builders(db: &PgPool, ec2: &Ec2Client, instance_hourl
         }
     };
 
-    for (build_id, instance_id, org_id, instance_type, started_at) in rows {
+    for (build_id, instance_id, org_id, app_id, instance_type, started_at) in rows {
         tracing::warn!("Reaping orphaned build {} (instance: {:?})", build_id, instance_id);
 
         if let Some(ref iid) = instance_id {
@@ -880,8 +895,28 @@ pub async fn reap_orphaned_builders(db: &PgPool, ec2: &Ec2Client, instance_hourl
                 .await;
             } else if let (Some(ref itype), Some(started)) = (&instance_type, started_at) {
                 // Fallback: metering tracking failed, bill directly for the full duration
-                let hourly_rate = instance_hourly_rate(itype);
-                bill_builder_usage(db, build_id, iid, org_id, itype, started, hourly_rate).await;
+                if let Some((base_rate, margin_percent, hourly_rate)) = instance_pricing(itype) {
+                    bill_builder_usage(
+                        db,
+                        build_id,
+                        iid,
+                        org_id,
+                        app_id,
+                        itype,
+                        started,
+                        base_rate,
+                        margin_percent,
+                        hourly_rate,
+                    )
+                    .await;
+                } else {
+                    tracing::error!(
+                        "Cannot bill orphaned builder {} for build {}: unknown instance type {}",
+                        iid,
+                        build_id,
+                        itype
+                    );
+                }
             }
 
             if let Err(e) = ec2.terminate_instances(&[iid.clone()]).await {

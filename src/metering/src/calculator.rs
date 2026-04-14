@@ -2,9 +2,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use crate::types::{Provider, ResourceType, ResourceUsage};
+use serde::Deserialize;
+use anyhow::Context;
 
 pub struct CostCalculator {
     pricing: PricingRules,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CalculatedCost {
+    pub base_unit_cost_usd: f64,
+    pub margin_percent: f64,
+    pub unit_cost_usd: f64,
+    pub total_cost_usd: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -28,7 +38,7 @@ pub struct PricingRate {
 impl Default for PricingRules {
     fn default() -> Self {
         Self {
-            margin_percent: 75.0, // 75% margin on top of base cloud costs
+            margin_percent: 0.0,
             rates: vec![
                 // AWS compute pricing (on-demand rates, us-west-2)
                 PricingRate {
@@ -129,14 +139,6 @@ impl Default for PricingRules {
                     region: None,
                     rate_per_unit: 0.306,
                 },
-                // Default AWS compute rate
-                PricingRate {
-                    provider: Provider::Aws,
-                    resource_type: ResourceType::Compute,
-                    instance_type: None,
-                    region: None,
-                    rate_per_unit: 0.20,
-                },
                 // AWS storage
                 PricingRate {
                     provider: Provider::Aws,
@@ -190,6 +192,11 @@ impl Default for PricingRules {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct PricingFileConfig {
+    compute_margin_percent: f64,
+}
+
 impl PricingRate {
     pub fn matches(&self, usage: &ResourceUsage) -> bool {
         if self.provider != usage.provider {
@@ -232,21 +239,29 @@ impl CostCalculator {
         Self { pricing }
     }
 
-    pub fn calculate_cost(&self, usage: &ResourceUsage) -> f64 {
-        let base_rate = self.find_rate(usage);
-        let base_cost = usage.quantity * base_rate;
-        let cost_with_margin = base_cost * (1.0 + self.pricing.margin_percent / 100.0);
+    pub fn calculate_pricing(&self, usage: &ResourceUsage) -> Option<CalculatedCost> {
+        let base_rate = self.find_rate(usage)?;
+        let unit_cost_usd = base_rate * (1.0 + self.pricing.margin_percent / 100.0);
+        let total_cost_usd = (usage.quantity * unit_cost_usd * 100.0).round() / 100.0;
 
-        // Round to 6 decimal places
-        (cost_with_margin * 1_000_000.0).round() / 1_000_000.0
+        Some(CalculatedCost {
+            base_unit_cost_usd: base_rate,
+            margin_percent: self.pricing.margin_percent,
+            unit_cost_usd,
+            total_cost_usd,
+        })
     }
 
-    fn find_rate(&self, usage: &ResourceUsage) -> f64 {
+    pub fn calculate_cost(&self, usage: &ResourceUsage) -> Option<f64> {
+        self.calculate_pricing(usage).map(|pricing| pricing.total_cost_usd)
+    }
+
+    fn find_rate(&self, usage: &ResourceUsage) -> Option<f64> {
         // First try to find a specific match (with instance_type/region)
         for rate in &self.pricing.rates {
             if rate.instance_type.is_some() || rate.region.is_some() {
                 if rate.matches(usage) {
-                    return rate.rate_per_unit;
+                    return Some(rate.rate_per_unit);
                 }
             }
         }
@@ -255,18 +270,31 @@ impl CostCalculator {
         for rate in &self.pricing.rates {
             if rate.instance_type.is_none() && rate.region.is_none() {
                 if rate.matches(usage) {
-                    return rate.rate_per_unit;
+                    return Some(rate.rate_per_unit);
                 }
             }
         }
 
-        // No match found, return 0
         tracing::warn!(
             "No pricing rate found for {:?} {:?}",
             usage.provider,
             usage.resource_type
         );
-        0.0
+        None
+    }
+}
+
+impl PricingRules {
+    pub fn load() -> anyhow::Result<Self> {
+        let mut rules = Self::default();
+
+        let contents = std::fs::read_to_string("prices.json")
+            .context("prices.json not found. Configure explicit pricing before starting metering.")?;
+        let config = serde_json::from_str::<PricingFileConfig>(&contents)
+            .context("Failed to parse prices.json for metering pricing. Ensure compute_margin_percent is explicitly set.")?;
+        rules.margin_percent = config.compute_margin_percent;
+        tracing::info!("Loaded metering pricing config from prices.json");
+        Ok(rules)
     }
 }
 
@@ -276,6 +304,12 @@ mod tests {
     use crate::types::UsageUnit;
     use time::OffsetDateTime;
     use uuid::Uuid;
+
+    fn default_rules_with_margin(margin_percent: f64) -> PricingRules {
+        let mut rules = PricingRules::default();
+        rules.margin_percent = margin_percent;
+        rules
+    }
 
     fn make_usage(
         provider: Provider,
@@ -298,7 +332,7 @@ mod tests {
 
     #[test]
     fn test_calculate_cost_with_margin() {
-        let calculator = CostCalculator::new(PricingRules::default());
+        let calculator = CostCalculator::new(default_rules_with_margin(75.0));
 
         let usage = make_usage(
             Provider::Aws,
@@ -307,17 +341,35 @@ mod tests {
             serde_json::json!({"instance_type": "m5.xlarge"}),
         );
 
-        let cost = calculator.calculate_cost(&usage);
+        let cost = calculator.calculate_cost(&usage).expect("known pricing");
 
         // $0.192/hr * 10 hrs * 1.75 margin = $3.36
         assert!((cost - 3.36).abs() < 0.001);
     }
 
     #[test]
-    fn test_fallback_to_default_rate() {
-        let calculator = CostCalculator::new(PricingRules::default());
+    fn test_calculate_pricing_exposes_unit_and_total_cost() {
+        let calculator = CostCalculator::new(default_rules_with_margin(75.0));
 
-        // Unknown instance type should fall back to default AWS compute rate ($0.20/hr)
+        let usage = make_usage(
+            Provider::Aws,
+            ResourceType::Compute,
+            2.0,
+            serde_json::json!({"instance_type": "m5.xlarge"}),
+        );
+
+        let pricing = calculator.calculate_pricing(&usage).expect("known pricing");
+
+        assert!((pricing.base_unit_cost_usd - 0.192).abs() < 0.000001);
+        assert!((pricing.margin_percent - 75.0).abs() < 0.000001);
+        assert!((pricing.unit_cost_usd - 0.336).abs() < 0.000001);
+        assert!((pricing.total_cost_usd - 0.672).abs() < 0.000001);
+    }
+
+    #[test]
+    fn test_unknown_aws_instance_type_returns_none() {
+        let calculator = CostCalculator::new(default_rules_with_margin(75.0));
+
         let usage = make_usage(
             Provider::Aws,
             ResourceType::Compute,
@@ -325,17 +377,13 @@ mod tests {
             serde_json::json!({"instance_type": "r6g.metal"}),
         );
 
-        let cost = calculator.calculate_cost(&usage);
-
-        // $0.20/hr * 10 hrs * 1.75 = $3.50
-        assert!((cost - 3.50).abs() < 0.001);
+        assert!(calculator.calculate_cost(&usage).is_none());
     }
 
     #[test]
-    fn test_no_instance_type_uses_default() {
-        let calculator = CostCalculator::new(PricingRules::default());
+    fn test_missing_aws_instance_type_returns_none() {
+        let calculator = CostCalculator::new(default_rules_with_margin(75.0));
 
-        // No instance_type in metadata → default rate
         let usage = make_usage(
             Provider::Aws,
             ResourceType::Compute,
@@ -343,15 +391,12 @@ mod tests {
             serde_json::json!({}),
         );
 
-        let cost = calculator.calculate_cost(&usage);
-
-        // $0.20/hr * 5 hrs * 1.75 = $1.75
-        assert!((cost - 1.75).abs() < 0.001);
+        assert!(calculator.calculate_cost(&usage).is_none());
     }
 
     #[test]
     fn test_zero_quantity_returns_zero() {
-        let calculator = CostCalculator::new(PricingRules::default());
+        let calculator = CostCalculator::new(default_rules_with_margin(75.0));
 
         let usage = make_usage(
             Provider::Aws,
@@ -360,12 +405,12 @@ mod tests {
             serde_json::json!({"instance_type": "m5.xlarge"}),
         );
 
-        assert_eq!(calculator.calculate_cost(&usage), 0.0);
+        assert_eq!(calculator.calculate_cost(&usage), Some(0.0));
     }
 
     #[test]
     fn test_gcp_compute_default_rate() {
-        let calculator = CostCalculator::new(PricingRules::default());
+        let calculator = CostCalculator::new(default_rules_with_margin(75.0));
 
         let usage = make_usage(
             Provider::Gcp,
@@ -374,7 +419,7 @@ mod tests {
             serde_json::json!({}),
         );
 
-        let cost = calculator.calculate_cost(&usage);
+        let cost = calculator.calculate_cost(&usage).expect("known pricing");
 
         // $0.19/hr * 10 hrs * 1.75 = $3.325
         assert!((cost - 3.325).abs() < 0.001);
@@ -382,7 +427,7 @@ mod tests {
 
     #[test]
     fn test_azure_compute_default_rate() {
-        let calculator = CostCalculator::new(PricingRules::default());
+        let calculator = CostCalculator::new(default_rules_with_margin(75.0));
 
         let usage = make_usage(
             Provider::Azure,
@@ -391,13 +436,13 @@ mod tests {
             serde_json::json!({}),
         );
 
-        let cost = calculator.calculate_cost(&usage);
+        let cost = calculator.calculate_cost(&usage).expect("known pricing");
         assert!((cost - 3.325).abs() < 0.001);
     }
 
     #[test]
     fn test_baremetal_compute_default_rate() {
-        let calculator = CostCalculator::new(PricingRules::default());
+        let calculator = CostCalculator::new(default_rules_with_margin(75.0));
 
         let usage = make_usage(
             Provider::Baremetal,
@@ -406,7 +451,7 @@ mod tests {
             serde_json::json!({}),
         );
 
-        let cost = calculator.calculate_cost(&usage);
+        let cost = calculator.calculate_cost(&usage).expect("known pricing");
 
         // $0.15/hr * 10 hrs * 1.75 = $2.625
         assert!((cost - 2.625).abs() < 0.001);
@@ -414,7 +459,7 @@ mod tests {
 
     #[test]
     fn test_aws_storage_pricing() {
-        let calculator = CostCalculator::new(PricingRules::default());
+        let calculator = CostCalculator::new(default_rules_with_margin(75.0));
 
         let usage = make_usage(
             Provider::Aws,
@@ -423,7 +468,7 @@ mod tests {
             serde_json::json!({}),
         );
 
-        let cost = calculator.calculate_cost(&usage);
+        let cost = calculator.calculate_cost(&usage).expect("known pricing");
 
         // ($0.10/720)/hr * 720 hrs * 1.75 = $0.175
         assert!((cost - 0.175).abs() < 0.001);
@@ -431,7 +476,7 @@ mod tests {
 
     #[test]
     fn test_aws_network_pricing() {
-        let calculator = CostCalculator::new(PricingRules::default());
+        let calculator = CostCalculator::new(default_rules_with_margin(75.0));
 
         let usage = make_usage(
             Provider::Aws,
@@ -440,7 +485,7 @@ mod tests {
             serde_json::json!({}),
         );
 
-        let cost = calculator.calculate_cost(&usage);
+        let cost = calculator.calculate_cost(&usage).expect("known pricing");
 
         // $0.09/GB * 100 GB * 1.75 = $15.75
         assert!((cost - 15.75).abs() < 0.001);
@@ -448,7 +493,7 @@ mod tests {
 
     #[test]
     fn test_aws_public_ip_pricing() {
-        let calculator = CostCalculator::new(PricingRules::default());
+        let calculator = CostCalculator::new(default_rules_with_margin(75.0));
 
         let usage = make_usage(
             Provider::Aws,
@@ -457,7 +502,7 @@ mod tests {
             serde_json::json!({}),
         );
 
-        let cost = calculator.calculate_cost(&usage);
+        let cost = calculator.calculate_cost(&usage).expect("known pricing");
 
         // $0.005/hr * 720 hrs * 1.75 = $6.30
         assert!((cost - 6.30).abs() < 0.001);
@@ -465,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_custom_resource_type_returns_zero() {
-        let calculator = CostCalculator::new(PricingRules::default());
+        let calculator = CostCalculator::new(default_rules_with_margin(75.0));
 
         let usage = make_usage(
             Provider::Aws,
@@ -474,15 +519,14 @@ mod tests {
             serde_json::json!({}),
         );
 
-        // No rate for custom type, returns 0
-        assert_eq!(calculator.calculate_cost(&usage), 0.0);
+        assert!(calculator.calculate_cost(&usage).is_none());
     }
 
     #[test]
     fn test_specific_instance_type_preferred_over_default() {
-        let calculator = CostCalculator::new(PricingRules::default());
+        let calculator = CostCalculator::new(default_rules_with_margin(75.0));
 
-        // c5.xlarge has a specific rate of $0.17/hr, default is $0.20/hr
+        // c5.xlarge has a specific rate of $0.17/hr
         let usage = make_usage(
             Provider::Aws,
             ResourceType::Compute,
@@ -490,9 +534,9 @@ mod tests {
             serde_json::json!({"instance_type": "c5.xlarge"}),
         );
 
-        let cost = calculator.calculate_cost(&usage);
+        let cost = calculator.calculate_cost(&usage).expect("known pricing");
 
-        // $0.17/hr * 10 * 1.75 = $2.975 (NOT $3.50 from default)
+        // $0.17/hr * 10 * 1.75 = $2.975
         assert!((cost - 2.975).abs() < 0.001);
     }
 
@@ -552,8 +596,7 @@ mod tests {
 
     #[test]
     fn test_custom_margin() {
-        let mut rules = PricingRules::default();
-        rules.margin_percent = 100.0; // 100% margin = 2x base cost
+        let rules = default_rules_with_margin(100.0); // 100% margin = 2x base cost
 
         let calculator = CostCalculator::new(rules);
 
@@ -564,7 +607,7 @@ mod tests {
             serde_json::json!({"instance_type": "m5.xlarge"}),
         );
 
-        let cost = calculator.calculate_cost(&usage);
+        let cost = calculator.calculate_cost(&usage).expect("known pricing");
 
         // $0.192/hr * 10 hrs * 2.0 = $3.84
         assert!((cost - 3.84).abs() < 0.001);
@@ -572,8 +615,7 @@ mod tests {
 
     #[test]
     fn test_zero_margin() {
-        let mut rules = PricingRules::default();
-        rules.margin_percent = 0.0;
+        let rules = default_rules_with_margin(0.0);
 
         let calculator = CostCalculator::new(rules);
 
@@ -584,7 +626,7 @@ mod tests {
             serde_json::json!({"instance_type": "m5.xlarge"}),
         );
 
-        let cost = calculator.calculate_cost(&usage);
+        let cost = calculator.calculate_cost(&usage).expect("known pricing");
 
         // $0.192/hr * 10 hrs * 1.0 = $1.92
         assert!((cost - 1.92).abs() < 0.001);

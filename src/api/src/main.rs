@@ -18,6 +18,7 @@ use tracing::info;
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
+use anyhow::Context;
 
 mod provisioning;
 mod deployment;
@@ -44,7 +45,6 @@ mod metering;
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct PricingConfig {
-    #[serde(default)]
     pub(crate) compute_margin_percent: f64,
     #[serde(default)]
     pub(crate) subscription_tiers: std::collections::HashMap<String, TierPricing>,
@@ -107,42 +107,21 @@ pub(crate) struct CreditPackagePricing {
     pub(crate) bonus_percent: f64,
 }
 
-impl Default for PricingConfig {
-    fn default() -> Self {
-        Self {
-            compute_margin_percent: 0.0,
-            subscription_tiers: std::collections::HashMap::new(),
-            extra_block: ExtraBlock::default(),
-            billing_discounts: BillingDiscounts::default(),
-            credit_packages: std::collections::HashMap::new(),
-        }
-    }
-}
-
 impl PricingConfig {
-    /// Get the hourly rate for an instance type (with margin applied), in USD.
-    pub(crate) fn instance_hourly_rate(&self, instance_type: &str) -> f64 {
-        let base = billing::base_instance_rate(instance_type);
-        base * (1.0 + self.compute_margin_percent / 100.0)
+    pub(crate) fn instance_pricing(&self, instance_type: &str) -> Option<(f64, f64, f64)> {
+        let base = billing::base_instance_rate(instance_type)?;
+        let margin_percent = self.compute_margin_percent;
+        let hourly_rate = base * (1.0 + margin_percent / 100.0);
+        Some((base, margin_percent, hourly_rate))
     }
 
-    pub(crate) fn load() -> Self {
-        match std::fs::read_to_string("prices.json") {
-            Ok(contents) => match serde_json::from_str(&contents) {
-                Ok(config) => {
-                    tracing::info!("Loaded pricing config from prices.json");
-                    config
-                }
-                Err(e) => {
-                    tracing::error!("Failed to parse prices.json: {}. Using defaults (all zeros).", e);
-                    Self::default()
-                }
-            },
-            Err(_) => {
-                tracing::warn!("prices.json not found. Using defaults (all zeros). Copy prices.json.example to prices.json to configure pricing.");
-                Self::default()
-            }
-        }
+    pub(crate) fn load() -> anyhow::Result<Self> {
+        let contents = std::fs::read_to_string("prices.json")
+            .context("prices.json not found. Configure explicit pricing before starting the API.")?;
+        let config = serde_json::from_str(&contents)
+            .context("Failed to parse prices.json. Ensure compute_margin_percent is explicitly set.")?;
+        tracing::info!("Loaded pricing config from prices.json");
+        Ok(config)
     }
 
     pub(crate) fn credit_bonus_percent(&self, package_key: &str) -> f64 {
@@ -1680,7 +1659,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("PADDLE_API_KEY is set but PADDLE_API_URL is not — set PADDLE_API_URL to the Paddle API base URL (e.g. https://sandbox-api.paddle.com or https://api.paddle.com)".into());
     }
 
-    let pricing = PricingConfig::load();
+    let pricing = PricingConfig::load()?;
     let builder_sizes = builder::BuilderSizesConfig::load()?;
 
     let builder_config = builder::BuilderConfig::from_env()?;
@@ -1795,7 +1774,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 region: std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()),
             };
             let ec2 = crate::ec2::Ec2Client::new(&platform_creds);
-            builder::reap_orphaned_builders(&reaper_state.db, &ec2, |itype| reaper_state.pricing.instance_hourly_rate(itype)).await;
+            builder::reap_orphaned_builders(&reaper_state.db, &ec2, |itype| reaper_state.pricing.instance_pricing(itype)).await;
         }
     });
     info!("Builder orphan reaper started (runs every 5 minutes)");

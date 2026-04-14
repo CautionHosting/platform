@@ -13,8 +13,8 @@ use crate::{AppState, AuthContext, PricingConfig, get_user_primary_org};
 
 /// Base AWS on-demand rates by instance type (USD/hr, us-west-2).
 /// Used by both compute metering and builder billing.
-pub(crate) fn base_instance_rate(instance_type: &str) -> f64 {
-    match instance_type {
+pub(crate) fn base_instance_rate(instance_type: &str) -> Option<f64> {
+    Some(match instance_type {
         "m5.xlarge" => 0.192,
         "m5.2xlarge" => 0.384,
         "m5.4xlarge" => 0.768,
@@ -29,8 +29,8 @@ pub(crate) fn base_instance_rate(instance_type: &str) -> f64 {
         "c6i.2xlarge" => 0.34,
         "c6a.xlarge" => 0.153,
         "c6a.2xlarge" => 0.306,
-        _ => 0.20,
-    }
+        _ => return None,
+    })
 }
 use crate::resources::ComputeResource;
 use crate::suspension::call_internal_unsuspend;
@@ -91,10 +91,6 @@ pub async fn get_billing_usage(
     // Verifiable compute margin (from prices.json, default 0%)
     let margin_percent = state.pricing.compute_margin_percent;
 
-    let get_base_rate = |instance_type: &str| -> f64 {
-        base_instance_rate(instance_type)
-    };
-
     let now = chrono::Utc::now();
 
     // Calculate billing period (first of current month to end of month)
@@ -131,7 +127,25 @@ pub async fn get_billing_usage(
             .and_then(|v: &serde_json::Value| v.as_str())
             .unwrap_or("default");
 
-        let base_rate = get_base_rate(instance_type);
+        let Some(base_rate) = base_instance_rate(instance_type) else {
+            items.push(serde_json::json!({
+                "id": resource.id,
+                "resource_id": resource.provider_resource_id,
+                "resource_name": resource.resource_name.clone().unwrap_or_else(|| "Unnamed".to_string()),
+                "resource_type": "compute",
+                "instance_type": instance_type,
+                "quantity": hours_this_period.max(0.0),
+                "unit": "hours",
+                "pricing_status": "unpriced",
+                "pricing_error": format!("Unknown instance type: {}", instance_type),
+            }));
+            tracing::error!(
+                "Cannot price compute resource {} with unknown instance type {}",
+                resource.id,
+                instance_type
+            );
+            continue;
+        };
         let hourly_rate = base_rate * (1.0 + margin_percent / 100.0);
         let cost_this_period = hours_this_period.max(0.0) * hourly_rate;
 
