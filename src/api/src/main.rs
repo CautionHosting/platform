@@ -1310,6 +1310,7 @@ async fn deploy_logic(
 
             let build_request = builder::BuildRequest {
                 org_id: req.org_id,
+                app_id: resource_id,
                 app_name: app_name.clone(),
                 commit_sha: commit_sha.clone(),
                 branch: req.branch.clone(),
@@ -1332,7 +1333,11 @@ async fn deploy_logic(
                 auth.user_id,
             ).await.map_err(|e| {
                 tracing::error!("Dedicated builder failed: {:?}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("Build failed: {}", e))
+                if e.to_string() == builder::ACTIVE_BUILD_CONFLICT_MSG {
+                    (StatusCode::CONFLICT, builder::ACTIVE_BUILD_CONFLICT_MSG.to_string())
+                } else {
+                    (StatusCode::INTERNAL_SERVER_ERROR, format!("Build failed: {}", e))
+                }
             })?;
 
             build_result.eif_s3_key

@@ -118,6 +118,7 @@ pub struct BuildResult {
 /// Input parameters for a build.
 pub struct BuildRequest {
     pub org_id: Uuid,
+    pub app_id: Uuid,
     pub app_name: String,
     pub commit_sha: String,
     pub branch: String,
@@ -135,6 +136,9 @@ pub struct BuildRequest {
     pub builder_instance_type: String,
     pub app_sources: Vec<String>,
 }
+
+pub const ACTIVE_BUILD_CONFLICT_MSG: &str =
+    "A build is already in progress for this app. Please wait for it to complete.";
 
 /// Compute a cache key from all inputs that affect the EIF output.
 pub fn compute_cache_key(
@@ -293,20 +297,30 @@ pub async fn execute_remote_build(
     let procfile_hash = format!("{:x}", Sha256::digest(request.procfile_content.as_bytes()));
 
     // 1. Insert pending build row
-    sqlx::query(
-        "INSERT INTO eif_builds (id, organization_id, user_id, commit_sha, procfile_hash, cache_key, builder_instance_type, status, started_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', NOW())"
+    let insert_result = sqlx::query(
+        "INSERT INTO eif_builds (id, organization_id, app_id, user_id, commit_sha, procfile_hash, cache_key, builder_instance_type, status, started_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', NOW())"
     )
     .bind(build_id)
     .bind(request.org_id)
+    .bind(request.app_id)
     .bind(user_id)
     .bind(&request.commit_sha)
     .bind(&procfile_hash)
     .bind(cache_key)
     .bind(instance_type)
     .execute(db)
-    .await
-    .context("Failed to insert eif_builds row")?;
+    .await;
+
+    match insert_result {
+        Ok(_) => {}
+        Err(sqlx::Error::Database(db_err))
+            if db_err.constraint() == Some("idx_eif_builds_active_app") =>
+        {
+            bail!(ACTIVE_BUILD_CONFLICT_MSG);
+        }
+        Err(e) => return Err(e).context("Failed to insert eif_builds row"),
+    }
 
     // 2. Generate user-data and launch EC2 instance
     let helper_s3_key = upload_remote_builder_helper(s3, &config.eif_s3_bucket, build_id, request.org_id).await
@@ -760,7 +774,7 @@ async fn bill_builder_usage(
 
         sqlx::query(
             "INSERT INTO usage_records (organization_id, resource_id, provider, resource_type, quantity, unit, cost_usd, recorded_at, metadata)
-             VALUES ($1, $2, 'aws', 'builder', $3, 'hours', $4, NOW(), $5)"
+             VALUES ($1, $2, 'aws', 'compute', $3, 'hours', $4, NOW(), $5)"
         )
         .bind(org_id)
         .bind(build_id)
@@ -1018,6 +1032,7 @@ mod tests {
 
         let request = BuildRequest {
             org_id: Uuid::new_v4(),
+            app_id: Uuid::new_v4(),
             app_name: "test-app".to_string(),
             commit_sha: "abc123def456".to_string(),
             branch: "main".to_string(),
@@ -1089,6 +1104,7 @@ mod tests {
 
         let request = BuildRequest {
             org_id: Uuid::new_v4(),
+            app_id: Uuid::new_v4(),
             app_name: "test-app".to_string(),
             commit_sha: "abc123".to_string(),
             branch: "main".to_string(),
