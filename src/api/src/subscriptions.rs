@@ -205,6 +205,8 @@ pub async fn subscribe(
     let now = Utc::now();
     let price_per_cycle = tier.cycle_price(&req.billing_period, &state.pricing.billing_discounts);
     let period_end = calculate_period_end(now, &req.billing_period);
+    let cost_hourly = state.pricing.subscription_cost_hourly_usd(&req.tier_id)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
 
     // Charge first period: credits first, then Paddle for remainder
     let total_charge = price_per_cycle;
@@ -382,14 +384,15 @@ pub async fn subscribe(
     // Record billing event
     sqlx::query(
         "INSERT INTO subscription_ledger
-         (subscription_id, organization_id, billing_period_start, billing_period_end, tier, invoice_id, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)"
+         (subscription_id, organization_id, billing_period_start, billing_period_end, tier, cost_hourly, invoice_id, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
     )
     .bind(sub_id.0)
     .bind(org_id)
     .bind(now)
     .bind(period_end)
     .bind(&req.tier_id)
+    .bind(cost_hourly)
     .bind(invoice_id)
     .bind(event_status)
     .execute(&mut *tx)

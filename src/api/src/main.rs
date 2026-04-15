@@ -131,6 +131,15 @@ impl PricingConfig {
         })
     }
 
+    pub(crate) fn subscription_cost_hourly_usd(
+        &self,
+        tier_id: &str,
+    ) -> Option<f64> {
+        const HOURS_PER_YEAR: f64 = 365.0 * 24.0;
+        let yearly_tier_cents = self.subscription_tiers.get(tier_id)?.annual_cents;
+        Some(yearly_tier_cents as f64 / 100.0 / HOURS_PER_YEAR)
+    }
+
     pub(crate) fn load() -> anyhow::Result<Self> {
         let contents = std::fs::read_to_string("prices.json")
             .context("prices.json not found. Configure explicit pricing before starting the API.")?;

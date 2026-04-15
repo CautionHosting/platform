@@ -735,10 +735,10 @@ fi
 
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
 INSERT INTO subscription_ledger (
-    subscription_id, organization_id, billing_period_start, billing_period_end, tier, status
+    subscription_id, organization_id, billing_period_start, billing_period_end, tier, cost_hourly, status
 )
 VALUES (
-    '$SUB_ID', '$ORG_ID', NOW() - interval '1 day', NOW() + interval '29 days', 'starter', '$BILLING_STATUS'
+    '$SUB_ID', '$ORG_ID', NOW() - interval '1 day', NOW() + interval '29 days', 'starter', 0.924658, '$BILLING_STATUS'
 );
 " >/dev/null 2>&1 || true
 

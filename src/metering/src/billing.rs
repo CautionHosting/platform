@@ -8,7 +8,9 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use serde::Deserialize;
 use sqlx::{PgPool, Postgres, Row, Transaction};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::collection::{
@@ -16,6 +18,49 @@ use crate::collection::{
 };
 use crate::AppState;
 use crate::{cost_explorer, paddle};
+
+#[derive(Debug, Default, Deserialize)]
+struct PricingConfig {
+    #[serde(default)]
+    subscription_tiers: HashMap<String, TierPricing>,
+    #[serde(default)]
+    extra_block: ExtraBlock,
+    #[serde(default)]
+    billing_discounts: BillingDiscounts,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TierPricing {
+    #[serde(default)]
+    annual_cents: i64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ExtraBlock {
+    #[serde(default)]
+    annual_cents: i64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BillingDiscounts {
+    #[serde(default)]
+    yearly_percent_off: f64,
+}
+
+impl PricingConfig {
+    fn load() -> Result<Self> {
+        let contents = std::fs::read_to_string("prices.json")
+            .context("prices.json not found. Configure explicit subscription pricing before starting metering.")?;
+        serde_json::from_str(&contents)
+            .context("Failed to parse prices.json for subscription pricing")
+    }
+
+    fn subscription_cost_hourly_usd(&self, tier_id: &str) -> Option<f64> {
+        const HOURS_PER_YEAR: f64 = 365.0 * 24.0;
+        let yearly_tier_cents = self.subscription_tiers.get(tier_id)?.annual_cents;
+        Some(yearly_tier_cents as f64 / 100.0 / HOURS_PER_YEAR)
+    }
+}
 
 /// Monthly billing loop.
 ///
@@ -436,6 +481,7 @@ async fn run_subscription_billing(state: &AppState) -> Result<()> {
 }
 
 async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
+    let pricing = PricingConfig::load()?;
     let due_subs = sqlx::query(
         r#"
         SELECT id, user_id, organization_id, tier, billing_period,
@@ -466,6 +512,9 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
         let base_price: i64 = row.get("price_cents_per_cycle");
         let extra_price: i64 = row.get("extra_block_price_cents_per_cycle");
         let cancel_at_end: bool = row.get("cancel_at_period_end");
+        let cost_hourly = pricing
+            .subscription_cost_hourly_usd(&tier)
+            .with_context(|| format!("Missing yearly subscription pricing for tier '{}'", tier))?;
 
         if cancel_at_end {
             sqlx::query(
@@ -520,10 +569,10 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                 sqlx::query(
                     r#"
                     INSERT INTO subscription_ledger
-                    (subscription_id, organization_id, billing_period_start, billing_period_end, tier, invoice_id, status)
-                    VALUES ($1, $2, $3, $4, $5, NULL, 'payment_failed')
+                    (subscription_id, organization_id, billing_period_start, billing_period_end, tier, cost_hourly, invoice_id, status)
+                    VALUES ($1, $2, $3, $4, $5, $6, NULL, 'payment_failed')
                     ON CONFLICT (subscription_id, billing_period_start)
-                    DO UPDATE SET status = 'payment_failed'
+                    DO UPDATE SET status = 'payment_failed', cost_hourly = EXCLUDED.cost_hourly
                     "#,
                 )
                 .bind(sub_id)
@@ -531,6 +580,7 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                 .bind(current_period_start)
                 .bind(current_period_end)
                 .bind(&tier)
+                .bind(cost_hourly)
                 .execute(&state.pool)
                 .await?;
 
@@ -572,10 +622,10 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                     sqlx::query(
                         r#"
                         INSERT INTO subscription_ledger
-                        (subscription_id, organization_id, billing_period_start, billing_period_end, tier, invoice_id, status)
-                        VALUES ($1, $2, $3, $4, $5, NULL, 'payment_failed')
+                        (subscription_id, organization_id, billing_period_start, billing_period_end, tier, cost_hourly, invoice_id, status)
+                        VALUES ($1, $2, $3, $4, $5, $6, NULL, 'payment_failed')
                         ON CONFLICT (subscription_id, billing_period_start)
-                        DO UPDATE SET status = 'payment_failed'
+                        DO UPDATE SET status = 'payment_failed', cost_hourly = EXCLUDED.cost_hourly
                         "#,
                     )
                     .bind(sub_id)
@@ -583,6 +633,7 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                     .bind(current_period_start)
                     .bind(current_period_end)
                     .bind(&tier)
+                    .bind(cost_hourly)
                     .execute(&state.pool)
                     .await?;
 
@@ -660,8 +711,8 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
         sqlx::query(
             r#"
             INSERT INTO subscription_ledger
-            (subscription_id, organization_id, billing_period_start, billing_period_end, tier, invoice_id, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            (subscription_id, organization_id, billing_period_start, billing_period_end, tier, cost_hourly, invoice_id, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
         )
         .bind(sub_id)
@@ -669,6 +720,7 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
         .bind(current_period_start)
         .bind(current_period_end)
         .bind(&tier)
+        .bind(cost_hourly)
         .bind(invoice_id)
         .bind(event_status)
         .execute(&mut *tx)
