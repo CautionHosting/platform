@@ -520,10 +520,8 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                 sqlx::query(
                     r#"
                     INSERT INTO subscription_ledger
-                    (subscription_id, organization_id, billing_period_start, billing_period_end, tier,
-                     base_amount_cents, addon_amount_cents, total_amount_cents, credits_applied_cents,
-                     charged_amount_cents, paddle_transaction_id, invoice_id, status)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, NULL, NULL, 'payment_failed')
+                    (subscription_id, organization_id, billing_period_start, billing_period_end, tier, invoice_id, status)
+                    VALUES ($1, $2, $3, $4, $5, NULL, 'payment_failed')
                     ON CONFLICT (subscription_id, billing_period_start)
                     DO UPDATE SET status = 'payment_failed'
                     "#,
@@ -533,9 +531,6 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                 .bind(current_period_start)
                 .bind(current_period_end)
                 .bind(&tier)
-                .bind(base_price)
-                .bind(extra_price)
-                .bind(total_charge)
                 .execute(&state.pool)
                 .await?;
 
@@ -577,10 +572,8 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                     sqlx::query(
                         r#"
                         INSERT INTO subscription_ledger
-                        (subscription_id, organization_id, billing_period_start, billing_period_end, tier,
-                         base_amount_cents, addon_amount_cents, total_amount_cents, credits_applied_cents,
-                         charged_amount_cents, paddle_transaction_id, invoice_id, status)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, NULL, NULL, 'payment_failed')
+                        (subscription_id, organization_id, billing_period_start, billing_period_end, tier, invoice_id, status)
+                        VALUES ($1, $2, $3, $4, $5, NULL, 'payment_failed')
                         ON CONFLICT (subscription_id, billing_period_start)
                         DO UPDATE SET status = 'payment_failed'
                         "#,
@@ -590,9 +583,6 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                     .bind(current_period_start)
                     .bind(current_period_end)
                     .bind(&tier)
-                    .bind(base_price)
-                    .bind(extra_price)
-                    .bind(total_charge)
                     .execute(&state.pool)
                     .await?;
 
@@ -670,10 +660,8 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
         sqlx::query(
             r#"
             INSERT INTO subscription_ledger
-            (subscription_id, organization_id, billing_period_start, billing_period_end, tier,
-             base_amount_cents, addon_amount_cents, total_amount_cents, credits_applied_cents,
-             charged_amount_cents, paddle_transaction_id, invoice_id, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            (subscription_id, organization_id, billing_period_start, billing_period_end, tier, invoice_id, status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             "#,
         )
         .bind(sub_id)
@@ -681,12 +669,6 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
         .bind(current_period_start)
         .bind(current_period_end)
         .bind(&tier)
-        .bind(base_price)
-        .bind(extra_price)
-        .bind(total_charge)
-        .bind(credits_applied)
-        .bind(remainder_cents)
-        .bind(&paddle_txn_id)
         .bind(invoice_id)
         .bind(event_status)
         .execute(&mut *tx)

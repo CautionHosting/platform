@@ -353,34 +353,12 @@ pub async fn subscribe(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record ledger: {}", e)))?;
     }
 
-    // Record billing event
-    sqlx::query(
-        "INSERT INTO subscription_ledger
-         (subscription_id, organization_id, billing_period_start, billing_period_end, tier,
-          base_amount_cents, total_amount_cents, credits_applied_cents, charged_amount_cents,
-          paddle_transaction_id, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
-    )
-    .bind(sub_id.0)
-    .bind(org_id)
-    .bind(now)
-    .bind(period_end)
-    .bind(&req.tier_id)
-    .bind(price_per_cycle)
-    .bind(total_charge)
-    .bind(credits_to_apply)
-    .bind(remainder_cents)
-    .bind(&paddle_txn_id)
-    .bind(event_status)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record billing event: {}", e)))?;
-
     // Record invoice
     let invoice_number = format!("INV-SUB-{}", &sub_id.0.to_string()[..8]);
-    sqlx::query(
+    let invoice_id: Uuid = sqlx::query_scalar(
         "INSERT INTO invoices (paddle_transaction_id, user_id, organization_id, invoice_number, amount_cents, currency, status, payment_status, billing_provider, created_at)
-         VALUES ($1, $2, $3, $4, $5, 'USD', 'finalized', $6, $7, NOW())"
+         VALUES ($1, $2, $3, $4, $5, 'USD', 'finalized', $6, $7, NOW())
+         RETURNING id"
     )
     .bind(&paddle_txn_id)
     .bind(auth.user_id)
@@ -397,9 +375,26 @@ pub async fn subscribe(
         "pending"
     })
     .bind(if remainder_cents == 0 { "credits" } else { "paddle" })
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record invoice: {}", e)))?;
+
+    // Record billing event
+    sqlx::query(
+        "INSERT INTO subscription_ledger
+         (subscription_id, organization_id, billing_period_start, billing_period_end, tier, invoice_id, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)"
+    )
+    .bind(sub_id.0)
+    .bind(org_id)
+    .bind(now)
+    .bind(period_end)
+    .bind(&req.tier_id)
+    .bind(invoice_id)
+    .bind(event_status)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record billing event: {}", e)))?;
 
     tx.commit().await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to commit: {}", e)))?;
