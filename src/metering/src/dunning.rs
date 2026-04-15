@@ -44,13 +44,14 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
         .await?;
     }
 
-    // 2. Also detect fully-managed orgs with negative wallet balance and no payment method
+    // 2. Also detect fully-managed orgs with negative derived balance and no payment method
     let negative_balance_orgs: Vec<(uuid::Uuid,)> = sqlx::query_as(
         r#"
         SELECT DISTINCT o.id
         FROM organizations o
-        JOIN wallet_balance wb ON wb.organization_id = o.id
-        WHERE wb.balance_cents < 0
+        LEFT JOIN credit_ledger_balances clb ON clb.organization_id = o.id
+        LEFT JOIN debit_ledger_balances dlb ON dlb.organization_id = o.id
+        WHERE (COALESCE(clb.credit_cents, 0) - COALESCE(dlb.debit_cents, 0)) < 0
           AND o.payment_failed_at IS NULL
           AND NOT EXISTS (
               SELECT 1 FROM payment_methods pm
@@ -201,12 +202,15 @@ async fn check_payment_resolved(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Resu
         return Ok(true);
     }
 
-    // Check if any member has positive wallet balance
+    // Check if the org has non-negative derived balance
     let has_balance: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS(
-            SELECT 1 FROM wallet_balance wb
-            WHERE wb.organization_id = $1 AND wb.balance_cents >= 0
+            SELECT 1
+            FROM (SELECT $1::uuid AS organization_id) org
+            LEFT JOIN credit_ledger_balances clb USING (organization_id)
+            LEFT JOIN debit_ledger_balances dlb USING (organization_id)
+            WHERE (COALESCE(clb.credit_cents, 0) - COALESCE(dlb.debit_cents, 0)) >= 0
         )
         "#,
     )

@@ -16,6 +16,7 @@ use std::sync::Arc;
 use crate::collection::{
     advisory_unlock, try_advisory_lock, LOCK_MONTHLY_BILLING, LOCK_SUBSCRIPTION_BILLING,
 };
+use crate::credits::get_ledger_balance_cents;
 use crate::AppState;
 use crate::{cost_explorer, paddle};
 
@@ -291,7 +292,7 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
         };
 
         let mut tx = state.pool.begin().await?;
-        let locked_balance: i64 = sqlx::query_scalar(
+        let _locked_wallet_row: Option<i64> = sqlx::query_scalar(
             "SELECT COALESCE(balance_cents, 0)
              FROM wallet_balance
              WHERE organization_id = $1
@@ -299,8 +300,9 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
         )
         .bind(org_id)
         .fetch_optional(&mut *tx)
-        .await?
-        .unwrap_or(0);
+        .await?;
+
+        let locked_balance = get_ledger_balance_cents(&mut *tx, org_id).await?;
 
         let credits_applied = locked_balance.min(remaining_cost_cents);
         let remainder_cents = remaining_cost_cents - credits_applied;
@@ -527,7 +529,7 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
         let next_period_end = calculate_subscription_period_end(current_period_end, &billing_period);
 
         let mut tx = state.pool.begin().await?;
-        let locked_balance: i64 = sqlx::query_scalar(
+        let _locked_wallet_row: Option<i64> = sqlx::query_scalar(
             "SELECT COALESCE(balance_cents, 0)
              FROM wallet_balance
              WHERE organization_id = $1
@@ -535,8 +537,9 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
         )
         .bind(org_id)
         .fetch_optional(&mut *tx)
-        .await?
-        .unwrap_or(0);
+        .await?;
+
+        let locked_balance = get_ledger_balance_cents(&mut *tx, org_id).await?;
 
         let credits_applied = locked_balance.min(total_charge);
         let remainder_cents = total_charge - credits_applied;

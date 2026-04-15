@@ -5,7 +5,7 @@ use axum::{
 };
 use chrono::{DateTime, Datelike, Utc};
 use serde::Deserialize;
-use sqlx::{PgPool, Row};
+use sqlx::{Executor, PgPool, Postgres, Row};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -63,6 +63,26 @@ pub(crate) fn build_credit_packages(pricing: &PricingConfig, paddle_ids: &[Optio
             paddle_price_id: paddle_ids[i].clone(),
         }
     }).collect()
+}
+
+pub async fn get_ledger_balance_cents<'e, E>(
+    executor: E,
+    organization_id: Uuid,
+) -> Result<i64, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(clb.credit_cents, 0) - COALESCE(dlb.debit_cents, 0)
+        FROM (SELECT $1::uuid AS organization_id) org
+        LEFT JOIN credit_ledger_balances clb USING (organization_id)
+        LEFT JOIN debit_ledger_balances dlb USING (organization_id)
+        "#,
+    )
+    .bind(organization_id)
+    .fetch_one(executor)
+    .await
 }
 
 pub async fn get_billing_usage(
@@ -629,14 +649,10 @@ pub async fn get_credit_balance(
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
 
-    let balance_cents: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
-    )
-    .bind(org_id)
-    .fetch_optional(&state.db)
+    let balance_cents = get_ledger_balance_cents(&state.db, org_id)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
-    .unwrap_or(0);
+    ;
 
     Ok(Json(serde_json::json!({
         "balance_cents": balance_cents,
@@ -856,14 +872,10 @@ pub async fn purchase_credits(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
     if already_exists {
-        let balance_cents: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
-        )
-        .bind(org_id)
-        .fetch_optional(&state.db)
+        let balance_cents = get_ledger_balance_cents(&state.db, org_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
-        .unwrap_or(0);
+        ;
 
         return Ok(Json(serde_json::json!({
             "success": true,

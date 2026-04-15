@@ -798,13 +798,9 @@ async fn bill_builder_usage(
         .await?;
 
         // Deduct up to available balance (can't go negative due to CHECK constraint)
-        let current_balance: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
-        )
-        .bind(org_id)
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap_or(0);
+        let current_balance = crate::billing::get_ledger_balance_cents(&mut *tx, org_id)
+            .await
+            .unwrap_or(0);
 
         let actual_deduction = cost_cents.min(current_balance);
 

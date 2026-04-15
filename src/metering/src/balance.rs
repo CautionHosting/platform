@@ -4,19 +4,14 @@
 use anyhow::Result;
 use sqlx::Row;
 
+use crate::credits::get_ledger_balance_cents;
 use crate::dunning::send_dunning_email;
 use crate::paddle;
 use crate::AppState;
 
 /// After deducting credits, check if the org's balance requires action.
 pub(crate) async fn check_balance_thresholds(state: &AppState, org_id: uuid::Uuid) -> Result<()> {
-    let balance_cents: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1",
-    )
-    .bind(org_id)
-    .fetch_optional(&state.pool)
-    .await?
-    .unwrap_or(0);
+    let balance_cents = get_ledger_balance_cents(&state.pool, org_id).await?;
 
     // Read billing config for auto-topup settings (now keyed by organization_id)
     let config = sqlx::query(

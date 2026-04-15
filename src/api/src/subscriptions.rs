@@ -212,14 +212,10 @@ pub async fn subscribe(
     let total_charge = price_per_cycle;
 
     // Read credit balance (non-binding — final deduction is atomic inside the transaction below)
-    let balance_cents: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
-    )
-    .bind(org_id)
-    .fetch_optional(&state.db)
+    let balance_cents = crate::billing::get_ledger_balance_cents(&state.db, org_id)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
-    .unwrap_or(0);
+    ;
 
     let estimated_credits = balance_cents.min(total_charge).max(0);
     let estimated_remainder = total_charge - estimated_credits;
@@ -315,14 +311,17 @@ pub async fn subscribe(
 
     // Atomically lock and deduct credits within the transaction
     // Re-read balance with FOR UPDATE to prevent TOCTOU race
-    let locked_balance: i64 = sqlx::query_scalar(
+    let _locked_wallet_row: Option<i64> = sqlx::query_scalar(
         "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1 FOR UPDATE"
     )
     .bind(org_id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
-    .unwrap_or(0);
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let locked_balance = crate::billing::get_ledger_balance_cents(&mut *tx, org_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
     let credits_to_apply = locked_balance.min(total_charge).max(0);
     let remainder_cents = total_charge - credits_to_apply;
@@ -457,14 +456,10 @@ pub async fn change_subscription_tier(
     let mut paddle_charged = false;
     if net_charge > 0 {
         // Check credit balance for estimated coverage
-        let balance: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
-        )
-        .bind(org_id)
-        .fetch_optional(&state.db)
+        let balance = crate::billing::get_ledger_balance_cents(&state.db, org_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
-        .unwrap_or(0);
+        ;
 
         let estimated_credits = balance.min(net_charge).max(0);
         let remainder = net_charge - estimated_credits;
@@ -537,14 +532,17 @@ pub async fn change_subscription_tier(
     // Apply credit adjustments atomically
     if net_charge > 0 {
         // Upgrade: deduct credits
-        let locked_balance: i64 = sqlx::query_scalar(
+        let _locked_wallet_row: Option<i64> = sqlx::query_scalar(
             "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1 FOR UPDATE"
         )
         .bind(org_id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
-        .unwrap_or(0);
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+        let locked_balance = crate::billing::get_ledger_balance_cents(&mut *tx, org_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
         let credits_to_apply = locked_balance.min(net_charge).max(0);
         let remainder_after_lock = net_charge - credits_to_apply;
@@ -663,14 +661,10 @@ pub async fn add_subscription_capacity(
     // Read balance as estimate for Paddle charge calculation; final deduction is atomic in the tx
     let mut paddle_charged = false;
     if prorated_charge > 0 {
-        let balance: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
-        )
-        .bind(org_id)
-        .fetch_optional(&state.db)
+        let balance = crate::billing::get_ledger_balance_cents(&state.db, org_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
-        .unwrap_or(0);
+        ;
 
         let estimated_credits = balance.min(prorated_charge).max(0);
         let remainder = prorated_charge - estimated_credits;
@@ -748,14 +742,17 @@ pub async fn add_subscription_capacity(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
     // Atomically lock and deduct credits within the transaction
-    let locked_balance: i64 = sqlx::query_scalar(
+    let _locked_wallet_row: Option<i64> = sqlx::query_scalar(
         "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1 FOR UPDATE"
     )
     .bind(org_id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
-    .unwrap_or(0);
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+    let locked_balance = crate::billing::get_ledger_balance_cents(&mut *tx, org_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
 
     let credits_applied = locked_balance.min(prorated_charge).max(0);
     let remainder_after_lock = prorated_charge - credits_applied;

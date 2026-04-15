@@ -82,14 +82,24 @@ log() {
   echo "[billing-gates] $*"
 }
 
-# Helper: set wallet balance for test user
+# Helper: set effective balance for the org in both the ledgers and the cache table.
 set_balance() {
   local cents=$1
   docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
+  DELETE FROM credit_ledger WHERE organization_id = '$ORG_ID';
+  DELETE FROM usage_ledger WHERE organization_id = '$ORG_ID';
+  DELETE FROM subscription_ledger WHERE organization_id = '$ORG_ID';
   INSERT INTO wallet_balance (organization_id, balance_cents)
   VALUES ('$ORG_ID', $cents)
   ON CONFLICT (organization_id) DO UPDATE SET balance_cents = $cents;
   " >/dev/null 2>&1
+
+  if [ "$cents" -gt 0 ]; then
+    docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
+    INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
+    VALUES ('$ORG_ID', '$USER_ID', $cents, 'purchase', 'billing gate seed');
+    " >/dev/null 2>&1
+  fi
 }
 
 # Helper: attempt deploy via gateway, return the error status from the
@@ -216,10 +226,8 @@ step_pass "E2E login (user: ${USER_ID:0:8}..., org: ${ORG_ID:0:8}...)"
 STEP_NUM=3
 log "Testing deploy with zero credits..."
 
-# Ensure no wallet balance exists
-docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-DELETE FROM wallet_balance WHERE organization_id = '$ORG_ID';
-" >/dev/null 2>&1
+# Ensure no derived balance exists
+set_balance 0
 
 RESULT=$(attempt_deploy)
 if [ "$RESULT" = "402" ]; then

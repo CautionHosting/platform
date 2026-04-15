@@ -3,8 +3,30 @@
 
 //! Prepaid credit deduction for month-end billing and real-time usage.
 
-use sqlx::PgPool;
+use sqlx::{Executor, PgPool, Postgres};
 use uuid::Uuid;
+
+pub async fn get_ledger_balance_cents<'e, E>(
+    executor: E,
+    organization_id: Uuid,
+) -> anyhow::Result<i64>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let balance = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(clb.credit_cents, 0) - COALESCE(dlb.debit_cents, 0)
+        FROM (SELECT $1::uuid AS organization_id) org
+        LEFT JOIN credit_ledger_balances clb USING (organization_id)
+        LEFT JOIN debit_ledger_balances dlb USING (organization_id)
+        "#,
+    )
+    .bind(organization_id)
+    .fetch_one(executor)
+    .await?;
+
+    Ok(balance)
+}
 
 /// Deduct credits from an organization's wallet, returning (credits_applied, remainder).
 /// If the org has no credits or insufficient credits, returns partial deduction.
@@ -19,13 +41,14 @@ pub async fn apply_credit_deduction(
     let mut tx = pool.begin().await?;
 
     // Lock the row to prevent concurrent deductions from reading stale balance
-    let balance_cents: i64 = sqlx::query_scalar(
+    let _locked_wallet_row: Option<i64> = sqlx::query_scalar(
         "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1 FOR UPDATE"
     )
     .bind(organization_id)
     .fetch_optional(&mut *tx)
-    .await?
-    .unwrap_or(0);
+    .await?;
+
+    let balance_cents = get_ledger_balance_cents(&mut *tx, organization_id).await?;
 
     if balance_cents <= 0 {
         tx.commit().await?;
@@ -72,13 +95,14 @@ pub async fn deduct_realtime_usage(
     let mut tx = pool.begin().await?;
 
     // Lock the row to prevent concurrent deductions
-    let balance_cents: i64 = sqlx::query_scalar(
+    let _locked_wallet_row: Option<i64> = sqlx::query_scalar(
         "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1 FOR UPDATE"
     )
     .bind(organization_id)
     .fetch_optional(&mut *tx)
-    .await?
-    .unwrap_or(0);
+    .await?;
+
+    let balance_cents = get_ledger_balance_cents(&mut *tx, organization_id).await?;
 
     if balance_cents <= 0 {
         tx.commit().await?;

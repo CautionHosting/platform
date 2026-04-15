@@ -1094,14 +1094,10 @@ async fn deploy_logic(
         tracing::info!("Billing gate passed: managed on-prem app {}/{}, sub={}", current_apps + 1, max_apps, sub_id);
     } else {
         // Fully managed: require >= $25 in wallet credits (org-level)
-        let balance: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
-        )
-        .bind(req.org_id)
-        .fetch_optional(&state.db)
+        let balance = crate::billing::get_ledger_balance_cents(&state.db, req.org_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?
-        .unwrap_or(0);
+        ;
 
         if balance < 2500 {
             return Err((StatusCode::PAYMENT_REQUIRED,
@@ -1278,14 +1274,10 @@ async fn deploy_logic(
 
             // Pre-build balance check: refuse if org can't cover minimum build cost (~$0.30 for 1 min)
             let min_build_cost_cents: i64 = 50; // $0.50 minimum balance required
-            let balance: i64 = sqlx::query_scalar(
-                "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
-            )
-            .bind(req.org_id)
-            .fetch_optional(&state.db)
+            let balance = crate::billing::get_ledger_balance_cents(&state.db, req.org_id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)))?
-            .unwrap_or(0);
+            ;
 
             if balance < min_build_cost_cents {
                 return Err((
