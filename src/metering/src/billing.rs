@@ -152,7 +152,7 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
         let already_recorded: bool = sqlx::query_scalar(
             "SELECT EXISTS(
                 SELECT 1
-                FROM usage_records
+                FROM usage_ledger
                 WHERE resource_id = $1
                   AND resource_type = 'monthly_total'
             )",
@@ -199,7 +199,7 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
 
             if let Err(e) = sqlx::query(
                 r#"
-                INSERT INTO usage_records (
+                INSERT INTO usage_ledger (
                     organization_id, user_id, application_id, resource_id, provider, resource_type,
                     quantity, unit, base_unit_cost_usd, margin_percent, recorded_at, metadata
                 )
@@ -383,7 +383,7 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
 
         sqlx::query(
             r#"
-            INSERT INTO usage_records (
+            INSERT INTO usage_ledger (
                 organization_id, user_id, application_id, resource_id, provider, resource_type,
                 quantity, unit, base_unit_cost_usd, margin_percent, recorded_at, metadata
             )

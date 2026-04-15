@@ -523,7 +523,7 @@ async fn get_user_usage(
             quantity,
             base_unit_cost_usd,
             margin_percent,
-        FROM usage_records
+        FROM usage_ledger
         WHERE user_id = $1
         AND recorded_at >= NOW() - INTERVAL '30 days'
 	GROUP BY provider, resource_type
@@ -582,6 +582,7 @@ async fn get_user_usage(
 struct TestSimulateUsageRequest {
     user_id: uuid::Uuid,
     organization_id: Option<uuid::Uuid>,
+    application_id: Option<uuid::Uuid>,
     hours: Option<f64>,
     instance_type: Option<String>,
 }
@@ -625,15 +626,16 @@ async fn test_simulate_usage(
     // Record locally
     let result = sqlx::query(
         r#"
-        INSERT INTO usage_records (
+        INSERT INTO usage_ledger (
             organization_id, user_id, application_id, resource_id, provider, resource_type,
             quantity, unit, base_unit_cost_usd, margin_percent, recorded_at, metadata
         )
-        VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
     )
     .bind(usage.organization_id)
     .bind(usage.user_id)
+    .bind(req.application_id)
     .bind(&usage.resource_id)
     .bind(usage.provider.as_str())
     .bind(usage.resource_type.as_str())
@@ -841,7 +843,7 @@ async fn sync_aws_costs(
         let now = time::OffsetDateTime::now_utc();
         let result = sqlx::query(
             r#"
-            INSERT INTO usage_records (
+            INSERT INTO usage_ledger (
                 organization_id, application_id, resource_id, provider, resource_type,
                 quantity, unit, base_unit_cost_usd, margin_percent, recorded_at, metadata
             )

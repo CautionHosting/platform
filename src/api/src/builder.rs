@@ -776,7 +776,7 @@ async fn bill_builder_usage(
         let mut tx = db.begin().await?;
 
         sqlx::query(
-            "INSERT INTO usage_records (
+            "INSERT INTO usage_ledger (
                 organization_id, application_id, resource_id, provider, resource_type,
                 quantity, unit, base_unit_cost_usd, margin_percent, recorded_at, metadata
              )

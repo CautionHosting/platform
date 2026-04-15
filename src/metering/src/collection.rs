@@ -211,7 +211,7 @@ pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) 
 
     sqlx::query(
         r#"
-        INSERT INTO usage_records (
+        INSERT INTO usage_ledger (
             organization_id, user_id, application_id, resource_id, provider, resource_type,
             quantity, unit, base_unit_cost_usd, margin_percent, recorded_at, metadata
         )
@@ -358,7 +358,7 @@ async fn collect_network_egress(
 
     sqlx::query(
         r#"
-        INSERT INTO usage_records (
+        INSERT INTO usage_ledger (
             organization_id, user_id, application_id, resource_id, provider, resource_type,
             quantity, unit, base_unit_cost_usd, margin_percent, recorded_at, metadata
         )
