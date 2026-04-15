@@ -1,6 +1,4 @@
-DROP VIEW IF EXISTS credit_ledger_balances;
-
-CREATE VIEW IF NOT EXISTS credit_ledger_balances AS
+CREATE OR REPLACE VIEW credit_ledger_balances AS
 SELECT
     organization_id,
     SUM(delta_cents)::bigint AS credit_cents
