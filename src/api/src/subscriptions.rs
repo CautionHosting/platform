@@ -342,17 +342,6 @@ pub async fn subscribe(
         .execute(&mut *tx)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to deduct credits: {}", e)))?;
-
-        sqlx::query(
-            "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
-             VALUES ($1, $2, 'billing_deduction', $3)"
-        )
-        .bind(org_id)
-        .bind(-credits_to_apply)
-        .bind(format!("Subscription: {} {}", tier_name, req.billing_period))
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record ledger: {}", e)))?;
     }
 
     // Record invoice
@@ -573,17 +562,6 @@ pub async fn change_subscription_tier(
             .execute(&mut *tx)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to deduct credits: {}", e)))?;
-
-            sqlx::query(
-                "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
-                 Values ($1, $2, 'billing_deduction', $3)"
-            )
-            .bind(org_id)
-            .bind(-credits_to_apply)
-            .bind(format!("Tier upgrade proration: {} → {}", old_tier_id, req.tier_id))
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record ledger: {}", e)))?;
         }
     } else if net_charge < 0 {
         // Downgrade: refund the difference as credits
@@ -795,16 +773,6 @@ pub async fn add_subscription_capacity(
         .execute(&mut *tx)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to deduct credits: {}", e)))?;
-
-        sqlx::query(
-            "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
-             VALUES ($1, $2, 'billing_deduction', 'Subscription capacity addon (prorated)')"
-        )
-        .bind(org_id)
-        .bind(-credits_applied)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record ledger: {}", e)))?;
     }
 
     tx.commit().await

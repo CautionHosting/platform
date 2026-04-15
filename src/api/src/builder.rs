@@ -818,16 +818,6 @@ async fn bill_builder_usage(
             .await?;
         }
 
-        sqlx::query(
-            "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
-             VALUES ($1, $2, 'realtime_usage', $3)"
-        )
-        .bind(org_id)
-        .bind(-actual_deduction)
-        .bind(format!("Builder: {} ({:.1} min)", instance_type, duration_secs / 60.0))
-        .execute(&mut *tx)
-        .await?;
-
         tx.commit().await?;
         Ok::<_, anyhow::Error>(())
     }.await {

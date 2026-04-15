@@ -109,8 +109,8 @@ async fn apply_locked_credit_deduction(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: uuid::Uuid,
     credits_to_apply: i64,
-    description: &str,
-    invoice_id: Option<uuid::Uuid>,
+    _description: &str,
+    _invoice_id: Option<uuid::Uuid>,
 ) -> Result<i64> {
     if credits_to_apply <= 0 {
         return Ok(0);
@@ -127,17 +127,6 @@ async fn apply_locked_credit_deduction(
     .fetch_optional(&mut **tx)
     .await?
     .context("Insufficient locked balance for credit deduction")?;
-
-    sqlx::query(
-        "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, invoice_id)
-         VALUES ($1, $2, 'billing_deduction', $3, $4)",
-    )
-    .bind(organization_id)
-    .bind(-credits_to_apply)
-    .bind(description)
-    .bind(invoice_id)
-    .execute(&mut **tx)
-    .await?;
 
     Ok(new_balance)
 }
@@ -217,12 +206,19 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
 
         let total_cost_cents = (cost_data.total_cost * 100.0).round() as i64;
         let realtime_billed_cents: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(-delta_cents), 0)
-             FROM credit_ledger
+            "SELECT COALESCE(
+                ROUND(
+                    SUM(quantity * base_unit_cost_usd * (1 + margin_percent / 100.0)) * 100
+                ),
+                0
+            )::bigint
+             FROM usage_ledger
              WHERE organization_id = $1
-               AND entry_type = 'realtime_usage'
-               AND created_at >= $2::date
-               AND created_at < $3::date",
+               AND recorded_at >= $2::date
+               AND recorded_at < $3::date
+               AND resource_type NOT IN ('monthly_total', 'aws_cost_explorer')
+               AND base_unit_cost_usd IS NOT NULL
+               AND margin_percent IS NOT NULL",
         )
         .bind(org_id)
         .bind(&start_date)

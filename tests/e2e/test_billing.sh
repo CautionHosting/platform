@@ -622,8 +622,6 @@ SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = '$
 DEDUCTION_AMOUNT=2000  # $20 deduction
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
 UPDATE wallet_balance SET balance_cents = balance_cents - $DEDUCTION_AMOUNT WHERE organization_id = '$ORG_ID';
-INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
-VALUES ('$ORG_ID', '$USER_ID', -$DEDUCTION_AMOUNT, 'billing_deduction', 'Monthly usage billing deduction');
 " >/dev/null 2>&1
 
 BALANCE_AFTER=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
@@ -631,14 +629,10 @@ SELECT balance_cents FROM wallet_balance WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 EXPECTED_BALANCE=$((BALANCE_BEFORE - DEDUCTION_AMOUNT))
-DEDUCTION_LEDGER=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM credit_ledger WHERE organization_id = '$ORG_ID' AND entry_type = 'billing_deduction';
-" 2>/dev/null | tr -d ' \n')
 
 log "  Before: $BALANCE_BEFORE cents, After: $BALANCE_AFTER cents (deducted $DEDUCTION_AMOUNT)"
-log "  Deduction ledger entries: $DEDUCTION_LEDGER"
 
-if [ "$BALANCE_AFTER" = "$EXPECTED_BALANCE" ] && [ "$DEDUCTION_LEDGER" -ge 1 ]; then
+if [ "$BALANCE_AFTER" = "$EXPECTED_BALANCE" ]; then
     step_pass "Credit deduction: \$$(awk "BEGIN {printf \"%.2f\", $DEDUCTION_AMOUNT / 100}") deducted, balance correct"
 else
     step_fail "Credit deduction (expected balance=$EXPECTED_BALANCE, got=$BALANCE_AFTER)"
@@ -720,9 +714,6 @@ log "  Remainder for Paddle: $REMAINDER cents"
 if [ "$CREDITS_TO_APPLY" -gt 0 ]; then
     docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
     UPDATE wallet_balance SET balance_cents = balance_cents - $CREDITS_TO_APPLY WHERE organization_id = '$ORG_ID';
-    INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
-    VALUES ('$ORG_ID', '$USER_ID', -$CREDITS_TO_APPLY,
-            'billing_deduction', 'Subscription renewal: starter (monthly)');
     " >/dev/null 2>&1 || true
 fi
 
@@ -846,34 +837,18 @@ TOTAL_ENTRIES=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t 
 SELECT COUNT(*) FROM credit_ledger WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
-# Verify ledger has both purchase and deduction entries
+# Verify ledger has purchase entries
 HAS_PURCHASE=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
 SELECT COUNT(*) FROM credit_ledger WHERE organization_id = '$ORG_ID' AND entry_type = 'purchase';
 " 2>/dev/null | tr -d ' \n')
 
-HAS_DEDUCTION=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM credit_ledger WHERE organization_id = '$ORG_ID' AND entry_type = 'billing_deduction';
-" 2>/dev/null | tr -d ' \n')
-
-# Verify final wallet balance matches the derived ledger total
-FINAL_WALLET=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT balance_cents FROM wallet_balance WHERE organization_id = '$ORG_ID';
-" 2>/dev/null | tr -d ' \n')
-
-LAST_LEDGER_BALANCE=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COALESCE(SUM(delta_cents), 0) FROM credit_ledger WHERE organization_id = '$ORG_ID';
-" 2>/dev/null | tr -d ' \n')
-
 log "  Total ledger entries: $TOTAL_ENTRIES"
 log "  Purchase entries: $HAS_PURCHASE"
-log "  Deduction entries: $HAS_DEDUCTION"
-log "  Final wallet: $FINAL_WALLET cents"
-log "  Last ledger balance: $LAST_LEDGER_BALANCE cents"
 
-if [ "$HAS_PURCHASE" -ge 1 ] && [ "$HAS_DEDUCTION" -ge 1 ] && [ "$FINAL_WALLET" = "$LAST_LEDGER_BALANCE" ]; then
-    step_pass "Credit ledger audit trail: $TOTAL_ENTRIES entries, wallet/ledger in sync"
+if [ "$HAS_PURCHASE" -ge 1 ]; then
+    step_pass "Credit ledger audit trail: $TOTAL_ENTRIES credit entries"
 else
-    step_fail "Ledger audit (purchases=$HAS_PURCHASE, deductions=$HAS_DEDUCTION, wallet=$FINAL_WALLET, ledger=$LAST_LEDGER_BALANCE)"
+    step_fail "Ledger audit (purchases=$HAS_PURCHASE)"
 fi
 
 # ── Step 19: Deploy gate $5 minimum ───────────────────────────────────
@@ -961,11 +936,11 @@ SELECT balance_cents FROM wallet_balance WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 RT_LEDGER=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM credit_ledger WHERE organization_id = '$ORG_ID' AND entry_type = 'realtime_usage';
+SELECT COUNT(*) FROM usage_ledger WHERE organization_id = '$ORG_ID' AND resource_id = '$RT_RESOURCE';
 " 2>/dev/null | tr -d ' \n')
 
 log "  Balance before: ${BALANCE_BEFORE_RT}c, after: ${BALANCE_AFTER_RT}c"
-log "  Realtime usage ledger entries: $RT_LEDGER"
+log "  Realtime usage entries: $RT_LEDGER"
 
 if [ "$BALANCE_AFTER_RT" -lt "$BALANCE_BEFORE_RT" ] && [ "$RT_LEDGER" -ge 1 ]; then
     step_pass "Real-time deduction: balance decreased, ledger entry created"

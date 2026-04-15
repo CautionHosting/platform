@@ -13,8 +13,8 @@ pub async fn apply_credit_deduction(
     pool: &PgPool,
     organization_id: Uuid,
     total_cost_cents: i64,
-    description: &str,
-    invoice_id: Option<Uuid>,
+    _description: &str,
+    _invoice_id: Option<Uuid>,
 ) -> anyhow::Result<(i64, i64)> {
     let mut tx = pool.begin().await?;
 
@@ -45,17 +45,6 @@ pub async fn apply_credit_deduction(
     .fetch_one(&mut *tx)
     .await?;
 
-    sqlx::query(
-        "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, invoice_id)
-         VALUES ($1, $2, 'billing_deduction', $3, $4)"
-    )
-    .bind(organization_id)
-    .bind(-credits_to_apply)
-    .bind(description)
-    .bind(invoice_id)
-    .execute(&mut *tx)
-    .await?;
-
     tx.commit().await?;
 
     tracing::info!(
@@ -78,7 +67,7 @@ pub async fn deduct_realtime_usage(
     organization_id: Uuid,
     cost_cents: i64,
     resource_id: &str,
-    hours: f64,
+    _hours: f64,
 ) -> anyhow::Result<(i64, i64, i64)> {
     let mut tx = pool.begin().await?;
 
@@ -107,21 +96,6 @@ pub async fn deduct_realtime_usage(
     .bind(organization_id)
     .bind(credits_to_apply)
     .fetch_one(&mut *tx)
-    .await?;
-
-    let description = format!(
-        "Usage: {} ({:.2}h) — {} cents",
-        resource_id, hours, credits_to_apply
-    );
-
-    sqlx::query(
-        "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
-         VALUES ($1, $2, 'realtime_usage', $3)"
-    )
-    .bind(organization_id)
-    .bind(-credits_to_apply)
-    .bind(&description)
-    .execute(&mut *tx)
     .await?;
 
     tx.commit().await?;
