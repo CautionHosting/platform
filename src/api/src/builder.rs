@@ -818,20 +818,12 @@ async fn bill_builder_usage(
             .await?;
         }
 
-        let new_balance: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1"
-        )
-        .bind(org_id)
-        .fetch_one(&mut *tx)
-        .await?;
-
         sqlx::query(
-            "INSERT INTO credit_ledger (organization_id, delta_cents, balance_after, entry_type, description)
-             VALUES ($1, $2, $3, 'realtime_usage', $4)"
+            "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
+             VALUES ($1, $2, 'realtime_usage', $3)"
         )
         .bind(org_id)
         .bind(-actual_deduction)
-        .bind(new_balance)
         .bind(format!("Builder: {} ({:.1} min)", instance_type, duration_secs / 60.0))
         .execute(&mut *tx)
         .await?;

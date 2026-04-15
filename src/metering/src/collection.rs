@@ -171,8 +171,8 @@ pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) 
     let seconds_elapsed = (now_unix - last_billed_unix) as f64;
     let hours = seconds_elapsed / 3600.0;
 
-    if hours < 0.01 {
-        // Less than ~36 seconds, skip
+    if hours < 1.0 {
+        // Less than 1 hour, skip
         return Ok(false);
     }
 

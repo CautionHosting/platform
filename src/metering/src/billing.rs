@@ -84,12 +84,11 @@ async fn apply_locked_credit_deduction(
     .context("Insufficient locked balance for credit deduction")?;
 
     sqlx::query(
-        "INSERT INTO credit_ledger (organization_id, delta_cents, balance_after, entry_type, description, invoice_id)
-         VALUES ($1, $2, $3, 'billing_deduction', $4, $5)",
+        "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, invoice_id)
+         VALUES ($1, $2, 'billing_deduction', $3, $4)",
     )
     .bind(organization_id)
     .bind(-credits_to_apply)
-    .bind(new_balance)
     .bind(description)
     .bind(invoice_id)
     .execute(&mut **tx)

@@ -46,12 +46,11 @@ pub async fn apply_credit_deduction(
     .await?;
 
     sqlx::query(
-        "INSERT INTO credit_ledger (organization_id, delta_cents, balance_after, entry_type, description, invoice_id)
-         VALUES ($1, $2, $3, 'billing_deduction', $4, $5)"
+        "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, invoice_id)
+         VALUES ($1, $2, 'billing_deduction', $3, $4)"
     )
     .bind(organization_id)
     .bind(-credits_to_apply)
-    .bind(new_balance)
     .bind(description)
     .bind(invoice_id)
     .execute(&mut *tx)
@@ -116,12 +115,11 @@ pub async fn deduct_realtime_usage(
     );
 
     sqlx::query(
-        "INSERT INTO credit_ledger (organization_id, delta_cents, balance_after, entry_type, description)
-         VALUES ($1, $2, $3, 'realtime_usage', $4)"
+        "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
+         VALUES ($1, $2, 'realtime_usage', $3)"
     )
     .bind(organization_id)
     .bind(-credits_to_apply)
-    .bind(new_balance)
     .bind(&description)
     .execute(&mut *tx)
     .await?;

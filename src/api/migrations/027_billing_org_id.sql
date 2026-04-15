@@ -30,14 +30,35 @@ ALTER TABLE credit_ledger ALTER COLUMN organization_id SET NOT NULL;
 ALTER TABLE credit_ledger ALTER COLUMN user_id DROP NOT NULL;
 CREATE INDEX idx_credit_ledger_org ON credit_ledger(organization_id);
 
--- 4. usage_records: replace user_id with organization_id (keep user_id as optional audit field)
-ALTER TABLE usage_records ADD COLUMN organization_id UUID REFERENCES organizations(id);
-UPDATE usage_records ur SET organization_id = (
-    SELECT organization_id FROM organization_members WHERE user_id = ur.user_id LIMIT 1
-);
-ALTER TABLE usage_records ALTER COLUMN organization_id SET NOT NULL;
-ALTER TABLE usage_records ALTER COLUMN user_id DROP NOT NULL;
-CREATE INDEX idx_usage_records_org ON usage_records(organization_id);
+-- 4. usage ledger: replace user_id with organization_id (keep user_id as optional audit field)
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'usage_ledger'
+    ) THEN
+        ALTER TABLE usage_ledger ADD COLUMN IF NOT EXISTS organization_id UUID REFERENCES organizations(id);
+        UPDATE usage_ledger ur SET organization_id = (
+            SELECT organization_id FROM organization_members WHERE user_id = ur.user_id LIMIT 1
+        )
+        WHERE organization_id IS NULL;
+        ALTER TABLE usage_ledger ALTER COLUMN organization_id SET NOT NULL;
+        ALTER TABLE usage_ledger ALTER COLUMN user_id DROP NOT NULL;
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_usage_ledger_org ON usage_ledger(organization_id)';
+    ELSIF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'usage_records'
+    ) THEN
+        ALTER TABLE usage_records ADD COLUMN IF NOT EXISTS organization_id UUID REFERENCES organizations(id);
+        UPDATE usage_records ur SET organization_id = (
+            SELECT organization_id FROM organization_members WHERE user_id = ur.user_id LIMIT 1
+        )
+        WHERE organization_id IS NULL;
+        ALTER TABLE usage_records ALTER COLUMN organization_id SET NOT NULL;
+        ALTER TABLE usage_records ALTER COLUMN user_id DROP NOT NULL;
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_usage_records_org ON usage_records(organization_id)';
+    END IF;
+END $$;
 
 -- 5. tracked_resources: replace user_id with organization_id (keep user_id as optional audit field)
 ALTER TABLE tracked_resources ADD COLUMN organization_id UUID REFERENCES organizations(id);

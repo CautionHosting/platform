@@ -341,21 +341,12 @@ pub async fn subscribe(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to deduct credits: {}", e)))?;
 
-        let new_balance: i64 = sqlx::query_scalar(
-            "SELECT balance_cents FROM wallet_balance WHERE organization_id = $1"
-        )
-        .bind(org_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-
         sqlx::query(
-            "INSERT INTO credit_ledger (organization_id, delta_cents, balance_after, entry_type, description)
-             VALUES ($1, $2, $3, 'billing_deduction', $4)"
+            "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
+             VALUES ($1, $2, 'billing_deduction', $3)"
         )
         .bind(org_id)
         .bind(-credits_to_apply)
-        .bind(new_balance)
         .bind(format!("Subscription: {} {}", tier_name, req.billing_period))
         .execute(&mut *tx)
         .await
@@ -585,21 +576,12 @@ pub async fn change_subscription_tier(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to deduct credits: {}", e)))?;
 
-            let new_balance: i64 = sqlx::query_scalar(
-                "SELECT balance_cents FROM wallet_balance WHERE organization_id = $1"
-            )
-            .bind(org_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-
             sqlx::query(
-                "INSERT INTO credit_ledger (organization_id, delta_cents, balance_after, entry_type, description)
-                 Values ($1, $2, $3, 'billing_deduction', $4)"
+                "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
+                 Values ($1, $2, 'billing_deduction', $3)"
             )
             .bind(org_id)
             .bind(-credits_to_apply)
-            .bind(new_balance)
             .bind(format!("Tier upgrade proration: {} → {}", old_tier_id, req.tier_id))
             .execute(&mut *tx)
             .await
@@ -619,21 +601,12 @@ pub async fn change_subscription_tier(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to refund credits: {}", e)))?;
 
-        let new_balance: i64 = sqlx::query_scalar(
-            "SELECT balance_cents FROM wallet_balance WHERE organization_id = $1"
-        )
-        .bind(org_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-
         sqlx::query(
-            "INSERT INTO credit_ledger (organization_id, delta_cents, balance_after, entry_type, description)
-             VALUES ($1, $2, $3, 'proration_refund', $4)"
+            "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
+             VALUES ($1, $2, 'proration_refund', $3)"
         )
         .bind(org_id)
         .bind(refund_cents)
-        .bind(new_balance)
         .bind(format!("Tier downgrade proration: {} → {}", old_tier_id, req.tier_id))
         .execute(&mut *tx)
         .await
@@ -825,21 +798,12 @@ pub async fn add_subscription_capacity(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to deduct credits: {}", e)))?;
 
-        let new_balance: i64 = sqlx::query_scalar(
-            "SELECT balance_cents FROM wallet_balance WHERE organization_id = $1"
-        )
-        .bind(org_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-
         sqlx::query(
-            "INSERT INTO credit_ledger (organization_id, delta_cents, balance_after, entry_type, description)
-             VALUES ($1, $2, $3, 'billing_deduction', 'Subscription capacity addon (prorated)')"
+            "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
+             VALUES ($1, $2, 'billing_deduction', 'Subscription capacity addon (prorated)')"
         )
         .bind(org_id)
         .bind(-credits_applied)
-        .bind(new_balance)
         .execute(&mut *tx)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record ledger: {}", e)))?;

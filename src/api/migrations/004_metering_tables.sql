@@ -20,26 +20,56 @@ CREATE INDEX IF NOT EXISTS idx_tracked_resources_user_id ON tracked_resources(us
 CREATE INDEX IF NOT EXISTS idx_tracked_resources_status ON tracked_resources(status);
 CREATE INDEX IF NOT EXISTS idx_tracked_resources_provider ON tracked_resources(provider);
 
--- Table to store usage records (for local auditing, Lago is source of truth for billing)
-CREATE TABLE IF NOT EXISTS usage_records (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES users(id),
-    resource_id TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    resource_type TEXT NOT NULL,  -- compute, storage, network, public_ip
-    quantity DOUBLE PRECISION NOT NULL,
-    unit TEXT NOT NULL,  -- hours, gb_hours, gb, count
-    cost_usd DOUBLE PRECISION NOT NULL,
-    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    metadata JSONB NOT NULL DEFAULT '{}',
-    lago_event_id TEXT,  -- Reference to Lago event if synced
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+-- Table to store usage ledger entries (for local auditing and prepaid credit accounting)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'usage_ledger'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'usage_records'
+    ) THEN
+        EXECUTE $create_usage_ledger$
+            CREATE TABLE usage_ledger (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                organization_id UUID NOT NULL REFERENCES organizations(id),
+                user_id UUID REFERENCES users(id),
+                application_id UUID REFERENCES compute_resources(id),
+                resource_id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                resource_type TEXT NOT NULL,  -- compute, storage, network, public_ip
+                quantity NUMERIC(20, 6) NOT NULL,
+                unit TEXT NOT NULL,  -- hours, gb_hours, gb, count
+                base_unit_cost_usd NUMERIC(20, 6),
+                margin_percent NUMERIC(10, 4),
+                recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                metadata JSONB NOT NULL DEFAULT '{}',
+                lago_event_id TEXT,  -- Reference to Lago event if synced
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        $create_usage_ledger$;
+    END IF;
+END $$;
 
--- Indexes for usage records
-CREATE INDEX IF NOT EXISTS idx_usage_records_user_id ON usage_records(user_id);
-CREATE INDEX IF NOT EXISTS idx_usage_records_resource_id ON usage_records(resource_id);
-CREATE INDEX IF NOT EXISTS idx_usage_records_recorded_at ON usage_records(recorded_at);
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'usage_ledger'
+    ) THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_usage_ledger_user_id ON usage_ledger(user_id)';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_usage_ledger_resource_id ON usage_ledger(resource_id)';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_usage_ledger_recorded_at ON usage_ledger(recorded_at)';
+    ELSIF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'usage_records'
+    ) THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_usage_records_user_id ON usage_records(user_id)';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_usage_records_resource_id ON usage_records(resource_id)';
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_usage_records_recorded_at ON usage_records(recorded_at)';
+    END IF;
+END $$;
 
 -- Table for billing configuration per user (spend limits, payment preferences)
 CREATE TABLE IF NOT EXISTS billing_config (

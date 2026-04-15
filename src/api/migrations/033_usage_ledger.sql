@@ -17,6 +17,3 @@ ALTER INDEX IF EXISTS idx_usage_records_recorded_at RENAME TO idx_usage_ledger_r
 ALTER INDEX IF EXISTS idx_usage_records_user_recorded RENAME TO idx_usage_ledger_user_recorded;
 ALTER INDEX IF EXISTS idx_usage_records_org RENAME TO idx_usage_ledger_org;
 ALTER INDEX IF EXISTS idx_usage_records_application_id RENAME TO idx_usage_ledger_application_id;
-
-CREATE INDEX IF NOT EXISTS idx_usage_ledger_org_source_recorded
-  ON usage_ledger(organization_id, source, recorded_at);

@@ -8,8 +8,21 @@ CREATE INDEX IF NOT EXISTS idx_eif_builds_cache ON eif_builds(cache_key) WHERE s
 -- subscriptions: looked up by user_id
 CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id);
 
--- usage_records: date range queries for billing periods
-CREATE INDEX IF NOT EXISTS idx_usage_records_user_recorded ON usage_records(user_id, recorded_at);
+-- usage ledger: date range queries for billing periods
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'usage_ledger'
+    ) THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_usage_ledger_user_recorded ON usage_ledger(user_id, recorded_at)';
+    ELSIF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'usage_records'
+    ) THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_usage_records_user_recorded ON usage_records(user_id, recorded_at)';
+    END IF;
+END $$;
 
 -- invoices: date range queries
 CREATE INDEX IF NOT EXISTS idx_invoices_created ON invoices(created_at);

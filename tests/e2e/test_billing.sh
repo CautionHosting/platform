@@ -575,8 +575,8 @@ ON CONFLICT (organization_id) DO UPDATE SET balance_cents = 5000;
 
 # Record ledger entry
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO credit_ledger (organization_id, user_id, delta_cents, balance_after, entry_type, description)
-VALUES ('$ORG_ID', '$USER_ID', 5000, 5000, 'purchase', 'Test credit purchase (\$50.00)');
+INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
+VALUES ('$ORG_ID', '$USER_ID', 5000, 'purchase', 'Test credit purchase (\$50.00)');
 " >/dev/null 2>&1
 
 WALLET_BALANCE=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
@@ -622,8 +622,8 @@ SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = '$
 DEDUCTION_AMOUNT=2000  # $20 deduction
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
 UPDATE wallet_balance SET balance_cents = balance_cents - $DEDUCTION_AMOUNT WHERE organization_id = '$ORG_ID';
-INSERT INTO credit_ledger (organization_id, user_id, delta_cents, balance_after, entry_type, description)
-VALUES ('$ORG_ID', '$USER_ID', -$DEDUCTION_AMOUNT, (SELECT balance_cents FROM wallet_balance WHERE organization_id = '$ORG_ID'), 'billing_deduction', 'Monthly usage billing deduction');
+INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
+VALUES ('$ORG_ID', '$USER_ID', -$DEDUCTION_AMOUNT, 'billing_deduction', 'Monthly usage billing deduction');
 " >/dev/null 2>&1
 
 BALANCE_AFTER=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
@@ -720,9 +720,8 @@ log "  Remainder for Paddle: $REMAINDER cents"
 if [ "$CREDITS_TO_APPLY" -gt 0 ]; then
     docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
     UPDATE wallet_balance SET balance_cents = balance_cents - $CREDITS_TO_APPLY WHERE organization_id = '$ORG_ID';
-    INSERT INTO credit_ledger (organization_id, user_id, delta_cents, balance_after, entry_type, description)
+    INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
     VALUES ('$ORG_ID', '$USER_ID', -$CREDITS_TO_APPLY,
-            (SELECT balance_cents FROM wallet_balance WHERE organization_id = '$ORG_ID'),
             'billing_deduction', 'Subscription renewal: starter (monthly)');
     " >/dev/null 2>&1 || true
 fi
@@ -842,7 +841,7 @@ STEP_NUM=18
 log "Verifying credit ledger audit trail..."
 
 LEDGER_ENTRIES=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT entry_type, delta_cents, balance_after FROM credit_ledger
+SELECT entry_type, delta_cents FROM credit_ledger
 WHERE organization_id = '$ORG_ID'
 ORDER BY created_at;
 " 2>/dev/null)
@@ -860,13 +859,13 @@ HAS_DEDUCTION=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t 
 SELECT COUNT(*) FROM credit_ledger WHERE organization_id = '$ORG_ID' AND entry_type = 'billing_deduction';
 " 2>/dev/null | tr -d ' \n')
 
-# Verify final wallet balance matches last ledger balance_after
+# Verify final wallet balance matches the derived ledger total
 FINAL_WALLET=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
 SELECT balance_cents FROM wallet_balance WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 LAST_LEDGER_BALANCE=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT balance_after FROM credit_ledger WHERE organization_id = '$ORG_ID' ORDER BY created_at DESC LIMIT 1;
+SELECT COALESCE(SUM(delta_cents), 0) FROM credit_ledger WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 log "  Total ledger entries: $TOTAL_ENTRIES"
@@ -950,10 +949,9 @@ curl -sf -X POST "$METERING_EXTERNAL_URL/api/resources/track" \
         \"region\": \"us-west-2\"
     }" >/dev/null 2>&1
 
-# Backdate last_billed_at by 1 hour so the collection cycle sees enough elapsed time
-# (the collector skips resources with < 0.01 hours / ~36 seconds since last billing)
+# Backdate last_billed_at well past the 1 hour collection threshold
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE tracked_resources SET last_billed_at = NOW() - INTERVAL '1 hour'
+UPDATE tracked_resources SET last_billed_at = NOW() - INTERVAL '2 hours'
 WHERE resource_id = '$RT_RESOURCE';
 " >/dev/null 2>&1
 
@@ -1008,7 +1006,7 @@ curl -sf -X POST "$METERING_EXTERNAL_URL/api/resources/track" \
 
 # Backdate last_billed_at so collection sees enough elapsed time
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE tracked_resources SET last_billed_at = NOW() - INTERVAL '1 hour'
+UPDATE tracked_resources SET last_billed_at = NOW() - INTERVAL '2 hours'
 WHERE resource_id = '$EXHAUST_RESOURCE';
 " >/dev/null 2>&1
 
@@ -1052,8 +1050,8 @@ log "Testing unsuspend on credit deposit..."
 # Add credits back
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
 UPDATE wallet_balance SET balance_cents = 5000 WHERE organization_id = '$ORG_ID';
-INSERT INTO credit_ledger (organization_id, user_id, delta_cents, balance_after, entry_type, description)
-VALUES ('$ORG_ID', '$USER_ID', 5000, 5000, 'purchase', 'Test deposit to clear suspension');
+INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
+VALUES ('$ORG_ID', '$USER_ID', 5000, 'purchase', 'Test deposit to clear suspension');
 " >/dev/null 2>&1
 
 # Clear credit_suspended_at (simulating what the API does on credit purchase)
@@ -1133,7 +1131,7 @@ curl -sf -X POST "$METERING_EXTERNAL_URL/api/resources/track" \
 
 # Backdate last_billed_at so collection sees enough elapsed time
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE tracked_resources SET last_billed_at = NOW() - INTERVAL '1 hour'
+UPDATE tracked_resources SET last_billed_at = NOW() - INTERVAL '2 hours'
 WHERE resource_id = '$LB_RESOURCE';
 " >/dev/null 2>&1
 

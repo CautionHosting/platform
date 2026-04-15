@@ -942,7 +942,9 @@ pub async fn get_credit_ledger(
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
 
     let rows: Vec<(Uuid, i64, i64, String, String, Option<String>, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT id, delta_cents, balance_after, entry_type, description, paddle_transaction_id, created_at
+        "SELECT id, delta_cents,
+                (SUM(delta_cents) OVER (PARTITION BY organization_id ORDER BY created_at, id))::bigint AS balance_after,
+                entry_type, description, paddle_transaction_id, created_at
          FROM credit_ledger
          WHERE organization_id = $1
          ORDER BY created_at DESC
@@ -1026,13 +1028,12 @@ pub async fn redeem_credit_code(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to apply credit: {}", e)))?;
 
     sqlx::query(
-        "INSERT INTO credit_ledger (organization_id, user_id, delta_cents, balance_after, entry_type, description)
-         VALUES ($1, $2, $3, $4, 'code_redemption', 'Redeemed credit code')"
+        "INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
+         VALUES ($1, $2, $3, 'code_redemption', 'Redeemed credit code')"
     )
     .bind(org_id)
     .bind(auth.user_id)
     .bind(amount_cents)
-    .bind(new_balance)
     .execute(&mut *tx)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record ledger entry: {}", e)))?;
@@ -1079,13 +1080,12 @@ pub async fn apply_credit(
     .map_err(|e| format!("Failed to upsert wallet_balance: {}", e))?;
 
     sqlx::query(
-        "INSERT INTO credit_ledger (organization_id, user_id, delta_cents, balance_after, entry_type, description, paddle_transaction_id, invoice_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+        "INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description, paddle_transaction_id, invoice_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)"
     )
     .bind(org_id)
     .bind(user_id)
     .bind(delta_cents)
-    .bind(new_balance)
     .bind(entry_type)
     .bind(description)
     .bind(paddle_txn_id)

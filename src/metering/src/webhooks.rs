@@ -294,12 +294,11 @@ async fn handle_transaction_completed(
             .await?;
 
             sqlx::query(
-                "INSERT INTO credit_ledger (organization_id, delta_cents, balance_after, entry_type, description, paddle_transaction_id)
-                 VALUES ($1, $2, $3, 'auto_topup', $4, $5)"
+                "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, paddle_transaction_id)
+                 VALUES ($1, $2, 'auto_topup', $3, $4)"
             )
             .bind(org_id)
             .bind(total_cents)
-            .bind(new_balance)
             .bind(format!("Auto top-up: ${:.2}", total_cents as f64 / 100.0))
             .bind(transaction_id)
             .execute(&mut *tx)
