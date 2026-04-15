@@ -651,7 +651,7 @@ log "Testing subscription creation and billing cycle..."
 
 # Clean up any existing subscriptions (|| true: tables may not exist on first run)
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-DELETE FROM subscription_billing_events WHERE user_id = '$USER_ID';
+DELETE FROM subscription_ledger WHERE organization_id = '$ORG_ID';
 DELETE FROM subscriptions WHERE user_id = '$USER_ID';
 " >/dev/null 2>&1 || true
 
@@ -734,13 +734,13 @@ else
 fi
 
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO subscription_billing_events (
-    subscription_id, user_id, billing_period_start, billing_period_end, tier,
+INSERT INTO subscription_ledger (
+    subscription_id, organization_id, billing_period_start, billing_period_end, tier,
     base_amount_cents, addon_amount_cents, total_amount_cents,
     credits_applied_cents, charged_amount_cents, status
 )
 VALUES (
-    '$SUB_ID', '$USER_ID', NOW() - interval '1 day', NOW() + interval '29 days', 'starter',
+    '$SUB_ID', '$ORG_ID', NOW() - interval '1 day', NOW() + interval '29 days', 'starter',
     $SUB_PRICE, 0, $SUB_PRICE,
     $CREDITS_TO_APPLY, $REMAINDER, '$BILLING_STATUS'
 );
@@ -763,11 +763,11 @@ SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = '$
 " 2>/dev/null | tr -d ' \n')
 
 EVENT_COUNT=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM subscription_billing_events WHERE subscription_id = '$SUB_ID';
+SELECT COUNT(*) FROM subscription_ledger WHERE subscription_id = '$SUB_ID';
 " 2>/dev/null | tr -d ' \n')
 
 EVENT_STATUS=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT status FROM subscription_billing_events WHERE subscription_id = '$SUB_ID' ORDER BY created_at DESC LIMIT 1;
+SELECT status FROM subscription_ledger WHERE subscription_id = '$SUB_ID' ORDER BY created_at DESC LIMIT 1;
 " 2>/dev/null | tr -d ' \n')
 
 NEXT_BILLING=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
@@ -1511,7 +1511,7 @@ SELECT COUNT(*) FROM credit_ledger WHERE organization_id = '$ORG_ID';
 log "  Credit ledger entries: $CREDIT_LEDGER_FINAL"
 
 SUB_EVENT_FINAL=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM subscription_billing_events WHERE user_id = '$USER_ID';
+SELECT COUNT(*) FROM subscription_ledger WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 log "  Subscription billing events: $SUB_EVENT_FINAL"
 

@@ -217,7 +217,7 @@ ON CONFLICT (organization_id) DO UPDATE SET balance_cents = 10000;
 # Seed active subscription for managed on-prem deploy gate
 log "Seeding active subscription for managed on-prem deploy gate..."
 docker exec postgres-test psql -U postgres -d caution_test -c "
-DELETE FROM subscription_billing_events WHERE user_id = '$USER_ID';
+DELETE FROM subscription_ledger WHERE organization_id = '$ORG_ID';
 DELETE FROM subscriptions WHERE user_id = '$USER_ID';
 INSERT INTO subscriptions (
     user_id, organization_id, tier, billing_period,

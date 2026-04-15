@@ -1,0 +1,291 @@
+diff --git a/.gitignore b/.gitignore
+index 83fc527..63adebf 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -14,3 +14,5 @@ tests/e2e/logs/
+ *.tfstate.backup
+ *.tfstate.*.backup
+ backend.tf.disabled
++
++target/
+diff --git a/src/api/migrations/035_credit_ledger_balances_view.sql b/src/api/migrations/035_credit_ledger_balances_view.sql
+new file mode 100644
+index 0000000..616653e
+--- /dev/null
++++ b/src/api/migrations/035_credit_ledger_balances_view.sql
+@@ -0,0 +1,21 @@
++DROP VIEW IF EXISTS credit_ledger_balances;
++
++CREATE VIEW IF NOT EXISTS credit_ledger_balances AS
++SELECT
++    organization_id,
++    SUM(delta_cents)::bigint AS credit_cents
++FROM credit_ledger
++GROUP BY organization_id;
++
++DO $$
++BEGIN
++    IF EXISTS (
++        SELECT 1 FROM information_schema.tables
++        WHERE table_schema = 'public' AND table_name = 'subscription_billing_events'
++    ) AND NOT EXISTS (
++        SELECT 1 FROM information_schema.tables
++        WHERE table_schema = 'public' AND table_name = 'subscription_ledger'
++    ) THEN
++        ALTER TABLE subscription_billing_events RENAME TO subscription_ledger;
++    END IF;
++END $$;
+diff --git a/src/api/migrations/036_subscription_ledger_org_id.sql b/src/api/migrations/036_subscription_ledger_org_id.sql
+new file mode 100644
+index 0000000..f677004
+--- /dev/null
++++ b/src/api/migrations/036_subscription_ledger_org_id.sql
+@@ -0,0 +1,66 @@
++DO $$
++BEGIN
++    IF EXISTS (
++        SELECT 1 FROM information_schema.tables
++        WHERE table_schema = 'public' AND table_name = 'subscription_ledger'
++    ) THEN
++        ALTER TABLE subscription_ledger
++            ADD COLUMN IF NOT EXISTS organization_id UUID;
++
++        UPDATE subscription_ledger sl
++        SET organization_id = s.organization_id
++        FROM subscriptions s
++        WHERE sl.subscription_id = s.id
++          AND sl.organization_id IS NULL;
++
++        IF NOT EXISTS (
++            SELECT 1
++            FROM pg_constraint
++            WHERE conname = 'subscription_ledger_organization_id_fkey'
++        ) THEN
++            ALTER TABLE subscription_ledger
++                ADD CONSTRAINT subscription_ledger_organization_id_fkey
++                FOREIGN KEY (organization_id) REFERENCES organizations(id);
++        END IF;
++
++        ALTER TABLE subscription_ledger
++            ALTER COLUMN organization_id SET NOT NULL;
++
++        ALTER TABLE subscription_ledger
++            DROP COLUMN IF EXISTS user_id;
++
++        CREATE INDEX IF NOT EXISTS idx_subscription_ledger_organization_id
++            ON subscription_ledger(organization_id);
++    ELSIF EXISTS (
++        SELECT 1 FROM information_schema.tables
++        WHERE table_schema = 'public' AND table_name = 'subscription_billing_events'
++    ) THEN
++        ALTER TABLE subscription_billing_events
++            ADD COLUMN IF NOT EXISTS organization_id UUID;
++
++        UPDATE subscription_billing_events sl
++        SET organization_id = s.organization_id
++        FROM subscriptions s
++        WHERE sl.subscription_id = s.id
++          AND sl.organization_id IS NULL;
++
++        IF NOT EXISTS (
++            SELECT 1
++            FROM pg_constraint
++            WHERE conname = 'subscription_billing_events_organization_id_fkey'
++        ) THEN
++            ALTER TABLE subscription_billing_events
++                ADD CONSTRAINT subscription_billing_events_organization_id_fkey
++                FOREIGN KEY (organization_id) REFERENCES organizations(id);
++        END IF;
++
++        ALTER TABLE subscription_billing_events
++            ALTER COLUMN organization_id SET NOT NULL;
++
++        ALTER TABLE subscription_billing_events
++            DROP COLUMN IF EXISTS user_id;
++
++        CREATE INDEX IF NOT EXISTS idx_subscription_billing_events_organization_id
++            ON subscription_billing_events(organization_id);
++    END IF;
++END $$;
+diff --git a/src/api/src/subscriptions.rs b/src/api/src/subscriptions.rs
+index 73af828..524f8df 100644
+--- a/src/api/src/subscriptions.rs
++++ b/src/api/src/subscriptions.rs
+@@ -355,14 +355,14 @@ pub async fn subscribe(
+ 
+     // Record billing event
+     sqlx::query(
+-        "INSERT INTO subscription_billing_events
+-         (subscription_id, user_id, billing_period_start, billing_period_end, tier,
++        "INSERT INTO subscription_ledger
++         (subscription_id, organization_id, billing_period_start, billing_period_end, tier,
+           base_amount_cents, total_amount_cents, credits_applied_cents, charged_amount_cents,
+           paddle_transaction_id, status)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
+     )
+     .bind(sub_id.0)
+-    .bind(auth.user_id)
++    .bind(org_id)
+     .bind(now)
+     .bind(period_end)
+     .bind(&req.tier_id)
+diff --git a/src/metering/src/billing.rs b/src/metering/src/billing.rs
+index 984ad79..fb4d4e5 100644
+--- a/src/metering/src/billing.rs
++++ b/src/metering/src/billing.rs
+@@ -519,8 +519,8 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
+ 
+                 sqlx::query(
+                     r#"
+-                    INSERT INTO subscription_billing_events
+-                    (subscription_id, user_id, billing_period_start, billing_period_end, tier,
++                    INSERT INTO subscription_ledger
++                    (subscription_id, organization_id, billing_period_start, billing_period_end, tier,
+                      base_amount_cents, addon_amount_cents, total_amount_cents, credits_applied_cents,
+                      charged_amount_cents, paddle_transaction_id, invoice_id, status)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, NULL, NULL, 'payment_failed')
+@@ -529,7 +529,7 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
+                     "#,
+                 )
+                 .bind(sub_id)
+-                .bind(user_id)
++                .bind(org_id)
+                 .bind(current_period_start)
+                 .bind(current_period_end)
+                 .bind(&tier)
+@@ -576,8 +576,8 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
+ 
+                     sqlx::query(
+                         r#"
+-                        INSERT INTO subscription_billing_events
+-                        (subscription_id, user_id, billing_period_start, billing_period_end, tier,
++                        INSERT INTO subscription_ledger
++                        (subscription_id, organization_id, billing_period_start, billing_period_end, tier,
+                          base_amount_cents, addon_amount_cents, total_amount_cents, credits_applied_cents,
+                          charged_amount_cents, paddle_transaction_id, invoice_id, status)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, NULL, NULL, 'payment_failed')
+@@ -586,7 +586,7 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
+                         "#,
+                     )
+                     .bind(sub_id)
+-                    .bind(user_id)
++                    .bind(org_id)
+                     .bind(current_period_start)
+                     .bind(current_period_end)
+                     .bind(&tier)
+@@ -669,15 +669,15 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
+ 
+         sqlx::query(
+             r#"
+-            INSERT INTO subscription_billing_events
+-            (subscription_id, user_id, billing_period_start, billing_period_end, tier,
++            INSERT INTO subscription_ledger
++            (subscription_id, organization_id, billing_period_start, billing_period_end, tier,
+              base_amount_cents, addon_amount_cents, total_amount_cents, credits_applied_cents,
+              charged_amount_cents, paddle_transaction_id, invoice_id, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+             "#,
+         )
+         .bind(sub_id)
+-        .bind(user_id)
++        .bind(org_id)
+         .bind(current_period_start)
+         .bind(current_period_end)
+         .bind(&tier)
+diff --git a/src/metering/src/webhooks.rs b/src/metering/src/webhooks.rs
+index 48acb2f..cee3d37 100644
+--- a/src/metering/src/webhooks.rs
++++ b/src/metering/src/webhooks.rs
+@@ -219,7 +219,7 @@ async fn handle_transaction_completed(
+ 
+     // Also mark any subscription billing event as paid
+     if let Err(e) = sqlx::query(
+-        "UPDATE subscription_billing_events SET status = 'paid' WHERE paddle_transaction_id = $1",
++        "UPDATE subscription_ledger SET status = 'paid' WHERE paddle_transaction_id = $1",
+     )
+     .bind(transaction_id)
+     .execute(&state.pool)
+@@ -501,7 +501,7 @@ async fn handle_payment_failed(
+         r#"
+         UPDATE subscriptions SET status = 'past_due', updated_at = NOW()
+         WHERE id IN (
+-            SELECT subscription_id FROM subscription_billing_events
++            SELECT subscription_id FROM subscription_ledger
+             WHERE paddle_transaction_id = $1
+         )
+         "#,
+@@ -519,7 +519,7 @@ async fn handle_payment_failed(
+ 
+     // Mark the billing event as failed
+     if let Err(e) = sqlx::query(
+-        "UPDATE subscription_billing_events SET status = 'payment_failed' WHERE paddle_transaction_id = $1"
++        "UPDATE subscription_ledger SET status = 'payment_failed' WHERE paddle_transaction_id = $1"
+     )
+     .bind(transaction_id)
+     .execute(&state.pool)
+diff --git a/tests/e2e/test_billing.sh b/tests/e2e/test_billing.sh
+index 608e2c3..9705fd1 100755
+--- a/tests/e2e/test_billing.sh
++++ b/tests/e2e/test_billing.sh
+@@ -651,7 +651,7 @@ log "Testing subscription creation and billing cycle..."
+ 
+ # Clean up any existing subscriptions (|| true: tables may not exist on first run)
+ docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
+-DELETE FROM subscription_billing_events WHERE user_id = '$USER_ID';
++DELETE FROM subscription_ledger WHERE organization_id = '$ORG_ID';
+ DELETE FROM subscriptions WHERE user_id = '$USER_ID';
+ " >/dev/null 2>&1 || true
+ 
+@@ -734,13 +734,13 @@ else
+ fi
+ 
+ docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
+-INSERT INTO subscription_billing_events (
+-    subscription_id, user_id, billing_period_start, billing_period_end, tier,
++INSERT INTO subscription_ledger (
++    subscription_id, organization_id, billing_period_start, billing_period_end, tier,
+     base_amount_cents, addon_amount_cents, total_amount_cents,
+     credits_applied_cents, charged_amount_cents, status
+ )
+ VALUES (
+-    '$SUB_ID', '$USER_ID', NOW() - interval '1 day', NOW() + interval '29 days', 'starter',
++    '$SUB_ID', '$ORG_ID', NOW() - interval '1 day', NOW() + interval '29 days', 'starter',
+     $SUB_PRICE, 0, $SUB_PRICE,
+     $CREDITS_TO_APPLY, $REMAINDER, '$BILLING_STATUS'
+ );
+@@ -763,11 +763,11 @@ SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = '$
+ " 2>/dev/null | tr -d ' \n')
+ 
+ EVENT_COUNT=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
+-SELECT COUNT(*) FROM subscription_billing_events WHERE subscription_id = '$SUB_ID';
++SELECT COUNT(*) FROM subscription_ledger WHERE subscription_id = '$SUB_ID';
+ " 2>/dev/null | tr -d ' \n')
+ 
+ EVENT_STATUS=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
+-SELECT status FROM subscription_billing_events WHERE subscription_id = '$SUB_ID' ORDER BY created_at DESC LIMIT 1;
++SELECT status FROM subscription_ledger WHERE subscription_id = '$SUB_ID' ORDER BY created_at DESC LIMIT 1;
+ " 2>/dev/null | tr -d ' \n')
+ 
+ NEXT_BILLING=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
+@@ -1511,7 +1511,7 @@ SELECT COUNT(*) FROM credit_ledger WHERE organization_id = '$ORG_ID';
+ log "  Credit ledger entries: $CREDIT_LEDGER_FINAL"
+ 
+ SUB_EVENT_FINAL=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
+-SELECT COUNT(*) FROM subscription_billing_events WHERE user_id = '$USER_ID';
++SELECT COUNT(*) FROM subscription_ledger WHERE organization_id = '$ORG_ID';
+ " 2>/dev/null | tr -d ' \n')
+ log "  Subscription billing events: $SUB_EVENT_FINAL"
+ 
+diff --git a/tests/e2e/test_managed_on_prem.sh b/tests/e2e/test_managed_on_prem.sh
+index 5274000..12c8b2b 100755
+--- a/tests/e2e/test_managed_on_prem.sh
++++ b/tests/e2e/test_managed_on_prem.sh
+@@ -217,7 +217,7 @@ ON CONFLICT (organization_id) DO UPDATE SET balance_cents = 10000;
+ # Seed active subscription for managed on-prem deploy gate
+ log "Seeding active subscription for managed on-prem deploy gate..."
+ docker exec postgres-test psql -U postgres -d caution_test -c "
+-DELETE FROM subscription_billing_events WHERE user_id = '$USER_ID';
++DELETE FROM subscription_ledger WHERE organization_id = '$ORG_ID';
+ DELETE FROM subscriptions WHERE user_id = '$USER_ID';
+ INSERT INTO subscriptions (
+     user_id, organization_id, tier, billing_period,

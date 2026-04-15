@@ -219,7 +219,7 @@ async fn handle_transaction_completed(
 
     // Also mark any subscription billing event as paid
     if let Err(e) = sqlx::query(
-        "UPDATE subscription_billing_events SET status = 'paid' WHERE paddle_transaction_id = $1",
+        "UPDATE subscription_ledger SET status = 'paid' WHERE paddle_transaction_id = $1",
     )
     .bind(transaction_id)
     .execute(&state.pool)
@@ -501,7 +501,7 @@ async fn handle_payment_failed(
         r#"
         UPDATE subscriptions SET status = 'past_due', updated_at = NOW()
         WHERE id IN (
-            SELECT subscription_id FROM subscription_billing_events
+            SELECT subscription_id FROM subscription_ledger
             WHERE paddle_transaction_id = $1
         )
         "#,
@@ -519,7 +519,7 @@ async fn handle_payment_failed(
 
     // Mark the billing event as failed
     if let Err(e) = sqlx::query(
-        "UPDATE subscription_billing_events SET status = 'payment_failed' WHERE paddle_transaction_id = $1"
+        "UPDATE subscription_ledger SET status = 'payment_failed' WHERE paddle_transaction_id = $1"
     )
     .bind(transaction_id)
     .execute(&state.pool)

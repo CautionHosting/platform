@@ -355,14 +355,14 @@ pub async fn subscribe(
 
     // Record billing event
     sqlx::query(
-        "INSERT INTO subscription_billing_events
-         (subscription_id, user_id, billing_period_start, billing_period_end, tier,
+        "INSERT INTO subscription_ledger
+         (subscription_id, organization_id, billing_period_start, billing_period_end, tier,
           base_amount_cents, total_amount_cents, credits_applied_cents, charged_amount_cents,
           paddle_transaction_id, status)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
     )
     .bind(sub_id.0)
-    .bind(auth.user_id)
+    .bind(org_id)
     .bind(now)
     .bind(period_end)
     .bind(&req.tier_id)

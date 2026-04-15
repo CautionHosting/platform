@@ -519,8 +519,8 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
 
                 sqlx::query(
                     r#"
-                    INSERT INTO subscription_billing_events
-                    (subscription_id, user_id, billing_period_start, billing_period_end, tier,
+                    INSERT INTO subscription_ledger
+                    (subscription_id, organization_id, billing_period_start, billing_period_end, tier,
                      base_amount_cents, addon_amount_cents, total_amount_cents, credits_applied_cents,
                      charged_amount_cents, paddle_transaction_id, invoice_id, status)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, NULL, NULL, 'payment_failed')
@@ -529,7 +529,7 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                     "#,
                 )
                 .bind(sub_id)
-                .bind(user_id)
+                .bind(org_id)
                 .bind(current_period_start)
                 .bind(current_period_end)
                 .bind(&tier)
@@ -576,8 +576,8 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
 
                     sqlx::query(
                         r#"
-                        INSERT INTO subscription_billing_events
-                        (subscription_id, user_id, billing_period_start, billing_period_end, tier,
+                        INSERT INTO subscription_ledger
+                        (subscription_id, organization_id, billing_period_start, billing_period_end, tier,
                          base_amount_cents, addon_amount_cents, total_amount_cents, credits_applied_cents,
                          charged_amount_cents, paddle_transaction_id, invoice_id, status)
                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, NULL, NULL, 'payment_failed')
@@ -586,7 +586,7 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                         "#,
                     )
                     .bind(sub_id)
-                    .bind(user_id)
+                    .bind(org_id)
                     .bind(current_period_start)
                     .bind(current_period_end)
                     .bind(&tier)
@@ -669,15 +669,15 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
 
         sqlx::query(
             r#"
-            INSERT INTO subscription_billing_events
-            (subscription_id, user_id, billing_period_start, billing_period_end, tier,
+            INSERT INTO subscription_ledger
+            (subscription_id, organization_id, billing_period_start, billing_period_end, tier,
              base_amount_cents, addon_amount_cents, total_amount_cents, credits_applied_cents,
              charged_amount_cents, paddle_transaction_id, invoice_id, status)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             "#,
         )
         .bind(sub_id)
-        .bind(user_id)
+        .bind(org_id)
         .bind(current_period_start)
         .bind(current_period_end)
         .bind(&tier)
