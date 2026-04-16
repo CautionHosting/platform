@@ -231,8 +231,8 @@ INSERT INTO subscriptions (
 VALUES (
     '$USER_ID', '$ORG_ID', 'starter', 'monthly',
     4, 2, 2900, 'active',
-    NOW(), NOW(), NOW() + interval '30 days',
-    NOW() + interval '30 days', NOW(), NOW()
+    NOW(), NOW(), NOW(),
+    TIMESTAMPTZ '9999-12-31 23:59:59+00', NOW(), NOW()
 );
 " >/dev/null 2>&1 || log "  Warning: could not seed subscription"
 

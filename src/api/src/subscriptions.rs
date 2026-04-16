@@ -3,47 +3,13 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use chrono::{DateTime, Datelike, Utc};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use sqlx::Row;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{get_user_primary_org, AppState, AuthContext};
-
-pub fn calculate_period_end(start: DateTime<Utc>) -> DateTime<Utc> {
-    let add_months = 1;
-
-    let total_months = start.month0() as i32 + add_months;
-    let target_year = start.year() + total_months / 12;
-    let target_month = (total_months % 12) as u32 + 1;
-    let day = start.day().min(days_in_month(target_year, target_month));
-
-    start
-        .date_naive()
-        .with_year(target_year)
-        .unwrap_or(start.date_naive())
-        .with_month(target_month)
-        .unwrap_or(start.date_naive())
-        .with_day(day)
-        .unwrap_or(start.date_naive())
-        .and_time(start.time())
-        .and_utc()
-}
-
-pub fn days_in_month(year: i32, month: u32) -> u32 {
-    use chrono::NaiveDate;
-    let (ny, nm) = if month == 12 {
-        (year + 1, 1)
-    } else {
-        (year, month + 1)
-    };
-    NaiveDate::from_ymd_opt(ny, nm, 1)
-        .unwrap_or_else(|| NaiveDate::from_ymd_opt(year + 1, 1, 1).unwrap())
-        .pred_opt()
-        .unwrap_or(NaiveDate::from_ymd_opt(year, month, 28).unwrap())
-        .day()
-}
 
 fn tier_display_name(id: &str) -> String {
     id.split('_')
@@ -80,6 +46,32 @@ fn resolved_subscription_values(
             stored_price_cents,
         )
     }
+}
+
+async fn close_open_subscription_segment(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    subscription_id: Uuid,
+    period_end: DateTime<Utc>,
+) -> Result<(), (StatusCode, String)> {
+    sqlx::query(
+        "UPDATE subscription_ledger
+         SET billing_period_end = $1
+         WHERE subscription_id = $2
+           AND billing_period_end IS NULL
+           AND billing_period_start < $1",
+    )
+    .bind(period_end)
+    .bind(subscription_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
+
+    Ok(())
 }
 
 pub async fn get_subscription_tiers(
@@ -183,7 +175,6 @@ pub async fn subscribe(
         .subscription_tiers
         .get(&req.tier_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
-    let tier_name = tier_display_name(&req.tier_id);
 
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
@@ -205,18 +196,6 @@ pub async fn subscribe(
         ));
     }
 
-    let now = Utc::now();
-    let price_per_cycle = tier.monthly_price_cents();
-    let period_end = calculate_period_end(now);
-    let cost_hourly = state
-        .pricing
-        .subscription_cost_hourly_usd(&req.tier_id)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
-
-    // Charge first period: credits first, then Paddle for remainder
-    let total_charge = price_per_cycle;
-
-    // Read credit balance (non-binding — final deduction is atomic inside the transaction below)
     let balance_cents = crate::billing::get_ledger_balance_cents(&state.db, org_id)
         .await
         .map_err(|e| {
@@ -226,97 +205,20 @@ pub async fn subscribe(
             )
         })?;
 
-    let estimated_credits = balance_cents.min(total_charge).max(0);
-    let estimated_remainder = total_charge - estimated_credits;
+    let now = Utc::now();
+    let price_per_cycle = tier.monthly_price_cents();
+    let cost_hourly = state
+        .pricing
+        .subscription_cost_hourly_usd(&req.tier_id)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
 
-    // If Paddle charge is needed, do it BEFORE creating the subscription
-    let mut paddle_txn_id: Option<String> = None;
-    let event_status;
-
-    if estimated_remainder > 0 {
-        let paddle_customer_id: Option<String> = sqlx::query_scalar(
-            "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1",
-        )
-        .bind(org_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?
-        .flatten();
-
-        if let Some(customer_id) = paddle_customer_id {
-            if let Some(ref api_key) = state.paddle_api_key {
-                let client = reqwest::Client::new();
-                let amount_str = estimated_remainder.to_string();
-                let body = serde_json::json!({
-                    "customer_id": customer_id,
-                    "items": [{
-                        "quantity": 1,
-                        "price": {
-                            "description": format!("{} subscription", tier_name),
-                            "unit_price": {
-                                "amount": amount_str,
-                                "currency_code": "USD",
-                            },
-                            "product": {
-                                "name": format!("{} Subscription", tier_name),
-                                "tax_category": "standard",
-                            }
-                        }
-                    }],
-                    "collection_mode": "automatic",
-                });
-
-                let response = client
-                    .post(format!("{}/transactions", state.paddle_api_url))
-                    .header("Authorization", format!("Bearer {}", api_key))
-                    .header("Content-Type", "application/json")
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Paddle API error: {}", e)))?;
-
-                if response.status().is_success() {
-                    let resp: serde_json::Value = response
-                        .json()
-                        .await
-                        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Parse error: {}", e)))?;
-                    paddle_txn_id = resp["data"]["id"].as_str().map(|s| s.to_string());
-                    event_status = "paid";
-                } else {
-                    let status = response.status();
-                    let err_body = response.text().await.unwrap_or_default();
-                    tracing::error!(
-                        "Paddle subscription charge failed: {} - {}",
-                        status,
-                        err_body
-                    );
-                    return Err((
-                        StatusCode::PAYMENT_REQUIRED,
-                        format!("Payment failed: {}", status),
-                    ));
-                }
-            } else {
-                return Err((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Paddle API not configured".to_string(),
-                ));
-            }
-        } else {
-            return Err((
-                StatusCode::PAYMENT_REQUIRED,
-                "no_payment_method".to_string(),
-            ));
-        }
-    } else {
-        event_status = "credits_covered";
+    if balance_cents <= cost_hourly * 100 * 24 {
+        return Err((
+            StatusCode::PAYMENT_REQUIRED,
+            "insufficient_balance".to_string(),
+        ));
     }
 
-    // Payment succeeded (or fully covered by credits) — now create subscription in a transaction
     let mut tx = state.db.begin().await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -328,9 +230,9 @@ pub async fn subscribe(
         "INSERT INTO subscriptions (
              user_id, organization_id, tier, billing_period, max_vcpus, max_apps,
              price_cents_per_cycle, extra_vcpu_blocks, extra_app_blocks,
-             extra_block_price_cents_per_cycle, current_period_end, next_billing_at, last_billed_at
+             extra_block_price_cents_per_cycle, current_period_end, next_billing_at
          )
-         VALUES ($1, $2, $3, 'monthly', $4, $5, $6, 0, 0, 0, $7, $7, NOW())
+         VALUES ($1, $2, $3, 'monthly', $4, $5, $6, 0, 0, 0, $7, TIMESTAMPTZ '9999-12-31 23:59:59+00')
          RETURNING id",
     )
     .bind(auth.user_id)
@@ -339,7 +241,7 @@ pub async fn subscribe(
     .bind(tier.vcpu)
     .bind(tier.enclaves)
     .bind(price_per_cycle)
-    .bind(period_end)
+    .bind(now)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
@@ -349,88 +251,16 @@ pub async fn subscribe(
         )
     })?;
 
-    // Atomically lock and deduct credits within the transaction
-    // Re-read balance with FOR UPDATE to prevent TOCTOU race
-    let _locked_wallet_row: Option<i64> = sqlx::query_scalar(
-        "SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = $1 FOR UPDATE"
-    )
-    .bind(org_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-
-    let locked_balance = crate::billing::get_ledger_balance_cents(&mut *tx, org_id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
-
-    let credits_to_apply = locked_balance.min(total_charge).max(0);
-    let remainder_cents = total_charge - credits_to_apply;
-
-    // If we estimated credits would cover more than they actually do, and we didn't charge
-    // Paddle enough, we need to fail. This can happen if balance changed between estimate and lock.
-    if remainder_cents > 0 && paddle_txn_id.is_none() {
-        return Err((
-            StatusCode::PAYMENT_REQUIRED,
-            "Insufficient credits and no payment charged".to_string(),
-        ));
-    }
-
-    if credits_to_apply > 0 {
-        sqlx::query(
-            "UPDATE wallet_balance SET balance_cents = balance_cents - $1 WHERE organization_id = $2 AND balance_cents >= $1"
-        )
-        .bind(credits_to_apply)
-        .bind(org_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to deduct credits: {}", e)))?;
-    }
-
-    // Record invoice
-    let invoice_number = format!("INV-SUB-{}", &sub_id.0.to_string()[..8]);
-    let invoice_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO invoices (paddle_transaction_id, user_id, organization_id, invoice_number, amount_cents, currency, status, payment_status, billing_provider, created_at)
-         VALUES ($1, $2, $3, $4, $5, 'USD', 'finalized', $6, $7, NOW())
-         RETURNING id"
-    )
-    .bind(&paddle_txn_id)
-    .bind(auth.user_id)
-    .bind(org_id)
-    .bind(&invoice_number)
-    .bind(if remainder_cents == 0 {
-        total_charge
-    } else {
-        remainder_cents
-    })
-    .bind(if remainder_cents == 0 {
-        "credits_applied"
-    } else {
-        "pending"
-    })
-    .bind(if remainder_cents == 0 { "credits" } else { "paddle" })
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record invoice: {}", e)))?;
-
-    // Record billing event
     sqlx::query(
         "INSERT INTO subscription_ledger
          (subscription_id, organization_id, billing_period_start, billing_period_end, tier, cost_hourly, invoice_id, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+         VALUES ($1, $2, $3, NULL, $4, $5, NULL, 'credits_covered')"
     )
     .bind(sub_id.0)
     .bind(org_id)
     .bind(now)
-    .bind(period_end)
     .bind(&req.tier_id)
     .bind(cost_hourly)
-    .bind(invoice_id)
-    .bind(event_status)
     .execute(&mut *tx)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record billing event: {}", e)))?;
@@ -443,13 +273,11 @@ pub async fn subscribe(
     })?;
 
     tracing::info!(
-        "Subscription created: sub={}, tier={}, org={}, charge={} cents (credits={}, paddle={})",
+        "Subscription created: sub={}, tier={}, org={}, opening_balance={} cents",
         sub_id.0,
         req.tier_id,
         org_id,
-        total_charge,
-        credits_to_apply,
-        remainder_cents
+        balance_cents
     );
 
     Ok(Json(serde_json::json!({
@@ -458,8 +286,8 @@ pub async fn subscribe(
         "tier": req.tier_id,
         "billing_period": "monthly",
         "price_cents_per_cycle": price_per_cycle,
-        "credits_applied": credits_to_apply,
-        "charged": remainder_cents,
+        "credits_applied": 0,
+        "charged": 0,
     })))
 }
 
@@ -559,6 +387,9 @@ pub async fn change_subscription_tier(
         "UPDATE subscriptions SET
          tier = $1,
          billing_period = 'monthly',
+         current_period_start = $5,
+         current_period_end = $5,
+         next_billing_at = TIMESTAMPTZ '9999-12-31 23:59:59+00',
          max_vcpus = $2,
          max_apps = $3,
          price_cents_per_cycle = $4,
@@ -566,12 +397,13 @@ pub async fn change_subscription_tier(
          extra_app_blocks = 0,
          extra_block_price_cents_per_cycle = 0,
          updated_at = NOW()
-         WHERE id = $5",
+        WHERE id = $6",
     )
     .bind(&req.tier_id)
     .bind(new_tier.vcpu)
     .bind(new_tier.enclaves)
     .bind(new_price)
+    .bind(now)
     .bind(sub_id)
     .execute(&mut *tx)
     .await
@@ -665,78 +497,68 @@ pub async fn cancel_subscription(
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
 
-    let sub: Option<(Uuid, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT id, current_period_end FROM subscriptions WHERE organization_id = $1 AND status = 'active' LIMIT 1"
+    let sub: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id
+         FROM subscriptions
+         WHERE organization_id = $1 AND status IN ('active', 'past_due')
+         LIMIT 1",
     )
     .bind(org_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
 
-    let Some((sub_id, period_end)) = sub else {
+    let Some((sub_id,)) = sub else {
         return Err((StatusCode::NOT_FOUND, "No active subscription".to_string()));
     };
 
-    sqlx::query(
-        "UPDATE subscriptions SET cancel_at_period_end = true, canceled_at = NOW(), updated_at = NOW() WHERE id = $1"
-    )
-    .bind(sub_id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+    let now = Utc::now();
+    let mut tx = state.db.begin().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
 
-    tracing::info!(
-        "Subscription {} set to cancel at period end ({})",
-        sub_id,
-        period_end
-    );
+    close_open_subscription_segment(&mut tx, sub_id, now).await?;
+
+    sqlx::query(
+        "UPDATE subscriptions SET
+         status = 'canceled',
+         canceled_at = NOW(),
+         cancel_at_period_end = false,
+         current_period_end = $1,
+         next_billing_at = TIMESTAMPTZ '9999-12-31 23:59:59+00',
+         updated_at = NOW()
+         WHERE id = $2",
+    )
+    .bind(now)
+    .bind(sub_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
+
+    tx.commit().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to commit: {}", e),
+        )
+    })?;
+
+    tracing::info!("Subscription {} canceled immediately", sub_id);
 
     Ok(Json(serde_json::json!({
         "success": true,
-        "cancel_at_period_end": true,
-        "active_until": period_end,
-    })))
-}
-
-pub async fn reactivate_subscription(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
-        .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
-
-    let sub: Option<(Uuid, bool)> = sqlx::query_as(
-        "SELECT id, cancel_at_period_end FROM subscriptions WHERE organization_id = $1 AND status = 'active' LIMIT 1"
-    )
-    .bind(org_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-
-    let Some((sub_id, cancel_pending)) = sub else {
-        return Err((StatusCode::NOT_FOUND, "No active subscription".to_string()));
-    };
-
-    if !cancel_pending {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Subscription is not pending cancellation".to_string(),
-        ));
-    }
-
-    sqlx::query(
-        "UPDATE subscriptions SET cancel_at_period_end = false, canceled_at = NULL, updated_at = NOW() WHERE id = $1"
-    )
-    .bind(sub_id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-
-    tracing::info!("Subscription {} reactivated", sub_id);
-
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "cancel_at_period_end": false,
+        "status": "canceled",
     })))
 }

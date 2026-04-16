@@ -1324,17 +1324,13 @@ make build-cli
               <span class="subscription-detail-value">{{ subscription.max_apps }}</span>
             </div>
             <div class="subscription-detail-item">
-              <span class="subscription-detail-label">Period</span>
-              <span class="subscription-detail-value">{{ formatDate(subscription.current_period_start) }} - {{ formatDate(subscription.current_period_end) }}</span>
+              <span class="subscription-detail-label">Started</span>
+              <span class="subscription-detail-value">{{ formatDate(subscription.started_at) }}</span>
             </div>
-          </div>
-          <div v-if="subscription.cancel_at_period_end" class="subscription-cancel-notice">
-            Cancels at end of current period ({{ formatDate(subscription.current_period_end) }})
-            <button @click="reactivateSubscription" class="btn-primary btn-small" style="margin-left: 0.5rem;">Reactivate</button>
           </div>
           <div class="subscription-actions">
             <button @click="showSelectPlanModal = true" class="btn-secondary btn-small">Change plan</button>
-            <button v-if="!subscription.cancel_at_period_end" @click="cancelSubscription" class="btn-secondary btn-small btn-danger-text">Cancel</button>
+            <button @click="cancelSubscription" class="btn-secondary btn-small btn-danger-text">Cancel</button>
           </div>
         </div>
         <div v-else class="subscription-empty">
@@ -2976,7 +2972,7 @@ export default {
           await loadSubscription();
           await loadCreditBalance();
         } else if (response.status === 402) {
-          subscribeError.value = 'Please add a payment method first.';
+          subscribeError.value = 'Add credits first.';
         } else if (response.status === 409) {
           subscribeError.value = 'You already have an active subscription.';
         } else {
@@ -2991,29 +2987,14 @@ export default {
     };
 
     const cancelSubscription = async () => {
-      if (!confirm('Cancel your subscription? It will remain active until the end of the current billing period.')) return;
+      if (!confirm('Cancel your subscription immediately?')) return;
       try {
         const response = await authFetch('/api/billing/subscription/cancel', { method: 'POST' });
         if (response.ok) {
-          showToast('Subscription will cancel at period end');
+          showToast('Subscription canceled');
           await loadSubscription();
         } else {
           showToast('Failed to cancel subscription', 'error');
-        }
-      } catch (err) {
-        showToast('Failed to connect to server', 'error');
-      }
-    };
-
-    const reactivateSubscription = async () => {
-      try {
-        const response = await authFetch('/api/billing/subscription/reactivate', { method: 'POST' });
-        if (response.ok) {
-          showToast('Subscription reactivated');
-          await loadSubscription();
-        } else {
-          const text = await response.text().catch(() => '');
-          showToast(text || 'Failed to reactivate subscription', 'error');
         }
       } catch (err) {
         showToast('Failed to connect to server', 'error');
@@ -4198,7 +4179,6 @@ export default {
       formatTierPrice,
       doSubscribe,
       cancelSubscription,
-      reactivateSubscription,
       userEmail,
       emailVerified,
       legalStatus,

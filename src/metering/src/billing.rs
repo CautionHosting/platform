@@ -8,11 +8,10 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use serde::Deserialize;
 use sqlx::{PgPool, Postgres, Row, Transaction};
-use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::balance::check_balance_thresholds;
 use crate::collection::{
     advisory_unlock, try_advisory_lock, LOCK_MONTHLY_BILLING, LOCK_SUBSCRIPTION_BILLING,
 };
@@ -20,42 +19,9 @@ use crate::credits::get_ledger_balance_cents;
 use crate::AppState;
 use crate::{cost_explorer, paddle};
 
-#[derive(Debug, Default, Deserialize)]
-struct PricingConfig {
-    #[serde(default)]
-    subscription_tiers: HashMap<String, TierPricing>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct TierPricing {
-    #[serde(default)]
-    annual_cents: i64,
-}
-
-impl TierPricing {
-    fn monthly_price_cents(&self) -> i64 {
-        self.annual_cents / 12
-    }
-}
-
-impl PricingConfig {
-    fn load() -> Result<Self> {
-        let contents = std::fs::read_to_string("prices.json")
-            .context("prices.json not found. Configure explicit subscription pricing before starting metering.")?;
-        serde_json::from_str(&contents)
-            .context("Failed to parse prices.json for subscription pricing")
-    }
-
-    fn subscription_cost_hourly_usd(&self, tier_id: &str) -> Option<f64> {
-        const HOURS_PER_YEAR: f64 = 365.0 * 24.0;
-        let annual_tier_cents = self.subscription_tiers.get(tier_id)?.annual_cents;
-        Some(annual_tier_cents as f64 / 100.0 / HOURS_PER_YEAR)
-    }
-}
-
 /// Monthly billing loop.
 ///
-/// Subscription renewals are processed every hour. The AWS month-end catch-up
+/// Subscription continuity checks run every hour. The AWS month-end catch-up
 /// should only run during the first few days of a month because it bills the
 /// month that just closed.
 pub async fn run_monthly_billing_loop(state: Arc<AppState>) {
@@ -64,9 +30,8 @@ pub async fn run_monthly_billing_loop(state: Arc<AppState>) {
     loop {
         interval.tick().await;
 
-        // Process subscription renewals on every tick
-        if let Err(e) = run_subscription_billing(&state).await {
-            tracing::error!("Subscription billing failed: {}", e);
+        if let Err(e) = run_subscription_maintenance(&state).await {
+            tracing::error!("Subscription maintenance failed: {}", e);
         }
 
         let today = time::OffsetDateTime::now_utc().date();
@@ -481,353 +446,94 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
     Ok(())
 }
 
-/// Process subscription renewals — called on every hourly tick
-async fn run_subscription_billing(state: &AppState) -> Result<()> {
+/// Check whether subscriptions should remain active.
+async fn run_subscription_maintenance(state: &AppState) -> Result<()> {
     if !try_advisory_lock(&state.pool, LOCK_SUBSCRIPTION_BILLING).await {
-        tracing::debug!("Subscription billing skipped — another instance holds the lock");
+        tracing::debug!("Subscription maintenance skipped — another instance holds the lock");
         return Ok(());
     }
-    let result = run_subscription_billing_inner(state).await;
+    let result = run_subscription_maintenance_inner(state).await;
     advisory_unlock(&state.pool, LOCK_SUBSCRIPTION_BILLING).await;
     result
 }
 
-async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
-    let pricing = PricingConfig::load()?;
-    let due_subs = sqlx::query(
+async fn run_subscription_maintenance_inner(state: &AppState) -> Result<()> {
+    let subs = sqlx::query(
         r#"
-        SELECT id, user_id, organization_id, tier, current_period_end,
-               cancel_at_period_end
+        SELECT id, organization_id, status, cancel_at_period_end
         FROM subscriptions
-        WHERE status IN ('active', 'past_due') AND next_billing_at <= NOW()
+        WHERE status IN ('active', 'past_due')
         "#,
     )
     .fetch_all(&state.pool)
     .await?;
 
-    if due_subs.is_empty() {
+    if subs.is_empty() {
         return Ok(());
     }
 
-    tracing::info!("Processing {} due subscription renewals", due_subs.len());
+    tracing::info!("Checking {} active subscriptions", subs.len());
 
-    for row in &due_subs {
+    for row in &subs {
         let sub_id: uuid::Uuid = row.get("id");
-        let user_id: uuid::Uuid = row.get("user_id");
         let org_id: uuid::Uuid = row.get("organization_id");
-        let tier: String = row.get("tier");
-        let current_period_end: chrono::DateTime<chrono::Utc> = row.get("current_period_end");
+        let status: String = row.get("status");
         let cancel_at_end: bool = row.get("cancel_at_period_end");
-        let tier_pricing = pricing
-            .subscription_tiers
-            .get(&tier)
-            .with_context(|| format!("Missing subscription pricing for tier '{}'", tier))?;
-        let total_charge = tier_pricing.monthly_price_cents();
-        let cost_hourly = pricing
-            .subscription_cost_hourly_usd(&tier)
-            .with_context(|| format!("Missing subscription pricing for tier '{}'", tier))?;
-        let next_period_start = current_period_end;
-        let next_period_end = calculate_subscription_period_end(current_period_end);
 
-        if cancel_at_end {
+        if let Err(e) = check_balance_thresholds(state, org_id).await {
+            tracing::error!(
+                "Failed to check subscription balance thresholds for {}: {}",
+                org_id,
+                e
+            );
+        }
+
+        let balance_cents = get_ledger_balance_cents(&state.pool, org_id).await?;
+
+        if cancel_at_end || balance_cents <= 0 {
+            let now = chrono::Utc::now();
             let mut tx = state.pool.begin().await?;
-            close_open_subscription_segment(&mut tx, sub_id, current_period_end).await?;
+            close_open_subscription_segment(&mut tx, sub_id, now).await?;
             sqlx::query(
-                "UPDATE subscriptions SET status = 'canceled', updated_at = NOW() WHERE id = $1",
+                "UPDATE subscriptions SET
+                 status = 'canceled',
+                 canceled_at = COALESCE(canceled_at, NOW()),
+                 cancel_at_period_end = false,
+                 current_period_end = $1,
+                 next_billing_at = TIMESTAMPTZ '9999-12-31 23:59:59+00',
+                 updated_at = NOW()
+                 WHERE id = $2",
             )
-            .bind(&sub_id)
+            .bind(now)
+            .bind(sub_id)
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;
-            tracing::info!("Subscription {} canceled at period end", sub_id);
+
+            tracing::info!(
+                "Subscription {} canceled ({})",
+                sub_id,
+                if cancel_at_end {
+                    "organization request"
+                } else {
+                    "insufficient funds"
+                }
+            );
             continue;
         }
 
-        let mut tx = state.pool.begin().await?;
-        let _locked_wallet_row: Option<i64> = sqlx::query_scalar(
-            "SELECT COALESCE(balance_cents, 0)
-             FROM wallet_balance
-             WHERE organization_id = $1
-             FOR UPDATE",
-        )
-        .bind(org_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        let locked_balance = get_ledger_balance_cents(&mut *tx, org_id).await?;
-
-        let credits_applied = locked_balance.min(total_charge);
-        let remainder_cents = total_charge - credits_applied;
-        let mut paddle_txn_id: Option<String> = None;
-
-        if remainder_cents > 0 {
-            let paddle_customer_id: Option<String> = sqlx::query_scalar(
-                "SELECT paddle_customer_id
-                 FROM billing_config
-                 WHERE organization_id = $1",
+        if status == "past_due" {
+            sqlx::query(
+                "UPDATE subscriptions SET status = 'active', updated_at = NOW() WHERE id = $1",
             )
-            .bind(org_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .flatten();
-
-            let Some(customer_id) = paddle_customer_id else {
-                tx.rollback().await?;
-                let mut mark_tx = state.pool.begin().await?;
-                close_open_subscription_segment(&mut mark_tx, sub_id, current_period_end).await?;
-                sqlx::query(
-                    "UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE id = $1",
-                )
-                .bind(sub_id)
-                .execute(&mut *mark_tx)
-                .await?;
-
-                sqlx::query(
-                    r#"
-                    INSERT INTO subscription_ledger
-                    (subscription_id, organization_id, billing_period_start, billing_period_end, tier, cost_hourly, invoice_id, status)
-                    VALUES ($1, $2, $3, $4, $5, $6, NULL, 'payment_failed')
-                    ON CONFLICT (subscription_id, billing_period_start)
-                    DO UPDATE SET
-                        billing_period_end = EXCLUDED.billing_period_end,
-                        tier = EXCLUDED.tier,
-                        cost_hourly = EXCLUDED.cost_hourly,
-                        status = 'payment_failed'
-                    "#,
-                )
-                .bind(sub_id)
-                .bind(org_id)
-                .bind(next_period_start)
-                .bind(next_period_end)
-                .bind(&tier)
-                .bind(cost_hourly)
-                .execute(&mut *mark_tx)
-                .await?;
-                mark_tx.commit().await?;
-
-                tracing::warn!(
-                    "Sub {} org {} has no paddle_customer_id; marked past_due",
-                    sub_id,
-                    org_id
-                );
-                continue;
-            };
-
-            let line_items = vec![paddle::LineItem {
-                description: format!("{} subscription renewal", tier),
-                quantity: 1,
-                unit_price_amount: remainder_cents.to_string(),
-                unit_price_currency: "USD".to_string(),
-            }];
-
-            match state
-                .paddle
-                .create_transaction(&customer_id, line_items)
-                .await
-            {
-                Ok(txn) => {
-                    tracing::info!(
-                        "Created Paddle transaction {} for sub {} renewal (${:.2}, credits ${:.2})",
-                        txn.id,
-                        sub_id,
-                        remainder_cents as f64 / 100.0,
-                        credits_applied as f64 / 100.0
-                    );
-                    paddle_txn_id = Some(txn.id);
-                }
-                Err(e) => {
-                    tx.rollback().await?;
-                    let mut mark_tx = state.pool.begin().await?;
-                    close_open_subscription_segment(&mut mark_tx, sub_id, current_period_end)
-                        .await?;
-                    sqlx::query(
-                        "UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE id = $1",
-                    )
-                    .bind(sub_id)
-                    .execute(&mut *mark_tx)
-                    .await?;
-
-                    sqlx::query(
-                        r#"
-                        INSERT INTO subscription_ledger
-                        (subscription_id, organization_id, billing_period_start, billing_period_end, tier, cost_hourly, invoice_id, status)
-                        VALUES ($1, $2, $3, $4, $5, $6, NULL, 'payment_failed')
-                        ON CONFLICT (subscription_id, billing_period_start)
-                        DO UPDATE SET
-                            billing_period_end = EXCLUDED.billing_period_end,
-                            tier = EXCLUDED.tier,
-                            cost_hourly = EXCLUDED.cost_hourly,
-                            status = 'payment_failed'
-                        "#,
-                    )
-                    .bind(sub_id)
-                    .bind(org_id)
-                    .bind(next_period_start)
-                    .bind(next_period_end)
-                    .bind(&tier)
-                    .bind(cost_hourly)
-                    .execute(&mut *mark_tx)
-                    .await?;
-                    mark_tx.commit().await?;
-
-                    tracing::error!("Paddle charge failed for sub {}: {}", sub_id, e);
-                    continue;
-                }
-            }
+            .bind(sub_id)
+            .execute(&state.pool)
+            .await?;
+            tracing::info!("Subscription {} restored to active", sub_id);
         }
-
-        let invoice_number = paddle_txn_id
-            .as_ref()
-            .map(|txn_id| format!("INV-SUB-{}", &txn_id[4..]))
-            .unwrap_or_else(|| {
-                format!(
-                    "INV-SUB-CR-{}-{}",
-                    &sub_id.to_string()[..8],
-                    next_period_start.format("%Y%m%d%H%M%S")
-                )
-            });
-
-        let invoice_id: uuid::Uuid = if let Some(txn_id) = paddle_txn_id.as_ref() {
-            sqlx::query_scalar(
-                r#"
-                INSERT INTO invoices (
-                    paddle_transaction_id, user_id, organization_id, invoice_number,
-                    amount_cents, currency, status, payment_status,
-                    billing_provider, created_at
-                )
-                VALUES ($1, $2, $3, $4, $5, 'USD', 'finalized', 'pending', 'paddle', NOW())
-                RETURNING id
-                "#,
-            )
-            .bind(txn_id)
-            .bind(user_id)
-            .bind(org_id)
-            .bind(&invoice_number)
-            .bind(remainder_cents)
-            .fetch_one(&mut *tx)
-            .await?
-        } else {
-            sqlx::query_scalar(
-                r#"
-                INSERT INTO invoices (
-                    user_id, organization_id, invoice_number,
-                    amount_cents, currency, status, payment_status,
-                    billing_provider, created_at, paid_at
-                )
-                VALUES ($1, $2, $3, $4, 'USD', 'finalized', 'credits_applied', 'credits', NOW(), NOW())
-                RETURNING id
-                "#,
-            )
-            .bind(user_id)
-            .bind(org_id)
-            .bind(&invoice_number)
-            .bind(total_charge)
-            .fetch_one(&mut *tx)
-            .await?
-        };
-
-        apply_locked_credit_deduction(
-            &mut tx,
-            org_id,
-            credits_applied,
-            &format!("Subscription renewal: {}", tier),
-            Some(invoice_id),
-        )
-        .await?;
-
-        let event_status = if paddle_txn_id.is_some() {
-            "pending"
-        } else {
-            "credits_covered"
-        };
-
-        close_open_subscription_segment(&mut tx, sub_id, current_period_end).await?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO subscription_ledger
-            (subscription_id, organization_id, billing_period_start, billing_period_end, tier, cost_hourly, invoice_id, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            ON CONFLICT (subscription_id, billing_period_start)
-            DO UPDATE SET
-                billing_period_end = EXCLUDED.billing_period_end,
-                tier = EXCLUDED.tier,
-                cost_hourly = EXCLUDED.cost_hourly,
-                invoice_id = EXCLUDED.invoice_id,
-                status = EXCLUDED.status
-            "#,
-        )
-        .bind(sub_id)
-        .bind(org_id)
-        .bind(next_period_start)
-        .bind(next_period_end)
-        .bind(&tier)
-        .bind(cost_hourly)
-        .bind(invoice_id)
-        .bind(event_status)
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "UPDATE subscriptions SET
-             current_period_start = $1,
-             current_period_end = $2,
-             next_billing_at = $2,
-             last_billed_at = NOW(),
-             status = 'active',
-             updated_at = NOW()
-             WHERE id = $3",
-        )
-        .bind(next_period_start)
-        .bind(next_period_end)
-        .bind(sub_id)
-        .execute(&mut *tx)
-        .await?;
-
-        tx.commit().await?;
     }
 
     Ok(())
-}
-
-pub(crate) fn calculate_subscription_period_end(
-    start: chrono::DateTime<chrono::Utc>,
-) -> chrono::DateTime<chrono::Utc> {
-    use chrono::{Datelike, NaiveDate};
-
-    let add_months = 1;
-
-    let total_months = start.month0() as i32 + add_months;
-    let target_year = start.year() + total_months / 12;
-    let target_month = (total_months % 12) as u32 + 1;
-
-    // Clamp day to last day of target month to avoid panics (e.g. Jan 31 -> Feb 28)
-    let last_day_of_target = NaiveDate::from_ymd_opt(
-        target_year,
-        if target_month == 12 {
-            1
-        } else {
-            target_month + 1
-        },
-        1,
-    )
-    .unwrap_or_else(|| NaiveDate::from_ymd_opt(target_year + 1, 1, 1).unwrap())
-    .pred_opt()
-    .unwrap()
-    .day();
-
-    let day = start.day().min(last_day_of_target);
-
-    start
-        .date_naive()
-        .with_year(target_year)
-        .unwrap_or(start.date_naive())
-        .with_month(target_month)
-        .unwrap_or(start.date_naive())
-        .with_day(day)
-        .unwrap_or(start.date_naive())
-        .and_time(start.time())
-        .and_utc()
 }
 
 /// Manually trigger monthly billing (for testing or catch-up)

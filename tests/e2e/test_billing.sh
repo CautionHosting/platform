@@ -638,10 +638,10 @@ else
     step_fail "Credit deduction (expected balance=$EXPECTED_BALANCE, got=$BALANCE_AFTER)"
 fi
 
-# ── Step 15: Subscription creation and billing ───────────────────────
+# ── Step 15: Subscription creation and continuous accrual ────────────
 
 STEP_NUM=15
-log "Testing subscription creation and billing cycle..."
+log "Testing subscription creation and continuous accrual..."
 
 # Clean up any existing subscriptions (|| true: tables may not exist on first run)
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
@@ -649,7 +649,7 @@ DELETE FROM subscription_ledger WHERE organization_id = '$ORG_ID';
 DELETE FROM subscriptions WHERE user_id = '$USER_ID';
 " >/dev/null 2>&1 || true
 
-# Create a subscription due for billing (next_billing_at in the past)
+# Create a continuous subscription with an open ledger segment.
 SUB_ID=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -A -c "
 INSERT INTO subscriptions (
     user_id, organization_id, tier, billing_period,
@@ -660,8 +660,8 @@ INSERT INTO subscriptions (
 VALUES (
     '$USER_ID', '$ORG_ID', 'starter', 'monthly',
     4, 2, 2900, 'active',
-    NOW() - interval '31 days', NOW() - interval '31 days', NOW() - interval '1 day',
-    NOW() - interval '1 day', NOW() - interval '31 days', NOW()
+    NOW() - interval '2 hours', NOW() - interval '2 hours', NOW() - interval '2 hours',
+    TIMESTAMPTZ '9999-12-31 23:59:59+00', NOW() - interval '2 hours', NOW()
 )
 RETURNING id;
 " 2>/dev/null | head -1 | tr -d ' \n') || true
@@ -672,154 +672,96 @@ else
     log "  Subscription ID: $SUB_ID"
     log "  Tier: starter, Price: \$29.00/month, max_vcpus: 4, max_apps: 2"
 
+    docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
+    INSERT INTO subscription_ledger (
+        subscription_id, organization_id, billing_period_start, billing_period_end, tier, cost_hourly, status
+    )
+    VALUES (
+        '$SUB_ID', '$ORG_ID', NOW() - interval '2 hours', NULL, 'starter', 0.924658, 'credits_covered'
+    );
+    " >/dev/null 2>&1 || true
+
     SUB_STATUS=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
     SELECT status FROM subscriptions WHERE id = '$SUB_ID';
     " 2>/dev/null | tr -d ' \n')
 
-    BILLING_DUE=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-    SELECT next_billing_at < NOW() FROM subscriptions WHERE id = '$SUB_ID';
+    OPEN_SEGMENTS=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
+    SELECT COUNT(*) FROM subscription_ledger
+    WHERE subscription_id = '$SUB_ID' AND billing_period_end IS NULL;
     " 2>/dev/null | tr -d ' \n')
 
-    if [ "$SUB_STATUS" = "active" ] && [ "$BILLING_DUE" = "t" ]; then
-        step_pass "Subscription created (active, billing due)"
+    if [ "$SUB_STATUS" = "active" ] && [ "$OPEN_SEGMENTS" = "1" ]; then
+        step_pass "Subscription created (active with open ledger segment)"
     else
-        step_fail "Subscription state (status=$SUB_STATUS, due=$BILLING_DUE)"
+        step_fail "Subscription state (status=$SUB_STATUS, open_segments=$OPEN_SEGMENTS)"
     fi
 fi
 
-# ── Step 16: Subscription billing with credit offset ────────────────
+# ── Step 16: Subscription debits accrue without renewal ─────────────
 
 STEP_NUM=16
-log "Testing subscription billing with partial credit offset..."
+log "Testing subscription debits accrue without renewal..."
 
-# Current wallet balance should partially cover the $29.00 subscription
-CREDIT_BALANCE=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = '$ORG_ID';
-" 2>/dev/null | tr -d ' \n')
-
-log "  Wallet balance before billing: $CREDIT_BALANCE cents"
-
-# Simulate the subscription billing cycle:
-# 1. Deduct credits (partial or full)
-# 2. Create Paddle transaction for remainder (or mark as credits_covered)
-SUB_PRICE=2900
-CREDITS_TO_APPLY=$((CREDIT_BALANCE < SUB_PRICE ? CREDIT_BALANCE : SUB_PRICE))
-REMAINDER=$((SUB_PRICE - CREDITS_TO_APPLY))
-
-log "  Subscription price: $SUB_PRICE cents"
-log "  Credits to apply: $CREDITS_TO_APPLY cents"
-log "  Remainder for Paddle: $REMAINDER cents"
-
-# Apply credit deduction
-if [ "$CREDITS_TO_APPLY" -gt 0 ]; then
-    docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-    UPDATE wallet_balance SET balance_cents = balance_cents - $CREDITS_TO_APPLY WHERE organization_id = '$ORG_ID';
-    " >/dev/null 2>&1 || true
-fi
-
-# Record the billing event
-if [ "$REMAINDER" -eq 0 ]; then
-    BILLING_STATUS="credits_covered"
-else
-    BILLING_STATUS="pending"
-fi
-
-docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO subscription_ledger (
-    subscription_id, organization_id, billing_period_start, billing_period_end, tier, cost_hourly, status
-)
-VALUES (
-    '$SUB_ID', '$ORG_ID', NOW() - interval '1 day', NOW() + interval '29 days', 'starter', 0.924658, '$BILLING_STATUS'
-);
-" >/dev/null 2>&1 || true
-
-# Advance subscription period
-docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE subscriptions SET
-    current_period_start = current_period_end,
-    current_period_end = NOW() + interval '30 days',
-    next_billing_at = NOW() + interval '30 days',
-    last_billed_at = NOW(),
-    updated_at = NOW()
-WHERE id = '$SUB_ID';
-" >/dev/null 2>&1 || true
-
-# Verify
-BALANCE_AFTER_SUB=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COALESCE(balance_cents, 0) FROM wallet_balance WHERE organization_id = '$ORG_ID';
+SUB_DEBIT=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
+SELECT COALESCE(debit_cents, 0) FROM subscription_ledger_balances WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 EVENT_COUNT=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
 SELECT COUNT(*) FROM subscription_ledger WHERE subscription_id = '$SUB_ID';
 " 2>/dev/null | tr -d ' \n')
 
+OPEN_SEGMENTS=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
+SELECT COUNT(*) FROM subscription_ledger
+WHERE subscription_id = '$SUB_ID' AND billing_period_end IS NULL;
+" 2>/dev/null | tr -d ' \n')
+
 EVENT_STATUS=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
 SELECT status FROM subscription_ledger WHERE subscription_id = '$SUB_ID' ORDER BY created_at DESC LIMIT 1;
 " 2>/dev/null | tr -d ' \n')
 
-NEXT_BILLING=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT next_billing_at > NOW() FROM subscriptions WHERE id = '$SUB_ID';
-" 2>/dev/null | tr -d ' \n')
-
-log "  Wallet after: $BALANCE_AFTER_SUB cents"
+log "  Subscription debit so far: $SUB_DEBIT cents"
 log "  Billing events: $EVENT_COUNT (status: $EVENT_STATUS)"
-log "  Next billing in future: $NEXT_BILLING"
+log "  Open ledger segments: $OPEN_SEGMENTS"
 
-EXPECTED_WALLET=$((CREDIT_BALANCE - CREDITS_TO_APPLY))
-if [ "$BALANCE_AFTER_SUB" = "$EXPECTED_WALLET" ] && [ "$EVENT_COUNT" -ge 1 ] && [ "$NEXT_BILLING" = "t" ]; then
-    step_pass "Subscription billing: credits=$CREDITS_TO_APPLY applied, status=$EVENT_STATUS, period advanced"
+if [ "${SUB_DEBIT:-0}" -gt 0 ] && [ "$EVENT_COUNT" = "1" ] && [ "$OPEN_SEGMENTS" = "1" ]; then
+    step_pass "Subscription accrual is continuous without renewal rows"
 else
-    step_fail "Subscription billing (wallet=$BALANCE_AFTER_SUB exp=$EXPECTED_WALLET, events=$EVENT_COUNT, next_future=$NEXT_BILLING)"
+    step_fail "Subscription accrual (debit=$SUB_DEBIT, events=$EVENT_COUNT, open_segments=$OPEN_SEGMENTS)"
 fi
 
-# ── Step 17: Subscription cancellation at period end ─────────────────
+# ── Step 17: Subscription cancellation closes the open segment ───────
 
 STEP_NUM=17
-log "Testing subscription cancellation at period end..."
+log "Testing immediate subscription cancellation..."
 
-# Flag the subscription for cancellation
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE subscriptions SET cancel_at_period_end = true WHERE id = '$SUB_ID';
+UPDATE subscription_ledger
+SET billing_period_end = NOW()
+WHERE subscription_id = '$SUB_ID' AND billing_period_end IS NULL;
+
+UPDATE subscriptions SET
+    status = 'canceled',
+    canceled_at = NOW(),
+    cancel_at_period_end = false,
+    current_period_end = NOW(),
+    next_billing_at = TIMESTAMPTZ '9999-12-31 23:59:59+00',
+    updated_at = NOW()
+WHERE id = '$SUB_ID';
 " >/dev/null 2>&1 || true
 
-CANCEL_FLAG=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT cancel_at_period_end FROM subscriptions WHERE id = '$SUB_ID';
-" 2>/dev/null | tr -d ' \n')
-
-# Verify it's flagged but still active (won't cancel until next billing)
-SUB_STATUS=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
+FINAL_STATUS=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
 SELECT status FROM subscriptions WHERE id = '$SUB_ID';
 " 2>/dev/null | tr -d ' \n')
 
-if [ "$CANCEL_FLAG" = "t" ] && [ "$SUB_STATUS" = "active" ]; then
-    log "  Subscription flagged for cancellation (still active until period end)"
+OPEN_SEGMENTS=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
+SELECT COUNT(*) FROM subscription_ledger
+WHERE subscription_id = '$SUB_ID' AND billing_period_end IS NULL;
+" 2>/dev/null | tr -d ' \n')
 
-    # Simulate what run_subscription_billing does when cancel_at_period_end is true
-    # and next_billing_at <= NOW(): set status = 'canceled'
-    docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-    UPDATE subscriptions SET
-        next_billing_at = NOW() - interval '1 hour',
-        updated_at = NOW()
-    WHERE id = '$SUB_ID';
-    " >/dev/null 2>&1 || true
-
-    # The billing loop would process this:
-    docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-    UPDATE subscriptions SET status = 'canceled', updated_at = NOW()
-    WHERE id = '$SUB_ID' AND cancel_at_period_end = true;
-    " >/dev/null 2>&1 || true
-
-    FINAL_STATUS=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-    SELECT status FROM subscriptions WHERE id = '$SUB_ID';
-    " 2>/dev/null | tr -d ' \n')
-
-    if [ "$FINAL_STATUS" = "canceled" ]; then
-        step_pass "Subscription cancellation: flagged → canceled at period end"
-    else
-        step_fail "Expected canceled, got $FINAL_STATUS"
-    fi
+if [ "$FINAL_STATUS" = "canceled" ] && [ "$OPEN_SEGMENTS" = "0" ]; then
+    step_pass "Subscription cancellation closes the active ledger segment"
 else
-    step_fail "Cancel flag (flag=$CANCEL_FLAG, status=$SUB_STATUS)"
+    step_fail "Subscription cancellation (status=$FINAL_STATUS, open_segments=$OPEN_SEGMENTS)"
 fi
 
 # ── Step 18: Verify credit ledger audit trail ────────────────────────
