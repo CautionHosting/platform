@@ -1349,18 +1349,18 @@ make build-cli
           <span class="billing-period-dates">{{ currentBillingPeriod }}</span>
         </div>
         <div class="billing-total">
-          <span class="billing-total-label">Cost so far</span>
+          <span class="billing-total-label">Total debits</span>
           <span class="billing-total-amount">${{ billingData.totalCost?.toFixed(2) || '0.00' }}</span>
         </div>
         <div class="billing-total">
-          <span class="billing-total-label">Projected total</span>
+          <span class="billing-total-label">Projected by period end</span>
           <span class="billing-total-amount billing-projected">${{ billingData.projectedCost?.toFixed(2) || '0.00' }}</span>
         </div>
       </div>
 
       <!-- Usage Breakdown -->
       <div class="billing-section">
-        <h3 class="billing-section-title">Usage breakdown</h3>
+        <h3 class="billing-section-title">Managed Resource Usage Breakdown</h3>
         <div v-if="loadingBilling" class="list-item-empty">Loading billing data...</div>
         <div v-else-if="billingData.items?.length === 0" class="list-item-empty">
           No usage this billing period.
@@ -1377,7 +1377,32 @@ make build-cli
               <span class="billing-resource-name">{{ item.resourceName }}</span>
               <span class="billing-resource-type">{{ item.resourceType }}</span>
             </span>
-            <span class="billing-col-usage">{{ item.usage }} {{ item.unit }}</span>
+            <span class="billing-col-usage">{{ formatBillingUsage(item.usage, item.unit) }} {{ item.unit }}</span>
+            <span class="billing-col-rate">${{ item.rate }}/{{ item.unit }}</span>
+            <span class="billing-col-cost">${{ item.cost.toFixed(2) }}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="billing-section">
+        <h3 class="billing-section-title">Subscription Spend</h3>
+        <div v-if="loadingBilling" class="list-item-empty">Loading billing data...</div>
+        <div v-else-if="billingData.subscriptionItems?.length === 0" class="list-item-empty">
+          No subscription charges this billing period.
+        </div>
+        <div v-else class="billing-table">
+          <div class="billing-table-header">
+            <span class="billing-col-resource">Subscription</span>
+            <span class="billing-col-usage">Usage</span>
+            <span class="billing-col-rate">Rate</span>
+            <span class="billing-col-cost">Cost</span>
+          </div>
+          <div v-for="item in billingData.subscriptionItems" :key="item.id" class="billing-table-row">
+            <span class="billing-col-resource">
+              <span class="billing-resource-name">{{ item.resourceName }}</span>
+              <span class="billing-resource-type">{{ item.resourceType }}</span>
+            </span>
+            <span class="billing-col-usage">{{ formatBillingUsage(item.usage, item.unit) }} {{ item.unit }}</span>
             <span class="billing-col-rate">${{ item.rate }}/{{ item.unit }}</span>
             <span class="billing-col-cost">${{ item.cost.toFixed(2) }}</span>
           </div>
@@ -2353,7 +2378,7 @@ export default {
     };
 
     // Billing state
-    const billingData = ref({ totalCost: 0, projectedCost: 0, items: [] });
+    const billingData = ref({ totalCost: 0, projectedCost: 0, items: [], subscriptionItems: [] });
     const loadingBilling = ref(false);
     const invoices = ref([]);
     const loadingInvoices = ref(false);
@@ -2401,6 +2426,19 @@ export default {
       const formatter = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' });
       return `${formatter.format(start)} - ${formatter.format(end)}, ${now.getFullYear()}`;
     });
+
+    const formatBillingUsage = (usage, unit) => {
+      if (unit !== 'hours') {
+        return usage ?? 0;
+      }
+
+      const numericUsage = Number(usage ?? 0);
+      if (!Number.isFinite(numericUsage)) {
+        return usage ?? 0;
+      }
+
+      return numericUsage.toFixed(2);
+    };
 
     const pageTitle = computed(() => {
       return "";
@@ -2509,19 +2547,29 @@ export default {
         if (response.ok) {
           const data = await response.json();
           billingData.value = {
-            totalCost: data.total_cost || 0,
-            projectedCost: data.projected_cost || 0,
-            billingPeriodStart: data.billing_period_start || '',
-            billingPeriodEnd: data.billing_period_end || '',
+            totalCost: data.total_cost ?? 0,
+            projectedCost: data.projected_cost ?? 0,
+            billingPeriodStart: data.billing_period_start ?? '',
+            billingPeriodEnd: data.billing_period_end ?? '',
             items: (data.items || []).map(item => ({
               id: item.id || item.resource_id,
-              resourceName: item.resource_name || item.resource_id,
-              resourceType: item.resource_type || 'compute',
-              usage: item.quantity || 0,
-              unit: item.unit || 'hours',
-              rate: item.rate || '0.05',
-              cost: item.cost || 0,
-              projectedCost: item.projected_cost || 0,
+              resourceName: item.resource_name ?? item.resource_id,
+              resourceType: item.resource_type ?? 'compute',
+              usage: item.quantity ?? 0,
+              unit: item.unit ?? 'hours',
+              rate: item.rate ?? '0.00',
+              cost: item.cost ?? 0,
+              projectedCost: item.projected_cost ?? 0,
+            })),
+            subscriptionItems: (data.subscription_items || []).map(item => ({
+              id: item.id || item.subscription_id,
+              resourceName: item.resource_name ?? item.tier ?? 'Subscription',
+              resourceType: item.resource_type ?? 'subscription',
+              usage: item.quantity ?? 0,
+              unit: item.unit ?? 'hours',
+              rate: item.rate ?? '0.00',
+              cost: item.cost ?? 0,
+              projectedCost: item.projected_cost ?? 0,
             })),
           };
         } else if (response.status === 401) {
@@ -2575,7 +2623,9 @@ export default {
       });
       return {
         totalCost: items.reduce((sum, item) => sum + item.cost, 0),
+        projectedCost: items.reduce((sum, item) => sum + item.cost, 0),
         items,
+        subscriptionItems: [],
       };
     };
 
@@ -4141,6 +4191,7 @@ export default {
       billingData,
       loadingBilling,
       currentBillingPeriod,
+      formatBillingUsage,
       loadBilling,
       invoices,
       loadingInvoices,

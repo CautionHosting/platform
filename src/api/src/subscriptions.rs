@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::{get_user_primary_org, AppState, AuthContext};
 
-fn tier_display_name(id: &str) -> String {
+pub(crate) fn tier_display_name(id: &str) -> String {
     id.split('_')
         .map(|w| {
             let mut c = w.chars();

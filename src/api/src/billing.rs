@@ -32,9 +32,30 @@ pub(crate) fn base_instance_rate(instance_type: &str) -> Option<f64> {
         _ => return None,
     })
 }
-use crate::resources::ComputeResource;
 use crate::suspension::call_internal_unsuspend;
 use serde::Serialize;
+
+#[derive(Debug, sqlx::FromRow)]
+struct BillingUsageRow {
+    id: Option<Uuid>,
+    resource_id: String,
+    resource_name: String,
+    resource_type: String,
+    quantity: f64,
+    unit: String,
+    rate: f64,
+    cost: f64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct SubscriptionSpendRow {
+    subscription_id: Uuid,
+    tier: String,
+    quantity: f64,
+    rate: f64,
+    cost: f64,
+    projected_cost: f64,
+}
 
 #[derive(Debug, Serialize, Clone)]
 pub(crate) struct CreditPackage {
@@ -90,6 +111,25 @@ where
     .await
 }
 
+pub async fn get_debit_balance_cents<'e, E>(
+    executor: E,
+    organization_id: Uuid,
+) -> Result<i64, sqlx::Error>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(dlb.debit_cents, 0)
+        FROM (SELECT $1::uuid AS organization_id) org
+        LEFT JOIN debit_ledger_balances dlb USING (organization_id)
+        "#,
+    )
+    .bind(organization_id)
+    .fetch_one(executor)
+    .await
+}
+
 pub async fn get_billing_usage(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -97,26 +137,6 @@ pub async fn get_billing_usage(
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
-
-    // Get all running resources for the org
-    let resources: Vec<ComputeResource> = sqlx::query_as(
-        "SELECT id, organization_id, provider_account_id, resource_type_id, provider_resource_id,
-                resource_name, state::text as state, region, public_ip,
-                configuration->>'domain' as domain, billing_tag, configuration,
-                created_at, updated_at
-         FROM compute_resources
-         WHERE organization_id = $1
-         ORDER BY created_at DESC",
-    )
-    .bind(org_id)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
 
     let now = chrono::Utc::now();
 
@@ -131,75 +151,184 @@ pub async fn get_billing_usage(
     let days_in_month = next_month_naive
         .signed_duration_since(first_of_month_naive)
         .num_days() as f64;
-    let hours_in_month = days_in_month * 24.0;
+    let next_month_dt = next_month_naive.and_hms_opt(0, 0, 0).unwrap().and_utc();
+    let billing_period_seconds = next_month_dt
+        .signed_duration_since(first_of_month_dt)
+        .num_seconds();
+    let elapsed_seconds = now.signed_duration_since(first_of_month_dt).num_seconds();
+    let projection_multiplier = if elapsed_seconds > 0 {
+        billing_period_seconds as f64 / elapsed_seconds as f64
+    } else {
+        days_in_month * 24.0
+    };
 
-    // Hours elapsed in the current billing period
-    let hours_elapsed_in_period = now.signed_duration_since(first_of_month_dt).num_hours() as f64;
+    let total_debits_cents = get_debit_balance_cents(&state.db, org_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
 
-    let mut total_cost = 0.0;
-    let mut total_projected = 0.0;
+    let usage_rows: Vec<BillingUsageRow> = sqlx::query_as(
+        r#"
+        WITH monthly_usage AS (
+            SELECT
+                ul.application_id AS id,
+                ul.resource_id,
+                COALESCE(
+                    NULLIF(cr.resource_name, ''),
+                    NULLIF(ul.metadata->>'resource_name', ''),
+                    ul.resource_id
+                ) AS resource_name,
+                ul.resource_type,
+                ul.unit,
+                (
+                    COALESCE(ul.base_unit_cost_usd, 0)
+                    * (1 + COALESCE(ul.margin_percent, 0) / 100.0)
+                )::double precision AS rate,
+                ul.quantity::double precision AS quantity,
+                (
+                    ul.quantity
+                    * COALESCE(ul.base_unit_cost_usd, 0)
+                    * (1 + COALESCE(ul.margin_percent, 0) / 100.0)
+                )::double precision AS cost
+            FROM usage_ledger ul
+            LEFT JOIN compute_resources cr
+                ON cr.id = ul.application_id
+               AND cr.organization_id = ul.organization_id
+            WHERE ul.organization_id = $1
+              AND ul.recorded_at >= $2
+              AND ul.recorded_at < $3
+        )
+        SELECT
+            id,
+            MIN(resource_id) AS resource_id,
+            resource_name,
+            resource_type,
+            SUM(quantity)::double precision AS quantity,
+            unit,
+            rate,
+            SUM(cost)::double precision AS cost
+        FROM monthly_usage
+        GROUP BY id, resource_name, resource_type, unit, rate
+        ORDER BY cost DESC, resource_name ASC, resource_type ASC
+        "#,
+    )
+    .bind(org_id)
+    .bind(first_of_month_dt)
+    .bind(next_month_dt)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
+
+    let subscription_rows: Vec<SubscriptionSpendRow> = sqlx::query_as(
+        r#"
+        WITH monthly_subscription_spend AS (
+            SELECT
+                sl.subscription_id,
+                sl.tier,
+                GREATEST(
+                    EXTRACT(
+                        EPOCH FROM
+                            LEAST(COALESCE(sl.billing_period_end, $3), $3)
+                            - GREATEST(sl.billing_period_start, $2)
+                    ) / 3600.0,
+                    0
+                )::double precision AS quantity,
+                sl.cost_hourly::double precision AS rate,
+                GREATEST(
+                    EXTRACT(
+                        EPOCH FROM
+                            LEAST(COALESCE(sl.billing_period_end, $3), $3)
+                            - GREATEST(sl.billing_period_start, $2)
+                    ) / 3600.0
+                    * sl.cost_hourly,
+                    0
+                )::double precision AS cost,
+                GREATEST(
+                    EXTRACT(
+                        EPOCH FROM
+                            LEAST(COALESCE(sl.billing_period_end, $4), $4)
+                            - GREATEST(sl.billing_period_start, $2)
+                    ) / 3600.0
+                    * sl.cost_hourly,
+                    0
+                )::double precision AS projected_cost
+            FROM subscription_ledger sl
+            WHERE sl.organization_id = $1
+              AND sl.billing_period_start < $4
+              AND COALESCE(sl.billing_period_end, $4) > $2
+        )
+        SELECT
+            subscription_id,
+            tier,
+            SUM(quantity)::double precision AS quantity,
+            rate,
+            SUM(cost)::double precision AS cost,
+            SUM(projected_cost)::double precision AS projected_cost
+        FROM monthly_subscription_spend
+        GROUP BY subscription_id, tier, rate
+        HAVING SUM(cost) > 0 OR SUM(projected_cost) > 0
+        ORDER BY cost DESC, tier ASC
+        "#,
+    )
+    .bind(org_id)
+    .bind(first_of_month_dt)
+    .bind(now)
+    .bind(next_month_dt)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
+
+    let total_cost = total_debits_cents as f64 / 100.0;
+    let mut total_projected = total_cost;
     let mut items = Vec::new();
+    let mut subscription_items = Vec::new();
 
-    for resource in resources {
-        // Hours in current billing period (resource may have started before this month)
-        let resource_start_of_period = if resource.created_at > first_of_month_dt {
-            resource.created_at
-        } else {
-            first_of_month_dt
-        };
-        let hours_this_period = now
-            .signed_duration_since(resource_start_of_period)
-            .num_hours() as f64;
+    for row in usage_rows {
+        let projected_cost = row.cost * projection_multiplier.max(1.0);
 
-        // Get instance type from config
-        let instance_type = resource
-            .configuration
-            .as_ref()
-            .and_then(|c: &serde_json::Value| c.get("instance_type"))
-            .and_then(|v: &serde_json::Value| v.as_str())
-            .unwrap_or("default");
-
-        let Some(pricing) = state.pricing.instance_pricing(instance_type) else {
-            items.push(serde_json::json!({
-                "id": resource.id,
-                "resource_id": resource.provider_resource_id,
-                "resource_name": resource.resource_name.clone().unwrap_or_else(|| "Unnamed".to_string()),
-                "resource_type": "compute",
-                "instance_type": instance_type,
-                "quantity": hours_this_period.max(0.0),
-                "unit": "hours",
-                "pricing_status": "unpriced",
-                "pricing_error": format!("Unknown instance type: {}", instance_type),
-            }));
-            tracing::error!(
-                "Cannot price compute resource {} with unknown instance type {}",
-                resource.id,
-                instance_type
-            );
-            continue;
-        };
-        let hourly_rate = pricing.unit_cost_usd();
-        let cost_this_period = pricing.total_cost_usd(hours_this_period.max(0.0));
-
-        // Project: assume resource runs for the rest of the month
-        let remaining_hours = hours_in_month - hours_elapsed_in_period;
-        let projected_cost = cost_this_period + pricing.total_cost_usd(remaining_hours.max(0.0));
-
-        total_cost += cost_this_period;
-        total_projected += projected_cost;
+        total_projected += (projected_cost - row.cost).max(0.0);
 
         items.push(serde_json::json!({
-            "id": resource.id,
-            "resource_id": resource.provider_resource_id,
-            "resource_name": resource.resource_name.clone().unwrap_or_else(|| "Unnamed".to_string()),
-            "resource_type": "compute",
-            "instance_type": instance_type,
-            "quantity": hours_this_period.max(0.0),
-            "unit": "hours",
-            "base_rate": format!("{:.3}", pricing.base_unit_cost_usd),
-            "rate": format!("{:.2}", hourly_rate),
-            "cost": cost_this_period,
+            "id": row.id,
+            "resource_id": row.resource_id,
+            "resource_name": row.resource_name,
+            "resource_type": row.resource_type,
+            "quantity": row.quantity,
+            "unit": row.unit,
+            "rate": format!("{:.2}", row.rate),
+            "cost": row.cost,
             "projected_cost": projected_cost,
+        }));
+    }
+
+    for row in subscription_rows {
+        total_projected += (row.projected_cost - row.cost).max(0.0);
+
+        subscription_items.push(serde_json::json!({
+            "id": format!("{}:{}:{:.6}", row.subscription_id, row.tier, row.rate),
+            "subscription_id": row.subscription_id,
+            "tier": row.tier,
+            "resource_name": crate::subscriptions::tier_display_name(&row.tier),
+            "resource_type": "subscription",
+            "quantity": row.quantity,
+            "unit": "hours",
+            "rate": format!("{:.2}", row.rate),
+            "cost": row.cost,
+            "projected_cost": row.projected_cost,
         }));
     }
 
@@ -210,6 +339,7 @@ pub async fn get_billing_usage(
         "billing_period_start": first_of_month_naive.to_string(),
         "billing_period_end": next_month_naive.to_string(),
         "items": items,
+        "subscription_items": subscription_items,
     })))
 }
 
