@@ -24,10 +24,6 @@ use crate::{cost_explorer, paddle};
 struct PricingConfig {
     #[serde(default)]
     subscription_tiers: HashMap<String, TierPricing>,
-    #[serde(default)]
-    extra_block: ExtraBlock,
-    #[serde(default)]
-    billing_discounts: BillingDiscounts,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -36,16 +32,10 @@ struct TierPricing {
     annual_cents: i64,
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct ExtraBlock {
-    #[serde(default)]
-    annual_cents: i64,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct BillingDiscounts {
-    #[serde(default)]
-    yearly_percent_off: f64,
+impl TierPricing {
+    fn monthly_price_cents(&self) -> i64 {
+        self.annual_cents / 12
+    }
 }
 
 impl PricingConfig {
@@ -58,8 +48,8 @@ impl PricingConfig {
 
     fn subscription_cost_hourly_usd(&self, tier_id: &str) -> Option<f64> {
         const HOURS_PER_YEAR: f64 = 365.0 * 24.0;
-        let yearly_tier_cents = self.subscription_tiers.get(tier_id)?.annual_cents;
-        Some(yearly_tier_cents as f64 / 100.0 / HOURS_PER_YEAR)
+        let annual_tier_cents = self.subscription_tiers.get(tier_id)?.annual_cents;
+        Some(annual_tier_cents as f64 / 100.0 / HOURS_PER_YEAR)
     }
 }
 
@@ -130,6 +120,26 @@ async fn apply_locked_credit_deduction(
     .context("Insufficient locked balance for credit deduction")?;
 
     Ok(new_balance)
+}
+
+async fn close_open_subscription_segment(
+    tx: &mut Transaction<'_, Postgres>,
+    subscription_id: uuid::Uuid,
+    period_end: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE subscription_ledger
+         SET billing_period_end = $1
+         WHERE subscription_id = $2
+           AND billing_period_end IS NULL
+           AND billing_period_start < $1",
+    )
+    .bind(period_end)
+    .bind(subscription_id)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
 }
 
 /// Run the monthly billing cycle
@@ -486,9 +496,7 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
     let pricing = PricingConfig::load()?;
     let due_subs = sqlx::query(
         r#"
-        SELECT id, user_id, organization_id, tier, billing_period,
-               current_period_start, current_period_end,
-               price_cents_per_cycle, extra_block_price_cents_per_cycle,
+        SELECT id, user_id, organization_id, tier, current_period_end,
                cancel_at_period_end
         FROM subscriptions
         WHERE status IN ('active', 'past_due') AND next_billing_at <= NOW()
@@ -508,30 +516,32 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
         let user_id: uuid::Uuid = row.get("user_id");
         let org_id: uuid::Uuid = row.get("organization_id");
         let tier: String = row.get("tier");
-        let billing_period: String = row.get("billing_period");
-        let current_period_start: chrono::DateTime<chrono::Utc> = row.get("current_period_start");
         let current_period_end: chrono::DateTime<chrono::Utc> = row.get("current_period_end");
-        let base_price: i64 = row.get("price_cents_per_cycle");
-        let extra_price: i64 = row.get("extra_block_price_cents_per_cycle");
         let cancel_at_end: bool = row.get("cancel_at_period_end");
+        let tier_pricing = pricing
+            .subscription_tiers
+            .get(&tier)
+            .with_context(|| format!("Missing subscription pricing for tier '{}'", tier))?;
+        let total_charge = tier_pricing.monthly_price_cents();
         let cost_hourly = pricing
             .subscription_cost_hourly_usd(&tier)
-            .with_context(|| format!("Missing yearly subscription pricing for tier '{}'", tier))?;
+            .with_context(|| format!("Missing subscription pricing for tier '{}'", tier))?;
+        let next_period_start = current_period_end;
+        let next_period_end = calculate_subscription_period_end(current_period_end);
 
         if cancel_at_end {
+            let mut tx = state.pool.begin().await?;
+            close_open_subscription_segment(&mut tx, sub_id, current_period_end).await?;
             sqlx::query(
                 "UPDATE subscriptions SET status = 'canceled', updated_at = NOW() WHERE id = $1",
             )
             .bind(&sub_id)
-            .execute(&state.pool)
+            .execute(&mut *tx)
             .await?;
+            tx.commit().await?;
             tracing::info!("Subscription {} canceled at period end", sub_id);
             continue;
         }
-
-        let total_charge = base_price + extra_price;
-        let next_period_end =
-            calculate_subscription_period_end(current_period_end, &billing_period);
 
         let mut tx = state.pool.begin().await?;
         let _locked_wallet_row: Option<i64> = sqlx::query_scalar(
@@ -563,11 +573,13 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
 
             let Some(customer_id) = paddle_customer_id else {
                 tx.rollback().await?;
+                let mut mark_tx = state.pool.begin().await?;
+                close_open_subscription_segment(&mut mark_tx, sub_id, current_period_end).await?;
                 sqlx::query(
                     "UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE id = $1",
                 )
                 .bind(sub_id)
-                .execute(&state.pool)
+                .execute(&mut *mark_tx)
                 .await?;
 
                 sqlx::query(
@@ -576,17 +588,22 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                     (subscription_id, organization_id, billing_period_start, billing_period_end, tier, cost_hourly, invoice_id, status)
                     VALUES ($1, $2, $3, $4, $5, $6, NULL, 'payment_failed')
                     ON CONFLICT (subscription_id, billing_period_start)
-                    DO UPDATE SET status = 'payment_failed', cost_hourly = EXCLUDED.cost_hourly
+                    DO UPDATE SET
+                        billing_period_end = EXCLUDED.billing_period_end,
+                        tier = EXCLUDED.tier,
+                        cost_hourly = EXCLUDED.cost_hourly,
+                        status = 'payment_failed'
                     "#,
                 )
                 .bind(sub_id)
                 .bind(org_id)
-                .bind(current_period_start)
-                .bind(current_period_end)
+                .bind(next_period_start)
+                .bind(next_period_end)
                 .bind(&tier)
                 .bind(cost_hourly)
-                .execute(&state.pool)
+                .execute(&mut *mark_tx)
                 .await?;
+                mark_tx.commit().await?;
 
                 tracing::warn!(
                     "Sub {} org {} has no paddle_customer_id; marked past_due",
@@ -597,7 +614,7 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
             };
 
             let line_items = vec![paddle::LineItem {
-                description: format!("{} subscription renewal ({})", tier, billing_period),
+                description: format!("{} subscription renewal", tier),
                 quantity: 1,
                 unit_price_amount: remainder_cents.to_string(),
                 unit_price_currency: "USD".to_string(),
@@ -620,11 +637,14 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                 }
                 Err(e) => {
                     tx.rollback().await?;
+                    let mut mark_tx = state.pool.begin().await?;
+                    close_open_subscription_segment(&mut mark_tx, sub_id, current_period_end)
+                        .await?;
                     sqlx::query(
                         "UPDATE subscriptions SET status = 'past_due', updated_at = NOW() WHERE id = $1",
                     )
                     .bind(sub_id)
-                    .execute(&state.pool)
+                    .execute(&mut *mark_tx)
                     .await?;
 
                     sqlx::query(
@@ -633,17 +653,22 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                         (subscription_id, organization_id, billing_period_start, billing_period_end, tier, cost_hourly, invoice_id, status)
                         VALUES ($1, $2, $3, $4, $5, $6, NULL, 'payment_failed')
                         ON CONFLICT (subscription_id, billing_period_start)
-                        DO UPDATE SET status = 'payment_failed', cost_hourly = EXCLUDED.cost_hourly
+                        DO UPDATE SET
+                            billing_period_end = EXCLUDED.billing_period_end,
+                            tier = EXCLUDED.tier,
+                            cost_hourly = EXCLUDED.cost_hourly,
+                            status = 'payment_failed'
                         "#,
                     )
                     .bind(sub_id)
                     .bind(org_id)
-                    .bind(current_period_start)
-                    .bind(current_period_end)
+                    .bind(next_period_start)
+                    .bind(next_period_end)
                     .bind(&tier)
                     .bind(cost_hourly)
-                    .execute(&state.pool)
+                    .execute(&mut *mark_tx)
                     .await?;
+                    mark_tx.commit().await?;
 
                     tracing::error!("Paddle charge failed for sub {}: {}", sub_id, e);
                     continue;
@@ -658,7 +683,7 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                 format!(
                     "INV-SUB-CR-{}-{}",
                     &sub_id.to_string()[..8],
-                    current_period_start.format("%Y%m%d%H%M%S")
+                    next_period_start.format("%Y%m%d%H%M%S")
                 )
             });
 
@@ -705,7 +730,7 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
             &mut tx,
             org_id,
             credits_applied,
-            &format!("Subscription renewal: {} ({})", tier, billing_period),
+            &format!("Subscription renewal: {}", tier),
             Some(invoice_id),
         )
         .await?;
@@ -716,17 +741,26 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
             "credits_covered"
         };
 
+        close_open_subscription_segment(&mut tx, sub_id, current_period_end).await?;
+
         sqlx::query(
             r#"
             INSERT INTO subscription_ledger
             (subscription_id, organization_id, billing_period_start, billing_period_end, tier, cost_hourly, invoice_id, status)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (subscription_id, billing_period_start)
+            DO UPDATE SET
+                billing_period_end = EXCLUDED.billing_period_end,
+                tier = EXCLUDED.tier,
+                cost_hourly = EXCLUDED.cost_hourly,
+                invoice_id = EXCLUDED.invoice_id,
+                status = EXCLUDED.status
             "#,
         )
         .bind(sub_id)
         .bind(org_id)
-        .bind(current_period_start)
-        .bind(current_period_end)
+        .bind(next_period_start)
+        .bind(next_period_end)
         .bind(&tier)
         .bind(cost_hourly)
         .bind(invoice_id)
@@ -736,14 +770,15 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
 
         sqlx::query(
             "UPDATE subscriptions SET
-             current_period_start = current_period_end,
-             current_period_end = $1,
-             next_billing_at = $1,
+             current_period_start = $1,
+             current_period_end = $2,
+             next_billing_at = $2,
              last_billed_at = NOW(),
              status = 'active',
              updated_at = NOW()
-             WHERE id = $2",
+             WHERE id = $3",
         )
+        .bind(next_period_start)
         .bind(next_period_end)
         .bind(sub_id)
         .execute(&mut *tx)
@@ -757,15 +792,10 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
 
 pub(crate) fn calculate_subscription_period_end(
     start: chrono::DateTime<chrono::Utc>,
-    billing_period: &str,
 ) -> chrono::DateTime<chrono::Utc> {
     use chrono::{Datelike, NaiveDate};
 
-    let add_months = match billing_period {
-        "yearly" => 12,
-        "2year" => 24,
-        _ => 1,
-    };
+    let add_months = 1;
 
     let total_months = start.month0() as i32 + add_months;
     let target_year = start.year() + total_months / 12;

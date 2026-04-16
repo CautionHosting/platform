@@ -37,17 +37,6 @@
       "storage_gb": 10000
     }
   },
-  "extra_block": {
-    "annual_cents": 0,
-    "enclaves": 1,
-    "vcpu": 16,
-    "ram_gb": 64,
-    "storage_gb": 500
-  },
-  "billing_discounts": {
-    "yearly_percent_off": 0,
-    "two_year_percent_off": 0
-  },
   "credit_packages": {
     "1000":  { "bonus_percent": 0 },
     "5000":  { "bonus_percent": 0 },

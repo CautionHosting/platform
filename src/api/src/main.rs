@@ -49,10 +49,6 @@ pub(crate) struct PricingConfig {
     #[serde(default)]
     pub(crate) subscription_tiers: std::collections::HashMap<String, TierPricing>,
     #[serde(default)]
-    pub(crate) extra_block: ExtraBlock,
-    #[serde(default)]
-    pub(crate) billing_discounts: BillingDiscounts,
-    #[serde(default)]
     pub(crate) credit_packages: std::collections::HashMap<String, CreditPackagePricing>,
 }
 
@@ -71,40 +67,9 @@ pub(crate) struct TierPricing {
 }
 
 impl TierPricing {
-    pub(crate) fn cycle_price(&self, billing_period: &str, discounts: &BillingDiscounts) -> i64 {
-        match billing_period {
-            "yearly" => {
-                (self.annual_cents as f64 * (1.0 - discounts.yearly_percent_off / 100.0)) as i64
-            }
-            "2year" => {
-                (self.annual_cents as f64 * 2.0 * (1.0 - discounts.two_year_percent_off / 100.0))
-                    as i64
-            }
-            _ => self.annual_cents / 12,
-        }
+    pub(crate) fn monthly_price_cents(&self) -> i64 {
+        self.annual_cents / 12
     }
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub(crate) struct ExtraBlock {
-    #[serde(default)]
-    pub(crate) annual_cents: i64,
-    #[serde(default)]
-    pub(crate) enclaves: i32,
-    #[serde(default)]
-    pub(crate) vcpu: i32,
-    #[serde(default)]
-    pub(crate) ram_gb: i32,
-    #[serde(default)]
-    pub(crate) storage_gb: i32,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub(crate) struct BillingDiscounts {
-    #[serde(default)]
-    pub(crate) yearly_percent_off: f64,
-    #[serde(default)]
-    pub(crate) two_year_percent_off: f64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -138,8 +103,8 @@ impl PricingConfig {
 
     pub(crate) fn subscription_cost_hourly_usd(&self, tier_id: &str) -> Option<f64> {
         const HOURS_PER_YEAR: f64 = 365.0 * 24.0;
-        let yearly_tier_cents = self.subscription_tiers.get(tier_id)?.annual_cents;
-        Some(yearly_tier_cents as f64 / 100.0 / HOURS_PER_YEAR)
+        let annual_tier_cents = self.subscription_tiers.get(tier_id)?.annual_cents;
+        Some(annual_tier_cents as f64 / 100.0 / HOURS_PER_YEAR)
     }
 
     pub(crate) fn load() -> anyhow::Result<Self> {
@@ -1209,8 +1174,8 @@ async fn deploy_logic(
 
     if is_managed_onprem {
         // Managed on-prem: require active subscription with capacity
-        let sub: Option<(Uuid, i32)> = sqlx::query_as(
-            "SELECT id, max_apps FROM subscriptions
+        let sub: Option<(Uuid, String, i32)> = sqlx::query_as(
+            "SELECT id, tier, max_apps FROM subscriptions
              WHERE organization_id = $1 AND status IN ('active', 'past_due') LIMIT 1",
         )
         .bind(req.org_id)
@@ -1223,10 +1188,17 @@ async fn deploy_logic(
             )
         })?;
 
-        let Some((sub_id, max_apps)) = sub else {
+        let Some((sub_id, tier_id, stored_max_apps)) = sub else {
             return Err((StatusCode::PAYMENT_REQUIRED,
                 "Managed on-premises deployment requires an active subscription. Choose a plan in Settings at https://caution.dev".to_string()));
         };
+
+        let max_apps = state
+            .pricing
+            .subscription_tiers
+            .get(&tier_id)
+            .map(|tier| tier.enclaves)
+            .unwrap_or(stored_max_apps);
 
         // Count current managed on-prem apps (exclude this resource if redeploying)
         let current_apps: i64 = sqlx::query_scalar(
@@ -1249,7 +1221,7 @@ async fn deploy_logic(
         // +1 for the app being deployed
         if current_apps + 1 > max_apps as i64 {
             return Err((StatusCode::PAYMENT_REQUIRED,
-                format!("App limit reached ({}/{}). Upgrade your plan or add capacity in Settings at https://caution.dev",
+                format!("App limit reached ({}/{}). Upgrade your plan in Settings at https://caution.dev",
                     current_apps + 1, max_apps)));
         }
 
@@ -2161,10 +2133,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/billing/subscription/change-tier",
             post(subscriptions::change_subscription_tier),
-        )
-        .route(
-            "/billing/subscription/add-capacity",
-            post(subscriptions::add_subscription_capacity),
         )
         .route(
             "/billing/subscription/cancel",

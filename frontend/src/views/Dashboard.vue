@@ -1313,7 +1313,7 @@ make build-cli
           <div class="subscription-details">
             <div class="subscription-detail-item">
               <span class="subscription-detail-label">Price</span>
-              <span class="subscription-detail-value">${{ (subscription.total_price_cents_per_cycle / 100).toLocaleString() }}/{{ subscription.billing_period === '2year' ? '2yr' : subscription.billing_period === 'yearly' ? 'yr' : 'mo' }}</span>
+              <span class="subscription-detail-value">${{ (subscription.price_cents_per_cycle / 100).toLocaleString() }}/mo</span>
             </div>
             <div class="subscription-detail-item">
               <span class="subscription-detail-label">vCPUs</span>
@@ -1505,17 +1505,6 @@ make build-cli
         <h3 class="modal-title">Choose a plan</h3>
         <p class="modal-description">Select a managed on-premises subscription tier.</p>
 
-        <div class="billing-period-toggle">
-          <button
-            v-for="period in ['monthly', 'yearly', '2year']"
-            :key="period"
-            :class="['billing-period-btn', { 'billing-period-btn--active': selectedBillingPeriod === period }]"
-            @click="selectedBillingPeriod = period"
-          >
-            {{ period === 'monthly' ? 'Monthly' : period === 'yearly' ? 'Yearly (10% off)' : '2-Year (20% off)' }}
-          </button>
-        </div>
-
         <div class="tier-cards">
           <button
             v-for="tier in subscriptionTiers"
@@ -1525,7 +1514,7 @@ make build-cli
             @click="selectedTier = tier"
           >
             <span class="tier-card-name">{{ tier.name }}</span>
-            <span class="tier-card-price">{{ formatTierPrice(tier, selectedBillingPeriod) }}<span class="tier-card-period">/{{ selectedBillingPeriod === '2year' ? '2yr' : selectedBillingPeriod === 'yearly' ? 'yr' : 'mo' }}</span></span>
+            <span class="tier-card-price">{{ formatTierPrice(tier) }}<span class="tier-card-period">/mo</span></span>
             <span class="tier-card-limits">{{ tier.enclaves }} {{ tier.enclaves === 1 ? 'enclave' : 'enclaves' }} &middot; {{ tier.vcpu }} vCPUs &middot; {{ tier.ram_gb }} GB RAM</span>
           </button>
         </div>
@@ -2397,7 +2386,6 @@ export default {
     const subscriptionTiers = ref([]);
     const showSelectPlanModal = ref(false);
     const selectedTier = ref(null);
-    const selectedBillingPeriod = ref('monthly');
     const subscribing = ref(false);
     const subscribeError = ref('');
 
@@ -2965,14 +2953,9 @@ export default {
       }
     };
 
-    const formatTierPrice = (tier, period) => {
-      const cents = tier.prices?.[period] || 0;
+    const formatTierPrice = (tier) => {
+      const cents = tier.price_cents_per_cycle || 0;
       return `$${(cents / 100).toLocaleString()}`;
-    };
-
-    const formatBillingPeriod = (period) => {
-      const labels = { monthly: 'Monthly', yearly: 'Yearly', '2year': '2-Year' };
-      return labels[period] || period;
     };
 
     const doSubscribe = async () => {
@@ -2985,7 +2968,6 @@ export default {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             tier_id: selectedTier.value.id,
-            billing_period: selectedBillingPeriod.value,
           }),
         });
         if (response.ok) {
@@ -4209,13 +4191,11 @@ export default {
       subscriptionTiers,
       showSelectPlanModal,
       selectedTier,
-      selectedBillingPeriod,
       subscribing,
       subscribeError,
       loadSubscription,
       loadSubscriptionTiers,
       formatTierPrice,
-      formatBillingPeriod,
       doSubscribe,
       cancelSubscription,
       reactivateSubscription,
@@ -6972,37 +6952,6 @@ export default {
 
 .subscription-empty p {
   margin-bottom: 0.75rem;
-}
-
-/* Plan selection modal */
-.billing-period-toggle {
-  display: flex;
-  gap: 0;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  overflow: hidden;
-  margin-bottom: 1rem;
-}
-
-.billing-period-btn {
-  flex: 1;
-  padding: 0.5rem;
-  font-size: 0.8125rem;
-  font-weight: 500;
-  border: none;
-  background: #fff;
-  color: #6b7280;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-
-.billing-period-btn:not(:last-child) {
-  border-right: 1px solid #e5e7eb;
-}
-
-.billing-period-btn--active {
-  background: #111827;
-  color: #fff;
 }
 
 .tier-cards {
