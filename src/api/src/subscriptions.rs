@@ -212,7 +212,7 @@ pub async fn subscribe(
         .subscription_cost_hourly_usd(&req.tier_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
 
-    if balance_cents <= cost_hourly * 100 * 24 {
+    if balance_cents <= f64::round(cost_hourly * 100. * 24.) as i64 {
         return Err((
             StatusCode::PAYMENT_REQUIRED,
             "insufficient_balance".to_string(),
