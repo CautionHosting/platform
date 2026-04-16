@@ -1232,7 +1232,7 @@ async fn deploy_logic(
             sub_id
         );
     } else {
-        // Fully managed: require >= $25 in wallet credits (org-level)
+        // Fully managed: require >= $25 in derived org credits
         let balance = crate::billing::get_ledger_balance_cents(&state.db, req.org_id)
             .await
             .map_err(|e| {

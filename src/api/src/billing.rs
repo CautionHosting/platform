@@ -1289,19 +1289,6 @@ pub async fn redeem_credit_code(
             )
         })?;
 
-    // Apply credits within the same transaction so redemption + credit are atomic
-    let new_balance: i64 = sqlx::query_scalar(
-        "INSERT INTO wallet_balance (organization_id, balance_cents)
-         VALUES ($1, $2)
-         ON CONFLICT (organization_id) DO UPDATE SET balance_cents = wallet_balance.balance_cents + $2
-         RETURNING balance_cents"
-    )
-    .bind(org_id)
-    .bind(amount_cents)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to apply credit: {}", e)))?;
-
     sqlx::query(
         "INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
          VALUES ($1, $2, $3, 'code_redemption', 'Redeemed credit code')",
@@ -1317,6 +1304,15 @@ pub async fn redeem_credit_code(
             format!("Failed to record ledger entry: {}", e),
         )
     })?;
+
+    let new_balance = get_ledger_balance_cents(&mut *tx, org_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to compute balance: {}", e),
+            )
+        })?;
 
     tx.commit().await.map_err(|e| {
         (
@@ -1340,8 +1336,7 @@ pub async fn redeem_credit_code(
     })))
 }
 
-/// Atomically upsert wallet_balance and insert a credit_ledger row.
-/// Returns the new balance.
+/// Atomically insert a credit_ledger row and return the derived balance.
 pub async fn apply_credit(
     db: &PgPool,
     org_id: Uuid,
@@ -1357,18 +1352,6 @@ pub async fn apply_credit(
         .await
         .map_err(|e| format!("Failed to begin transaction: {}", e))?;
 
-    let new_balance: i64 = sqlx::query_scalar(
-        "INSERT INTO wallet_balance (organization_id, balance_cents)
-         VALUES ($1, $2)
-         ON CONFLICT (organization_id) DO UPDATE SET balance_cents = wallet_balance.balance_cents + $2
-         RETURNING balance_cents"
-    )
-    .bind(org_id)
-    .bind(delta_cents)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| format!("Failed to upsert wallet_balance: {}", e))?;
-
     sqlx::query(
         "INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description, paddle_transaction_id, invoice_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7)"
@@ -1383,6 +1366,10 @@ pub async fn apply_credit(
     .execute(&mut *tx)
     .await
     .map_err(|e| format!("Failed to insert credit_ledger: {}", e))?;
+
+    let new_balance = get_ledger_balance_cents(&mut *tx, org_id)
+        .await
+        .map_err(|e| format!("Failed to compute balance: {}", e))?;
 
     tx.commit()
         .await

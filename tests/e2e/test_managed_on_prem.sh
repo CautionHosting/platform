@@ -213,8 +213,6 @@ docker exec postgres-test psql -U postgres -d caution_test -c "
 DELETE FROM credit_ledger WHERE organization_id = '$ORG_ID';
 INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
 VALUES ('$ORG_ID', '$USER_ID', 10000, 'purchase', 'e2e managed on-prem gate seed');
-INSERT INTO wallet_balance (organization_id, balance_cents) VALUES ('$ORG_ID', 10000)
-ON CONFLICT (organization_id) DO UPDATE SET balance_cents = 10000;
 " >/dev/null 2>&1 || log "  Warning: could not seed credits"
 
 # Seed active subscription for managed on-prem deploy gate

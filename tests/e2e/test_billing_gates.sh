@@ -82,16 +82,13 @@ log() {
   echo "[billing-gates] $*"
 }
 
-# Helper: set effective balance for the org in both the ledgers and the cache table.
+# Helper: set an exact derived balance for the org.
 set_balance() {
   local cents=$1
   docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
   DELETE FROM credit_ledger WHERE organization_id = '$ORG_ID';
   DELETE FROM usage_ledger WHERE organization_id = '$ORG_ID';
   DELETE FROM subscription_ledger WHERE organization_id = '$ORG_ID';
-  INSERT INTO wallet_balance (organization_id, balance_cents)
-  VALUES ('$ORG_ID', $cents)
-  ON CONFLICT (organization_id) DO UPDATE SET balance_cents = $cents;
   " >/dev/null 2>&1
 
   if [ "$cents" -gt 0 ]; then

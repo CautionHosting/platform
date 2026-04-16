@@ -4,7 +4,7 @@
 //! Webhook handlers for Paddle billing events
 //!
 //! Paddle acts as merchant of record — it handles payment collection,
-//! so we no longer need charge_payment_method() or wallet logic.
+//! so we no longer need charge_payment_method() or cached balance logic.
 
 use axum::{
     extract::State,
@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::sync::Arc;
 
+use crate::credits::get_ledger_balance_cents;
 use crate::AppState;
 
 /// Paddle webhook payload
@@ -285,19 +286,8 @@ async fn handle_transaction_completed(
                 org_id
             );
 
-            // Deposit credits to wallet (wallet_balance keyed by organization_id)
+            // Record the deposited credits in the source-of-truth ledger.
             let mut tx = state.pool.begin().await?;
-
-            let new_balance: i64 = sqlx::query_scalar(
-                "INSERT INTO wallet_balance (organization_id, balance_cents)
-                 VALUES ($1, $2)
-                 ON CONFLICT (organization_id) DO UPDATE SET balance_cents = wallet_balance.balance_cents + $2
-                 RETURNING balance_cents"
-            )
-            .bind(org_id)
-            .bind(total_cents)
-            .fetch_one(&mut *tx)
-            .await?;
 
             sqlx::query(
                 "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, paddle_transaction_id)
@@ -309,6 +299,8 @@ async fn handle_transaction_completed(
             .bind(transaction_id)
             .execute(&mut *tx)
             .await?;
+
+            let new_balance = get_ledger_balance_cents(&mut *tx, org_id).await?;
 
             tx.commit().await?;
 

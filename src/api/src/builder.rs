@@ -843,7 +843,7 @@ async fn bill_builder_usage(
                 organization_id, application_id, resource_id, provider, resource_type,
                 quantity, unit, base_unit_cost_usd, margin_percent, recorded_at, metadata
              )
-             VALUES ($1, $2, $3, 'aws', 'compute', $4, 'hours', $5, $6, NOW(), $7)"
+             VALUES ($1, $2, $3, 'aws', 'compute', $4, 'hours', $5, $6, NOW(), $7)",
         )
         .bind(org_id)
         .bind(app_id)
@@ -860,32 +860,17 @@ async fn bill_builder_usage(
         .execute(&mut *tx)
         .await?;
 
-        // Deduct up to available balance (can't go negative due to CHECK constraint)
-        let current_balance = crate::billing::get_ledger_balance_cents(&mut *tx, org_id)
-            .await
-            .unwrap_or(0);
-
-        let actual_deduction = cost_cents.min(current_balance);
-
-        if actual_deduction > 0 {
-            sqlx::query(
-                "UPDATE wallet_balance SET balance_cents = balance_cents - $1 WHERE organization_id = $2"
-            )
-            .bind(actual_deduction)
-            .bind(org_id)
-            .execute(&mut *tx)
-            .await?;
-        }
-
         tx.commit().await?;
         Ok::<_, anyhow::Error>(())
-    }.await {
+    }
+    .await
+    {
         tracing::error!("Failed to bill for build {}: {}", build_id, e);
         return;
     }
 
     tracing::info!(
-        "Builder billing: org={}, build={}, type={}, {:.1}min, ${:.4} ({}c deducted)",
+        "Builder billing: org={}, build={}, type={}, {:.1}min, ${:.4} ({}c debited)",
         org_id,
         build_id,
         instance_type,

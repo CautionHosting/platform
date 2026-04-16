@@ -146,9 +146,8 @@ pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize
     Ok(collected)
 }
 
-/// Collect usage for a resource and deduct credits in real-time.
-/// Returns Ok(true) if a credit deduction occurred, Ok(false) if usage was recorded
-/// but no deduction was needed (e.g. zero cost).
+/// Collect usage for a resource and record billable debits.
+/// Returns Ok(true) if billable usage was recorded, Ok(false) otherwise.
 pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) -> Result<bool> {
     let resource = sqlx::query_as::<_, TrackedResource>(
         r#"
@@ -248,18 +247,7 @@ pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) 
         cost
     );
 
-    // Real-time credit deduction (wallet_balance keyed by organization_id)
     let cost_cents = (cost * 100.0).round() as i64;
-    if cost_cents > 0 {
-        let (_applied, _remainder, _new_balance) = crate::credits::deduct_realtime_usage(
-            &state.pool,
-            resource.organization_id,
-            cost_cents,
-            resource_id,
-            hours,
-        )
-        .await?;
-    }
 
     // Collect network egress via CloudWatch (best-effort, don't block compute billing)
     if let Err(e) = collect_network_egress(state, &resource, last_billed, now).await {
@@ -378,15 +366,6 @@ async fn collect_network_egress(
     .bind(end)
     .bind(&usage.metadata)
     .execute(&state.pool)
-    .await?;
-
-    crate::credits::deduct_realtime_usage(
-        &state.pool,
-        resource.organization_id,
-        cost_cents,
-        &resource.resource_id,
-        gb,
-    )
     .await?;
 
     tracing::info!(

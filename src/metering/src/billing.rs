@@ -61,32 +61,6 @@ async fn billing_user_for_org(pool: &PgPool, organization_id: uuid::Uuid) -> Res
     .context("Organization has no members for billing")
 }
 
-async fn apply_locked_credit_deduction(
-    tx: &mut Transaction<'_, Postgres>,
-    organization_id: uuid::Uuid,
-    credits_to_apply: i64,
-    _description: &str,
-    _invoice_id: Option<uuid::Uuid>,
-) -> Result<i64> {
-    if credits_to_apply <= 0 {
-        return Ok(0);
-    }
-
-    let new_balance: i64 = sqlx::query_scalar(
-        "UPDATE wallet_balance
-         SET balance_cents = balance_cents - $2, updated_at = NOW()
-         WHERE organization_id = $1 AND balance_cents >= $2
-         RETURNING balance_cents",
-    )
-    .bind(organization_id)
-    .bind(credits_to_apply)
-    .fetch_optional(&mut **tx)
-    .await?
-    .context("Insufficient locked balance for credit deduction")?;
-
-    Ok(new_balance)
-}
-
 async fn close_open_subscription_segment(
     tx: &mut Transaction<'_, Postgres>,
     subscription_id: uuid::Uuid,
@@ -267,19 +241,9 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
         };
 
         let mut tx = state.pool.begin().await?;
-        let _locked_wallet_row: Option<i64> = sqlx::query_scalar(
-            "SELECT COALESCE(balance_cents, 0)
-             FROM wallet_balance
-             WHERE organization_id = $1
-             FOR UPDATE",
-        )
-        .bind(org_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let balance_cents = get_ledger_balance_cents(&mut *tx, org_id).await?;
 
-        let locked_balance = get_ledger_balance_cents(&mut *tx, org_id).await?;
-
-        let credits_applied = locked_balance.min(remaining_cost_cents);
+        let credits_applied = balance_cents.min(remaining_cost_cents);
         let remainder_cents = remaining_cost_cents - credits_applied;
         let mut paddle_transaction_id: Option<String> = None;
 
@@ -392,15 +356,6 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
             .fetch_one(&mut *tx)
             .await?
         };
-
-        apply_locked_credit_deduction(
-            &mut tx,
-            org_id,
-            credits_applied,
-            &format!("Monthly billing: {}", billing_period),
-            Some(invoice_id),
-        )
-        .await?;
 
         sqlx::query(
             r#"
