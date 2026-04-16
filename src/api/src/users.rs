@@ -12,9 +12,9 @@ use sqlx::FromRow;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{AppState, AuthContext};
 use crate::validated_types;
 use crate::validated_types::UpdateUserRequest;
+use crate::{AppState, AuthContext};
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct User {
@@ -32,7 +32,7 @@ pub async fn get_current_user(
 ) -> Result<Json<User>, StatusCode> {
     let user = sqlx::query_as::<_, User>(
         "SELECT id, username, email, is_active, created_at, updated_at
-         FROM users WHERE id = $1"
+         FROM users WHERE id = $1",
     )
     .bind(auth.user_id)
     .fetch_one(&state.db)
@@ -96,8 +96,8 @@ pub async fn update_current_user(
 
     // Send verification email for the new address
     if let (Some(email), Some(token)) = (&new_email, &verification_token) {
-        let email_service_url = std::env::var("EMAIL_SERVICE_URL")
-            .unwrap_or_else(|_| "http://email:8082".to_string());
+        let email_service_url =
+            std::env::var("EMAIL_SERVICE_URL").unwrap_or_else(|_| "http://email:8082".to_string());
 
         let client = reqwest::Client::new();
         let email_request = serde_json::json!({

@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use enclave_builder::{EnclaveBuilder, EnclaveManifest, EnclaveSource, FrameworkSource, UserImage};
 
 fn env_flag(name: &str) -> bool {
@@ -38,13 +38,21 @@ fn ports_from_env() -> Vec<u16> {
 fn enclave_source_from_manifest(manifest: &EnclaveManifest) -> Result<(String, String)> {
     match &manifest.enclave_source {
         EnclaveSource::GitArchive { urls, commit } => {
-            let url = urls.first().cloned().context("manifest enclave_source.urls is empty")?;
+            let url = urls
+                .first()
+                .cloned()
+                .context("manifest enclave_source.urls is empty")?;
             let version = commit.clone().unwrap_or_else(|| "main".to_string());
             Ok((url, version))
         }
-        EnclaveSource::GitRepository { url, branch, commit } => {
-            Ok((url.clone(), commit.clone().unwrap_or_else(|| branch.clone())))
-        }
+        EnclaveSource::GitRepository {
+            url,
+            branch,
+            commit,
+        } => Ok((
+            url.clone(),
+            commit.clone().unwrap_or_else(|| branch.clone()),
+        )),
         EnclaveSource::Local { path } => Ok((path.clone(), "local".to_string())),
     }
 }
@@ -67,21 +75,33 @@ async fn main() -> Result<()> {
     let no_cache = env_flag("CAUTION_NO_CACHE");
     let ports = ports_from_env();
 
-    tokio::fs::create_dir_all(&work_dir).await
+    tokio::fs::create_dir_all(&work_dir)
+        .await
         .with_context(|| format!("Failed to create work dir {}", work_dir.display()))?;
     if let Some(parent) = output_eif.parent() {
-        tokio::fs::create_dir_all(parent).await
+        tokio::fs::create_dir_all(parent)
+            .await
             .with_context(|| format!("Failed to create output dir {}", parent.display()))?;
     }
 
-    let manifest = EnclaveManifest::read_from_file(&manifest_path).await
+    let manifest = EnclaveManifest::read_from_file(&manifest_path)
+        .await
         .with_context(|| format!("Failed to read manifest {}", manifest_path.display()))?;
 
     let (enclave_source, enclave_version) = enclave_source_from_manifest(&manifest)?;
     let framework_source = framework_source_from_manifest(&manifest);
-    let app_source_urls = manifest.app_source.as_ref().map(|source| source.urls.clone());
-    let app_branch = manifest.app_source.as_ref().and_then(|source| source.branch.clone());
-    let app_commit = manifest.app_source.as_ref().map(|source| source.commit.clone());
+    let app_source_urls = manifest
+        .app_source
+        .as_ref()
+        .map(|source| source.urls.clone());
+    let app_branch = manifest
+        .app_source
+        .as_ref()
+        .and_then(|source| source.branch.clone());
+    let app_commit = manifest
+        .app_source
+        .as_ref()
+        .map(|source| source.commit.clone());
     let binary_path = manifest.binary.clone();
     let run_command = manifest.run_command.clone();
     let metadata = manifest.metadata.clone();
@@ -96,35 +116,41 @@ async fn main() -> Result<()> {
     .with_work_dir(work_dir.clone())
     .with_no_cache(no_cache);
 
-    let user_image = UserImage { reference: image_ref };
+    let user_image = UserImage {
+        reference: image_ref,
+    };
     let deployment = if let Some(binary_path) = binary_path {
-        builder.build_enclave_auto(
-            &user_image,
-            &binary_path,
-            run_command,
-            app_source_urls,
-            app_branch,
-            app_commit,
-            metadata,
-            Some(manifest),
-            &ports,
-            e2e,
-            locksmith,
-        ).await?
+        builder
+            .build_enclave_auto(
+                &user_image,
+                &binary_path,
+                run_command,
+                app_source_urls,
+                app_branch,
+                app_commit,
+                metadata,
+                Some(manifest),
+                &ports,
+                e2e,
+                locksmith,
+            )
+            .await?
     } else {
-        builder.build_enclave(
-            &user_image,
-            None,
-            run_command,
-            app_source_urls,
-            app_branch,
-            app_commit,
-            metadata,
-            Some(manifest),
-            &ports,
-            e2e,
-            locksmith,
-        ).await?
+        builder
+            .build_enclave(
+                &user_image,
+                None,
+                run_command,
+                app_source_urls,
+                app_branch,
+                app_commit,
+                metadata,
+                Some(manifest),
+                &ports,
+                e2e,
+                locksmith,
+            )
+            .await?
     };
 
     let generated_pcrs = deployment.eif.path.with_extension("pcrs");
@@ -132,9 +158,11 @@ async fn main() -> Result<()> {
         bail!("Expected PCR output at {}", generated_pcrs.display());
     }
 
-    tokio::fs::copy(&deployment.eif.path, &output_eif).await
+    tokio::fs::copy(&deployment.eif.path, &output_eif)
+        .await
         .with_context(|| format!("Failed to copy EIF to {}", output_eif.display()))?;
-    tokio::fs::copy(&generated_pcrs, &output_pcrs).await
+    tokio::fs::copy(&generated_pcrs, &output_pcrs)
+        .await
         .with_context(|| format!("Failed to copy PCRs to {}", output_pcrs.display()))?;
 
     println!("EIF written to {}", output_eif.display());

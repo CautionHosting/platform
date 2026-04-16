@@ -13,8 +13,8 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{AppState, AuthContext};
 use crate::validation::validate_email;
+use crate::{AppState, AuthContext};
 
 #[derive(Debug, Serialize)]
 pub struct UserStatus {
@@ -59,10 +59,14 @@ pub async fn get_user_status(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<UserStatus>, StatusCode> {
-    let result: Option<(Option<DateTime<Utc>>, Option<DateTime<Utc>>, Option<uuid::Uuid>)> = sqlx::query_as(
+    let result: Option<(
+        Option<DateTime<Utc>>,
+        Option<DateTime<Utc>>,
+        Option<uuid::Uuid>,
+    )> = sqlx::query_as(
         "SELECT email_verified_at, payment_method_added_at, beta_code_id
          FROM users
-         WHERE id = $1"
+         WHERE id = $1",
     )
     .bind(auth.user_id)
     .fetch_optional(&state.db)
@@ -72,8 +76,8 @@ pub async fn get_user_status(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let (email_verified_at, payment_method_added_at, alpha_code_id) = result
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let (email_verified_at, payment_method_added_at, alpha_code_id) =
+        result.ok_or(StatusCode::NOT_FOUND)?;
 
     // Alpha users skip email verification AND payment
     let is_alpha_user = alpha_code_id.is_some();
@@ -120,7 +124,7 @@ pub async fn send_verification_email(
          SET email = $1,
              email_verification_token = $2,
              email_verification_token_expires_at = $3
-         WHERE id = $4"
+         WHERE id = $4",
     )
     .bind(&payload.email)
     .bind(&token)
@@ -133,8 +137,8 @@ pub async fn send_verification_email(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let email_service_url = std::env::var("EMAIL_SERVICE_URL")
-        .unwrap_or_else(|_| "http://email:8082".to_string());
+    let email_service_url =
+        std::env::var("EMAIL_SERVICE_URL").unwrap_or_else(|_| "http://email:8082".to_string());
 
     let client = reqwest::Client::new();
     let email_request = serde_json::json!({
@@ -182,7 +186,7 @@ pub async fn verify_email(
         "SELECT id, email_verification_token_expires_at
          FROM users
          WHERE email_verification_token = $1
-           AND email_verified_at IS NULL"
+           AND email_verified_at IS NULL",
     )
     .bind(&params.token)
     .fetch_optional(&state.db)
@@ -204,11 +208,7 @@ pub async fn verify_email(
     };
 
     if Utc::now() > expires_at {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            "Verification token has expired",
-        )
-            .into_response());
+        return Ok((StatusCode::BAD_REQUEST, "Verification token has expired").into_response());
     }
 
     sqlx::query(
@@ -216,7 +216,7 @@ pub async fn verify_email(
          SET email_verified_at = NOW(),
              email_verification_token = NULL,
              email_verification_token_expires_at = NULL
-         WHERE id = $1"
+         WHERE id = $1",
     )
     .bind(user_id)
     .execute(&state.db)
@@ -231,13 +231,17 @@ pub async fn verify_email(
     if let Err(e) = crate::provisioning::initialize_user_account(&state.db, user_id).await {
         tracing::error!("Failed to initialize account for user {}: {:?}", user_id, e);
     } else {
-        tracing::info!("Account initialized for user {} after email verification", user_id);
+        tracing::info!(
+            "Account initialized for user {} after email verification",
+            user_id
+        );
     }
 
-    let frontend_url = std::env::var("FRONTEND_URL")
-        .unwrap_or_else(|_| "http://localhost:3000".to_string());
+    let frontend_url =
+        std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
 
-    let html = format!(r#"<!DOCTYPE html>
+    let html = format!(
+        r#"<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
@@ -290,27 +294,21 @@ a:hover {{ background: #333; }}
   <a href="{frontend_url}/login">Go to Login</a>
 </div>
 </body>
-</html>"#);
+</html>"#
+    );
 
-    Ok((
-        StatusCode::OK,
-        [("content-type", "text/html")],
-        html,
-    )
-        .into_response())
+    Ok((StatusCode::OK, [("content-type", "text/html")], html).into_response())
 }
 
 pub async fn check_onboarding_status(db: &PgPool, user_id: uuid::Uuid) -> Result<bool, StatusCode> {
-    let result: Option<bool> = sqlx::query_scalar(
-        "SELECT user_is_onboarded($1)"
-    )
-    .bind(user_id)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to check onboarding status: {:?}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let result: Option<bool> = sqlx::query_scalar("SELECT user_is_onboarded($1)")
+        .bind(user_id)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to check onboarding status: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok(result.unwrap_or(false))
 }

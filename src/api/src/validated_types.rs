@@ -21,12 +21,13 @@ where
     type Rejection = ValidationRejection;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        let Json(value) = Json::<T>::from_request(req, state)
-            .await
-            .map_err(|err| ValidationRejection {
-                message: format!("Invalid JSON: {}", err),
-                status: StatusCode::BAD_REQUEST,
-            })?;
+        let Json(value) =
+            Json::<T>::from_request(req, state)
+                .await
+                .map_err(|err| ValidationRejection {
+                    message: format!("Invalid JSON: {}", err),
+                    status: StatusCode::BAD_REQUEST,
+                })?;
 
         value.validate().map_err(|err| ValidationRejection {
             message: format!("Validation failed: {}", err),
@@ -77,13 +78,11 @@ impl Validate for UpdateUserRequest {
         }
 
         if let Some(username) = &self.username {
-            validation::validate_username(username)
-                .map_err(|e| e.to_string())?;
+            validation::validate_username(username).map_err(|e| e.to_string())?;
         }
 
         if let Some(email) = &self.email {
-            validation::validate_email(email)
-                .map_err(|e| e.to_string())?;
+            validation::validate_email(email).map_err(|e| e.to_string())?;
         }
 
         Ok(())
@@ -97,8 +96,7 @@ pub struct CreateOrganizationRequest {
 
 impl Validate for CreateOrganizationRequest {
     fn validate(&self) -> Result<(), String> {
-        validation::validate_org_name(&self.name)
-            .map_err(|e| format!("Invalid name: {}", e))?;
+        validation::validate_org_name(&self.name).map_err(|e| format!("Invalid name: {}", e))?;
 
         Ok(())
     }
@@ -116,8 +114,7 @@ impl Validate for UpdateOrganizationRequest {
         }
 
         if let Some(name) = &self.name {
-            validation::validate_org_name(name)
-                .map_err(|e| format!("Invalid name: {}", e))?;
+            validation::validate_org_name(name).map_err(|e| format!("Invalid name: {}", e))?;
         }
 
         Ok(())
@@ -132,8 +129,7 @@ pub struct AddMemberRequest {
 
 impl Validate for AddMemberRequest {
     fn validate(&self) -> Result<(), String> {
-        validation::validate_role(&self.role)
-            .map_err(|e| e.to_string())?;
+        validation::validate_role(&self.role).map_err(|e| e.to_string())?;
 
         Ok(())
     }
@@ -146,8 +142,7 @@ pub struct UpdateMemberRequest {
 
 impl Validate for UpdateMemberRequest {
     fn validate(&self) -> Result<(), String> {
-        validation::validate_role(&self.role)
-            .map_err(|e| e.to_string())?;
+        validation::validate_role(&self.role).map_err(|e| e.to_string())?;
 
         Ok(())
     }
@@ -170,8 +165,7 @@ impl Validate for CreateResourceRequest {
         }
 
         if let Some(name) = &self.name {
-            validation::validate_app_name(name)
-                .map_err(|e| format!("Invalid name: {}", e))?;
+            validation::validate_app_name(name).map_err(|e| format!("Invalid name: {}", e))?;
         }
 
         Ok(())
@@ -226,8 +220,7 @@ pub struct RenameResourceRequest {
 
 impl Validate for RenameResourceRequest {
     fn validate(&self) -> Result<(), String> {
-        validation::validate_app_name(&self.name)
-            .map_err(|e| e.to_string())?;
+        validation::validate_app_name(&self.name).map_err(|e| e.to_string())?;
 
         Ok(())
     }

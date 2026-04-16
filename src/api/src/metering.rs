@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use uuid::Uuid;
 
 /// Upsert a tracked resource row for a compute resource that should accrue
@@ -66,8 +66,8 @@ pub async fn stop_tracked_resource(
     internal_service_secret: Option<&str>,
     resource_id: &str,
 ) -> Result<()> {
-    let metering_service_url =
-        std::env::var("METERING_SERVICE_URL").unwrap_or_else(|_| "http://metering:8083".to_string());
+    let metering_service_url = std::env::var("METERING_SERVICE_URL")
+        .unwrap_or_else(|_| "http://metering:8083".to_string());
     let internal_secret = internal_service_secret
         .context("INTERNAL_SERVICE_SECRET must be set to stop tracked resources safely")?;
 

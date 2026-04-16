@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use std::io::{self, Write};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::Duration;
 
@@ -30,12 +33,8 @@ impl Loader {
 
         let handle = thread::spawn(move || {
             let frames = match style {
-                LoaderStyle::KeyTap => vec![
-                    "▹▹▹", "▸▹▹", "▹▸▹", "▹▹▸"
-                ],
-                LoaderStyle::Processing => vec![
-                    "⣼", "⣹", "⢻", "⠿", "⡟", "⣏", "⣧", "⣶"
-                ],
+                LoaderStyle::KeyTap => vec!["▹▹▹", "▸▹▹", "▹▸▹", "▹▹▸"],
+                LoaderStyle::Processing => vec!["⣼", "⣹", "⢻", "⠿", "⡟", "⣏", "⣧", "⣶"],
             };
 
             let mut frame_idx = 0;

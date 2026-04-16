@@ -347,7 +347,11 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
                 continue;
             };
 
-            match state.paddle.create_transaction(&customer_id, line_items).await {
+            match state
+                .paddle
+                .create_transaction(&customer_id, line_items)
+                .await
+            {
                 Ok(txn) => {
                     tracing::info!(
                         "Created Paddle transaction {} for org {} (${:.2}, credits ${:.2})",
@@ -526,7 +530,8 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
         }
 
         let total_charge = base_price + extra_price;
-        let next_period_end = calculate_subscription_period_end(current_period_end, &billing_period);
+        let next_period_end =
+            calculate_subscription_period_end(current_period_end, &billing_period);
 
         let mut tx = state.pool.begin().await?;
         let _locked_wallet_row: Option<i64> = sqlx::query_scalar(
@@ -598,7 +603,11 @@ async fn run_subscription_billing_inner(state: &AppState) -> Result<()> {
                 unit_price_currency: "USD".to_string(),
             }];
 
-            match state.paddle.create_transaction(&customer_id, line_items).await {
+            match state
+                .paddle
+                .create_transaction(&customer_id, line_items)
+                .await
+            {
                 Ok(txn) => {
                     tracing::info!(
                         "Created Paddle transaction {} for sub {} renewal (${:.2}, credits ${:.2})",

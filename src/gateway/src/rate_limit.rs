@@ -2,16 +2,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
-    extract::{Request, ConnectInfo, State},
+    extract::{ConnectInfo, Request, State},
+    http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
-    http::StatusCode,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct RateLimiter {

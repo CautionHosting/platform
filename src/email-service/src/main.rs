@@ -15,9 +15,9 @@ use lettre::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use uuid::Uuid;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
+use uuid::Uuid;
 
 struct AppError(anyhow::Error);
 
@@ -97,14 +97,19 @@ async fn get_sent_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     if !state.test_mode {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "only available in test mode"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "only available in test mode"})),
+        )
+            .into_response();
     }
 
     let sent = state.sent_emails.lock().unwrap_or_else(|e| e.into_inner());
     let template_filter = params.get("template");
     let to_filter = params.get("to");
 
-    let filtered: Vec<&SentEmail> = sent.iter()
+    let filtered: Vec<&SentEmail> = sent
+        .iter()
         .filter(|e| template_filter.map_or(true, |t| &e.template == t))
         .filter(|e| to_filter.map_or(true, |t| &e.to == t))
         .collect();
@@ -112,15 +117,18 @@ async fn get_sent_handler(
     Json(serde_json::json!({
         "count": filtered.len(),
         "emails": filtered,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 /// Clear sent emails store (test mode only).
-async fn clear_sent_handler(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn clear_sent_handler(State(state): State<AppState>) -> impl IntoResponse {
     if !state.test_mode {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "only available in test mode"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "only available in test mode"})),
+        )
+            .into_response();
     }
 
     let mut sent = state.sent_emails.lock().unwrap_or_else(|e| e.into_inner());
@@ -129,7 +137,8 @@ async fn clear_sent_handler(
 
     Json(serde_json::json!({
         "cleared": count,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 async fn send_verification_handler(
@@ -138,7 +147,10 @@ async fn send_verification_handler(
 ) -> Result<Json<SendVerificationResponse>, AppError> {
     info!("Sending verification email to: {}", req.email);
 
-    let verification_url = format!("{}/api/onboarding/verify?token={}", state.base_url, req.token);
+    let verification_url = format!(
+        "{}/api/onboarding/verify?token={}",
+        state.base_url, req.token
+    );
 
     if state.test_mode {
         info!("");
@@ -170,7 +182,10 @@ async fn send_verification_handler(
 
         return Ok(Json(SendVerificationResponse {
             success: true,
-            message: format!("TEST MODE: Verification link logged (not sent to {})", req.email),
+            message: format!(
+                "TEST MODE: Verification link logged (not sent to {})",
+                req.email
+            ),
         }));
     }
 
@@ -297,7 +312,10 @@ async fn send_email_handler(
         info!("========================================");
         info!("To: {}", req.to);
         info!("Subject: {}", subject);
-        info!("Data: {}", serde_json::to_string_pretty(&req.data).unwrap_or_default());
+        info!(
+            "Data: {}",
+            serde_json::to_string_pretty(&req.data).unwrap_or_default()
+        );
         info!("========================================");
         info!("");
 
@@ -313,7 +331,10 @@ async fn send_email_handler(
 
         return Ok(Json(SendEmailResponse {
             success: true,
-            message: format!("TEST MODE: {} email logged (not sent to {})", req.template, req.to),
+            message: format!(
+                "TEST MODE: {} email logged (not sent to {})",
+                req.template, req.to
+            ),
         }));
     }
 
@@ -352,11 +373,7 @@ async fn send_email_handler(
         .send(&email)
         .map_err(|e| anyhow::anyhow!("Failed to send email: {}", e))?;
 
-    info!(
-        "Email sent successfully to {}: {:?}",
-        req.to,
-        result.code()
-    );
+    info!("Email sent successfully to {}: {:?}", req.to, result.code());
 
     Ok(Json(SendEmailResponse {
         success: true,
@@ -366,10 +383,10 @@ async fn send_email_handler(
 
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
-     .replace('<', "&lt;")
-     .replace('>', "&gt;")
-     .replace('"', "&quot;")
-     .replace('\'', "&#x27;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
 }
 
 fn generate_invoice_email(data: &serde_json::Value) -> (String, String, String) {
@@ -385,7 +402,12 @@ fn generate_invoice_email(data: &serde_json::Value) -> (String, String, String) 
     let subject = format!("Invoice {} - Caution", invoice_number_raw);
 
     let pdf_link = pdf_url
-        .map(|url| format!(r#"<p><a href="{}" style="color: #3498db;">Download Invoice PDF</a></p>"#, html_escape(url)))
+        .map(|url| {
+            format!(
+                r#"<p><a href="{}" style="color: #3498db;">Download Invoice PDF</a></p>"#,
+                html_escape(url)
+            )
+        })
         .unwrap_or_default();
 
     let html_body = format!(
@@ -590,13 +612,18 @@ fn generate_payment_failure_email(data: &serde_json::Value) -> (String, String, 
 fn generate_insufficient_balance_email(data: &serde_json::Value) -> (String, String, String) {
     let invoice_number_raw = data["invoice_number"].as_str().unwrap_or("N/A");
     let amount_raw = data["amount"].as_str().unwrap_or("$0.00");
-    let topup_url_raw = data["topup_url"].as_str().unwrap_or("https://caution.co/billing/topup");
+    let topup_url_raw = data["topup_url"]
+        .as_str()
+        .unwrap_or("https://caution.co/billing/topup");
 
     let invoice_number = html_escape(invoice_number_raw);
     let amount = html_escape(amount_raw);
     let topup_url = html_escape(topup_url_raw);
 
-    let subject = format!("Action Required: Insufficient Balance - Invoice {}", invoice_number_raw);
+    let subject = format!(
+        "Action Required: Insufficient Balance - Invoice {}",
+        invoice_number_raw
+    );
 
     let html_body = format!(
         r#"
@@ -800,12 +827,15 @@ async fn main() -> anyhow::Result<()> {
     if test_mode {
         let env = std::env::var("ENVIRONMENT").unwrap_or_default();
         if env == "production" {
-            eprintln!("FATAL: EMAIL_TEST_MODE is enabled in a production environment. Refusing to start.");
+            eprintln!(
+                "FATAL: EMAIL_TEST_MODE is enabled in a production environment. Refusing to start."
+            );
             std::process::exit(1);
         }
     }
 
-    let from_email = std::env::var("FROM_EMAIL").unwrap_or_else(|_| "noreply@localhost".to_string());
+    let from_email =
+        std::env::var("FROM_EMAIL").unwrap_or_else(|_| "noreply@localhost".to_string());
     let from_name = std::env::var("FROM_NAME").unwrap_or_else(|_| "Caution".to_string());
     let base_url =
         std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
@@ -857,19 +887,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/send", post(send_email_handler));
 
     if test_mode {
-        app = app
-            .route("/sent", get(get_sent_handler).delete(clear_sent_handler));
+        app = app.route("/sent", get(get_sent_handler).delete(clear_sent_handler));
         info!("Test mode: GET /sent and DELETE /sent endpoints enabled");
     }
 
-    let app = app
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+    let app = app.layer(TraceLayer::new_for_http()).with_state(state);
 
-    let bind_addr = std::env::var("EMAIL_BIND_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:8082".to_string());
-    let listener = tokio::net::TcpListener::bind(&bind_addr)
-        .await?;
+    let bind_addr =
+        std::env::var("EMAIL_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8082".to_string());
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
 
     info!("Email service listening on {}", bind_addr);
 
@@ -882,10 +908,8 @@ async fn main() -> anyhow::Result<()> {
 
 async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
-    let mut sigterm = tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::terminate(),
-    )
-    .expect("failed to register SIGTERM handler");
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to register SIGTERM handler");
     tokio::select! {
         _ = ctrl_c => tracing::info!("Received SIGINT, shutting down"),
         _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down"),
@@ -1018,11 +1042,23 @@ mod tests {
             };
 
             let (subject, html, text) = result;
-            assert!(!subject.is_empty(), "Subject empty for template: {}", template);
+            assert!(
+                !subject.is_empty(),
+                "Subject empty for template: {}",
+                template
+            );
             assert!(!html.is_empty(), "HTML empty for template: {}", template);
             assert!(!text.is_empty(), "Text empty for template: {}", template);
-            assert!(html.contains("</html>"), "HTML not well-formed for template: {}", template);
-            assert!(text.contains("Caution"), "Text missing branding for template: {}", template);
+            assert!(
+                html.contains("</html>"),
+                "HTML not well-formed for template: {}",
+                template
+            );
+            assert!(
+                text.contains("Caution"),
+                "Text missing branding for template: {}",
+                template
+            );
         }
     }
 

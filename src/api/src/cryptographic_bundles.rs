@@ -52,7 +52,7 @@ pub async fn list_quorum_bundles(
         "SELECT id, organization_id, data, name, labels, created_by, created_at, updated_at
          FROM quorum_bundles
          WHERE organization_id = $1
-         ORDER BY created_at"
+         ORDER BY created_at",
     )
     .bind(org_id)
     .fetch_all(pool)
@@ -70,7 +70,7 @@ pub async fn get_quorum_bundle(
     let row = sqlx::query_as::<_, QuorumBundle>(
         "SELECT id, organization_id, data, name, labels, created_by, created_at, updated_at
          FROM quorum_bundles
-         WHERE organization_id = $1 AND id = $2"
+         WHERE organization_id = $1 AND id = $2",
     )
     .bind(org_id)
     .bind(bundle_id)
@@ -91,7 +91,7 @@ pub async fn create_quorum_bundle(
     let row = sqlx::query_as::<_, QuorumBundle>(
         "INSERT INTO quorum_bundles (organization_id, data, name, labels, created_by)
          VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, organization_id, data, name, labels, created_by, created_at, updated_at"
+         RETURNING id, organization_id, data, name, labels, created_by, created_at, updated_at",
     )
     .bind(org_id)
     .bind(&req.data)
@@ -118,7 +118,7 @@ pub async fn update_quorum_bundle(
              labels = COALESCE($3, labels),
              updated_at = NOW()
          WHERE organization_id = $4 AND id = $5
-         RETURNING id, organization_id, data, name, labels, created_by, created_at, updated_at"
+         RETURNING id, organization_id, data, name, labels, created_by, created_at, updated_at",
     )
     .bind(&req.data)
     .bind(&req.name)
@@ -137,14 +137,12 @@ pub async fn delete_quorum_bundle(
     org_id: Uuid,
     bundle_id: Uuid,
 ) -> Result<bool, (StatusCode, String)> {
-    let result = sqlx::query(
-        "DELETE FROM quorum_bundles WHERE organization_id = $1 AND id = $2"
-    )
-    .bind(org_id)
-    .bind(bundle_id)
-    .execute(pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let result = sqlx::query("DELETE FROM quorum_bundles WHERE organization_id = $1 AND id = $2")
+        .bind(org_id)
+        .bind(bundle_id)
+        .execute(pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -159,7 +157,7 @@ pub async fn list_secrets_bundles(
         "SELECT id, organization_id, data, created_by, created_at, updated_at
          FROM secrets_bundles
          WHERE organization_id = $1
-         ORDER BY created_at"
+         ORDER BY created_at",
     )
     .bind(org_id)
     .fetch_all(pool)
@@ -177,7 +175,7 @@ pub async fn get_secrets_bundle(
     let row = sqlx::query_as::<_, SecretsBundle>(
         "SELECT id, organization_id, data, created_by, created_at, updated_at
          FROM secrets_bundles
-         WHERE organization_id = $1 AND id = $2"
+         WHERE organization_id = $1 AND id = $2",
     )
     .bind(org_id)
     .bind(bundle_id)
@@ -197,7 +195,7 @@ pub async fn create_secrets_bundle(
     let row = sqlx::query_as::<_, SecretsBundle>(
         "INSERT INTO secrets_bundles (organization_id, data, created_by)
          VALUES ($1, $2, $3)
-         RETURNING id, organization_id, data, created_by, created_at, updated_at"
+         RETURNING id, organization_id, data, created_by, created_at, updated_at",
     )
     .bind(org_id)
     .bind(&req.data)
@@ -218,7 +216,7 @@ pub async fn update_secrets_bundle(
     let row = sqlx::query_as::<_, SecretsBundle>(
         "UPDATE secrets_bundles SET data = COALESCE($1, data), updated_at = NOW()
          WHERE organization_id = $2 AND id = $3
-         RETURNING id, organization_id, data, created_by, created_at, updated_at"
+         RETURNING id, organization_id, data, created_by, created_at, updated_at",
     )
     .bind(&req.data)
     .bind(org_id)
@@ -235,14 +233,12 @@ pub async fn delete_secrets_bundle(
     org_id: Uuid,
     bundle_id: Uuid,
 ) -> Result<bool, (StatusCode, String)> {
-    let result = sqlx::query(
-        "DELETE FROM secrets_bundles WHERE organization_id = $1 AND id = $2"
-    )
-    .bind(org_id)
-    .bind(bundle_id)
-    .execute(pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let result = sqlx::query("DELETE FROM secrets_bundles WHERE organization_id = $1 AND id = $2")
+        .bind(org_id)
+        .bind(bundle_id)
+        .execute(pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(result.rows_affected() > 0)
 }

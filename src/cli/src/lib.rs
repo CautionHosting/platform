@@ -2,32 +2,34 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use anyhow::{Context, Result, bail};
+use authenticator::{
+    Pin, RegisterResult, SignResult, StatusPinUv, StatusUpdate,
+    authenticatorservice::{AuthenticatorService, RegisterArgs, SignArgs},
+    crypto::COSEAlgorithm,
+    ctap2::server::{
+        PublicKeyCredentialDescriptor, PublicKeyCredentialParameters,
+        PublicKeyCredentialUserEntity, RelyingParty, Transport,
+    },
+    errors::AuthenticatorError,
+    statecallback::StateCallback,
+};
+use base64::{Engine as _, engine::general_purpose};
+use bootproof_sdk::{
+    VerifiableSignedAttestationFormat,
+    format::nitro::{Nitro, NitroPcrs},
+};
 use clap::{Parser, Subcommand};
+use enclave_builder::{BuildConfig, build_user_image};
 use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_cbor;
-use base64::{Engine as _, engine::general_purpose};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::mpsc::channel;
 use std::time::Duration;
-use std::process::Command;
-use authenticator::{
-    authenticatorservice::{AuthenticatorService, RegisterArgs, SignArgs},
-    ctap2::server::{
-        PublicKeyCredentialParameters, RelyingParty,
-        PublicKeyCredentialUserEntity, PublicKeyCredentialDescriptor,
-        Transport,
-    },
-    crypto::COSEAlgorithm,
-    errors::AuthenticatorError,
-    statecallback::StateCallback,
-    Pin, RegisterResult, SignResult, StatusUpdate, StatusPinUv,
-};
-use sha2::{Sha256, Digest};
-use enclave_builder::{BuildConfig, build_user_image};
-use bootproof_sdk::{VerifiableSignedAttestationFormat, format::nitro::{Nitro, NitroPcrs}};
 
 mod loader;
 use loader::{Loader, LoaderStyle};
@@ -36,7 +38,7 @@ mod attestation;
 
 fn prompt_for_pin() -> Result<Option<String>> {
     let pin = rpassword::prompt_password(
-        "Enter your security key PIN (or press Enter if no PIN is set): "
+        "Enter your security key PIN (or press Enter if no PIN is set): ",
     )?;
 
     if pin.trim().is_empty() {
@@ -74,14 +76,20 @@ fn log_verbose(verbose: bool, msg: &str) {
 
 fn ssh_fingerprint(key: &str) -> String {
     let parts: Vec<&str> = key.split_whitespace().collect();
-    parts.get(1)
+    parts
+        .get(1)
         .and_then(|key_data| general_purpose::STANDARD.decode(key_data).ok())
-        .map(|decoded| format!("SHA256:{}", general_purpose::STANDARD_NO_PAD.encode(Sha256::digest(&decoded))))
+        .map(|decoded| {
+            format!(
+                "SHA256:{}",
+                general_purpose::STANDARD_NO_PAD.encode(Sha256::digest(&decoded))
+            )
+        })
         .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn render_qr_code(url: &str) -> Result<()> {
-    use qrcode::{QrCode, EcLevel};
+    use qrcode::{EcLevel, QrCode};
 
     let code = QrCode::with_error_correction_level(url.as_bytes(), EcLevel::L)
         .context("Failed to generate QR code")?;
@@ -110,7 +118,11 @@ fn render_qr_code(url: &str) -> Result<()> {
         let mut line = String::new();
         for col in 0..total_width {
             let top = is_dark(row, col);
-            let bottom = if row + 1 < total_height { is_dark(row + 1, col) } else { false };
+            let bottom = if row + 1 < total_height {
+                is_dark(row + 1, col)
+            } else {
+                false
+            };
 
             match (top, bottom) {
                 (true, true) => line.push(' '),
@@ -131,7 +143,10 @@ fn check_dependencies(verbose: bool) -> Result<()> {
 
     let usb_dev_path = std::path::Path::new("/dev/bus/usb");
     if !usb_dev_path.exists() {
-        log_verbose(verbose, "Warning: /dev/bus/usb not found - USB access may not work");
+        log_verbose(
+            verbose,
+            "Warning: /dev/bus/usb not found - USB access may not work",
+        );
     } else {
         log_verbose(verbose, "USB device access available");
     }
@@ -142,7 +157,10 @@ fn check_dependencies(verbose: bool) -> Result<()> {
 }
 
 async fn check_gateway_connectivity(url: &str, verbose: bool) -> Result<()> {
-    log_verbose(verbose, &format!("Testing connectivity to gateway: {}", url));
+    log_verbose(
+        verbose,
+        &format!("Testing connectivity to gateway: {}", url),
+    );
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -153,12 +171,18 @@ async fn check_gateway_connectivity(url: &str, verbose: bool) -> Result<()> {
 
     match client.head(url).send().await {
         Ok(resp) => {
-            log_verbose(verbose, &format!("Gateway reachable (status: {})", resp.status()));
+            log_verbose(
+                verbose,
+                &format!("Gateway reachable (status: {})", resp.status()),
+            );
             Ok(())
         }
         Err(e) => {
             log_verbose(verbose, &format!("HEAD request failed (this is ok): {}", e));
-            log_verbose(verbose, "Skipping connectivity check, will test during auth");
+            log_verbose(
+                verbose,
+                "Skipping connectivity check, will test during auth",
+            );
             Ok(())
         }
     }
@@ -172,13 +196,24 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    #[arg(short, long, default_value = "https://alpha.caution.co", env = "CAUTION_BACKEND_URL", help = "Caution API server URL", global = true)]
+    #[arg(
+        short,
+        long,
+        default_value = "https://alpha.caution.co",
+        env = "CAUTION_BACKEND_URL",
+        help = "Caution API server URL",
+        global = true
+    )]
     url: String,
 
     #[arg(short, long, help = "Enable verbose output")]
     verbose: bool,
 
-    #[arg(long, global = true, help = "Use QR code for cross-device FIDO2 signing (no local security key needed)")]
+    #[arg(
+        long,
+        global = true,
+        help = "Use QR code for cross-device FIDO2 signing (no local security key needed)"
+    )]
     qr: bool,
 }
 
@@ -191,7 +226,10 @@ enum Commands {
     },
     #[command(about = "Login to your Caution account")]
     Login {
-        #[arg(long, help = "Use QR code for cross-device authentication (no local security key needed)")]
+        #[arg(
+            long,
+            help = "Use QR code for cross-device authentication (no local security key needed)"
+        )]
         qr: bool,
     },
     #[command(about = "Logout and clear local session")]
@@ -200,15 +238,32 @@ enum Commands {
     Init {
         #[arg(long, help = "Set up managed on-premises deployment")]
         managed_on_prem: bool,
-        #[arg(long, requires = "managed_on_prem", help = "Cloud platform (default: aws)", default_value = "aws")]
+        #[arg(
+            long,
+            requires = "managed_on_prem",
+            help = "Cloud platform (default: aws)",
+            default_value = "aws"
+        )]
         platform: String,
         #[arg(long, help = "App name (default: current directory name)")]
         name: Option<String>,
-        #[arg(long, requires = "managed_on_prem", help = "AWS region (default: us-west-2)")]
+        #[arg(
+            long,
+            requires = "managed_on_prem",
+            help = "AWS region (default: us-west-2)"
+        )]
         region: Option<String>,
-        #[arg(long, requires = "managed_on_prem", help = "Use local provisioner image (skip docker pull)")]
+        #[arg(
+            long,
+            requires = "managed_on_prem",
+            help = "Use local provisioner image (skip docker pull)"
+        )]
         local: bool,
-        #[arg(long, requires = "managed_on_prem", help = "Path to encrypted credentials file from manual Docker setup")]
+        #[arg(
+            long,
+            requires = "managed_on_prem",
+            help = "Path to encrypted credentials file from manual Docker setup"
+        )]
         config: Option<PathBuf>,
     },
     #[command(about = "Tear down a managed on-premises deployment")]
@@ -220,9 +275,14 @@ enum Commands {
         #[arg(short, long, help = "Skip confirmation prompt")]
         force: bool,
     },
-    #[command(about = "Verify enclave attestation. By default, fetches manifest from the remote enclave and reproduces the build.")]
+    #[command(
+        about = "Verify enclave attestation. By default, fetches manifest from the remote enclave and reproduces the build."
+    )]
     Verify {
-        #[arg(long, help = "Attestation endpoint URL (default: inferred from .caution/deployment)")]
+        #[arg(
+            long,
+            help = "Attestation endpoint URL (default: inferred from .caution/deployment)"
+        )]
         attestation_url: Option<String>,
         #[arg(long, help = "Build from current directory instead of remote manifest")]
         from_local: bool,
@@ -232,7 +292,10 @@ enum Commands {
         pcrs: Option<String>,
         #[arg(long, help = "Force rebuild, ignore cache")]
         no_cache: bool,
-        #[arg(long, help = "Save verified PCR hashes to .caution/trusted_hashes.json for use by send-shard")]
+        #[arg(
+            long,
+            help = "Save verified PCR hashes to .caution/trusted_hashes.json for use by send-shard"
+        )]
         save_pcrs: bool,
     },
     #[command(about = "Manage deployed applications")]
@@ -279,7 +342,10 @@ enum AppCommands {
         id: Option<String>,
         #[arg(short, long, help = "Skip confirmation prompt")]
         force: bool,
-        #[arg(long, help = "Force delete from database even if cloud resource cleanup fails")]
+        #[arg(
+            long,
+            help = "Force delete from database even if cloud resource cleanup fails"
+        )]
         force_delete: bool,
     },
     #[command(about = "Build enclave image locally for inspection")]
@@ -370,13 +436,21 @@ enum SecretCommands {
         keyring: PathBuf,
         #[arg(long, requires = "max", help = "Minimum shares needed to reconstruct")]
         threshold: Option<u8>,
-        #[arg(long, requires = "threshold", help = "Total number of shares to generate")]
+        #[arg(
+            long,
+            requires = "threshold",
+            help = "Total number of shares to generate"
+        )]
         max: Option<u8>,
         #[arg(long, help = "Skip uploading bundle to Caution")]
         no_upload: bool,
         #[arg(long, help = "Name for the quorum bundle")]
         name: Option<String>,
-        #[arg(long = "label", help = "Label in key=value format (can be repeated)", value_name = "KEY=VALUE")]
+        #[arg(
+            long = "label",
+            help = "Label in key=value format (can be repeated)",
+            value_name = "KEY=VALUE"
+        )]
         labels: Vec<String>,
     },
     #[command(about = "Rename a quorum bundle")]
@@ -393,7 +467,10 @@ enum SecretCommands {
     },
     #[command(about = "Send a shard to a running enclave's locksmith daemon")]
     SendShard {
-        #[arg(long, help = "App ID or resource name (defaults to current deployment)")]
+        #[arg(
+            long,
+            help = "App ID or resource name (defaults to current deployment)"
+        )]
         app: Option<String>,
         #[arg(long, help = "Path to quorum bundle JSON file")]
         bundle: Option<PathBuf>,
@@ -555,14 +632,16 @@ struct QrSignStatusResponse {
 
 /// Extract session ID from Set-Cookie header
 fn extract_session_from_cookies(response: &reqwest::Response) -> Option<String> {
-    response.headers()
+    response
+        .headers()
         .get_all("set-cookie")
         .iter()
         .filter_map(|v| v.to_str().ok())
         .find(|s| s.starts_with("caution_session="))
         .and_then(|cookie| {
             // Parse "caution_session=VALUE; path=/; ..."
-            cookie.strip_prefix("caution_session=")
+            cookie
+                .strip_prefix("caution_session=")
                 .and_then(|rest| rest.split(';').next())
                 .map(|s| s.to_string())
         })
@@ -647,8 +726,7 @@ impl ApiClient {
 
         log_verbose(verbose, &format!("Config directory: {:?}", config_dir));
 
-        fs::create_dir_all(&config_dir)
-            .context("Failed to create config directory")?;
+        fs::create_dir_all(&config_dir).context("Failed to create config directory")?;
         let config_path = config_dir.join("config.json");
 
         // Local deployment info in the current git repo (optional - may not have a valid cwd)
@@ -675,13 +753,15 @@ impl ApiClient {
 
     /// Get deployment path, creating .caution directory if needed
     fn get_deployment_path(&self) -> Result<&PathBuf> {
-        self.deployment_path.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Cannot access current directory. Please run this command from a valid directory."))
+        self.deployment_path.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cannot access current directory. Please run this command from a valid directory."
+            )
+        })
     }
 
     fn frontend_url(&self) -> String {
-        std::env::var("FRONTEND_URL")
-            .unwrap_or_else(|_| self.base_url.clone())
+        std::env::var("FRONTEND_URL").unwrap_or_else(|_| self.base_url.clone())
     }
 
     fn legal_document_label(document_type: &str) -> &'static str {
@@ -698,8 +778,7 @@ impl ApiClient {
 
         format!(
             "You need to accept updated legal documents before continuing.\nRequired: {}\nOpen the Caution web app and accept the update:\n  {}/dashboard",
-            document_label,
-            frontend_url
+            document_label, frontend_url
         )
     }
 
@@ -761,17 +840,22 @@ impl ApiClient {
     }
 
     fn is_session_expired(&self, config: &Config) -> bool {
-        use chrono::{DateTime, Utc, NaiveDateTime};
+        use chrono::{DateTime, NaiveDateTime, Utc};
 
         if let Ok(expires) = DateTime::parse_from_rfc3339(&config.expires_at) {
             return Utc::now() >= expires.with_timezone(&Utc);
         }
 
-        if let Ok(naive) = NaiveDateTime::parse_from_str(&config.expires_at, "%Y-%m-%dT%H:%M:%S%.f") {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(&config.expires_at, "%Y-%m-%dT%H:%M:%S%.f")
+        {
             return Utc::now() >= naive.and_utc();
         }
 
-        let timestamp_part = config.expires_at.split(" +").next().unwrap_or(&config.expires_at);
+        let timestamp_part = config
+            .expires_at
+            .split(" +")
+            .next()
+            .unwrap_or(&config.expires_at);
         if let Ok(naive) = NaiveDateTime::parse_from_str(timestamp_part, "%Y-%m-%d %H:%M:%S%.f") {
             return Utc::now() >= naive.and_utc();
         }
@@ -781,7 +865,9 @@ impl ApiClient {
 
     async fn ensure_authenticated(&self) -> Result<Config> {
         match self.load_config() {
-            Ok(config) if !self.is_session_expired(&config) && self.is_same_server(&config) => Ok(config),
+            Ok(config) if !self.is_session_expired(&config) && self.is_same_server(&config) => {
+                Ok(config)
+            }
             _ => {
                 if self.qr {
                     self.login_qr().await?;
@@ -794,7 +880,10 @@ impl ApiClient {
     }
 
     fn is_same_server(&self, config: &Config) -> bool {
-        config.server_url.as_ref().map_or(true, |url| url == &self.base_url)
+        config
+            .server_url
+            .as_ref()
+            .map_or(true, |url| url == &self.base_url)
     }
 
     fn save_deployment(&self, resource_id: &str) -> Result<()> {
@@ -804,14 +893,17 @@ impl ApiClient {
         };
         let json = serde_json::to_string_pretty(&deployment_info)?;
         fs::write(deployment_path, json)?;
-        log_verbose(self.verbose, &format!("Saved deployment info to {:?}", deployment_path));
+        log_verbose(
+            self.verbose,
+            &format!("Saved deployment info to {:?}", deployment_path),
+        );
         Ok(())
     }
 
     fn load_deployment(&self) -> Result<DeploymentInfo> {
         let deployment_path = self.get_deployment_path()?;
-        let content = fs::read_to_string(deployment_path)
-            .context("No deployment found. Run 'init' first")?;
+        let content =
+            fs::read_to_string(deployment_path).context("No deployment found. Run 'init' first")?;
         let deployment_info: DeploymentInfo = serde_json::from_str(&content)?;
         Ok(deployment_info)
     }
@@ -842,8 +934,7 @@ impl ApiClient {
             std::process::exit(1);
         }
 
-        let content = fs::read_to_string(&procfile_path)
-            .context("Failed to read Procfile")?;
+        let content = fs::read_to_string(&procfile_path).context("Failed to read Procfile")?;
 
         // Parse the Procfile to find the build command
         for line in content.lines() {
@@ -856,7 +947,9 @@ impl ApiClient {
             if let Some(build_cmd) = line.strip_prefix("build:") {
                 let cmd = build_cmd.trim();
                 if cmd.is_empty() {
-                    bail!("Procfile has empty build command. Expected format: build: docker build -t myapp .");
+                    bail!(
+                        "Procfile has empty build command. Expected format: build: docker build -t myapp ."
+                    );
                 }
                 return Ok(cmd.to_string());
             }
@@ -901,12 +994,10 @@ impl ApiClient {
 
     fn read_procfile_ports(&self) -> Vec<u16> {
         match self.read_procfile_field("ports") {
-            Some(ports_str) => {
-                ports_str
-                    .split(',')
-                    .filter_map(|s| s.trim().parse::<u16>().ok())
-                    .collect()
-            }
+            Some(ports_str) => ports_str
+                .split(',')
+                .filter_map(|s| s.trim().parse::<u16>().ok())
+                .collect(),
             None => vec![8080], // Default port
         }
     }
@@ -976,7 +1067,8 @@ impl ApiClient {
             return Ok(());
         }
 
-        let source_line = self.detect_source_url()
+        let source_line = self
+            .detect_source_url()
             .map(|url| format!("app_sources: {}", url))
             .unwrap_or_else(|| "# app_sources: git@codeberg.org:user/repo.git".to_string());
 
@@ -995,7 +1087,8 @@ aws_region: us-east-1
             ""
         };
 
-        let procfile_content = format!(r#"# Caution Procfile - https://docs.caution.co/reference/procfile/
+        let procfile_content = format!(
+            r#"# Caution Procfile - https://docs.caution.co/reference/procfile/
 
 # Build configuration
 run: /app/myapp
@@ -1022,10 +1115,10 @@ build: docker build -t app .
 # debug: false
 # no_cache: false
 # ssh_keys: ssh-ed25519 AAAA...
-{managed_on_prem_section}"#);
+{managed_on_prem_section}"#
+        );
 
-        fs::write(procfile_path, procfile_content)
-            .context("Failed to create Procfile")?;
+        fs::write(procfile_path, procfile_content).context("Failed to create Procfile")?;
 
         println!("\nCreated Procfile in current directory");
         println!("Edit the required 'run' field to match your application");
@@ -1080,7 +1173,10 @@ build: docker build -t app .
     fn construct_archive_url(&self, host: &str, path: &str) -> String {
         if host.contains("gitlab") {
             let repo_name = path.rsplit('/').next().unwrap_or("repo");
-            format!("https://{}/{}/-/archive/${{COMMIT}}/{}-${{COMMIT}}.tar.gz", host, path, repo_name)
+            format!(
+                "https://{}/{}/-/archive/${{COMMIT}}/{}-${{COMMIT}}.tar.gz",
+                host, path, repo_name
+            )
         } else {
             format!("https://{}/{}/archive/${{COMMIT}}.tar.gz", host, path)
         }
@@ -1088,23 +1184,31 @@ build: docker build -t app .
 
     fn git_url_to_archive_urls(&self, git_url: &str, commit: &str) -> Result<Vec<String>> {
         // If the URL is already a direct archive URL, use it as-is
-        if git_url.contains("/archive/") && (git_url.ends_with(".tar.gz") || git_url.ends_with(".tar")) {
+        if git_url.contains("/archive/")
+            && (git_url.ends_with(".tar.gz") || git_url.ends_with(".tar"))
+        {
             return Ok(vec![git_url.to_string()]);
         }
 
         let (host, path) = if git_url.starts_with("git@") {
-            let without_prefix = git_url.strip_prefix("git@")
+            let without_prefix = git_url
+                .strip_prefix("git@")
                 .ok_or_else(|| anyhow::anyhow!("Invalid git URL format"))?;
-            let (host, path) = without_prefix.split_once(':')
+            let (host, path) = without_prefix
+                .split_once(':')
                 .ok_or_else(|| anyhow::anyhow!("Invalid git SSH URL format"))?;
             (host.to_string(), path.trim_end_matches(".git").to_string())
         } else if git_url.starts_with("https://") || git_url.starts_with("http://") {
-            let url = url::Url::parse(git_url)
-                .context("Failed to parse git URL")?;
-            let host = url.host_str()
+            let url = url::Url::parse(git_url).context("Failed to parse git URL")?;
+            let host = url
+                .host_str()
                 .ok_or_else(|| anyhow::anyhow!("Git URL has no host"))?
                 .to_string();
-            let path = url.path().trim_start_matches('/').trim_end_matches(".git").to_string();
+            let path = url
+                .path()
+                .trim_start_matches('/')
+                .trim_end_matches(".git")
+                .to_string();
             (host, path)
         } else {
             bail!("Unsupported git URL format: {}", git_url);
@@ -1115,8 +1219,14 @@ build: docker build -t app .
         Ok(vec![
             format!("http://{}/{}/archive/{}.tar.gz", host, path, commit),
             format!("https://{}/{}/archive/{}.tar.gz", host, path, commit),
-            format!("http://{}/{}/-/archive/{}/{}-{}.tar.gz", host, path, commit, repo_name, commit),
-            format!("https://{}/{}/-/archive/{}/{}-{}.tar.gz", host, path, commit, repo_name, commit),
+            format!(
+                "http://{}/{}/-/archive/{}/{}-{}.tar.gz",
+                host, path, commit, repo_name, commit
+            ),
+            format!(
+                "https://{}/{}/-/archive/{}/{}-{}.tar.gz",
+                host, path, commit, repo_name, commit
+            ),
             format!("http://{}/{}/get/{}.tar.gz", host, path, commit),
             format!("https://{}/{}/get/{}.tar.gz", host, path, commit),
         ])
@@ -1131,7 +1241,10 @@ build: docker build -t app .
             .cookie_provider(std::sync::Arc::new(cookie_store))
             .build()?;
 
-        log_verbose(self.verbose, "Sending registration begin request with alpha code...");
+        log_verbose(
+            self.verbose,
+            "Sending registration begin request with alpha code...",
+        );
         let response = client
             .post(format!("{}/auth/register/begin", self.base_url))
             .json(&serde_json::json!({ "alpha_code": alpha_code }))
@@ -1139,17 +1252,25 @@ build: docker build -t app .
             .await
             .context("Failed to send registration begin request")?;
 
-        log_verbose(self.verbose, &format!("Response status: {}", response.status()));
+        log_verbose(
+            self.verbose,
+            &format!("Response status: {}", response.status()),
+        );
 
         if !response.status().is_success() {
             let error = response.text().await?;
             bail!("Registration begin failed: {}", error);
         }
 
-        let begin_resp: RegisterBeginResponse = response.json().await
+        let begin_resp: RegisterBeginResponse = response
+            .json()
+            .await
             .context("Failed to parse registration begin response")?;
         log_verbose(self.verbose, "Registration challenge received");
-        log_verbose(self.verbose, &format!("Challenge: {}", begin_resp.public_key.challenge));
+        log_verbose(
+            self.verbose,
+            &format!("Challenge: {}", begin_resp.public_key.challenge),
+        );
 
         log_verbose(self.verbose, "Creating credential on security key...");
 
@@ -1169,7 +1290,10 @@ build: docker build -t app .
             .await
             .context("Failed to send registration finish request")?;
 
-        log_verbose(self.verbose, &format!("Response status: {}", response.status()));
+        log_verbose(
+            self.verbose,
+            &format!("Response status: {}", response.status()),
+        );
 
         if response.status().is_success() {
             // Extract session from Set-Cookie header (not response body)
@@ -1182,10 +1306,7 @@ build: docker build -t app .
             println!("\nYou are now logged in:");
             println!("Expires: {}", finish_resp.expires_at);
 
-            self.save_config(
-                session_id.clone(),
-                finish_resp.expires_at.clone(),
-            )?;
+            self.save_config(session_id.clone(), finish_resp.expires_at.clone())?;
 
             println!("\n=======================================================");
             println!("ALPHA ACCESS GRANTED");
@@ -1216,8 +1337,18 @@ build: docker build -t app .
                     println!("COMPLETE YOUR ONBOARDING");
                     println!("=======================================================");
                     println!("\nYou need to complete onboarding to use this service:");
-                    println!("  1. Verify your email address {}", if status.email_verified { "✓" } else { "✗" });
-                    println!("  2. Add payment information {}", if status.payment_method_added { "✓" } else { "✗" });
+                    println!(
+                        "  1. Verify your email address {}",
+                        if status.email_verified { "✓" } else { "✗" }
+                    );
+                    println!(
+                        "  2. Add payment information {}",
+                        if status.payment_method_added {
+                            "✓"
+                        } else {
+                            "✗"
+                        }
+                    );
                     println!("\nOnboarding URL:");
                     println!("  {}/onboarding", self.frontend_url());
                     println!("\nYou must complete onboarding before you can create apps.");
@@ -1225,7 +1356,10 @@ build: docker build -t app .
                 }
             }
             Err(e) => {
-                log_verbose(self.verbose, &format!("Could not check onboarding status: {}", e));
+                log_verbose(
+                    self.verbose,
+                    &format!("Could not check onboarding status: {}", e),
+                );
             }
         }
 
@@ -1238,7 +1372,10 @@ build: docker build -t app .
                 }
             }
             Err(e) => {
-                log_verbose(self.verbose, &format!("Could not check security settings: {}", e));
+                log_verbose(
+                    self.verbose,
+                    &format!("Could not check security settings: {}", e),
+                );
             }
         }
 
@@ -1249,7 +1386,8 @@ build: docker build -t app .
         log_verbose(self.verbose, "Starting QR code cross-device login...");
 
         // Step 1: Request a QR login token from the gateway
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/auth/qr-login/begin", self.base_url))
             .send()
             .await?;
@@ -1285,7 +1423,8 @@ build: docker build -t app .
 
                 tokio::time::sleep(Duration::from_secs(2)).await;
 
-                let status_resp = self.client
+                let status_resp = self
+                    .client
                     .get(format!("{}/auth/qr-login/status", self.base_url))
                     .query(&[("token", &begin_resp.token)])
                     .send()
@@ -1301,10 +1440,12 @@ build: docker build -t app .
 
                 match status.status.as_str() {
                     "completed" => {
-                        let session_id = status.session_id
-                            .ok_or_else(|| anyhow::anyhow!("Completed but no session_id returned"))?;
-                        let expires_at = status.expires_at
-                            .ok_or_else(|| anyhow::anyhow!("Completed but no expires_at returned"))?;
+                        let session_id = status.session_id.ok_or_else(|| {
+                            anyhow::anyhow!("Completed but no session_id returned")
+                        })?;
+                        let expires_at = status.expires_at.ok_or_else(|| {
+                            anyhow::anyhow!("Completed but no expires_at returned")
+                        })?;
 
                         self.save_config(session_id.clone(), expires_at)?;
                         return Ok(session_id);
@@ -1316,7 +1457,8 @@ build: docker build -t app .
                     _ => continue,
                 }
             }
-        }.await;
+        }
+        .await;
 
         loader.stop();
 
@@ -1331,7 +1473,10 @@ build: docker build -t app .
                 }
             }
             Err(e) => {
-                log_verbose(self.verbose, &format!("Could not check security settings: {}", e));
+                log_verbose(
+                    self.verbose,
+                    &format!("Could not check security settings: {}", e),
+                );
             }
         }
 
@@ -1342,7 +1487,8 @@ build: docker build -t app .
         // Try to invalidate session on server if we have a config
         if let Ok(config) = self.load_config() {
             log_verbose(self.verbose, "Invalidating session on server...");
-            match self.client
+            match self
+                .client
                 .post(format!("{}/auth/logout", self.base_url))
                 .header("X-Session-ID", &config.session_id)
                 .send()
@@ -1352,7 +1498,10 @@ build: docker build -t app .
                     log_verbose(self.verbose, "Session invalidated on server");
                 }
                 Ok(response) => {
-                    log_verbose(self.verbose, &format!("Server returned {}", response.status()));
+                    log_verbose(
+                        self.verbose,
+                        &format!("Server returned {}", response.status()),
+                    );
                 }
                 Err(e) => {
                     log_verbose(self.verbose, &format!("Could not reach server: {}", e));
@@ -1372,7 +1521,8 @@ build: docker build -t app .
     }
 
     async fn check_onboarding_status(&self, session_id: &str) -> Result<UserStatus> {
-        let response = self.client
+        let response = self
+            .client
             .get(format!("{}/api/user/status", self.base_url))
             .header("X-Session-ID", session_id)
             .send()
@@ -1389,7 +1539,8 @@ build: docker build -t app .
 
     async fn check_org_security_settings(&self, session_id: &str) -> Result<OrgSettings> {
         // Get the user's organizations
-        let orgs_response = self.client
+        let orgs_response = self
+            .client
             .get(format!("{}/api/organizations", self.base_url))
             .header("X-Session-ID", session_id)
             .send()
@@ -1406,8 +1557,12 @@ build: docker build -t app .
         }
 
         // Get the first org's settings
-        let settings_response = self.client
-            .get(format!("{}/api/organizations/{}/settings", self.base_url, orgs[0].id))
+        let settings_response = self
+            .client
+            .get(format!(
+                "{}/api/organizations/{}/settings",
+                self.base_url, orgs[0].id
+            ))
             .header("X-Session-ID", session_id)
             .send()
             .await?;
@@ -1421,13 +1576,17 @@ build: docker build -t app .
         Ok(settings)
     }
 
-    fn make_credential(&self, options: &RegisterBeginResponse, base_url: &str) -> Result<serde_json::Value> {
+    fn make_credential(
+        &self,
+        options: &RegisterBeginResponse,
+        base_url: &str,
+    ) -> Result<serde_json::Value> {
         log_verbose(self.verbose, "Attempting registration without PIN first...");
         match self.try_make_credential(options, base_url, None) {
             Ok(result) => {
                 log_verbose(self.verbose, "Registration succeeded without PIN");
                 Ok(result)
-            },
+            }
             Err(e) => {
                 log_verbose(self.verbose, &format!("First attempt failed: {:?}", e));
                 log_verbose(self.verbose, &format!("Full error details: {:#?}", e));
@@ -1441,7 +1600,7 @@ build: docker build -t app .
                             let pin = Pin::new(&pin_string.0);
                             log_verbose(self.verbose, "Retrying registration with PIN...");
                             self.try_make_credential(options, base_url, Some(pin))
-                        },
+                        }
                         None => {
                             log_verbose(self.verbose, "No PIN provided, returning original error");
                             Err(e)
@@ -1449,14 +1608,22 @@ build: docker build -t app .
                     }
                 } else {
                     // Not a PIN error, return the original error
-                    log_verbose(self.verbose, "Error is not PIN-related, not prompting for PIN");
+                    log_verbose(
+                        self.verbose,
+                        "Error is not PIN-related, not prompting for PIN",
+                    );
                     Err(e)
                 }
             }
         }
     }
 
-    fn try_make_credential(&self, options: &RegisterBeginResponse, base_url: &str, pin: Option<Pin>) -> Result<serde_json::Value> {
+    fn try_make_credential(
+        &self,
+        options: &RegisterBeginResponse,
+        base_url: &str,
+        pin: Option<Pin>,
+    ) -> Result<serde_json::Value> {
         let opts = &options.public_key;
 
         log_verbose(self.verbose, "Creating FIDO2 credential...");
@@ -1487,24 +1654,28 @@ build: docker build -t app .
         let pub_key_params: Vec<PublicKeyCredentialParameters> = opts
             .pub_key_cred_params
             .iter()
-            .filter_map(|p| {
-                match p.alg {
-                    -7 => Some(PublicKeyCredentialParameters {
-                        alg: COSEAlgorithm::ES256,
-                    }),
-                    -257 => Some(PublicKeyCredentialParameters {
-                        alg: COSEAlgorithm::RS256,
-                    }),
-                    _ => None,
-                }
+            .filter_map(|p| match p.alg {
+                -7 => Some(PublicKeyCredentialParameters {
+                    alg: COSEAlgorithm::ES256,
+                }),
+                -257 => Some(PublicKeyCredentialParameters {
+                    alg: COSEAlgorithm::RS256,
+                }),
+                _ => None,
             })
             .collect();
 
-        log_verbose(self.verbose, &format!("pub_key_params count: {}", pub_key_params.len()));
-        log_verbose(self.verbose, &format!("timeout from server: {} ms", opts.timeout));
+        log_verbose(
+            self.verbose,
+            &format!("pub_key_params count: {}", pub_key_params.len()),
+        );
+        log_verbose(
+            self.verbose,
+            &format!("timeout from server: {} ms", opts.timeout),
+        );
 
-        let mut manager = AuthenticatorService::new()
-            .context("Failed to create authenticator service")?;
+        let mut manager =
+            AuthenticatorService::new().context("Failed to create authenticator service")?;
 
         manager.add_u2f_usb_hid_platform_transports();
 
@@ -1520,13 +1691,15 @@ build: docker build -t app .
                 "type": "webauthn.create",
                 "challenge": opts.challenge,
                 "origin": base_url,
-            }))?).into(),
+            }))?)
+            .into(),
             relying_party: rp,
             origin: base_url.to_string(),
             user,
             pub_cred_params: pub_key_params,
             exclude_list: vec![],
-            user_verification_req: authenticator::ctap2::server::UserVerificationRequirement::Preferred,
+            user_verification_req:
+                authenticator::ctap2::server::UserVerificationRequirement::Preferred,
             resident_key_req: authenticator::ctap2::server::ResidentKeyRequirement::Required,
             extensions: Default::default(),
             pin,
@@ -1538,7 +1711,10 @@ build: docker build -t app .
             .register(opts.timeout, args, status_tx, callback)
             .context("Failed to start registration")?;
 
-        log_verbose(self.verbose, "Waiting for callback result (up to 60 seconds)...");
+        log_verbose(
+            self.verbose,
+            "Waiting for callback result (up to 60 seconds)...",
+        );
 
         let mut loader = Loader::new("Tap your security key to continue", LoaderStyle::KeyTap);
 
@@ -1550,7 +1726,9 @@ build: docker build -t app .
                         loader.stop();
                         println!("Multiple credentials found. Please select one:");
                         for (idx, user) in users.iter().enumerate() {
-                            let display = user.display_name.as_deref()
+                            let display = user
+                                .display_name
+                                .as_deref()
                                 .or(user.name.as_deref())
                                 .unwrap_or("Unknown");
                             println!("[{}] {}", idx, display);
@@ -1562,15 +1740,19 @@ build: docker build -t app .
 
                         let mut input = String::new();
                         io::stdin().read_line(&mut input)?;
-                        let selection: usize = input.trim().parse()
-                            .context("Invalid selection")?;
+                        let selection: usize = input.trim().parse().context("Invalid selection")?;
 
                         if selection >= users.len() {
                             bail!("Selection out of range");
                         }
 
-                        println!("Selected: {}", users[selection].name.as_deref().unwrap_or("Unknown"));
-                        sender.send(Some(selection)).context("Failed to send selection")?;
+                        println!(
+                            "Selected: {}",
+                            users[selection].name.as_deref().unwrap_or("Unknown")
+                        );
+                        sender
+                            .send(Some(selection))
+                            .context("Failed to send selection")?;
                     }
                     StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender)) => {
                         loader.stop();
@@ -1579,7 +1761,10 @@ build: docker build -t app .
                             Some(pin_string) => {
                                 let pin = Pin::new(&pin_string);
                                 sender.send(pin).context("Failed to send PIN")?;
-                                loader = Loader::new("Tap your security key to continue", LoaderStyle::KeyTap);
+                                loader = Loader::new(
+                                    "Tap your security key to continue",
+                                    LoaderStyle::KeyTap,
+                                );
                             }
                             None => {
                                 bail!("PIN is required but none provided");
@@ -1614,13 +1799,14 @@ build: docker build -t app .
                 let auth_data_bytes = att_obj.auth_data.to_vec();
 
                 if auth_data_bytes.len() < 37 {
-                    bail!("Invalid authenticator data length: {}", auth_data_bytes.len());
+                    bail!(
+                        "Invalid authenticator data length: {}",
+                        auth_data_bytes.len()
+                    );
                 }
 
-                let credential_id_len = u16::from_be_bytes([
-                    auth_data_bytes[53],
-                    auth_data_bytes[54],
-                ]) as usize;
+                let credential_id_len =
+                    u16::from_be_bytes([auth_data_bytes[53], auth_data_bytes[54]]) as usize;
 
                 let credential_id_start = 55;
                 let credential_id_end = credential_id_start + credential_id_len;
@@ -1631,8 +1817,14 @@ build: docker build -t app .
 
                 let credential_id = &auth_data_bytes[credential_id_start..credential_id_end];
 
-                log_verbose(self.verbose, &format!("credential_id len: {}", credential_id.len()));
-                log_verbose(self.verbose, &format!("credential_id: {}", hex::encode(credential_id)));
+                log_verbose(
+                    self.verbose,
+                    &format!("credential_id len: {}", credential_id.len()),
+                );
+                log_verbose(
+                    self.verbose,
+                    &format!("credential_id: {}", hex::encode(credential_id)),
+                );
 
                 let att_obj_bytes = serde_cbor::to_vec(&register_result.att_obj)?;
 
@@ -1672,7 +1864,10 @@ build: docker build -t app .
 
         let begin_resp: LoginBeginResponse = response.json().await?;
         log_verbose(self.verbose, "Login challenge received");
-        log_verbose(self.verbose, &format!("Session from server: {:?}", begin_resp.session));
+        log_verbose(
+            self.verbose,
+            &format!("Session from server: {:?}", begin_resp.session),
+        );
 
         let assertion = self.get_assertion(&begin_resp, &self.base_url)?;
 
@@ -1687,7 +1882,10 @@ build: docker build -t app .
             obj.insert("session".to_string(), serde_json::json!(begin_resp.session));
         }
 
-        log_verbose(self.verbose, "Final payload being sent to /auth/login/finish:");
+        log_verbose(
+            self.verbose,
+            "Final payload being sent to /auth/login/finish:",
+        );
         log_verbose(self.verbose, &serde_json::to_string_pretty(&credential)?);
 
         let response = client
@@ -1703,16 +1901,16 @@ build: docker build -t app .
 
             let finish_resp: LoginFinishResponse = response.json().await?;
 
-            self.save_config(
-                session_id.clone(),
-                finish_resp.expires_at.clone(),
-            )?;
+            self.save_config(session_id.clone(), finish_resp.expires_at.clone())?;
 
             Ok((session_id, finish_resp.expires_at))
         } else {
             let status = response.status();
             let error = response.text().await?;
-            log_verbose(self.verbose, &format!("Server error response (status {}): {}", status, error));
+            log_verbose(
+                self.verbose,
+                &format!("Server error response (status {}): {}", status, error),
+            );
             bail!("Login failed: {}", error)
         }
     }
@@ -1733,7 +1931,10 @@ build: docker build -t app .
         // The gateway nests /api routes, so the sign middleware sees paths with /api stripped
         let challenge_path = path.strip_prefix("/api").unwrap_or(path);
 
-        log_verbose(self.verbose, &format!("Requesting FIDO2 sign challenge for POST {}", path));
+        log_verbose(
+            self.verbose,
+            &format!("Requesting FIDO2 sign challenge for POST {}", path),
+        );
 
         let sign_req = serde_json::json!({
             "method": "POST",
@@ -1741,7 +1942,8 @@ build: docker build -t app .
             "body_hash": body_hash,
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/auth/sign-request", self.base_url))
             .header("X-Session-ID", session_id)
             .json(&sign_req)
@@ -1770,7 +1972,8 @@ build: docker build -t app .
 
         log_verbose(self.verbose, "Sending FIDO2-signed request");
 
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}{}", self.base_url, path))
             .header("X-Fido2-Challenge-Id", &sign_resp.challenge_id)
             .header("X-Fido2-Response", &fido_response_b64)
@@ -1805,7 +2008,8 @@ build: docker build -t app .
             "body_hash": body_hash,
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/auth/qr-sign/begin", self.base_url))
             .header("X-Session-ID", session_id)
             .json(&sign_req)
@@ -1818,7 +2022,10 @@ build: docker build -t app .
         }
 
         let begin_resp: QrSignBeginResponse = response.json().await?;
-        log_verbose(self.verbose, &format!("QR sign token: {}", begin_resp.token));
+        log_verbose(
+            self.verbose,
+            &format!("QR sign token: {}", begin_resp.token),
+        );
 
         // Step 2: Render QR code
         println!();
@@ -1842,7 +2049,8 @@ build: docker build -t app .
 
                 tokio::time::sleep(Duration::from_secs(2)).await;
 
-                let status_resp = self.client
+                let status_resp = self
+                    .client
                     .get(format!("{}/auth/qr-sign/status", self.base_url))
                     .query(&[("token", &begin_resp.token)])
                     .send()
@@ -1858,10 +2066,12 @@ build: docker build -t app .
 
                 match status.status.as_str() {
                     "completed" => {
-                        let fido2_response = status.fido2_response
-                            .ok_or_else(|| anyhow::anyhow!("Completed but no fido2_response returned"))?;
-                        let challenge_id = status.challenge_id
-                            .ok_or_else(|| anyhow::anyhow!("Completed but no challenge_id returned"))?;
+                        let fido2_response = status.fido2_response.ok_or_else(|| {
+                            anyhow::anyhow!("Completed but no fido2_response returned")
+                        })?;
+                        let challenge_id = status.challenge_id.ok_or_else(|| {
+                            anyhow::anyhow!("Completed but no challenge_id returned")
+                        })?;
                         return Ok((fido2_response, challenge_id));
                     }
                     "expired" => {
@@ -1871,7 +2081,8 @@ build: docker build -t app .
                     _ => continue,
                 }
             }
-        }.await;
+        }
+        .await;
 
         loader.stop();
 
@@ -1879,7 +2090,8 @@ build: docker build -t app .
         log_verbose(self.verbose, "Sending QR-signed request");
 
         // Step 4: Send the actual request with the FIDO2 assertion from the phone
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}{}", self.base_url, path))
             .header("X-Fido2-Challenge-Id", &challenge_id)
             .header("X-Fido2-Response", &fido2_response)
@@ -1891,13 +2103,17 @@ build: docker build -t app .
         Ok(response)
     }
 
-    fn get_assertion(&self, options: &LoginBeginResponse, base_url: &str) -> Result<AssertionResult> {
+    fn get_assertion(
+        &self,
+        options: &LoginBeginResponse,
+        base_url: &str,
+    ) -> Result<AssertionResult> {
         log_verbose(self.verbose, "Attempting assertion without PIN first...");
         match self.try_get_assertion(options, base_url, None) {
             Ok(result) => {
                 log_verbose(self.verbose, "Assertion succeeded without PIN");
                 Ok(result)
-            },
+            }
             Err(e) => {
                 log_verbose(self.verbose, &format!("First attempt failed: {:?}", e));
                 log_verbose(self.verbose, &format!("Full error details: {:#?}", e));
@@ -1911,7 +2127,7 @@ build: docker build -t app .
                             let pin = Pin::new(&pin_string.0);
                             log_verbose(self.verbose, "Retrying assertion with PIN...");
                             self.try_get_assertion(options, base_url, Some(pin))
-                        },
+                        }
                         None => {
                             log_verbose(self.verbose, "No PIN provided, returning original error");
                             Err(e)
@@ -1919,14 +2135,22 @@ build: docker build -t app .
                     }
                 } else {
                     // Not a PIN error, return the original error
-                    log_verbose(self.verbose, "Error is not PIN-related, not prompting for PIN");
+                    log_verbose(
+                        self.verbose,
+                        "Error is not PIN-related, not prompting for PIN",
+                    );
                     Err(e)
                 }
             }
         }
     }
 
-    fn try_get_assertion(&self, options: &LoginBeginResponse, base_url: &str, pin: Option<Pin>) -> Result<AssertionResult> {
+    fn try_get_assertion(
+        &self,
+        options: &LoginBeginResponse,
+        base_url: &str,
+        pin: Option<Pin>,
+    ) -> Result<AssertionResult> {
         let opts = &options.public_key;
 
         log_verbose(self.verbose, "Getting assertion from authenticator...");
@@ -1938,8 +2162,8 @@ build: docker build -t app .
         log_verbose(self.verbose, &format!("challenge bytes: {:?}", challenge));
         log_verbose(self.verbose, &format!("rpId: {}", opts.rp_id));
 
-        let mut manager = AuthenticatorService::new()
-            .context("Failed to create authenticator service")?;
+        let mut manager =
+            AuthenticatorService::new().context("Failed to create authenticator service")?;
 
         manager.add_u2f_usb_hid_platform_transports();
 
@@ -1950,33 +2174,37 @@ build: docker build -t app .
             let _ = callback_tx.send(result);
         }));
 
-        let allow_list: Vec<PublicKeyCredentialDescriptor> = opts.allow_credentials
+        let allow_list: Vec<PublicKeyCredentialDescriptor> = opts
+            .allow_credentials
             .iter()
             .filter_map(|cred| {
                 general_purpose::URL_SAFE_NO_PAD
                     .decode(&cred.id)
                     .ok()
-                    .map(|id_bytes| {
-                        PublicKeyCredentialDescriptor {
-                            id: id_bytes,
-                            transports: vec![Transport::USB],
-                        }
+                    .map(|id_bytes| PublicKeyCredentialDescriptor {
+                        id: id_bytes,
+                        transports: vec![Transport::USB],
                     })
             })
             .collect();
 
-        log_verbose(self.verbose, &format!("Allow list has {} credentials", allow_list.len()));
+        log_verbose(
+            self.verbose,
+            &format!("Allow list has {} credentials", allow_list.len()),
+        );
 
         let args = SignArgs {
             client_data_hash: Sha256::digest(serde_json::to_vec(&serde_json::json!({
                 "type": "webauthn.get",
                 "challenge": opts.challenge,
                 "origin": base_url,
-            }))?).into(),
+            }))?)
+            .into(),
             origin: base_url.to_string(),
             relying_party_id: opts.rp_id.clone(),
             allow_list,
-            user_verification_req: authenticator::ctap2::server::UserVerificationRequirement::Preferred,
+            user_verification_req:
+                authenticator::ctap2::server::UserVerificationRequirement::Preferred,
             user_presence_req: true,
             extensions: Default::default(),
             pin,
@@ -1988,7 +2216,10 @@ build: docker build -t app .
             .sign(opts.timeout, args, status_tx, callback)
             .context("Failed to start assertion")?;
 
-        log_verbose(self.verbose, "Waiting for callback result (up to 60 seconds)...");
+        log_verbose(
+            self.verbose,
+            "Waiting for callback result (up to 60 seconds)...",
+        );
 
         let mut loader = Loader::new("Tap your security key to continue", LoaderStyle::KeyTap);
 
@@ -2000,7 +2231,9 @@ build: docker build -t app .
                         loader.stop();
                         println!("Multiple credentials found. Please select one:");
                         for (idx, user) in users.iter().enumerate() {
-                            let display = user.display_name.as_deref()
+                            let display = user
+                                .display_name
+                                .as_deref()
                                 .or(user.name.as_deref())
                                 .unwrap_or("Unknown");
                             println!("[{}] {}", idx, display);
@@ -2012,15 +2245,19 @@ build: docker build -t app .
 
                         let mut input = String::new();
                         io::stdin().read_line(&mut input)?;
-                        let selection: usize = input.trim().parse()
-                            .context("Invalid selection")?;
+                        let selection: usize = input.trim().parse().context("Invalid selection")?;
 
                         if selection >= users.len() {
                             bail!("Selection out of range");
                         }
 
-                        println!("Selected: {}", users[selection].name.as_deref().unwrap_or("Unknown"));
-                        sender.send(Some(selection)).context("Failed to send selection")?;
+                        println!(
+                            "Selected: {}",
+                            users[selection].name.as_deref().unwrap_or("Unknown")
+                        );
+                        sender
+                            .send(Some(selection))
+                            .context("Failed to send selection")?;
                     }
                     StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender)) => {
                         loader.stop();
@@ -2029,7 +2266,10 @@ build: docker build -t app .
                             Some(pin_string) => {
                                 let pin = Pin::new(&pin_string);
                                 sender.send(pin).context("Failed to send PIN")?;
-                                loader = Loader::new("Tap your security key to continue", LoaderStyle::KeyTap);
+                                loader = Loader::new(
+                                    "Tap your security key to continue",
+                                    LoaderStyle::KeyTap,
+                                );
                             }
                             None => {
                                 bail!("PIN is required but none provided");
@@ -2070,7 +2310,9 @@ build: docker build -t app .
                 });
                 let client_data_json_bytes = serde_json::to_vec(&client_data_json)?;
 
-                let cred_id_bytes = &sign_result.assertion.credentials
+                let cred_id_bytes = &sign_result
+                    .assertion
+                    .credentials
                     .as_ref()
                     .context("No credential")?
                     .id;
@@ -2122,7 +2364,8 @@ build: docker build -t app .
 
         let mut loader = Loader::new("Setting up your app", LoaderStyle::Processing);
 
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/api/resources", self.base_url))
             .header("X-Session-ID", config.session_id)
             .json(&body)
@@ -2135,10 +2378,15 @@ build: docker build -t app .
             let error = self.api_error_message(response).await;
             loader.stop();
 
-            if error.contains("initialize") || error.contains("provisioning") || error.contains("AWS account") {
+            if error.contains("initialize")
+                || error.contains("provisioning")
+                || error.contains("AWS account")
+            {
                 eprintln!("\n❌ Failed to initialize your AWS account");
                 eprintln!("\nThis is your first time using Caution. We attempted to provision");
-                eprintln!("a dedicated AWS account for your organization, but encountered an error:");
+                eprintln!(
+                    "a dedicated AWS account for your organization, but encountered an error:"
+                );
                 eprintln!("\n{}", error);
                 eprintln!("\nPlease check:");
                 eprintln!("  • AWS Organizations is enabled in your main account");
@@ -2150,7 +2398,9 @@ build: docker build -t app .
             bail!("Failed to create app (status {}): {}", status, error);
         }
 
-        let create_response: CreateAppResponse = response.json().await
+        let create_response: CreateAppResponse = response
+            .json()
+            .await
             .context("Failed to parse create app response")?;
 
         loader.stop();
@@ -2175,7 +2425,8 @@ build: docker build -t app .
     async fn list_apps(&self) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
-        let response = self.client
+        let response = self
+            .client
             .get(format!("{}/api/resources", self.base_url))
             .header("X-Session-ID", config.session_id)
             .send()
@@ -2220,7 +2471,8 @@ build: docker build -t app .
     async fn fetch_app(&self, id: &str) -> Result<App> {
         let config = self.ensure_authenticated().await?;
 
-        let response = self.client
+        let response = self
+            .client
             .get(format!("{}/api/resources/{}", self.base_url, id))
             .header("X-Session-ID", config.session_id)
             .send()
@@ -2271,7 +2523,8 @@ build: docker build -t app .
                 }
                 if let Some(ports) = enclave_config.get("ports").and_then(|v| v.as_array()) {
                     if !ports.is_empty() {
-                        let ports_str: Vec<String> = ports.iter()
+                        let ports_str: Vec<String> = ports
+                            .iter()
                             .filter_map(|p| p.as_u64().map(|n| n.to_string()))
                             .collect();
                         println!("  Ports: {}", ports_str.join(", "));
@@ -2312,7 +2565,9 @@ build: docker build -t app .
             }
             if force_delete {
                 println!();
-                println!("  WARNING: --force-delete will remove from database even if cloud cleanup fails!");
+                println!(
+                    "  WARNING: --force-delete will remove from database even if cloud cleanup fails!"
+                );
             }
             println!();
             print!("Are you sure you want to destroy this app? [y/N] ");
@@ -2329,7 +2584,10 @@ build: docker build -t app .
 
         let config = self.ensure_authenticated().await?;
 
-        let mut loader = Loader::new(&format!("Destroying app {} ({})", name, app.id), LoaderStyle::Processing);
+        let mut loader = Loader::new(
+            &format!("Destroying app {} ({})", name, app.id),
+            LoaderStyle::Processing,
+        );
 
         let url = if force_delete {
             format!("{}/api/resources/{}?force=true", self.base_url, app.id)
@@ -2337,7 +2595,8 @@ build: docker build -t app .
             format!("{}/api/resources/{}", self.base_url, app.id)
         };
 
-        let response = self.client
+        let response = self
+            .client
             .delete(&url)
             .header("X-Session-ID", config.session_id)
             .send()
@@ -2371,7 +2630,8 @@ build: docker build -t app .
             "name": new_name
         });
 
-        let response = self.client
+        let response = self
+            .client
             .patch(format!("{}/api/resources/{}", self.base_url, app.id))
             .header("X-Session-ID", config.session_id)
             .json(&body)
@@ -2392,10 +2652,19 @@ build: docker build -t app .
         }
     }
 
-    async fn init(&self, managed_on_prem: bool, name: Option<String>, region: Option<String>, local: bool, config_path: Option<PathBuf>) -> Result<()> {
+    async fn init(
+        &self,
+        managed_on_prem: bool,
+        name: Option<String>,
+        region: Option<String>,
+        local: bool,
+        config_path: Option<PathBuf>,
+    ) -> Result<()> {
         // If --managed-on-prem without --config, use the new interactive flow
         if managed_on_prem && config_path.is_none() {
-            return self.init_managed_on_prem_interactive(name, region, local).await;
+            return self
+                .init_managed_on_prem_interactive(name, region, local)
+                .await;
         }
 
         println!("Initializing new deployment...");
@@ -2419,7 +2688,13 @@ build: docker build -t app .
 
         // Check if there's an existing deployment with a resource ID
         if let Ok(deployment) = self.load_deployment() {
-            log_verbose(self.verbose, &format!("Found existing deployment with ID: {}", deployment.resource_id));
+            log_verbose(
+                self.verbose,
+                &format!(
+                    "Found existing deployment with ID: {}",
+                    deployment.resource_id
+                ),
+            );
 
             if let Ok(app) = self.fetch_app(&deployment.resource_id).await {
                 let name = app.resource_name.as_deref().unwrap_or("unnamed");
@@ -2438,7 +2713,10 @@ build: docker build -t app .
                 println!("  git push caution main");
                 return Ok(());
             } else {
-                log_verbose(self.verbose, "Previous resource no longer exists, creating new one...");
+                log_verbose(
+                    self.verbose,
+                    "Previous resource no longer exists, creating new one...",
+                );
             }
         }
 
@@ -2447,7 +2725,11 @@ build: docker build -t app .
                 .ok()
                 .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
                 .map(|s| s.to_lowercase().replace(' ', "-"))
-                .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'))
+                .filter(|s| {
+                    !s.is_empty()
+                        && s.chars()
+                            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                })
                 .unwrap_or_else(|| "app".to_string())
         });
 
@@ -2459,7 +2741,8 @@ build: docker build -t app .
 
         let mut loader = Loader::new("Setting up your app", LoaderStyle::Processing);
 
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/api/resources", self.base_url))
             .header("X-Session-ID", config.session_id)
             .json(&body)
@@ -2472,10 +2755,15 @@ build: docker build -t app .
             let error = self.api_error_message(response).await;
             loader.stop();
 
-            if error.contains("initialize") || error.contains("provisioning") || error.contains("AWS account") {
+            if error.contains("initialize")
+                || error.contains("provisioning")
+                || error.contains("AWS account")
+            {
                 eprintln!("\n❌ Failed to initialize your AWS account");
                 eprintln!("\nThis is your first time using Caution. We attempted to provision");
-                eprintln!("a dedicated AWS account for your organization, but encountered an error:");
+                eprintln!(
+                    "a dedicated AWS account for your organization, but encountered an error:"
+                );
                 eprintln!("\n{}", error);
                 eprintln!("\nPlease check:");
                 eprintln!("  • AWS Organizations is enabled in your main account");
@@ -2487,7 +2775,9 @@ build: docker build -t app .
             bail!("Failed to create app (status {}): {}", status, error);
         }
 
-        let create_response: CreateAppResponse = response.json().await
+        let create_response: CreateAppResponse = response
+            .json()
+            .await
             .context("Failed to parse create app response")?;
 
         loader.stop();
@@ -2520,24 +2810,35 @@ build: docker build -t app .
     async fn init_managed_onprem(&self, config_path: &PathBuf) -> Result<()> {
         println!("Initializing managed on-premises deployment...");
 
-        log_verbose(self.verbose, &format!("Reading config from {:?}", config_path));
-        let config_content = fs::read_to_string(config_path)
-            .context("Failed to read config file")?;
+        log_verbose(
+            self.verbose,
+            &format!("Reading config from {:?}", config_path),
+        );
+        let config_content =
+            fs::read_to_string(config_path).context("Failed to read config file")?;
 
-        let has_gpg_extension = config_path.extension()
+        let has_gpg_extension = config_path
+            .extension()
             .map(|ext| ext == "gpg" || ext == "asc")
             .unwrap_or(false);
-        let has_gpg_header = config_content.trim().starts_with("-----BEGIN PGP MESSAGE-----");
+        let has_gpg_header = config_content
+            .trim()
+            .starts_with("-----BEGIN PGP MESSAGE-----");
         let is_gpg_encrypted = has_gpg_extension || has_gpg_header;
 
         let request_body = if is_gpg_encrypted {
-            log_verbose(self.verbose, "Config file is GPG-encrypted (will be decrypted server-side)");
+            log_verbose(
+                self.verbose,
+                "Config file is GPG-encrypted (will be decrypted server-side)",
+            );
             println!("Detected GPG-encrypted config file");
 
             let existing_resource_id = self.load_deployment().ok().map(|d| d.resource_id);
             if let Some(ref id) = existing_resource_id {
                 println!("Found existing deployment: {}", id);
-                println!("Note: For updates with encrypted config, ensure resource_id is in the decrypted JSON");
+                println!(
+                    "Note: For updates with encrypted config, ensure resource_id is in the decrypted JSON"
+                );
             }
 
             config_content
@@ -2554,7 +2855,10 @@ build: docker build -t app .
 
             let platform = config_json.get("platform").and_then(|v| v.as_str());
             if platform != Some("aws") {
-                bail!("Config file must have platform: \"aws\" (got: {:?})", platform);
+                bail!(
+                    "Config file must have platform: \"aws\" (got: {:?})",
+                    platform
+                );
             }
 
             let managed_on_prem = config_json.get("managed_on_prem").and_then(|v| v.as_bool());
@@ -2563,10 +2867,20 @@ build: docker build -t app .
             }
 
             let required_fields = [
-                "aws_region", "aws_access_key_id", "aws_secret_access_key",
-                "deployment_id", "asg_name", "eif_bucket", "launch_template_name",
-                "launch_template_id", "vpc_id", "subnet_ids", "instance_profile_name",
-                "iam_user", "aws_account_id", "scope_tag"
+                "aws_region",
+                "aws_access_key_id",
+                "aws_secret_access_key",
+                "deployment_id",
+                "asg_name",
+                "eif_bucket",
+                "launch_template_name",
+                "launch_template_id",
+                "vpc_id",
+                "subnet_ids",
+                "instance_profile_name",
+                "iam_user",
+                "aws_account_id",
+                "scope_tag",
             ];
             for field in required_fields {
                 if config_json.get(field).is_none() {
@@ -2595,7 +2909,8 @@ build: docker build -t app .
         };
         let mut loader = Loader::new(loader_msg, LoaderStyle::Processing);
 
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/api/resources/managed-onprem", self.base_url))
             .header("X-Session-ID", &auth_config.session_id)
             .header("Content-Type", "text/plain")
@@ -2609,16 +2924,23 @@ build: docker build -t app .
             let error = response.text().await?;
             loader.stop();
             let action = if is_update { "update" } else { "create" };
-            bail!("Failed to {} managed on-prem resource (status {}): {}", action, status, error);
+            bail!(
+                "Failed to {} managed on-prem resource (status {}): {}",
+                action,
+                status,
+                error
+            );
         }
 
-        let create_response: serde_json::Value = response.json().await
-            .context("Failed to parse response")?;
+        let create_response: serde_json::Value =
+            response.json().await.context("Failed to parse response")?;
 
         loader.stop();
 
         let id = create_response["id"].as_str().unwrap_or("unknown");
-        let resource_name = create_response["resource_name"].as_str().unwrap_or("unnamed");
+        let resource_name = create_response["resource_name"]
+            .as_str()
+            .unwrap_or("unnamed");
         let git_url = create_response["git_url"].as_str().unwrap_or("");
         let state = create_response["state"].as_str().unwrap_or("unknown");
 
@@ -2673,11 +2995,12 @@ build: docker build -t app .
         let config_path = home.join(".aws").join("config");
 
         // Parse credentials file for the selected profile
-        let (access_key, secret_key, session_token) = if let Ok(creds_content) = fs::read_to_string(&creds_path) {
-            Self::parse_aws_credentials_file(&creds_content, &profile)
-        } else {
-            (None, None, None)
-        };
+        let (access_key, secret_key, session_token) =
+            if let Ok(creds_content) = fs::read_to_string(&creds_path) {
+                Self::parse_aws_credentials_file(&creds_content, &profile)
+            } else {
+                (None, None, None)
+            };
 
         // Parse config file for region (and potentially credentials for SSO profiles)
         let region = if let Ok(config_content) = fs::read_to_string(&config_path) {
@@ -2692,7 +3015,10 @@ build: docker build -t app .
         }
     }
 
-    fn parse_aws_credentials_file(content: &str, profile: &str) -> (Option<String>, Option<String>, Option<String>) {
+    fn parse_aws_credentials_file(
+        content: &str,
+        profile: &str,
+    ) -> (Option<String>, Option<String>, Option<String>) {
         let mut access_key = None;
         let mut secret_key = None;
         let mut session_token = None;
@@ -2753,7 +3079,12 @@ build: docker build -t app .
     }
 
     /// Interactive managed on-prem initialization
-    async fn init_managed_on_prem_interactive(&self, name: Option<String>, region: Option<String>, local: bool) -> Result<()> {
+    async fn init_managed_on_prem_interactive(
+        &self,
+        name: Option<String>,
+        region: Option<String>,
+        local: bool,
+    ) -> Result<()> {
         use std::io::{self, Write};
 
         println!("\n╔══════════════════════════════════════════════════════════════════╗");
@@ -2771,11 +3102,18 @@ build: docker build -t app .
                 .ok()
                 .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
                 .map(|s| s.to_lowercase().replace(' ', "-"))
-                .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'))
+                .filter(|s| {
+                    !s.is_empty()
+                        && s.chars()
+                            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                })
                 .unwrap_or_else(|| "app".to_string())
         });
 
-        if !app_name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        if !app_name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
             bail!("App name must contain only alphanumeric characters, hyphens, and underscores");
         }
 
@@ -2783,9 +3121,10 @@ build: docker build -t app .
 
         // Check AWS credentials
         let aws_profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".to_string());
-        let (aws_key, aws_secret, detected_region, aws_session_token) = Self::detect_aws_credentials()
-            .ok_or_else(|| anyhow::anyhow!(
-                "AWS credentials not found.\n\n\
+        let (aws_key, aws_secret, detected_region, aws_session_token) =
+            Self::detect_aws_credentials().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "AWS credentials not found.\n\n\
                 Please set up AWS credentials using one of these methods:\n\
                 1. Set environment variables:\n\
                    export AWS_ACCESS_KEY_ID=your_key\n\
@@ -2803,7 +3142,8 @@ build: docker build -t app .
                 • s3:* (bucket creation and management)\n\
                 • iam:* (create user, role, instance profile)\n\
                 • sts:GetCallerIdentity"
-            ))?;
+                )
+            })?;
 
         let aws_region = region
             .or(detected_region)
@@ -2842,7 +3182,10 @@ build: docker build -t app .
         } else {
             println!("\nPulling provisioner image...");
             let pull_output = Command::new("docker")
-                .args(&["pull", "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest"])
+                .args(&[
+                    "pull",
+                    "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest",
+                ])
                 .output()
                 .context("Failed to pull provisioner image")?;
 
@@ -2857,11 +3200,16 @@ build: docker build -t app .
         println!("---");
 
         let mut docker_args = vec![
-            "run".to_string(), "--rm".to_string(),
-            "-e".to_string(), format!("AWS_ACCESS_KEY_ID={}", aws_key),
-            "-e".to_string(), format!("AWS_SECRET_ACCESS_KEY={}", aws_secret),
-            "-e".to_string(), format!("AWS_REGION={}", aws_region),
-            "-e".to_string(), "CLI_MODE=true".to_string(),
+            "run".to_string(),
+            "--rm".to_string(),
+            "-e".to_string(),
+            format!("AWS_ACCESS_KEY_ID={}", aws_key),
+            "-e".to_string(),
+            format!("AWS_SECRET_ACCESS_KEY={}", aws_secret),
+            "-e".to_string(),
+            format!("AWS_REGION={}", aws_region),
+            "-e".to_string(),
+            "CLI_MODE=true".to_string(),
         ];
 
         // Add session token if present (needed for temporary credentials/SSO)
@@ -2870,7 +3218,9 @@ build: docker build -t app .
             docker_args.push(format!("AWS_SESSION_TOKEN={}", token));
         }
 
-        docker_args.push("codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest".to_string());
+        docker_args.push(
+            "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest".to_string(),
+        );
 
         let output = Command::new("docker")
             .args(&docker_args)
@@ -2890,18 +3240,24 @@ build: docker build -t app .
             if !stdout.is_empty() {
                 eprintln!("stdout: {}", stdout);
             }
-            bail!("Provisioning failed (exit code: {:?})", output.status.code());
+            bail!(
+                "Provisioning failed (exit code: {:?})",
+                output.status.code()
+            );
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         // Parse the JSON output from the provisioner (CLI_MODE outputs to stdout)
-        let credentials_json: serde_json::Value = serde_json::from_str(&stdout)
-            .with_context(|| {
+        let credentials_json: serde_json::Value =
+            serde_json::from_str(&stdout).with_context(|| {
                 if stdout.trim().is_empty() {
                     "Provisioner returned empty output (expected JSON)".to_string()
                 } else {
-                    format!("Failed to parse provisioner output as JSON. Raw output:\n{}", stdout)
+                    format!(
+                        "Failed to parse provisioner output as JSON. Raw output:\n{}",
+                        stdout
+                    )
                 }
             })?;
 
@@ -2932,7 +3288,8 @@ build: docker build -t app .
             "cmd": create_cmd
         });
 
-        let create_response = self.client
+        let create_response = self
+            .client
             .post(format!("{}/api/resources", self.base_url))
             .header("X-Session-ID", &auth_config.session_id)
             .json(&create_body)
@@ -2947,7 +3304,9 @@ build: docker build -t app .
             bail!("Failed to create app (status {}): {}", status, error);
         }
 
-        let app_data: serde_json::Value = create_response.json().await
+        let app_data: serde_json::Value = create_response
+            .json()
+            .await
             .context("Failed to parse create app response")?;
 
         let resource_id = app_data["id"].as_str().unwrap_or("");
@@ -2964,7 +3323,8 @@ build: docker build -t app .
         let mut creds_with_resource = credentials_json.clone();
         creds_with_resource["resource_id"] = serde_json::json!(resource_id);
 
-        let register_response = self.client
+        let register_response = self
+            .client
             .post(format!("{}/api/resources/managed-onprem", self.base_url))
             .header("X-Session-ID", &auth_config.session_id)
             .header("Content-Type", "application/json")
@@ -2977,7 +3337,11 @@ build: docker build -t app .
             loader.stop();
             let status = register_response.status();
             let error = register_response.text().await?;
-            bail!("Failed to register credentials (status {}): {}", status, error);
+            bail!(
+                "Failed to register credentials (status {}): {}",
+                status,
+                error
+            );
         }
 
         loader.stop();
@@ -3041,8 +3405,7 @@ build: docker build -t app .
         let resource_id = deployment.as_ref().map(|d| d.resource_id.clone());
 
         // Look for managed-on-prem.json in ~/.caution/*/
-        let home = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
+        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
         let caution_dir = home.join(".caution");
 
         let mut managed_state: Option<serde_json::Value> = None;
@@ -3070,15 +3433,18 @@ build: docker build -t app .
 
         let (deployment_id, app_name, aws_region) = match &managed_state {
             Some(state) => {
-                let did = state["deployment_id"].as_str()
+                let did = state["deployment_id"]
+                    .as_str()
                     .ok_or_else(|| anyhow::anyhow!("Missing deployment_id in state file"))?;
                 let name = state["app_name"].as_str().unwrap_or("unknown");
                 let region = state["aws_region"].as_str().unwrap_or("us-west-2");
                 (did.to_string(), name.to_string(), region.to_string())
             }
             None => {
-                bail!("No managed on-prem state found.\n\
-                       Run this command from your app directory or ensure ~/.caution/<app>/managed-on-prem.json exists.");
+                bail!(
+                    "No managed on-prem state found.\n\
+                       Run this command from your app directory or ensure ~/.caution/<app>/managed-on-prem.json exists."
+                );
             }
         };
 
@@ -3107,10 +3473,12 @@ build: docker build -t app .
 
         // Check AWS credentials for teardown
         let (aws_key, aws_secret, _, aws_session_token) = Self::detect_aws_credentials()
-            .ok_or_else(|| anyhow::anyhow!(
-                "AWS credentials required for teardown.\n\
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "AWS credentials required for teardown.\n\
                  Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables."
-            ))?;
+                )
+            })?;
 
         // Destroy Caution resource first
         if let Some(ref rid) = resource_id {
@@ -3118,7 +3486,8 @@ build: docker build -t app .
             let mut loader = Loader::new("Destroying app", LoaderStyle::Processing);
 
             let auth_config = self.ensure_authenticated().await?;
-            let response = self.client
+            let response = self
+                .client
                 .delete(format!("{}/api/resources/{}", self.base_url, rid))
                 .header("X-Session-ID", &auth_config.session_id)
                 .query(&[("force_delete", "true")])
@@ -3147,16 +3516,25 @@ build: docker build -t app .
 
         // Pull the image first (in case it's not cached)
         let _ = Command::new("docker")
-            .args(&["pull", "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest"])
+            .args(&[
+                "pull",
+                "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest",
+            ])
             .output();
 
         let mut teardown_args = vec![
-            "run".to_string(), "--rm".to_string(),
-            "-e".to_string(), format!("AWS_ACCESS_KEY_ID={}", aws_key),
-            "-e".to_string(), format!("AWS_SECRET_ACCESS_KEY={}", aws_secret),
-            "-e".to_string(), format!("AWS_REGION={}", aws_region),
-            "-e".to_string(), format!("DEPLOYMENT_ID={}", deployment_id),
-            "-e".to_string(), "TEARDOWN=true".to_string(),
+            "run".to_string(),
+            "--rm".to_string(),
+            "-e".to_string(),
+            format!("AWS_ACCESS_KEY_ID={}", aws_key),
+            "-e".to_string(),
+            format!("AWS_SECRET_ACCESS_KEY={}", aws_secret),
+            "-e".to_string(),
+            format!("AWS_REGION={}", aws_region),
+            "-e".to_string(),
+            format!("DEPLOYMENT_ID={}", deployment_id),
+            "-e".to_string(),
+            "TEARDOWN=true".to_string(),
         ];
 
         // Add session token if present (needed for temporary credentials/SSO)
@@ -3165,7 +3543,9 @@ build: docker build -t app .
             teardown_args.push(format!("AWS_SESSION_TOKEN={}", token));
         }
 
-        teardown_args.push("codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest".to_string());
+        teardown_args.push(
+            "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest".to_string(),
+        );
 
         let output = Command::new("docker")
             .args(&teardown_args)
@@ -3206,15 +3586,17 @@ build: docker build -t app .
     }
 
     async fn get_attestation_url(&self) -> Result<String> {
-        let app = self.get_current_app().await
+        let app = self
+            .get_current_app()
+            .await
             .context("No deployment found. Either run 'caution init' first or provide --url")?;
 
         match app.public_ip {
-            Some(ref ip) if !ip.is_empty() => {
-                Ok(format!("http://{}/attestation", ip))
-            }
+            Some(ref ip) if !ip.is_empty() => Ok(format!("http://{}/attestation", ip)),
             _ => {
-                bail!("No public IP available. Run 'caution describe' to check deployment status, or provide --url explicitly.")
+                bail!(
+                    "No public IP available. Run 'caution describe' to check deployment status, or provide --url explicitly."
+                )
             }
         }
     }
@@ -3226,14 +3608,17 @@ build: docker build -t app .
             .args(&["rev-parse", "HEAD"])
             .output()
             .ok()
-            .and_then(|o| if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
             })
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        let procfile_no_cache = self.read_procfile_field("no_cache")
+        let procfile_no_cache = self
+            .read_procfile_field("no_cache")
             .map(|v| v.to_lowercase() == "true")
             .unwrap_or(false);
         let no_cache = no_cache || procfile_no_cache;
@@ -3261,17 +3646,34 @@ build: docker build -t app .
             reference: image_ref.clone(),
         };
 
-        let binary_path = self.read_procfile_field("binary")
+        let binary_path = self
+            .read_procfile_field("binary")
             .context("Procfile must specify 'binary' field")?;
 
         let run_command = self.read_procfile_field("run");
         let app_source_urls = self.read_procfile_sources();
-        let app_source_urls_opt = if app_source_urls.is_empty() { None } else { Some(app_source_urls.clone()) };
+        let app_source_urls_opt = if app_source_urls.is_empty() {
+            None
+        } else {
+            Some(app_source_urls.clone())
+        };
         let ports = self.read_procfile_ports();
 
         let mut loader = Loader::new("Building enclave image", LoaderStyle::Processing);
         let deployment = builder
-            .build_enclave_auto(&user_image, &binary_path, run_command, app_source_urls_opt, None, None, None, None, &ports, false, false)
+            .build_enclave_auto(
+                &user_image,
+                &binary_path,
+                run_command,
+                app_source_urls_opt,
+                None,
+                None,
+                None,
+                None,
+                &ports,
+                false,
+                false,
+            )
             .await
             .context("Failed to build enclave")?;
         loader.stop();
@@ -3312,7 +3714,11 @@ build: docker build -t app .
         }
     }
 
-    async fn build_and_get_pcrs(&self, external_manifest: Option<enclave_builder::EnclaveManifest>, no_cache: bool) -> Result<enclave_builder::PcrValues> {
+    async fn build_and_get_pcrs(
+        &self,
+        external_manifest: Option<enclave_builder::EnclaveManifest>,
+        no_cache: bool,
+    ) -> Result<enclave_builder::PcrValues> {
         let (enclave_source, enclave_version) = if let Some(ref manifest) = external_manifest {
             match &manifest.enclave_source {
                 enclave_builder::EnclaveSource::GitArchive { urls, commit } => {
@@ -3334,11 +3740,19 @@ build: docker build -t app .
         } else {
             let enclave_sources = self.read_procfile_enclave_sources();
             if !enclave_sources.is_empty() {
-                log_verbose(self.verbose, &format!("Using enclave source from Procfile: {}", enclave_sources[0]));
+                log_verbose(
+                    self.verbose,
+                    &format!("Using enclave source from Procfile: {}", enclave_sources[0]),
+                );
                 (enclave_sources[0].clone(), "unused".to_string())
             } else {
-                let source = enclave_builder::enclave_source_url(&enclave_builder::build::resolve_enclaveos_commit());
-                log_verbose(self.verbose, &format!("Using default enclave source: {}", source));
+                let source = enclave_builder::enclave_source_url(
+                    &enclave_builder::build::resolve_enclaveos_commit(),
+                );
+                log_verbose(
+                    self.verbose,
+                    &format!("Using default enclave source: {}", source),
+                );
                 (source, "unused".to_string())
             }
         };
@@ -3368,10 +3782,12 @@ build: docker build -t app .
                 .args(&["rev-parse", "HEAD"])
                 .output()
                 .ok()
-                .and_then(|o| if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
-                    None
+                .and_then(|o| {
+                    if o.status.success() {
+                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
                 })
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
         };
@@ -3398,127 +3814,183 @@ build: docker build -t app .
 
         let mut loader = Loader::new("Reproducing enclave image", LoaderStyle::Processing);
         let image_ref = if let Some(ref manifest) = external_manifest {
-            let app_source = manifest.app_source.as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Manifest does not contain app_source - cannot reproduce without source URL"))?;
+            let app_source = manifest.app_source.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Manifest does not contain app_source - cannot reproduce without source URL"
+                )
+            })?;
 
-            let archive_urls: Vec<String> = app_source.urls.iter()
+            let archive_urls: Vec<String> = app_source
+                .urls
+                .iter()
                 .filter_map(|url| self.git_url_to_archive_urls(url, &app_source.commit).ok())
                 .flatten()
                 .collect();
 
-            let git_fallback = app_source.urls.first()
-                .map(|url| (url.clone(), app_source.commit.clone(), app_source.branch.clone()));
+            let git_fallback = app_source.urls.first().map(|url| {
+                (
+                    url.clone(),
+                    app_source.commit.clone(),
+                    app_source.branch.clone(),
+                )
+            });
 
-            let app_dir = self.download_and_extract_app_source_with_git_fallback(
-                &archive_urls,
-                git_fallback.as_ref().map(|(u, c, b)| (u.as_str(), c.as_str(), b.as_deref())),
-            ).await?;
+            let app_dir = self
+                .download_and_extract_app_source_with_git_fallback(
+                    &archive_urls,
+                    git_fallback
+                        .as_ref()
+                        .map(|(u, c, b)| (u.as_str(), c.as_str(), b.as_deref())),
+                )
+                .await?;
             self.build_docker_image_from_dir(&app_dir, no_cache).await?
         } else {
             self.build_local_docker_image(no_cache).await?
         };
 
-        log_verbose(self.verbose, "Building EIF locally to calculate expected PCRs...");
+        log_verbose(
+            self.verbose,
+            "Building EIF locally to calculate expected PCRs...",
+        );
 
         let user_image = enclave_builder::UserImage {
             reference: image_ref.clone(),
         };
 
-        let (binary_path, run_command, app_source_urls, app_branch, app_commit, metadata) = if let Some(ref manifest) = external_manifest {
-            let binary = manifest.binary.clone();
-            let run_cmd = manifest.run_command.clone();
-            let source_urls: Option<Vec<String>> = manifest.app_source.as_ref().map(|s| s.urls.clone());
-            let branch = manifest.app_source.as_ref().and_then(|s| s.branch.clone());
-            let commit = manifest.app_source.as_ref().map(|s| s.commit.clone());
+        let (binary_path, run_command, app_source_urls, app_branch, app_commit, metadata) =
+            if let Some(ref manifest) = external_manifest {
+                let binary = manifest.binary.clone();
+                let run_cmd = manifest.run_command.clone();
+                let source_urls: Option<Vec<String>> =
+                    manifest.app_source.as_ref().map(|s| s.urls.clone());
+                let branch = manifest.app_source.as_ref().and_then(|s| s.branch.clone());
+                let commit = manifest.app_source.as_ref().map(|s| s.commit.clone());
 
-            log_verbose(self.verbose, &format!("Binary from manifest: {:?}", binary));
-            log_verbose(self.verbose, &format!("Run command from manifest: {:?}", run_cmd));
-            log_verbose(self.verbose, &format!("App source URLs from manifest: {:?}", source_urls));
-            log_verbose(self.verbose, &format!("Branch from manifest: {:?}", branch));
-            log_verbose(self.verbose, &format!("Commit from manifest: {:?}", commit));
+                log_verbose(self.verbose, &format!("Binary from manifest: {:?}", binary));
+                log_verbose(
+                    self.verbose,
+                    &format!("Run command from manifest: {:?}", run_cmd),
+                );
+                log_verbose(
+                    self.verbose,
+                    &format!("App source URLs from manifest: {:?}", source_urls),
+                );
+                log_verbose(self.verbose, &format!("Branch from manifest: {:?}", branch));
+                log_verbose(self.verbose, &format!("Commit from manifest: {:?}", commit));
 
-            (binary, run_cmd, source_urls, branch, commit, manifest.metadata.clone())
-        } else {
-            let binary = self.read_procfile_field("binary");
-            let run_cmd = self.read_procfile_field("run");
-            let source_urls = self.read_procfile_sources();
-            let source_urls_opt = if source_urls.is_empty() { None } else { Some(source_urls) };
-            let metadata = self.read_procfile_field("metadata");
-
-            let commit = Command::new("git")
-                .args(&["rev-parse", "HEAD"])
-                .output()
-                .ok()
-                .and_then(|o| if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
+                (
+                    binary,
+                    run_cmd,
+                    source_urls,
+                    branch,
+                    commit,
+                    manifest.metadata.clone(),
+                )
+            } else {
+                let binary = self.read_procfile_field("binary");
+                let run_cmd = self.read_procfile_field("run");
+                let source_urls = self.read_procfile_sources();
+                let source_urls_opt = if source_urls.is_empty() {
                     None
-                });
-
-            let branch = Command::new("git")
-                .args(&["rev-parse", "--abbrev-ref", "HEAD"])
-                .output()
-                .ok()
-                .and_then(|o| if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
                 } else {
-                    None
-                });
+                    Some(source_urls)
+                };
+                let metadata = self.read_procfile_field("metadata");
 
-            log_verbose(self.verbose, &format!("Binary from Procfile: {:?}", binary));
-            log_verbose(self.verbose, &format!("Run command from Procfile: {:?}", run_cmd));
-            log_verbose(self.verbose, &format!("Source URLs from Procfile: {:?}", source_urls_opt));
-            log_verbose(self.verbose, &format!("Git branch: {:?}", branch));
-            log_verbose(self.verbose, &format!("Git commit: {:?}", commit));
-            log_verbose(self.verbose, &format!("Metadata: {:?}", metadata));
+                let commit = Command::new("git")
+                    .args(&["rev-parse", "HEAD"])
+                    .output()
+                    .ok()
+                    .and_then(|o| {
+                        if o.status.success() {
+                            Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        } else {
+                            None
+                        }
+                    });
 
-            (binary, run_cmd, source_urls_opt, branch, commit, metadata)
-        };
+                let branch = Command::new("git")
+                    .args(&["rev-parse", "--abbrev-ref", "HEAD"])
+                    .output()
+                    .ok()
+                    .and_then(|o| {
+                        if o.status.success() {
+                            Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        } else {
+                            None
+                        }
+                    });
+
+                log_verbose(self.verbose, &format!("Binary from Procfile: {:?}", binary));
+                log_verbose(
+                    self.verbose,
+                    &format!("Run command from Procfile: {:?}", run_cmd),
+                );
+                log_verbose(
+                    self.verbose,
+                    &format!("Source URLs from Procfile: {:?}", source_urls_opt),
+                );
+                log_verbose(self.verbose, &format!("Git branch: {:?}", branch));
+                log_verbose(self.verbose, &format!("Git commit: {:?}", commit));
+                log_verbose(self.verbose, &format!("Metadata: {:?}", metadata));
+
+                (binary, run_cmd, source_urls_opt, branch, commit, metadata)
+            };
 
         let ports = self.read_procfile_ports();
         log_verbose(self.verbose, &format!("Ports: {:?}", ports));
 
-        let e2e = self.read_procfile_field("e2e")
+        let e2e = self
+            .read_procfile_field("e2e")
             .map(|v| v.to_lowercase() == "true")
             .unwrap_or(false);
         log_verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
-        let locksmith = self.read_procfile_field("locksmith")
+        let locksmith = self
+            .read_procfile_field("locksmith")
             .map(|v| v.to_lowercase() == "true")
             .unwrap_or(false);
         log_verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
 
         let deployment = if let Some(ref bin_path) = binary_path {
-            log_verbose(self.verbose, &format!("Using build_enclave_auto with binary: {}", bin_path));
-            builder.build_enclave_auto(
-                &user_image,
-                bin_path,
-                run_command,
-                app_source_urls,
-                app_branch,
-                app_commit,
-                metadata,
-                external_manifest,
-                &ports,
-                e2e,
-                locksmith,
-            ).await
+            log_verbose(
+                self.verbose,
+                &format!("Using build_enclave_auto with binary: {}", bin_path),
+            );
+            builder
+                .build_enclave_auto(
+                    &user_image,
+                    bin_path,
+                    run_command,
+                    app_source_urls,
+                    app_branch,
+                    app_commit,
+                    metadata,
+                    external_manifest,
+                    &ports,
+                    e2e,
+                    locksmith,
+                )
+                .await
         } else {
             log_verbose(self.verbose, "Using build_enclave (no binary specified)");
-            builder.build_enclave(
-                &user_image,
-                None,
-                run_command,
-                app_source_urls,
-                app_branch,
-                app_commit,
-                metadata,
-                external_manifest,
-                &ports,
-                e2e,
-                locksmith,
-            ).await
-        }.context("Failed to build enclave locally")?;
+            builder
+                .build_enclave(
+                    &user_image,
+                    None,
+                    run_command,
+                    app_source_urls,
+                    app_branch,
+                    app_commit,
+                    metadata,
+                    external_manifest,
+                    &ports,
+                    e2e,
+                    locksmith,
+                )
+                .await
+        }
+        .context("Failed to build enclave locally")?;
         loader.stop();
 
         if let Some(work_dir) = deployment.eif.path.parent() {
@@ -3540,8 +4012,8 @@ build: docker build -t app .
 
     fn read_pcrs_from_file(&self, path: &str) -> Result<enclave_builder::PcrValues> {
         use std::fs;
-        let content = fs::read_to_string(path)
-            .context(format!("Failed to read PCRs file: {}", path))?;
+        let content =
+            fs::read_to_string(path).context(format!("Failed to read PCRs file: {}", path))?;
 
         if let Ok(pcrs) = serde_json::from_str::<enclave_builder::PcrValues>(&content) {
             return Ok(pcrs);
@@ -3569,12 +4041,26 @@ build: docker build -t app .
         }
 
         match (pcr0, pcr1, pcr2) {
-            (Some(pcr0), Some(pcr1), Some(pcr2)) => Ok(enclave_builder::PcrValues { pcr0, pcr1, pcr2, pcr3: None, pcr4: None }),
-            _ => bail!("PCRs file must contain PCR0, PCR1, and PCR2 values")
+            (Some(pcr0), Some(pcr1), Some(pcr2)) => Ok(enclave_builder::PcrValues {
+                pcr0,
+                pcr1,
+                pcr2,
+                pcr3: None,
+                pcr4: None,
+            }),
+            _ => bail!("PCRs file must contain PCR0, PCR1, and PCR2 values"),
         }
     }
 
-    async fn verify(&self, attestation_url_opt: Option<String>, from_local: bool, app_source_url: Option<String>, pcrs_file: Option<String>, no_cache: bool, save_pcrs: bool) -> Result<()> {
+    async fn verify(
+        &self,
+        attestation_url_opt: Option<String>,
+        from_local: bool,
+        app_source_url: Option<String>,
+        pcrs_file: Option<String>,
+        no_cache: bool,
+        save_pcrs: bool,
+    ) -> Result<()> {
         println!("Verifying enclave attestation...");
         println!("Learn more: https://docs.caution.co/concepts/attestation/");
 
@@ -3593,10 +4079,14 @@ build: docker build -t app .
 
         println!("\nChallenge nonce (sent): {}", hex::encode(&nonce));
 
-        log_verbose(self.verbose, &format!("Requesting attestation from: {}", attestation_url));
+        log_verbose(
+            self.verbose,
+            &format!("Requesting attestation from: {}", attestation_url),
+        );
         println!("Requesting attestation...");
 
-        let response = self.client
+        let response = self
+            .client
             .post(&attestation_url)
             .json(&serde_json::json!({"nonce": general_purpose::STANDARD.encode(&nonce)}))
             .send()
@@ -3607,15 +4097,29 @@ build: docker build -t app .
             bail!("Failed to fetch attestation: {}", response.status());
         }
 
-        let attest_resp: serde_json::Value = response.json().await
+        let attest_resp: serde_json::Value = response
+            .json()
+            .await
             .context("Failed to parse attestation response as JSON")?;
 
-        let attestation_b64 = attest_resp.get("attestation_document")
+        let attestation_b64 = attest_resp
+            .get("attestation_document")
             .or_else(|| attest_resp.get("document"))
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("No attestation document in response. Fields: {:?}", attest_resp.as_object().map(|o| o.keys().collect::<Vec<_>>())))?;
-        log_verbose(self.verbose, &format!("Received attestation: {} bytes", attestation_b64.len()));
-        let attestation_bytes = base64::engine::general_purpose::STANDARD.decode(attestation_b64)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No attestation document in response. Fields: {:?}",
+                    attest_resp
+                        .as_object()
+                        .map(|o| o.keys().collect::<Vec<_>>())
+                )
+            })?;
+        log_verbose(
+            self.verbose,
+            &format!("Received attestation: {} bytes", attestation_b64.len()),
+        );
+        let attestation_bytes = base64::engine::general_purpose::STANDARD
+            .decode(attestation_b64)
             .context("Failed to decode attestation document")?;
 
         println!("\nExtracting remote PCR values...");
@@ -3627,17 +4131,18 @@ build: docker build -t app .
         println!("  PCR1: {}", remote_pcrs.pcr1);
         println!("  PCR2: {}", remote_pcrs.pcr2);
 
-        let manifest: Option<enclave_builder::EnclaveManifest> = if let Some(manifest_val) = attest_resp.get("manifest").cloned() {
-            match serde_json::from_value(manifest_val) {
-                Ok(m) => Some(m),
-                Err(e) => {
-                    log_verbose(self.verbose, &format!("Failed to parse manifest: {}", e));
-                    None
+        let manifest: Option<enclave_builder::EnclaveManifest> =
+            if let Some(manifest_val) = attest_resp.get("manifest").cloned() {
+                match serde_json::from_value(manifest_val) {
+                    Ok(m) => Some(m),
+                    Err(e) => {
+                        log_verbose(self.verbose, &format!("Failed to parse manifest: {}", e));
+                        None
+                    }
                 }
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
 
         if let Some(ref m) = manifest {
             println!("\nManifest information:");
@@ -3678,7 +4183,11 @@ build: docker build -t app .
                         }
                     }
                 }
-                enclave_builder::EnclaveSource::GitRepository { url, branch, commit } => {
+                enclave_builder::EnclaveSource::GitRepository {
+                    url,
+                    branch,
+                    commit,
+                } => {
                     print!("  Enclave source: {}", url);
                     if let Some(c) = commit {
                         print!(" commit: {}", c);
@@ -3713,7 +4222,9 @@ build: docker build -t app .
             println!("\nBuilding from provided source URL: {}", source_url);
             if let Some(ref m) = manifest {
                 let mut modified_manifest = m.clone();
-                let commit = m.app_source.as_ref()
+                let commit = m
+                    .app_source
+                    .as_ref()
                     .map(|s| s.commit.clone())
                     .unwrap_or_else(|| "HEAD".to_string());
                 modified_manifest.app_source = Some(enclave_builder::AppSource {
@@ -3721,7 +4232,8 @@ build: docker build -t app .
                     commit,
                     branch: None,
                 });
-                self.build_and_get_pcrs(Some(modified_manifest), no_cache).await?
+                self.build_and_get_pcrs(Some(modified_manifest), no_cache)
+                    .await?
             } else {
                 println!("\n⚠️  Remote attestation does not include a manifest");
                 println!("Cannot determine commit hash without manifest.");
@@ -3741,7 +4253,9 @@ build: docker build -t app .
                     println!("You cannot reproduce this build from remote manifest.");
                     println!();
                     println!("Options:");
-                    println!("  1. Provide the source URL: caution verify --app-source-url git@codeberg.org:org/repo.git");
+                    println!(
+                        "  1. Provide the source URL: caution verify --app-source-url git@codeberg.org:org/repo.git"
+                    );
                     println!("  2. Build from local directory: caution verify --from-local");
                     println!("  3. Use a PCRs file: caution verify --pcrs pcrs.txt");
                     println!();
@@ -3783,16 +4297,23 @@ build: docker build -t app .
 
         println!("\nVerifying attestation with bootproof-sdk...");
         let expected_nitro_pcrs: NitroPcrs = [
-            (0u8, hex::decode(&expected_pcrs.pcr0).context("bad PCR0 hex")?),
-            (1u8, hex::decode(&expected_pcrs.pcr1).context("bad PCR1 hex")?),
-            (2u8, hex::decode(&expected_pcrs.pcr2).context("bad PCR2 hex")?),
+            (
+                0u8,
+                hex::decode(&expected_pcrs.pcr0).context("bad PCR0 hex")?,
+            ),
+            (
+                1u8,
+                hex::decode(&expected_pcrs.pcr1).context("bad PCR1 hex")?,
+            ),
+            (
+                2u8,
+                hex::decode(&expected_pcrs.pcr2).context("bad PCR2 hex")?,
+            ),
         ]
         .into_iter()
         .collect();
-        let nitro = Nitro::new(
-            attestation_bytes,
-            expected_nitro_pcrs,
-        ).context("could not build bootproof nitro attestation")?;
+        let nitro = Nitro::new(attestation_bytes, expected_nitro_pcrs)
+            .context("could not build bootproof nitro attestation")?;
         let duration_since_epoch = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .context("could not get time since epoch")?;
@@ -3805,15 +4326,17 @@ build: docker build -t app .
                 println!("✓ PCR values match expected");
 
                 if let serde_cbor::Value::Map(map) = &payload {
-                    if let Some(serde_cbor::Value::Bytes(user_data)) = map.get(&serde_cbor::Value::Text("user_data".to_string())) {
+                    if let Some(serde_cbor::Value::Bytes(user_data)) =
+                        map.get(&serde_cbor::Value::Text("user_data".to_string()))
+                    {
                         println!();
                         match str::from_utf8(user_data) {
                             Ok(user_data) => {
                                 println!("User data: {user_data}");
-                            },
+                            }
                             Err(_) => {
                                 println!("User data: {user_data:?}");
-                            },
+                            }
                         }
                     }
                 }
@@ -3831,8 +4354,9 @@ build: docker build -t app .
                         "verified_at": chrono::Utc::now().to_rfc3339(),
                     });
                     let hashes_path = PathBuf::from(".caution/trusted_hashes.json");
-                    fs::write(&hashes_path, serde_json::to_string_pretty(&trusted)?)
-                        .with_context(|| format!("Failed to save trusted hashes to {}", hashes_path.display()))?;
+                    fs::write(&hashes_path, serde_json::to_string_pretty(&trusted)?).with_context(
+                        || format!("Failed to save trusted hashes to {}", hashes_path.display()),
+                    )?;
                     println!("Trusted hashes saved to {}", hashes_path.display());
                 }
 
@@ -3869,12 +4393,15 @@ build: docker build -t app .
     }
 
     async fn build_local_docker_image(&self, no_cache: bool) -> Result<String> {
-        let work_dir = std::env::current_dir()
-            .context("Failed to get current directory")?;
+        let work_dir = std::env::current_dir().context("Failed to get current directory")?;
         self.build_docker_image_from_dir(&work_dir, no_cache).await
     }
 
-    async fn build_docker_image_from_dir(&self, work_dir: &std::path::Path, no_cache: bool) -> Result<String> {
+    async fn build_docker_image_from_dir(
+        &self,
+        work_dir: &std::path::Path,
+        no_cache: bool,
+    ) -> Result<String> {
         use tokio::process::Command;
 
         let commit_sha = Command::new("git")
@@ -3883,14 +4410,19 @@ build: docker build -t app .
             .output()
             .await
             .ok()
-            .and_then(|o| if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
             })
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        let tag = format!("caution-local-build:{}", &commit_sha[..12.min(commit_sha.len())]);
+        let tag = format!(
+            "caution-local-build:{}",
+            &commit_sha[..12.min(commit_sha.len())]
+        );
 
         if !no_cache {
             let inspect = Command::new("docker")
@@ -3904,15 +4436,21 @@ build: docker build -t app .
                 return Ok(tag);
             }
         } else {
-            log_verbose(self.verbose, "--no-cache specified, rebuilding Docker image...");
+            log_verbose(
+                self.verbose,
+                "--no-cache specified, rebuilding Docker image...",
+            );
         }
 
-        log_verbose(self.verbose, &format!("Building Docker image with tag: {}", tag));
+        log_verbose(
+            self.verbose,
+            &format!("Building Docker image with tag: {}", tag),
+        );
 
         let procfile_path = work_dir.join("Procfile");
         let config = if procfile_path.exists() {
-            let content = std::fs::read_to_string(&procfile_path)
-                .context("Failed to read Procfile")?;
+            let content =
+                std::fs::read_to_string(&procfile_path).context("Failed to read Procfile")?;
             let mut build_command = None;
             let mut containerfile = None;
             let mut oci_tarball = None;
@@ -3954,7 +4492,10 @@ build: docker build -t app .
 
         build_user_image(work_dir, &tag, &config).await?;
 
-        log_verbose(self.verbose, &format!("Docker image built successfully: {}", tag));
+        log_verbose(
+            self.verbose,
+            &format!("Docker image built successfully: {}", tag),
+        );
         Ok(tag)
     }
 
@@ -3973,8 +4514,16 @@ build: docker build -t app .
         let extract_dir = cache_dir.join(hex::encode(&url_hash[..8]));
 
         // Check if already cached
-        if extract_dir.exists() && extract_dir.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false) {
-            log_verbose(self.verbose, &format!("Using cached app source: {}", extract_dir.display()));
+        if extract_dir.exists()
+            && extract_dir
+                .read_dir()
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(false)
+        {
+            log_verbose(
+                self.verbose,
+                &format!("Using cached app source: {}", extract_dir.display()),
+            );
             return Ok(extract_dir);
         }
 
@@ -3988,11 +4537,12 @@ build: docker build -t app .
 
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(30))
-            .timeout(std::time::Duration::from_secs(300))  // 5 minutes for full download
+            .timeout(std::time::Duration::from_secs(300)) // 5 minutes for full download
             .build()
             .context("Failed to create HTTP client")?;
 
-        let response = client.get(url)
+        let response = client
+            .get(url)
             .send()
             .await
             .context("Failed to download app source")?;
@@ -4001,11 +4551,15 @@ build: docker build -t app .
             bail!("Failed to download app source: HTTP {}", response.status());
         }
 
-        let archive_bytes = response.bytes()
+        let archive_bytes = response
+            .bytes()
             .await
             .context("Failed to read archive bytes")?;
 
-        log_verbose(self.verbose, &format!("Downloaded {} bytes, extracting...", archive_bytes.len()));
+        log_verbose(
+            self.verbose,
+            &format!("Downloaded {} bytes, extracting...", archive_bytes.len()),
+        );
 
         // Extract tar.gz archive with strip_components=1
         let decoder = GzDecoder::new(&archive_bytes[..]);
@@ -4013,10 +4567,17 @@ build: docker build -t app .
 
         std::fs::create_dir_all(&extract_dir)
             .with_context(|| format!("Failed to create extract dir: {}", extract_dir.display()))?;
-        let canonical_extract = extract_dir.canonicalize()
-            .with_context(|| format!("Failed to canonicalize extract dir: {}", extract_dir.display()))?;
+        let canonical_extract = extract_dir.canonicalize().with_context(|| {
+            format!(
+                "Failed to canonicalize extract dir: {}",
+                extract_dir.display()
+            )
+        })?;
 
-        for entry in archive.entries().context("Failed to read archive entries")? {
+        for entry in archive
+            .entries()
+            .context("Failed to read archive entries")?
+        {
             let mut entry = entry.context("Failed to read archive entry")?;
             let path = entry.path().context("Failed to get entry path")?;
 
@@ -4034,23 +4595,34 @@ build: docker build -t app .
                     .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
 
                 // Security: verify the resolved path stays within the extract directory
-                let canonical_parent = parent.canonicalize()
+                let canonical_parent = parent
+                    .canonicalize()
                     .with_context(|| format!("Failed to canonicalize: {}", parent.display()))?;
                 if !canonical_parent.starts_with(&canonical_extract) {
-                    bail!("Archive path traversal detected: {}", stripped_path.display());
+                    bail!(
+                        "Archive path traversal detected: {}",
+                        stripped_path.display()
+                    );
                 }
             }
 
-            entry.unpack(&dest_path)
+            entry
+                .unpack(&dest_path)
                 .with_context(|| format!("Failed to extract: {}", stripped_path.display()))?;
         }
 
-        log_verbose(self.verbose, &format!("App source extracted to: {}", extract_dir.display()));
+        log_verbose(
+            self.verbose,
+            &format!("App source extracted to: {}", extract_dir.display()),
+        );
 
         Ok(extract_dir)
     }
 
-    async fn download_and_extract_app_source_with_fallbacks(&self, urls: &[String]) -> Result<PathBuf> {
+    async fn download_and_extract_app_source_with_fallbacks(
+        &self,
+        urls: &[String],
+    ) -> Result<PathBuf> {
         if urls.is_empty() {
             bail!("No source URLs provided");
         }
@@ -4059,13 +4631,19 @@ build: docker build -t app .
 
         for (i, url) in urls.iter().enumerate() {
             if i > 0 {
-                log_verbose(self.verbose, &format!("Trying fallback URL ({}/{}): {}", i + 1, urls.len(), url));
+                log_verbose(
+                    self.verbose,
+                    &format!("Trying fallback URL ({}/{}): {}", i + 1, urls.len(), url),
+                );
             }
 
             match self.download_and_extract_app_source(url).await {
                 Ok(path) => return Ok(path),
                 Err(e) => {
-                    log_verbose(self.verbose, &format!("Failed to download from {}: {}", url, e));
+                    log_verbose(
+                        self.verbose,
+                        &format!("Failed to download from {}: {}", url, e),
+                    );
                     last_error = Some(e);
                 }
             }
@@ -4080,7 +4658,10 @@ build: docker build -t app .
         git_fallback: Option<(&str, &str, Option<&str>)>,
     ) -> Result<PathBuf> {
         if !archive_urls.is_empty() {
-            match self.download_and_extract_app_source_with_fallbacks(archive_urls).await {
+            match self
+                .download_and_extract_app_source_with_fallbacks(archive_urls)
+                .await
+            {
                 Ok(path) => return Ok(path),
                 Err(e) => {
                     log_verbose(self.verbose, &format!("Archive download failed: {}", e));
@@ -4091,17 +4672,31 @@ build: docker build -t app .
         if let Some((git_url, commit, branch)) = git_fallback {
             log_verbose(self.verbose, "Archive download failed. Trying git clone...");
 
-            let temp_dir = tempfile::TempDir::new()
-                .context("Failed to create temp directory")?;
+            let temp_dir = tempfile::TempDir::new().context("Failed to create temp directory")?;
             let clone_path = temp_dir.path().join("repo");
 
             // If we have a branch, clone by branch first (works with Forgejo/Codeberg)
             // then checkout the specific commit
             if let Some(branch_name) = branch {
-                log_verbose(self.verbose, &format!("Cloning branch '{}' then checking out commit '{}'", branch_name, commit));
+                log_verbose(
+                    self.verbose,
+                    &format!(
+                        "Cloning branch '{}' then checking out commit '{}'",
+                        branch_name, commit
+                    ),
+                );
 
                 let clone_output = Command::new("git")
-                    .args(&["clone", "--depth", "100", "--single-branch", "--branch", branch_name, git_url, clone_path.to_str().unwrap()])
+                    .args(&[
+                        "clone",
+                        "--depth",
+                        "100",
+                        "--single-branch",
+                        "--branch",
+                        branch_name,
+                        git_url,
+                        clone_path.to_str().unwrap(),
+                    ])
                     .output()
                     .context("Failed to clone repository")?;
 
@@ -4119,11 +4714,17 @@ build: docker build -t app .
 
                     if checkout_output.status.success() {
                         let extract_dir = temp_dir.keep().join("repo");
-                        log_verbose(self.verbose, &format!("Git clone successful: {}", extract_dir.display()));
+                        log_verbose(
+                            self.verbose,
+                            &format!("Git clone successful: {}", extract_dir.display()),
+                        );
                         return Ok(extract_dir);
                     } else {
                         let stderr = String::from_utf8_lossy(&checkout_output.stderr);
-                        log_verbose(self.verbose, &format!("Commit checkout failed: {}, will try deeper clone", stderr));
+                        log_verbose(
+                            self.verbose,
+                            &format!("Commit checkout failed: {}, will try deeper clone", stderr),
+                        );
 
                         // Try fetching more history to find the commit
                         let _ = Command::new("git")
@@ -4139,7 +4740,13 @@ build: docker build -t app .
 
                         if checkout_retry.status.success() {
                             let extract_dir = temp_dir.keep().join("repo");
-                            log_verbose(self.verbose, &format!("Git clone successful after unshallow: {}", extract_dir.display()));
+                            log_verbose(
+                                self.verbose,
+                                &format!(
+                                    "Git clone successful after unshallow: {}",
+                                    extract_dir.display()
+                                ),
+                            );
                             return Ok(extract_dir);
                         }
                     }
@@ -4194,14 +4801,23 @@ build: docker build -t app .
             }
 
             let extract_dir = temp_dir.keep().join("repo");
-            log_verbose(self.verbose, &format!("Git clone successful: {}", extract_dir.display()));
+            log_verbose(
+                self.verbose,
+                &format!("Git clone successful: {}", extract_dir.display()),
+            );
             return Ok(extract_dir);
         }
 
         bail!("No source URLs available and no git fallback configured")
     }
 
-    async fn add_ssh_key(&self, key_file: Option<PathBuf>, from_agent: bool, key: Option<String>, name: Option<String>) -> Result<()> {
+    async fn add_ssh_key(
+        &self,
+        key_file: Option<PathBuf>,
+        from_agent: bool,
+        key: Option<String>,
+        name: Option<String>,
+    ) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
         if from_agent {
@@ -4211,7 +4827,7 @@ build: docker build -t app .
             }
 
             let index = if keys.len() > 1 {
-                for (i ,(k, comment)) in keys.iter().enumerate() {
+                for (i, (k, comment)) in keys.iter().enumerate() {
                     let key_name = name.clone().unwrap_or_else(|| comment.clone());
                     let fingerprint = ssh_fingerprint(k);
                     println!("{}. [{}], [{}]", i + 1, key_name, fingerprint);
@@ -4225,7 +4841,10 @@ build: docker build -t app .
 
                 match input.trim().parse::<usize>() {
                     Ok(n) if n >= 1 && n <= keys.len() => n - 1,
-                    _ => bail!("Invalid number, please select a number between 1 and {}", keys.len()),
+                    _ => bail!(
+                        "Invalid number, please select a number between 1 and {}",
+                        keys.len()
+                    ),
                 }
             } else {
                 let (k, comment) = &keys[0];
@@ -4239,7 +4858,8 @@ build: docker build -t app .
             let fingerprint = ssh_fingerprint(k);
             let key_name = name.clone().unwrap_or(comment.clone());
 
-            self.add_single_key(&config.session_id, &key_name, k).await?;
+            self.add_single_key(&config.session_id, &key_name, k)
+                .await?;
             println!("Added SSH key: [{}] [{}]", key_name, fingerprint);
         } else if let Some(key_str) = key {
             let key_content = key_str.trim();
@@ -4247,7 +4867,8 @@ build: docker build -t app .
                 bail!("Invalid SSH key format");
             }
             let key_name = name.unwrap_or_else(|| "key".to_string());
-            self.add_single_key(&config.session_id, &key_name, key_content).await?;
+            self.add_single_key(&config.session_id, &key_name, key_content)
+                .await?;
             println!("Added: {}", key_name);
             println!("  {}", key_content);
         } else if let Some(path) = key_file {
@@ -4267,7 +4888,8 @@ build: docker build -t app .
                     .to_string()
             });
 
-            self.add_single_key(&config.session_id, &key_name, &key_content).await?;
+            self.add_single_key(&config.session_id, &key_name, &key_content)
+                .await?;
             println!("Added: {}", key_name);
             println!("  {}", key_content);
         } else {
@@ -4284,7 +4906,10 @@ build: docker build -t app .
 
         if !response.status().is_success() {
             let error = self.api_error_message(response).await;
-            if error.contains("insert SSH key") || error.contains("duplicate") || error.contains("23505") {
+            if error.contains("insert SSH key")
+                || error.contains("duplicate")
+                || error.contains("23505")
+            {
                 bail!("Key already exists");
             }
             bail!("{}", error);
@@ -4295,7 +4920,8 @@ build: docker build -t app .
     async fn remove_ssh_key(&self, fingerprint: &str) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
-        let response = self.client
+        let response = self
+            .client
             .delete(format!("{}/ssh-keys/{}", self.base_url, fingerprint))
             .header("X-Session-ID", config.session_id)
             .send()
@@ -4313,25 +4939,24 @@ build: docker build -t app .
     fn get_ssh_agent_keys(&self) -> Vec<(String, String)> {
         let output = Command::new("ssh-add").arg("-L").output();
         match output {
-            Ok(out) if out.status.success() => {
-                String::from_utf8_lossy(&out.stdout)
-                    .lines()
-                    .filter(|line| line.starts_with("ssh-"))
-                    .map(|line| {
-                        let parts: Vec<&str> = line.splitn(3, ' ').collect();
-                        let comment = parts.get(2).unwrap_or(&"unnamed").to_string();
-                        (line.to_string(), comment)
-                    })
-                    .collect()
-            }
-            _ => Vec::new()
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|line| line.starts_with("ssh-"))
+                .map(|line| {
+                    let parts: Vec<&str> = line.splitn(3, ' ').collect();
+                    let comment = parts.get(2).unwrap_or(&"unnamed").to_string();
+                    (line.to_string(), comment)
+                })
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
     async fn list_ssh_keys(&self) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
-        let response = self.client
+        let response = self
+            .client
             .get(format!("{}/ssh-keys", self.base_url))
             .header("X-Session-ID", config.session_id)
             .send()
@@ -4339,7 +4964,8 @@ build: docker build -t app .
 
         if response.status().is_success() {
             let response_data: serde_json::Value = response.json().await?;
-            let keys = response_data["keys"].as_array()
+            let keys = response_data["keys"]
+                .as_array()
                 .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
 
             if keys.is_empty() {
@@ -4406,7 +5032,8 @@ build: docker build -t app .
                     for entry in items {
                         let path = entry.path();
                         let size = self.dir_size(&path).unwrap_or(0);
-                        let name = path.file_name()
+                        let name = path
+                            .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| "unknown".to_string());
                         println!("  {} ({})", name, self.format_size(size));
@@ -4447,8 +5074,7 @@ build: docker build -t app .
             }
         }
 
-        fs::remove_dir_all(&cache_dir)
-            .context("Failed to remove cache directory")?;
+        fs::remove_dir_all(&cache_dir).context("Failed to remove cache directory")?;
 
         println!("Cache cleared ({} freed)", self.format_size(total_size));
         Ok(())
@@ -4489,7 +5115,13 @@ build: docker build -t app .
         }
     }
 
-    async fn add_credential(&self, platform: CredentialPlatform, name: String, is_default: bool, region: Option<String>) -> Result<()> {
+    async fn add_credential(
+        &self,
+        platform: CredentialPlatform,
+        name: String,
+        is_default: bool,
+        region: Option<String>,
+    ) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
         let request_body = match platform {
@@ -4503,8 +5135,8 @@ build: docker build -t app .
 
                 print!("AWS Secret Access Key: ");
                 std::io::stdout().flush()?;
-                let secret_access_key = rpassword::read_password()
-                    .context("Failed to read secret access key")?;
+                let secret_access_key =
+                    rpassword::read_password().context("Failed to read secret access key")?;
 
                 serde_json::json!({
                     "platform": "aws",
@@ -4515,13 +5147,15 @@ build: docker build -t app .
                     "is_default": is_default
                 })
             }
-            CredentialPlatform::Digitalocean | CredentialPlatform::Hetzner |
-            CredentialPlatform::Linode | CredentialPlatform::Vultr | CredentialPlatform::Ovh => {
+            CredentialPlatform::Digitalocean
+            | CredentialPlatform::Hetzner
+            | CredentialPlatform::Linode
+            | CredentialPlatform::Vultr
+            | CredentialPlatform::Ovh => {
                 println!("Adding {} credentials for '{}'", platform, name);
                 print!("API Token: ");
                 std::io::stdout().flush()?;
-                let api_token = rpassword::read_password()
-                    .context("Failed to read API token")?;
+                let api_token = rpassword::read_password().context("Failed to read API token")?;
 
                 serde_json::json!({
                     "platform": platform.to_string(),
@@ -4575,8 +5209,8 @@ build: docker build -t app .
 
                 print!("Client Secret: ");
                 std::io::stdout().flush()?;
-                let client_secret = rpassword::read_password()
-                    .context("Failed to read client secret")?;
+                let client_secret =
+                    rpassword::read_password().context("Failed to read client secret")?;
 
                 print!("Subscription ID: ");
                 std::io::stdout().flush()?;
@@ -4624,8 +5258,7 @@ build: docker build -t app .
                 let (ssh_private_key, ssh_password) = if auth_type == "p" {
                     print!("SSH Password: ");
                     std::io::stdout().flush()?;
-                    let password = rpassword::read_password()
-                        .context("Failed to read password")?;
+                    let password = rpassword::read_password().context("Failed to read password")?;
                     (None, Some(password))
                 } else {
                     print!("Path to SSH private key [~/.ssh/id_ed25519]: ");
@@ -4660,7 +5293,8 @@ build: docker build -t app .
             }
         };
 
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/credentials", self.base_url))
             .header("X-Session-ID", &config.session_id)
             .json(&request_body)
@@ -4669,7 +5303,10 @@ build: docker build -t app .
 
         if response.status().is_success() {
             let cred: serde_json::Value = response.json().await?;
-            println!("Credential '{}' added successfully (ID: {})", name, cred["id"]);
+            println!(
+                "Credential '{}' added successfully (ID: {})",
+                name, cred["id"]
+            );
             if is_default {
                 println!("Set as default for {}", platform);
             }
@@ -4683,7 +5320,8 @@ build: docker build -t app .
     async fn list_credentials(&self) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
-        let response = self.client
+        let response = self
+            .client
             .get(format!("{}/credentials", self.base_url))
             .header("X-Session-ID", &config.session_id)
             .send()
@@ -4693,7 +5331,9 @@ build: docker build -t app .
             let credentials: Vec<serde_json::Value> = response.json().await?;
 
             if credentials.is_empty() {
-                println!("No cloud credentials found. Add one with 'caution credentials add <platform> <name>'");
+                println!(
+                    "No cloud credentials found. Add one with 'caution credentials add <platform> <name>'"
+                );
             } else {
                 println!("Cloud Credentials:");
                 println!();
@@ -4708,7 +5348,10 @@ build: docker build -t app .
                     let default_marker = if is_default { " (default)" } else { "" };
                     let region_str = region.map(|r| format!(" [{}]", r)).unwrap_or_default();
 
-                    println!("  [{}] {} - {}{}{}", id, name, platform, default_marker, region_str);
+                    println!(
+                        "  [{}] {} - {}{}{}",
+                        id, name, platform, default_marker, region_str
+                    );
                     println!("       Identifier: {}", identifier);
                 }
             }
@@ -4722,10 +5365,11 @@ build: docker build -t app .
     async fn remove_credential(&self, id: &str, force: bool) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
-        let credential_id = uuid::Uuid::parse_str(id)
-            .context("Invalid credential ID - must be a valid UUID")?;
+        let credential_id =
+            uuid::Uuid::parse_str(id).context("Invalid credential ID - must be a valid UUID")?;
 
-        let response = self.client
+        let response = self
+            .client
             .get(format!("{}/credentials/{}", self.base_url, credential_id))
             .header("X-Session-ID", &config.session_id)
             .send()
@@ -4760,7 +5404,8 @@ build: docker build -t app .
             }
         }
 
-        let response = self.client
+        let response = self
+            .client
             .delete(format!("{}/credentials/{}", self.base_url, credential_id))
             .header("X-Session-ID", &config.session_id)
             .send()
@@ -4778,11 +5423,15 @@ build: docker build -t app .
     async fn set_default_credential(&self, id: &str) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
-        let credential_id = uuid::Uuid::parse_str(id)
-            .context("Invalid credential ID - must be a valid UUID")?;
+        let credential_id =
+            uuid::Uuid::parse_str(id).context("Invalid credential ID - must be a valid UUID")?;
 
-        let response = self.client
-            .post(format!("{}/credentials/{}/default", self.base_url, credential_id))
+        let response = self
+            .client
+            .post(format!(
+                "{}/credentials/{}/default",
+                self.base_url, credential_id
+            ))
             .header("X-Session-ID", &config.session_id)
             .send()
             .await?;
@@ -4798,7 +5447,15 @@ build: docker build -t app .
         }
     }
 
-    async fn secret_new(&self, keyring: PathBuf, threshold: Option<u8>, max: Option<u8>, upload: bool, name: Option<String>, labels: Vec<String>) -> Result<()> {
+    async fn secret_new(
+        &self,
+        keyring: PathBuf,
+        threshold: Option<u8>,
+        max: Option<u8>,
+        upload: bool,
+        name: Option<String>,
+        labels: Vec<String>,
+    ) -> Result<()> {
         let keymaker_url = std::env::var("KEYMAKER_URL")
             .context("KEYMAKER_URL environment variable is required")?;
 
@@ -4815,9 +5472,13 @@ build: docker build -t app .
             "label": {},
         });
 
-        eprintln!("Generating quorum (threshold={}, max={})...", threshold, max);
+        eprintln!(
+            "Generating quorum (threshold={}, max={})...",
+            threshold, max
+        );
 
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/generate_quorum", keymaker_url))
             .json(&request_body)
             .send()
@@ -4830,13 +5491,16 @@ build: docker build -t app .
             bail!("Keymaker error ({}): {}", status, error);
         }
 
-        let quorum_response: serde_json::Value = response.json().await
+        let quorum_response: serde_json::Value = response
+            .json()
+            .await
             .context("Failed to parse Keymaker response")?;
 
         let json = serde_json::to_string_pretty(&quorum_response)?;
 
         let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
-        let in_caution_repo = PathBuf::from("Procfile").exists() || PathBuf::from(".caution/deployment.json").exists();
+        let in_caution_repo = PathBuf::from("Procfile").exists()
+            || PathBuf::from(".caution/deployment.json").exists();
 
         // Always save to file when in a caution repo
         if in_caution_repo {
@@ -4857,18 +5521,23 @@ build: docker build -t app .
 
         if upload || self.qr {
             if self.qr {
-                eprintln!("\nUploading public key material bundle to Caution via QR code signing...");
+                eprintln!(
+                    "\nUploading public key material bundle to Caution via QR code signing..."
+                );
             } else {
                 eprintln!("\nTo back up public key material bundle to Caution, tap your key.");
             }
             if in_caution_repo {
-                eprintln!("The key material bundle is also accessible at .caution/quorum-bundle.json");
+                eprintln!(
+                    "The key material bundle is also accessible at .caution/quorum-bundle.json"
+                );
             }
             eprintln!("Press Ctrl+C to cancel.");
 
             let config = self.ensure_authenticated().await?;
 
-            let label_map: serde_json::Map<String, serde_json::Value> = labels.iter()
+            let label_map: serde_json::Map<String, serde_json::Value> = labels
+                .iter()
                 .filter_map(|l| l.split_once('='))
                 .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
                 .collect();
@@ -4879,7 +5548,9 @@ build: docker build -t app .
                 "labels": label_map,
             });
 
-            let response = self.signed_post(&config.session_id, "/api/quorum-bundles", &upload_body).await?;
+            let response = self
+                .signed_post(&config.session_id, "/api/quorum-bundles", &upload_body)
+                .await?;
 
             if response.status().is_success() {
                 let result: serde_json::Value = response.json().await?;
@@ -4905,7 +5576,8 @@ build: docker build -t app .
             "name": name,
         });
 
-        let response = self.client
+        let response = self
+            .client
             .patch(format!("{}/api/quorum-bundles/{}", self.base_url, id))
             .header("X-Session-ID", &config.session_id)
             .json(&body)
@@ -4928,7 +5600,8 @@ build: docker build -t app .
         let config = self.ensure_authenticated().await?;
 
         // Get current bundle to read existing labels
-        let response = self.client
+        let response = self
+            .client
             .get(format!("{}/api/quorum-bundles/{}", self.base_url, id))
             .header("X-Session-ID", &config.session_id)
             .send()
@@ -4942,20 +5615,23 @@ build: docker build -t app .
         }
 
         let bundle: serde_json::Value = response.json().await?;
-        let mut current_labels = bundle.get("labels")
+        let mut current_labels = bundle
+            .get("labels")
             .and_then(|l| l.as_object().cloned())
             .unwrap_or_default();
 
         // Merge new labels
         for label in &labels {
-            let (k, v) = label.split_once('=')
-                .ok_or_else(|| anyhow::anyhow!("Invalid label format '{}', expected key=value", label))?;
+            let (k, v) = label.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("Invalid label format '{}', expected key=value", label)
+            })?;
             current_labels.insert(k.to_string(), serde_json::Value::String(v.to_string()));
         }
 
         let body = serde_json::json!({ "labels": current_labels });
 
-        let response = self.client
+        let response = self
+            .client
             .patch(format!("{}/api/quorum-bundles/{}", self.base_url, id))
             .header("X-Session-ID", &config.session_id)
             .json(&body)
@@ -4978,7 +5654,8 @@ build: docker build -t app .
         let config = self.ensure_authenticated().await?;
 
         // Get current bundle to read existing labels
-        let response = self.client
+        let response = self
+            .client
             .get(format!("{}/api/quorum-bundles/{}", self.base_url, id))
             .header("X-Session-ID", &config.session_id)
             .send()
@@ -4992,7 +5669,8 @@ build: docker build -t app .
         }
 
         let bundle: serde_json::Value = response.json().await?;
-        let mut current_labels = bundle.get("labels")
+        let mut current_labels = bundle
+            .get("labels")
             .and_then(|l| l.as_object().cloned())
             .unwrap_or_default();
 
@@ -5002,7 +5680,8 @@ build: docker build -t app .
 
         let body = serde_json::json!({ "labels": current_labels });
 
-        let response = self.client
+        let response = self
+            .client
             .patch(format!("{}/api/quorum-bundles/{}", self.base_url, id))
             .header("X-Session-ID", &config.session_id)
             .json(&body)
@@ -5021,14 +5700,19 @@ build: docker build -t app .
         Ok(())
     }
 
-    async fn secret_send_shard(&self, app: Option<String>, bundle_path: Option<PathBuf>) -> Result<()> {
+    async fn secret_send_shard(
+        &self,
+        app: Option<String>,
+        bundle_path: Option<PathBuf>,
+    ) -> Result<()> {
         // Resolve the app to get the enclave's public IP
         let app_info = match app {
             Some(id) => self.fetch_app(&id).await?,
             None => self.get_current_app().await?,
         };
 
-        let public_ip = app_info.public_ip
+        let public_ip = app_info
+            .public_ip
             .context("App has no public IP. Is the enclave running?")?;
 
         // Resolve the bundle file
@@ -5048,7 +5732,8 @@ build: docker build -t app .
                 // Try to pull from Caution API
                 eprintln!("No local bundle found, checking Caution...");
                 let config = self.ensure_authenticated().await?;
-                let response = self.client
+                let response = self
+                    .client
                     .get(format!("{}/api/quorum-bundles", self.base_url))
                     .header("X-Session-ID", &config.session_id)
                     .send()
@@ -5056,23 +5741,27 @@ build: docker build -t app .
                     .context("Failed to fetch quorum bundles from Caution")?;
 
                 if !response.status().is_success() {
-                    bail!("No bundle found locally or on Caution. Create one with: caution secret new <keyring>");
+                    bail!(
+                        "No bundle found locally or on Caution. Create one with: caution secret new <keyring>"
+                    );
                 }
 
-                let bundles: Vec<serde_json::Value> = response.json().await
+                let bundles: Vec<serde_json::Value> = response
+                    .json()
+                    .await
                     .context("Failed to parse bundles response")?;
 
                 if bundles.is_empty() {
-                    bail!("No bundle found locally or on Caution. Create one with: caution secret new <keyring>");
+                    bail!(
+                        "No bundle found locally or on Caution. Create one with: caution secret new <keyring>"
+                    );
                 }
 
                 // Use the first bundle's data
-                let bundle_data = bundles[0].get("data")
-                    .context("Bundle has no data field")?;
+                let bundle_data = bundles[0].get("data").context("Bundle has no data field")?;
 
                 let secrets_dir = PathBuf::from(".caution/secrets");
-                fs::create_dir_all(&secrets_dir)
-                    .context("Failed to create .caution/secrets/")?;
+                fs::create_dir_all(&secrets_dir).context("Failed to create .caution/secrets/")?;
                 let path = secrets_dir.join("bundle.json");
                 let json = serde_json::to_string_pretty(bundle_data)?;
                 fs::write(&path, &json)
@@ -5082,7 +5771,11 @@ build: docker build -t app .
             }
         };
 
-        anyhow::ensure!(bundle_file.exists(), "Bundle file not found: {}", bundle_file.display());
+        anyhow::ensure!(
+            bundle_file.exists(),
+            "Bundle file not found: {}",
+            bundle_file.display()
+        );
 
         // Load trusted hashes from a prior `caution verify --save-pcrs`
         let hashes_path = PathBuf::from(".caution/trusted_hashes.json");
@@ -5093,9 +5786,21 @@ build: docker build -t app .
             .context("Failed to parse .caution/trusted_hashes.json")?;
 
         let pcrs = std::collections::HashMap::from([
-            (0u8, hex::decode(hashes["pcr0"].as_str().context("missing pcr0")?).context("invalid pcr0 hex")?),
-            (1u8, hex::decode(hashes["pcr1"].as_str().context("missing pcr1")?).context("invalid pcr1 hex")?),
-            (2u8, hex::decode(hashes["pcr2"].as_str().context("missing pcr2")?).context("invalid pcr2 hex")?),
+            (
+                0u8,
+                hex::decode(hashes["pcr0"].as_str().context("missing pcr0")?)
+                    .context("invalid pcr0 hex")?,
+            ),
+            (
+                1u8,
+                hex::decode(hashes["pcr1"].as_str().context("missing pcr1")?)
+                    .context("invalid pcr1 hex")?,
+            ),
+            (
+                2u8,
+                hex::decode(hashes["pcr2"].as_str().context("missing pcr2")?)
+                    .context("invalid pcr2 hex")?,
+            ),
         ]);
 
         if let Some(verified_at) = hashes["verified_at"].as_str() {
@@ -5118,7 +5823,10 @@ build: docker build -t app .
 
         match status {
             locksmith::models::SendSignedEncryptedShardResponse::Accepted { remaining } => {
-                eprintln!("Shard accepted, {} remaining shards until reconstitution", remaining);
+                eprintln!(
+                    "Shard accepted, {} remaining shards until reconstitution",
+                    remaining
+                );
             }
             locksmith::models::SendSignedEncryptedShardResponse::Rejected { reason } => {
                 bail!("Shard rejected by enclave: {}", reason);
@@ -5156,7 +5864,8 @@ pub async fn run() -> Result<()> {
     }
 
     log_verbose(cli.verbose, "Initializing API client...");
-    let client = ApiClient::new(&cli.url, cli.verbose, cli.qr).context("Failed to initialize API client")?;
+    let client =
+        ApiClient::new(&cli.url, cli.verbose, cli.qr).context("Failed to initialize API client")?;
     log_verbose(cli.verbose, "API client ready");
 
     match cli.command {
@@ -5173,115 +5882,159 @@ pub async fn run() -> Result<()> {
         Commands::Logout => {
             client.logout().await?;
         }
-        Commands::Init { managed_on_prem, platform, name, region, local, config } => {
+        Commands::Init {
+            managed_on_prem,
+            platform,
+            name,
+            region,
+            local,
+            config,
+        } => {
             if managed_on_prem && platform != "aws" {
                 bail!("Only --platform aws is currently supported for managed on-prem deployments");
             }
-            client.init(managed_on_prem, name, region, local, config).await?;
+            client
+                .init(managed_on_prem, name, region, local, config)
+                .await?;
         }
-        Commands::Teardown { managed_on_prem, platform, force } => {
+        Commands::Teardown {
+            managed_on_prem,
+            platform,
+            force,
+        } => {
             if managed_on_prem {
                 if platform != "aws" {
-                    bail!("Only --platform aws is currently supported for managed on-prem deployments");
+                    bail!(
+                        "Only --platform aws is currently supported for managed on-prem deployments"
+                    );
                 }
                 client.teardown_managed_on_prem(force).await?;
             } else {
                 bail!("Please specify --managed-on-prem to tear down managed infrastructure");
             }
         }
-        Commands::Verify { attestation_url, from_local, app_source_url, pcrs, no_cache, save_pcrs } => {
-            client.verify(attestation_url, from_local, app_source_url, pcrs, no_cache, save_pcrs).await?;
+        Commands::Verify {
+            attestation_url,
+            from_local,
+            app_source_url,
+            pcrs,
+            no_cache,
+            save_pcrs,
+        } => {
+            client
+                .verify(
+                    attestation_url,
+                    from_local,
+                    app_source_url,
+                    pcrs,
+                    no_cache,
+                    save_pcrs,
+                )
+                .await?;
         }
-        Commands::Apps { command } => {
-            match command {
-                AppCommands::Create => {
-                    client.create_app().await?;
-                }
-                AppCommands::List => {
-                    client.list_apps().await?;
-                }
-                AppCommands::Get { id } => {
-                    client.get_app(id).await?;
-                }
-                AppCommands::Destroy { id, force, force_delete } => {
-                    client.destroy_app(id, force, force_delete).await?;
-                }
-                AppCommands::Build { no_cache } => {
-                    client.build_local(no_cache).await?;
-                }
-                AppCommands::Rename { name, id } => {
-                    client.rename_app(id, name).await?;
-                }
+        Commands::Apps { command } => match command {
+            AppCommands::Create => {
+                client.create_app().await?;
             }
-        }
-        Commands::SshKeys { command } => {
-            match command {
-                SshKeyCommands::Add { key_file, from_agent, key, name } => {
-                    client.add_ssh_key(key_file, from_agent, key, name).await?;
-                }
-                SshKeyCommands::List => {
-                    client.list_ssh_keys().await?;
-                }
-                SshKeyCommands::Remove { fingerprint } => {
-                    client.remove_ssh_key(&fingerprint).await?;
-                }
+            AppCommands::List => {
+                client.list_apps().await?;
             }
-        }
-        Commands::Cache { command } => {
-            match command {
-                CacheCommands::Path => {
-                    client.cache_path()?;
-                }
-                CacheCommands::Size => {
-                    client.cache_size()?;
-                }
-                CacheCommands::List => {
-                    client.cache_list()?;
-                }
-                CacheCommands::Destroy { force } => {
-                    client.cache_destroy(force)?;
-                }
+            AppCommands::Get { id } => {
+                client.get_app(id).await?;
             }
-        }
-        Commands::Credentials { command } => {
-            match command {
-                CredentialCommands::Add { platform, name, default, region } => {
-                    client.add_credential(platform, name, default, region).await?;
-                }
-                CredentialCommands::List => {
-                    client.list_credentials().await?;
-                }
-                CredentialCommands::Remove { id, force } => {
-                    client.remove_credential(&id, force).await?;
-                }
-                CredentialCommands::SetDefault { id } => {
-                    client.set_default_credential(&id).await?;
-                }
+            AppCommands::Destroy {
+                id,
+                force,
+                force_delete,
+            } => {
+                client.destroy_app(id, force, force_delete).await?;
             }
-        }
-        Commands::Secret { command } => {
-            match command {
-                SecretCommands::New { keyring, threshold, max, no_upload, name, labels } => {
-                    client.secret_new(keyring, threshold, max, !no_upload, name, labels).await?;
-                }
-                SecretCommands::Rename { id, name } => {
-                    client.secret_rename(id, name).await?;
-                }
-                SecretCommands::Label { command } => {
-                    match command {
-                        LabelCommands::Set { id, labels } => {
-                            client.secret_label_set(id, labels).await?;
-                        }
-                        LabelCommands::Remove { id, keys } => {
-                            client.secret_label_remove(id, keys).await?;
-                        }
-                    }
-                }
-                SecretCommands::SendShard { app, bundle } => {
-                    client.secret_send_shard(app, bundle).await?;
-                }
+            AppCommands::Build { no_cache } => {
+                client.build_local(no_cache).await?;
             }
-        }
+            AppCommands::Rename { name, id } => {
+                client.rename_app(id, name).await?;
+            }
+        },
+        Commands::SshKeys { command } => match command {
+            SshKeyCommands::Add {
+                key_file,
+                from_agent,
+                key,
+                name,
+            } => {
+                client.add_ssh_key(key_file, from_agent, key, name).await?;
+            }
+            SshKeyCommands::List => {
+                client.list_ssh_keys().await?;
+            }
+            SshKeyCommands::Remove { fingerprint } => {
+                client.remove_ssh_key(&fingerprint).await?;
+            }
+        },
+        Commands::Cache { command } => match command {
+            CacheCommands::Path => {
+                client.cache_path()?;
+            }
+            CacheCommands::Size => {
+                client.cache_size()?;
+            }
+            CacheCommands::List => {
+                client.cache_list()?;
+            }
+            CacheCommands::Destroy { force } => {
+                client.cache_destroy(force)?;
+            }
+        },
+        Commands::Credentials { command } => match command {
+            CredentialCommands::Add {
+                platform,
+                name,
+                default,
+                region,
+            } => {
+                client
+                    .add_credential(platform, name, default, region)
+                    .await?;
+            }
+            CredentialCommands::List => {
+                client.list_credentials().await?;
+            }
+            CredentialCommands::Remove { id, force } => {
+                client.remove_credential(&id, force).await?;
+            }
+            CredentialCommands::SetDefault { id } => {
+                client.set_default_credential(&id).await?;
+            }
+        },
+        Commands::Secret { command } => match command {
+            SecretCommands::New {
+                keyring,
+                threshold,
+                max,
+                no_upload,
+                name,
+                labels,
+            } => {
+                client
+                    .secret_new(keyring, threshold, max, !no_upload, name, labels)
+                    .await?;
+            }
+            SecretCommands::Rename { id, name } => {
+                client.secret_rename(id, name).await?;
+            }
+            SecretCommands::Label { command } => match command {
+                LabelCommands::Set { id, labels } => {
+                    client.secret_label_set(id, labels).await?;
+                }
+                LabelCommands::Remove { id, keys } => {
+                    client.secret_label_remove(id, keys).await?;
+                }
+            },
+            SecretCommands::SendShard { app, bundle } => {
+                client.secret_send_shard(app, bundle).await?;
+            }
+        },
     }
 
     Ok(())

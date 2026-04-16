@@ -25,27 +25,28 @@ impl Config {
     pub fn from_env() -> Result<Self> {
         dotenvy::dotenv().ok();
 
-        let database_url = env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgresql://apiuser:apipass@localhost:5432/apidb?sslmode=disable".to_string());
+        let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgresql://apiuser:apipass@localhost:5432/apidb?sslmode=disable".to_string()
+        });
 
-        let api_service_url = env::var("API_SERVICE_URL")
-            .unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let api_service_url =
+            env::var("API_SERVICE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
 
         // Validate API service URL
-        Url::parse(&api_service_url)
-            .context("Invalid API_SERVICE_URL")?;
+        Url::parse(&api_service_url).context("Invalid API_SERVICE_URL")?;
 
-        let metering_service_url = env::var("METERING_SERVICE_URL")
-            .unwrap_or_else(|_| "http://metering:8083".to_string());
+        let metering_service_url =
+            env::var("METERING_SERVICE_URL").unwrap_or_else(|_| "http://metering:8083".to_string());
 
-        let rp_id = env::var("RP_ID")
-            .unwrap_or_else(|_| "localhost".to_string());
+        let rp_id = env::var("RP_ID").unwrap_or_else(|_| "localhost".to_string());
 
-        let rp_display_name = env::var("RP_DISPLAY_NAME")
-            .unwrap_or_else(|_| "Hybrid API".to_string());
+        let rp_display_name =
+            env::var("RP_DISPLAY_NAME").unwrap_or_else(|_| "Hybrid API".to_string());
 
         let rp_origins: Vec<String> = env::var("RP_ORIGINS")
-            .unwrap_or_else(|_| "http://localhost:8080,http://localhost:8000,http://localhost:3000".to_string())
+            .unwrap_or_else(|_| {
+                "http://localhost:8080,http://localhost:8000,http://localhost:3000".to_string()
+            })
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -75,11 +76,11 @@ impl Config {
             .parse()
             .context("Invalid SESSION_TIMEOUT_HOURS")?;
 
-        let data_dir = env::var("CAUTION_DATA_DIR")
-            .unwrap_or_else(|_| "/var/cache/caution".to_string());
+        let data_dir =
+            env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
 
-        let csrf_secret = env::var("CSRF_SECRET")
-            .context("CSRF_SECRET environment variable must be set")?;
+        let csrf_secret =
+            env::var("CSRF_SECRET").context("CSRF_SECRET environment variable must be set")?;
 
         Ok(Config {
             database_url,

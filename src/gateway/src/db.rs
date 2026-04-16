@@ -87,7 +87,7 @@ pub async fn create_user(
                 user_id, legal_document_id, document_type, document_version,
                 event_type, event_source, occurred_at,
                 ip_address, user_agent
-            ) VALUES ($1, $2, $3, $4, $5, 'signup', NOW(), $6::inet, $7)"
+            ) VALUES ($1, $2, $3, $4, $5, 'signup', NOW(), $6::inet, $7)",
         )
         .bind(user_id)
         .bind(legal_document_id)

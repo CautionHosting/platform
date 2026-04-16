@@ -35,8 +35,8 @@ pub fn get_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
 /// # Returns
 /// A hex-encoded CSRF token
 pub fn derive_csrf_token(session_id: &str, secret: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC can take key of any size");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
     mac.update(session_id.as_bytes());
     mac.update(b":csrf"); // domain separation
     hex::encode(mac.finalize().into_bytes())
@@ -134,7 +134,10 @@ mod tests {
     fn test_get_cookie_from_headers() {
         let mut headers = HeaderMap::new();
         headers.insert("cookie", "session_id=abc123; other=xyz".parse().unwrap());
-        assert_eq!(get_cookie(&headers, "session_id"), Some("abc123".to_string()));
+        assert_eq!(
+            get_cookie(&headers, "session_id"),
+            Some("abc123".to_string())
+        );
         assert_eq!(get_cookie(&headers, "other"), Some("xyz".to_string()));
         assert_eq!(get_cookie(&headers, "missing"), None);
     }

@@ -15,8 +15,7 @@ pub fn extract_pcrs_from_eif(eif: &EifFile) -> Result<PcrValues> {
         );
     }
 
-    let pcrs_content = std::fs::read_to_string(&pcrs_path)
-        .context("Failed to read PCR file")?;
+    let pcrs_content = std::fs::read_to_string(&pcrs_path).context("Failed to read PCR file")?;
 
     parse_pcrs_file(&pcrs_content)
 }
@@ -85,8 +84,8 @@ pub fn parse_attestation_document(attestation_b64: &str) -> Result<PcrValues> {
         _ => anyhow::bail!("Payload is not bytes"),
     };
 
-    let attestation: serde_cbor::Value = serde_cbor::from_slice(payload_bytes)
-        .context("Failed to parse attestation payload")?;
+    let attestation: serde_cbor::Value =
+        serde_cbor::from_slice(payload_bytes).context("Failed to parse attestation payload")?;
 
     let attestation_map = match attestation {
         serde_cbor::Value::Map(ref map) => map,
@@ -138,9 +137,7 @@ pub fn parse_attestation_document(attestation_b64: &str) -> Result<PcrValues> {
 }
 
 pub fn is_debug_mode(pcrs: &PcrValues) -> bool {
-    let is_zero = |s: &str| {
-        s.chars().all(|c| c == '0')
-    };
+    let is_zero = |s: &str| s.chars().all(|c| c == '0');
 
     is_zero(&pcrs.pcr0) || is_zero(&pcrs.pcr1) || is_zero(&pcrs.pcr2)
 }

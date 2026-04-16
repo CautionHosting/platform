@@ -9,8 +9,8 @@ use axum::{
 };
 use reqwest::Client;
 
-use crate::types::{AppState, AuthenticatedUserId};
 use crate::request_id::RequestId;
+use crate::types::{AppState, AuthenticatedUserId};
 
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB
 
@@ -27,11 +27,8 @@ pub async fn metering_proxy_handler(
     tracing::debug!("Proxying webhook to metering: {}", target_url);
 
     // Only forward headers needed for webhook signature verification
-    const ALLOWED_WEBHOOK_HEADERS: &[&str] = &[
-        "content-type",
-        "content-length",
-        "paddle-signature",
-    ];
+    const ALLOWED_WEBHOOK_HEADERS: &[&str] =
+        &["content-type", "content-length", "paddle-signature"];
 
     let headers = req.headers().clone();
     let method = req.method().clone();
@@ -71,7 +68,11 @@ pub async fn metering_proxy_handler(
     }
     response.body(Body::from(resp_body)).map_err(|e| {
         tracing::error!("Failed to build response: {:?}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to build response",
+        )
+            .into_response()
     })
 }
 
@@ -82,9 +83,13 @@ pub async fn proxy_handler(
     let client = Client::new();
 
     let path = req.uri().path();
-    let query = req.uri().query().map(|q| format!("?{}", q)).unwrap_or_default();
+    let query = req
+        .uri()
+        .query()
+        .map(|q| format!("?{}", q))
+        .unwrap_or_default();
     let target_url = format!("{}{}{}", state.api_service_url, path, query);
-    
+
     tracing::debug!("Proxying request to: {}", target_url);
 
     let session_id_header = req.headers().get("X-Session-ID").cloned();
@@ -128,24 +133,21 @@ pub async fn proxy_handler(
         proxy_req = proxy_req.body(body_bytes.to_vec());
     }
 
-    let proxy_response = proxy_req
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!("Proxy request failed: {:?}", e);
-            (StatusCode::BAD_GATEWAY, "Backend service unavailable").into_response()
-        })?;
+    let proxy_response = proxy_req.send().await.map_err(|e| {
+        tracing::error!("Proxy request failed: {:?}", e);
+        (StatusCode::BAD_GATEWAY, "Backend service unavailable").into_response()
+    })?;
 
     let status = proxy_response.status();
     let headers = proxy_response.headers().clone();
-    
+
     let body_bytes = proxy_response.bytes().await.map_err(|e| {
         tracing::error!("Failed to read proxy response body: {:?}", e);
         (StatusCode::BAD_GATEWAY, "Failed to read backend response").into_response()
     })?;
 
     let mut response = Response::builder().status(status);
-    
+
     const ALLOWED_RESPONSE_HEADERS: &[&str] = &[
         "content-type",
         "content-length",
@@ -162,11 +164,13 @@ pub async fn proxy_handler(
             response = response.header(key, value);
         }
     }
-    
-    response
-        .body(Body::from(body_bytes))
-        .map_err(|e| {
-            tracing::error!("Failed to build response: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
-        })
+
+    response.body(Body::from(body_bytes)).map_err(|e| {
+        tracing::error!("Failed to build response: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to build response",
+        )
+            .into_response()
+    })
 }

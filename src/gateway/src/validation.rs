@@ -51,10 +51,16 @@ pub fn validate_ssh_public_key(public_key: &str) -> Result<()> {
     let key = public_key.trim();
 
     if key.len() < SSH_KEY_MIN_LEN {
-        bail!("SSH public key is too short (minimum {} characters)", SSH_KEY_MIN_LEN);
+        bail!(
+            "SSH public key is too short (minimum {} characters)",
+            SSH_KEY_MIN_LEN
+        );
     }
     if key.len() > SSH_KEY_MAX_LEN {
-        bail!("SSH public key is too long (maximum {} characters)", SSH_KEY_MAX_LEN);
+        bail!(
+            "SSH public key is too long (maximum {} characters)",
+            SSH_KEY_MAX_LEN
+        );
     }
 
     let parts: Vec<&str> = key.split_whitespace().collect();
@@ -124,7 +130,8 @@ pub fn validate_passkey_name(name: &str) -> Result<()> {
 }
 
 fn is_valid_base64(s: &str) -> bool {
-    s.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
         && !s.is_empty()
 }
 
@@ -219,7 +226,8 @@ mod tests {
 
     #[test]
     fn test_ssh_key_unsupported_type() {
-        let key = "ssh-dss AAAAB3NzaC1kc3MAAACBAJlkjFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA user@host";
+        let key =
+            "ssh-dss AAAAB3NzaC1kc3MAAACBAJlkjFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA user@host";
         assert!(validate_ssh_public_key(key).is_err());
     }
 
@@ -236,7 +244,8 @@ mod tests {
 
     #[test]
     fn test_ssh_key_no_comment() {
-        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+        let key =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
         assert!(validate_ssh_public_key(key).is_ok());
     }
 

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use anyhow::{Context, Result};
+use bollard::container::{Config, CreateContainerOptions, DownloadFromContainerOptions};
 use bollard::Docker;
-use bollard::container::{CreateContainerOptions, Config, DownloadFromContainerOptions};
 use futures_util::stream::StreamExt;
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -12,9 +12,15 @@ use tokio::io::AsyncWriteExt;
 /// Safely unpack a tar archive into `dest`, rejecting any entry whose path
 /// contains `..` components (zip-slip / path traversal).
 fn safe_unpack(archive: &mut tar::Archive<impl std::io::Read>, dest: &Path) -> Result<()> {
-    for entry in archive.entries().context("Failed to read archive entries")? {
+    for entry in archive
+        .entries()
+        .context("Failed to read archive entries")?
+    {
         let mut entry = entry.context("Failed to read archive entry")?;
-        let path = entry.path().context("Failed to get entry path")?.into_owned();
+        let path = entry
+            .path()
+            .context("Failed to get entry path")?
+            .into_owned();
 
         for component in path.components() {
             if matches!(component, std::path::Component::ParentDir) {
@@ -25,7 +31,8 @@ fn safe_unpack(archive: &mut tar::Archive<impl std::io::Read>, dest: &Path) -> R
             }
         }
 
-        entry.unpack_in(dest)
+        entry
+            .unpack_in(dest)
             .with_context(|| format!("Failed to extract: {}", path.display()))?;
     }
     Ok(())
@@ -34,8 +41,8 @@ fn safe_unpack(archive: &mut tar::Archive<impl std::io::Read>, dest: &Path) -> R
 pub async fn extract_image_filesystem(image_ref: &str, work_dir: &Path) -> Result<PathBuf> {
     tracing::info!("Extracting filesystem from image: {}", image_ref);
 
-    let docker = Docker::connect_with_local_defaults()
-        .context("Failed to connect to Docker daemon")?;
+    let docker =
+        Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon")?;
 
     verify_image_exists_locally(&docker, image_ref).await?;
 
@@ -131,8 +138,7 @@ async fn export_container_filesystem(
     archive.set_preserve_mtime(true);
     archive.set_unpack_xattrs(true);
 
-    safe_unpack(&mut archive, output_dir)
-        .context("Failed to extract tar archive")?;
+    safe_unpack(&mut archive, output_dir).context("Failed to extract tar archive")?;
 
     fs::remove_file(&tar_path).await.ok();
 
@@ -145,10 +151,14 @@ pub async fn extract_specific_files(
     files: &[String],
     work_dir: &Path,
 ) -> Result<PathBuf> {
-    tracing::info!("Extracting {} specific files from image: {}", files.len(), image_ref);
+    tracing::info!(
+        "Extracting {} specific files from image: {}",
+        files.len(),
+        image_ref
+    );
 
-    let docker = Docker::connect_with_local_defaults()
-        .context("Failed to connect to Docker daemon")?;
+    let docker =
+        Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon")?;
 
     verify_image_exists_locally(&docker, image_ref).await?;
 
@@ -201,8 +211,7 @@ pub async fn extract_specific_files(
         archive.set_preserve_mtime(true);
         archive.set_unpack_xattrs(true);
 
-        safe_unpack(&mut archive, &output_dir)
-            .context("Failed to extract tar archive")?;
+        safe_unpack(&mut archive, &output_dir).context("Failed to extract tar archive")?;
 
         fs::remove_file(&tar_path).await.ok();
 
@@ -223,10 +232,14 @@ pub async fn extract_static_binary(
     binary_path: &str,
     work_dir: &Path,
 ) -> Result<PathBuf> {
-    tracing::info!("Extracting static binary from image: {} (binary: {})", image_ref, binary_path);
+    tracing::info!(
+        "Extracting static binary from image: {} (binary: {})",
+        image_ref,
+        binary_path
+    );
 
-    let docker = Docker::connect_with_local_defaults()
-        .context("Failed to connect to Docker daemon")?;
+    let docker =
+        Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon")?;
 
     verify_image_exists_locally(&docker, image_ref).await?;
 
@@ -272,8 +285,7 @@ pub async fn extract_static_binary(
     let parent_dir = file_path_obj.parent().unwrap_or(std::path::Path::new("/"));
     let target_dir = output_dir.join(parent_dir.strip_prefix("/").unwrap_or(parent_dir));
 
-    std::fs::create_dir_all(&target_dir)
-        .context("Failed to create target directory")?;
+    std::fs::create_dir_all(&target_dir).context("Failed to create target directory")?;
 
     let tar_file = std::fs::File::open(&tar_path).context("Failed to open tar file")?;
     let mut archive = tar::Archive::new(tar_file);
@@ -282,8 +294,7 @@ pub async fn extract_static_binary(
     archive.set_preserve_mtime(true);
     archive.set_unpack_xattrs(true);
 
-    safe_unpack(&mut archive, &target_dir)
-        .context("Failed to extract tar archive")?;
+    safe_unpack(&mut archive, &target_dir).context("Failed to extract tar archive")?;
 
     fs::remove_file(&tar_path).await.ok();
 
@@ -339,8 +350,8 @@ pub async fn extract_static_binary(
 pub async fn extract_last_layer_only(image_ref: &str, work_dir: &Path) -> Result<PathBuf> {
     tracing::info!("Extracting last layer from image: {}", image_ref);
 
-    let docker = Docker::connect_with_local_defaults()
-        .context("Failed to connect to Docker daemon")?;
+    let docker =
+        Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon")?;
 
     verify_image_exists_locally(&docker, image_ref).await?;
 
@@ -380,8 +391,14 @@ pub async fn extract_last_layer_only(image_ref: &str, work_dir: &Path) -> Result
         .context("Failed to get last layer")?;
 
     // Validate manifest layer path doesn't escape extract_dir
-    if std::path::Path::new(last_layer).components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-        anyhow::bail!("Path traversal detected in manifest layer path: {}", last_layer);
+    if std::path::Path::new(last_layer)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        anyhow::bail!(
+            "Path traversal detected in manifest layer path: {}",
+            last_layer
+        );
     }
 
     let layer_path = extract_dir.join(last_layer);

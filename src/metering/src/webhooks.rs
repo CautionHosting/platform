@@ -533,12 +533,17 @@ async fn handle_payment_failed(
         FROM invoices i
         WHERE sl.invoice_id = i.id
           AND i.paddle_transaction_id = $1
-        "#
+        "#,
     )
     .bind(transaction_id)
     .execute(&state.pool)
-    .await {
-        tracing::error!("Failed to mark billing event as payment_failed for txn {}: {}", transaction_id, e);
+    .await
+    {
+        tracing::error!(
+            "Failed to mark billing event as payment_failed for txn {}: {}",
+            transaction_id,
+            e
+        );
     }
 
     send_payment_failure_email(state, user_id, transaction_id).await?;

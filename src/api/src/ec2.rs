@@ -4,9 +4,9 @@
 //! Minimal AWS clients using direct HTTP calls with SigV4 signing.
 //! Replaces aws-sdk-ec2 and aws-sdk-autoscaling to avoid compiling massive generated SDKs.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use hmac::{Hmac, Mac};
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 use base64::Engine;
 
@@ -111,15 +111,36 @@ impl Ec2Client {
             ("MaxCount".to_string(), "1".to_string()),
             ("UserData".to_string(), user_data_b64),
             ("SubnetId".to_string(), params.subnet_id.clone()),
-            ("IamInstanceProfile.Name".to_string(), params.iam_instance_profile.clone()),
+            (
+                "IamInstanceProfile.Name".to_string(),
+                params.iam_instance_profile.clone(),
+            ),
             // IMDSv2 required
-            ("MetadataOptions.HttpTokens".to_string(), "required".to_string()),
-            ("MetadataOptions.HttpPutResponseHopLimit".to_string(), "2".to_string()),
+            (
+                "MetadataOptions.HttpTokens".to_string(),
+                "required".to_string(),
+            ),
+            (
+                "MetadataOptions.HttpPutResponseHopLimit".to_string(),
+                "2".to_string(),
+            ),
             // Encrypted root volume
-            ("BlockDeviceMapping.1.DeviceName".to_string(), "/dev/xvda".to_string()),
-            ("BlockDeviceMapping.1.Ebs.VolumeSize".to_string(), "50".to_string()),
-            ("BlockDeviceMapping.1.Ebs.VolumeType".to_string(), "gp3".to_string()),
-            ("BlockDeviceMapping.1.Ebs.Encrypted".to_string(), "true".to_string()),
+            (
+                "BlockDeviceMapping.1.DeviceName".to_string(),
+                "/dev/xvda".to_string(),
+            ),
+            (
+                "BlockDeviceMapping.1.Ebs.VolumeSize".to_string(),
+                "50".to_string(),
+            ),
+            (
+                "BlockDeviceMapping.1.Ebs.VolumeType".to_string(),
+                "gp3".to_string(),
+            ),
+            (
+                "BlockDeviceMapping.1.Ebs.Encrypted".to_string(),
+                "true".to_string(),
+            ),
         ];
 
         for (i, sg_id) in params.security_group_ids.iter().enumerate() {
@@ -127,11 +148,17 @@ impl Ec2Client {
         }
 
         if !params.tags.is_empty() {
-            req_params.push(("TagSpecification.1.ResourceType".to_string(), "instance".to_string()));
+            req_params.push((
+                "TagSpecification.1.ResourceType".to_string(),
+                "instance".to_string(),
+            ));
             for (i, (key, value)) in params.tags.iter().enumerate() {
                 let idx = i + 1;
                 req_params.push((format!("TagSpecification.1.Tag.{}.Key", idx), key.clone()));
-                req_params.push((format!("TagSpecification.1.Tag.{}.Value", idx), value.clone()));
+                req_params.push((
+                    format!("TagSpecification.1.Tag.{}.Value", idx),
+                    value.clone(),
+                ));
             }
         }
 
@@ -158,11 +185,7 @@ impl Ec2Client {
         Ok(())
     }
 
-    pub async fn associate_address(
-        &self,
-        allocation_id: &str,
-        instance_id: &str,
-    ) -> Result<()> {
+    pub async fn associate_address(&self, allocation_id: &str, instance_id: &str) -> Result<()> {
         let params = vec![
             ("Action".to_string(), "AssociateAddress".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -182,7 +205,8 @@ impl Ec2Client {
             &self.region,
             "ec2",
             params,
-        ).await
+        )
+        .await
     }
 }
 
@@ -203,11 +227,7 @@ impl AsgClient {
         }
     }
 
-    pub async fn set_desired_capacity(
-        &self,
-        asg_name: &str,
-        desired_capacity: i32,
-    ) -> Result<()> {
+    pub async fn set_desired_capacity(&self, asg_name: &str, desired_capacity: i32) -> Result<()> {
         let params = vec![
             ("Action".to_string(), "SetDesiredCapacity".to_string()),
             ("Version".to_string(), "2011-01-01".to_string()),
@@ -228,7 +248,10 @@ impl AsgClient {
             ("Action".to_string(), "UpdateAutoScalingGroup".to_string()),
             ("Version".to_string(), "2011-01-01".to_string()),
             ("AutoScalingGroupName".to_string(), asg_name.to_string()),
-            ("LaunchTemplate.LaunchTemplateId".to_string(), launch_template_id.to_string()),
+            (
+                "LaunchTemplate.LaunchTemplateId".to_string(),
+                launch_template_id.to_string(),
+            ),
             ("LaunchTemplate.Version".to_string(), "$Latest".to_string()),
         ];
 
@@ -244,7 +267,8 @@ impl AsgClient {
             &self.region,
             "autoscaling",
             params,
-        ).await
+        )
+        .await
     }
 }
 
@@ -309,7 +333,10 @@ async fn signed_request(
         .context(format!("{} API request failed", service))?;
 
     let status = response.status();
-    let text = response.text().await.context(format!("Failed to read {} response", service))?;
+    let text = response
+        .text()
+        .await
+        .context(format!("Failed to read {} response", service))?;
 
     if !status.is_success() {
         bail!("{} API returned {}: {}", service, status, text);
@@ -321,13 +348,7 @@ async fn signed_request(
 fn encode_form(params: &[(String, String)]) -> String {
     params
         .iter()
-        .map(|(k, v)| {
-            format!(
-                "{}={}",
-                url_encode(k),
-                url_encode(v)
-            )
-        })
+        .map(|(k, v)| format!("{}={}", url_encode(k), url_encode(v)))
         .collect::<Vec<_>>()
         .join("&")
 }
@@ -354,10 +375,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 }
 
 fn derive_signing_key(secret: &str, date_stamp: &str, region: &str, service: &str) -> Vec<u8> {
-    let k_date = hmac_sha256(
-        format!("AWS4{}", secret).as_bytes(),
-        date_stamp.as_bytes(),
-    );
+    let k_date = hmac_sha256(format!("AWS4{}", secret).as_bytes(), date_stamp.as_bytes());
     let k_region = hmac_sha256(&k_date, region.as_bytes());
     let k_service = hmac_sha256(&k_region, service.as_bytes());
     hmac_sha256(&k_service, b"aws4_request")
@@ -429,7 +447,10 @@ mod tests {
 
     #[test]
     fn test_url_encode() {
-        assert_eq!(url_encode("tag:aws:autoscaling:groupName"), "tag%3Aaws%3Aautoscaling%3AgroupName");
+        assert_eq!(
+            url_encode("tag:aws:autoscaling:groupName"),
+            "tag%3Aaws%3Aautoscaling%3AgroupName"
+        );
         assert_eq!(url_encode("running"), "running");
     }
 
@@ -523,10 +544,20 @@ mod tests {
     #[test]
     fn test_derive_signing_key() {
         // Just verify it doesn't panic and returns 32 bytes (SHA-256 output)
-        let key = derive_signing_key("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", "20240101", "us-east-1", "ec2");
+        let key = derive_signing_key(
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            "20240101",
+            "us-east-1",
+            "ec2",
+        );
         assert_eq!(key.len(), 32);
 
-        let key2 = derive_signing_key("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY", "20240101", "us-east-1", "autoscaling");
+        let key2 = derive_signing_key(
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            "20240101",
+            "us-east-1",
+            "autoscaling",
+        );
         assert_eq!(key2.len(), 32);
         assert_ne!(key, key2);
     }

@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
-    Json,
-    extract::{Extension, State, Request},
-    http::{StatusCode, HeaderMap},
+    extract::{Extension, Request, State},
+    http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
+    Json,
 };
 use serde::Serialize;
 use sqlx::PgPool;
@@ -23,32 +23,60 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Result<Response, (StatusCode, String)> {
     // Check which auth method is being used
-    let internal_secret = headers.get("x-internal-service-secret").and_then(|h| h.to_str().ok());
+    let internal_secret = headers
+        .get("x-internal-service-secret")
+        .and_then(|h| h.to_str().ok());
     let session_id = headers.get("x-session-id").and_then(|h| h.to_str().ok());
 
     // Internal service authentication (takes precedence if secret header is present)
     if let Some(provided_secret) = internal_secret {
         let Some(ref configured_secret) = state.internal_service_secret else {
-            tracing::warn!("Auth middleware: internal service auth rejected - no secret configured on server");
-            return Err((StatusCode::UNAUTHORIZED, "Internal service authentication not configured".to_string()));
+            tracing::warn!(
+                "Auth middleware: internal service auth rejected - no secret configured on server"
+            );
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Internal service authentication not configured".to_string(),
+            ));
         };
 
-        if !bool::from(provided_secret.as_bytes().ct_eq(configured_secret.as_bytes())) {
+        if !bool::from(
+            provided_secret
+                .as_bytes()
+                .ct_eq(configured_secret.as_bytes()),
+        ) {
             tracing::warn!("Auth middleware: internal service auth rejected - invalid secret");
-            return Err((StatusCode::UNAUTHORIZED, "Invalid internal service secret".to_string()));
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Invalid internal service secret".to_string(),
+            ));
         }
 
-        let Some(user_id_str) = headers.get("x-authenticated-user-id").and_then(|h| h.to_str().ok()) else {
+        let Some(user_id_str) = headers
+            .get("x-authenticated-user-id")
+            .and_then(|h| h.to_str().ok())
+        else {
             tracing::warn!("Auth middleware: internal service auth rejected - missing user ID");
-            return Err((StatusCode::UNAUTHORIZED, "Missing user ID for internal service auth".to_string()));
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Missing user ID for internal service auth".to_string(),
+            ));
         };
 
         let Ok(user_id) = Uuid::parse_str(user_id_str) else {
-            tracing::warn!("Auth middleware: internal service auth rejected - invalid user ID format");
-            return Err((StatusCode::UNAUTHORIZED, "Invalid user ID format".to_string()));
+            tracing::warn!(
+                "Auth middleware: internal service auth rejected - invalid user ID format"
+            );
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Invalid user ID format".to_string(),
+            ));
         };
 
-        tracing::debug!("Auth middleware: internal service auth for user_id={}", user_id);
+        tracing::debug!(
+            "Auth middleware: internal service auth for user_id={}",
+            user_id
+        );
         request.extensions_mut().insert(AuthContext { user_id });
         return Ok(next.run(request).await);
     }
@@ -56,13 +84,15 @@ pub async fn auth_middleware(
     // Session-based authentication
     if let Some(session_id) = session_id {
         tracing::debug!("Auth middleware: validating session");
-        let user_id = validate_session(&state.db, session_id).await.map_err(|status| {
-            let msg = match status {
-                StatusCode::UNAUTHORIZED => "Invalid or expired session".to_string(),
-                _ => "Authentication failed".to_string(),
-            };
-            (status, msg)
-        })?;
+        let user_id = validate_session(&state.db, session_id)
+            .await
+            .map_err(|status| {
+                let msg = match status {
+                    StatusCode::UNAUTHORIZED => "Invalid or expired session".to_string(),
+                    _ => "Authentication failed".to_string(),
+                };
+                (status, msg)
+            })?;
         tracing::debug!("Session validated: user_id={}", user_id);
         request.extensions_mut().insert(AuthContext { user_id });
         return Ok(next.run(request).await);
@@ -70,7 +100,10 @@ pub async fn auth_middleware(
 
     // No valid authentication method provided
     tracing::debug!("Auth middleware: no authentication provided");
-    Err((StatusCode::UNAUTHORIZED, "No authentication provided".to_string()))
+    Err((
+        StatusCode::UNAUTHORIZED,
+        "No authentication provided".to_string(),
+    ))
 }
 
 /// Internal-only auth middleware — rejects session-based auth, requires service secret + user_id.
@@ -80,22 +113,40 @@ pub async fn internal_auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, (StatusCode, String)> {
-    let internal_secret = headers.get("x-internal-service-secret").and_then(|h| h.to_str().ok());
+    let internal_secret = headers
+        .get("x-internal-service-secret")
+        .and_then(|h| h.to_str().ok());
 
     let Some(provided_secret) = internal_secret else {
-        return Err((StatusCode::UNAUTHORIZED, "Internal service secret required".to_string()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Internal service secret required".to_string(),
+        ));
     };
 
     let Some(ref configured_secret) = state.internal_service_secret else {
-        return Err((StatusCode::UNAUTHORIZED, "Internal service authentication not configured".to_string()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Internal service authentication not configured".to_string(),
+        ));
     };
 
-    if !bool::from(provided_secret.as_bytes().ct_eq(configured_secret.as_bytes())) {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid internal service secret".to_string()));
+    if !bool::from(
+        provided_secret
+            .as_bytes()
+            .ct_eq(configured_secret.as_bytes()),
+    ) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Invalid internal service secret".to_string(),
+        ));
     }
 
     // User ID is optional for internal routes — most operate on org_id from path
-    if let Some(user_id_str) = headers.get("x-authenticated-user-id").and_then(|h| h.to_str().ok()) {
+    if let Some(user_id_str) = headers
+        .get("x-authenticated-user-id")
+        .and_then(|h| h.to_str().ok())
+    {
         if let Ok(user_id) = Uuid::parse_str(user_id_str) {
             request.extensions_mut().insert(AuthContext { user_id });
         }
@@ -129,16 +180,21 @@ pub async fn legal_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    let blocking_document = crate::legal::get_blocking_document_requiring_acceptance(&state.db, auth.user_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to evaluate legal enforcement for user {}: {:?}", auth.user_id, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to evaluate legal acceptance requirements".to_string(),
-            )
-                .into_response()
-        })?;
+    let blocking_document =
+        crate::legal::get_blocking_document_requiring_acceptance(&state.db, auth.user_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to evaluate legal enforcement for user {}: {:?}",
+                    auth.user_id,
+                    e
+                );
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to evaluate legal acceptance requirements".to_string(),
+                )
+                    .into_response()
+            })?;
 
     if let Some(document_type) = blocking_document {
         return Err((
@@ -162,7 +218,7 @@ pub async fn validate_session(db: &PgPool, session_id: &str) -> Result<Uuid, Sta
          FROM auth_sessions s
          INNER JOIN fido2_credentials c ON s.credential_id = c.credential_id
          INNER JOIN users u ON c.user_id = u.id
-         WHERE s.session_id = $1 AND s.expires_at > NOW()"
+         WHERE s.session_id = $1 AND s.expires_at > NOW()",
     )
     .bind(session_id)
     .fetch_optional(db)
@@ -189,7 +245,7 @@ pub async fn ensure_user_has_org(db: &PgPool, user_id: Uuid) -> Result<(), Statu
     }
 
     let has_org: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT organization_id FROM organization_members WHERE user_id = $1 LIMIT 1"
+        "SELECT organization_id FROM organization_members WHERE user_id = $1 LIMIT 1",
     )
     .bind(user_id)
     .fetch_optional(db)
@@ -204,7 +260,10 @@ pub async fn ensure_user_has_org(db: &PgPool, user_id: Uuid) -> Result<(), Statu
         return Ok(());
     }
 
-    tracing::info!("User {} has no organization, initializing new account", user_id);
+    tracing::info!(
+        "User {} has no organization, initializing new account",
+        user_id
+    );
 
     crate::provisioning::initialize_user_account(db, user_id)
         .await

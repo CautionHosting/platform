@@ -117,17 +117,37 @@ impl CreateCredentialRequest {
                     ];
                     for (field, value) in required {
                         if value.is_none() || value.map(|s| s.is_empty()).unwrap_or(true) {
-                            return Err(format!("Missing required field for managed on-prem: {}", field));
+                            return Err(format!(
+                                "Missing required field for managed on-prem: {}",
+                                field
+                            ));
                         }
                     }
-                    if self.subnet_ids.as_ref().map(|v| v.is_empty()).unwrap_or(true) {
-                        return Err("Missing required field for managed on-prem: subnet_ids".to_string());
+                    if self
+                        .subnet_ids
+                        .as_ref()
+                        .map(|v| v.is_empty())
+                        .unwrap_or(true)
+                    {
+                        return Err(
+                            "Missing required field for managed on-prem: subnet_ids".to_string()
+                        );
                     }
                 } else {
-                    if self.access_key_id.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                    if self
+                        .access_key_id
+                        .as_ref()
+                        .map(|s| s.is_empty())
+                        .unwrap_or(true)
+                    {
                         return Err("Missing required field: access_key_id".to_string());
                     }
-                    if self.secret_access_key.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                    if self
+                        .secret_access_key
+                        .as_ref()
+                        .map(|s| s.is_empty())
+                        .unwrap_or(true)
+                    {
                         return Err("Missing required field: secret_access_key".to_string());
                     }
                 }
@@ -188,32 +208,47 @@ pub async fn create_credential(
 ) -> Result<CloudCredential, (StatusCode, String)> {
     req.validate().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
-    let secrets_encrypted = encryptor
-        .encrypt_json(&req.secrets())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encryption failed: {}", e)))?;
+    let secrets_encrypted = encryptor.encrypt_json(&req.secrets()).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Encryption failed: {}", e),
+        )
+    })?;
 
     if req.is_default {
         sqlx::query(
             "UPDATE cloud_credentials SET is_default = false
-             WHERE organization_id = $1 AND platform = $2 AND is_default = true"
+             WHERE organization_id = $1 AND platform = $2 AND is_default = true",
         )
         .bind(org_id)
         .bind(req.platform)
         .execute(pool)
         .await
-        .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
+        .map_err(|e| {
+            tracing::error!("Database error: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal database error".to_string(),
+            )
+        })?;
     }
 
     // Verify resource_id belongs to this org to prevent IDOR
     if let Some(resource_id) = req.resource_id {
         let owns_resource: Option<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM compute_resources WHERE id = $1 AND organization_id = $2"
+            "SELECT id FROM compute_resources WHERE id = $1 AND organization_id = $2",
         )
         .bind(resource_id)
         .bind(org_id)
         .fetch_optional(pool)
         .await
-        .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
+        .map_err(|e| {
+            tracing::error!("Database error: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal database error".to_string(),
+            )
+        })?;
 
         if owns_resource.is_none() {
             return Err((StatusCode::NOT_FOUND, "Resource not found".to_string()));
@@ -237,7 +272,7 @@ pub async fn create_credential(
              WHERE id = $8 AND organization_id = $9
              RETURNING id, organization_id, resource_id, platform, managed_on_prem, identifier,
                        config, is_default, is_active, last_validated_at, validation_error,
-                       created_at, updated_at"
+                       created_at, updated_at",
         )
         .bind(req.platform)
         .bind(req.managed_on_prem)
@@ -250,7 +285,13 @@ pub async fn create_credential(
         .bind(org_id)
         .fetch_one(pool)
         .await
-        .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
+        .map_err(|e| {
+            tracing::error!("Database error: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal database error".to_string(),
+            )
+        })?;
 
         return Ok(row);
     }
@@ -289,12 +330,18 @@ pub async fn list_credentials(
                 created_at, updated_at
          FROM cloud_credentials
          WHERE organization_id = $1
-         ORDER BY platform, created_at"
+         ORDER BY platform, created_at",
     )
     .bind(org_id)
     .fetch_all(pool)
     .await
-    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
+    .map_err(|e| {
+        tracing::error!("Database error: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal database error".to_string(),
+        )
+    })?;
 
     Ok(rows)
 }
@@ -309,13 +356,19 @@ pub async fn get_credential(
                 config, is_default, is_active, last_validated_at, validation_error,
                 created_at, updated_at
          FROM cloud_credentials
-         WHERE organization_id = $1 AND id = $2"
+         WHERE organization_id = $1 AND id = $2",
     )
     .bind(org_id)
     .bind(credential_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
+    .map_err(|e| {
+        tracing::error!("Database error: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal database error".to_string(),
+        )
+    })?;
 
     Ok(row)
 }
@@ -328,19 +381,29 @@ pub async fn get_credential_secrets(
 ) -> Result<Option<serde_json::Value>, (StatusCode, String)> {
     let row: Option<(Vec<u8>,)> = sqlx::query_as(
         "SELECT secrets_encrypted FROM cloud_credentials
-         WHERE organization_id = $1 AND id = $2"
+         WHERE organization_id = $1 AND id = $2",
     )
     .bind(org_id)
     .bind(credential_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
+    .map_err(|e| {
+        tracing::error!("Database error: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal database error".to_string(),
+        )
+    })?;
 
     match row {
         Some((secrets_encrypted,)) => {
-            let secrets: serde_json::Value = encryptor
-                .decrypt_json(&secrets_encrypted)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Decryption failed: {}", e)))?;
+            let secrets: serde_json::Value =
+                encryptor.decrypt_json(&secrets_encrypted).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Decryption failed: {}", e),
+                    )
+                })?;
             Ok(Some(secrets))
         }
         None => Ok(None),
@@ -352,14 +415,19 @@ pub async fn delete_credential(
     org_id: Uuid,
     credential_id: Uuid,
 ) -> Result<bool, (StatusCode, String)> {
-    let result = sqlx::query(
-        "DELETE FROM cloud_credentials WHERE organization_id = $1 AND id = $2"
-    )
-    .bind(org_id)
-    .bind(credential_id)
-    .execute(pool)
-    .await
-    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
+    let result =
+        sqlx::query("DELETE FROM cloud_credentials WHERE organization_id = $1 AND id = $2")
+            .bind(org_id)
+            .bind(credential_id)
+            .execute(pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("Database error: {:?}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal database error".to_string(),
+                )
+            })?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -377,23 +445,35 @@ pub async fn set_default_credential(
 
     sqlx::query(
         "UPDATE cloud_credentials SET is_default = false
-         WHERE organization_id = $1 AND platform = $2 AND is_default = true"
+         WHERE organization_id = $1 AND platform = $2 AND is_default = true",
     )
     .bind(org_id)
     .bind(cred.platform)
     .execute(pool)
     .await
-    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
+    .map_err(|e| {
+        tracing::error!("Database error: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal database error".to_string(),
+        )
+    })?;
 
     let result = sqlx::query(
         "UPDATE cloud_credentials SET is_default = true
-         WHERE organization_id = $1 AND id = $2"
+         WHERE organization_id = $1 AND id = $2",
     )
     .bind(org_id)
     .bind(credential_id)
     .execute(pool)
     .await
-    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
+    .map_err(|e| {
+        tracing::error!("Database error: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal database error".to_string(),
+        )
+    })?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -408,13 +488,19 @@ pub async fn get_default_credential_for_platform(
                 config, is_default, is_active, last_validated_at, validation_error,
                 created_at, updated_at
          FROM cloud_credentials
-         WHERE organization_id = $1 AND platform = $2 AND is_default = true AND is_active = true"
+         WHERE organization_id = $1 AND platform = $2 AND is_default = true AND is_active = true",
     )
     .bind(org_id)
     .bind(platform)
     .fetch_optional(pool)
     .await
-    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
+    .map_err(|e| {
+        tracing::error!("Database error: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal database error".to_string(),
+        )
+    })?;
 
     Ok(row)
 }
@@ -465,26 +551,55 @@ pub async fn get_managed_onprem_credential(
     };
 
     if !cred.managed_on_prem {
-        return Err((StatusCode::BAD_REQUEST, "Credential is not a managed on-prem type".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Credential is not a managed on-prem type".to_string(),
+        ));
     }
 
-    let secrets = get_credential_secrets(pool, encryptor, org_id, credential_id).await?
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Failed to get secrets".to_string()))?;
+    let secrets = get_credential_secrets(pool, encryptor, org_id, credential_id)
+        .await?
+        .ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to get secrets".to_string(),
+        ))?;
 
     let data = ManagedOnPremCredentialData {
-        deployment_id: cred.config["deployment_id"].as_str().unwrap_or("").to_string(),
+        deployment_id: cred.config["deployment_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
         asg_name: cred.config["asg_name"].as_str().unwrap_or("").to_string(),
-        launch_template_name: cred.config["launch_template_name"].as_str().unwrap_or("").to_string(),
-        launch_template_id: cred.config["launch_template_id"].as_str().unwrap_or("").to_string(),
+        launch_template_name: cred.config["launch_template_name"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        launch_template_id: cred.config["launch_template_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
         vpc_id: cred.config["vpc_id"].as_str().unwrap_or("").to_string(),
         subnet_ids: cred.config["subnet_ids"]
             .as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default(),
         eif_bucket: cred.config["eif_bucket"].as_str().unwrap_or("").to_string(),
-        instance_profile_name: cred.config["instance_profile_name"].as_str().unwrap_or("").to_string(),
-        aws_access_key_id: secrets["aws_access_key_id"].as_str().unwrap_or("").to_string(),
-        aws_secret_access_key: secrets["aws_secret_access_key"].as_str().unwrap_or("").to_string(),
+        instance_profile_name: cred.config["instance_profile_name"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        aws_access_key_id: secrets["aws_access_key_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        aws_secret_access_key: secrets["aws_secret_access_key"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
         aws_region: cred.config["aws_region"].as_str().unwrap_or("").to_string(),
     };
 
@@ -501,12 +616,18 @@ pub async fn list_managed_onprem_credentials(
                 created_at, updated_at
          FROM cloud_credentials
          WHERE organization_id = $1 AND managed_on_prem = true
-         ORDER BY created_at"
+         ORDER BY created_at",
     )
     .bind(org_id)
     .fetch_all(pool)
     .await
-    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
+    .map_err(|e| {
+        tracing::error!("Database error: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal database error".to_string(),
+        )
+    })?;
 
     Ok(rows)
 }
@@ -521,13 +642,19 @@ pub async fn get_credential_by_resource(
                 config, is_default, is_active, last_validated_at, validation_error,
                 created_at, updated_at
          FROM cloud_credentials
-         WHERE organization_id = $1 AND resource_id = $2"
+         WHERE organization_id = $1 AND resource_id = $2",
     )
     .bind(org_id)
     .bind(resource_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
+    .map_err(|e| {
+        tracing::error!("Database error: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal database error".to_string(),
+        )
+    })?;
 
     Ok(row)
 }
@@ -542,13 +669,19 @@ pub async fn get_credential_by_identifier(
                 config, is_default, is_active, last_validated_at, validation_error,
                 created_at, updated_at
          FROM cloud_credentials
-         WHERE organization_id = $1 AND identifier = $2"
+         WHERE organization_id = $1 AND identifier = $2",
     )
     .bind(org_id)
     .bind(identifier)
     .fetch_optional(pool)
     .await
-    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
+    .map_err(|e| {
+        tracing::error!("Database error: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal database error".to_string(),
+        )
+    })?;
 
     Ok(row)
 }

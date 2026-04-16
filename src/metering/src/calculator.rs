@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use crate::types::{Provider, ResourceType, ResourceUsage};
-use serde::Deserialize;
 use anyhow::Context;
+use serde::Deserialize;
 
 pub struct CostCalculator {
     pricing: PricingRules,
@@ -292,8 +292,9 @@ impl PricingRules {
     pub fn load() -> anyhow::Result<Self> {
         let mut rules = Self::default();
 
-        let contents = std::fs::read_to_string("prices.json")
-            .context("prices.json not found. Configure explicit pricing before starting metering.")?;
+        let contents = std::fs::read_to_string("prices.json").context(
+            "prices.json not found. Configure explicit pricing before starting metering.",
+        )?;
         let config = serde_json::from_str::<PricingFileConfig>(&contents)
             .context("Failed to parse prices.json for metering pricing. Ensure compute_margin_percent is explicitly set.")?;
         rules.margin_percent = config.compute_margin_percent;

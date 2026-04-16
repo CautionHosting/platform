@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use std::path::Path;
 use tokio::process::Command;
 
@@ -124,7 +124,8 @@ pub async fn build_user_image(
         let load_stdout = String::from_utf8_lossy(&load_output.stdout);
         tracing::info!("Docker load output: {}", load_stdout);
 
-        let loaded_image = load_stdout.lines()
+        let loaded_image = load_stdout
+            .lines()
             .find(|l| l.contains("Loaded image"))
             .and_then(|line| {
                 if line.contains("Loaded image ID:") {

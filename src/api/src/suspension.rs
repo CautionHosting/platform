@@ -6,14 +6,17 @@ use axum::{
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{AppState, ec2, deployment, cloud_credentials, metering};
+use crate::{cloud_credentials, deployment, ec2, metering, AppState};
 
 /// Helper: call the internal unsuspend endpoint (used after credit purchase/auto-topup).
 pub async fn call_internal_unsuspend(state: &AppState, org_id: Uuid) -> Result<(), String> {
     let secret = state.internal_service_secret.as_deref().unwrap_or_default();
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("http://127.0.0.1:8080/internal/org/{}/unsuspend", org_id))
+        .post(format!(
+            "http://127.0.0.1:8080/internal/org/{}/unsuspend",
+            org_id
+        ))
         .header("x-internal-service-secret", secret)
         .send()
         .await
@@ -34,7 +37,10 @@ pub async fn suspend_managed_resources(
     State(state): State<Arc<AppState>>,
     Path(org_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    tracing::info!("Suspending fully-managed resources for org {} (credit exhaustion)", org_id);
+    tracing::info!(
+        "Suspending fully-managed resources for org {} (credit exhaustion)",
+        org_id
+    );
 
     let resources: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT cr.id, cr.resource_name, cr.provider_resource_id FROM compute_resources cr
@@ -42,12 +48,17 @@ pub async fn suspend_managed_resources(
            AND NOT EXISTS (
                SELECT 1 FROM cloud_credentials cc
                WHERE cc.resource_id = cr.id AND cc.managed_on_prem = true
-           )"
+           )",
     )
     .bind(org_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
 
     let mut stopped = 0u32;
     let mut errors = Vec::new();
@@ -62,13 +73,18 @@ pub async fn suspend_managed_resources(
 
             match ec2.describe_instances(&[tag_filter, state_filter]).await {
                 Ok(instances) if !instances.is_empty() => {
-                    let ids: Vec<String> = instances.iter().map(|i| i.instance_id.clone()).collect();
+                    let ids: Vec<String> =
+                        instances.iter().map(|i| i.instance_id.clone()).collect();
                     if let Err(e) = ec2.stop_instances(&ids).await {
                         tracing::error!("Failed to stop instances for {}: {}", resource_name, e);
                         errors.push(format!("{}: {}", resource_name, e));
                         continue;
                     }
-                    tracing::info!("Stopped {} instance(s) for resource {}", ids.len(), resource_name);
+                    tracing::info!(
+                        "Stopped {} instance(s) for resource {}",
+                        ids.len(),
+                        resource_name
+                    );
                 }
                 Ok(_) => {
                     tracing::info!("No running instances found for resource {}", resource_name);
@@ -84,7 +100,8 @@ pub async fn suspend_managed_resources(
         if let Err(e) = sqlx::query("UPDATE compute_resources SET state = 'stopped' WHERE id = $1")
             .bind(resource_id)
             .execute(&state.db)
-            .await {
+            .await
+        {
             tracing::error!("Failed to mark resource {} as stopped: {}", resource_id, e);
         }
 
@@ -92,8 +109,13 @@ pub async fn suspend_managed_resources(
             state.internal_service_secret.as_deref(),
             provider_resource_id,
         )
-        .await {
-            tracing::error!("Failed to stop metering for resource {}: {}", resource_id, e);
+        .await
+        {
+            tracing::error!(
+                "Failed to stop metering for resource {}: {}",
+                resource_id,
+                e
+            );
             let _ = sqlx::query(
                 "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
             )
@@ -121,12 +143,17 @@ pub async fn suspend_org_resources(
 
     let resources: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT id, resource_name, provider_resource_id FROM compute_resources
-         WHERE organization_id = $1 AND state = 'running'"
+         WHERE organization_id = $1 AND state = 'running'",
     )
     .bind(org_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
 
     let mut stopped = 0u32;
     let mut errors = Vec::new();
@@ -142,13 +169,18 @@ pub async fn suspend_org_resources(
 
             match ec2.describe_instances(&[tag_filter, state_filter]).await {
                 Ok(instances) if !instances.is_empty() => {
-                    let ids: Vec<String> = instances.iter().map(|i| i.instance_id.clone()).collect();
+                    let ids: Vec<String> =
+                        instances.iter().map(|i| i.instance_id.clone()).collect();
                     if let Err(e) = ec2.stop_instances(&ids).await {
                         tracing::error!("Failed to stop instances for {}: {}", resource_name, e);
                         errors.push(format!("{}: {}", resource_name, e));
                         continue;
                     }
-                    tracing::info!("Stopped {} instance(s) for resource {}", ids.len(), resource_name);
+                    tracing::info!(
+                        "Stopped {} instance(s) for resource {}",
+                        ids.len(),
+                        resource_name
+                    );
                 }
                 Ok(_) => {
                     tracing::info!("No running instances found for resource {}", resource_name);
@@ -165,7 +197,8 @@ pub async fn suspend_org_resources(
         if let Err(e) = sqlx::query("UPDATE compute_resources SET state = 'stopped' WHERE id = $1")
             .bind(resource_id)
             .execute(&state.db)
-            .await {
+            .await
+        {
             tracing::error!("Failed to mark resource {} as stopped: {}", resource_id, e);
         }
 
@@ -173,8 +206,13 @@ pub async fn suspend_org_resources(
             state.internal_service_secret.as_deref(),
             provider_resource_id,
         )
-        .await {
-            tracing::error!("Failed to stop metering for resource {}: {}", resource_id, e);
+        .await
+        {
+            tracing::error!(
+                "Failed to stop metering for resource {}: {}",
+                resource_id,
+                e
+            );
             let _ = sqlx::query(
                 "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
             )
@@ -186,12 +224,12 @@ pub async fn suspend_org_resources(
     }
 
     // Mark org as suspended
-    if let Err(e) = sqlx::query(
-        "UPDATE organizations SET dunning_stage = 'suspended' WHERE id = $1"
-    )
-    .bind(org_id)
-    .execute(&state.db)
-    .await {
+    if let Err(e) =
+        sqlx::query("UPDATE organizations SET dunning_stage = 'suspended' WHERE id = $1")
+            .bind(org_id)
+            .execute(&state.db)
+            .await
+    {
         tracing::error!("Failed to update dunning_stage for org {}: {}", org_id, e);
     }
 
@@ -232,13 +270,18 @@ pub async fn unsuspend_org_resources(
 
             match ec2.describe_instances(&[tag_filter, state_filter]).await {
                 Ok(instances) if !instances.is_empty() => {
-                    let ids: Vec<String> = instances.iter().map(|i| i.instance_id.clone()).collect();
+                    let ids: Vec<String> =
+                        instances.iter().map(|i| i.instance_id.clone()).collect();
                     if let Err(e) = ec2.start_instances(&ids).await {
                         tracing::error!("Failed to start instances for {}: {}", resource_name, e);
                         errors.push(format!("{}: {}", resource_name, e));
                         continue;
                     }
-                    tracing::info!("Started {} instance(s) for resource {}", ids.len(), resource_name);
+                    tracing::info!(
+                        "Started {} instance(s) for resource {}",
+                        ids.len(),
+                        resource_name
+                    );
                 }
                 Ok(_) => {
                     tracing::info!("No stopped instances found for resource {}", resource_name);
@@ -254,7 +297,8 @@ pub async fn unsuspend_org_resources(
         if let Err(e) = sqlx::query("UPDATE compute_resources SET state = 'running' WHERE id = $1")
             .bind(resource_id)
             .execute(&state.db)
-            .await {
+            .await
+        {
             tracing::error!("Failed to mark resource {} as running: {}", resource_id, e);
         }
 
@@ -279,19 +323,25 @@ pub async fn unsuspend_org_resources(
             region.as_deref(),
             &metadata,
         )
-        .await {
-            tracing::error!("Failed to resume metering for resource {}: {}", resource_id, e);
+        .await
+        {
+            tracing::error!(
+                "Failed to resume metering for resource {}: {}",
+                resource_id,
+                e
+            );
         }
         started += 1;
     }
 
     // Clear dunning state
     if let Err(e) = sqlx::query(
-        "UPDATE organizations SET payment_failed_at = NULL, dunning_stage = 'none' WHERE id = $1"
+        "UPDATE organizations SET payment_failed_at = NULL, dunning_stage = 'none' WHERE id = $1",
     )
     .bind(org_id)
     .execute(&state.db)
-    .await {
+    .await
+    {
         tracing::error!("Failed to clear dunning state for org {}: {}", org_id, e);
     }
 
@@ -310,16 +360,32 @@ pub async fn get_aws_credentials_for_resource(
 ) -> Option<deployment::AwsCredentials> {
     // Check for managed on-prem credentials first
     if let Some(encryptor) = state.encryptor.as_ref() {
-        if let Ok(Some(credential)) = cloud_credentials::get_credential_by_resource(&state.db, org_id, resource_id).await {
+        if let Ok(Some(credential)) =
+            cloud_credentials::get_credential_by_resource(&state.db, org_id, resource_id).await
+        {
             if credential.managed_on_prem {
-                if let Ok(Some(secrets)) = cloud_credentials::get_credential_secrets(&state.db, encryptor, org_id, credential.id).await {
-                    let region = credential.config["aws_region"].as_str()
+                if let Ok(Some(secrets)) = cloud_credentials::get_credential_secrets(
+                    &state.db,
+                    encryptor,
+                    org_id,
+                    credential.id,
+                )
+                .await
+                {
+                    let region = credential.config["aws_region"]
+                        .as_str()
                         .map(|s| s.to_string())
                         .or_else(|| std::env::var("AWS_REGION").ok())
                         .unwrap_or_else(|| "us-west-2".to_string());
                     return Some(deployment::AwsCredentials {
-                        access_key_id: secrets["aws_access_key_id"].as_str().unwrap_or("").to_string(),
-                        secret_access_key: secrets["aws_secret_access_key"].as_str().unwrap_or("").to_string(),
+                        access_key_id: secrets["aws_access_key_id"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string(),
+                        secret_access_key: secrets["aws_secret_access_key"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string(),
                         region,
                     });
                 }

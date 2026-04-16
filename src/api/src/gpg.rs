@@ -7,12 +7,12 @@
 //! - CAUTION_GPG_PRIVATE_KEY: ASCII-armored or base64-encoded key content
 //! - CAUTION_GPG_KEY_PATH: path to key file
 
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use openpgp::armor::{Kind, Reader, ReaderMode};
 use openpgp::cert::prelude::*;
 use openpgp::crypto::SessionKey;
 use openpgp::packet::prelude::*;
-use openpgp::parse::{Parse, PacketParser, PacketParserResult};
+use openpgp::parse::{PacketParser, PacketParserResult, Parse};
 use openpgp::policy::StandardPolicy;
 use openpgp::types::SymmetricAlgorithm;
 use sequoia_openpgp as openpgp;
@@ -33,7 +33,8 @@ pub fn decrypt_gpg_message(encrypted_content: &str) -> Result<String, String> {
         ReaderMode::Tolerant(Some(Kind::Message)),
     );
     let mut dearmored = Vec::new();
-    reader.read_to_end(&mut dearmored)
+    reader
+        .read_to_end(&mut dearmored)
         .map_err(|e| format!("Failed to dearmor message: {}", e))?;
 
     let mut ppr = PacketParser::from_bytes(&dearmored)
@@ -43,11 +44,13 @@ pub fn decrypt_gpg_message(encrypted_content: &str) -> Result<String, String> {
 
     // First pass: find and decrypt the session key
     while let PacketParserResult::Some(pp) = ppr {
-        let (packet, next_ppr) = pp.recurse()
+        let (packet, next_ppr) = pp
+            .recurse()
             .map_err(|e| format!("Failed to recurse packet: {}", e))?;
 
         if let Packet::PKESK(pkesk) = &packet {
-            for key in cert.keys()
+            for key in cert
+                .keys()
                 .with_policy(&policy, None)
                 .for_transport_encryption()
                 .for_storage_encryption()
@@ -87,7 +90,8 @@ pub fn decrypt_gpg_message(encrypted_content: &str) -> Result<String, String> {
                 tracing::debug!("Decrypting SEIP/AED packet");
                 pp.decrypt(algo, &sk)
                     .map_err(|e| format!("Failed to decrypt SEIP: {}", e))?;
-                let (_, next_ppr) = pp.recurse()
+                let (_, next_ppr) = pp
+                    .recurse()
                     .map_err(|e| format!("Failed to recurse decrypted: {}", e))?;
                 ppr = next_ppr;
             }
@@ -98,19 +102,22 @@ pub fn decrypt_gpg_message(encrypted_content: &str) -> Result<String, String> {
                     .map_err(|e| format!("Failed to read literal body: {}", e))?;
                 tracing::debug!("Read {} bytes from literal packet", body.len());
                 decrypted_data = body;
-                let (_, next_ppr) = pp.recurse()
+                let (_, next_ppr) = pp
+                    .recurse()
                     .map_err(|e| format!("Failed to recurse literal: {}", e))?;
                 ppr = next_ppr;
             }
             Packet::CompressedData(cd) => {
                 tracing::debug!("Found compressed data packet, algo: {:?}", cd.algo());
-                let (_, next_ppr) = pp.recurse()
+                let (_, next_ppr) = pp
+                    .recurse()
                     .map_err(|e| format!("Failed to decompress: {}", e))?;
                 ppr = next_ppr;
             }
             _ => {
                 tracing::debug!("Skipping packet: {:?}", pp.packet.tag());
-                let (_, next_ppr) = pp.recurse()
+                let (_, next_ppr) = pp
+                    .recurse()
                     .map_err(|e| format!("Failed to skip packet: {}", e))?;
                 ppr = next_ppr;
             }
@@ -130,7 +137,8 @@ fn get_private_key() -> Result<String, String> {
         if key_content.trim().starts_with("-----BEGIN PGP") {
             return Ok(key_content);
         }
-        let decoded = BASE64.decode(key_content.trim())
+        let decoded = BASE64
+            .decode(key_content.trim())
             .map_err(|e| format!("Failed to decode base64 key: {}", e))?;
         return String::from_utf8(decoded)
             .map_err(|e| format!("Decoded key is not valid UTF-8: {}", e));
@@ -141,12 +149,14 @@ fn get_private_key() -> Result<String, String> {
             .map_err(|e| format!("Failed to read key file {}: {}", key_path, e));
     }
 
-    Err("No GPG private key configured. Set CAUTION_GPG_PRIVATE_KEY or CAUTION_GPG_KEY_PATH".to_string())
+    Err(
+        "No GPG private key configured. Set CAUTION_GPG_PRIVATE_KEY or CAUTION_GPG_KEY_PATH"
+            .to_string(),
+    )
 }
 
 fn load_cert(key_content: &str) -> Result<Cert, String> {
-    Cert::from_reader(key_content.as_bytes())
-        .map_err(|e| format!("Failed to parse GPG key: {}", e))
+    Cert::from_reader(key_content.as_bytes()).map_err(|e| format!("Failed to parse GPG key: {}", e))
 }
 
 pub fn is_gpg_encrypted(content: &str) -> bool {
@@ -159,7 +169,9 @@ mod tests {
 
     #[test]
     fn test_is_gpg_encrypted() {
-        assert!(is_gpg_encrypted("-----BEGIN PGP MESSAGE-----\nsome content\n-----END PGP MESSAGE-----"));
+        assert!(is_gpg_encrypted(
+            "-----BEGIN PGP MESSAGE-----\nsome content\n-----END PGP MESSAGE-----"
+        ));
         assert!(is_gpg_encrypted("  -----BEGIN PGP MESSAGE-----\n"));
         assert!(!is_gpg_encrypted("{\"json\": \"data\"}"));
         assert!(!is_gpg_encrypted("plain text"));

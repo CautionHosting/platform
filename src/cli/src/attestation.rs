@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use anyhow::{Context, Result, bail};
-use serde_cbor::Value as CborValue;
 use coset::CborSerializable;
+use serde_cbor::Value as CborValue;
 
 #[derive(Debug, Clone)]
 pub struct AttestationPcrs {
@@ -16,15 +16,17 @@ pub fn extract_pcrs(attestation_bytes: &[u8]) -> Result<AttestationPcrs> {
     let cose_sign1 = coset::CoseSign1::from_slice(attestation_bytes)
         .map_err(|e| anyhow::anyhow!("Failed to parse COSE_Sign1: {:?}", e))?;
 
-    let payload = cose_sign1.payload.as_ref()
+    let payload = cose_sign1
+        .payload
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("No payload in COSE_Sign1"))?;
 
     extract_pcrs_from_payload(payload)
 }
 
 fn extract_pcrs_from_payload(payload: &[u8]) -> Result<AttestationPcrs> {
-    let attestation: CborValue = serde_cbor::from_slice(payload)
-        .context("Failed to parse attestation payload as CBOR")?;
+    let attestation: CborValue =
+        serde_cbor::from_slice(payload).context("Failed to parse attestation payload as CBOR")?;
 
     let attestation_map = match attestation {
         CborValue::Map(map) => map,
@@ -80,18 +82,12 @@ mod tests {
         // Build PCR map
         let mut pcr_map = BTreeMap::new();
         for (idx, bytes) in pcrs {
-            pcr_map.insert(
-                CborValue::Integer(*idx),
-                CborValue::Bytes(bytes.to_vec()),
-            );
+            pcr_map.insert(CborValue::Integer(*idx), CborValue::Bytes(bytes.to_vec()));
         }
 
         // Build attestation document payload
         let mut att_map = BTreeMap::new();
-        att_map.insert(
-            CborValue::Text("pcrs".to_string()),
-            CborValue::Map(pcr_map),
-        );
+        att_map.insert(CborValue::Text("pcrs".to_string()), CborValue::Map(pcr_map));
         let payload_bytes = serde_cbor::to_vec(&CborValue::Map(att_map)).unwrap();
 
         // Build COSE_Sign1: [protected, unprotected, payload, signature]
@@ -118,10 +114,7 @@ mod tests {
 
     #[test]
     fn test_extract_pcrs_missing_pcr0() {
-        let cose_bytes = build_cose_sign1_with_pcrs(&[
-            (1, &[0x11]),
-            (2, &[0x22]),
-        ]);
+        let cose_bytes = build_cose_sign1_with_pcrs(&[(1, &[0x11]), (2, &[0x22])]);
 
         let result = extract_pcrs(&cose_bytes);
         assert!(result.is_err());
@@ -130,10 +123,7 @@ mod tests {
 
     #[test]
     fn test_extract_pcrs_missing_pcr1() {
-        let cose_bytes = build_cose_sign1_with_pcrs(&[
-            (0, &[0xAA]),
-            (2, &[0x22]),
-        ]);
+        let cose_bytes = build_cose_sign1_with_pcrs(&[(0, &[0xAA]), (2, &[0x22])]);
 
         let result = extract_pcrs(&cose_bytes);
         assert!(result.is_err());
@@ -142,10 +132,7 @@ mod tests {
 
     #[test]
     fn test_extract_pcrs_missing_pcr2() {
-        let cose_bytes = build_cose_sign1_with_pcrs(&[
-            (0, &[0xAA]),
-            (1, &[0x11]),
-        ]);
+        let cose_bytes = build_cose_sign1_with_pcrs(&[(0, &[0xAA]), (1, &[0x11])]);
 
         let result = extract_pcrs(&cose_bytes);
         assert!(result.is_err());
@@ -173,11 +160,7 @@ mod tests {
     fn test_extract_pcrs_realistic_hash_length() {
         // PCRs are SHA-384 hashes (48 bytes = 96 hex chars)
         let hash = vec![0xABu8; 48];
-        let cose_bytes = build_cose_sign1_with_pcrs(&[
-            (0, &hash),
-            (1, &hash),
-            (2, &hash),
-        ]);
+        let cose_bytes = build_cose_sign1_with_pcrs(&[(0, &hash), (1, &hash), (2, &hash)]);
 
         let result = extract_pcrs(&cose_bytes).unwrap();
         assert_eq!(result.pcr0.len(), 96);
@@ -214,7 +197,8 @@ mod tests {
 
     #[test]
     fn test_extract_pcrs_from_payload_not_map() {
-        let payload = serde_cbor::to_vec(&serde_cbor::Value::Text("not a map".to_string())).unwrap();
+        let payload =
+            serde_cbor::to_vec(&serde_cbor::Value::Text("not a map".to_string())).unwrap();
 
         let result = extract_pcrs_from_payload(&payload);
         assert!(result.is_err());

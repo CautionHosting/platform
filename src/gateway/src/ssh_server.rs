@@ -1,19 +1,19 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result, bail};
-use russh::server::{Auth, Msg, Session, Server};
+use anyhow::{bail, Context, Result};
+use futures::StreamExt;
+use russh::server::{Auth, Msg, Server, Session};
 use russh::{Channel, ChannelId};
 use russh_keys::key::{KeyPair, PublicKey};
 use russh_keys::PublicKeyBase64;
 use sqlx::PgPool;
-use std::sync::Arc;
 use std::collections::HashMap;
-use tokio::sync::Mutex;
-use tokio::process::Child;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::Child;
+use tokio::sync::Mutex;
 use uuid::Uuid;
-use futures::StreamExt;
 
 #[derive(Clone)]
 pub struct SshServer {
@@ -24,7 +24,12 @@ pub struct SshServer {
 }
 
 impl SshServer {
-    pub fn new(pool: PgPool, api_service_url: String, data_dir: String, internal_service_secret: Option<String>) -> Self {
+    pub fn new(
+        pool: PgPool,
+        api_service_url: String,
+        data_dir: String,
+        internal_service_secret: Option<String>,
+    ) -> Self {
         Self {
             pool,
             api_service_url,
@@ -88,7 +93,9 @@ impl russh::server::Handler for SshSession {
             Ok(fp) => fp,
             Err(e) => {
                 tracing::warn!("Failed to generate SSH fingerprint: {}", e);
-                return Ok(Auth::Reject { proceed_with_methods: None });
+                return Ok(Auth::Reject {
+                    proceed_with_methods: None,
+                });
             }
         };
         tracing::info!("Calculated fingerprint during auth: {}", fingerprint);
@@ -126,7 +133,9 @@ impl russh::server::Handler for SshSession {
         let command = String::from_utf8_lossy(data);
         tracing::info!("SSH exec request: {}", command);
 
-        let fingerprint = self.ssh_fingerprint.as_ref()
+        let fingerprint = self
+            .ssh_fingerprint
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
 
         if let Some(app_id) = parse_git_receive_pack(&command) {
@@ -137,28 +146,53 @@ impl russh::server::Handler for SshSession {
                 &self.pool,
                 fingerprint,
                 &app_id,
-            ).await {
+            )
+            .await
+            {
                 Ok(Some((user_id, org_id))) => {
-                    tracing::info!("Resolved user {} in org {} for app {}", user_id, org_id, app_id);
+                    tracing::info!(
+                        "Resolved user {} in org {} for app {}",
+                        user_id,
+                        org_id,
+                        app_id
+                    );
 
                     // Update last_used_at for this SSH key
-                    if let Err(e) = crate::db::update_ssh_key_last_used(&self.pool, fingerprint).await {
+                    if let Err(e) =
+                        crate::db::update_ssh_key_last_used(&self.pool, fingerprint).await
+                    {
                         tracing::warn!("Failed to update SSH key last_used_at: {:?}", e);
                     }
 
                     (user_id, org_id)
                 }
                 Ok(None) => {
-                    let error_msg = "Your SSH key is not registered to any user in this app's organization.\n";
-                    tracing::warn!("SSH key {} not found for any user in app {}'s org", fingerprint, app_id);
-                    session.extended_data(channel, 1, format!("remote: error: {}", error_msg).into_bytes().into());
+                    let error_msg =
+                        "Your SSH key is not registered to any user in this app's organization.\n";
+                    tracing::warn!(
+                        "SSH key {} not found for any user in app {}'s org",
+                        fingerprint,
+                        app_id
+                    );
+                    session.extended_data(
+                        channel,
+                        1,
+                        format!("remote: error: {}", error_msg).into_bytes().into(),
+                    );
                     session.exit_status_request(channel, 1);
                     session.close(channel);
                     return Ok(());
                 }
                 Err(e) => {
                     tracing::error!("Failed to resolve user for app: {:?}", e);
-                    session.extended_data(channel, 1, "remote: error: Internal error, please try again later.\n".as_bytes().to_vec().into());
+                    session.extended_data(
+                        channel,
+                        1,
+                        "remote: error: Internal error, please try again later.\n"
+                            .as_bytes()
+                            .to_vec()
+                            .into(),
+                    );
                     session.exit_status_request(channel, 1);
                     session.close(channel);
                     return Ok(());
@@ -175,8 +209,10 @@ impl russh::server::Handler for SshSession {
                 &app_id,
                 channel,
                 session,
-                self.git_processes.clone()
-            ).await {
+                self.git_processes.clone(),
+            )
+            .await
+            {
                 Ok(()) => {
                     tracing::info!("Git push completed successfully");
                 }
@@ -237,9 +273,7 @@ fn parse_git_receive_pack(command: &str) -> Option<String> {
     }
 
     let repo_path = parts[1].trim_matches('\'').trim_matches('"');
-    let app_id = repo_path
-        .trim_start_matches('/')
-        .trim_end_matches(".git");
+    let app_id = repo_path.trim_start_matches('/').trim_end_matches(".git");
 
     if let Err(e) = crate::validation::validate_app_id(app_id) {
         tracing::warn!("Invalid app ID '{}' in git push: {}", app_id, e);
@@ -261,8 +295,7 @@ fn ensure_git_repo_exists(repo_path: &str) -> Result<()> {
     tracing::info!("Initializing bare git repository at {}", repo_path);
 
     if let Some(parent) = std::path::Path::new(repo_path).parent() {
-        fs::create_dir_all(parent)
-            .context("Failed to create git repos directory")?;
+        fs::create_dir_all(parent).context("Failed to create git repos directory")?;
     }
 
     let output = Command::new("git")
@@ -283,12 +316,13 @@ fn update_repo_head(repo_path: &str) -> Result<String> {
 
     let output = Command::new("git")
         .args(&[
-            "--git-dir", repo_path,
+            "--git-dir",
+            repo_path,
             "for-each-ref",
             "--sort=-committerdate",
             "--format=%(refname:short)",
             "refs/heads/",
-            "--count=1"
+            "--count=1",
         ])
         .output()
         .context("Failed to list branches")?;
@@ -309,7 +343,14 @@ fn update_repo_head(repo_path: &str) -> Result<String> {
     tracing::info!("Setting HEAD to refs/heads/{}", target_branch);
 
     let output = Command::new("git")
-        .args(&["--git-dir", repo_path, "symbolic-ref", "--", "HEAD", &format!("refs/heads/{}", target_branch)])
+        .args(&[
+            "--git-dir",
+            repo_path,
+            "symbolic-ref",
+            "--",
+            "HEAD",
+            &format!("refs/heads/{}", target_branch),
+        ])
         .output()
         .context("Failed to update HEAD")?;
 
@@ -339,7 +380,7 @@ async fn handle_git_push(
 
     let existing: Option<(String,)> = sqlx::query_as(
         "SELECT state::text FROM compute_resources
-         WHERE id = $1 AND organization_id = $2"
+         WHERE id = $1 AND organization_id = $2",
     )
     .bind(app_uuid)
     .bind(org_id)
@@ -352,7 +393,11 @@ async fn handle_git_push(
             if state == "running" || state == "stopped" {
                 bail!("App '{}' already exists in state '{}'. Use 'caution apps destroy {}' to destroy it first.", app_id, state, app_id);
             }
-            tracing::info!("App '{}' exists in state '{}', allowing push", app_id, state);
+            tracing::info!(
+                "App '{}' exists in state '{}', allowing push",
+                app_id,
+                state
+            );
         }
         None => {
             bail!("App '{}' not found. Run 'caution init' first.", app_id);
@@ -388,7 +433,6 @@ async fn handle_git_push(
     let channel_id = channel;
 
     tokio::spawn(async move {
-
         let stdout_task = {
             let handle = session_handle.clone();
             tokio::spawn(async move {
@@ -421,7 +465,10 @@ async fn handle_git_push(
                         Ok(0) => break,
                         Ok(n) => {
                             tracing::debug!("Git stderr: {} bytes", n);
-                            if let Err(e) = handle.extended_data(channel, 1, buf[..n].to_vec().into()).await {
+                            if let Err(e) = handle
+                                .extended_data(channel, 1, buf[..n].to_vec().into())
+                                .await
+                            {
                                 tracing::error!("Failed to send git stderr to SSH: {:?}", e);
                                 break;
                             }
@@ -444,8 +491,11 @@ async fn handle_git_push(
                     Ok(status) => status,
                     Err(e) => {
                         tracing::error!("Failed to wait for git process: {}", e);
-                        let error_msg = format!("remote: error: Failed to complete git receive-pack\n");
-                        let _ = session_handle.extended_data(channel, 1, error_msg.into_bytes().into()).await;
+                        let error_msg =
+                            format!("remote: error: Failed to complete git receive-pack\n");
+                        let _ = session_handle
+                            .extended_data(channel, 1, error_msg.into_bytes().into())
+                            .await;
                         let _ = session_handle.exit_status_request(channel, 1).await;
                         let _ = session_handle.close(channel).await;
                         return;
@@ -460,7 +510,9 @@ async fn handle_git_push(
         if !exit_status.success() {
             let exit_code = exit_status.code().unwrap_or(1);
             tracing::error!("Git receive-pack failed with exit code: {}", exit_code);
-            let _ = session_handle.exit_status_request(channel, exit_code as u32).await;
+            let _ = session_handle
+                .exit_status_request(channel, exit_code as u32)
+                .await;
             let _ = session_handle.close(channel).await;
             return;
         }
@@ -475,7 +527,9 @@ async fn handle_git_push(
             }
         };
 
-        let _ = session_handle.extended_data(channel, 1, b"\n".to_vec().into()).await;
+        let _ = session_handle
+            .extended_data(channel, 1, b"\n".to_vec().into())
+            .await;
 
         #[derive(serde::Serialize)]
         struct DeployRequest {
@@ -511,8 +565,12 @@ async fn handle_git_push(
             Ok(resp) => resp,
             Err(e) => {
                 tracing::error!("Failed to send deployment request: {}", e);
-                let error_msg = "remote: error: Failed to trigger deployment, please try again later.\n".to_string();
-                let _ = session_handle.extended_data(channel, 1, error_msg.into_bytes().into()).await;
+                let error_msg =
+                    "remote: error: Failed to trigger deployment, please try again later.\n"
+                        .to_string();
+                let _ = session_handle
+                    .extended_data(channel, 1, error_msg.into_bytes().into())
+                    .await;
                 let _ = session_handle.exit_status_request(channel, 1).await;
                 let _ = session_handle.close(channel).await;
                 return;
@@ -520,10 +578,16 @@ async fn handle_git_push(
         };
 
         if !response.status().is_success() {
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             tracing::error!("Deployment failed: {}", error_text);
-            let error_msg = "remote: error: Deployment failed, please try again later.\n".to_string();
-            let _ = session_handle.extended_data(channel, 1, error_msg.into_bytes().into()).await;
+            let error_msg =
+                "remote: error: Deployment failed, please try again later.\n".to_string();
+            let _ = session_handle
+                .extended_data(channel, 1, error_msg.into_bytes().into())
+                .await;
             let _ = session_handle.exit_status_request(channel, 1).await;
             let _ = session_handle.close(channel).await;
             return;
@@ -565,7 +629,9 @@ async fn handle_git_push(
                             }
                             if let Some(milestone) = current_milestone.take() {
                                 let done_msg = format!("\rremote: [x] {}\n", milestone);
-                                let _ = session_handle.extended_data(channel, 1, done_msg.into_bytes().into()).await;
+                                let _ = session_handle
+                                    .extended_data(channel, 1, done_msg.into_bytes().into())
+                                    .await;
                             }
                             last_line = line;
                         } else if let Some(step_msg) = line.strip_prefix("STEP:") {
@@ -575,7 +641,9 @@ async fn handle_git_push(
                             }
                             if let Some(prev_milestone) = current_milestone.take() {
                                 let done_msg = format!("\rremote: [x] {}\n", prev_milestone);
-                                let _ = session_handle.extended_data(channel, 1, done_msg.into_bytes().into()).await;
+                                let _ = session_handle
+                                    .extended_data(channel, 1, done_msg.into_bytes().into())
+                                    .await;
                             }
 
                             // Extract milestone text and start spinner
@@ -590,8 +658,11 @@ async fn handle_git_push(
                             let milestone_for_spinner = milestone_text.clone();
                             tokio::spawn(async move {
                                 let mut frame_idx = 0;
-                                let mut interval = tokio::time::interval(std::time::Duration::from_millis(120));
-                                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                                let mut interval =
+                                    tokio::time::interval(std::time::Duration::from_millis(120));
+                                interval.set_missed_tick_behavior(
+                                    tokio::time::MissedTickBehavior::Skip,
+                                );
 
                                 loop {
                                     tokio::select! {
@@ -606,8 +677,11 @@ async fn handle_git_push(
                             });
 
                             // Show initial state
-                            let initial_msg = format!("remote: {} {}", spinner_frames[0], milestone_text);
-                            let _ = session_handle.extended_data(channel, 1, initial_msg.into_bytes().into()).await;
+                            let initial_msg =
+                                format!("remote: {} {}", spinner_frames[0], milestone_text);
+                            let _ = session_handle
+                                .extended_data(channel, 1, initial_msg.into_bytes().into())
+                                .await;
                         } else if !line.is_empty() {
                             // Plain message or error - stop spinner and show
                             if let Some(tx) = spinner_stop_tx.take() {
@@ -615,10 +689,14 @@ async fn handle_git_push(
                             }
                             if let Some(milestone) = current_milestone.take() {
                                 let done_msg = format!("\rremote: [x] {}\n", milestone);
-                                let _ = session_handle.extended_data(channel, 1, done_msg.into_bytes().into()).await;
+                                let _ = session_handle
+                                    .extended_data(channel, 1, done_msg.into_bytes().into())
+                                    .await;
                             }
                             let msg = format!("remote: {}\n", line);
-                            let _ = session_handle.extended_data(channel, 1, msg.into_bytes().into()).await;
+                            let _ = session_handle
+                                .extended_data(channel, 1, msg.into_bytes().into())
+                                .await;
                         }
                     }
                 }
@@ -628,7 +706,9 @@ async fn handle_git_push(
                     }
                     tracing::error!("Error reading deployment stream: {}", e);
                     let error_msg = format!("remote: error: Stream error: {}\n", e);
-                    let _ = session_handle.extended_data(channel, 1, error_msg.into_bytes().into()).await;
+                    let _ = session_handle
+                        .extended_data(channel, 1, error_msg.into_bytes().into())
+                        .await;
                     let _ = session_handle.exit_status_request(channel, 1).await;
                     let _ = session_handle.close(channel).await;
                     return;
@@ -642,7 +722,9 @@ async fn handle_git_push(
         }
         if let Some(milestone) = current_milestone.take() {
             let done_msg = format!("\rremote: [x] {}\n", milestone);
-            let _ = session_handle.extended_data(channel, 1, done_msg.into_bytes().into()).await;
+            let _ = session_handle
+                .extended_data(channel, 1, done_msg.into_bytes().into())
+                .await;
         }
         if !buffer.is_empty() && buffer.starts_with('{') {
             last_line = buffer;
@@ -651,21 +733,34 @@ async fn handle_git_push(
         let deploy_result: DeployResponse = match serde_json::from_str(&last_line) {
             Ok(result) => result,
             Err(e) => {
-                tracing::error!("Failed to parse deployment response: {} (line: {})", e, last_line);
+                tracing::error!(
+                    "Failed to parse deployment response: {} (line: {})",
+                    e,
+                    last_line
+                );
                 let error_msg = format!("remote: error: Invalid deployment response\n");
-                let _ = session_handle.extended_data(channel, 1, error_msg.into_bytes().into()).await;
+                let _ = session_handle
+                    .extended_data(channel, 1, error_msg.into_bytes().into())
+                    .await;
                 let _ = session_handle.exit_status_request(channel, 1).await;
                 let _ = session_handle.close(channel).await;
                 return;
             }
         };
 
-        tracing::info!("Deployment successful: {} (resource_id: {})", deploy_result.url, deploy_result.resource_id);
+        tracing::info!(
+            "Deployment successful: {} (resource_id: {})",
+            deploy_result.url,
+            deploy_result.resource_id
+        );
 
         let attestation_url = format!("{}/attestation", deploy_result.url);
 
         let dns_note = if let Some(ref domain) = deploy_result.domain {
-            format!("\nNOTE: Add a DNS A record for '{}' pointing to {}\n", domain, deploy_result.public_ip)
+            format!(
+                "\nNOTE: Add a DNS A record for '{}' pointing to {}\n",
+                domain, deploy_result.public_ip
+            )
         } else {
             String::new()
         };
@@ -676,7 +771,9 @@ async fn handle_git_push(
             attestation_url,
             dns_note
         );
-        let _ = session_handle.extended_data(channel, 1, success_msg.into_bytes().into()).await;
+        let _ = session_handle
+            .extended_data(channel, 1, success_msg.into_bytes().into())
+            .await;
         let _ = session_handle.exit_status_request(channel, 0).await;
         let _ = session_handle.close(channel).await;
     });
@@ -701,10 +798,10 @@ pub async fn run_ssh_server(
     });
 
     let mut server = SshServer::new(pool, api_service_url, data_dir, internal_service_secret);
-    
+
     tracing::info!("Starting SSH server on {}", bind_addr);
-    
+
     server.run_on_address(config, bind_addr).await?;
-    
+
     Ok(())
 }

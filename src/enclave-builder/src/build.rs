@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
 use tokio::fs;
-use sha2::{Sha256, Digest};
+use tokio::process::Command;
 
-use crate::EifFile;
 use crate::manifest::EnclaveManifest;
+use crate::EifFile;
 
 const DEFAULT_ENCLAVEOS_COMMIT: &str = "9582e25239430070667fdd0a6b64d887f1c308df";
 const DEFAULT_BOOTPROOF_COMMIT: &str = "64dae0628e58b9f898b89f9b7a404b37e2f0ca9f";
@@ -16,8 +16,7 @@ const DEFAULT_STEVE_COMMIT: &str = "ed38a190cd5d7a8f452c854e41d00ec748e172bf";
 const DEFAULT_LOCKSMITH_COMMIT: &str = "d16b74c6b3fd1d1006a5b00e4d9e21a4613947a9";
 
 pub fn resolve_enclaveos_commit() -> String {
-    std::env::var("ENCLAVEOS_COMMIT")
-        .unwrap_or_else(|_| DEFAULT_ENCLAVEOS_COMMIT.to_string())
+    std::env::var("ENCLAVEOS_COMMIT").unwrap_or_else(|_| DEFAULT_ENCLAVEOS_COMMIT.to_string())
 }
 
 /// Resolve the templates directory at runtime.
@@ -39,9 +38,11 @@ fn resolve_templates_dir() -> Result<PathBuf> {
     }
 
     let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates");
-    anyhow::ensure!(dev_path.exists(),
+    anyhow::ensure!(
+        dev_path.exists(),
         "Templates directory not found. Checked CAUTION_TEMPLATES_DIR, /app/templates, and {}",
-        dev_path.display());
+        dev_path.display()
+    );
     Ok(dev_path)
 }
 
@@ -72,25 +73,31 @@ pub async fn stage_eif_components(
     tracing::info!("Staging user application from: {}", user_fs_path.display());
     copy_dir_recursive(user_fs_path, &app_dir).await?;
 
-    tracing::info!("Staging enclave source from: {}", enclave_source_path.display());
+    tracing::info!(
+        "Staging enclave source from: {}",
+        enclave_source_path.display()
+    );
     copy_dir_recursive(enclave_source_path, &enclave_dir).await?;
 
-    let enclaveos_commit = manifest.as_ref()
+    let enclaveos_commit = manifest
+        .as_ref()
         .and_then(|m| m.enclaveos_commit.clone())
         .unwrap_or_else(resolve_enclaveos_commit);
-    let bootproof_commit = manifest.as_ref()
+    let bootproof_commit = manifest
+        .as_ref()
         .and_then(|m| m.bootproof_commit.clone())
         .unwrap_or_else(|| {
             std::env::var("BOOTPROOF_COMMIT")
                 .unwrap_or_else(|_| DEFAULT_BOOTPROOF_COMMIT.to_string())
         });
-    let steve_commit = manifest.as_ref()
+    let steve_commit = manifest
+        .as_ref()
         .and_then(|m| m.steve_commit.clone())
         .unwrap_or_else(|| {
-            std::env::var("STEVE_COMMIT")
-                .unwrap_or_else(|_| DEFAULT_STEVE_COMMIT.to_string())
+            std::env::var("STEVE_COMMIT").unwrap_or_else(|_| DEFAULT_STEVE_COMMIT.to_string())
         });
-    let locksmith_commit = manifest.as_ref()
+    let locksmith_commit = manifest
+        .as_ref()
         .and_then(|m| m.locksmith_commit.clone())
         .unwrap_or_else(|| {
             std::env::var("LOCKSMITH_COMMIT")
@@ -98,16 +105,24 @@ pub async fn stage_eif_components(
         });
 
     if let Some(mut manifest) = manifest {
-        manifest.enclaveos_commit.get_or_insert(enclaveos_commit.clone());
-        manifest.bootproof_commit.get_or_insert(bootproof_commit.clone());
+        manifest
+            .enclaveos_commit
+            .get_or_insert(enclaveos_commit.clone());
+        manifest
+            .bootproof_commit
+            .get_or_insert(bootproof_commit.clone());
         if e2e {
             manifest.steve_commit.get_or_insert(steve_commit.clone());
         }
         if locksmith {
-            manifest.locksmith_commit.get_or_insert(locksmith_commit.clone());
+            manifest
+                .locksmith_commit
+                .get_or_insert(locksmith_commit.clone());
         }
         let manifest_path = stage_dir.join("manifest.json");
-        manifest.write_to_file(&manifest_path).await
+        manifest
+            .write_to_file(&manifest_path)
+            .await
             .context("Failed to write manifest.json")?;
         tracing::info!("Wrote manifest to: {}", manifest_path.display());
     }
@@ -119,19 +134,30 @@ pub async fn stage_eif_components(
     };
 
     let run_sh_template = templates_dir.join("run.sh.template");
-    anyhow::ensure!(run_sh_template.exists(),
+    anyhow::ensure!(
+        run_sh_template.exists(),
         "run.sh.template not found at {}",
-        run_sh_template.display());
+        run_sh_template.display()
+    );
 
     let containerfile_template = templates_dir.join("Containerfile.eif");
-    anyhow::ensure!(containerfile_template.exists(),
+    anyhow::ensure!(
+        containerfile_template.exists(),
         "Containerfile.eif template not found at {}",
-        containerfile_template.display());
+        containerfile_template.display()
+    );
 
-    let run_sh_content = render_run_sh_template(&run_sh_template, run_command, ports, e2e, locksmith).await?;
+    let run_sh_content =
+        render_run_sh_template(&run_sh_template, run_command, ports, e2e, locksmith).await?;
     let containerfile_content = render_containerfile_template(
-        &containerfile_template, e2e, locksmith, &bootproof_commit, &steve_commit, &locksmith_commit,
-    ).await?;
+        &containerfile_template,
+        e2e,
+        locksmith,
+        &bootproof_commit,
+        &steve_commit,
+        &locksmith_commit,
+    )
+    .await?;
 
     let run_sh_path = stage_dir.join("run.sh");
     fs::write(&run_sh_path, &run_sh_content).await?;
@@ -139,9 +165,15 @@ pub async fn stage_eif_components(
 
     let containerfile_path = stage_dir.join("Containerfile.eif");
     fs::write(&containerfile_path, &containerfile_content).await?;
-    tracing::info!("Generated Containerfile.eif at: {}", containerfile_path.display());
+    tracing::info!(
+        "Generated Containerfile.eif at: {}",
+        containerfile_path.display()
+    );
 
-    tracing::info!("EIF components staged successfully in: {}", stage_dir.display());
+    tracing::info!(
+        "EIF components staged successfully in: {}",
+        stage_dir.display()
+    );
     Ok(stage_dir)
 }
 
@@ -181,12 +213,17 @@ async fn render_run_sh_template(
     e2e: bool,
     locksmith: bool,
 ) -> Result<String> {
-    let template = fs::read_to_string(template_path).await
+    let template = fs::read_to_string(template_path)
+        .await
         .context("Failed to read run.sh template")?;
 
     let mut enabled_blocks: Vec<&str> = vec![];
-    if e2e { enabled_blocks.push("STEVE"); }
-    if locksmith { enabled_blocks.push("LOCKSMITH"); }
+    if e2e {
+        enabled_blocks.push("STEVE");
+    }
+    if locksmith {
+        enabled_blocks.push("LOCKSMITH");
+    }
     let processed = process_template_blocks(&template, &enabled_blocks);
 
     let user_cmd = if let Some(cmd) = run_command {
@@ -211,14 +248,22 @@ async fn render_run_sh_template(
     let custom_port_proxies: String = ports
         .iter()
         .filter(|&&port| port != 8080 && port != 8081 && port != 8082 && port != 8084)
-        .map(|port| format!("/bin/socat VSOCK-LISTEN:{},reuseaddr,fork TCP:localhost:{} &", port, port))
+        .map(|port| {
+            format!(
+                "/bin/socat VSOCK-LISTEN:{},reuseaddr,fork TCP:localhost:{} &",
+                port, port
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
     let custom_port_section = if custom_port_proxies.is_empty() {
         String::new()
     } else {
-        format!("\necho \"Starting custom port proxies...\"\n{}\n", custom_port_proxies)
+        format!(
+            "\necho \"Starting custom port proxies...\"\n{}\n",
+            custom_port_proxies
+        )
     };
 
     let result = processed
@@ -236,12 +281,17 @@ async fn render_containerfile_template(
     steve_commit: &str,
     locksmith_commit: &str,
 ) -> Result<String> {
-    let template = fs::read_to_string(template_path).await
+    let template = fs::read_to_string(template_path)
+        .await
         .context("Failed to read Containerfile.eif template")?;
 
     let mut enabled_blocks: Vec<&str> = vec![];
-    if e2e { enabled_blocks.push("STEVE"); }
-    if locksmith { enabled_blocks.push("LOCKSMITH"); }
+    if e2e {
+        enabled_blocks.push("STEVE");
+    }
+    if locksmith {
+        enabled_blocks.push("LOCKSMITH");
+    }
     let processed = process_template_blocks(&template, &enabled_blocks);
 
     Ok(processed
@@ -271,7 +321,18 @@ pub async fn build_eif_from_filesystems(
         fs::create_dir_all(parent).await?;
     }
 
-    let stage_dir = stage_eif_components(user_fs_path, enclave_source_path, work_dir, run_command, manifest, ports, e2e, locksmith, templates_dir).await?;
+    let stage_dir = stage_eif_components(
+        user_fs_path,
+        enclave_source_path,
+        work_dir,
+        run_command,
+        manifest,
+        ports,
+        e2e,
+        locksmith,
+        templates_dir,
+    )
+    .await?;
 
     tracing::info!("Building EIF using Docker and Containerfile.eif");
     let output_dir = stage_dir.join("output");
@@ -281,16 +342,25 @@ pub async fn build_eif_from_filesystems(
     let output_dir_absolute = std::fs::canonicalize(&output_dir)
         .context("Failed to get absolute path for output directory")?;
 
-    tracing::info!("Output directory (absolute): {}", output_dir_absolute.display());
+    tracing::info!(
+        "Output directory (absolute): {}",
+        output_dir_absolute.display()
+    );
     eprintln!("Output directory: {}", output_dir_absolute.display());
 
     // Build docker args, conditionally adding --no-cache
     let mut docker_args = vec![
         "build".to_string(),
         "--progress=plain".to_string(),
-        "--target".to_string(), "output".to_string(),
-        "--output".to_string(), format!("type=local,rewrite-timestamp=true,dest={}", output_dir_absolute.to_str().unwrap()),
-        "-f".to_string(), "Containerfile.eif".to_string(),
+        "--target".to_string(),
+        "output".to_string(),
+        "--output".to_string(),
+        format!(
+            "type=local,rewrite-timestamp=true,dest={}",
+            output_dir_absolute.to_str().unwrap()
+        ),
+        "-f".to_string(),
+        "Containerfile.eif".to_string(),
     ];
     if no_cache {
         docker_args.insert(1, "--no-cache".to_string());
@@ -350,20 +420,36 @@ pub async fn build_eif_from_filesystems(
                 }
             }
         } else {
-            eprintln!("Output directory does not exist: {}", output_dir_absolute.display());
+            eprintln!(
+                "Output directory does not exist: {}",
+                output_dir_absolute.display()
+            );
         }
-        anyhow::bail!("EIF file was not created at: {}. Check build log: {}",
-            built_eif.display(), build_log_path.display());
+        anyhow::bail!(
+            "EIF file was not created at: {}. Check build log: {}",
+            built_eif.display(),
+            build_log_path.display()
+        );
     }
 
-    fs::copy(&built_eif, &output_path).await
-        .with_context(|| format!("Failed to copy EIF from {} to {}", built_eif.display(), output_path.display()))?;
+    fs::copy(&built_eif, &output_path).await.with_context(|| {
+        format!(
+            "Failed to copy EIF from {} to {}",
+            built_eif.display(),
+            output_path.display()
+        )
+    })?;
 
     let built_pcrs = output_dir_absolute.join("enclave.pcrs");
     let pcrs_path = output_path.with_extension("pcrs");
     if built_pcrs.exists() {
-        fs::copy(&built_pcrs, &pcrs_path).await
-            .with_context(|| format!("Failed to copy PCRs from {} to {}", built_pcrs.display(), pcrs_path.display()))?;
+        fs::copy(&built_pcrs, &pcrs_path).await.with_context(|| {
+            format!(
+                "Failed to copy PCRs from {} to {}",
+                built_pcrs.display(),
+                pcrs_path.display()
+            )
+        })?;
     }
 
     let metadata = fs::metadata(&output_path)
@@ -419,23 +505,25 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
             let target = std::fs::read_link(path)
                 .with_context(|| format!("Failed to read symlink: {}", path.display()))?;
             let _ = fs::remove_file(&dst_path).await;
-            std::os::unix::fs::symlink(&target, &dst_path)
-                .with_context(|| format!(
+            std::os::unix::fs::symlink(&target, &dst_path).with_context(|| {
+                format!(
                     "Failed to create symlink:\n  link: {}\n  target: {}",
                     dst_path.display(),
                     target.display()
-                ))?;
+                )
+            })?;
         } else {
             if let Some(parent) = dst_path.parent() {
                 fs::create_dir_all(parent).await?;
             }
 
-            fs::copy(path, &dst_path).await
-                .with_context(|| format!(
+            fs::copy(path, &dst_path).await.with_context(|| {
+                format!(
                     "Failed to copy file:\n  src: {}\n  dst: {}",
                     path.display(),
                     dst_path.display()
-                ))?;
+                )
+            })?;
         }
     }
 
@@ -511,7 +599,8 @@ mod tests {
 
     #[test]
     fn test_process_template_blocks_steve_and_locksmith() {
-        let content = "start\n# {STEVE\nsteve\n# }STEVE\nmid\n# {LOCKSMITH\nlocksmith\n# }LOCKSMITH\nend\n";
+        let content =
+            "start\n# {STEVE\nsteve\n# }STEVE\nmid\n# {LOCKSMITH\nlocksmith\n# }LOCKSMITH\nend\n";
 
         // Both enabled
         let result = process_template_blocks(content, &["STEVE", "LOCKSMITH"]);

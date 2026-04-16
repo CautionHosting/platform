@@ -9,10 +9,15 @@ use sqlx::FromRow;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{AppState, AuthContext, get_user_primary_org, get_or_create_provider_account, get_or_create_resource_type};
 use crate::validated_types;
-use crate::validated_types::{CreateResourceRequest, CreateResourceResponse, RenameResourceRequest};
-use crate::{types, validation, deployment, cloud_credentials};
+use crate::validated_types::{
+    CreateResourceRequest, CreateResourceResponse, RenameResourceRequest,
+};
+use crate::{cloud_credentials, deployment, types, validation};
+use crate::{
+    get_or_create_provider_account, get_or_create_resource_type, get_user_primary_org, AppState,
+    AuthContext,
+};
 
 #[derive(Debug, Serialize, FromRow)]
 pub struct ComputeResource {
@@ -46,7 +51,11 @@ pub async fn create_resource(
             id
         }
         Err(e) => {
-            tracing::error!("Failed to get primary org for user {}: {:?}", auth.user_id, e);
+            tracing::error!(
+                "Failed to get primary org for user {}: {:?}",
+                auth.user_id,
+                e
+            );
             return Err(e);
         }
     };
@@ -79,13 +88,17 @@ pub async fn create_resource(
     let resource_slug = if let Some(ref name) = payload.name {
         // Validate the app name
         if let Err(e) = validation::validate_app_name(name) {
-            tracing::warn!("Invalid app name '{}': {}, falling back to auto-generated", name, e);
+            tracing::warn!(
+                "Invalid app name '{}': {}, falling back to auto-generated",
+                name,
+                e
+            );
             format!("app-{}", &provider_resource_id[..8])
         } else {
             // Check if name is already taken in this organization
             let existing: Option<(Uuid,)> = sqlx::query_as(
                 "SELECT id FROM compute_resources
-                 WHERE organization_id = $1 AND resource_name = $2 AND destroyed_at IS NULL"
+                 WHERE organization_id = $1 AND resource_name = $2 AND destroyed_at IS NULL",
             )
             .bind(org_id)
             .bind(name)
@@ -97,7 +110,10 @@ pub async fn create_resource(
             })?;
 
             if existing.is_some() {
-                tracing::warn!("App name '{}' already exists, falling back to auto-generated", name);
+                tracing::warn!(
+                    "App name '{}' already exists, falling back to auto-generated",
+                    name
+                );
                 format!("app-{}", &provider_resource_id[..8])
             } else {
                 name.clone()
@@ -118,7 +134,7 @@ pub async fn create_resource(
          (organization_id, provider_account_id, resource_type_id, provider_resource_id,
           resource_name, state, configuration, created_by)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         RETURNING id, state, created_at"
+         RETURNING id, state, created_at",
     )
     .bind(org_id)
     .bind(provider_account_id)
@@ -129,7 +145,8 @@ pub async fn create_resource(
     .bind(&configuration)
     .bind(auth.user_id)
     .fetch_one(&state.db)
-    .await {
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Database error creating resource: {:?}", e);
@@ -140,11 +157,18 @@ pub async fn create_resource(
     let (resource_id, resource_state, created_at) = resource;
 
     let git_url = match state.git_ssh_port {
-        Some(port) => format!("ssh://git@{}:{}/{}.git", state.git_hostname, port, resource_id),
+        Some(port) => format!(
+            "ssh://git@{}:{}/{}.git",
+            state.git_hostname, port, resource_id
+        ),
         None => format!("git@{}:{}.git", state.git_hostname, resource_id),
     };
 
-    tracing::info!("Resource created successfully: id={}, name={}", resource_id, resource_slug);
+    tracing::info!(
+        "Resource created successfully: id={}, name={}",
+        resource_id,
+        resource_slug
+    );
 
     Ok(Json(CreateResourceResponse {
         id: resource_id,
@@ -161,7 +185,11 @@ pub async fn list_resources(
 ) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
     let org_id = get_user_primary_org(&state.db, auth.user_id).await?;
 
-    tracing::info!("Listing resources for user {} in org {}", auth.user_id, org_id);
+    tracing::info!(
+        "Listing resources for user {} in org {}",
+        auth.user_id,
+        org_id
+    );
 
     let resources = sqlx::query_as::<_, ComputeResource>(
         "SELECT id, organization_id, provider_account_id, resource_type_id,
@@ -169,7 +197,7 @@ pub async fn list_resources(
                 region, public_ip, configuration->>'domain' as domain,
                 billing_tag, configuration, created_at, updated_at
          FROM compute_resources
-         WHERE organization_id = $1"
+         WHERE organization_id = $1",
     )
     .bind(org_id)
     .fetch_all(&state.db)
@@ -185,7 +213,10 @@ pub async fn list_resources(
         .into_iter()
         .map(|resource| {
             let git_url = match state.git_ssh_port {
-                Some(port) => format!("ssh://git@{}:{}/{}.git", state.git_hostname, port, resource.id),
+                Some(port) => format!(
+                    "ssh://git@{}:{}/{}.git",
+                    state.git_hostname, port, resource.id
+                ),
                 None => format!("git@{}:{}.git", state.git_hostname, resource.id),
             };
             let mut value = serde_json::to_value(&resource).unwrap_or_default();
@@ -211,7 +242,7 @@ pub async fn get_resource(
                 cr.billing_tag, cr.configuration, cr.created_at, cr.updated_at
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
-         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL"
+         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL",
     )
     .bind(resource_id)
     .bind(auth.user_id)
@@ -220,7 +251,10 @@ pub async fn get_resource(
     .map_err(|_| StatusCode::NOT_FOUND)?;
 
     let git_url = match state.git_ssh_port {
-        Some(port) => format!("ssh://git@{}:{}/{}.git", state.git_hostname, port, resource_id),
+        Some(port) => format!(
+            "ssh://git@{}:{}/{}.git",
+            state.git_hostname, port, resource_id
+        ),
         None => format!("git@{}:{}.git", state.git_hostname, resource_id),
     };
 
@@ -243,7 +277,7 @@ pub async fn proxy_attestation(
         "SELECT cr.public_ip, cr.configuration->>'domain' as domain
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
-         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL"
+         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL",
     )
     .bind(resource_id)
     .bind(auth.user_id)
@@ -252,7 +286,10 @@ pub async fn proxy_attestation(
     .map_err(|_| (StatusCode::NOT_FOUND, "Resource not found".to_string()))?;
 
     let public_ip = resource.0.ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, "Resource has no public IP".to_string())
+        (
+            StatusCode::BAD_REQUEST,
+            "Resource has no public IP".to_string(),
+        )
     })?;
 
     // Create HTTP client that accepts self-signed certs (for IP fallback)
@@ -260,7 +297,12 @@ pub async fn proxy_attestation(
         .danger_accept_invalid_certs(true)
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create HTTP client: {}", e)))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to create HTTP client: {}", e),
+            )
+        })?;
 
     // Always use HTTPS — domain gets Let's Encrypt, IP gets self-signed cert
     // (danger_accept_invalid_certs handles the self-signed case)
@@ -279,20 +321,28 @@ pub async fn proxy_attestation(
         .await
         .map_err(|e| {
             tracing::error!("Attestation proxy request failed: {:?}", e);
-            (StatusCode::BAD_GATEWAY, format!("Failed to reach attestation endpoint: {}", e))
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to reach attestation endpoint: {}", e),
+            )
         })?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         tracing::error!("Attestation endpoint returned error: {} - {}", status, body);
-        return Err((StatusCode::BAD_GATEWAY, format!("Attestation endpoint error: {}", status)));
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("Attestation endpoint error: {}", status),
+        ));
     }
 
-    let json: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Invalid JSON from attestation endpoint: {}", e)))?;
+    let json: serde_json::Value = response.json().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("Invalid JSON from attestation endpoint: {}", e),
+        )
+    })?;
 
     Ok(Json(json))
 }
@@ -305,7 +355,9 @@ pub async fn rename_resource(
 ) -> Result<Json<ComputeResource>, (StatusCode, String)> {
     tracing::info!(
         "rename_resource: resource_id={}, user_id={}, new_name={}",
-        resource_id, auth.user_id, payload.name
+        resource_id,
+        auth.user_id,
+        payload.name
     );
 
     // Verify user has access to this resource via organization membership
@@ -313,7 +365,7 @@ pub async fn rename_resource(
         "SELECT cr.organization_id, cr.resource_name
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
-         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL"
+         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL",
     )
     .bind(resource_id)
     .bind(auth.user_id)
@@ -321,7 +373,10 @@ pub async fn rename_resource(
     .await
     .map_err(|e| {
         tracing::error!("Database error in rename_resource: {:?}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Database error".to_string(),
+        )
     })?;
 
     let Some((org_id, old_name)) = resource else {
@@ -333,7 +388,7 @@ pub async fn rename_resource(
         "SELECT EXISTS(
             SELECT 1 FROM compute_resources
             WHERE organization_id = $1 AND resource_name = $2 AND destroyed_at IS NULL AND id != $3
-        )"
+        )",
     )
     .bind(org_id)
     .bind(&payload.name)
@@ -342,13 +397,19 @@ pub async fn rename_resource(
     .await
     .map_err(|e| {
         tracing::error!("Database error checking name uniqueness: {:?}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Database error".to_string(),
+        )
     })?;
 
     if name_exists == Some(true) {
         return Err((
             StatusCode::CONFLICT,
-            format!("An app with the name '{}' already exists in this organization", payload.name),
+            format!(
+                "An app with the name '{}' already exists in this organization",
+                payload.name
+            ),
         ));
     }
 
@@ -360,7 +421,7 @@ pub async fn rename_resource(
          RETURNING id, organization_id, provider_account_id, resource_type_id,
                    provider_resource_id, resource_name, state::text as state,
                    region, public_ip, configuration->>'domain' as domain,
-                   billing_tag, configuration, created_at, updated_at"
+                   billing_tag, configuration, created_at, updated_at",
     )
     .bind(&payload.name)
     .bind(resource_id)
@@ -369,7 +430,10 @@ pub async fn rename_resource(
     .await
     .map_err(|e| {
         tracing::error!("Failed to update resource name: {:?}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to rename resource".to_string())
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to rename resource".to_string(),
+        )
     })?;
 
     // Rename the git repository if it exists
@@ -380,16 +444,25 @@ pub async fn rename_resource(
         if let Err(e) = tokio::fs::rename(&old_repo_path, &new_repo_path).await {
             tracing::warn!(
                 "Failed to rename git repo from {} to {}: {} (resource renamed in DB)",
-                old_repo_path, new_repo_path, e
+                old_repo_path,
+                new_repo_path,
+                e
             );
         } else {
-            tracing::info!("Renamed git repo from {} to {}", old_repo_path, new_repo_path);
+            tracing::info!(
+                "Renamed git repo from {} to {}",
+                old_repo_path,
+                new_repo_path
+            );
         }
     }
 
     tracing::info!(
         "Resource {} renamed from '{}' to '{}' by user {}",
-        resource_id, old_name, payload.name, auth.user_id
+        resource_id,
+        old_name,
+        payload.name,
+        auth.user_id
     );
 
     Ok(Json(updated_resource))
@@ -407,15 +480,24 @@ pub async fn delete_resource(
     Path(resource_id): Path<Uuid>,
     query: axum::extract::Query<DeleteResourceQuery>,
 ) -> Result<StatusCode, StatusCode> {
-    tracing::info!("delete_resource called: resource_id={}, user_id={}, force={}", resource_id, auth.user_id, query.force);
+    tracing::info!(
+        "delete_resource called: resource_id={}, user_id={}, force={}",
+        resource_id,
+        auth.user_id,
+        query.force
+    );
 
-    tracing::debug!("Querying resource access for user {} on resource {}", auth.user_id, resource_id);
+    tracing::debug!(
+        "Querying resource access for user {} on resource {}",
+        auth.user_id,
+        resource_id
+    );
     let resource: Option<(Uuid, Uuid, String, Option<String>, String)> = sqlx::query_as(
         "SELECT cr.id, cr.organization_id, cr.resource_name, pa.role_arn, cr.provider_resource_id
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
          INNER JOIN provider_accounts pa ON cr.provider_account_id = pa.id
-         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL"
+         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL",
     )
     .bind(resource_id)
     .bind(auth.user_id)
@@ -427,27 +509,55 @@ pub async fn delete_resource(
     })?;
 
     let Some((_, org_id, resource_name, _role_arn_opt, tracked_resource_id)) = resource else {
-        tracing::warn!("Resource {} not found or user {} has no access", resource_id, auth.user_id);
+        tracing::warn!(
+            "Resource {} not found or user {} has no access",
+            resource_id,
+            auth.user_id
+        );
         return Err(StatusCode::NOT_FOUND);
     };
 
-    tracing::info!("Destroying resource {} (id: {})", resource_name, resource_id);
+    tracing::info!(
+        "Destroying resource {} (id: {})",
+        resource_name,
+        resource_id
+    );
 
     let (aws_credentials, asg_name) = if let Some(encryptor) = state.encryptor.as_ref() {
-        if let Ok(Some(credential)) = cloud_credentials::get_credential_by_resource(&state.db, org_id, resource_id).await {
+        if let Ok(Some(credential)) =
+            cloud_credentials::get_credential_by_resource(&state.db, org_id, resource_id).await
+        {
             if credential.managed_on_prem {
-                if let Ok(Some(secrets)) = cloud_credentials::get_credential_secrets(&state.db, encryptor, org_id, credential.id).await {
-                    let region = credential.config["aws_region"].as_str()
+                if let Ok(Some(secrets)) = cloud_credentials::get_credential_secrets(
+                    &state.db,
+                    encryptor,
+                    org_id,
+                    credential.id,
+                )
+                .await
+                {
+                    let region = credential.config["aws_region"]
+                        .as_str()
                         .map(|s| s.to_string())
                         .or_else(|| std::env::var("AWS_REGION").ok())
                         .unwrap_or_else(|| "us-west-2".to_string());
-                    let asg = credential.config["asg_name"].as_str()
+                    let asg = credential.config["asg_name"]
+                        .as_str()
                         .map(|s| s.to_string());
-                    (Some(deployment::AwsCredentials {
-                        access_key_id: secrets["aws_access_key_id"].as_str().unwrap_or("").to_string(),
-                        secret_access_key: secrets["aws_secret_access_key"].as_str().unwrap_or("").to_string(),
-                        region,
-                    }), asg)
+                    (
+                        Some(deployment::AwsCredentials {
+                            access_key_id: secrets["aws_access_key_id"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_string(),
+                            secret_access_key: secrets["aws_secret_access_key"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_string(),
+                            region,
+                        }),
+                        asg,
+                    )
                 } else {
                     (None, None)
                 }
@@ -461,10 +571,21 @@ pub async fn delete_resource(
         (None, None)
     };
 
-    let terraform_result = deployment::destroy_app_with_credentials(org_id, resource_id, resource_name.clone(), aws_credentials, asg_name).await;
+    let terraform_result = deployment::destroy_app_with_credentials(
+        org_id,
+        resource_id,
+        resource_name.clone(),
+        aws_credentials,
+        asg_name,
+    )
+    .await;
 
     if let Err(ref e) = terraform_result {
-        tracing::error!("Terraform destroy failed for resource {}: {}", resource_id, e);
+        tracing::error!(
+            "Terraform destroy failed for resource {}: {}",
+            resource_id,
+            e
+        );
         if !query.force {
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
@@ -474,7 +595,7 @@ pub async fn delete_resource(
     sqlx::query(
         "UPDATE compute_resources
          SET destroyed_at = NOW(), state = $1
-         WHERE id = $2 AND organization_id = $3"
+         WHERE id = $2 AND organization_id = $3",
     )
     .bind(types::ResourceState::Terminated)
     .bind(resource_id)
@@ -488,7 +609,8 @@ pub async fn delete_resource(
         state.internal_service_secret.as_deref(),
         &tracked_resource_id,
     )
-    .await {
+    .await
+    {
         Ok(()) => {
             tracing::info!("Stopped metering for resource {}", resource_id);
         }
@@ -507,7 +629,11 @@ pub async fn delete_resource(
         }
     }
 
-    tracing::info!("Resource {} terminated by user {} (git repo preserved for redeployment)", resource_id, auth.user_id);
+    tracing::info!(
+        "Resource {} terminated by user {} (git repo preserved for redeployment)",
+        resource_id,
+        auth.user_id
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }

@@ -7,13 +7,16 @@
 //! ephemeral EC2 instances that perform the build, upload the EIF to S3,
 //! and signal completion via an S3 status file.
 
-use anyhow::{Context, Result, bail};
-use sha2::{Sha256, Digest};
+use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-use crate::{AppliedPricing, ec2::{Ec2Client, RunInstancesParams}};
+use crate::{
+    ec2::{Ec2Client, RunInstancesParams},
+    AppliedPricing,
+};
 
 const REMOTE_BUILDER_HELPER: &str = "remote-build-helper";
 
@@ -27,7 +30,9 @@ pub struct BuilderSizeSpec {
     pub ram_gb: u32,
 }
 
-fn default_max_resources() -> u32 { 10 }
+fn default_max_resources() -> u32 {
+    10
+}
 
 /// Platform configuration loaded from config.json.
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -39,10 +44,11 @@ pub struct BuilderSizesConfig {
 
 impl BuilderSizesConfig {
     pub fn load() -> Result<Self> {
-        let contents = std::fs::read_to_string("config.json")
-            .context("config.json not found. Copy config.json.example to config.json to configure.")?;
-        let config: Self = serde_json::from_str(&contents)
-            .context("Failed to parse config.json")?;
+        let contents = std::fs::read_to_string("config.json").context(
+            "config.json not found. Copy config.json.example to config.json to configure.",
+        )?;
+        let config: Self =
+            serde_json::from_str(&contents).context("Failed to parse config.json")?;
         if config.builder_sizes.is_empty() {
             bail!("config.json: builder_sizes must not be empty");
         }
@@ -55,7 +61,8 @@ impl BuilderSizesConfig {
         match size_id {
             Some(id) => {
                 let lower = id.to_lowercase();
-                self.builder_sizes.iter()
+                self.builder_sizes
+                    .iter()
                     .find(|s| s.id == lower)
                     .unwrap_or(first)
             }
@@ -84,23 +91,20 @@ pub struct BuilderConfig {
 impl BuilderConfig {
     pub fn from_env() -> Result<Self> {
         Ok(Self {
-            ami_id: std::env::var("BUILDER_AMI_ID")
-                .context("BUILDER_AMI_ID required")?,
+            ami_id: std::env::var("BUILDER_AMI_ID").context("BUILDER_AMI_ID required")?,
             security_group_id: std::env::var("BUILDER_SECURITY_GROUP_ID")
                 .context("BUILDER_SECURITY_GROUP_ID required")?,
-            subnet_id: std::env::var("BUILDER_SUBNET_ID")
-                .context("BUILDER_SUBNET_ID required")?,
+            subnet_id: std::env::var("BUILDER_SUBNET_ID").context("BUILDER_SUBNET_ID required")?,
             instance_profile: std::env::var("BUILDER_INSTANCE_PROFILE")
                 .context("BUILDER_INSTANCE_PROFILE required")?,
             timeout_secs: std::env::var("BUILDER_TIMEOUT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1200),
-            eif_s3_bucket: std::env::var("EIF_S3_BUCKET")
-                .unwrap_or_else(|_| {
-                    let account = std::env::var("AWS_ACCOUNT_ID").unwrap_or_default();
-                    format!("caution-eif-storage-{}", account)
-                }),
+            eif_s3_bucket: std::env::var("EIF_S3_BUCKET").unwrap_or_else(|_| {
+                let account = std::env::var("AWS_ACCOUNT_ID").unwrap_or_default();
+                format!("caution-eif-storage-{}", account)
+            }),
             git_hostname: std::env::var("GIT_HOSTNAME").unwrap_or_default(),
         })
     }
@@ -157,7 +161,14 @@ pub fn compute_cache_key(
     hasher.update(b"|");
     hasher.update(if e2e { "e2e" } else { "no-e2e" }.as_bytes());
     hasher.update(b"|");
-    hasher.update(if locksmith { "locksmith" } else { "no-locksmith" }.as_bytes());
+    hasher.update(
+        if locksmith {
+            "locksmith"
+        } else {
+            "no-locksmith"
+        }
+        .as_bytes(),
+    );
     format!("{:x}", hasher.finalize())
 }
 
@@ -171,7 +182,7 @@ pub async fn check_build_cache(
         "SELECT eif_s3_key, eif_sha256, eif_size_bytes, pcrs
          FROM eif_builds
          WHERE organization_id = $1 AND cache_key = $2 AND status = 'completed'
-         LIMIT 1"
+         LIMIT 1",
     )
     .bind(org_id)
     .bind(cache_key)
@@ -179,12 +190,14 @@ pub async fn check_build_cache(
     .await
     .context("Failed to query eif_builds cache")?;
 
-    Ok(row.map(|(eif_s3_key, eif_sha256, eif_size_bytes, pcrs)| BuildResult {
-        eif_s3_key,
-        eif_sha256,
-        eif_size_bytes,
-        pcrs,
-    }))
+    Ok(row.map(
+        |(eif_s3_key, eif_sha256, eif_size_bytes, pcrs)| BuildResult {
+            eif_s3_key,
+            eif_sha256,
+            eif_size_bytes,
+            pcrs,
+        },
+    ))
 }
 
 /// Archive the source at a given commit and upload to S3 for the builder.
@@ -201,7 +214,13 @@ pub async fn upload_source_archive(
 
     // git archive produces a tar.gz of the repo at the given commit
     let output = tokio::process::Command::new("git")
-        .args(&["--git-dir", git_dir, "archive", "--format=tar.gz", commit_sha])
+        .args(&[
+            "--git-dir",
+            git_dir,
+            "archive",
+            "--format=tar.gz",
+            commit_sha,
+        ])
         .output()
         .await
         .context("Failed to run git archive")?;
@@ -230,7 +249,10 @@ fn resolve_remote_builder_helper_path() -> Result<PathBuf> {
         if path.exists() {
             return Ok(path);
         }
-        bail!("REMOTE_BUILDER_HELPER_PATH does not exist: {}", path.display());
+        bail!(
+            "REMOTE_BUILDER_HELPER_PATH does not exist: {}",
+            path.display()
+        );
     }
 
     if let Ok(current_exe) = std::env::current_exe() {
@@ -270,7 +292,11 @@ async fn upload_remote_builder_helper(
         .await
         .context("Failed to upload remote builder helper to S3")?;
 
-    tracing::info!("Remote builder helper uploaded to s3://{}/{}", bucket, s3_key);
+    tracing::info!(
+        "Remote builder helper uploaded to s3://{}/{}",
+        bucket,
+        s3_key
+    );
     Ok(s3_key)
 }
 
@@ -323,8 +349,10 @@ pub async fn execute_remote_build(
     }
 
     // 2. Generate user-data and launch EC2 instance
-    let helper_s3_key = upload_remote_builder_helper(s3, &config.eif_s3_bucket, build_id, request.org_id).await
-        .context("Failed to stage remote builder helper")?;
+    let helper_s3_key =
+        upload_remote_builder_helper(s3, &config.eif_s3_bucket, build_id, request.org_id)
+            .await
+            .context("Failed to stage remote builder helper")?;
     let framework_commit = resolve_framework_commit(enclave_builder::FRAMEWORK_SOURCE).await;
     let user_data = generate_builder_userdata(
         build_id,
@@ -334,20 +362,26 @@ pub async fn execute_remote_build(
         &helper_s3_key,
         framework_commit,
     )?;
-    let instance_id = match ec2.run_instances(&RunInstancesParams {
-        image_id: config.ami_id.clone(),
-        instance_type: instance_type.to_string(),
-        user_data,
-        iam_instance_profile: config.instance_profile.clone(),
-        security_group_ids: vec![config.security_group_id.clone()],
-        subnet_id: config.subnet_id.clone(),
-        tags: vec![
-            ("Name".to_string(), format!("caution-builder-{}", &build_id.to_string()[..8])),
-            ("org_id".to_string(), request.org_id.to_string()),
-            ("ManagedBy".to_string(), "caution-builder".to_string()),
-            ("BuildId".to_string(), build_id.to_string()),
-        ],
-    }).await {
+    let instance_id = match ec2
+        .run_instances(&RunInstancesParams {
+            image_id: config.ami_id.clone(),
+            instance_type: instance_type.to_string(),
+            user_data,
+            iam_instance_profile: config.instance_profile.clone(),
+            security_group_ids: vec![config.security_group_id.clone()],
+            subnet_id: config.subnet_id.clone(),
+            tags: vec![
+                (
+                    "Name".to_string(),
+                    format!("caution-builder-{}", &build_id.to_string()[..8]),
+                ),
+                ("org_id".to_string(), request.org_id.to_string()),
+                ("ManagedBy".to_string(), "caution-builder".to_string()),
+                ("BuildId".to_string(), build_id.to_string()),
+            ],
+        })
+        .await
+    {
         Ok(id) => id,
         Err(e) => {
             mark_build_failed(db, build_id, &format!("Failed to launch builder: {}", e)).await;
@@ -355,14 +389,20 @@ pub async fn execute_remote_build(
         }
     };
 
-    tracing::info!("Builder instance {} launched for build {}", instance_id, build_id);
+    tracing::info!(
+        "Builder instance {} launched for build {}",
+        instance_id,
+        build_id
+    );
 
     // Update build row with instance ID
-    let _ = sqlx::query("UPDATE eif_builds SET builder_instance_id = $1, status = 'building' WHERE id = $2")
-        .bind(&instance_id)
-        .bind(build_id)
-        .execute(db)
-        .await;
+    let _ = sqlx::query(
+        "UPDATE eif_builds SET builder_instance_id = $1, status = 'building' WHERE id = $2",
+    )
+    .bind(&instance_id)
+    .bind(build_id)
+    .execute(db)
+    .await;
 
     // Register builder with metering so the collection loop deducts credits in real-time
     if let Err(e) = sqlx::query(
@@ -389,15 +429,15 @@ pub async fn execute_remote_build(
         &status_key,
         config.timeout_secs,
         tx,
-    ).await;
+    )
+    .await;
 
     // 4. Stop metering for the builder instance and force a final usage slice.
     let internal_service_secret = std::env::var("INTERNAL_SERVICE_SECRET").ok();
-    if let Err(e) = crate::metering::stop_tracked_resource(
-        internal_service_secret.as_deref(),
-        &instance_id,
-    )
-    .await {
+    if let Err(e) =
+        crate::metering::stop_tracked_resource(internal_service_secret.as_deref(), &instance_id)
+            .await
+    {
         tracing::error!("Failed to stop metering for builder {}: {}", instance_id, e);
         let _ = sqlx::query(
             "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
@@ -419,8 +459,16 @@ pub async fn execute_remote_build(
                     tracing::error!("Failed to terminate builder {} after {} attempts: {}. INSTANCE MAY BE LEAKED.", instance_id, terminate_attempts, e);
                     break;
                 }
-                tracing::warn!("Failed to terminate builder {} (attempt {}): {}, retrying...", instance_id, terminate_attempts, e);
-                tokio::time::sleep(std::time::Duration::from_secs(2_u64.pow(terminate_attempts))).await;
+                tracing::warn!(
+                    "Failed to terminate builder {} (attempt {}): {}, retrying...",
+                    instance_id,
+                    terminate_attempts,
+                    e
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    2_u64.pow(terminate_attempts),
+                ))
+                .await;
             }
         }
     }
@@ -503,14 +551,12 @@ async fn poll_build_status(
 
         tokio::time::sleep(poll_interval).await;
 
-        match s3.get_object()
-            .bucket(bucket)
-            .key(status_key)
-            .send()
-            .await
-        {
+        match s3.get_object().bucket(bucket).key(status_key).send().await {
             Ok(output) => {
-                let body = output.body.collect().await
+                let body = output
+                    .body
+                    .collect()
+                    .await
                     .context("Failed to read status body")?;
                 let status: BuildStatus = serde_json::from_slice(&body.into_bytes())
                     .context("Failed to parse status.json")?;
@@ -525,14 +571,18 @@ async fn poll_build_status(
                         "failed" => "Build failed",
                         _ => &status.phase,
                     };
-                    let _ = tx.send(Ok(bytes::Bytes::from(format!("STEP:{}\n", msg)))).await;
+                    let _ = tx
+                        .send(Ok(bytes::Bytes::from(format!("STEP:{}\n", msg))))
+                        .await;
                     last_phase = status.phase.clone();
                 }
 
                 match status.phase.as_str() {
                     "completed" => return Ok(status),
                     "failed" => {
-                        let err = status.error.unwrap_or_else(|| "Unknown build error".to_string());
+                        let err = status
+                            .error
+                            .unwrap_or_else(|| "Unknown build error".to_string());
                         bail!("Build failed: {}", err);
                     }
                     _ => continue,
@@ -577,9 +627,17 @@ fn generate_builder_userdata(
     let status_key = format!("builds/{}/status.json", build_id);
     let bucket = &config.eif_s3_bucket;
     let source_s3_key = &request.source_s3_key;
-    let ports_csv = request.ports.iter().map(u16::to_string).collect::<Vec<_>>().join(",");
+    let ports_csv = request
+        .ports
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
 
-    let build_cmd_raw = request.build_command.as_deref().unwrap_or("docker build -t app-image .");
+    let build_cmd_raw = request
+        .build_command
+        .as_deref()
+        .unwrap_or("docker build -t app-image .");
     let build_cmd = build_cmd_raw.replace('\'', "'\\''");
 
     let bootproof_commit = std::env::var("BOOTPROOF_COMMIT")
@@ -605,7 +663,10 @@ fn generate_builder_userdata(
     let mut manifest = enclave_builder::EnclaveManifest::new(
         app_source,
         enclave_builder::EnclaveSource::GitArchive {
-            urls: vec![format!("https://git.distrust.co/public/enclaveos/archive/{}.tar.gz", request.enclaveos_commit)],
+            urls: vec![format!(
+                "https://git.distrust.co/public/enclaveos/archive/{}.tar.gz",
+                request.enclaveos_commit
+            )],
             commit: Some(request.enclaveos_commit.clone()),
         },
         enclave_builder::FrameworkSource::GitArchive {
@@ -624,9 +685,11 @@ fn generate_builder_userdata(
     if request.locksmith {
         manifest.locksmith_commit = Some(locksmith_commit);
     }
-    let manifest_json = serde_json::to_string(&manifest).expect("manifest serialization cannot fail");
+    let manifest_json =
+        serde_json::to_string(&manifest).expect("manifest serialization cannot fail");
 
-    Ok(format!(r##"#!/bin/bash
+    Ok(format!(
+        r##"#!/bin/bash
 set -euo pipefail
 
 # --- Caution Dedicated Builder ---
@@ -823,7 +886,12 @@ async fn bill_builder_usage(
 
     tracing::info!(
         "Builder billing: org={}, build={}, type={}, {:.1}min, ${:.4} ({}c deducted)",
-        org_id, build_id, instance_type, duration_secs / 60.0, cost_usd, cost_cents
+        org_id,
+        build_id,
+        instance_type,
+        duration_secs / 60.0,
+        cost_usd,
+        cost_cents
     );
 }
 
@@ -847,12 +915,16 @@ pub async fn reap_orphaned_builders(
     };
 
     for (build_id, instance_id, org_id, app_id, instance_type, started_at) in rows {
-        tracing::warn!("Reaping orphaned build {} (instance: {:?})", build_id, instance_id);
+        tracing::warn!(
+            "Reaping orphaned build {} (instance: {:?})",
+            build_id,
+            instance_id
+        );
 
         if let Some(ref iid) = instance_id {
             // Check if this builder was tracked by the metering collection loop
             let was_tracked: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM tracked_resources WHERE resource_id = $1)"
+                "SELECT EXISTS(SELECT 1 FROM tracked_resources WHERE resource_id = $1)",
             )
             .bind(iid)
             .fetch_one(db)
@@ -870,17 +942,8 @@ pub async fn reap_orphaned_builders(
             } else if let (Some(ref itype), Some(started)) = (&instance_type, started_at) {
                 // Fallback: metering tracking failed, bill directly for the full duration
                 if let Some(pricing) = instance_pricing(itype) {
-                    bill_builder_usage(
-                        db,
-                        build_id,
-                        iid,
-                        org_id,
-                        app_id,
-                        itype,
-                        started,
-                        pricing,
-                    )
-                    .await;
+                    bill_builder_usage(db, build_id, iid, org_id, app_id, itype, started, pricing)
+                        .await;
                 } else {
                     tracing::error!(
                         "Cannot bill orphaned builder {} for build {}: unknown instance type {}",
@@ -1068,36 +1131,70 @@ mod tests {
             "eifs/org/key.eif",
             "builds/test-id/remote-build-helper",
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Should be a valid bash script
-        assert!(userdata.starts_with("#!/bin/bash"), "should start with shebang");
+        assert!(
+            userdata.starts_with("#!/bin/bash"),
+            "should start with shebang"
+        );
 
         // Should contain S3 bucket reference
-        assert!(userdata.contains("test-bucket"), "should reference S3 bucket");
+        assert!(
+            userdata.contains("test-bucket"),
+            "should reference S3 bucket"
+        );
 
         // Should download source from S3, not git clone
         assert!(userdata.contains("aws s3 cp"), "should download from S3");
-        assert!(userdata.contains("source.tar.gz"), "should reference source archive");
+        assert!(
+            userdata.contains("source.tar.gz"),
+            "should reference source archive"
+        );
         // User source comes from S3, not git clone (Containerfile.eif still clones bootproof/steve deps)
-        assert!(!userdata.contains("git clone \"$GIT_URL\""), "should not git clone user repo");
+        assert!(
+            !userdata.contains("git clone \"$GIT_URL\""),
+            "should not git clone user repo"
+        );
 
         // Should contain docker build
-        assert!(userdata.contains("docker build -t app-image"), "should build docker image");
+        assert!(
+            userdata.contains("docker build -t app-image"),
+            "should build docker image"
+        );
 
         // Should invoke the shared remote-build-helper path
-        assert!(userdata.contains("remote-build-helper"), "should use remote build helper");
-        assert!(userdata.contains("CAUTION_MANIFEST_PATH"), "should pass manifest to helper");
+        assert!(
+            userdata.contains("remote-build-helper"),
+            "should use remote build helper"
+        );
+        assert!(
+            userdata.contains("CAUTION_MANIFEST_PATH"),
+            "should pass manifest to helper"
+        );
 
         // Should upload EIF to S3
-        assert!(userdata.contains("eifs/org/key.eif"), "should upload to correct S3 key");
+        assert!(
+            userdata.contains("eifs/org/key.eif"),
+            "should upload to correct S3 key"
+        );
 
         // Should write status updates
-        assert!(userdata.contains("write_status"), "should write status to S3");
-        assert!(userdata.contains("\"completed\""), "should write completed status");
+        assert!(
+            userdata.contains("write_status"),
+            "should write status to S3"
+        );
+        assert!(
+            userdata.contains("\"completed\""),
+            "should write completed status"
+        );
 
         // Should download the helper from S3
-        assert!(userdata.contains("builds/test-id/remote-build-helper"), "should download helper binary");
+        assert!(
+            userdata.contains("builds/test-id/remote-build-helper"),
+            "should download helper binary"
+        );
     }
 
     #[test]
@@ -1139,7 +1236,8 @@ mod tests {
             "eifs/test.eif",
             "builds/test/remote-build-helper",
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         // AWS user-data limit is 16KB (before base64 encoding)
         // base64 expands by ~33%, so raw limit is effectively ~12KB to be safe
@@ -1150,6 +1248,10 @@ mod tests {
             size
         );
         // Log the actual size for visibility
-        eprintln!("User-data size: {} bytes ({:.1}% of 16KB limit)", size, size as f64 / 16384.0 * 100.0);
+        eprintln!(
+            "User-data size: {} bytes ({:.1}% of 16KB limit)",
+            size,
+            size as f64 / 16384.0 * 100.0
+        );
     }
 }

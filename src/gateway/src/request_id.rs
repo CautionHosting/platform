@@ -1,12 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use axum::{
-    extract::Request,
-    http::HeaderValue,
-    middleware::Next,
-    response::Response,
-};
+use axum::{extract::Request, http::HeaderValue, middleware::Next, response::Response};
 use uuid::Uuid;
 
 /// A request correlation ID propagated through all services.

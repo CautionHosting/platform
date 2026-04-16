@@ -1,30 +1,28 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use sqlx::PgPool;
-use anyhow::{Context, Result, bail};
-use uuid::Uuid;
 use crate::types;
+use anyhow::{bail, Context, Result};
+use sqlx::PgPool;
+use uuid::Uuid;
 
 pub async fn initialize_user_account(pool: &PgPool, user_id: Uuid) -> Result<Uuid> {
     tracing::info!("Initializing account for user_id: {}", user_id);
 
-    let mut tx = pool.begin().await
-        .context("Failed to begin transaction")?;
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
-    let org_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO organizations (name) VALUES ($1) RETURNING id"
-    )
-    .bind(format!("Organization for user {}", user_id))
-    .fetch_one(&mut *tx)
-    .await
-    .context("Failed to create organization")?;
+    let org_id: Uuid =
+        sqlx::query_scalar("INSERT INTO organizations (name) VALUES ($1) RETURNING id")
+            .bind(format!("Organization for user {}", user_id))
+            .fetch_one(&mut *tx)
+            .await
+            .context("Failed to create organization")?;
 
     tracing::info!("Created organization {} for user {}", org_id, user_id);
 
     sqlx::query(
         "INSERT INTO organization_members (organization_id, user_id, role)
-         VALUES ($1, $2, $3)"
+         VALUES ($1, $2, $3)",
     )
     .bind(org_id)
     .bind(user_id)
@@ -32,28 +30,27 @@ pub async fn initialize_user_account(pool: &PgPool, user_id: Uuid) -> Result<Uui
     .execute(&mut *tx)
     .await
     .context("Failed to add user as organization owner")?;
-    
+
     // Commit the transaction before Terraform (so org exists even if Terraform fails)
-    tx.commit().await
-        .context("Failed to commit transaction")?;
+    tx.commit().await.context("Failed to commit transaction")?;
 
     tracing::info!("Database transaction committed for org {}", org_id);
 
-    let root_aws_account_id = std::env::var("AWS_ACCOUNT_ID")
-        .unwrap_or_else(|_| "900896541515".to_string());
+    let root_aws_account_id =
+        std::env::var("AWS_ACCOUNT_ID").unwrap_or_else(|_| "900896541515".to_string());
 
-    tracing::info!("Using root AWS account {} for org {}", root_aws_account_id, org_id);
+    tracing::info!(
+        "Using root AWS account {} for org {}",
+        root_aws_account_id,
+        org_id
+    );
 
-    create_provider_account(
-        pool,
-        org_id,
-        &root_aws_account_id,
-        None,
-    ).await
-    .context("Failed to create provider account in database")?;
-    
+    create_provider_account(pool, org_id, &root_aws_account_id, None)
+        .await
+        .context("Failed to create provider account in database")?;
+
     tracing::info!("Successfully initialized account for user {}", user_id);
-    
+
     Ok(org_id)
 }
 
@@ -95,7 +92,11 @@ async fn create_provider_account(
     .await
     .context("Failed to insert provider account")?;
 
-    tracing::info!("Created provider account for org {} with AWS account {}", org_id, aws_account_id);
+    tracing::info!(
+        "Created provider account for org {} with AWS account {}",
+        org_id,
+        aws_account_id
+    );
 
     Ok(())
 }

@@ -359,9 +359,7 @@ impl IntoResponse for PasskeyError {
                 (StatusCode::TOO_MANY_REQUESTS, self.to_string()).into_response()
             }
             Self::CredentialNotFound => (StatusCode::NOT_FOUND, self.to_string()).into_response(),
-            Self::LastCredential => {
-                (StatusCode::CONFLICT, self.to_string()).into_response()
-            }
+            Self::LastCredential => (StatusCode::CONFLICT, self.to_string()).into_response(),
             Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message).into_response(),
             Self::Forbidden(message) => (StatusCode::FORBIDDEN, message).into_response(),
             Self::Internal(err) => {
@@ -613,7 +611,10 @@ pub async fn delete_passkey_handler(
 ) -> Result<StatusCode, PasskeyError> {
     authenticate_session(&state, &headers).await?;
     let credentials = db::list_user_credentials(&state.db, user_id).await?;
-    if !credentials.iter().any(|credential| credential.id == passkey_id) {
+    if !credentials
+        .iter()
+        .any(|credential| credential.id == passkey_id)
+    {
         return Err(PasskeyError::CredentialNotFound);
     }
 

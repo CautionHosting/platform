@@ -12,10 +12,13 @@ use sqlx::FromRow;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{AppState, AuthContext, check_org_access, can_manage_org, is_owner};
-use crate::validated_types;
-use crate::validated_types::{CreateOrganizationRequest, UpdateOrganizationRequest, AddMemberRequest, UpdateMemberRequest, UpdateOrgSettingsRequest};
 use crate::types;
+use crate::validated_types;
+use crate::validated_types::{
+    AddMemberRequest, CreateOrganizationRequest, UpdateMemberRequest, UpdateOrgSettingsRequest,
+    UpdateOrganizationRequest,
+};
+use crate::{can_manage_org, check_org_access, is_owner, AppState, AuthContext};
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct Organization {
@@ -51,7 +54,7 @@ pub async fn list_organizations(
         "SELECT o.id, o.name, o.is_active, o.created_at, o.updated_at
          FROM organizations o
          INNER JOIN organization_members om ON o.id = om.organization_id
-         WHERE om.user_id = $1"
+         WHERE om.user_id = $1",
     )
     .bind(auth.user_id)
     .fetch_all(&state.db)
@@ -73,7 +76,7 @@ pub async fn create_organization(
     let org = sqlx::query_as::<_, Organization>(
         "INSERT INTO organizations (name)
          VALUES ($1)
-         RETURNING id, name, is_active, created_at, updated_at"
+         RETURNING id, name, is_active, created_at, updated_at",
     )
     .bind(&payload.name)
     .fetch_one(&state.db)
@@ -82,7 +85,7 @@ pub async fn create_organization(
 
     sqlx::query(
         "INSERT INTO organization_members (organization_id, user_id, role)
-         VALUES ($1, $2, $3)"
+         VALUES ($1, $2, $3)",
     )
     .bind(org.id)
     .bind(auth.user_id)
@@ -103,7 +106,7 @@ pub async fn get_organization(
 
     let org = sqlx::query_as::<_, Organization>(
         "SELECT id, name, is_active, created_at, updated_at
-         FROM organizations WHERE id = $1"
+         FROM organizations WHERE id = $1",
     )
     .bind(org_id)
     .fetch_one(&state.db)
@@ -178,17 +181,16 @@ pub async fn get_org_settings(
     tracing::debug!("get_org_settings called for org {}", org_id);
     check_org_access(&state.db, auth.user_id, org_id).await?;
 
-    let settings: Option<serde_json::Value> = sqlx::query_scalar(
-        "SELECT settings FROM organizations WHERE id = $1"
-    )
-    .bind(org_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| {
-        tracing::error!("get_org_settings failed: {:?}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?
-    .flatten();
+    let settings: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT settings FROM organizations WHERE id = $1")
+            .bind(org_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!("get_org_settings failed: {:?}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .flatten();
 
     let org_settings = settings
         .and_then(|s| serde_json::from_value(s).ok())
@@ -222,7 +224,7 @@ pub async fn update_org_settings(
          SET settings = COALESCE(settings, '{}'::jsonb) || $1::jsonb,
              updated_at = NOW()
          WHERE id = $2
-         RETURNING settings"
+         RETURNING settings",
     )
     .bind(&settings)
     .bind(org_id)
@@ -233,9 +235,13 @@ pub async fn update_org_settings(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let org_settings: OrgSettings = serde_json::from_value(updated_settings.clone())
-        .map_err(|e| {
-            tracing::error!("Failed to parse updated org settings: {:?}, raw value: {:?}", e, updated_settings);
+    let org_settings: OrgSettings =
+        serde_json::from_value(updated_settings.clone()).map_err(|e| {
+            tracing::error!(
+                "Failed to parse updated org settings: {:?}, raw value: {:?}",
+                e,
+                updated_settings
+            );
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -252,7 +258,7 @@ pub async fn list_members(
     let members = sqlx::query_as::<_, OrganizationMember>(
         "SELECT id, organization_id, user_id, role::text as role, joined_at, created_at, updated_at
          FROM organization_members
-         WHERE organization_id = $1"
+         WHERE organization_id = $1",
     )
     .bind(org_id)
     .fetch_all(&state.db)
@@ -331,7 +337,7 @@ pub async fn remove_member(
 
     sqlx::query(
         "DELETE FROM organization_members
-         WHERE organization_id = $1 AND user_id = $2"
+         WHERE organization_id = $1 AND user_id = $2",
     )
     .bind(org_id)
     .bind(member_user_id)

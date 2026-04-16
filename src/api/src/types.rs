@@ -359,7 +359,10 @@ impl BuildConfig {
                                 .filter(|s| !s.is_empty())
                                 .collect();
                             if !app_sources.is_empty() {
-                                tracing::info!("Parsed {} app source URL(s) from Procfile", app_sources.len());
+                                tracing::info!(
+                                    "Parsed {} app source URL(s) from Procfile",
+                                    app_sources.len()
+                                );
                             }
                         }
                     }
@@ -371,7 +374,10 @@ impl BuildConfig {
                                 .filter(|s| !s.is_empty())
                                 .collect();
                             if !enclave_sources.is_empty() {
-                                tracing::info!("Parsed {} enclave source URL(s) from Procfile", enclave_sources.len());
+                                tracing::info!(
+                                    "Parsed {} enclave source URL(s) from Procfile",
+                                    enclave_sources.len()
+                                );
                             }
                         }
                     }
@@ -422,7 +428,10 @@ impl BuildConfig {
                                     tracing::warn!("Invalid port 0 in Procfile, ignoring");
                                 }
                                 Err(_) => {
-                                    tracing::warn!("Invalid port '{}' in Procfile, ignoring", trimmed);
+                                    tracing::warn!(
+                                        "Invalid port '{}' in Procfile, ignoring",
+                                        trimmed
+                                    );
                                 }
                             }
                         }
@@ -433,21 +442,23 @@ impl BuildConfig {
                             tracing::info!("Parsed ports from Procfile: {:?}", ports);
                         }
                     }
-                    "http_port" => {
-                        match value.parse::<u16>() {
-                            Ok(port) if port > 0 => {
-                                http_port = Some(port);
-                                tracing::info!("Parsed http_port from Procfile: {}", port);
-                            }
-                            _ => {
-                                tracing::warn!("Invalid http_port '{}' in Procfile, ignoring", value);
-                            }
+                    "http_port" => match value.parse::<u16>() {
+                        Ok(port) if port > 0 => {
+                            http_port = Some(port);
+                            tracing::info!("Parsed http_port from Procfile: {}", port);
                         }
-                    }
+                        _ => {
+                            tracing::warn!("Invalid http_port '{}' in Procfile, ignoring", value);
+                        }
+                    },
                     "ssh_keys" | "ssh_key" => {
                         if !value.is_empty() {
                             let unquoted = value.trim_matches('"').trim_matches('\'').trim();
-                            if !unquoted.is_empty() && (unquoted.starts_with("ssh-") || unquoted.starts_with("ecdsa-") || unquoted.starts_with("sk-")) {
+                            if !unquoted.is_empty()
+                                && (unquoted.starts_with("ssh-")
+                                    || unquoted.starts_with("ecdsa-")
+                                    || unquoted.starts_with("sk-"))
+                            {
                                 ssh_keys.push(unquoted.to_string());
                                 tracing::info!("Parsed SSH key from Procfile");
                             }
@@ -457,7 +468,10 @@ impl BuildConfig {
                         if !value.is_empty() {
                             validate_domain(&value)?;
                             domain = Some(value);
-                            tracing::info!("Parsed domain from Procfile: {}", domain.as_ref().unwrap());
+                            tracing::info!(
+                                "Parsed domain from Procfile: {}",
+                                domain.as_ref().unwrap()
+                            );
                         }
                     }
                     "managed_on_prem" => {
@@ -528,9 +542,7 @@ impl BuildConfig {
         let http_port = match http_port {
             Some(hp) => {
                 if !ports.contains(&hp) {
-                    return Err(format!(
-                        "http_port {} must also be listed in ports", hp
-                    ));
+                    return Err(format!("http_port {} must also be listed in ports", hp));
                 }
                 Some(hp)
             }
@@ -546,7 +558,8 @@ impl BuildConfig {
 
             match platform.as_str() {
                 "aws" => {
-                    let region = aws_region.ok_or("managed_on_prem with platform 'aws' requires 'aws_region'")?;
+                    let region = aws_region
+                        .ok_or("managed_on_prem with platform 'aws' requires 'aws_region'")?;
                     Some(ManagedOnPremConfig::Aws(AwsDeploymentConfig {
                         region,
                         instance_type: aws_instance_type,
@@ -556,7 +569,10 @@ impl BuildConfig {
                     }))
                 }
                 other => {
-                    return Err(format!("Unsupported platform '{}'. Currently only 'aws' is supported.", other));
+                    return Err(format!(
+                        "Unsupported platform '{}'. Currently only 'aws' is supported.",
+                        other
+                    ));
                 }
             }
         } else {

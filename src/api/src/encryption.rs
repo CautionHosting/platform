@@ -5,7 +5,7 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use rand::RngCore;
 
 const NONCE_SIZE: usize = 12;
@@ -67,12 +67,15 @@ impl Encryptor {
     }
 
     pub fn encrypt_json<T: serde::Serialize>(&self, value: &T) -> Result<Vec<u8>, String> {
-        let json = serde_json::to_vec(value)
-            .map_err(|e| format!("JSON serialization failed: {}", e))?;
+        let json =
+            serde_json::to_vec(value).map_err(|e| format!("JSON serialization failed: {}", e))?;
         self.encrypt(&json)
     }
 
-    pub fn decrypt_json<T: serde::de::DeserializeOwned>(&self, encrypted: &[u8]) -> Result<T, String> {
+    pub fn decrypt_json<T: serde::de::DeserializeOwned>(
+        &self,
+        encrypted: &[u8],
+    ) -> Result<T, String> {
         let plaintext = self.decrypt(encrypted)?;
         serde_json::from_slice(&plaintext)
             .map_err(|e| format!("JSON deserialization failed: {}", e))
@@ -273,7 +276,11 @@ mod tests {
         let short_key = general_purpose::STANDARD.encode([0u8; 16]);
         let result = Encryptor::from_key(&short_key);
         match result {
-            Err(e) => assert!(e.contains("32 bytes"), "Error should mention key size: {}", e),
+            Err(e) => assert!(
+                e.contains("32 bytes"),
+                "Error should mention key size: {}",
+                e
+            ),
             Ok(_) => panic!("Expected error for wrong key length"),
         }
     }

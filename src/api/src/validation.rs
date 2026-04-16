@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+use crate::errors::{Span, ValidationError};
+use crate::types::UserRole;
 use regex::Regex;
 use std::sync::OnceLock;
-use crate::types::UserRole;
-use crate::errors::{ValidationError, Span};
 
 const APP_NAME_MIN_LEN: usize = 3;
 const APP_NAME_MAX_LEN: usize = 63;
@@ -150,7 +150,6 @@ pub fn validate_org_name(name: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-
 pub fn validate_username(username: &str) -> Result<(), ValidationError> {
     let len = username.len();
 
@@ -252,7 +251,8 @@ pub fn validate_ssh_public_key(public_key: &str) -> Result<(), ValidationError> 
 }
 
 fn is_valid_base64(s: &str) -> bool {
-    s.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
         && !s.is_empty()
 }
 
@@ -323,7 +323,9 @@ mod tests {
     #[test]
     fn test_app_name_error_codes() {
         match validate_app_name("ab").unwrap_err() {
-            ValidationError::AppNameLength { min, max, actual, .. } => {
+            ValidationError::AppNameLength {
+                min, max, actual, ..
+            } => {
                 assert_eq!(min, 3);
                 assert_eq!(max, 63);
                 assert_eq!(actual, 2);
@@ -408,7 +410,6 @@ mod tests {
         assert!(validate_username(&"a".repeat(39)).is_ok());
         assert!(validate_username(&"a".repeat(40)).is_err());
     }
-
 
     #[test]
     fn test_username_special_chars() {
@@ -503,10 +504,7 @@ mod tests {
             sanitize_for_terraform("test\"value${}"),
             "test\\\"value\\${}"
         );
-        assert_eq!(
-            sanitize_for_terraform("line1\nline2"),
-            "line1\\nline2"
-        );
+        assert_eq!(sanitize_for_terraform("line1\nline2"), "line1\\nline2");
     }
 
     #[test]
@@ -525,10 +523,7 @@ mod tests {
             "safe-file_name.txt"
         );
         // '-', '/', and alphanumeric are preserved; '$', '(', ')', ' ' are stripped
-        assert_eq!(
-            sanitize_for_shell("evil$(rm -rf /)name"),
-            "evilrm-rf/name"
-        );
+        assert_eq!(sanitize_for_shell("evil$(rm -rf /)name"), "evilrm-rf/name");
     }
 
     #[test]
@@ -564,7 +559,9 @@ mod tests {
     #[test]
     fn test_validation_error_display() {
         let err = ValidationError::AppNameLength {
-            min: 3, max: 63, actual: 2,
+            min: 3,
+            max: 63,
+            actual: 2,
             span: Span::new(0, 2),
         };
         assert!(err.to_string().contains("3"));
@@ -577,7 +574,9 @@ mod tests {
     #[test]
     fn test_validation_error_codes() {
         let err = ValidationError::AppNameLength {
-            min: 3, max: 63, actual: 2,
+            min: 3,
+            max: 63,
+            actual: 2,
             span: Span::new(0, 2),
         };
         assert_eq!(err.code(), "app_name_length");

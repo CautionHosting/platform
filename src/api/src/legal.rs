@@ -6,11 +6,11 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use std::sync::Arc;
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
 
 use crate::{AppState, AuthContext};
 
@@ -50,7 +50,7 @@ async fn get_active_document(
 ) -> Result<Option<LegalDocumentIdentity>, sqlx::Error> {
     sqlx::query_as(
         "SELECT id, version, NULL::timestamptz AS occurred_at FROM legal_documents
-         WHERE document_type = $1 AND is_active = true"
+         WHERE document_type = $1 AND is_active = true",
     )
     .bind(document_type)
     .fetch_optional(pool)
@@ -76,7 +76,7 @@ async fn get_latest_user_document_by_type(
            AND document_type = $2
            AND event_type = $3
          ORDER BY occurred_at DESC
-         LIMIT 1"
+         LIMIT 1",
     )
     .bind(user_id)
     .bind(document_type)
@@ -92,7 +92,9 @@ fn compute_document_status(
 ) -> LegalDocumentStatus {
     let active_version = active_document.as_ref().map(|doc| doc.version.clone());
     let accepted_version = latest_user_document.as_ref().map(|doc| doc.version.clone());
-    let accepted_at = latest_user_document.as_ref().and_then(|doc| doc.occurred_at);
+    let accepted_at = latest_user_document
+        .as_ref()
+        .and_then(|doc| doc.occurred_at);
 
     let requires_action = match (&active_document, &latest_user_document) {
         // Compare exact legal document rows, not just display versions.
@@ -113,7 +115,10 @@ fn compute_document_status(
 }
 
 /// Get the full legal status for a user across all document types.
-pub async fn get_user_legal_status(pool: &PgPool, user_id: Uuid) -> Result<UserLegalStatus, sqlx::Error> {
+pub async fn get_user_legal_status(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<UserLegalStatus, sqlx::Error> {
     let tos_active = get_active_document(pool, "terms_of_service").await?;
     let pn_active = get_active_document(pool, "privacy_notice").await?;
 
@@ -138,7 +143,7 @@ pub async fn get_blocking_document_requiring_acceptance(
         "SELECT COALESCE(MAX(requires_blocking_reacceptance::int), 0)::bool
          FROM legal_documents
          WHERE document_type = 'terms_of_service'
-           AND is_active = true"
+           AND is_active = true",
     )
     .fetch_one(pool)
     .await?;
@@ -151,7 +156,7 @@ pub async fn get_blocking_document_requiring_acceptance(
         "SELECT COALESCE(MAX(requires_blocking_reacceptance::int), 0)::bool
          FROM legal_documents
          WHERE document_type = 'privacy_notice'
-           AND is_active = true"
+           AND is_active = true",
     )
     .fetch_one(pool)
     .await?;
@@ -199,11 +204,17 @@ pub async fn accept_legal_document(
         .await
         .map_err(|e| {
             tracing::error!("Failed to get active legal version: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to query legal documents".to_string())
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to query legal documents".to_string(),
+            )
         })?;
 
     let active_document = active_document.ok_or_else(|| {
-        (StatusCode::NOT_FOUND, format!("No active {} document found", payload.document_type))
+        (
+            StatusCode::NOT_FOUND,
+            format!("No active {} document found", payload.document_type),
+        )
     })?;
     let version = active_document.version.clone();
 
@@ -213,7 +224,7 @@ pub async fn accept_legal_document(
         "INSERT INTO user_legal_events (
             user_id, legal_document_id, document_type, document_version,
             event_type, event_source, occurred_at, session_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)"
+        ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)",
     )
     .bind(auth.user_id)
     .bind(active_document.id)
@@ -226,19 +237,28 @@ pub async fn accept_legal_document(
     .await
     .map_err(|e| {
         tracing::error!("Failed to record legal event: {:?}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to record legal acceptance".to_string())
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to record legal acceptance".to_string(),
+        )
     })?;
 
     tracing::info!(
         "User {} {} {} version {}",
-        auth.user_id, event_type, payload.document_type, version
+        auth.user_id,
+        event_type,
+        payload.document_type,
+        version
     );
 
     let legal = get_user_legal_status(&state.db, auth.user_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to fetch updated legal status: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch legal status".to_string())
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to fetch legal status".to_string(),
+            )
         })?;
 
     Ok(Json(AcceptLegalResponse {

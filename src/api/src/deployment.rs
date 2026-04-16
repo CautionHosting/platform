@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -106,7 +106,9 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
         request.resource_name
     );
 
-    let aws_region = request.credentials.as_ref()
+    let aws_region = request
+        .credentials
+        .as_ref()
         .map(|c| c.region.clone())
         .unwrap_or_else(|| std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()));
 
@@ -119,7 +121,9 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
 
     if let Some(ref managed_onprem) = request.managed_onprem {
         tracing::info!("Using managed on-prem deployment flow");
-        let customer_creds = request.credentials.as_ref()
+        let customer_creds = request
+            .credentials
+            .as_ref()
             .context("Credentials required for managed on-prem")?;
         let eif_s3_path = if let Some(ref s3_key) = request.eif_s3_key {
             upload_eif_from_platform_s3_to_customer_bucket(
@@ -128,15 +132,18 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
                 &managed_onprem.eif_bucket,
                 customer_creds,
                 &request.aws_account_id,
-            ).await
+            )
+            .await
         } else {
             upload_eif_to_customer_bucket(
                 &request.eif_path,
                 &request.resource_id,
                 &managed_onprem.eif_bucket,
                 customer_creds,
-            ).await
-        }.context("Failed to upload EIF to customer bucket")?;
+            )
+            .await
+        }
+        .context("Failed to upload EIF to customer bucket")?;
         provision_managed_onprem(&request, &eif_s3_path, &config).await
     } else if let Some(ref s3_key) = request.eif_s3_key {
         // EIF already in S3 (uploaded by dedicated builder)
@@ -148,17 +155,19 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
         tracing::info!("Using pre-uploaded EIF: {}", eif_s3_path);
         provision_nitro_enclave(&request, &eif_s3_path, &config).await
     } else {
-        let eif_s3_path = upload_eif_to_s3(&request.eif_path, &request.org_id, &request.resource_id, &request.aws_account_id).await
-            .context("Failed to upload EIF to S3")?;
+        let eif_s3_path = upload_eif_to_s3(
+            &request.eif_path,
+            &request.org_id,
+            &request.resource_id,
+            &request.aws_account_id,
+        )
+        .await
+        .context("Failed to upload EIF to S3")?;
         provision_nitro_enclave(&request, &eif_s3_path, &config).await
     }
 }
 
-pub async fn destroy_app(
-    org_id: Uuid,
-    resource_id: Uuid,
-    resource_name: String,
-) -> Result<()> {
+pub async fn destroy_app(org_id: Uuid, resource_id: Uuid, resource_name: String) -> Result<()> {
     destroy_app_with_credentials(org_id, resource_id, resource_name, None, None).await
 }
 
@@ -192,7 +201,8 @@ pub async fn destroy_app_with_credentials(
         &resource_name,
         &config,
         credentials.as_ref(),
-    ).await
+    )
+    .await
 }
 
 /// Scale down ASG to 0 and wait for instances to terminate
@@ -204,7 +214,10 @@ async fn scale_down_asg(asg_name: &str, credentials: &AwsCredentials) -> Result<
         .await
         .context("Failed to set ASG desired capacity to 0")?;
 
-    tracing::info!("Set ASG {} desired capacity to 0, waiting for instance termination...", asg_name);
+    tracing::info!(
+        "Set ASG {} desired capacity to 0, waiting for instance termination...",
+        asg_name
+    );
 
     let ec2 = crate::ec2::Ec2Client::new(credentials);
 
@@ -217,10 +230,12 @@ async fn scale_down_asg(asg_name: &str, credentials: &AwsCredentials) -> Result<
             break;
         }
 
-        let result = ec2.describe_instances(&[
-            crate::ec2::Filter::new("tag:aws:autoscaling:groupName", &[asg_name]),
-            crate::ec2::Filter::new("instance-state-name", &["pending", "running", "stopping"]),
-        ]).await;
+        let result = ec2
+            .describe_instances(&[
+                crate::ec2::Filter::new("tag:aws:autoscaling:groupName", &[asg_name]),
+                crate::ec2::Filter::new("instance-state-name", &["pending", "running", "stopping"]),
+            ])
+            .await;
 
         match result {
             Ok(instances) => {
@@ -253,8 +268,7 @@ impl Default for TerraformConfig {
             module_path: PathBuf::from("terraform/modules/aws/nitro-enclave"),
             s3_bucket: std::env::var("TERRAFORM_STATE_BUCKET")
                 .unwrap_or_else(|_| "caution-terraform-state".to_string()),
-            aws_region: std::env::var("AWS_REGION")
-                .unwrap_or_else(|_| "us-west-2".to_string()),
+            aws_region: std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()),
         }
     }
 }
@@ -268,11 +282,11 @@ async fn destroy_ec2_app(
 ) -> Result<()> {
     tracing::info!("Starting Terraform destroy for resource: {}", resource_name);
 
-    let temp_dir = TempDir::new()
-        .context("Failed to create temporary directory")?;
+    let temp_dir = TempDir::new().context("Failed to create temporary directory")?;
     let work_dir = temp_dir.path();
 
-    generate_backend_config(work_dir, org_id, resource_id, &config.s3_bucket).await
+    generate_backend_config(work_dir, org_id, resource_id, &config.s3_bucket)
+        .await
         .context("Failed to generate backend config")?;
 
     let aws_region = credentials
@@ -338,14 +352,13 @@ provider "aws" {{
         )
     };
 
-    fs::write(work_dir.join("main.tf"), minimal_tf).await
+    fs::write(work_dir.join("main.tf"), minimal_tf)
+        .await
         .context("Failed to write main.tf")?;
 
-    run_tofu_init(work_dir, None)
-        .context("Failed to run tofu init")?;
+    run_tofu_init(work_dir, None).context("Failed to run tofu init")?;
 
-    run_tofu_destroy(work_dir, resource_name, credentials)
-        .context("Failed to run tofu destroy")?;
+    run_tofu_destroy(work_dir, resource_name, credentials).context("Failed to run tofu destroy")?;
 
     tracing::info!("Successfully destroyed EC2 for resource {}", resource_name);
 
@@ -370,11 +383,12 @@ async fn generate_backend_config(
 "#,
         s3_bucket, org_id, resource_id
     );
-    
+
     let backend_path = work_dir.join("backend.tf");
-    fs::write(&backend_path, backend_content).await
+    fs::write(&backend_path, backend_content)
+        .await
         .context("Failed to write backend.tf")?;
-    
+
     Ok(())
 }
 
@@ -391,13 +405,17 @@ fn run_tofu_init(work_dir: &Path, credentials: Option<&AwsCredentials>) -> Resul
             .env("AWS_REGION", &creds.region);
     }
 
-    let output = run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS)
-        .context("tofu init failed")?;
+    let output = run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS).context("tofu init failed")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        tracing::error!("Tofu init failed (exit code {:?}):\nstderr: {}\nstdout: {}", output.status.code(), stderr, stdout);
+        tracing::error!(
+            "Tofu init failed (exit code {:?}):\nstderr: {}\nstdout: {}",
+            output.status.code(),
+            stderr,
+            stdout
+        );
         bail!("Infrastructure initialization failed");
     }
 
@@ -414,7 +432,13 @@ fn run_tofu_apply_with_provider_creds(
     http_port: Option<u16>,
     credentials: Option<&AwsCredentials>,
 ) -> Result<()> {
-    tracing::info!("Running tofu apply for {} in {} (ports={:?}, http_port={:?})...", resource_name, work_dir.display(), ports, http_port);
+    tracing::info!(
+        "Running tofu apply for {} in {} (ports={:?}, http_port={:?})...",
+        resource_name,
+        work_dir.display(),
+        ports,
+        http_port
+    );
 
     let mut cmd = Command::new("tofu");
     cmd.arg("apply")
@@ -429,7 +453,8 @@ fn run_tofu_apply_with_provider_creds(
         "ports=[]".to_string()
     };
     cmd.arg("-var").arg(&ports_var);
-    cmd.arg("-var").arg(format!("http_port={}", http_port.unwrap_or(0)));
+    cmd.arg("-var")
+        .arg(format!("http_port={}", http_port.unwrap_or(0)));
 
     if let Some(creds) = credentials {
         tracing::info!("Passing user credentials to AWS provider via environment variables");
@@ -438,13 +463,18 @@ fn run_tofu_apply_with_provider_creds(
         cmd.env("TF_VAR_provider_region", &creds.region);
     }
 
-    let output = run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS)
-        .context("tofu apply failed")?;
+    let output = run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS).context("tofu apply failed")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        tracing::error!("Tofu apply failed for {} (exit code {:?}):\nstderr: {}\nstdout: {}", resource_name, output.status.code(), stderr, stdout);
+        tracing::error!(
+            "Tofu apply failed for {} (exit code {:?}):\nstderr: {}\nstdout: {}",
+            resource_name,
+            output.status.code(),
+            stderr,
+            stdout
+        );
         bail!("Failed to run tofu apply");
     }
 
@@ -456,13 +486,14 @@ fn run_tofu_apply_with_provider_creds(
 
 fn get_tofu_outputs(work_dir: &Path) -> Result<DeploymentResult> {
     tracing::info!("Retrieving tofu outputs...");
-    
+
     let output = run_with_timeout(
         Command::new("tofu")
             .args(&["output", "-json", "-no-color"])
             .current_dir(work_dir),
         TOFU_TIMEOUT_SECS,
-    ).context("tofu output failed")?;
+    )
+    .context("tofu output failed")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -471,24 +502,24 @@ fn get_tofu_outputs(work_dir: &Path) -> Result<DeploymentResult> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let outputs: serde_json::Value = serde_json::from_str(&stdout)
-        .context("Failed to parse tofu output JSON")?;
+    let outputs: serde_json::Value =
+        serde_json::from_str(&stdout).context("Failed to parse tofu output JSON")?;
 
     let instance_id = outputs["instance_id"]["value"]
         .as_str()
         .context("Missing instance_id in tofu output")?
         .to_string();
-    
+
     let public_ip = outputs["public_ip"]["value"]
         .as_str()
         .context("Missing public_ip in tofu output")?
         .to_string();
-    
+
     let url = outputs["url"]["value"]
         .as_str()
         .context("Missing url in tofu output")?
         .to_string();
-    
+
     let instance_type = outputs["instance_type"]["value"]
         .as_str()
         .map(|s| s.to_string());
@@ -520,7 +551,8 @@ fn get_managed_onprem_tofu_outputs(work_dir: &Path) -> Result<ManagedOnPremTerra
             .args(&["output", "-json", "-no-color"])
             .current_dir(work_dir),
         TOFU_TIMEOUT_SECS,
-    ).context("tofu output failed")?;
+    )
+    .context("tofu output failed")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -529,8 +561,8 @@ fn get_managed_onprem_tofu_outputs(work_dir: &Path) -> Result<ManagedOnPremTerra
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let outputs: serde_json::Value = serde_json::from_str(&stdout)
-        .context("Failed to parse tofu output JSON")?;
+    let outputs: serde_json::Value =
+        serde_json::from_str(&stdout).context("Failed to parse tofu output JSON")?;
 
     Ok(ManagedOnPremTerraformOutputs {
         launch_template_id: outputs["launch_template_id"]["value"]
@@ -566,7 +598,11 @@ async fn update_asg_launch_template(
     launch_template_id: &str,
     credentials: &AwsCredentials,
 ) -> Result<()> {
-    tracing::info!("Updating ASG {} with launch template {}", asg_name, launch_template_id);
+    tracing::info!(
+        "Updating ASG {} with launch template {}",
+        asg_name,
+        launch_template_id
+    );
 
     let asg = crate::ec2::AsgClient::new(credentials);
 
@@ -575,7 +611,11 @@ async fn update_asg_launch_template(
     for attempt in 0..5u32 {
         if attempt > 0 {
             let delay = std::time::Duration::from_secs(2u64.pow(attempt));
-            tracing::info!("Retrying ASG update in {:?} (attempt {}/5)", delay, attempt + 1);
+            tracing::info!(
+                "Retrying ASG update in {:?} (attempt {}/5)",
+                delay,
+                attempt + 1
+            );
             tokio::time::sleep(delay).await;
         }
         // TODO(error-infra): update_auto_scaling_group can fail with:
@@ -588,8 +628,14 @@ async fn update_asg_launch_template(
         //     - HTTP 400 ValidationError: ASG or launch template doesn't exist, invalid params
         //     - HTTP 403 AccessDenied: IAM policy permanently forbids the action
         //     - HTTP 400 ScalingActivityInProgress: must wait for current scaling to finish (retryable with longer backoff)
-        match asg.update_auto_scaling_group(asg_name, launch_template_id).await {
-            Ok(_) => { last_err = None; break; }
+        match asg
+            .update_auto_scaling_group(asg_name, launch_template_id)
+            .await
+        {
+            Ok(_) => {
+                last_err = None;
+                break;
+            }
             Err(e) => {
                 tracing::warn!("ASG update attempt {} failed: {:?}", attempt + 1, e);
                 last_err = Some(e);
@@ -631,10 +677,13 @@ async fn wait_for_asg_instance(
             bail!("Timeout waiting for instance in ASG {}", asg_name);
         }
 
-        let instances = ec2.describe_instances(&[
-            crate::ec2::Filter::new("tag:aws:autoscaling:groupName", &[asg_name]),
-            crate::ec2::Filter::new("instance-state-name", &["running"]),
-        ]).await.context("Failed to describe instances")?;
+        let instances = ec2
+            .describe_instances(&[
+                crate::ec2::Filter::new("tag:aws:autoscaling:groupName", &[asg_name]),
+                crate::ec2::Filter::new("instance-state-name", &["running"]),
+            ])
+            .await
+            .context("Failed to describe instances")?;
 
         if let Some(instance) = instances.first() {
             tracing::info!("Found running instance: {}", instance.instance_id);
@@ -652,7 +701,11 @@ async fn associate_eip_with_instance(
     instance_id: &str,
     credentials: &AwsCredentials,
 ) -> Result<()> {
-    tracing::info!("Associating EIP {} with instance {}", allocation_id, instance_id);
+    tracing::info!(
+        "Associating EIP {} with instance {}",
+        allocation_id,
+        instance_id
+    );
 
     let ec2 = crate::ec2::Ec2Client::new(credentials);
     ec2.associate_address(allocation_id, instance_id)
@@ -664,7 +717,11 @@ async fn associate_eip_with_instance(
     Ok(())
 }
 
-fn run_tofu_destroy(work_dir: &Path, resource_name: &str, credentials: Option<&AwsCredentials>) -> Result<()> {
+fn run_tofu_destroy(
+    work_dir: &Path,
+    resource_name: &str,
+    credentials: Option<&AwsCredentials>,
+) -> Result<()> {
     tracing::info!("Running tofu destroy for {}...", resource_name);
 
     let mut cmd = Command::new("tofu");
@@ -678,13 +735,18 @@ fn run_tofu_destroy(work_dir: &Path, resource_name: &str, credentials: Option<&A
         cmd.env("TF_VAR_provider_region", &creds.region);
     }
 
-    let output = run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS)
-        .context("tofu destroy failed")?;
+    let output = run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS).context("tofu destroy failed")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        tracing::error!("Tofu destroy failed for {} (exit code {:?}):\nstderr: {}\nstdout: {}", resource_name, output.status.code(), stderr, stdout);
+        tracing::error!(
+            "Tofu destroy failed for {} (exit code {:?}):\nstderr: {}\nstdout: {}",
+            resource_name,
+            output.status.code(),
+            stderr,
+            stdout
+        );
         bail!("Infrastructure teardown failed");
     }
 
@@ -694,7 +756,12 @@ fn run_tofu_destroy(work_dir: &Path, resource_name: &str, credentials: Option<&A
     Ok(())
 }
 
-async fn upload_eif_to_s3(eif_path: &str, org_id: &Uuid, resource_id: &Uuid, aws_account_id: &str) -> Result<String> {
+async fn upload_eif_to_s3(
+    eif_path: &str,
+    org_id: &Uuid,
+    resource_id: &Uuid,
+    aws_account_id: &str,
+) -> Result<String> {
     use aws_sdk_s3::primitives::ByteStream;
 
     tracing::info!("Uploading EIF to S3: {}", eif_path);
@@ -711,7 +778,8 @@ async fn upload_eif_to_s3(eif_path: &str, org_id: &Uuid, resource_id: &Uuid, aws
     //   Non-retryable:
     //     - File not found: EIF build produced no output or path is wrong
     //     - Permission denied: filesystem permissions on the EIF artifact
-    let body = ByteStream::from_path(Path::new(eif_path)).await
+    let body = ByteStream::from_path(Path::new(eif_path))
+        .await
         .context("Failed to read EIF file")?;
 
     // TODO(error-infra): S3 PutObject can fail with:
@@ -773,11 +841,16 @@ async fn upload_eif_to_customer_bucket(
     for attempt in 0..5u32 {
         if attempt > 0 {
             let delay = std::time::Duration::from_secs(2u64.pow(attempt));
-            tracing::info!("Retrying EIF upload in {:?} (attempt {}/5)", delay, attempt + 1);
+            tracing::info!(
+                "Retrying EIF upload in {:?} (attempt {}/5)",
+                delay,
+                attempt + 1
+            );
             tokio::time::sleep(delay).await;
         }
 
-        let body = ByteStream::from_path(Path::new(eif_path)).await
+        let body = ByteStream::from_path(Path::new(eif_path))
+            .await
             .context("Failed to read EIF file")?;
 
         // TODO(error-infra): S3 PutObject to customer bucket can fail with:
@@ -882,22 +955,37 @@ async fn provision_nitro_enclave(
     eif_s3_path: &str,
     config: &TerraformConfig,
 ) -> Result<DeploymentResult> {
-    tracing::info!("Starting Terraform Nitro Enclave provisioning for resource: {}", request.resource_name);
-    tracing::info!("Deployment config - domain: {:?}, memory: {}MB, cpus: {}, debug: {}, ports: {:?}",
-        request.domain, request.memory_mb, request.cpu_count, request.debug_mode, request.ports);
+    tracing::info!(
+        "Starting Terraform Nitro Enclave provisioning for resource: {}",
+        request.resource_name
+    );
+    tracing::info!(
+        "Deployment config - domain: {:?}, memory: {}MB, cpus: {}, debug: {}, ports: {:?}",
+        request.domain,
+        request.memory_mb,
+        request.cpu_count,
+        request.debug_mode,
+        request.ports
+    );
 
     if request.credentials.is_some() {
         tracing::info!("Using user-provided AWS credentials for provider (Caution credentials for state backend)");
     }
 
-    let temp_dir = TempDir::new()
-        .context("Failed to create temporary directory")?;
+    let temp_dir = TempDir::new().context("Failed to create temporary directory")?;
     let work_dir = temp_dir.path();
 
-    generate_backend_config(work_dir, request.org_id, request.resource_id, &config.s3_bucket).await
-        .context("Failed to generate backend config")?;
+    generate_backend_config(
+        work_dir,
+        request.org_id,
+        request.resource_id,
+        &config.s3_bucket,
+    )
+    .await
+    .context("Failed to generate backend config")?;
 
-    generate_nitro_deployment_main_tf(work_dir, request, eif_s3_path).await
+    generate_nitro_deployment_main_tf(work_dir, request, eif_s3_path)
+        .await
         .context("Failed to generate main.tf")?;
 
     let user_data_template = std::fs::read_to_string(config.module_path.join("user-data.sh"))
@@ -906,16 +994,20 @@ async fn provision_nitro_enclave(
         .context("Failed to write user-data.sh")?;
 
     // Always use Caution's env credentials for init (S3 state backend access)
-    run_tofu_init(work_dir, None)
-        .context("Failed to run tofu init")?;
+    run_tofu_init(work_dir, None).context("Failed to run tofu init")?;
 
     // Pass user credentials as Terraform variables, not env vars
     // This keeps Caution's creds for S3 state but uses user's creds for AWS provider
-    run_tofu_apply_with_provider_creds(work_dir, &request.resource_name, &request.ports, request.http_port, request.credentials.as_ref())
-        .context("Failed to run tofu apply")?;
+    run_tofu_apply_with_provider_creds(
+        work_dir,
+        &request.resource_name,
+        &request.ports,
+        request.http_port,
+        request.credentials.as_ref(),
+    )
+    .context("Failed to run tofu apply")?;
 
-    let result = get_tofu_outputs(work_dir)
-        .context("Failed to get tofu outputs")?;
+    let result = get_tofu_outputs(work_dir).context("Failed to get tofu outputs")?;
 
     tracing::info!(
         "Successfully provisioned Nitro Enclave for resource {} at {}",
@@ -931,7 +1023,9 @@ async fn provision_managed_onprem(
     eif_s3_path: &str,
     config: &TerraformConfig,
 ) -> Result<DeploymentResult> {
-    let onprem = request.managed_onprem.as_ref()
+    let onprem = request
+        .managed_onprem
+        .as_ref()
         .context("Missing managed_onprem config")?;
 
     tracing::info!(
@@ -940,14 +1034,20 @@ async fn provision_managed_onprem(
         onprem.deployment_id
     );
 
-    let temp_dir = TempDir::new()
-        .context("Failed to create temporary directory")?;
+    let temp_dir = TempDir::new().context("Failed to create temporary directory")?;
     let work_dir = temp_dir.path();
 
-    generate_backend_config(work_dir, request.org_id, request.resource_id, &config.s3_bucket).await
-        .context("Failed to generate backend config")?;
+    generate_backend_config(
+        work_dir,
+        request.org_id,
+        request.resource_id,
+        &config.s3_bucket,
+    )
+    .await
+    .context("Failed to generate backend config")?;
 
-    generate_managed_onprem_deployment_tf(work_dir, request, eif_s3_path).await
+    generate_managed_onprem_deployment_tf(work_dir, request, eif_s3_path)
+        .await
         .context("Failed to generate main.tf")?;
 
     let user_data_template = std::fs::read_to_string(config.module_path.join("user-data.sh"))
@@ -955,14 +1055,19 @@ async fn provision_managed_onprem(
     std::fs::write(work_dir.join("user-data.sh"), user_data_template)
         .context("Failed to write user-data.sh")?;
 
-    run_tofu_init(work_dir, None)
-        .context("Failed to run tofu init")?;
+    run_tofu_init(work_dir, None).context("Failed to run tofu init")?;
 
-    run_tofu_apply_with_provider_creds(work_dir, &request.resource_name, &request.ports, request.http_port, request.credentials.as_ref())
-        .context("Failed to run tofu apply")?;
+    run_tofu_apply_with_provider_creds(
+        work_dir,
+        &request.resource_name,
+        &request.ports,
+        request.http_port,
+        request.credentials.as_ref(),
+    )
+    .context("Failed to run tofu apply")?;
 
-    let tf_outputs = get_managed_onprem_tofu_outputs(work_dir)
-        .context("Failed to get tofu outputs")?;
+    let tf_outputs =
+        get_managed_onprem_tofu_outputs(work_dir).context("Failed to get tofu outputs")?;
 
     tracing::info!(
         "Terraform created launch template {} and EIP {}",
@@ -970,12 +1075,18 @@ async fn provision_managed_onprem(
         tf_outputs.eip_allocation_id
     );
 
-    let credentials = request.credentials.as_ref()
+    let credentials = request
+        .credentials
+        .as_ref()
         .context("Missing AWS credentials for managed on-prem deployment")?;
 
-    update_asg_launch_template(&onprem.asg_name, &tf_outputs.launch_template_id, credentials)
-        .await
-        .context("Failed to update ASG")?;
+    update_asg_launch_template(
+        &onprem.asg_name,
+        &tf_outputs.launch_template_id,
+        credentials,
+    )
+    .await
+    .context("Failed to update ASG")?;
 
     let instance_id = wait_for_asg_instance(&onprem.asg_name, credentials, 300)
         .await
@@ -1049,7 +1160,9 @@ async fn generate_nitro_deployment_main_tf(
     request: &NitroDeploymentRequest,
     eif_s3_path: &str,
 ) -> Result<()> {
-    let aws_region = request.credentials.as_ref()
+    let aws_region = request
+        .credentials
+        .as_ref()
         .map(|c| c.region.clone())
         .unwrap_or_else(|| std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()));
     let ssh_key_name = std::env::var("SSH_KEY_NAME").ok();
@@ -1397,7 +1510,8 @@ output "instance_type" {{
 "#,
         provider_block = provider_block,
         instance_type = instance_type,
-        ssh_key_line = ssh_key_name.as_ref()
+        ssh_key_line = ssh_key_name
+            .as_ref()
             .map(|key| format!("\n  key_name = \"{}\"", key))
             .unwrap_or_default(),
         resource_id = request.resource_id,
@@ -1409,7 +1523,8 @@ output "instance_type" {{
         cpu_count = cpu_count_rounded,
         disk_gb = request.disk_gb,
         debug_mode = if request.debug_mode { "true" } else { "false" },
-        ssh_keys_json = serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string()),
+        ssh_keys_json =
+            serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string()),
         ssh_ingress = if request.ssh_keys.is_empty() {
             "# SSH ingress disabled (no ssh_keys in Procfile)".to_string()
         } else {
@@ -1423,7 +1538,8 @@ output "instance_type" {{
         },
     );
 
-    fs::write(work_dir.join("main.tf"), main_tf_content).await
+    fs::write(work_dir.join("main.tf"), main_tf_content)
+        .await
         .context("Failed to write main.tf")?;
 
     Ok(())
@@ -1434,10 +1550,14 @@ async fn generate_managed_onprem_deployment_tf(
     request: &NitroDeploymentRequest,
     eif_s3_path: &str,
 ) -> Result<()> {
-    let onprem = request.managed_onprem.as_ref()
+    let onprem = request
+        .managed_onprem
+        .as_ref()
         .context("Missing managed_onprem config")?;
 
-    let aws_region = request.credentials.as_ref()
+    let aws_region = request
+        .credentials
+        .as_ref()
         .map(|c| c.region.clone())
         .unwrap_or_else(|| std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()));
 
@@ -1691,7 +1811,8 @@ output "instance_type" {{
         cpu_count = cpu_count_rounded,
         disk_gb = request.disk_gb,
         debug_mode = if request.debug_mode { "true" } else { "false" },
-        ssh_keys_json = serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string()),
+        ssh_keys_json =
+            serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string()),
         ssh_ingress = if request.ssh_keys.is_empty() {
             "# SSH ingress disabled (no ssh_keys in Procfile)".to_string()
         } else {
@@ -1705,7 +1826,8 @@ output "instance_type" {{
         },
     );
 
-    fs::write(work_dir.join("main.tf"), main_tf_content).await
+    fs::write(work_dir.join("main.tf"), main_tf_content)
+        .await
         .context("Failed to write main.tf")?;
 
     Ok(())

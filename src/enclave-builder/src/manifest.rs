@@ -231,7 +231,11 @@ mod tests {
 
         let deserialized: EnclaveSource = serde_json::from_str(&json).unwrap();
         match deserialized {
-            EnclaveSource::GitRepository { url, branch, commit } => {
+            EnclaveSource::GitRepository {
+                url,
+                branch,
+                commit,
+            } => {
                 assert_eq!(url, "https://github.com/org/repo.git");
                 assert_eq!(branch, "main");
                 assert!(commit.is_none());

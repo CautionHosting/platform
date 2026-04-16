@@ -549,21 +549,25 @@ async fn get_user_usage(
                 }
                 .total_cost_usd(quantity);
 
-                let entry = usage_map.entry((provider, resource_type)).or_insert((0.0, 0.0));
+                let entry = usage_map
+                    .entry((provider, resource_type))
+                    .or_insert((0.0, 0.0));
                 entry.0 += quantity;
                 entry.1 += total_cost;
             }
 
             let usage: Vec<serde_json::Value> = usage_map
                 .into_iter()
-                .map(|((provider, resource_type), (total_quantity, total_cost))| {
-                    serde_json::json!({
-                        "provider": provider,
-                        "resource_type": resource_type,
-                        "total_quantity": total_quantity,
-                        "total_cost": total_cost,
-                    })
-                })
+                .map(
+                    |((provider, resource_type), (total_quantity, total_cost))| {
+                        serde_json::json!({
+                            "provider": provider,
+                            "resource_type": resource_type,
+                            "total_quantity": total_quantity,
+                            "total_cost": total_cost,
+                        })
+                    },
+                )
                 .collect();
             (StatusCode::OK, Json(serde_json::json!({"usage": usage})))
         }

@@ -15,7 +15,8 @@ pub async fn build_combined_image(
 ) -> Result<String> {
     tracing::info!("Building combined enclave image");
 
-    let template_dir = if template_source.starts_with("http") || template_source.starts_with("git@") {
+    let template_dir = if template_source.starts_with("http") || template_source.starts_with("git@")
+    {
         clone_template(template_source, template_version, work_dir).await?
     } else {
         PathBuf::from(template_source)
@@ -153,8 +154,13 @@ async fn copy_recursive(src: &Path, dst: &Path) -> Result<()> {
             if let Some(parent) = dst_path.parent() {
                 fs::create_dir_all(parent).await?;
             }
-            fs::copy(path, &dst_path).await
-                .with_context(|| format!("Failed to copy {} to {}", path.display(), dst_path.display()))?;
+            fs::copy(path, &dst_path).await.with_context(|| {
+                format!(
+                    "Failed to copy {} to {}",
+                    path.display(),
+                    dst_path.display()
+                )
+            })?;
         }
     }
 

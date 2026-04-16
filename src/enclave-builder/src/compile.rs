@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
-use tokio::process::Command;
-use tokio::fs;
 use flate2::read::GzDecoder;
+use std::path::{Path, PathBuf};
 use tar::Archive;
+use tokio::fs;
+use tokio::process::Command;
 
 pub struct EnclaveBinaries {
     pub bootproofd: PathBuf,
@@ -17,7 +17,10 @@ pub async fn compile_enclave_binaries(
     enclave_source_path: &Path,
     work_dir: &Path,
 ) -> Result<EnclaveBinaries> {
-    tracing::info!("Compiling enclave binaries from source: {}", enclave_source_path.display());
+    tracing::info!(
+        "Compiling enclave binaries from source: {}",
+        enclave_source_path.display()
+    );
 
     let build_dir = work_dir.join("enclave-build");
     fs::create_dir_all(&build_dir).await?;
@@ -70,9 +73,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         .args([
             "build",
             "--progress=plain",
-            "--target", "enclave-builder",
-            "--output", &format!("type=local,dest={}", output_dir.to_str().unwrap()),
-            "-f", dockerfile_path.to_str().unwrap(),
+            "--target",
+            "enclave-builder",
+            "--output",
+            &format!("type=local,dest={}", output_dir.to_str().unwrap()),
+            "-f",
+            dockerfile_path.to_str().unwrap(),
             enclave_source_path.to_str().unwrap(),
         ])
         .output()
@@ -101,10 +107,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     }
 
     tracing::info!("Enclave binaries compiled successfully");
-    Ok(EnclaveBinaries {
-        bootproofd,
-        init,
-    })
+    Ok(EnclaveBinaries { bootproofd, init })
 }
 
 /// Result of fetching enclave source, including path and commit info
@@ -122,7 +125,10 @@ fn archive_url_to_git_url(archive_url: &str) -> Option<String> {
         tracing::debug!("archive_url_to_git_url: {} -> {}", archive_url, git_url);
         Some(git_url)
     } else {
-        tracing::debug!("archive_url_to_git_url: {} -> None (no /archive/ found)", archive_url);
+        tracing::debug!(
+            "archive_url_to_git_url: {} -> None (no /archive/ found)",
+            archive_url
+        );
         None
     }
 }
@@ -138,7 +144,9 @@ fn extract_ref_from_archive_url(url: &str) -> Option<String> {
         } else {
             after_archive
         };
-        let clean_ref = ref_part.trim_end_matches(".tar.gz").trim_end_matches(".tar");
+        let clean_ref = ref_part
+            .trim_end_matches(".tar.gz")
+            .trim_end_matches(".tar");
         if !clean_ref.is_empty() {
             tracing::debug!("extract_ref_from_archive_url: {} -> {}", url, clean_ref);
             return Some(clean_ref.to_string());
@@ -150,7 +158,11 @@ fn extract_ref_from_archive_url(url: &str) -> Option<String> {
 
 /// Resolve a branch/tag name to a commit SHA using git ls-remote
 pub async fn resolve_ref_to_commit(git_url: &str, ref_name: &str) -> Option<String> {
-    tracing::info!("resolve_ref_to_commit: git_url={}, ref_name={}", git_url, ref_name);
+    tracing::info!(
+        "resolve_ref_to_commit: git_url={}, ref_name={}",
+        git_url,
+        ref_name
+    );
 
     // If ref_name already looks like a commit SHA (40 hex chars), use it directly
     if ref_name.len() == 40 && ref_name.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -169,8 +181,12 @@ pub async fn resolve_ref_to_commit(git_url: &str, ref_name: &str) -> Option<Stri
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::info!("git ls-remote (branch) status={}, stdout='{}', stderr='{}'",
-                output.status, stdout.trim(), stderr.trim());
+            tracing::info!(
+                "git ls-remote (branch) status={}, stdout='{}', stderr='{}'",
+                output.status,
+                stdout.trim(),
+                stderr.trim()
+            );
 
             if output.status.success() {
                 if let Some(sha) = stdout.split_whitespace().next() {
@@ -197,8 +213,12 @@ pub async fn resolve_ref_to_commit(git_url: &str, ref_name: &str) -> Option<Stri
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::info!("git ls-remote (tag) status={}, stdout='{}', stderr='{}'",
-                output.status, stdout.trim(), stderr.trim());
+            tracing::info!(
+                "git ls-remote (tag) status={}, stdout='{}', stderr='{}'",
+                output.status,
+                stdout.trim(),
+                stderr.trim()
+            );
 
             if output.status.success() {
                 if let Some(sha) = stdout.split_whitespace().next() {
@@ -225,15 +245,26 @@ pub async fn get_or_clone_enclave_source(
 ) -> Result<EnclaveSourceResult> {
     // Check if it's an archive URL (tar.gz)
     if enclave_source.ends_with(".tar.gz") || enclave_source.ends_with(".tar") {
-        tracing::info!("Downloading enclave source archive from: {}", enclave_source);
+        tracing::info!(
+            "Downloading enclave source archive from: {}",
+            enclave_source
+        );
 
         // Try to resolve the commit SHA before downloading
         let git_url = archive_url_to_git_url(enclave_source);
         let ref_name = extract_ref_from_archive_url(enclave_source);
-        tracing::info!("Enclave source URL parsing: git_url={:?}, ref_name={:?}", git_url, ref_name);
+        tracing::info!(
+            "Enclave source URL parsing: git_url={:?}, ref_name={:?}",
+            git_url,
+            ref_name
+        );
 
         let commit = if let (Some(git_url), Some(ref_name)) = (git_url, ref_name) {
-            tracing::info!("Resolving enclave ref '{}' from '{}' to commit SHA", ref_name, git_url);
+            tracing::info!(
+                "Resolving enclave ref '{}' from '{}' to commit SHA",
+                ref_name,
+                git_url
+            );
             match resolve_ref_to_commit(&git_url, &ref_name).await {
                 Some(sha) => {
                     tracing::info!("Resolved enclave '{}' to commit {}", ref_name, sha);
@@ -245,7 +276,10 @@ pub async fn get_or_clone_enclave_source(
                 }
             }
         } else {
-            tracing::warn!("Could not extract git URL or ref from enclave source: {}", enclave_source);
+            tracing::warn!(
+                "Could not extract git URL or ref from enclave source: {}",
+                enclave_source
+            );
             None
         };
 
@@ -253,7 +287,10 @@ pub async fn get_or_clone_enclave_source(
 
         // Remove existing directory if it exists
         if download_dir.exists() {
-            tracing::info!("Removing existing source directory: {}", download_dir.display());
+            tracing::info!(
+                "Removing existing source directory: {}",
+                download_dir.display()
+            );
             fs::remove_dir_all(&download_dir).await?;
         }
 
@@ -269,7 +306,8 @@ pub async fn get_or_clone_enclave_source(
             anyhow::bail!("Failed to download archive: HTTP {}", response.status());
         }
 
-        let archive_bytes = response.bytes()
+        let archive_bytes = response
+            .bytes()
             .await
             .context("Failed to read archive bytes")?;
 
@@ -280,21 +318,30 @@ pub async fn get_or_clone_enclave_source(
         let mut archive = Archive::new(decoder);
 
         // Extract with strip_components=1 equivalent (skip first path component)
-        for entry in archive.entries().context("Failed to read archive entries")? {
+        for entry in archive
+            .entries()
+            .context("Failed to read archive entries")?
+        {
             let mut entry = entry.context("Failed to read archive entry")?;
             let path = entry.path().context("Failed to get entry path")?;
 
             // Skip the first path component (equivalent to --strip-components=1)
             let components: Vec<_> = path.components().collect();
             if components.len() <= 1 {
-                continue;  // Skip the top-level directory itself
+                continue; // Skip the top-level directory itself
             }
 
             let stripped_path: PathBuf = components[1..].iter().collect();
 
             // Reject paths with .. components (zip-slip prevention)
-            if stripped_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-                anyhow::bail!("Path traversal detected in archive entry: {}", path.display());
+            if stripped_path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                anyhow::bail!(
+                    "Path traversal detected in archive entry: {}",
+                    path.display()
+                );
             }
 
             let dest_path = download_dir.join(&stripped_path);
@@ -305,7 +352,8 @@ pub async fn get_or_clone_enclave_source(
                     .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
             }
 
-            entry.unpack(&dest_path)
+            entry
+                .unpack(&dest_path)
                 .with_context(|| format!("Failed to extract: {}", stripped_path.display()))?;
         }
 
@@ -314,8 +362,15 @@ pub async fn get_or_clone_enclave_source(
             path: download_dir,
             commit,
         })
-    } else if enclave_source.starts_with("http://") || enclave_source.starts_with("https://") || enclave_source.starts_with("git@") {
-        tracing::info!("Cloning enclave source from: {} (version: {})", enclave_source, enclave_version);
+    } else if enclave_source.starts_with("http://")
+        || enclave_source.starts_with("https://")
+        || enclave_source.starts_with("git@")
+    {
+        tracing::info!(
+            "Cloning enclave source from: {} (version: {})",
+            enclave_source,
+            enclave_version
+        );
 
         let clone_dir = work_dir.join("enclave-source");
 
@@ -330,8 +385,10 @@ pub async fn get_or_clone_enclave_source(
         let output = Command::new("git")
             .args([
                 "clone",
-                "--depth", "1",
-                "--branch", enclave_version,
+                "--depth",
+                "1",
+                "--branch",
+                enclave_version,
                 enclave_source,
                 clone_dir.to_str().unwrap(),
             ])
@@ -397,22 +454,32 @@ pub async fn get_or_clone_framework_source(
     let download_dir = work_dir.join("framework-source");
 
     if download_dir.exists() {
-        tracing::info!("Removing existing framework source directory: {}", download_dir.display());
+        tracing::info!(
+            "Removing existing framework source directory: {}",
+            download_dir.display()
+        );
         fs::remove_dir_all(&download_dir).await?;
     }
 
     fs::create_dir_all(&download_dir).await?;
 
-    tracing::info!("Downloading framework source archive from: {}", framework_source_url);
+    tracing::info!(
+        "Downloading framework source archive from: {}",
+        framework_source_url
+    );
     let response = reqwest::get(framework_source_url)
         .await
         .context("Failed to download framework source archive")?;
 
     if !response.status().is_success() {
-        anyhow::bail!("Failed to download framework source archive: HTTP {}", response.status());
+        anyhow::bail!(
+            "Failed to download framework source archive: HTTP {}",
+            response.status()
+        );
     }
 
-    let archive_bytes = response.bytes()
+    let archive_bytes = response
+        .bytes()
         .await
         .context("Failed to read framework source archive bytes")?;
 
@@ -421,7 +488,10 @@ pub async fn get_or_clone_framework_source(
     let decoder = GzDecoder::new(&archive_bytes[..]);
     let mut archive = Archive::new(decoder);
 
-    for entry in archive.entries().context("Failed to read framework archive entries")? {
+    for entry in archive
+        .entries()
+        .context("Failed to read framework archive entries")?
+    {
         let mut entry = entry.context("Failed to read framework archive entry")?;
         let path = entry.path().context("Failed to get entry path")?;
 
@@ -433,8 +503,14 @@ pub async fn get_or_clone_framework_source(
         let stripped_path: PathBuf = components[1..].iter().collect();
 
         // Reject paths with .. components (zip-slip prevention)
-        if stripped_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-            anyhow::bail!("Path traversal detected in archive entry: {}", path.display());
+        if stripped_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            anyhow::bail!(
+                "Path traversal detected in archive entry: {}",
+                path.display()
+            );
         }
 
         let dest_path = download_dir.join(&stripped_path);
@@ -444,7 +520,8 @@ pub async fn get_or_clone_framework_source(
                 .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
         }
 
-        entry.unpack(&dest_path)
+        entry
+            .unpack(&dest_path)
             .with_context(|| format!("Failed to extract: {}", stripped_path.display()))?;
     }
 
