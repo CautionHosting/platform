@@ -619,8 +619,39 @@ pub async fn get_paddle_client_token(
     })?
     .flatten();
 
+    let customer_auth_token = if let (Some(customer_id), Some(api_key)) = (
+        paddle_customer_id.as_deref(),
+        state.paddle_api_key.as_deref(),
+    ) {
+        if state.paddle_api_url.is_empty() {
+            None
+        } else {
+            match generate_paddle_customer_auth_token(
+                &state.paddle_api_url,
+                api_key,
+                customer_id,
+            )
+            .await
+            {
+                Ok(token) => Some(token),
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to generate Paddle customer auth token for org {} and customer {}: {}",
+                        org_id,
+                        customer_id,
+                        err
+                    );
+                    None
+                }
+            }
+        }
+    } else {
+        None
+    };
+
     Ok(Json(serde_json::json!({
         "client_token": client_token,
+        "customer_auth_token": customer_auth_token,
         "paddle_customer_id": paddle_customer_id,
         "setup_price_id": state.paddle_setup_price_id,
     })))
@@ -866,6 +897,30 @@ async fn fetch_paddle_transaction(
     }
 
     resp.json().await.map_err(|e| format!("Parse error: {}", e))
+}
+
+async fn generate_paddle_customer_auth_token(
+    api_url: &str,
+    api_key: &str,
+    customer_id: &str,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/customers/{}/auth-token", api_url, customer_id))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .send()
+        .await
+        .map_err(|e| format!("Paddle API error: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Paddle API returned {}", resp.status()));
+    }
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
+    body["data"]["customer_auth_token"]
+        .as_str()
+        .map(|token| token.to_string())
+        .ok_or_else(|| "No customer_auth_token in response".to_string())
 }
 
 /// Fetch the customer_id from a Paddle transaction

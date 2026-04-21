@@ -2773,10 +2773,10 @@ export default {
         const tokenResponse = await authFetch('/api/billing/paddle/client-token');
 
         if (!tokenResponse.ok) {
-          throw new Error('Failed to initialize payment form');
+          throw new Error(await readResponseError(tokenResponse, 'Failed to initialize payment form'));
         }
 
-        const { client_token, paddle_customer_id, setup_price_id } = await tokenResponse.json();
+        const { client_token, customer_auth_token, paddle_customer_id, setup_price_id } = await tokenResponse.json();
 
         const isSandbox = import.meta.env.VITE_PADDLE_SANDBOX === 'true';
 
@@ -2812,11 +2812,11 @@ export default {
                   showAddPaymentModal.value = false;
                   await loadPaymentMethods();
                 } else {
-                  cardError.value = 'Failed to save payment method. Please try again.';
+                  cardError.value = await readResponseError(response, 'Failed to save payment method. Please try again.');
                 }
               } catch (err) {
                 console.error('Transaction completed callback error:', err);
-                cardError.value = 'Failed to save payment method. Please try again.';
+                cardError.value = err?.message || 'Failed to save payment method. Please try again.';
               }
             }
           },
@@ -2837,7 +2837,9 @@ export default {
           items: [{ priceId: setup_price_id, quantity: 1 }],
         };
 
-        if (paddle_customer_id) {
+        if (customer_auth_token) {
+          checkoutSettings.customerAuthToken = customer_auth_token;
+        } else if (paddle_customer_id) {
           checkoutSettings.customer = { id: paddle_customer_id };
         } else if (userEmail.value) {
           checkoutSettings.customer = { email: userEmail.value };
@@ -2846,7 +2848,7 @@ export default {
         window.Paddle.Checkout.open(checkoutSettings);
       } catch (err) {
         console.error('Failed to initialize Paddle checkout:', err);
-        cardError.value = 'Failed to initialize payment form. Please try again.';
+        cardError.value = err?.message || 'Failed to initialize payment form. Please try again.';
       }
     };
 
