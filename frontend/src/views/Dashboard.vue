@@ -2776,7 +2776,13 @@ export default {
           throw new Error(await readResponseError(tokenResponse, 'Failed to initialize payment form'));
         }
 
-        const { client_token, customer_auth_token, paddle_customer_id, setup_price_id } = await tokenResponse.json();
+        const {
+          client_token,
+          customer_auth_token,
+          checkout_custom_data,
+          paddle_customer_id,
+          setup_price_id,
+        } = await tokenResponse.json();
 
         const isSandbox = import.meta.env.VITE_PADDLE_SANDBOX === 'true';
 
@@ -2836,6 +2842,10 @@ export default {
           },
           items: [{ priceId: setup_price_id, quantity: 1 }],
         };
+
+        if (checkout_custom_data) {
+          checkoutSettings.customData = checkout_custom_data;
+        }
 
         if (customer_auth_token) {
           checkoutSettings.customerAuthToken = customer_auth_token;

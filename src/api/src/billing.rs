@@ -4,7 +4,9 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, Datelike, Utc};
+use hmac::{Hmac, Mac};
 use serde::Deserialize;
+use sha2::Sha256;
 use sqlx::{Executor, PgPool, Postgres, Row};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -65,6 +67,11 @@ pub(crate) struct CreditPackage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) paddle_price_id: Option<String>,
 }
+
+const PADDLE_CHECKOUT_BINDING_CONTEXT: &str = "paddle_setup_checkout_v1";
+const PADDLE_CHECKOUT_BINDING_MAX_AGE_SECS: i64 = 3600;
+
+type HmacSha256 = Hmac<Sha256>;
 
 // Credit package base amounts (purchase_cents). Bonus percentages come from prices.json.
 const CREDIT_PACKAGE_BASES: &[(i64, &str)] =
@@ -648,10 +655,15 @@ pub async fn get_paddle_client_token(
     } else {
         None
     };
+    let checkout_custom_data = state
+        .internal_service_secret
+        .as_deref()
+        .map(|secret| build_paddle_checkout_custom_data(secret, auth.user_id, org_id));
 
     Ok(Json(serde_json::json!({
         "client_token": client_token,
         "customer_auth_token": customer_auth_token,
+        "checkout_custom_data": checkout_custom_data,
         "paddle_customer_id": paddle_customer_id,
         "setup_price_id": state.paddle_setup_price_id,
     })))
@@ -697,11 +709,91 @@ fn transaction_contains_price_id(txn: &serde_json::Value, expected_price_id: &st
             .unwrap_or(false)
 }
 
+fn paddle_checkout_binding_payload(user_id: Uuid, org_id: Uuid, issued_at: i64) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        PADDLE_CHECKOUT_BINDING_CONTEXT, user_id, org_id, issued_at
+    )
+}
+
+fn sign_paddle_checkout_binding(
+    secret: &str,
+    user_id: Uuid,
+    org_id: Uuid,
+    issued_at: i64,
+) -> String {
+    let payload = paddle_checkout_binding_payload(user_id, org_id, issued_at);
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
+    mac.update(payload.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn build_paddle_checkout_custom_data(
+    secret: &str,
+    user_id: Uuid,
+    org_id: Uuid,
+) -> serde_json::Value {
+    let issued_at = Utc::now().timestamp();
+    serde_json::json!({
+        "caution_checkout_user_id": user_id.to_string(),
+        "caution_checkout_org_id": org_id.to_string(),
+        "caution_checkout_issued_at": issued_at,
+        "caution_checkout_sig": sign_paddle_checkout_binding(secret, user_id, org_id, issued_at),
+    })
+}
+
+fn validate_paddle_checkout_binding(
+    txn: &serde_json::Value,
+    secret: &str,
+    user_id: Uuid,
+    org_id: Uuid,
+) -> Result<(), String> {
+    let custom_data = txn["data"]["custom_data"]
+        .as_object()
+        .ok_or_else(|| "Transaction is not bound to this account".to_string())?;
+    let txn_user_id = custom_data
+        .get("caution_checkout_user_id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "Transaction is not bound to this account".to_string())?;
+    let txn_org_id = custom_data
+        .get("caution_checkout_org_id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "Transaction is not bound to this account".to_string())?;
+    let issued_at = custom_data
+        .get("caution_checkout_issued_at")
+        .and_then(|value| value.as_i64())
+        .ok_or_else(|| "Transaction is not bound to this account".to_string())?;
+    let sig_hex = custom_data
+        .get("caution_checkout_sig")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "Transaction is not bound to this account".to_string())?;
+
+    if txn_user_id != user_id.to_string() || txn_org_id != org_id.to_string() {
+        return Err("Transaction does not belong to this account".to_string());
+    }
+
+    let now = Utc::now().timestamp();
+    if issued_at > now + 300 || now - issued_at > PADDLE_CHECKOUT_BINDING_MAX_AGE_SECS {
+        return Err("Transaction checkout has expired. Please try again.".to_string());
+    }
+
+    let sig_bytes =
+        hex::decode(sig_hex).map_err(|_| "Transaction checkout binding is invalid".to_string())?;
+    let payload = paddle_checkout_binding_payload(user_id, org_id, issued_at);
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
+    mac.update(payload.as_bytes());
+    mac.verify_slice(&sig_bytes)
+        .map_err(|_| "Transaction checkout binding is invalid".to_string())
+}
+
 fn validate_paddle_setup_transaction(
     txn: &serde_json::Value,
     expected_setup_price_id: &str,
     expected_customer_id: Option<&str>,
     expected_customer_email: Option<&str>,
+    allow_checkout_binding: bool,
 ) -> Result<(String, Option<String>), String> {
     let status = txn["data"]["status"].as_str().unwrap_or("");
     if !is_completed_paddle_transaction_status(status) {
@@ -724,15 +816,15 @@ fn validate_paddle_setup_transaction(
         if customer_id != expected_customer_id {
             return Err("Transaction does not belong to this account".to_string());
         }
-    } else {
-        let expected_customer_email = expected_customer_email
-            .ok_or_else(|| "No billing customer or verified email on file".to_string())?;
+    } else if let Some(expected_customer_email) = expected_customer_email {
         let txn_customer_email = txn["data"]["customer"]["email"]
             .as_str()
             .ok_or_else(|| "Transaction customer email is unavailable".to_string())?;
         if !txn_customer_email.eq_ignore_ascii_case(expected_customer_email) {
             return Err("Transaction does not belong to this account".to_string());
         }
+    } else if !allow_checkout_binding {
+        return Err("No billing customer, account email, or valid checkout binding on file".to_string());
     }
 
     Ok((
@@ -802,12 +894,27 @@ pub async fn paddle_transaction_completed(
                 format!("Failed to verify transaction: {}", e),
             )
         })?;
+    let allow_checkout_binding =
+        if existing_paddle_customer_id.is_none() && user_email.as_deref().is_none() {
+            let secret = state.internal_service_secret.as_deref().ok_or_else(|| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Checkout binding is unavailable. Contact support.".to_string(),
+                )
+            })?;
+            validate_paddle_checkout_binding(&txn, secret, auth.user_id, org_id)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            true
+        } else {
+            false
+        };
 
     let (customer_id, paddle_payment_method_id) = validate_paddle_setup_transaction(
         &txn,
         setup_price_id,
         existing_paddle_customer_id.as_deref(),
         user_email.as_deref(),
+        allow_checkout_binding,
     )
     .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
@@ -1671,9 +1778,11 @@ pub async fn put_auto_topup(
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_paddle_payment_method_id, transaction_contains_price_id,
+        build_paddle_checkout_custom_data, extract_paddle_payment_method_id,
+        transaction_contains_price_id, validate_paddle_checkout_binding,
         validate_paddle_setup_transaction,
     };
+    use uuid::Uuid;
 
     fn sample_transaction() -> serde_json::Value {
         serde_json::json!({
@@ -1723,7 +1832,7 @@ mod tests {
     fn accepts_matching_existing_customer() {
         let txn = sample_transaction();
         let (customer_id, payment_method_id) =
-            validate_paddle_setup_transaction(&txn, "pri_setup", Some("ctm_123"), None)
+            validate_paddle_setup_transaction(&txn, "pri_setup", Some("ctm_123"), None, false)
                 .expect("transaction should validate");
 
         assert_eq!(customer_id, "ctm_123");
@@ -1733,8 +1842,31 @@ mod tests {
     #[test]
     fn accepts_first_time_setup_with_matching_email() {
         let txn = sample_transaction();
+        let (customer_id, _) = validate_paddle_setup_transaction(
+            &txn,
+            "pri_setup",
+            None,
+            Some("USER@example.com"),
+            false,
+        )
+        .expect("transaction should validate");
+
+        assert_eq!(customer_id, "ctm_123");
+    }
+
+    #[test]
+    fn accepts_first_time_setup_with_valid_checkout_binding() {
+        let user_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let org_id = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let mut txn = sample_transaction();
+        txn["data"]["custom_data"] =
+            build_paddle_checkout_custom_data("secret", user_id, org_id);
+
+        validate_paddle_checkout_binding(&txn, "secret", user_id, org_id)
+            .expect("checkout binding should validate");
+
         let (customer_id, _) =
-            validate_paddle_setup_transaction(&txn, "pri_setup", None, Some("USER@example.com"))
+            validate_paddle_setup_transaction(&txn, "pri_setup", None, None, true)
                 .expect("transaction should validate");
 
         assert_eq!(customer_id, "ctm_123");
@@ -1743,8 +1875,9 @@ mod tests {
     #[test]
     fn rejects_transaction_for_different_customer() {
         let txn = sample_transaction();
-        let err = validate_paddle_setup_transaction(&txn, "pri_setup", Some("ctm_other"), None)
-            .expect_err("transaction should be rejected");
+        let err =
+            validate_paddle_setup_transaction(&txn, "pri_setup", Some("ctm_other"), None, false)
+                .expect_err("transaction should be rejected");
 
         assert!(err.contains("does not belong to this account"));
     }
@@ -1772,9 +1905,14 @@ mod tests {
                 "payments": []
             }
         });
-        let err =
-            validate_paddle_setup_transaction(&txn, "pri_setup", None, Some("user@example.com"))
-                .expect_err("transaction should be rejected");
+        let err = validate_paddle_setup_transaction(
+            &txn,
+            "pri_setup",
+            None,
+            Some("user@example.com"),
+            false,
+        )
+        .expect_err("transaction should be rejected");
 
         assert!(err.contains("setup price"));
     }
