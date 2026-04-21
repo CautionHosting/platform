@@ -15,7 +15,7 @@
 #   3. Push demo app
 #   4. Verify builder EC2 instance was launched
 #   5. Wait for build completion
-#   6. Verify EIF in S3
+#   6. Verify EIF in the fully managed S3 bucket
 #   7. Verify eif_builds DB row
 #   8. Verify builder instance terminated
 #   9. Redeploy same commit — verify cache hit (no new builder)
@@ -314,9 +314,9 @@ for i in $(seq 1 120); do
     sleep 10
 done
 
-# ── Step 7: Verify EIF in S3 ─────────────────────────────────────────
+# ── Step 7: Verify EIF in the fully managed S3 bucket ────────────────
 STEP_NUM=7
-echo "── Step $STEP_NUM: Verify EIF exists in S3 ──"
+echo "── Step $STEP_NUM: Verify EIF exists in the fully managed S3 bucket ──"
 
 EIF_S3_KEY=$(query_db "SELECT eif_s3_key FROM eif_builds WHERE id = '$BUILD_ID'" || true)
 if [ -n "$EIF_S3_KEY" ]; then

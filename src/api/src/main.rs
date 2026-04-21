@@ -695,6 +695,7 @@ async fn create_managed_onprem_resource(
         "subnet_ids": req.subnet_ids,
         "eif_bucket": req.eif_bucket,
         "instance_profile_name": req.instance_profile_name,
+        "builder_instance_profile_name": req.builder_instance_profile_name,
         "aws_region": req.aws_region,
         "aws_account_id": req.aws_account_id,
     });
@@ -874,6 +875,144 @@ fn milestone_error(msg: &str) -> bytes::Bytes {
     bytes::Bytes::from(format!("error: {}\n", msg))
 }
 
+#[derive(Clone)]
+struct ResolvedBuilderTarget {
+    config: builder::BuilderConfig,
+    aws_credentials: deployment::AwsCredentials,
+    cache_app_id: Option<Uuid>,
+}
+
+fn aws_credentials_from_managed_onprem(
+    credential: &cloud_credentials::ManagedOnPremCredentialData,
+) -> deployment::AwsCredentials {
+    deployment::AwsCredentials {
+        access_key_id: credential.aws_access_key_id.clone(),
+        secret_access_key: credential.aws_secret_access_key.clone(),
+        region: credential.aws_region.clone(),
+    }
+}
+
+fn managed_onprem_config_from_credential(
+    credential: &cloud_credentials::ManagedOnPremCredentialData,
+) -> deployment::ManagedOnPremConfig {
+    deployment::ManagedOnPremConfig {
+        deployment_id: credential.deployment_id.clone(),
+        asg_name: credential.asg_name.clone(),
+        launch_template_name: credential.launch_template_name.clone(),
+        launch_template_id: credential.launch_template_id.clone(),
+        vpc_id: credential.vpc_id.clone(),
+        subnet_ids: credential.subnet_ids.clone(),
+        eif_bucket: credential.eif_bucket.clone(),
+        instance_profile_name: credential.instance_profile_name.clone(),
+        builder_instance_profile_name: credential.builder_instance_profile_name.clone(),
+    }
+}
+
+fn platform_builder_credentials() -> deployment::AwsCredentials {
+    deployment::AwsCredentials {
+        access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
+        secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),
+        region: std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()),
+    }
+}
+
+async fn s3_client_for_credentials(credentials: &deployment::AwsCredentials) -> aws_sdk_s3::Client {
+    let creds = aws_sdk_s3::config::Credentials::new(
+        &credentials.access_key_id,
+        &credentials.secret_access_key,
+        None,
+        None,
+        "caution-builder",
+    );
+
+    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_config::Region::new(credentials.region.clone()))
+        .credentials_provider(creds)
+        .load()
+        .await;
+
+    aws_sdk_s3::Client::new(&config)
+}
+
+async fn cached_object_exists(s3: &aws_sdk_s3::Client, bucket: &str, key: &str) -> bool {
+    match s3.head_object().bucket(bucket).key(key).send().await {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::warn!(
+                "Skipping cached build because s3://{}/{} was not readable: {:?}",
+                bucket,
+                key,
+                error
+            );
+            false
+        }
+    }
+}
+
+async fn resolve_builder_target(
+    default_config: &builder::BuilderConfig,
+    managed_onprem: Option<&deployment::ManagedOnPremConfig>,
+    managed_onprem_credentials: Option<&deployment::AwsCredentials>,
+    resource_id: Uuid,
+) -> Result<ResolvedBuilderTarget, (StatusCode, String)> {
+    if builder::should_use_customer_builder_path(managed_onprem) {
+        let managed_onprem = managed_onprem.ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Managed on-prem builder path selected without managed_onprem config".to_string(),
+            )
+        })?;
+        let managed_onprem_credentials = managed_onprem_credentials.ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Managed on-prem builder path selected without customer credentials".to_string(),
+            )
+        })?;
+
+        let config = builder::resolve_managed_onprem_builder_config(
+            default_config,
+            managed_onprem_credentials,
+            managed_onprem,
+        )
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "Failed to resolve managed on-prem builder target: {}",
+                    error
+                ),
+            )
+        })?;
+
+        tracing::info!(
+            "Using managed on-prem builder target: bucket={}, subnet_id={}, instance_profile={}",
+            config.eif_s3_bucket,
+            config.subnet_id,
+            config.instance_profile
+        );
+
+        Ok(ResolvedBuilderTarget {
+            config,
+            aws_credentials: managed_onprem_credentials.clone(),
+            cache_app_id: Some(resource_id),
+        })
+    } else {
+        if let Some(managed_onprem) = managed_onprem {
+            tracing::info!(
+                "Managed on-prem credential has no builder profile; falling back to platform builder path for deployment {}",
+                managed_onprem.deployment_id
+            );
+        }
+
+        Ok(ResolvedBuilderTarget {
+            config: default_config.clone(),
+            aws_credentials: platform_builder_credentials(),
+            cache_app_id: None,
+        })
+    }
+}
+
 async fn get_builder_config(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -962,8 +1101,6 @@ async fn deploy_handler(
     Extension(auth): Extension<AuthContext>,
     validated_types::Validated(req): validated_types::Validated<DeployRequest>,
 ) -> Response {
-    use tokio::process::Command;
-
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
 
     // Spawn the deploy logic in a separate task
@@ -1431,9 +1568,45 @@ async fn deploy_logic(
         http_port: build_config.http_port,
     };
 
+    let managed_onprem_credential = if let Some(credential) = cred
+        .as_ref()
+        .filter(|credential| credential.managed_on_prem)
+    {
+        let encryptor = state.encryptor.as_ref().ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Encryptor not configured".to_string(),
+            )
+        })?;
+
+        cloud_credentials::get_managed_onprem_credential(
+            &state.db,
+            encryptor,
+            req.org_id,
+            credential.id,
+        )
+        .await?
+    } else {
+        None
+    };
+
+    let deployment_credentials = managed_onprem_credential
+        .as_ref()
+        .map(aws_credentials_from_managed_onprem);
+    let managed_onprem_config = managed_onprem_credential
+        .as_ref()
+        .map(managed_onprem_config_from_credential);
+
     // --- Dedicated builder path ---
     // Builds are always offloaded to an ephemeral EC2 builder instance.
     let builder_cfg = &state.builder_config;
+    let builder_target = resolve_builder_target(
+        builder_cfg,
+        managed_onprem_config.as_ref(),
+        deployment_credentials.as_ref(),
+        resource_id,
+    )
+    .await?;
     let builder_eif_s3_key = {
         let procfile_content = String::from_utf8_lossy(&procfile_output.stdout).to_string();
         let enclaveos_commit = enclave_builder::build::resolve_enclaveos_commit();
@@ -1444,17 +1617,39 @@ async fn deploy_logic(
             build_config.e2e,
             build_config.locksmith,
         );
+        let s3_client = s3_client_for_credentials(&builder_target.aws_credentials).await;
 
         // Check cache first
         let cached_result = if !build_config.no_cache {
-            builder::check_build_cache(&state.db, req.org_id, &cache_key)
+            builder::check_build_cache(
+                &state.db,
+                req.org_id,
+                &cache_key,
+                builder_target.cache_app_id,
+            )
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Cache lookup failed: {}", e),
+                )
+            })?
+        } else {
+            None
+        };
+        let cached_result = if let Some(cached) = cached_result {
+            if builder_target.cache_app_id.is_some()
+                && !cached_object_exists(
+                    &s3_client,
+                    &builder_target.config.eif_s3_bucket,
+                    &cached.eif_s3_key,
+                )
                 .await
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Cache lookup failed: {}", e),
-                    )
-                })?
+            {
+                None
+            } else {
+                Some(cached)
+            }
         } else {
             None
         };
@@ -1474,13 +1669,6 @@ async fn deploy_logic(
 
             // Archive source and upload to S3
             let git_dir = format!("{}/git-repos/{}.git", state.data_dir, app_id_str);
-            let s3_config = aws_config::from_env()
-                .region(aws_sdk_s3::config::Region::new(
-                    std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()),
-                ))
-                .load()
-                .await;
-            let s3_client = aws_sdk_s3::Client::new(&s3_config);
 
             // Pre-build balance check: refuse if org can't cover minimum build cost (~$0.30 for 1 min)
             let min_build_cost_cents: i64 = 50; // $0.50 minimum balance required
@@ -1506,7 +1694,7 @@ async fn deploy_logic(
             let build_id = uuid::Uuid::new_v4();
             let source_s3_key = builder::upload_source_archive(
                 &s3_client,
-                &builder_cfg.eif_s3_bucket,
+                &builder_target.config.eif_s3_bucket,
                 &git_dir,
                 &commit_sha,
                 build_id,
@@ -1520,12 +1708,7 @@ async fn deploy_logic(
                 )
             })?;
 
-            let platform_creds = crate::deployment::AwsCredentials {
-                access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
-                secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),
-                region: std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()),
-            };
-            let ec2_client = crate::ec2::Ec2Client::new(&platform_creds);
+            let ec2_client = crate::ec2::Ec2Client::new(&builder_target.aws_credentials);
 
             let size_id = req
                 .builder_size
@@ -1557,7 +1740,7 @@ async fn deploy_logic(
                 &state.db,
                 &ec2_client,
                 &s3_client,
-                builder_cfg,
+                &builder_target.config,
                 &build_request,
                 &cache_key,
                 &tx,
@@ -1583,7 +1766,10 @@ async fn deploy_logic(
         }
     };
 
-    let eif_path = format!("s3://{}/{}", builder_cfg.eif_s3_bucket, builder_eif_s3_key);
+    let eif_path = format!(
+        "s3://{}/{}",
+        builder_target.config.eif_s3_bucket, builder_eif_s3_key
+    );
     let (eif_hash, eif_size_bytes_db) = sqlx::query_as::<_, (String, i64)>(
         "SELECT eif_sha256, eif_size_bytes FROM eif_builds WHERE eif_s3_key = $1 AND status = 'completed' LIMIT 1"
     )
@@ -1645,134 +1831,24 @@ async fn deploy_logic(
         enclave_config.debug
     );
 
-    // Check if there's a managed-on-prem credential linked to this resource
-    // This takes precedence over the Procfile - if init was called with --config,
-    // the credential is already linked to the resource
-    let (credentials, managed_onprem_config) = {
-        let cred =
-            cloud_credentials::get_credential_by_resource(&state.db, req.org_id, resource_id)
-                .await?;
-
-        if let Some(credential) = cred {
-            if credential.managed_on_prem {
-                tracing::info!(
-                    "Managed on-prem credential found for resource {}, using linked credential",
-                    resource_id
-                );
-
-                let encryptor = state.encryptor.as_ref().ok_or_else(|| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Encryptor not configured".to_string(),
-                    )
-                })?;
-
-                let secrets = cloud_credentials::get_credential_secrets(
-                    &state.db,
-                    encryptor,
-                    req.org_id,
-                    credential.id,
-                )
-                .await?;
-
-                match secrets {
-                    Some(secrets_json) => {
-                        let aws_access_key_id =
-                            secrets_json["aws_access_key_id"].as_str().ok_or_else(|| {
-                                (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    "Missing aws_access_key_id in managed on-prem credentials"
-                                        .to_string(),
-                                )
-                            })?;
-                        let aws_secret_access_key = secrets_json["aws_secret_access_key"]
-                            .as_str()
-                            .ok_or_else(|| {
-                                (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    "Missing aws_secret_access_key in managed on-prem credentials"
-                                        .to_string(),
-                                )
-                            })?;
-
-                        // Extract infrastructure config from credential
-                        let config = &credential.config;
-                        let region = config["aws_region"]
-                            .as_str()
-                            .unwrap_or("us-west-2")
-                            .to_string();
-
-                        let onprem_config = deployment::ManagedOnPremConfig {
-                            deployment_id: config["deployment_id"]
-                                .as_str()
-                                .unwrap_or("")
-                                .to_string(),
-                            asg_name: config["asg_name"].as_str().unwrap_or("").to_string(),
-                            launch_template_name: config["launch_template_name"]
-                                .as_str()
-                                .unwrap_or("")
-                                .to_string(),
-                            launch_template_id: config["launch_template_id"]
-                                .as_str()
-                                .unwrap_or("")
-                                .to_string(),
-                            vpc_id: config["vpc_id"].as_str().unwrap_or("").to_string(),
-                            subnet_ids: config["subnet_ids"]
-                                .as_array()
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                        .collect()
-                                })
-                                .unwrap_or_default(),
-                            eif_bucket: config["eif_bucket"].as_str().unwrap_or("").to_string(),
-                            instance_profile_name: config["instance_profile_name"]
-                                .as_str()
-                                .unwrap_or("")
-                                .to_string(),
-                        };
-
-                        tracing::info!(
-                            "Using managed on-prem config: deployment_id={}, region={}",
-                            onprem_config.deployment_id,
-                            region
-                        );
-
-                        (
-                            Some(deployment::AwsCredentials {
-                                access_key_id: aws_access_key_id.to_string(),
-                                secret_access_key: aws_secret_access_key.to_string(),
-                                region,
-                            }),
-                            Some(onprem_config),
-                        )
-                    }
-                    None => {
-                        return Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "Failed to decrypt managed on-prem credentials".to_string(),
-                        ));
-                    }
-                }
-            } else {
-                // Credential linked but not managed on-prem - fully managed deployment
-                tracing::info!(
-                    "Non-managed-on-prem credential found, using fully managed deployment"
-                );
-                (None, None)
-            }
-        } else {
-            // No credential linked - fully managed deployment
-            tracing::info!(
-                "No credential linked to resource {}, using fully managed deployment",
-                resource_id
-            );
-            (None, None)
-        }
-    };
+    if let Some(managed_onprem) = managed_onprem_config.as_ref() {
+        tracing::info!(
+            "Using managed on-prem config: deployment_id={}, region={}",
+            managed_onprem.deployment_id,
+            deployment_credentials
+                .as_ref()
+                .map(|credentials| credentials.region.as_str())
+                .unwrap_or("us-west-2")
+        );
+    } else {
+        tracing::info!(
+            "No managed on-prem credential linked to resource {}, using fully managed deployment",
+            resource_id
+        );
+    }
 
     // Extract region from credentials before moving into nitro_request
-    let deployed_region = credentials
+    let deployed_region = deployment_credentials
         .as_ref()
         .map(|c| c.region.clone())
         .unwrap_or_else(|| "us-west-2".to_string());
@@ -1793,7 +1869,7 @@ async fn deploy_logic(
         http_port: enclave_config.http_port,
         ssh_keys: build_config.ssh_keys.clone(),
         domain: build_config.domain.clone(),
-        credentials,
+        credentials: deployment_credentials,
         managed_onprem: managed_onprem_config,
     };
 

@@ -14,11 +14,13 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::{
+    deployment::{AwsCredentials, ManagedOnPremConfig},
     ec2::{Ec2Client, RunInstancesParams},
     AppliedPricing,
 };
 
 const REMOTE_BUILDER_HELPER: &str = "remote-build-helper";
+const MANAGED_ONPREM_DEPLOYMENT_TAG_KEY: &str = "caution:deployment-id";
 
 /// Specification for a builder instance size, loaded from config.json.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -83,13 +85,16 @@ pub struct BuilderConfig {
     pub security_group_id: String,
     pub subnet_id: String,
     pub instance_profile: String,
+    pub region: String,
     pub timeout_secs: u64,
     pub eif_s3_bucket: String,
     pub git_hostname: String,
+    pub additional_instance_tags: Vec<(String, String)>,
 }
 
 impl BuilderConfig {
     pub fn from_env() -> Result<Self> {
+        let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string());
         Ok(Self {
             ami_id: std::env::var("BUILDER_AMI_ID").context("BUILDER_AMI_ID required")?,
             security_group_id: std::env::var("BUILDER_SECURITY_GROUP_ID")
@@ -97,6 +102,7 @@ impl BuilderConfig {
             subnet_id: std::env::var("BUILDER_SUBNET_ID").context("BUILDER_SUBNET_ID required")?,
             instance_profile: std::env::var("BUILDER_INSTANCE_PROFILE")
                 .context("BUILDER_INSTANCE_PROFILE required")?,
+            region,
             timeout_secs: std::env::var("BUILDER_TIMEOUT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -106,6 +112,7 @@ impl BuilderConfig {
                 format!("caution-eif-storage-{}", account)
             }),
             git_hostname: std::env::var("GIT_HOSTNAME").unwrap_or_default(),
+            additional_instance_tags: Vec::new(),
         })
     }
 }
@@ -144,6 +151,79 @@ pub struct BuildRequest {
 pub const ACTIVE_BUILD_CONFLICT_MSG: &str =
     "A build is already in progress for this app. Please wait for it to complete.";
 
+pub fn should_use_customer_builder_path(managed_onprem: Option<&ManagedOnPremConfig>) -> bool {
+    managed_onprem
+        .and_then(|config| config.builder_instance_profile_name.as_deref())
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+}
+
+pub fn build_managed_onprem_builder_config(
+    default_config: &BuilderConfig,
+    managed_onprem: &ManagedOnPremConfig,
+    ami_id: String,
+    security_group_id: String,
+    subnet_id: String,
+    region: String,
+    instance_profile: String,
+) -> BuilderConfig {
+    BuilderConfig {
+        ami_id,
+        security_group_id,
+        subnet_id,
+        instance_profile,
+        region,
+        timeout_secs: default_config.timeout_secs,
+        eif_s3_bucket: managed_onprem.eif_bucket.clone(),
+        git_hostname: default_config.git_hostname.clone(),
+        additional_instance_tags: vec![(
+            MANAGED_ONPREM_DEPLOYMENT_TAG_KEY.to_string(),
+            managed_onprem.deployment_id.clone(),
+        )],
+    }
+}
+
+pub async fn resolve_managed_onprem_builder_config(
+    default_config: &BuilderConfig,
+    credentials: &AwsCredentials,
+    managed_onprem: &ManagedOnPremConfig,
+) -> Result<BuilderConfig> {
+    let instance_profile = managed_onprem
+        .builder_instance_profile_name
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .context("Managed on-prem credential missing builder_instance_profile_name")?
+        .to_string();
+    let subnet_id = managed_onprem
+        .subnet_ids
+        .iter()
+        .find(|value| !value.is_empty())
+        .cloned()
+        .context("Managed on-prem credential missing subnet_ids")?;
+
+    let ec2 = Ec2Client::new(credentials);
+    let security_group_id = ensure_managed_onprem_builder_security_group(
+        &ec2,
+        &managed_onprem.deployment_id,
+        &managed_onprem.vpc_id,
+    )
+    .await?;
+    let ami_id = ec2
+        .latest_amazon_linux_2023_ami_id()
+        .await
+        .context("Failed to resolve Amazon Linux 2023 AMI for managed on-prem builder")?;
+
+    Ok(build_managed_onprem_builder_config(
+        default_config,
+        managed_onprem,
+        ami_id,
+        security_group_id,
+        subnet_id,
+        credentials.region.clone(),
+        instance_profile,
+    ))
+}
+
 /// Compute a cache key from all inputs that affect the EIF output.
 pub fn compute_cache_key(
     commit_sha: &str,
@@ -177,18 +257,34 @@ pub async fn check_build_cache(
     db: &PgPool,
     org_id: Uuid,
     cache_key: &str,
+    app_id_scope: Option<Uuid>,
 ) -> Result<Option<BuildResult>> {
-    let row = sqlx::query_as::<_, (String, String, i64, serde_json::Value)>(
-        "SELECT eif_s3_key, eif_sha256, eif_size_bytes, pcrs
-         FROM eif_builds
-         WHERE organization_id = $1 AND cache_key = $2 AND status = 'completed'
-         LIMIT 1",
-    )
-    .bind(org_id)
-    .bind(cache_key)
-    .fetch_optional(db)
-    .await
-    .context("Failed to query eif_builds cache")?;
+    let row = if let Some(app_id) = app_id_scope {
+        sqlx::query_as::<_, (String, String, i64, serde_json::Value)>(
+            "SELECT eif_s3_key, eif_sha256, eif_size_bytes, pcrs
+             FROM eif_builds
+             WHERE organization_id = $1 AND app_id = $2 AND cache_key = $3 AND status = 'completed'
+             LIMIT 1",
+        )
+        .bind(org_id)
+        .bind(app_id)
+        .bind(cache_key)
+        .fetch_optional(db)
+        .await
+        .context("Failed to query resource-scoped eif_builds cache")?
+    } else {
+        sqlx::query_as::<_, (String, String, i64, serde_json::Value)>(
+            "SELECT eif_s3_key, eif_sha256, eif_size_bytes, pcrs
+             FROM eif_builds
+             WHERE organization_id = $1 AND cache_key = $2 AND status = 'completed'
+             LIMIT 1",
+        )
+        .bind(org_id)
+        .bind(cache_key)
+        .fetch_optional(db)
+        .await
+        .context("Failed to query eif_builds cache")?
+    };
 
     Ok(row.map(
         |(eif_s3_key, eif_sha256, eif_size_bytes, pcrs)| BuildResult {
@@ -300,6 +396,35 @@ async fn upload_remote_builder_helper(
     Ok(s3_key)
 }
 
+async fn ensure_managed_onprem_builder_security_group(
+    ec2: &Ec2Client,
+    deployment_id: &str,
+    vpc_id: &str,
+) -> Result<String> {
+    let group_name = format!("caution-builder-{}", deployment_id);
+    if let Some(group_id) = ec2.find_security_group_id(vpc_id, &group_name).await? {
+        return Ok(group_id);
+    }
+
+    ec2.create_security_group(
+        &group_name,
+        &format!(
+            "Security group for Caution builder deployment {}",
+            deployment_id
+        ),
+        vpc_id,
+        &[
+            ("Name".to_string(), group_name.clone()),
+            ("ManagedBy".to_string(), "caution-builder".to_string()),
+            (
+                MANAGED_ONPREM_DEPLOYMENT_TAG_KEY.to_string(),
+                deployment_id.to_string(),
+            ),
+        ],
+    )
+    .await
+}
+
 /// Execute a build on a dedicated EC2 instance.
 ///
 /// 1. Insert a pending build row
@@ -362,6 +487,16 @@ pub async fn execute_remote_build(
         &helper_s3_key,
         framework_commit,
     )?;
+    let mut instance_tags = vec![
+        (
+            "Name".to_string(),
+            format!("caution-builder-{}", &build_id.to_string()[..8]),
+        ),
+        ("org_id".to_string(), request.org_id.to_string()),
+        ("ManagedBy".to_string(), "caution-builder".to_string()),
+        ("BuildId".to_string(), build_id.to_string()),
+    ];
+    instance_tags.extend(config.additional_instance_tags.clone());
     let instance_id = match ec2
         .run_instances(&RunInstancesParams {
             image_id: config.ami_id.clone(),
@@ -370,15 +505,7 @@ pub async fn execute_remote_build(
             iam_instance_profile: config.instance_profile.clone(),
             security_group_ids: vec![config.security_group_id.clone()],
             subnet_id: config.subnet_id.clone(),
-            tags: vec![
-                (
-                    "Name".to_string(),
-                    format!("caution-builder-{}", &build_id.to_string()[..8]),
-                ),
-                ("org_id".to_string(), request.org_id.to_string()),
-                ("ManagedBy".to_string(), "caution-builder".to_string()),
-                ("BuildId".to_string(), build_id.to_string()),
-            ],
+            tags: instance_tags,
         })
         .await
     {
@@ -414,7 +541,7 @@ pub async fn execute_remote_build(
     .bind(request.org_id)
     .bind(request.app_id)
     .bind(instance_type)
-    .bind(std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()))
+    .bind(&config.region)
     .bind(serde_json::json!({"build_id": build_id.to_string(), "resource_type": "builder"}))
     .execute(db)
     .await {
@@ -1074,6 +1201,75 @@ mod tests {
         assert_eq!(config.max_resources_per_org, 5);
     }
 
+    #[test]
+    fn test_should_use_customer_builder_path_requires_builder_profile() {
+        let mut config = ManagedOnPremConfig {
+            deployment_id: "dep-123".to_string(),
+            asg_name: "asg-123".to_string(),
+            launch_template_name: "lt-name".to_string(),
+            launch_template_id: "lt-123".to_string(),
+            vpc_id: "vpc-123".to_string(),
+            subnet_ids: vec!["subnet-123".to_string()],
+            eif_bucket: "customer-bucket".to_string(),
+            instance_profile_name: "runtime-profile".to_string(),
+            builder_instance_profile_name: None,
+        };
+        assert!(!should_use_customer_builder_path(Some(&config)));
+
+        config.builder_instance_profile_name = Some("builder-profile".to_string());
+        assert!(should_use_customer_builder_path(Some(&config)));
+    }
+
+    #[test]
+    fn test_build_managed_onprem_builder_config_uses_customer_settings() {
+        let default_config = BuilderConfig {
+            ami_id: "ami-platform".to_string(),
+            security_group_id: "sg-platform".to_string(),
+            subnet_id: "subnet-platform".to_string(),
+            instance_profile: "profile-platform".to_string(),
+            region: "us-west-2".to_string(),
+            timeout_secs: 1200,
+            eif_s3_bucket: "platform-bucket".to_string(),
+            git_hostname: "git.example.com".to_string(),
+            additional_instance_tags: Vec::new(),
+        };
+        let managed_onprem = ManagedOnPremConfig {
+            deployment_id: "dep-123".to_string(),
+            asg_name: "asg-123".to_string(),
+            launch_template_name: "lt-name".to_string(),
+            launch_template_id: "lt-123".to_string(),
+            vpc_id: "vpc-123".to_string(),
+            subnet_ids: vec!["subnet-123".to_string()],
+            eif_bucket: "customer-bucket".to_string(),
+            instance_profile_name: "runtime-profile".to_string(),
+            builder_instance_profile_name: Some("builder-profile".to_string()),
+        };
+
+        let resolved = build_managed_onprem_builder_config(
+            &default_config,
+            &managed_onprem,
+            "ami-customer".to_string(),
+            "sg-customer".to_string(),
+            "subnet-customer".to_string(),
+            "us-east-1".to_string(),
+            "builder-profile".to_string(),
+        );
+
+        assert_eq!(resolved.ami_id, "ami-customer");
+        assert_eq!(resolved.security_group_id, "sg-customer");
+        assert_eq!(resolved.subnet_id, "subnet-customer");
+        assert_eq!(resolved.instance_profile, "builder-profile");
+        assert_eq!(resolved.region, "us-east-1");
+        assert_eq!(resolved.eif_s3_bucket, "customer-bucket");
+        assert_eq!(
+            resolved.additional_instance_tags,
+            vec![(
+                MANAGED_ONPREM_DEPLOYMENT_TAG_KEY.to_string(),
+                "dep-123".to_string(),
+            )]
+        );
+    }
+
     // --- generate_builder_userdata ---
 
     #[test]
@@ -1083,9 +1279,11 @@ mod tests {
             security_group_id: "sg-test".to_string(),
             subnet_id: "subnet-test".to_string(),
             instance_profile: "profile-test".to_string(),
+            region: "us-west-2".to_string(),
             timeout_secs: 1200,
             eif_s3_bucket: "test-bucket".to_string(),
             git_hostname: "git.example.com".to_string(),
+            additional_instance_tags: Vec::new(),
         };
 
         let request = BuildRequest {
@@ -1189,9 +1387,11 @@ mod tests {
             security_group_id: "sg-test".to_string(),
             subnet_id: "subnet-test".to_string(),
             instance_profile: "profile-test".to_string(),
+            region: "us-west-2".to_string(),
             timeout_secs: 1200,
             eif_s3_bucket: "test-bucket".to_string(),
             git_hostname: "git.example.com".to_string(),
+            additional_instance_tags: Vec::new(),
         };
 
         let request = BuildRequest {

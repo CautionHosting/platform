@@ -97,6 +97,18 @@ pub struct ManagedOnPremConfig {
     pub subnet_ids: Vec<String>,
     pub eif_bucket: String,
     pub instance_profile_name: String,
+    #[serde(default)]
+    pub builder_instance_profile_name: Option<String>,
+}
+
+fn managed_onprem_uses_direct_customer_bucket(
+    request: &NitroDeploymentRequest,
+    managed_onprem: &ManagedOnPremConfig,
+) -> bool {
+    request.eif_s3_key.is_some()
+        && request
+            .eif_path
+            .starts_with(&format!("s3://{}/", managed_onprem.eif_bucket))
 }
 
 pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<DeploymentResult> {
@@ -125,7 +137,13 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
             .credentials
             .as_ref()
             .context("Credentials required for managed on-prem")?;
-        let eif_s3_path = if let Some(ref s3_key) = request.eif_s3_key {
+        let eif_s3_path = if managed_onprem_uses_direct_customer_bucket(&request, managed_onprem) {
+            tracing::info!(
+                "Managed on-prem builder output already in customer bucket: {}",
+                request.eif_path
+            );
+            Ok(request.eif_path.clone())
+        } else if let Some(ref s3_key) = request.eif_s3_key {
             upload_eif_from_platform_s3_to_customer_bucket(
                 s3_key,
                 &request.resource_id,
@@ -254,6 +272,71 @@ async fn scale_down_asg(asg_name: &str, credentials: &AwsCredentials) -> Result<
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn managed_onprem_config() -> ManagedOnPremConfig {
+        ManagedOnPremConfig {
+            deployment_id: "dep-123".to_string(),
+            asg_name: "asg-123".to_string(),
+            launch_template_name: "lt-name".to_string(),
+            launch_template_id: "lt-123".to_string(),
+            vpc_id: "vpc-123".to_string(),
+            subnet_ids: vec!["subnet-123".to_string()],
+            eif_bucket: "customer-bucket".to_string(),
+            instance_profile_name: "runtime-profile".to_string(),
+            builder_instance_profile_name: Some("builder-profile".to_string()),
+        }
+    }
+
+    fn deployment_request(eif_path: &str, eif_s3_key: Option<&str>) -> NitroDeploymentRequest {
+        NitroDeploymentRequest {
+            org_id: Uuid::nil(),
+            resource_id: Uuid::nil(),
+            resource_name: "app".to_string(),
+            aws_account_id: "123456789012".to_string(),
+            role_arn: None,
+            eif_path: eif_path.to_string(),
+            eif_s3_key: eif_s3_key.map(|key| key.to_string()),
+            memory_mb: 512,
+            cpu_count: 2,
+            disk_gb: 30,
+            debug_mode: false,
+            ports: vec![],
+            http_port: None,
+            ssh_keys: vec![],
+            domain: None,
+            credentials: None,
+            managed_onprem: Some(managed_onprem_config()),
+        }
+    }
+
+    #[test]
+    fn test_managed_onprem_uses_direct_customer_bucket_for_builder_output() {
+        let request = deployment_request(
+            "s3://customer-bucket/eifs/org/key.eif",
+            Some("eifs/org/key.eif"),
+        );
+        assert!(managed_onprem_uses_direct_customer_bucket(
+            &request,
+            request.managed_onprem.as_ref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_managed_onprem_does_not_use_direct_customer_bucket_for_platform_path() {
+        let request = deployment_request(
+            "s3://platform-bucket/eifs/org/key.eif",
+            Some("eifs/org/key.eif"),
+        );
+        assert!(!managed_onprem_uses_direct_customer_bucket(
+            &request,
+            request.managed_onprem.as_ref().unwrap()
+        ));
+    }
 }
 
 struct TerraformConfig {

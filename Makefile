@@ -6,7 +6,7 @@ export
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-legal test-e2e-onprem test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-legal test-e2e-onprem test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-onprem-provisioner
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -390,6 +390,9 @@ TEST_DB_NAME := caution_test
 TEST_DB_VOLUME := caution-test-postgres-data
 TEST_DB_HOST := postgres-test
 TEST_DATABASE_URL := postgresql://$(DB_USER):$(DB_PASSWORD)@$(TEST_DB_HOST):5432/$(TEST_DB_NAME)
+E2E_LOCK_FILE ?= /tmp/caution-platform-e2e.lock
+ONPREM_PROVISIONER_DIR ?= ../bring-your-own-cloud-setup
+ONPREM_PROVISIONER_IMAGE ?= codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest
 
 postgres-test: network
 	@docker rm -f $(TEST_DB_HOST) 2>/dev/null || true
@@ -538,6 +541,16 @@ down-test:
 	@docker volume rm $(TEST_DB_VOLUME) 2>/dev/null || true
 	@echo "Test services and data removed"
 
+prepare-onprem-provisioner:
+	@if [ -d "$(ONPREM_PROVISIONER_DIR)" ]; then \
+		echo "Building local managed on-prem provisioner from $(ONPREM_PROVISIONER_DIR)..."; \
+		$(MAKE) -C "$(ONPREM_PROVISIONER_DIR)" build; \
+		docker tag caution-managed-on-prem-aws-provisioner:latest "$(ONPREM_PROVISIONER_IMAGE)"; \
+		echo "Tagged local provisioner image as $(ONPREM_PROVISIONER_IMAGE)"; \
+	else \
+		echo "Local managed on-prem provisioner repo not found at $(ONPREM_PROVISIONER_DIR); using published image."; \
+	fi
+
 test-unit:
 	cargo test --workspace
 
@@ -566,13 +579,25 @@ test-e2e-legal:
 	exit $$status
 
 test-e2e-onprem:
-	@$(MAKE) build-cli
-	@$(MAKE) up-test
-	@echo "Running managed on-prem e2e tests..."
-	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_managed_on_prem.sh; \
-	status=$$?; \
-	$(MAKE) down-test; \
-	exit $$status
+	@flock "$(E2E_LOCK_FILE)" /bin/bash -lc '\
+		set -e; \
+		status=0; \
+		trap '"'"'$(MAKE) down-test'"'"' EXIT; \
+		if [ "$${ONPREM_LOCAL_PROVISIONER:-0}" = "1" ]; then \
+			$(MAKE) prepare-onprem-provisioner; \
+		fi; \
+		$(MAKE) build-cli; \
+		$(MAKE) up-test; \
+		echo "Running managed on-prem e2e tests..."; \
+		if [ "$${ONPREM_LOCAL_PROVISIONER:-0}" = "1" ]; then \
+			echo "Using local managed-on-prem provisioner image..."; \
+		else \
+			echo "Using published managed-on-prem provisioner image ($(ONPREM_PROVISIONER_IMAGE))..."; \
+			export ONPREM_LOCAL_PROVISIONER=0; \
+		fi; \
+		export CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)"; \
+		bash tests/e2e/test_managed_on_prem.sh || status=$$?; \
+		exit $$status'
 
 test-e2e-billing:
 	@$(MAKE) up-test-billing
