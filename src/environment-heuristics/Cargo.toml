@@ -1,0 +1,8 @@
+[package]
+name = "caution-environment-heuristics"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+which = "8.0.2"

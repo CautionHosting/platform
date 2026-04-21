@@ -1367,6 +1367,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "caution-environment-heuristics"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "which",
+]
+
+[[package]]
 name = "cbc"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1532,6 +1540,7 @@ dependencies = [
  "authenticator",
  "base64 0.22.1",
  "bootproof-sdk",
+ "caution-environment-heuristics",
  "chrono",
  "clap",
  "coset 0.3.8",
@@ -7201,6 +7210,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22cfaf3c063993ff62e73cb4311efde4db1efb31ab78a3e5c457939ad5cc0bed"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "which"
+version = "8.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81995fafaaaf6ae47a7d0cc83c67caf92aeb7e5331650ae6ff856f7c0c60c459"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
