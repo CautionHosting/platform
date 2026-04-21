@@ -272,6 +272,12 @@ enum Commands {
         managed_on_prem: bool,
         #[arg(long, help = "Cloud platform (default: aws)", default_value = "aws")]
         platform: String,
+        #[arg(
+            long,
+            requires = "managed_on_prem",
+            help = "Use local provisioner image (skip docker pull)"
+        )]
+        local: bool,
         #[arg(short, long, help = "Skip confirmation prompt")]
         force: bool,
     },
@@ -2888,6 +2894,12 @@ build: docker build -t app .
                 }
             }
 
+            if let Some(value) = config_json.get("builder_instance_profile_name") {
+                if !value.is_string() {
+                    bail!("Config field builder_instance_profile_name must be a string");
+                }
+            }
+
             log_verbose(self.verbose, "Config file validated");
             serde_json::to_string(&config_json)?
         };
@@ -3393,7 +3405,7 @@ build: docker build -t app .
     }
 
     /// Tear down managed on-prem deployment
-    async fn teardown_managed_on_prem(&self, force: bool) -> Result<()> {
+    async fn teardown_managed_on_prem(&self, force: bool, local: bool) -> Result<()> {
         use std::io::{self, Write};
 
         println!("\n╔══════════════════════════════════════════════════════════════════╗");
@@ -3514,13 +3526,14 @@ build: docker build -t app .
         println!("\nDestroying AWS infrastructure...");
         let mut loader = Loader::new("Running teardown", LoaderStyle::Processing);
 
-        // Pull the image first (in case it's not cached)
-        let _ = Command::new("docker")
-            .args(&[
-                "pull",
-                "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest",
-            ])
-            .output();
+        let provisioner_image = "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest";
+        if local {
+            println!("Using local provisioner image (--local)...");
+        } else {
+            let _ = Command::new("docker")
+                .args(&["pull", provisioner_image])
+                .output();
+        }
 
         let mut teardown_args = vec![
             "run".to_string(),
@@ -3543,9 +3556,7 @@ build: docker build -t app .
             teardown_args.push(format!("AWS_SESSION_TOKEN={}", token));
         }
 
-        teardown_args.push(
-            "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest".to_string(),
-        );
+        teardown_args.push(provisioner_image.to_string());
 
         let output = Command::new("docker")
             .args(&teardown_args)
@@ -5900,6 +5911,7 @@ pub async fn run() -> Result<()> {
         Commands::Teardown {
             managed_on_prem,
             platform,
+            local,
             force,
         } => {
             if managed_on_prem {
@@ -5908,7 +5920,7 @@ pub async fn run() -> Result<()> {
                         "Only --platform aws is currently supported for managed on-prem deployments"
                     );
                 }
-                client.teardown_managed_on_prem(force).await?;
+                client.teardown_managed_on_prem(force, local).await?;
             } else {
                 bail!("Please specify --managed-on-prem to tear down managed infrastructure");
             }

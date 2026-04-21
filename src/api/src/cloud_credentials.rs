@@ -60,6 +60,7 @@ pub struct CreateCredentialRequest {
     pub subnet_ids: Option<Vec<String>>,
     pub eif_bucket: Option<String>,
     pub instance_profile_name: Option<String>,
+    pub builder_instance_profile_name: Option<String>,
     pub iam_user: Option<String>,
     pub aws_access_key_id: Option<String>,
     pub aws_secret_access_key: Option<String>,
@@ -85,6 +86,10 @@ impl std::fmt::Debug for CreateCredentialRequest {
             .field("subnet_ids", &self.subnet_ids)
             .field("eif_bucket", &self.eif_bucket)
             .field("instance_profile_name", &self.instance_profile_name)
+            .field(
+                "builder_instance_profile_name",
+                &self.builder_instance_profile_name,
+            )
             .field("iam_user", &self.iam_user)
             .field("aws_access_key_id", &"[REDACTED]")
             .field("aws_secret_access_key", &"[REDACTED]")
@@ -188,6 +193,7 @@ impl CreateCredentialRequest {
                 "subnet_ids": self.subnet_ids,
                 "eif_bucket": self.eif_bucket,
                 "instance_profile_name": self.instance_profile_name,
+                "builder_instance_profile_name": self.builder_instance_profile_name,
                 "iam_user": self.iam_user,
                 "aws_region": self.aws_region,
                 "aws_account_id": self.aws_account_id,
@@ -515,6 +521,7 @@ pub struct ManagedOnPremCredentialData {
     pub subnet_ids: Vec<String>,
     pub eif_bucket: String,
     pub instance_profile_name: String,
+    pub builder_instance_profile_name: Option<String>,
     pub aws_access_key_id: String,
     pub aws_secret_access_key: String,
     pub aws_region: String,
@@ -531,10 +538,61 @@ impl std::fmt::Debug for ManagedOnPremCredentialData {
             .field("subnet_ids", &self.subnet_ids)
             .field("eif_bucket", &self.eif_bucket)
             .field("instance_profile_name", &self.instance_profile_name)
+            .field(
+                "builder_instance_profile_name",
+                &self.builder_instance_profile_name,
+            )
             .field("aws_access_key_id", &"[REDACTED]")
             .field("aws_secret_access_key", &"[REDACTED]")
             .field("aws_region", &self.aws_region)
             .finish()
+    }
+}
+
+fn managed_onprem_credential_data(
+    cred: &CloudCredential,
+    secrets: &serde_json::Value,
+) -> ManagedOnPremCredentialData {
+    ManagedOnPremCredentialData {
+        deployment_id: cred.config["deployment_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        asg_name: cred.config["asg_name"].as_str().unwrap_or("").to_string(),
+        launch_template_name: cred.config["launch_template_name"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        launch_template_id: cred.config["launch_template_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        vpc_id: cred.config["vpc_id"].as_str().unwrap_or("").to_string(),
+        subnet_ids: cred.config["subnet_ids"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        eif_bucket: cred.config["eif_bucket"].as_str().unwrap_or("").to_string(),
+        instance_profile_name: cred.config["instance_profile_name"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        builder_instance_profile_name: cred.config["builder_instance_profile_name"]
+            .as_str()
+            .map(|value| value.to_string()),
+        aws_access_key_id: secrets["aws_access_key_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        aws_secret_access_key: secrets["aws_secret_access_key"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        aws_region: cred.config["aws_region"].as_str().unwrap_or("").to_string(),
     }
 }
 
@@ -564,46 +622,7 @@ pub async fn get_managed_onprem_credential(
             "Failed to get secrets".to_string(),
         ))?;
 
-    let data = ManagedOnPremCredentialData {
-        deployment_id: cred.config["deployment_id"]
-            .as_str()
-            .unwrap_or("")
-            .to_string(),
-        asg_name: cred.config["asg_name"].as_str().unwrap_or("").to_string(),
-        launch_template_name: cred.config["launch_template_name"]
-            .as_str()
-            .unwrap_or("")
-            .to_string(),
-        launch_template_id: cred.config["launch_template_id"]
-            .as_str()
-            .unwrap_or("")
-            .to_string(),
-        vpc_id: cred.config["vpc_id"].as_str().unwrap_or("").to_string(),
-        subnet_ids: cred.config["subnet_ids"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        eif_bucket: cred.config["eif_bucket"].as_str().unwrap_or("").to_string(),
-        instance_profile_name: cred.config["instance_profile_name"]
-            .as_str()
-            .unwrap_or("")
-            .to_string(),
-        aws_access_key_id: secrets["aws_access_key_id"]
-            .as_str()
-            .unwrap_or("")
-            .to_string(),
-        aws_secret_access_key: secrets["aws_secret_access_key"]
-            .as_str()
-            .unwrap_or("")
-            .to_string(),
-        aws_region: cred.config["aws_region"].as_str().unwrap_or("").to_string(),
-    };
-
-    Ok(Some(data))
+    Ok(Some(managed_onprem_credential_data(&cred, &secrets)))
 }
 
 pub async fn list_managed_onprem_credentials(
@@ -684,4 +703,57 @@ pub async fn get_credential_by_identifier(
     })?;
 
     Ok(row)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn managed_onprem_request() -> CreateCredentialRequest {
+        CreateCredentialRequest {
+            platform: CloudPlatform::Aws,
+            resource_id: None,
+            managed_on_prem: true,
+            is_default: false,
+            access_key_id: None,
+            secret_access_key: None,
+            deployment_id: Some("dep-123".to_string()),
+            asg_name: Some("caution-asg".to_string()),
+            launch_template_name: Some("caution-lt".to_string()),
+            launch_template_id: Some("lt-123".to_string()),
+            vpc_id: Some("vpc-123".to_string()),
+            subnet_ids: Some(vec!["subnet-a".to_string(), "subnet-b".to_string()]),
+            eif_bucket: Some("customer-bucket".to_string()),
+            instance_profile_name: Some("caution-ec2-profile-dep-123".to_string()),
+            builder_instance_profile_name: None,
+            iam_user: Some("caution-provisioner-dep-123".to_string()),
+            aws_access_key_id: Some("AKIA_TEST".to_string()),
+            aws_secret_access_key: Some("secret".to_string()),
+            aws_region: Some("us-east-1".to_string()),
+            aws_account_id: Some("123456789012".to_string()),
+            scope_tag: Some("caution:deployment-id=dep-123".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_managed_onprem_validation_allows_missing_builder_instance_profile() {
+        let req = managed_onprem_request();
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn test_managed_onprem_config_preserves_builder_instance_profile() {
+        let mut req = managed_onprem_request();
+        req.builder_instance_profile_name = Some("caution-builder-profile-dep-123".to_string());
+
+        let config = req.config();
+        assert_eq!(
+            config["builder_instance_profile_name"].as_str(),
+            Some("caution-builder-profile-dep-123")
+        );
+        assert_eq!(
+            config["instance_profile_name"].as_str(),
+            Some("caution-ec2-profile-dep-123")
+        );
+    }
 }

@@ -38,6 +38,11 @@ pub struct Instance {
     pub instance_id: String,
 }
 
+pub struct Image {
+    pub image_id: String,
+    pub creation_date: String,
+}
+
 impl Filter {
     pub fn new(name: &str, values: &[&str]) -> Self {
         Self {
@@ -171,6 +176,88 @@ impl Ec2Client {
             .next()
             .map(|i| i.instance_id)
             .ok_or_else(|| anyhow::anyhow!("RunInstances response did not contain an instance ID"))
+    }
+
+    pub async fn latest_amazon_linux_2023_ami_id(&self) -> Result<String> {
+        let params = vec![
+            ("Action".to_string(), "DescribeImages".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+            ("Owner.1".to_string(), "amazon".to_string()),
+            ("Filter.1.Name".to_string(), "name".to_string()),
+            (
+                "Filter.1.Value.1".to_string(),
+                "al2023-ami-*-x86_64".to_string(),
+            ),
+            (
+                "Filter.2.Name".to_string(),
+                "virtualization-type".to_string(),
+            ),
+            ("Filter.2.Value.1".to_string(), "hvm".to_string()),
+            ("Filter.3.Name".to_string(), "root-device-type".to_string()),
+            ("Filter.3.Value.1".to_string(), "ebs".to_string()),
+        ];
+
+        let body = self.signed_request(&params).await?;
+        let mut images = parse_images(&body);
+        images.sort_by(|left, right| left.creation_date.cmp(&right.creation_date));
+        images
+            .pop()
+            .map(|image| image.image_id)
+            .ok_or_else(|| anyhow::anyhow!("No Amazon Linux 2023 AMI returned by DescribeImages"))
+    }
+
+    pub async fn find_security_group_id(
+        &self,
+        vpc_id: &str,
+        group_name: &str,
+    ) -> Result<Option<String>> {
+        let params = vec![
+            ("Action".to_string(), "DescribeSecurityGroups".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+            ("Filter.1.Name".to_string(), "vpc-id".to_string()),
+            ("Filter.1.Value.1".to_string(), vpc_id.to_string()),
+            ("Filter.2.Name".to_string(), "group-name".to_string()),
+            ("Filter.2.Value.1".to_string(), group_name.to_string()),
+        ];
+
+        let body = self.signed_request(&params).await?;
+        Ok(parse_first_tag_value(&body, "groupId"))
+    }
+
+    pub async fn create_security_group(
+        &self,
+        group_name: &str,
+        description: &str,
+        vpc_id: &str,
+        tags: &[(String, String)],
+    ) -> Result<String> {
+        let mut params = vec![
+            ("Action".to_string(), "CreateSecurityGroup".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+            ("GroupName".to_string(), group_name.to_string()),
+            ("GroupDescription".to_string(), description.to_string()),
+            ("VpcId".to_string(), vpc_id.to_string()),
+        ];
+
+        if !tags.is_empty() {
+            params.push((
+                "TagSpecification.1.ResourceType".to_string(),
+                "security-group".to_string(),
+            ));
+            for (index, (key, value)) in tags.iter().enumerate() {
+                let idx = index + 1;
+                params.push((format!("TagSpecification.1.Tag.{}.Key", idx), key.clone()));
+                params.push((
+                    format!("TagSpecification.1.Tag.{}.Value", idx),
+                    value.clone(),
+                ));
+            }
+        }
+
+        let body = self.signed_request(&params).await?;
+        parse_first_tag_value(&body, "groupId").ok_or_else(|| {
+            anyhow::anyhow!("CreateSecurityGroup response did not contain a groupId")
+        })
     }
 
     pub async fn terminate_instances(&self, instance_ids: &[String]) -> Result<()> {
@@ -402,6 +489,43 @@ fn parse_instance_ids(xml: &str) -> Vec<Instance> {
     instances
 }
 
+fn parse_first_tag_value(xml: &str, tag_name: &str) -> Option<String> {
+    parse_tag_values(xml, tag_name).into_iter().next()
+}
+
+fn parse_tag_values(xml: &str, tag_name: &str) -> Vec<String> {
+    let tag = format!("<{}>", tag_name);
+    let end_tag = format!("</{}>", tag_name);
+    let mut values = Vec::new();
+    let mut pos = 0;
+
+    while let Some(start) = xml[pos..].find(&tag) {
+        let start = pos + start + tag.len();
+        if let Some(end) = xml[start..].find(&end_tag) {
+            values.push(xml[start..start + end].to_string());
+            pos = start + end + end_tag.len();
+        } else {
+            break;
+        }
+    }
+
+    values
+}
+
+fn parse_images(xml: &str) -> Vec<Image> {
+    let image_ids = parse_tag_values(xml, "imageId");
+    let creation_dates = parse_tag_values(xml, "creationDate");
+
+    image_ids
+        .into_iter()
+        .zip(creation_dates)
+        .map(|(image_id, creation_date)| Image {
+            image_id,
+            creation_date,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,6 +570,46 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_first_tag_value() {
+        let xml = r#"
+        <DescribeSecurityGroupsResponse>
+          <securityGroupInfo>
+            <item>
+              <groupId>sg-1234567890abcdef0</groupId>
+              <groupName>default</groupName>
+            </item>
+          </securityGroupInfo>
+        </DescribeSecurityGroupsResponse>"#;
+
+        assert_eq!(
+            parse_first_tag_value(xml, "groupId").as_deref(),
+            Some("sg-1234567890abcdef0")
+        );
+    }
+
+    #[test]
+    fn test_parse_images() {
+        let xml = r#"
+        <DescribeImagesResponse>
+          <imagesSet>
+            <item>
+              <imageId>ami-old</imageId>
+              <creationDate>2025-01-01T00:00:00.000Z</creationDate>
+            </item>
+            <item>
+              <imageId>ami-new</imageId>
+              <creationDate>2025-02-01T00:00:00.000Z</creationDate>
+            </item>
+          </imagesSet>
+        </DescribeImagesResponse>"#;
+
+        let images = parse_images(xml);
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].image_id, "ami-old");
+        assert_eq!(images[1].creation_date, "2025-02-01T00:00:00.000Z");
+    }
+
+    #[test]
     fn test_url_encode() {
         assert_eq!(
             url_encode("tag:aws:autoscaling:groupName"),
@@ -463,6 +627,29 @@ mod tests {
         assert_eq!(
             encode_form(&params),
             "Action=DescribeInstances&Version=2016-11-15"
+        );
+    }
+
+    #[test]
+    fn test_create_security_group_uses_group_description_param() {
+        let params = vec![
+            ("Action".to_string(), "CreateSecurityGroup".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+            ("GroupName".to_string(), "caution-builder-dep-123".to_string()),
+            (
+                "GroupDescription".to_string(),
+                "Security group for Caution builder deployment dep-123".to_string(),
+            ),
+            ("VpcId".to_string(), "vpc-123".to_string()),
+        ];
+
+        let encoded = encode_form(&params);
+        assert!(encoded.contains("Action=CreateSecurityGroup"));
+        assert!(encoded.contains("GroupDescription=Security%20group%20for%20Caution%20builder%20deployment%20dep-123"));
+        assert!(
+            encoded
+                .split('&')
+                .all(|param| !param.starts_with("Description="))
         );
     }
 

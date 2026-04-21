@@ -19,6 +19,8 @@
 # Prerequisites:
 #   - AWS credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or ~/.aws/credentials)
 #   - Docker available (provisioner runs as container)
+#   - Managed-on-prem provisioner policy updated to allow the scoped IAM user to
+#     pass/read the deployment-scoped builder role and instance profile
 
 set -euo pipefail
 
@@ -27,6 +29,7 @@ API_URL="${API_URL:-http://127.0.0.1:8080}"
 CAUTION_BIN="${CAUTION_BIN:-caution}"
 DEMO_REPO="${DEMO_REPO:-https://codeberg.org/caution/demo-hello-world-enclave.git}"
 ONPREM_TEST_REGION="${ONPREM_TEST_REGION:-us-east-1}"
+ONPREM_LOCAL_PROVISIONER="${ONPREM_LOCAL_PROVISIONER:-0}"
 WORK_DIR=$(mktemp -d)
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/api-cli"
 SSH_KEY_PATH="$WORK_DIR/test_key"
@@ -76,6 +79,11 @@ cleanup() {
     echo ""
     echo "=== Cleanup ==="
 
+    echo ""
+    echo "--- Test container state ---"
+    docker ps -a --filter "name=gateway" --filter "name=api" --filter "name=email" --filter "name=frontend" --filter "name=postgres-test" --format "table {{.Names}}\t{{.Status}}" || true
+    echo "--- End container state ---"
+
     # Dump API container logs for debugging
     echo ""
     echo "--- API container logs (last 80 lines) ---"
@@ -83,10 +91,19 @@ cleanup() {
     echo "--- End API logs ---"
     echo ""
 
+    echo "--- Gateway container logs (last 80 lines) ---"
+    docker logs gateway 2>&1 | tail -80 || true
+    echo "--- End gateway logs ---"
+    echo ""
+
     # Teardown managed on-prem resources if we have a resource ID
     if [ -n "$RESOURCE_ID" ]; then
         echo "Running managed on-prem teardown for $RESOURCE_ID..."
-        "$CAUTION_BIN" -u "$GATEWAY_URL" teardown --managed-on-prem --force 2>/dev/null || true
+        TEARDOWN_ARGS=(-u "$GATEWAY_URL" teardown --managed-on-prem --force)
+        if [ "$ONPREM_LOCAL_PROVISIONER" = "1" ]; then
+            TEARDOWN_ARGS+=(--local)
+        fi
+        "$CAUTION_BIN" "${TEARDOWN_ARGS[@]}" 2>/dev/null || true
     elif [ -n "$PROVISIONER_DEPLOYMENT_ID" ]; then
         echo "Running provisioner teardown for deployment $PROVISIONER_DEPLOYMENT_ID..."
         docker run --rm \
@@ -270,9 +287,14 @@ step_pass "Clone demo app"
 
 STEP_NUM=5
 APP_NAME="e2e-onprem-$(date +%s)"
+INIT_ARGS=(-u "$GATEWAY_URL" init --managed-on-prem --region "$ONPREM_TEST_REGION" --name "$APP_NAME")
+if [ "$ONPREM_LOCAL_PROVISIONER" = "1" ]; then
+    INIT_ARGS+=(--local)
+    log "Using local managed-on-prem provisioner image for caution init..."
+fi
 log "Running caution init --managed-on-prem --region $ONPREM_TEST_REGION --name $APP_NAME..."
 set +e
-INIT_OUTPUT=$(echo y | "$CAUTION_BIN" -u "$GATEWAY_URL" init --managed-on-prem --region "$ONPREM_TEST_REGION" --name "$APP_NAME" 2>&1)
+INIT_OUTPUT=$(echo y | "$CAUTION_BIN" "${INIT_ARGS[@]}" 2>&1)
 INIT_STATUS=$?
 set -e
 PROVISIONER_DEPLOYMENT_ID=$(echo "$INIT_OUTPUT" | grep -oE 'Deployment ID: [a-f0-9]+' | tail -1 | awk '{print $3}')
@@ -340,7 +362,30 @@ done
 if [ $ELAPSED -ge $MAX_WAIT ]; then
     step_fail "Deployment (timed out after ${MAX_WAIT}s)"
 fi
-step_pass "Deployment (app running)"
+
+ONPREM_EIF_BUCKET=$(docker exec postgres-test psql -U postgres -d caution_test -t -A -c "
+SELECT config->>'eif_bucket' FROM cloud_credentials WHERE resource_id = '$RESOURCE_ID' LIMIT 1;
+" 2>/dev/null | head -1 | tr -d ' \n')
+ONPREM_BUILDER_PROFILE=$(docker exec postgres-test psql -U postgres -d caution_test -t -A -c "
+SELECT config->>'builder_instance_profile_name' FROM cloud_credentials WHERE resource_id = '$RESOURCE_ID' LIMIT 1;
+" 2>/dev/null | head -1 | tr -d ' \n')
+
+if [ -z "$ONPREM_EIF_BUCKET" ] || [ -z "$ONPREM_BUILDER_PROFILE" ]; then
+    step_fail "Deployment metadata (missing managed on-prem bucket/profile)"
+fi
+
+API_LOGS=$(docker logs api 2>&1 || true)
+if ! echo "$API_LOGS" | grep -F "Using managed on-prem builder target: bucket=$ONPREM_EIF_BUCKET" >/dev/null; then
+    step_fail "Deployment logs (missing managed on-prem builder bucket log)"
+fi
+if ! echo "$API_LOGS" | grep -F "instance_profile=$ONPREM_BUILDER_PROFILE" >/dev/null; then
+    step_fail "Deployment logs (missing managed on-prem builder profile log)"
+fi
+if ! echo "$API_LOGS" | grep -F "Managed on-prem builder output already in customer bucket: s3://$ONPREM_EIF_BUCKET/" >/dev/null; then
+    step_fail "Deployment logs (missing direct customer-bucket EIF log)"
+fi
+
+step_pass "Deployment (app running with customer-bucket builder path)"
 
 # ── Step 8: caution verify ───────────────────────────────────────────
 
@@ -375,8 +420,13 @@ fi
 
 STEP_NUM=9
 log "Running managed on-prem teardown..."
+TEARDOWN_ARGS=(-u "$GATEWAY_URL" teardown --managed-on-prem --force)
+if [ "$ONPREM_LOCAL_PROVISIONER" = "1" ]; then
+    TEARDOWN_ARGS+=(--local)
+    log "Using local managed-on-prem provisioner image for caution teardown..."
+fi
 set +e
-TEARDOWN_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" teardown --managed-on-prem --force 2>&1)
+TEARDOWN_OUTPUT=$("$CAUTION_BIN" "${TEARDOWN_ARGS[@]}" 2>&1)
 TEARDOWN_STATUS=$?
 set -e
 
