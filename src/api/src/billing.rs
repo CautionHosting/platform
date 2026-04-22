@@ -70,6 +70,7 @@ pub(crate) struct CreditPackage {
 
 const PADDLE_CHECKOUT_BINDING_CONTEXT: &str = "paddle_setup_checkout_v1";
 const PADDLE_CHECKOUT_BINDING_MAX_AGE_SECS: i64 = 3600;
+const MIN_CUSTOM_CREDIT_PURCHASE_CENTS: i64 = 10_00;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -1086,7 +1087,10 @@ pub async fn get_credit_packages(
         })
         .collect();
 
-    Ok(Json(serde_json::json!({ "packages": packages })))
+    Ok(Json(serde_json::json!({
+        "packages": packages,
+        "minimum_custom_purchase_cents": MIN_CUSTOM_CREDIT_PURCHASE_CENTS,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -1094,7 +1098,87 @@ pub struct PurchaseCreditsRequest {
     /// Set by frontend after inline checkout completes (fallback flow)
     #[serde(default)]
     transaction_id: Option<String>,
-    package_index: usize,
+    #[serde(default)]
+    package_index: Option<usize>,
+    #[serde(default)]
+    amount_cents: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreditPurchaseKind {
+    Package,
+    Custom,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedCreditPurchase {
+    kind: CreditPurchaseKind,
+    purchase_cents: i64,
+    credit_cents: i64,
+    price_id: Option<String>,
+    description: String,
+}
+
+fn format_currency_amount(cents: i64) -> String {
+    format!("{:.2}", cents as f64 / 100.0)
+}
+
+fn resolve_credit_purchase_request(
+    req: &PurchaseCreditsRequest,
+    credit_packages: &[CreditPackage],
+    paddle_price_ids: &[Option<String>; 3],
+) -> Result<ResolvedCreditPurchase, (StatusCode, String)> {
+    match (req.package_index, req.amount_cents) {
+        (Some(package_index), None) => {
+            let pkg = credit_packages.get(package_index).ok_or_else(|| {
+                (StatusCode::BAD_REQUEST, "Invalid package index".to_string())
+            })?;
+
+            Ok(ResolvedCreditPurchase {
+                kind: CreditPurchaseKind::Package,
+                purchase_cents: pkg.purchase_cents,
+                credit_cents: pkg.credit_cents,
+                price_id: paddle_price_ids[package_index].clone(),
+                description: format!(
+                    "Credit purchase: ${} → ${} credits ({}% bonus)",
+                    format_currency_amount(pkg.purchase_cents),
+                    format_currency_amount(pkg.credit_cents),
+                    pkg.bonus_percent,
+                ),
+            })
+        }
+        (None, Some(amount_cents)) => {
+            if amount_cents < MIN_CUSTOM_CREDIT_PURCHASE_CENTS {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "Custom credit purchases must be at least ${}",
+                        format_currency_amount(MIN_CUSTOM_CREDIT_PURCHASE_CENTS)
+                    ),
+                ));
+            }
+
+            Ok(ResolvedCreditPurchase {
+                kind: CreditPurchaseKind::Custom,
+                purchase_cents: amount_cents,
+                credit_cents: amount_cents,
+                price_id: None,
+                description: format!(
+                    "Credit purchase: ${} → ${} credits (no bonus)",
+                    format_currency_amount(amount_cents),
+                    format_currency_amount(amount_cents),
+                ),
+            })
+        }
+        (Some(_), Some(_)) => Err((
+            StatusCode::BAD_REQUEST,
+            "Specify either package_index or amount_cents, not both".to_string(),
+        )),
+        (None, None) => Err((
+            StatusCode::BAD_REQUEST,
+            "Either package_index or amount_cents is required".to_string(),
+        )),
+    }
 }
 
 pub async fn purchase_credits(
@@ -1103,9 +1187,8 @@ pub async fn purchase_credits(
     Json(req): Json<PurchaseCreditsRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let credit_packages = build_credit_packages(&state.pricing, &state.paddle_credits_price_ids);
-    let pkg = credit_packages
-        .get(req.package_index)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid package index".to_string()))?;
+    let purchase =
+        resolve_credit_purchase_request(&req, &credit_packages, &state.paddle_credits_price_ids)?;
 
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
@@ -1173,17 +1256,32 @@ pub async fn purchase_credits(
                 .as_str()
                 .and_then(|s| s.parse::<i64>().ok())
                 .unwrap_or(0);
-            if txn_total != pkg.purchase_cents {
+            if txn_total != purchase.purchase_cents {
                 tracing::warn!(
                     "Paddle transaction {} amount {} does not match package price {}",
                     txn_id,
                     txn_total,
-                    pkg.purchase_cents
+                    purchase.purchase_cents
                 );
                 return Err((
                     StatusCode::BAD_REQUEST,
-                    "Transaction amount does not match package price".to_string(),
+                    "Transaction amount does not match the requested credit purchase".to_string(),
                 ));
+            }
+
+            if purchase.kind == CreditPurchaseKind::Package {
+                let expected_price_id = purchase.price_id.as_deref().ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "Credit package price not configured".to_string(),
+                    )
+                })?;
+                if !transaction_contains_price_id(&verify_data, expected_price_id) {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "Transaction does not match the selected credit package".to_string(),
+                    ));
+                }
             }
 
             // Verify transaction belongs to this org's Paddle customer
@@ -1309,26 +1407,44 @@ pub async fn purchase_credits(
                 )
             })?;
 
-            // Get price ID for this package
-            let price_id = state.paddle_credits_price_ids[req.package_index]
-                .as_ref()
-                .ok_or_else(|| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        "Credit package price not configured".to_string(),
-                    )
-                })?;
-
             // Create transaction via Paddle API — automatic collection charges saved payment method
             let client = reqwest::Client::new();
-            let body = serde_json::json!({
-                "customer_id": customer_id,
-                "items": [{
-                    "price_id": price_id,
-                    "quantity": 1,
-                }],
-                "collection_mode": "automatic",
-            });
+            let body = match purchase.kind {
+                CreditPurchaseKind::Package => {
+                    let price_id = purchase.price_id.as_ref().ok_or_else(|| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            "Credit package price not configured".to_string(),
+                        )
+                    })?;
+                    serde_json::json!({
+                        "customer_id": customer_id,
+                        "items": [{
+                            "price_id": price_id,
+                            "quantity": 1,
+                        }],
+                        "collection_mode": "automatic",
+                    })
+                }
+                CreditPurchaseKind::Custom => serde_json::json!({
+                    "customer_id": customer_id,
+                    "items": [{
+                        "quantity": 1,
+                        "price": {
+                            "description": format!("Caution prepaid credits ${}", format_currency_amount(purchase.purchase_cents)),
+                            "unit_price": {
+                                "amount": purchase.purchase_cents.to_string(),
+                                "currency_code": "USD",
+                            },
+                            "product": {
+                                "name": "Prepaid credits",
+                                "tax_category": "standard",
+                            }
+                        }
+                    }],
+                    "collection_mode": "automatic",
+                }),
+            };
 
             let response = client
                 .post(format!("{}/transactions", state.paddle_api_url))
@@ -1367,8 +1483,9 @@ pub async fn purchase_credits(
                 .to_string();
 
             tracing::info!(
-                "Created Paddle transaction {} for credit purchase (card on file)",
-                txn_id
+                "Created Paddle transaction {} for credit purchase (card on file, {} cents)",
+                txn_id,
+                purchase.purchase_cents
             );
             txn_id
         };
@@ -1405,20 +1522,13 @@ pub async fn purchase_credits(
         })));
     }
 
-    let description = format!(
-        "Credit purchase: ${} → ${} credits ({}% bonus)",
-        pkg.purchase_cents / 100,
-        pkg.credit_cents / 100,
-        pkg.bonus_percent,
-    );
-
     let new_balance = apply_credit(
         &state.db,
         org_id,
         auth.user_id,
-        pkg.credit_cents,
+        purchase.credit_cents,
         "purchase",
-        &description,
+        &purchase.description,
         Some(&transaction_id),
         None,
     )
@@ -1435,7 +1545,7 @@ pub async fn purchase_credits(
         org_id,
         auth.user_id,
         transaction_id,
-        pkg.credit_cents,
+        purchase.credit_cents,
         new_balance
     );
 
@@ -1779,9 +1889,11 @@ pub async fn put_auto_topup(
 mod tests {
     use super::{
         build_paddle_checkout_custom_data, extract_paddle_payment_method_id,
-        transaction_contains_price_id, validate_paddle_checkout_binding,
-        validate_paddle_setup_transaction,
+        resolve_credit_purchase_request, transaction_contains_price_id,
+        validate_paddle_checkout_binding, validate_paddle_setup_transaction,
+        CreditPackage, CreditPurchaseKind, PurchaseCreditsRequest,
     };
+    use axum::http::StatusCode;
     use uuid::Uuid;
 
     fn sample_transaction() -> serde_json::Value {
@@ -1812,6 +1924,29 @@ mod tests {
         })
     }
 
+    fn sample_credit_packages() -> Vec<CreditPackage> {
+        vec![
+            CreditPackage {
+                purchase_cents: 100_000,
+                credit_cents: 110_000,
+                bonus_percent: 10.0,
+                paddle_price_id: Some("pri_1000".to_string()),
+            },
+            CreditPackage {
+                purchase_cents: 500_000,
+                credit_cents: 575_000,
+                bonus_percent: 15.0,
+                paddle_price_id: Some("pri_5000".to_string()),
+            },
+            CreditPackage {
+                purchase_cents: 2_500_000,
+                credit_cents: 3_000_000,
+                bonus_percent: 20.0,
+                paddle_price_id: Some("pri_25000".to_string()),
+            },
+        ]
+    }
+
     #[test]
     fn extracts_payment_method_id_from_transaction() {
         let txn = sample_transaction();
@@ -1826,6 +1961,97 @@ mod tests {
         let txn = sample_transaction();
         assert!(transaction_contains_price_id(&txn, "pri_setup"));
         assert!(!transaction_contains_price_id(&txn, "pri_other"));
+    }
+
+    #[test]
+    fn resolves_preset_credit_purchase_request() {
+        let req = PurchaseCreditsRequest {
+            transaction_id: None,
+            package_index: Some(1),
+            amount_cents: None,
+        };
+
+        let resolved = resolve_credit_purchase_request(
+            &req,
+            &sample_credit_packages(),
+            &[
+                Some("pri_1000".to_string()),
+                Some("pri_5000".to_string()),
+                Some("pri_25000".to_string()),
+            ],
+        )
+        .expect("preset package should resolve");
+
+        assert_eq!(resolved.kind, CreditPurchaseKind::Package);
+        assert_eq!(resolved.purchase_cents, 500_000);
+        assert_eq!(resolved.credit_cents, 575_000);
+        assert_eq!(resolved.price_id.as_deref(), Some("pri_5000"));
+    }
+
+    #[test]
+    fn resolves_custom_credit_purchase_request_at_face_value() {
+        let req = PurchaseCreditsRequest {
+            transaction_id: None,
+            package_index: None,
+            amount_cents: Some(12_345),
+        };
+
+        let resolved = resolve_credit_purchase_request(
+            &req,
+            &sample_credit_packages(),
+            &[
+                Some("pri_1000".to_string()),
+                Some("pri_5000".to_string()),
+                Some("pri_25000".to_string()),
+            ],
+        )
+        .expect("custom amount should resolve");
+
+        assert_eq!(resolved.kind, CreditPurchaseKind::Custom);
+        assert_eq!(resolved.purchase_cents, 12_345);
+        assert_eq!(resolved.credit_cents, 12_345);
+        assert_eq!(resolved.price_id, None);
+    }
+
+    #[test]
+    fn rejects_invalid_custom_credit_purchase_request() {
+        let below_minimum_req = PurchaseCreditsRequest {
+            transaction_id: None,
+            package_index: None,
+            amount_cents: Some(999),
+        };
+
+        let below_minimum_err = resolve_credit_purchase_request(
+            &below_minimum_req,
+            &sample_credit_packages(),
+            &[
+                Some("pri_1000".to_string()),
+                Some("pri_5000".to_string()),
+                Some("pri_25000".to_string()),
+            ],
+        )
+        .expect_err("below-minimum request should be rejected");
+
+        assert_eq!(below_minimum_err.0, StatusCode::BAD_REQUEST);
+
+        let ambiguous_req = PurchaseCreditsRequest {
+            transaction_id: None,
+            package_index: Some(0),
+            amount_cents: Some(999),
+        };
+
+        let ambiguous_err = resolve_credit_purchase_request(
+            &ambiguous_req,
+            &sample_credit_packages(),
+            &[
+                Some("pri_1000".to_string()),
+                Some("pri_5000".to_string()),
+                Some("pri_25000".to_string()),
+            ],
+        )
+        .expect_err("ambiguous request should be rejected");
+
+        assert_eq!(ambiguous_err.0, StatusCode::BAD_REQUEST);
     }
 
     #[test]

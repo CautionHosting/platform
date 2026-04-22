@@ -278,6 +278,7 @@ run-metering: network postgres
 		--env-file .env \
 		-e DATABASE_URL=$(DATABASE_URL) \
 		-e METERING_INTERVAL_SECS=60 \
+		$(if $(wildcard $(PWD)/prices.json),-v $(PWD)/prices.json:/app/prices.json:ro) \
 		caution-metering
 	@echo "Metering service started (internal port 8083)"
 

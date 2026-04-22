@@ -1479,33 +1479,57 @@ make build-cli
     </div>
 
     <!-- Add Credits Modal -->
-    <div v-if="showAddCreditsModal" class="modal-overlay" @click="showAddCreditsModal = false">
+    <div v-if="showAddCreditsModal" class="modal-overlay" @click="closeCreditsModal">
       <div class="modal-content" @click.stop>
         <h3 class="modal-title">Add prepaid credits</h3>
-        <p class="modal-description">Purchase credits at a volume discount. Credits never expire and are applied automatically at billing time.</p>
+        <p class="modal-description">Choose a discounted bundle or enter a custom amount. Custom purchases are credited 1:1 with no bonus. Credits never expire and are applied automatically at billing time.</p>
 
         <div class="credit-packages">
           <button
             v-for="(pkg, index) in creditPackages"
             :key="index"
             class="credit-package-card"
-            :class="{ 'credit-package-card--selected': selectedPackage === index }"
-            @click="selectedPackage = index"
+            :class="{ 'credit-package-card--selected': selectedCreditMode === 'package' && selectedPackage === index }"
+            @click="selectCreditPackage(index)"
           >
             <span class="credit-package-pay">Pay {{ pkg.purchase_display }}</span>
             <span class="credit-package-get">Get {{ pkg.credit_display }} in credits</span>
             <span class="credit-package-bonus">{{ pkg.bonus_percent }}% bonus</span>
           </button>
+
+          <div
+            class="credit-package-card credit-package-card--custom"
+            :class="{ 'credit-package-card--selected': selectedCreditMode === 'custom' }"
+            @click="selectCustomCreditPurchase"
+          >
+            <div class="credit-package-copy">
+              <span class="credit-package-pay">Custom amount</span>
+              <span class="credit-package-get">Get {{ customCreditAmountPreview }} in credits</span>
+              <span class="credit-custom-hint">Minimum {{ minimumCustomCreditPurchaseDisplay }}. No bonus credits.</span>
+            </div>
+            <label class="credit-custom-input-row" @click.stop>
+              <span class="credit-custom-input-prefix">$</span>
+              <input
+                v-model="customCreditAmountInput"
+                class="credit-custom-input"
+                type="number"
+                min="10"
+                step="10"
+                placeholder="10.00"
+                inputmode="decimal"
+                @focus="selectCustomCreditPurchase"
+              >
+            </label>
+          </div>
         </div>
 
         <div v-if="creditPurchaseError" class="card-error">{{ creditPurchaseError }}</div>
 
         <div class="modal-actions">
           <button
-            v-if="selectedPackage !== null"
             @click="openCreditCheckout"
             class="btn-primary"
-            :disabled="purchasingCredits"
+            :disabled="purchasingCredits || !canPurchaseCredits"
           >
             {{ purchasingCredits ? 'Processing...' : 'Purchase with card on file' }}
           </button>
@@ -2389,8 +2413,11 @@ export default {
     // Credits state
     const creditBalance = ref({ balance_cents: 0, balance_display: '$0.00' });
     const creditPackages = ref([]);
+    const minimumCustomCreditPurchaseCents = ref(1000);
     const showAddCreditsModal = ref(false);
+    const selectedCreditMode = ref('package');
     const selectedPackage = ref(null);
+    const customCreditAmountInput = ref('');
     const purchasingCredits = ref(false);
     const creditPurchaseError = ref('');
     const creditCheckoutOpen = ref(false);
@@ -2915,10 +2942,66 @@ export default {
         if (response.ok) {
           const data = await response.json();
           creditPackages.value = data.packages || [];
+          minimumCustomCreditPurchaseCents.value = data.minimum_custom_purchase_cents || 1000;
         }
       } catch (err) {
         // silently fail
       }
+    };
+
+    const formatCurrencyCents = (cents) => {
+      return new Intl.NumberFormat('en-US', {
+        style: 'currency',
+        currency: 'USD',
+      }).format((cents || 0) / 100);
+    };
+
+    const parseCreditAmountInputToCents = (value) => {
+      if (value === null || value === undefined) return null;
+
+      const normalized = typeof value === 'string' ? value.trim() : value;
+      if (normalized === '') return null;
+
+      const parsed = typeof normalized === 'number'
+        ? normalized
+        : Number(normalized);
+      if (!Number.isFinite(parsed) || parsed <= 0) return null;
+      return Math.round(parsed * 100);
+    };
+
+    const customCreditAmountCents = computed(() => {
+      return parseCreditAmountInputToCents(customCreditAmountInput.value);
+    });
+
+    const customCreditAmountPreview = computed(() => {
+      const cents = customCreditAmountCents.value;
+      return formatCurrencyCents(cents ?? minimumCustomCreditPurchaseCents.value);
+    });
+
+    const minimumCustomCreditPurchaseDisplay = computed(() => {
+      return formatCurrencyCents(minimumCustomCreditPurchaseCents.value);
+    });
+
+    const canPurchaseCredits = computed(() => {
+      if (selectedCreditMode.value === 'custom') {
+        return (
+          customCreditAmountCents.value !== null &&
+          customCreditAmountCents.value >= minimumCustomCreditPurchaseCents.value
+        );
+      }
+      return selectedPackage.value !== null;
+    });
+
+    const selectCreditPackage = (index) => {
+      selectedCreditMode.value = 'package';
+      selectedPackage.value = index;
+      creditPurchaseError.value = '';
+    };
+
+    const selectCustomCreditPurchase = () => {
+      selectedCreditMode.value = 'custom';
+      selectedPackage.value = null;
+      creditPurchaseError.value = '';
     };
 
     const loadAutoTopup = async () => {
@@ -3090,15 +3173,34 @@ export default {
 
     const closeCreditsModal = () => {
       showAddCreditsModal.value = false;
+      selectedCreditMode.value = 'package';
       selectedPackage.value = null;
+      customCreditAmountInput.value = '';
       creditPurchaseError.value = '';
       creditCheckoutOpen.value = false;
     };
 
     const openCreditCheckout = async () => {
-      if (selectedPackage.value === null) return;
-
       creditPurchaseError.value = '';
+      let payload;
+      if (selectedCreditMode.value === 'custom') {
+        if (customCreditAmountCents.value === null) {
+          creditPurchaseError.value = 'Enter a custom amount to purchase credits.';
+          return;
+        }
+        if (customCreditAmountCents.value < minimumCustomCreditPurchaseCents.value) {
+          creditPurchaseError.value = `Custom credit purchases must be at least ${minimumCustomCreditPurchaseDisplay.value}.`;
+          return;
+        }
+        payload = { amount_cents: customCreditAmountCents.value };
+      } else {
+        if (selectedPackage.value === null) {
+          creditPurchaseError.value = 'Select a credit package or enter a custom amount.';
+          return;
+        }
+        payload = { package_index: selectedPackage.value };
+      }
+
       purchasingCredits.value = true;
 
       try {
@@ -3106,7 +3208,7 @@ export default {
         const response = await authFetch('/api/billing/credits/purchase', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ package_index: selectedPackage.value }),
+          body: JSON.stringify(payload),
         });
 
         if (response.ok) {
@@ -4215,17 +4317,25 @@ export default {
       setPrimaryPaymentMethod,
       creditBalance,
       creditPackages,
+      minimumCustomCreditPurchaseCents,
+      minimumCustomCreditPurchaseDisplay,
       showAddCreditsModal,
+      selectedCreditMode,
       autoTopup,
       savingAutoTopup,
       autoTopupError,
       saveAutoTopup,
       onAutoTopupToggle,
       selectedPackage,
+      customCreditAmountInput,
+      customCreditAmountPreview,
+      canPurchaseCredits,
       purchasingCredits,
       creditPurchaseError,
       loadCreditBalance,
       loadCreditPackages,
+      selectCreditPackage,
+      selectCustomCreditPurchase,
       openCreditCheckout,
       closeCreditsModal,
       redeemCode,
@@ -6570,6 +6680,15 @@ export default {
   .billing-pricing-grid {
     grid-template-columns: 1fr;
   }
+
+  .credit-package-card--custom {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .credit-custom-input-row {
+    width: 100%;
+  }
 }
 
 /* Email settings */
@@ -6897,6 +7016,52 @@ export default {
   background: #dcfce7;
   padding: 0.25rem 0.5rem;
   border-radius: 4px;
+}
+
+.credit-package-card--custom {
+  align-items: center;
+  gap: 1rem;
+}
+
+.credit-package-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.credit-custom-hint {
+  font-size: 0.8125rem;
+  color: #6b7280;
+}
+
+.credit-custom-input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 132px;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.credit-custom-input-prefix {
+  color: #4b5563;
+  font-weight: 600;
+}
+
+.credit-custom-input {
+  width: 100%;
+  border: none;
+  padding: 0;
+  font-size: 0.95rem;
+  background: transparent;
+  color: #111827;
+}
+
+.credit-custom-input:focus {
+  outline: none;
 }
 
 .modal-description {
