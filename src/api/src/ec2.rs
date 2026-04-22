@@ -635,7 +635,10 @@ mod tests {
         let params = vec![
             ("Action".to_string(), "CreateSecurityGroup".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
-            ("GroupName".to_string(), "caution-builder-dep-123".to_string()),
+            (
+                "GroupName".to_string(),
+                "caution-builder-dep-123".to_string(),
+            ),
             (
                 "GroupDescription".to_string(),
                 "Security group for Caution builder deployment dep-123".to_string(),
@@ -645,12 +648,12 @@ mod tests {
 
         let encoded = encode_form(&params);
         assert!(encoded.contains("Action=CreateSecurityGroup"));
-        assert!(encoded.contains("GroupDescription=Security%20group%20for%20Caution%20builder%20deployment%20dep-123"));
-        assert!(
-            encoded
-                .split('&')
-                .all(|param| !param.starts_with("Description="))
-        );
+        assert!(encoded.contains(
+            "GroupDescription=Security%20group%20for%20Caution%20builder%20deployment%20dep-123"
+        ));
+        assert!(encoded
+            .split('&')
+            .all(|param| !param.starts_with("Description=")));
     }
 
     // Verify stop/start param construction by testing the pattern they use

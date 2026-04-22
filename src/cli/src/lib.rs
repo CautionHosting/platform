@@ -1,9 +1,8 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use authenticator::{
-    Pin, RegisterResult, SignResult, StatusPinUv, StatusUpdate,
     authenticatorservice::{AuthenticatorService, RegisterArgs, SignArgs},
     crypto::COSEAlgorithm,
     ctap2::server::{
@@ -12,21 +11,22 @@ use authenticator::{
     },
     errors::AuthenticatorError,
     statecallback::StateCallback,
+    Pin, RegisterResult, SignResult, StatusPinUv, StatusUpdate,
 };
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use bootproof_sdk::{
-    VerifiableSignedAttestationFormat,
     format::nitro::{Nitro, NitroPcrs},
+    VerifiableSignedAttestationFormat,
 };
 use clap::{Parser, Subcommand};
-use enclave_builder::{BuildConfig, build_user_image};
+use enclave_builder::{build_user_image, BuildConfig};
 use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_cbor;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::channel;
 use std::time::Duration;
@@ -35,6 +35,14 @@ mod loader;
 use loader::{Loader, LoaderStyle};
 
 mod attestation;
+
+const BYOC_PROVISIONER_IMAGE: &str =
+    "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest";
+const BYOC_STATE_FILE_NAME: &str = "bring-your-own-cloud.json";
+
+fn byoc_state_path(base_dir: &Path) -> PathBuf {
+    base_dir.join(BYOC_STATE_FILE_NAME)
+}
 
 fn prompt_for_pin() -> Result<Option<String>> {
     let pin = rpassword::prompt_password(
@@ -236,11 +244,15 @@ enum Commands {
     Logout,
     #[command(about = "Initialize a new deployment in the current directory")]
     Init {
-        #[arg(long, help = "Set up managed on-premises deployment")]
-        managed_on_prem: bool,
+        #[arg(
+            long = "byoc",
+            alias = "bring-your-own-cloud",
+            help = "Set up a bring-your-own-cloud (BYOC) deployment"
+        )]
+        bring_your_own_cloud: bool,
         #[arg(
             long,
-            requires = "managed_on_prem",
+            requires = "bring_your_own_cloud",
             help = "Cloud platform (default: aws)",
             default_value = "aws"
         )]
@@ -249,32 +261,36 @@ enum Commands {
         name: Option<String>,
         #[arg(
             long,
-            requires = "managed_on_prem",
+            requires = "bring_your_own_cloud",
             help = "AWS region (default: us-west-2)"
         )]
         region: Option<String>,
         #[arg(
             long,
-            requires = "managed_on_prem",
+            requires = "bring_your_own_cloud",
             help = "Use local provisioner image (skip docker pull)"
         )]
         local: bool,
         #[arg(
             long,
-            requires = "managed_on_prem",
-            help = "Path to encrypted credentials file from manual Docker setup"
+            requires = "bring_your_own_cloud",
+            help = "Path to encrypted credentials file from manual BYOC setup"
         )]
         config: Option<PathBuf>,
     },
-    #[command(about = "Tear down a managed on-premises deployment")]
+    #[command(about = "Tear down a bring-your-own-cloud (BYOC) deployment")]
     Teardown {
-        #[arg(long, help = "Tear down managed on-premises infrastructure")]
-        managed_on_prem: bool,
+        #[arg(
+            long = "byoc",
+            alias = "bring-your-own-cloud",
+            help = "Tear down bring-your-own-cloud infrastructure"
+        )]
+        bring_your_own_cloud: bool,
         #[arg(long, help = "Cloud platform (default: aws)", default_value = "aws")]
         platform: String,
         #[arg(
             long,
-            requires = "managed_on_prem",
+            requires = "bring_your_own_cloud",
             help = "Use local provisioner image (skip docker pull)"
         )]
         local: bool,
@@ -319,7 +335,7 @@ enum Commands {
         #[command(subcommand)]
         command: CacheCommands,
     },
-    #[command(about = "Manage cloud provider credentials for managed on-premises deployments")]
+    #[command(about = "Manage cloud provider credentials for BYOC deployments")]
     Credentials {
         #[command(subcommand)]
         command: CredentialCommands,
@@ -1062,7 +1078,7 @@ impl ApiClient {
         Ok(())
     }
 
-    fn create_procfile_if_needed(&self, managed_on_prem: bool) -> Result<()> {
+    fn create_procfile_if_needed(&self, byoc: bool) -> Result<()> {
         use std::fs;
         use std::path::Path;
 
@@ -1078,9 +1094,9 @@ impl ApiClient {
             .map(|url| format!("app_sources: {}", url))
             .unwrap_or_else(|| "# app_sources: git@codeberg.org:user/repo.git".to_string());
 
-        let managed_on_prem_section = if managed_on_prem {
+        let byoc_section = if byoc {
             r#"
-# Managed on-premises deployment configuration
+# BYOC deployment configuration
 managed_on_prem: true
 platform: aws
 aws_region: us-east-1
@@ -1121,15 +1137,15 @@ build: docker build -t app .
 # debug: false
 # no_cache: false
 # ssh_keys: ssh-ed25519 AAAA...
-{managed_on_prem_section}"#
+{byoc_section}"#
         );
 
         fs::write(procfile_path, procfile_content).context("Failed to create Procfile")?;
 
         println!("\nCreated Procfile in current directory");
         println!("Edit the required 'run' field to match your application");
-        if managed_on_prem {
-            println!("Configure AWS deployment settings in the managed_on_prem section");
+        if byoc {
+            println!("Configure AWS deployment settings in the BYOC section");
         }
         println!("Learn more: https://docs.caution.co/reference/procfile/");
 
@@ -2660,17 +2676,16 @@ build: docker build -t app .
 
     async fn init(
         &self,
-        managed_on_prem: bool,
+        bring_your_own_cloud: bool,
         name: Option<String>,
         region: Option<String>,
         local: bool,
         config_path: Option<PathBuf>,
     ) -> Result<()> {
-        // If --managed-on-prem without --config, use the new interactive flow
-        if managed_on_prem && config_path.is_none() {
-            return self
-                .init_managed_on_prem_interactive(name, region, local)
-                .await;
+        // If --byoc without --config, use the interactive flow.
+        // Keep the longer bring-your-own-cloud spelling working via a clap alias.
+        if bring_your_own_cloud && config_path.is_none() {
+            return self.init_byoc_interactive(name, region, local).await;
         }
 
         println!("Initializing new deployment...");
@@ -2680,10 +2695,10 @@ build: docker build -t app .
         println!("Git repository found");
 
         if let Some(ref path) = config_path {
-            return self.init_managed_onprem(path).await;
+            return self.init_byoc(path).await;
         }
 
-        self.create_procfile_if_needed(managed_on_prem)?;
+        self.create_procfile_if_needed(bring_your_own_cloud)?;
 
         log_verbose(self.verbose, "Reading Procfile...");
         let cmd = self.read_procfile()?;
@@ -2813,8 +2828,8 @@ build: docker build -t app .
         Ok(())
     }
 
-    async fn init_managed_onprem(&self, config_path: &PathBuf) -> Result<()> {
-        println!("Initializing managed on-premises deployment...");
+    async fn init_byoc(&self, config_path: &PathBuf) -> Result<()> {
+        println!("Initializing bring-your-own-cloud deployment...");
 
         log_verbose(
             self.verbose,
@@ -2867,9 +2882,9 @@ build: docker build -t app .
                 );
             }
 
-            let managed_on_prem = config_json.get("managed_on_prem").and_then(|v| v.as_bool());
-            if managed_on_prem != Some(true) {
-                bail!("Config file must have managed_on_prem: true");
+            let byoc_enabled = config_json.get("managed_on_prem").and_then(|v| v.as_bool());
+            if byoc_enabled != Some(true) {
+                bail!("Config file must have managed_on_prem: true for BYOC deployments");
             }
 
             let required_fields = [
@@ -2915,9 +2930,9 @@ build: docker build -t app .
         let existing_resource_id = self.load_deployment().ok().map(|d| d.resource_id);
         let is_update = existing_resource_id.is_some();
         let loader_msg = if is_update {
-            "Updating managed on-premises resource"
+            "Updating bring-your-own-cloud resource"
         } else {
-            "Creating managed on-premises resource"
+            "Creating bring-your-own-cloud resource"
         };
         let mut loader = Loader::new(loader_msg, LoaderStyle::Processing);
 
@@ -2929,7 +2944,7 @@ build: docker build -t app .
             .body(request_body)
             .send()
             .await
-            .context("Failed to send managed on-prem request")?;
+            .context("Failed to send bring-your-own-cloud request")?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -2937,7 +2952,7 @@ build: docker build -t app .
             loader.stop();
             let action = if is_update { "update" } else { "create" };
             bail!(
-                "Failed to {} managed on-prem resource (status {}): {}",
+                "Failed to {} bring-your-own-cloud resource (status {}): {}",
                 action,
                 status,
                 error
@@ -2957,9 +2972,9 @@ build: docker build -t app .
         let state = create_response["state"].as_str().unwrap_or("unknown");
 
         if is_update {
-            println!("Managed on-premises resource updated!");
+            println!("Bring-your-own-cloud resource updated!");
         } else {
-            println!("Managed on-premises resource created!");
+            println!("Bring-your-own-cloud resource created!");
         }
         println!("ID: {}", id);
         println!("Name: {}", resource_name);
@@ -3090,8 +3105,8 @@ build: docker build -t app .
         region
     }
 
-    /// Interactive managed on-prem initialization
-    async fn init_managed_on_prem_interactive(
+    /// Interactive bring-your-own-cloud initialization
+    async fn init_byoc_interactive(
         &self,
         name: Option<String>,
         region: Option<String>,
@@ -3100,7 +3115,7 @@ build: docker build -t app .
         use std::io::{self, Write};
 
         println!("\n╔══════════════════════════════════════════════════════════════════╗");
-        println!("║          Managed On-Premises Deployment Setup (AWS)              ║");
+        println!("║          Bring-Your-Own-Cloud Deployment Setup (AWS)             ║");
         println!("╚══════════════════════════════════════════════════════════════════╝\n");
 
         // Check for Docker
@@ -3194,10 +3209,7 @@ build: docker build -t app .
         } else {
             println!("\nPulling provisioner image...");
             let pull_output = Command::new("docker")
-                .args(&[
-                    "pull",
-                    "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest",
-                ])
+                .args(&["pull", BYOC_PROVISIONER_IMAGE])
                 .output()
                 .context("Failed to pull provisioner image")?;
 
@@ -3230,9 +3242,7 @@ build: docker build -t app .
             docker_args.push(format!("AWS_SESSION_TOKEN={}", token));
         }
 
-        docker_args.push(
-            "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest".to_string(),
-        );
+        docker_args.push(BYOC_PROVISIONER_IMAGE.to_string());
 
         let output = Command::new("docker")
             .args(&docker_args)
@@ -3327,8 +3337,8 @@ build: docker build -t app .
         loader.stop();
         println!("App created: {}", app_name);
 
-        // Now register the managed on-prem credentials
-        println!("Registering managed on-prem configuration...");
+        // Now register the BYOC credentials
+        println!("Registering bring-your-own-cloud configuration...");
         let mut loader = Loader::new("Registering credentials", LoaderStyle::Processing);
 
         // Add resource_id to credentials
@@ -3343,7 +3353,7 @@ build: docker build -t app .
             .body(serde_json::to_string(&creds_with_resource)?)
             .send()
             .await
-            .context("Failed to register managed on-prem credentials")?;
+            .context("Failed to register BYOC credentials")?;
 
         if !register_response.status().is_success() {
             loader.stop();
@@ -3366,7 +3376,7 @@ build: docker build -t app .
 
         fs::create_dir_all(&caution_dir)?;
 
-        let managed_state = serde_json::json!({
+        let byoc_state = serde_json::json!({
             "deployment_id": deployment_id,
             "resource_id": resource_id,
             "app_name": app_name,
@@ -3375,8 +3385,8 @@ build: docker build -t app .
         });
 
         fs::write(
-            caution_dir.join("managed-on-prem.json"),
-            serde_json::to_string_pretty(&managed_state)?,
+            byoc_state_path(&caution_dir),
+            serde_json::to_string_pretty(&byoc_state)?,
         )?;
 
         // Also save deployment.json in current directory
@@ -3399,41 +3409,41 @@ build: docker build -t app .
         println!("  1. Create your Procfile with 'build:' and 'run:' commands");
         println!("  2. Push to deploy: git push caution main");
         println!("\nTo tear down this deployment:");
-        println!("  caution teardown --managed-on-prem");
+        println!("  caution teardown --byoc");
 
         Ok(())
     }
 
-    /// Tear down managed on-prem deployment
-    async fn teardown_managed_on_prem(&self, force: bool, local: bool) -> Result<()> {
+    /// Tear down bring-your-own-cloud deployment
+    async fn teardown_byoc(&self, force: bool, local: bool) -> Result<()> {
         use std::io::{self, Write};
 
         println!("\n╔══════════════════════════════════════════════════════════════════╗");
-        println!("║          Managed On-Premises Teardown (AWS)                      ║");
+        println!("║          Bring-Your-Own-Cloud Teardown (AWS)                     ║");
         println!("╚══════════════════════════════════════════════════════════════════╝\n");
 
         // Try to find local state
         let deployment = self.load_deployment().ok();
         let resource_id = deployment.as_ref().map(|d| d.resource_id.clone());
 
-        // Look for managed-on-prem.json in ~/.caution/*/
+        // Look for the BYOC state file in ~/.caution/*/
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
         let caution_dir = home.join(".caution");
 
-        let mut managed_state: Option<serde_json::Value> = None;
-        let mut managed_state_path: Option<PathBuf> = None;
+        let mut byoc_state: Option<serde_json::Value> = None;
+        let mut byoc_state_dir: Option<PathBuf> = None;
 
         if let Some(ref rid) = resource_id {
             // Look for state file that matches this resource_id
             if let Ok(entries) = fs::read_dir(&caution_dir) {
                 for entry in entries.flatten() {
-                    let state_path = entry.path().join("managed-on-prem.json");
+                    let state_path = byoc_state_path(&entry.path());
                     if state_path.exists() {
                         if let Ok(content) = fs::read_to_string(&state_path) {
                             if let Ok(state) = serde_json::from_str::<serde_json::Value>(&content) {
                                 if state.get("resource_id").and_then(|v| v.as_str()) == Some(rid) {
-                                    managed_state = Some(state);
-                                    managed_state_path = Some(entry.path());
+                                    byoc_state = Some(state);
+                                    byoc_state_dir = Some(entry.path());
                                     break;
                                 }
                             }
@@ -3443,7 +3453,7 @@ build: docker build -t app .
             }
         }
 
-        let (deployment_id, app_name, aws_region) = match &managed_state {
+        let (deployment_id, app_name, aws_region) = match &byoc_state {
             Some(state) => {
                 let did = state["deployment_id"]
                     .as_str()
@@ -3454,13 +3464,13 @@ build: docker build -t app .
             }
             None => {
                 bail!(
-                    "No managed on-prem state found.\n\
-                       Run this command from your app directory or ensure ~/.caution/<app>/managed-on-prem.json exists."
+                    "No bring-your-own-cloud state found.\n\
+                       Run this command from your app directory or ensure ~/.caution/<app>/bring-your-own-cloud.json exists."
                 );
             }
         };
 
-        println!("Found managed on-prem deployment:");
+        println!("Found bring-your-own-cloud deployment:");
         println!("  App: {}", app_name);
         println!("  Deployment ID: {}", deployment_id);
         println!("  Region: {}", aws_region);
@@ -3526,7 +3536,7 @@ build: docker build -t app .
         println!("\nDestroying AWS infrastructure...");
         let mut loader = Loader::new("Running teardown", LoaderStyle::Processing);
 
-        let provisioner_image = "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest";
+        let provisioner_image = BYOC_PROVISIONER_IMAGE;
         if local {
             println!("Using local provisioner image (--local)...");
         } else {
@@ -3574,7 +3584,7 @@ build: docker build -t app .
         }
 
         // Clean up local state
-        if let Some(path) = managed_state_path {
+        if let Some(path) = byoc_state_dir {
             if let Err(e) = fs::remove_dir_all(&path) {
                 eprintln!("Warning: Failed to remove local state: {}", e);
             } else {
@@ -3591,7 +3601,7 @@ build: docker build -t app .
         println!("\n╔══════════════════════════════════════════════════════════════════╗");
         println!("║                    Teardown Complete                             ║");
         println!("╚══════════════════════════════════════════════════════════════════╝");
-        println!("\nAll managed on-prem resources have been destroyed.");
+        println!("\nAll bring-your-own-cloud resources have been destroyed.");
 
         Ok(())
     }
@@ -5894,35 +5904,37 @@ pub async fn run() -> Result<()> {
             client.logout().await?;
         }
         Commands::Init {
-            managed_on_prem,
+            bring_your_own_cloud,
             platform,
             name,
             region,
             local,
             config,
         } => {
-            if managed_on_prem && platform != "aws" {
-                bail!("Only --platform aws is currently supported for managed on-prem deployments");
+            if bring_your_own_cloud && platform != "aws" {
+                bail!(
+                    "Only --platform aws is currently supported for bring-your-own-cloud deployments"
+                );
             }
             client
-                .init(managed_on_prem, name, region, local, config)
+                .init(bring_your_own_cloud, name, region, local, config)
                 .await?;
         }
         Commands::Teardown {
-            managed_on_prem,
+            bring_your_own_cloud,
             platform,
             local,
             force,
         } => {
-            if managed_on_prem {
+            if bring_your_own_cloud {
                 if platform != "aws" {
                     bail!(
-                        "Only --platform aws is currently supported for managed on-prem deployments"
+                        "Only --platform aws is currently supported for bring-your-own-cloud deployments"
                     );
                 }
-                client.teardown_managed_on_prem(force, local).await?;
+                client.teardown_byoc(force, local).await?;
             } else {
-                bail!("Please specify --managed-on-prem to tear down managed infrastructure");
+                bail!("Please specify --byoc to tear down BYOC infrastructure");
             }
         }
         Commands::Verify {

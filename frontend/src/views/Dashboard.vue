@@ -3213,6 +3213,16 @@ export default {
 
         if (response.ok) {
           const result = await response.json();
+          if (result.pending) {
+            showToast('Payment submitted. Credits will appear once Paddle confirms the charge.');
+            closeCreditsModal();
+            void loadCreditBalance();
+            setTimeout(() => {
+              void loadCreditBalance();
+            }, 2000);
+            return;
+          }
+
           creditBalance.value = {
             balance_cents: result.balance_cents,
             balance_display: result.balance_display,

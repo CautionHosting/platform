@@ -6,7 +6,7 @@ export
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-legal test-e2e-onprem test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-onprem-provisioner
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -542,14 +542,14 @@ down-test:
 	@docker volume rm $(TEST_DB_VOLUME) 2>/dev/null || true
 	@echo "Test services and data removed"
 
-prepare-onprem-provisioner:
+prepare-byoc-provisioner:
 	@if [ -d "$(ONPREM_PROVISIONER_DIR)" ]; then \
-		echo "Building local managed on-prem provisioner from $(ONPREM_PROVISIONER_DIR)..."; \
+		echo "Building local BYOC provisioner from $(ONPREM_PROVISIONER_DIR)..."; \
 		$(MAKE) -C "$(ONPREM_PROVISIONER_DIR)" build; \
 		docker tag caution-managed-on-prem-aws-provisioner:latest "$(ONPREM_PROVISIONER_IMAGE)"; \
 		echo "Tagged local provisioner image as $(ONPREM_PROVISIONER_IMAGE)"; \
 	else \
-		echo "Local managed on-prem provisioner repo not found at $(ONPREM_PROVISIONER_DIR); using published image."; \
+		echo "Local BYOC provisioner repo not found at $(ONPREM_PROVISIONER_DIR); using published image."; \
 	fi
 
 test-unit:
@@ -579,25 +579,25 @@ test-e2e-legal:
 	$(MAKE) down-test; \
 	exit $$status
 
-test-e2e-onprem:
+test-e2e-byoc:
 	@flock "$(E2E_LOCK_FILE)" /bin/bash -lc '\
 		set -e; \
 		status=0; \
 		trap '"'"'$(MAKE) down-test'"'"' EXIT; \
 		if [ "$${ONPREM_LOCAL_PROVISIONER:-0}" = "1" ]; then \
-			$(MAKE) prepare-onprem-provisioner; \
+			$(MAKE) prepare-byoc-provisioner; \
 		fi; \
 		$(MAKE) build-cli; \
 		$(MAKE) up-test; \
-		echo "Running managed on-prem e2e tests..."; \
+		echo "Running BYOC e2e tests..."; \
 		if [ "$${ONPREM_LOCAL_PROVISIONER:-0}" = "1" ]; then \
-			echo "Using local managed-on-prem provisioner image..."; \
+			echo "Using local BYOC provisioner image..."; \
 		else \
-			echo "Using published managed-on-prem provisioner image ($(ONPREM_PROVISIONER_IMAGE))..."; \
+			echo "Using published BYOC provisioner image ($(ONPREM_PROVISIONER_IMAGE))..."; \
 			export ONPREM_LOCAL_PROVISIONER=0; \
 		fi; \
 		export CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)"; \
-		bash tests/e2e/test_managed_on_prem.sh || status=$$?; \
+		bash tests/e2e/test_byoc.sh || status=$$?; \
 		exit $$status'
 
 test-e2e-billing:

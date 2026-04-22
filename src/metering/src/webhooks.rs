@@ -28,6 +28,12 @@ pub struct PaddleWebhookPayload {
     pub data: serde_json::Value,
 }
 
+#[derive(Debug)]
+struct PrepaidCreditPurchaseMetadata {
+    credit_cents: i64,
+    description: String,
+}
+
 /// Handle incoming Paddle webhooks
 pub async fn paddle_webhook_handler(
     State(state): State<Arc<AppState>>,
@@ -175,6 +181,86 @@ pub async fn paddle_webhook_handler(
     )
 }
 
+fn extract_prepaid_credit_purchase_metadata(
+    data: &serde_json::Value,
+) -> Option<PrepaidCreditPurchaseMetadata> {
+    let custom_data = data["custom_data"].as_object()?;
+
+    if custom_data
+        .get("caution_credit_purchase")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+    {
+        return None;
+    }
+
+    let credit_cents = custom_data
+        .get("caution_credit_purchase_credit_cents")
+        .and_then(|value| value.as_i64())?;
+
+    let description = custom_data
+        .get("caution_credit_purchase_description")
+        .and_then(|value| value.as_str())
+        .unwrap_or("Prepaid credit purchase")
+        .to_string();
+
+    Some(PrepaidCreditPurchaseMetadata {
+        credit_cents,
+        description,
+    })
+}
+
+async fn clear_credit_suspension_if_needed(
+    state: &AppState,
+    org_id: uuid::Uuid,
+) -> anyhow::Result<()> {
+    let suspended: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT credit_suspended_at FROM organizations WHERE id = $1")
+            .bind(org_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .flatten();
+
+    if suspended.is_none() {
+        return Ok(());
+    }
+
+    tracing::info!(
+        "Clearing credit suspension for org {} after completed Paddle credit transaction",
+        org_id
+    );
+    sqlx::query("UPDATE organizations SET credit_suspended_at = NULL WHERE id = $1")
+        .bind(org_id)
+        .execute(&state.pool)
+        .await?;
+
+    let unsuspend_user_id: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1",
+    )
+    .bind(org_id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    if let Some(uid) = unsuspend_user_id {
+        let api_url = std::env::var("API_URL").unwrap_or_else(|_| "http://api:8080".to_string());
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        let _ = client
+            .post(format!("{}/internal/org/{}/unsuspend", api_url, org_id))
+            .header(
+                "x-internal-service-secret",
+                state.internal_service_secret.as_str(),
+            )
+            .header("x-authenticated-user-id", uid.to_string())
+            .send()
+            .await;
+    }
+
+    Ok(())
+}
+
 /// Handle transaction.completed — payment was collected successfully
 async fn handle_transaction_completed(
     state: &AppState,
@@ -251,6 +337,51 @@ async fn handle_transaction_completed(
         send_payment_confirmation_email(state, user_id, transaction_id).await?;
     }
 
+    if let Some(prepaid_purchase) = extract_prepaid_credit_purchase_metadata(&payload.data) {
+        let already_credited: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM credit_ledger WHERE paddle_transaction_id = $1)",
+        )
+        .bind(transaction_id)
+        .fetch_one(&state.pool)
+        .await?;
+
+        if already_credited {
+            tracing::info!(
+                "Prepaid credit purchase {} already credited, skipping",
+                transaction_id
+            );
+            return Ok(());
+        }
+
+        let mut tx = state.pool.begin().await?;
+
+        sqlx::query(
+            "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, paddle_transaction_id)
+             VALUES ($1, $2, 'purchase', $3, $4)"
+        )
+        .bind(org_id)
+        .bind(prepaid_purchase.credit_cents)
+        .bind(&prepaid_purchase.description)
+        .bind(transaction_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let new_balance = get_ledger_balance_cents(&mut *tx, org_id).await?;
+
+        tx.commit().await?;
+
+        tracing::info!(
+            "Prepaid credit purchase credited: org={}, txn={}, +{}c, new_balance={}",
+            org_id,
+            transaction_id,
+            prepaid_purchase.credit_cents,
+            new_balance
+        );
+
+        clear_credit_suspension_if_needed(state, org_id).await?;
+        return Ok(());
+    }
+
     // Check if this was an auto top-up transaction — deposit credits and unsuspend if needed
     let line_items = payload.data["details"]["line_items"].as_array();
     let is_auto_topup = line_items
@@ -311,50 +442,7 @@ async fn handle_transaction_completed(
                 new_balance
             );
 
-            // Check if org was credit-suspended and unsuspend
-            let suspended: Option<chrono::DateTime<chrono::Utc>> =
-                sqlx::query_scalar("SELECT credit_suspended_at FROM organizations WHERE id = $1")
-                    .bind(org_id)
-                    .fetch_optional(&state.pool)
-                    .await?
-                    .flatten();
-
-            if suspended.is_some() {
-                tracing::info!(
-                    "Clearing credit suspension for org {} after auto top-up",
-                    org_id
-                );
-                sqlx::query("UPDATE organizations SET credit_suspended_at = NULL WHERE id = $1")
-                    .bind(org_id)
-                    .execute(&state.pool)
-                    .await?;
-
-                // Trigger unsuspend — need a user_id for internal auth header
-                let unsuspend_user_id: Option<uuid::Uuid> = sqlx::query_scalar(
-                    "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1",
-                )
-                .bind(org_id)
-                .fetch_optional(&state.pool)
-                .await?;
-
-                if let Some(uid) = unsuspend_user_id {
-                    let api_url =
-                        std::env::var("API_URL").unwrap_or_else(|_| "http://api:8080".to_string());
-                    let client = reqwest::Client::builder()
-                        .timeout(std::time::Duration::from_secs(30))
-                        .build()
-                        .unwrap_or_else(|_| reqwest::Client::new());
-                    let _ = client
-                        .post(format!("{}/internal/org/{}/unsuspend", api_url, org_id))
-                        .header(
-                            "x-internal-service-secret",
-                            state.internal_service_secret.as_str(),
-                        )
-                        .header("x-authenticated-user-id", uid.to_string())
-                        .send()
-                        .await;
-                }
-            }
+            clear_credit_suspension_if_needed(state, org_id).await?;
         }
     }
 
@@ -834,5 +922,37 @@ mod tests {
         let payload: PaddleWebhookPayload = serde_json::from_value(json).unwrap();
         assert_eq!(payload.event_type, "subscription.activated");
         // Should parse without error — unknown events are simply ignored
+    }
+
+    #[test]
+    fn extracts_prepaid_credit_purchase_metadata_from_custom_data() {
+        let json = serde_json::json!({
+            "custom_data": {
+                "caution_credit_purchase": true,
+                "caution_credit_purchase_credit_cents": 12345,
+                "caution_credit_purchase_description": "Credit purchase: $123.45 → $123.45 credits (no bonus)"
+            }
+        });
+
+        let metadata = extract_prepaid_credit_purchase_metadata(&json)
+            .expect("expected prepaid credit purchase metadata");
+
+        assert_eq!(metadata.credit_cents, 12_345);
+        assert_eq!(
+            metadata.description,
+            "Credit purchase: $123.45 → $123.45 credits (no bonus)"
+        );
+    }
+
+    #[test]
+    fn ignores_non_credit_purchase_custom_data() {
+        let json = serde_json::json!({
+            "custom_data": {
+                "caution_credit_purchase": false,
+                "caution_credit_purchase_credit_cents": 5000
+            }
+        });
+
+        assert!(extract_prepaid_credit_purchase_metadata(&json).is_none());
     }
 }

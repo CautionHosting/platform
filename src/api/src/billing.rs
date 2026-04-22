@@ -9,6 +9,7 @@ use serde::Deserialize;
 use sha2::Sha256;
 use sqlx::{Executor, PgPool, Postgres, Row};
 use std::sync::Arc;
+use tokio::time::{sleep, Duration};
 use uuid::Uuid;
 
 use crate::{get_user_primary_org, AppState, AuthContext, PricingConfig};
@@ -634,12 +635,8 @@ pub async fn get_paddle_client_token(
         if state.paddle_api_url.is_empty() {
             None
         } else {
-            match generate_paddle_customer_auth_token(
-                &state.paddle_api_url,
-                api_key,
-                customer_id,
-            )
-            .await
+            match generate_paddle_customer_auth_token(&state.paddle_api_url, api_key, customer_id)
+                .await
             {
                 Ok(token) => Some(token),
                 Err(err) => {
@@ -681,6 +678,14 @@ pub struct PaddleTransactionCompletedRequest {
 
 fn is_completed_paddle_transaction_status(status: &str) -> bool {
     matches!(status, "completed" | "paid" | "billed")
+}
+
+fn is_settled_credit_purchase_status(status: &str) -> bool {
+    matches!(status, "completed" | "paid")
+}
+
+fn is_failed_credit_purchase_status(status: &str) -> bool {
+    matches!(status, "past_due" | "canceled")
 }
 
 fn extract_paddle_payment_method_id(txn: &serde_json::Value) -> Option<String> {
@@ -825,7 +830,9 @@ fn validate_paddle_setup_transaction(
             return Err("Transaction does not belong to this account".to_string());
         }
     } else if !allow_checkout_binding {
-        return Err("No billing customer, account email, or valid checkout binding on file".to_string());
+        return Err(
+            "No billing customer, account email, or valid checkout binding on file".to_string(),
+        );
     }
 
     Ok((
@@ -1024,25 +1031,158 @@ async fn generate_paddle_customer_auth_token(
         return Err(format!("Paddle API returned {}", resp.status()));
     }
 
-    let body: serde_json::Value = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Parse error: {}", e))?;
     body["data"]["customer_auth_token"]
         .as_str()
         .map(|token| token.to_string())
         .ok_or_else(|| "No customer_auth_token in response".to_string())
 }
 
-/// Fetch the customer_id from a Paddle transaction
-pub async fn fetch_paddle_customer_id_from_txn(
+fn build_credit_purchase_custom_data(
+    org_id: Uuid,
+    user_id: Uuid,
+    purchase: &ResolvedCreditPurchase,
+) -> serde_json::Value {
+    serde_json::json!({
+        "caution_credit_purchase": true,
+        "caution_credit_purchase_org_id": org_id.to_string(),
+        "caution_credit_purchase_user_id": user_id.to_string(),
+        "caution_credit_purchase_purchase_cents": purchase.purchase_cents,
+        "caution_credit_purchase_credit_cents": purchase.credit_cents,
+        "caution_credit_purchase_kind": match purchase.kind {
+            CreditPurchaseKind::Package => "package",
+            CreditPurchaseKind::Custom => "custom",
+        },
+        "caution_credit_purchase_description": purchase.description,
+    })
+}
+
+async fn resolve_saved_payment_method_context(
+    db: &PgPool,
+    api_url: &str,
+    api_key: &str,
+    org_id: Uuid,
+    mut paddle_customer_id: Option<String>,
+) -> Result<(String, String), (StatusCode, String)> {
+    let existing_txn: Option<String> = sqlx::query_scalar(
+        "SELECT provider_token
+         FROM payment_methods
+         WHERE organization_id = $1 AND is_active = true AND provider_token IS NOT NULL
+         ORDER BY is_primary DESC, created_at DESC
+         LIMIT 1",
+    )
+    .bind(org_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
+
+    let setup_txn = if let Some(txn_id) = existing_txn.as_deref() {
+        Some(
+            fetch_paddle_transaction(api_url, api_key, txn_id)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!("Failed to fetch saved payment method details: {}", e),
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+
+    if paddle_customer_id.is_none() {
+        if let Some(txn) = setup_txn.as_ref() {
+            if let Some(cid) = txn["data"]["customer_id"].as_str() {
+                if let Err(e) = sqlx::query(
+                    "INSERT INTO billing_config (organization_id, paddle_customer_id)
+                     VALUES ($1, $2)
+                     ON CONFLICT (organization_id) DO UPDATE SET paddle_customer_id = $2",
+                )
+                .bind(org_id)
+                .bind(cid)
+                .execute(db)
+                .await
+                {
+                    tracing::error!(
+                        "Failed to cache paddle_customer_id for org {}: {}",
+                        org_id,
+                        e
+                    );
+                } else {
+                    tracing::info!(
+                        "Resolved and cached paddle_customer_id {} for org {}",
+                        cid,
+                        org_id
+                    );
+                }
+                paddle_customer_id = Some(cid.to_string());
+            }
+        }
+    }
+
+    let customer_id = paddle_customer_id.ok_or_else(|| {
+        (
+            StatusCode::PAYMENT_REQUIRED,
+            "no_payment_method".to_string(),
+        )
+    })?;
+
+    let setup_txn = setup_txn.ok_or_else(|| {
+        (
+            StatusCode::PAYMENT_REQUIRED,
+            "Saved payment method is unavailable. Please add a payment method again.".to_string(),
+        )
+    })?;
+
+    if let Some(txn_customer_id) = setup_txn["data"]["customer_id"].as_str() {
+        if txn_customer_id != customer_id {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Saved payment method does not match the current billing account. Please add a payment method again.".to_string(),
+            ));
+        }
+    }
+
+    let address_id = setup_txn["data"]["address_id"]
+        .as_str()
+        .map(|value| value.to_string())
+        .ok_or_else(|| {
+            (
+                StatusCode::PAYMENT_REQUIRED,
+                "Saved payment method is missing billing address details. Please add your payment method again.".to_string(),
+            )
+        })?;
+
+    Ok((customer_id, address_id))
+}
+
+async fn wait_for_credit_purchase_transaction_settlement(
     api_url: &str,
     api_key: &str,
     transaction_id: &str,
-) -> Result<String, String> {
-    let body = fetch_paddle_transaction(api_url, api_key, transaction_id).await?;
+) -> Result<serde_json::Value, String> {
+    let mut latest = fetch_paddle_transaction(api_url, api_key, transaction_id).await?;
 
-    body["data"]["customer_id"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "No customer_id in transaction".to_string())
+    for _ in 0..10 {
+        let status = latest["data"]["status"].as_str().unwrap_or("");
+        if is_settled_credit_purchase_status(status) || is_failed_credit_purchase_status(status) {
+            return Ok(latest);
+        }
+
+        sleep(Duration::from_millis(500)).await;
+        latest = fetch_paddle_transaction(api_url, api_key, transaction_id).await?;
+    }
+
+    Ok(latest)
 }
 
 pub async fn get_credit_balance(
@@ -1130,9 +1270,9 @@ fn resolve_credit_purchase_request(
 ) -> Result<ResolvedCreditPurchase, (StatusCode, String)> {
     match (req.package_index, req.amount_cents) {
         (Some(package_index), None) => {
-            let pkg = credit_packages.get(package_index).ok_or_else(|| {
-                (StatusCode::BAD_REQUEST, "Invalid package index".to_string())
-            })?;
+            let pkg = credit_packages
+                .get(package_index)
+                .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid package index".to_string()))?;
 
             Ok(ResolvedCreditPurchase {
                 kind: CreditPurchaseKind::Package,
@@ -1195,302 +1335,265 @@ pub async fn purchase_credits(
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
 
     // Determine the transaction_id — either provided by frontend (checkout flow)
-    // or created server-side using saved payment method
-    let transaction_id =
-        if let Some(txn_id) = req.transaction_id {
-            // Verify the transaction with Paddle before accepting
-            let paddle_api_key = state.paddle_api_key.as_ref().ok_or_else(|| {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Paddle API not configured".to_string(),
-                )
-            })?;
+    // or created server-side using saved payment method.
+    let (transaction_id, transaction_status) = if let Some(txn_id) = req.transaction_id {
+        let paddle_api_key = state.paddle_api_key.as_ref().ok_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Paddle API not configured".to_string(),
+            )
+        })?;
 
-            let client = reqwest::Client::new();
-            let verify_resp = client
-                .get(format!("{}/transactions/{}", state.paddle_api_url, txn_id))
-                .header("Authorization", format!("Bearer {}", paddle_api_key))
-                .send()
-                .await
-                .map_err(|e| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        format!("Failed to verify transaction: {}", e),
-                    )
-                })?;
-
-            if !verify_resp.status().is_success() {
-                tracing::warn!(
-                    "Paddle transaction verification failed for txn_id={}: {}",
-                    txn_id,
-                    verify_resp.status()
-                );
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "Invalid transaction ID".to_string(),
-                ));
-            }
-
-            let verify_data: serde_json::Value = verify_resp.json().await.map_err(|e| {
+        let client = reqwest::Client::new();
+        let verify_resp = client
+            .get(format!("{}/transactions/{}", state.paddle_api_url, txn_id))
+            .header("Authorization", format!("Bearer {}", paddle_api_key))
+            .send()
+            .await
+            .map_err(|e| {
                 (
                     StatusCode::BAD_GATEWAY,
-                    format!("Failed to parse Paddle response: {}", e),
+                    format!("Failed to verify transaction: {}", e),
                 )
             })?;
 
-            let txn_status = verify_data["data"]["status"].as_str().unwrap_or("");
-            if txn_status != "completed" && txn_status != "paid" && txn_status != "billed" {
-                tracing::warn!(
-                    "Paddle transaction {} has status '{}', not completed",
-                    txn_id,
-                    txn_status
-                );
+        if !verify_resp.status().is_success() {
+            tracing::warn!(
+                "Paddle transaction verification failed for txn_id={}: {}",
+                txn_id,
+                verify_resp.status()
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid transaction ID".to_string(),
+            ));
+        }
+
+        let verify_data: serde_json::Value = verify_resp.json().await.map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to parse Paddle response: {}", e),
+            )
+        })?;
+
+        let txn_status = verify_data["data"]["status"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
+        let txn_total = verify_data["data"]["details"]["totals"]["total"]
+            .as_str()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        if txn_total != purchase.purchase_cents {
+            tracing::warn!(
+                "Paddle transaction {} amount {} does not match package price {}",
+                txn_id,
+                txn_total,
+                purchase.purchase_cents
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Transaction amount does not match the requested credit purchase".to_string(),
+            ));
+        }
+
+        if purchase.kind == CreditPurchaseKind::Package {
+            let expected_price_id = purchase.price_id.as_deref().ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Credit package price not configured".to_string(),
+                )
+            })?;
+            if !transaction_contains_price_id(&verify_data, expected_price_id) {
                 return Err((
-                    StatusCode::PAYMENT_REQUIRED,
-                    format!("Transaction not completed (status: {})", txn_status),
+                    StatusCode::BAD_REQUEST,
+                    "Transaction does not match the selected credit package".to_string(),
                 ));
             }
+        }
 
-            // Verify transaction amount matches the selected package price
-            let txn_total = verify_data["data"]["details"]["totals"]["total"]
-                .as_str()
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(0);
-            if txn_total != purchase.purchase_cents {
+        let txn_customer_id = verify_data["data"]["customer_id"].as_str().unwrap_or("");
+        let org_paddle_customer_id: Option<String> = sqlx::query_scalar(
+            "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1",
+        )
+        .bind(org_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?
+        .flatten();
+
+        if let Some(ref expected_cid) = org_paddle_customer_id {
+            if txn_customer_id != expected_cid.as_str() {
                 tracing::warn!(
-                    "Paddle transaction {} amount {} does not match package price {}",
+                    "Paddle transaction {} customer_id '{}' does not match user's customer_id '{}'",
                     txn_id,
-                    txn_total,
-                    purchase.purchase_cents
+                    txn_customer_id,
+                    expected_cid
                 );
                 return Err((
                     StatusCode::BAD_REQUEST,
-                    "Transaction amount does not match the requested credit purchase".to_string(),
+                    "Transaction does not belong to this account".to_string(),
                 ));
             }
+        } else {
+            tracing::warn!(
+                "Org {} has no paddle_customer_id on file, cannot verify transaction ownership",
+                org_id
+            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "No billing account on file".to_string(),
+            ));
+        }
 
-            if purchase.kind == CreditPurchaseKind::Package {
-                let expected_price_id = purchase.price_id.as_deref().ok_or_else(|| {
+        (txn_id, txn_status)
+    } else {
+        let paddle_api_key = state.paddle_api_key.as_ref().ok_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Paddle API not configured".to_string(),
+            )
+        })?;
+
+        let paddle_customer_id: Option<String> = sqlx::query_scalar(
+            "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1",
+        )
+        .bind(org_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?
+        .flatten();
+
+        let (customer_id, address_id) = resolve_saved_payment_method_context(
+            &state.db,
+            &state.paddle_api_url,
+            paddle_api_key,
+            org_id,
+            paddle_customer_id,
+        )
+        .await?;
+
+        let custom_data = build_credit_purchase_custom_data(org_id, auth.user_id, &purchase);
+
+        let client = reqwest::Client::new();
+        let body = match purchase.kind {
+            CreditPurchaseKind::Package => {
+                let price_id = purchase.price_id.as_ref().ok_or_else(|| {
                     (
                         StatusCode::BAD_REQUEST,
                         "Credit package price not configured".to_string(),
                     )
                 })?;
-                if !transaction_contains_price_id(&verify_data, expected_price_id) {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        "Transaction does not match the selected credit package".to_string(),
-                    ));
-                }
-            }
-
-            // Verify transaction belongs to this org's Paddle customer
-            let txn_customer_id = verify_data["data"]["customer_id"].as_str().unwrap_or("");
-            let org_paddle_customer_id: Option<String> = sqlx::query_scalar(
-                "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1",
-            )
-            .bind(org_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
-                )
-            })?
-            .flatten();
-
-            if let Some(ref expected_cid) = org_paddle_customer_id {
-                if txn_customer_id != expected_cid.as_str() {
-                    tracing::warn!(
-                    "Paddle transaction {} customer_id '{}' does not match user's customer_id '{}'",
-                    txn_id, txn_customer_id, expected_cid
-                );
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        "Transaction does not belong to this account".to_string(),
-                    ));
-                }
-            } else {
-                tracing::warn!(
-                    "Org {} has no paddle_customer_id on file, cannot verify transaction ownership",
-                    org_id
-                );
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "No billing account on file".to_string(),
-                ));
-            }
-
-            txn_id
-        } else {
-            // Try to charge the card on file via Paddle API
-            let paddle_api_key = state.paddle_api_key.as_ref().ok_or_else(|| {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Paddle API not configured".to_string(),
-                )
-            })?;
-
-            // Try billing_config first, then resolve from an existing payment method transaction
-            let mut paddle_customer_id: Option<String> = sqlx::query_scalar(
-                "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1",
-            )
-            .bind(org_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
-                )
-            })?
-            .flatten();
-
-            // If no billing_config row, resolve customer_id from an existing payment method's transaction
-            if paddle_customer_id.is_none() {
-                let existing_txn: Option<String> = sqlx::query_scalar(
-                    "SELECT provider_token FROM payment_methods
-                 WHERE organization_id = $1 AND is_active = true AND provider_token IS NOT NULL
-                 LIMIT 1",
-                )
-                .bind(org_id)
-                .fetch_optional(&state.db)
-                .await
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Database error: {}", e),
-                    )
-                })?;
-
-                if let Some(txn_id) = existing_txn {
-                    if let Ok(cid) = fetch_paddle_customer_id_from_txn(
-                        &state.paddle_api_url,
-                        paddle_api_key,
-                        &txn_id,
-                    )
-                    .await
-                    {
-                        // Cache it in billing_config for future use
-                        if let Err(e) = sqlx::query(
-                            "INSERT INTO billing_config (organization_id, paddle_customer_id)
-                         VALUES ($1, $2)
-                         ON CONFLICT (organization_id) DO UPDATE SET paddle_customer_id = $2",
-                        )
-                        .bind(org_id)
-                        .bind(&cid)
-                        .execute(&state.db)
-                        .await
-                        {
-                            tracing::error!(
-                                "Failed to cache paddle_customer_id for org {}: {}",
-                                org_id,
-                                e
-                            );
-                        } else {
-                            tracing::info!(
-                                "Resolved and cached paddle_customer_id {} for org {}",
-                                cid,
-                                org_id
-                            );
-                        }
-                        paddle_customer_id = Some(cid);
-                    }
-                }
-            }
-
-            let customer_id = paddle_customer_id.ok_or_else(|| {
-                (
-                    StatusCode::PAYMENT_REQUIRED,
-                    "no_payment_method".to_string(),
-                )
-            })?;
-
-            // Create transaction via Paddle API — automatic collection charges saved payment method
-            let client = reqwest::Client::new();
-            let body = match purchase.kind {
-                CreditPurchaseKind::Package => {
-                    let price_id = purchase.price_id.as_ref().ok_or_else(|| {
-                        (
-                            StatusCode::BAD_REQUEST,
-                            "Credit package price not configured".to_string(),
-                        )
-                    })?;
-                    serde_json::json!({
-                        "customer_id": customer_id,
-                        "items": [{
-                            "price_id": price_id,
-                            "quantity": 1,
-                        }],
-                        "collection_mode": "automatic",
-                    })
-                }
-                CreditPurchaseKind::Custom => serde_json::json!({
+                serde_json::json!({
                     "customer_id": customer_id,
+                    "address_id": address_id,
                     "items": [{
+                        "price_id": price_id,
                         "quantity": 1,
-                        "price": {
-                            "description": format!("Caution prepaid credits ${}", format_currency_amount(purchase.purchase_cents)),
-                            "unit_price": {
-                                "amount": purchase.purchase_cents.to_string(),
-                                "currency_code": "USD",
-                            },
-                            "product": {
-                                "name": "Prepaid credits",
-                                "tax_category": "standard",
-                            }
-                        }
                     }],
                     "collection_mode": "automatic",
-                }),
-            };
-
-            let response = client
-                .post(format!("{}/transactions", state.paddle_api_url))
-                .header("Authorization", format!("Bearer {}", paddle_api_key))
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Paddle API error: {}", e)))?;
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let err_body = response.text().await.unwrap_or_default();
-                tracing::error!("Paddle transaction failed: {} - {}", status, err_body);
-                return Err((
-                    StatusCode::BAD_GATEWAY,
-                    format!("Paddle payment failed: {}", status),
-                ));
+                    "custom_data": custom_data,
+                })
             }
-
-            let resp: serde_json::Value = response.json().await.map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Paddle response parse error: {}", e),
-                )
-            })?;
-
-            let txn_id = resp["data"]["id"]
-                .as_str()
-                .ok_or_else(|| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        "Missing transaction ID in Paddle response".to_string(),
-                    )
-                })?
-                .to_string();
-
-            tracing::info!(
-                "Created Paddle transaction {} for credit purchase (card on file, {} cents)",
-                txn_id,
-                purchase.purchase_cents
-            );
-            txn_id
+            CreditPurchaseKind::Custom => serde_json::json!({
+                "customer_id": customer_id,
+                "address_id": address_id,
+                "items": [{
+                    "quantity": 1,
+                    "price": {
+                        "description": format!(
+                            "Caution prepaid credits ${}",
+                            format_currency_amount(purchase.purchase_cents)
+                        ),
+                        "unit_price": {
+                            "amount": purchase.purchase_cents.to_string(),
+                            "currency_code": "USD",
+                        },
+                        "product": {
+                            "name": "Prepaid credits",
+                            "tax_category": "standard",
+                        }
+                    }
+                }],
+                "collection_mode": "automatic",
+                "custom_data": custom_data,
+            }),
         };
 
-    // Idempotency: check if this transaction was already processed
+        let response = client
+            .post(format!("{}/transactions", state.paddle_api_url))
+            .header("Authorization", format!("Bearer {}", paddle_api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Paddle API error: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let err_body = response.text().await.unwrap_or_default();
+            tracing::error!("Paddle transaction failed: {} - {}", status, err_body);
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                format!("Paddle payment failed: {}", status),
+            ));
+        }
+
+        let resp: serde_json::Value = response.json().await.map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Paddle response parse error: {}", e),
+            )
+        })?;
+
+        let txn_id = resp["data"]["id"]
+            .as_str()
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "Missing transaction ID in Paddle response".to_string(),
+                )
+            })?
+            .to_string();
+
+        let latest_txn = wait_for_credit_purchase_transaction_settlement(
+            &state.paddle_api_url,
+            paddle_api_key,
+            &txn_id,
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to verify transaction settlement: {}", e),
+            )
+        })?;
+        let txn_status = latest_txn["data"]["status"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
+        tracing::info!(
+            "Created Paddle transaction {} for credit purchase (card on file, {} cents, status={})",
+            txn_id,
+            purchase.purchase_cents,
+            txn_status
+        );
+
+        (txn_id, txn_status)
+    };
+
     let already_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM credit_ledger WHERE paddle_transaction_id = $1)",
     )
@@ -1522,6 +1625,31 @@ pub async fn purchase_credits(
         })));
     }
 
+    if is_failed_credit_purchase_status(&transaction_status) {
+        return Err((
+            StatusCode::PAYMENT_REQUIRED,
+            format!(
+                "Transaction payment failed (status: {})",
+                transaction_status
+            ),
+        ));
+    }
+
+    if !is_settled_credit_purchase_status(&transaction_status) {
+        tracing::info!(
+            "Credit purchase transaction {} is pending settlement with status {}",
+            transaction_id,
+            transaction_status
+        );
+
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "pending": true,
+            "transaction_id": transaction_id,
+            "transaction_status": transaction_status,
+        })));
+    }
+
     let new_balance = apply_credit(
         &state.db,
         org_id,
@@ -1549,7 +1677,6 @@ pub async fn purchase_credits(
         new_balance
     );
 
-    // Check if org was credit-suspended and unsuspend if balance is now positive
     if new_balance > 0 {
         if let Ok(org_id) = get_user_primary_org(&state.db, auth.user_id).await {
             let suspended: Option<chrono::DateTime<chrono::Utc>> =
@@ -1579,7 +1706,6 @@ pub async fn purchase_credits(
                     );
                 }
 
-                // Trigger unsuspend via internal endpoint
                 let _ = call_internal_unsuspend(&state, org_id).await;
             }
         }
@@ -1890,8 +2016,8 @@ mod tests {
     use super::{
         build_paddle_checkout_custom_data, extract_paddle_payment_method_id,
         resolve_credit_purchase_request, transaction_contains_price_id,
-        validate_paddle_checkout_binding, validate_paddle_setup_transaction,
-        CreditPackage, CreditPurchaseKind, PurchaseCreditsRequest,
+        validate_paddle_checkout_binding, validate_paddle_setup_transaction, CreditPackage,
+        CreditPurchaseKind, PurchaseCreditsRequest,
     };
     use axum::http::StatusCode;
     use uuid::Uuid;
@@ -2085,8 +2211,7 @@ mod tests {
         let user_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
         let org_id = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
         let mut txn = sample_transaction();
-        txn["data"]["custom_data"] =
-            build_paddle_checkout_custom_data("secret", user_id, org_id);
+        txn["data"]["custom_data"] = build_paddle_checkout_custom_data("secret", user_id, org_id);
 
         validate_paddle_checkout_binding(&txn, "secret", user_id, org_id)
             .expect("checkout binding should validate");

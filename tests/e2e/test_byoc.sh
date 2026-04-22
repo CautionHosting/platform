@@ -2,24 +2,24 @@
 # SPDX-FileCopyrightText: 2025 Caution SEZC
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 #
-# E2E managed on-prem test for the Caution platform.
+# E2E BYOC test for the Caution platform.
 # Requires: make up-test (builds with e2e-testing feature)
 #
-# Tests the full managed on-prem flow:
+# Tests the full BYOC flow:
 #   1. Wait for gateway
 #   2. Create test user via e2e-login endpoint
 #   3. Add SSH key via gateway API (FIDO2 sign bypassed)
 #   4. Clone demo app
-#   5. caution init --managed-on-prem --region us-east-1
+#   5. caution init --byoc --region us-east-1
 #   6. git push caution main (triggers enclave build)
 #   7. Wait for deployment
 #   8. caution verify (attestation + reproduction)
-#   9. caution teardown --managed-on-prem --force (cleanup)
+#   9. caution teardown --byoc --force (cleanup)
 #
 # Prerequisites:
 #   - AWS credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY or ~/.aws/credentials)
 #   - Docker available (provisioner runs as container)
-#   - Managed-on-prem provisioner policy updated to allow the scoped IAM user to
+#   - BYOC provisioner policy updated to allow the scoped IAM user to
 #     pass/read the deployment-scoped builder role and instance profile
 
 set -euo pipefail
@@ -38,7 +38,7 @@ ORG_ID=""
 PROVISIONER_DEPLOYMENT_ID=""
 APP_NAME=""
 LOG_DIR="tests/e2e/logs"
-LOG_FILE="$LOG_DIR/e2e-onprem-$(date +%Y%m%d-%H%M%S).log"
+LOG_FILE="$LOG_DIR/e2e-byoc-$(date +%Y%m%d-%H%M%S).log"
 STEP_NUM=0
 STEPS_PASSED=0
 STEPS_FAILED=0
@@ -50,7 +50,7 @@ mkdir -p "$LOG_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 # ── Preflight: check AWS credentials ─────────────────────────────────
-# Use ONPREM_AWS_* credentials if available (dedicated managed-on-prem IAM user),
+# Use ONPREM_AWS_* credentials if available (dedicated BYOC IAM user),
 # otherwise fall back to AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY.
 
 if [ -n "${ONPREM_AWS_ACCESS_KEY_ID:-}" ] && [ -n "${ONPREM_AWS_SECRET_ACCESS_KEY:-}" ]; then
@@ -59,7 +59,7 @@ if [ -n "${ONPREM_AWS_ACCESS_KEY_ID:-}" ] && [ -n "${ONPREM_AWS_SECRET_ACCESS_KE
     if [ -n "${ONPREM_AWS_SESSION_TOKEN:-}" ]; then
         export AWS_SESSION_TOKEN="$ONPREM_AWS_SESSION_TOKEN"
     fi
-    echo "[e2e-onprem] Using ONPREM_AWS_* credentials for provisioner"
+    echo "[e2e-byoc] Using ONPREM_AWS_* credentials for provisioner"
 elif [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
     if [ ! -f "${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials}" ]; then
         echo "ERROR: AWS credentials not found."
@@ -96,10 +96,10 @@ cleanup() {
     echo "--- End gateway logs ---"
     echo ""
 
-    # Teardown managed on-prem resources if we have a resource ID
+    # Teardown BYOC resources if we have a resource ID
     if [ -n "$RESOURCE_ID" ]; then
-        echo "Running managed on-prem teardown for $RESOURCE_ID..."
-        TEARDOWN_ARGS=(-u "$GATEWAY_URL" teardown --managed-on-prem --force)
+        echo "Running BYOC teardown for $RESOURCE_ID..."
+        TEARDOWN_ARGS=(-u "$GATEWAY_URL" teardown --byoc --force)
         if [ "$ONPREM_LOCAL_PROVISIONER" = "1" ]; then
             TEARDOWN_ARGS+=(--local)
         fi
@@ -126,7 +126,7 @@ cleanup() {
     # Print summary
     echo ""
     echo "========================================"
-    echo "  E2E Managed On-Prem Test Results"
+    echo "  E2E BYOC Test Results"
     echo "========================================"
     for result in "${STEP_RESULTS[@]}"; do
         echo "  $result"
@@ -159,7 +159,7 @@ step_warn() {
 }
 
 log() {
-    echo "[e2e-onprem] $*"
+    echo "[e2e-byoc] $*"
 }
 
 # ── Step 1: Wait for services ────────────────────────────────────────
@@ -229,11 +229,11 @@ log "Seeding test credits for deploy gate..."
 docker exec postgres-test psql -U postgres -d caution_test -c "
 DELETE FROM credit_ledger WHERE organization_id = '$ORG_ID';
 INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
-VALUES ('$ORG_ID', '$USER_ID', 10000, 'purchase', 'e2e managed on-prem gate seed');
+VALUES ('$ORG_ID', '$USER_ID', 10000, 'purchase', 'e2e byoc gate seed');
 " >/dev/null 2>&1 || log "  Warning: could not seed credits"
 
-# Seed active subscription for managed on-prem deploy gate
-log "Seeding active subscription for managed on-prem deploy gate..."
+# Seed active subscription for BYOC deploy gate
+log "Seeding active subscription for BYOC deploy gate..."
 docker exec postgres-test psql -U postgres -d caution_test -c "
 DELETE FROM subscription_ledger WHERE organization_id = '$ORG_ID';
 DELETE FROM subscriptions WHERE user_id = '$USER_ID';
@@ -283,16 +283,16 @@ git clone "$DEMO_REPO" "$CLONE_DIR"
 cd "$CLONE_DIR"
 step_pass "Clone demo app"
 
-# ── Step 5: caution init --managed-on-prem ───────────────────────────
+# ── Step 5: caution init --byoc ──────────────────────────────────────
 
 STEP_NUM=5
-APP_NAME="e2e-onprem-$(date +%s)"
-INIT_ARGS=(-u "$GATEWAY_URL" init --managed-on-prem --region "$ONPREM_TEST_REGION" --name "$APP_NAME")
+APP_NAME="e2e-byoc-$(date +%s)"
+INIT_ARGS=(-u "$GATEWAY_URL" init --byoc --region "$ONPREM_TEST_REGION" --name "$APP_NAME")
 if [ "$ONPREM_LOCAL_PROVISIONER" = "1" ]; then
     INIT_ARGS+=(--local)
-    log "Using local managed-on-prem provisioner image for caution init..."
+    log "Using local BYOC provisioner image for caution init..."
 fi
-log "Running caution init --managed-on-prem --region $ONPREM_TEST_REGION --name $APP_NAME..."
+log "Running caution init --byoc --region $ONPREM_TEST_REGION --name $APP_NAME..."
 set +e
 INIT_OUTPUT=$(echo y | "$CAUTION_BIN" "${INIT_ARGS[@]}" 2>&1)
 INIT_STATUS=$?
@@ -301,7 +301,7 @@ PROVISIONER_DEPLOYMENT_ID=$(echo "$INIT_OUTPUT" | grep -oE 'Deployment ID: [a-f0
 
 if [ $INIT_STATUS -ne 0 ]; then
     echo "$INIT_OUTPUT"
-    step_fail "caution init --managed-on-prem (exit code $INIT_STATUS)"
+    step_fail "caution init --byoc (exit code $INIT_STATUS)"
 fi
 
 # Extract resource ID from .caution/deployment.json
@@ -309,15 +309,15 @@ if [ -f ".caution/deployment.json" ]; then
     RESOURCE_ID=$(jq -r '.resource_id' .caution/deployment.json)
 else
     echo "$INIT_OUTPUT"
-    step_fail "caution init --managed-on-prem (no .caution/deployment.json)"
+    step_fail "caution init --byoc (no .caution/deployment.json)"
 fi
 
 # Verify git remote was set
 GIT_URL=$(git remote get-url caution 2>/dev/null || true)
 if [ -z "$GIT_URL" ]; then
-    step_fail "caution init --managed-on-prem (git remote not set)"
+    step_fail "caution init --byoc (git remote not set)"
 fi
-step_pass "caution init --managed-on-prem (app: $RESOURCE_ID)"
+step_pass "caution init --byoc (app: $RESOURCE_ID)"
 
 # ── Step 6: git push ────────────────────────────────────────────────
 
@@ -371,17 +371,17 @@ SELECT config->>'builder_instance_profile_name' FROM cloud_credentials WHERE res
 " 2>/dev/null | head -1 | tr -d ' \n')
 
 if [ -z "$ONPREM_EIF_BUCKET" ] || [ -z "$ONPREM_BUILDER_PROFILE" ]; then
-    step_fail "Deployment metadata (missing managed on-prem bucket/profile)"
+    step_fail "Deployment metadata (missing BYOC bucket/profile)"
 fi
 
 API_LOGS=$(docker logs api 2>&1 || true)
-if ! echo "$API_LOGS" | grep -F "Using managed on-prem builder target: bucket=$ONPREM_EIF_BUCKET" >/dev/null; then
-    step_fail "Deployment logs (missing managed on-prem builder bucket log)"
+if ! echo "$API_LOGS" | grep -F "builder target: bucket=$ONPREM_EIF_BUCKET" >/dev/null; then
+    step_fail "Deployment logs (missing BYOC builder bucket log)"
 fi
 if ! echo "$API_LOGS" | grep -F "instance_profile=$ONPREM_BUILDER_PROFILE" >/dev/null; then
-    step_fail "Deployment logs (missing managed on-prem builder profile log)"
+    step_fail "Deployment logs (missing BYOC builder profile log)"
 fi
-if ! echo "$API_LOGS" | grep -F "Managed on-prem builder output already in customer bucket: s3://$ONPREM_EIF_BUCKET/" >/dev/null; then
+if ! echo "$API_LOGS" | grep -F "builder output already in customer bucket: s3://$ONPREM_EIF_BUCKET/" >/dev/null; then
     step_fail "Deployment logs (missing direct customer-bucket EIF log)"
 fi
 
@@ -416,14 +416,14 @@ else
     step_pass "caution verify (attestation verified)"
 fi
 
-# ── Step 9: caution teardown --managed-on-prem ───────────────────────
+# ── Step 9: caution teardown --byoc ──────────────────────────────────
 
 STEP_NUM=9
-log "Running managed on-prem teardown..."
-TEARDOWN_ARGS=(-u "$GATEWAY_URL" teardown --managed-on-prem --force)
+log "Running BYOC teardown..."
+TEARDOWN_ARGS=(-u "$GATEWAY_URL" teardown --byoc --force)
 if [ "$ONPREM_LOCAL_PROVISIONER" = "1" ]; then
     TEARDOWN_ARGS+=(--local)
-    log "Using local managed-on-prem provisioner image for caution teardown..."
+    log "Using local BYOC provisioner image for caution teardown..."
 fi
 set +e
 TEARDOWN_OUTPUT=$("$CAUTION_BIN" "${TEARDOWN_ARGS[@]}" 2>&1)
@@ -432,7 +432,7 @@ set -e
 
 if [ $TEARDOWN_STATUS -ne 0 ]; then
     echo "$TEARDOWN_OUTPUT"
-    step_fail "caution teardown --managed-on-prem"
+    step_fail "caution teardown --byoc"
 fi
 RESOURCE_ID=""  # Clear so cleanup trap doesn't try again
-step_pass "caution teardown --managed-on-prem"
+step_pass "caution teardown --byoc"
