@@ -152,7 +152,7 @@
               <div class="mobile-menu-section__inner">
                 <a href="https://caution.co/about.html" class="mobile-menu-link">About</a>
                 <a href="https://caution.co/platform-tour.html" class="mobile-menu-link">Platform demo</a>
-                <a href="https://alpha.caution.co/" class="mobile-menu-link">Early access</a>
+                <a href="https://dashboard.caution.co/" class="mobile-menu-link">Early access</a>
               </div>
             </div>
           </div>

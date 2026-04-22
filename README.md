@@ -1,6 +1,6 @@
 **GitHub users:** This repo is mirrored from <a href="https://codeberg.org/caution/platform" target="_blank">Codeberg</a>. Please open issues and PRs there.
 
-**Hosted version:** A hosted deployment is available in closed alpha at <a href="https://alpha.caution.co" target="_blank">alpha.caution.co</a>. To request a registration code, <a href="mailto:info@caution.co?subject=Caution%20Alpha%20Access&body=Hi%2C%0A%0AI%20was%20reviewing%20your%20docs%20at%20https%3A%2F%2Fcodeberg.org%2Fcaution%2Fplatform%20and%20noticed%20that%20you%20are%20also%20offering%20a%20closed%20alpha%20for%20hosted%20deployments.%20Can%20I%20please%20get%20a%20code%20to%20try%20it%20out%3F%0A%0AMy%20details%3A%0AMy%20name%3A%20%0AMy%20company%20name%3A%0A%0AThank%20you">contact info@caution.co</a>.
+**Hosted version:** A hosted deployment is available in closed alpha at <a href="https://dashboard.caution.co" target="_blank">dashboard.caution.co</a>. To request a registration code, <a href="mailto:info@caution.co?subject=Caution%20Alpha%20Access&body=Hi%2C%0A%0AI%20was%20reviewing%20your%20docs%20at%20https%3A%2F%2Fcodeberg.org%2Fcaution%2Fplatform%20and%20noticed%20that%20you%20are%20also%20offering%20a%20closed%20alpha%20for%20hosted%20deployments.%20Can%20I%20please%20get%20a%20code%20to%20try%20it%20out%3F%0A%0AMy%20details%3A%0AMy%20name%3A%20%0AMy%20company%20name%3A%0A%0AThank%20you">contact info@caution.co</a>.
 
 # Caution Platform
 

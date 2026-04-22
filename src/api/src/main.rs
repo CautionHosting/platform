@@ -1994,7 +1994,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
     let git_hostname =
-        std::env::var("GIT_HOSTNAME").unwrap_or_else(|_| "alpha.caution.co".to_string());
+        std::env::var("GIT_HOSTNAME").unwrap_or_else(|_| "dashboard.caution.co".to_string());
 
     let git_ssh_port: Option<u16> = std::env::var("SSH_PORT").ok().and_then(|p| p.parse().ok());
 

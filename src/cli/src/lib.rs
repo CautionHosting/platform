@@ -199,7 +199,7 @@ struct Cli {
     #[arg(
         short,
         long,
-        default_value = "https://alpha.caution.co",
+        default_value = "https://dashboard.caution.co",
         env = "CAUTION_BACKEND_URL",
         help = "Caution API server URL",
         global = true
