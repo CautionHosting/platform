@@ -58,12 +58,6 @@ pub(crate) struct TierPricing {
     pub(crate) annual_cents: i64,
     #[serde(default)]
     pub(crate) enclaves: i32,
-    #[serde(default)]
-    pub(crate) vcpu: i32,
-    #[serde(default)]
-    pub(crate) ram_gb: i32,
-    #[serde(default)]
-    pub(crate) storage_gb: i32,
 }
 
 impl TierPricing {
@@ -2044,7 +2038,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let paddle_credits_price_ids = [
         std::env::var("PADDLE_CREDITS_PRICE_ID_1000").ok(),
         std::env::var("PADDLE_CREDITS_PRICE_ID_5000").ok(),
-        std::env::var("PADDLE_CREDITS_PRICE_ID_25000").ok(),
+        std::env::var("PADDLE_CREDITS_PRICE_ID_10000").ok(),
     ];
 
     let paddle_api_url = std::env::var("PADDLE_API_URL").unwrap_or_default();

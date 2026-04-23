@@ -1,45 +1,26 @@
 {
   "compute_margin_percent": 0,
   "subscription_tiers": {
-    "starter": {
-      "annual_cents": 0,
-      "enclaves": 1,
-      "vcpu": 16,
-      "ram_gb": 64,
-      "storage_gb": 500
+    "1_enclave": {
+      "annual_cents": 300000,
+      "enclaves": 1
     },
-    "developer": {
-      "annual_cents": 0,
-      "enclaves": 2,
-      "vcpu": 32,
-      "ram_gb": 128,
-      "storage_gb": 1000
+    "3_enclaves": {
+      "annual_cents": 600000,
+      "enclaves": 3
     },
-    "base_platform": {
-      "annual_cents": 0,
-      "enclaves": 3,
-      "vcpu": 48,
-      "ram_gb": 192,
-      "storage_gb": 1500
+    "5_enclaves": {
+      "annual_cents": 900000,
+      "enclaves": 5
     },
-    "growth": {
-      "annual_cents": 0,
-      "enclaves": 6,
-      "vcpu": 96,
-      "ram_gb": 384,
-      "storage_gb": 4000
-    },
-    "enterprise": {
-      "annual_cents": 0,
-      "enclaves": 12,
-      "vcpu": 192,
-      "ram_gb": 768,
-      "storage_gb": 10000
+    "10_enclaves": {
+      "annual_cents": 1500000,
+      "enclaves": 10
     }
   },
   "credit_packages": {
-    "1000":  { "bonus_percent": 0 },
-    "5000":  { "bonus_percent": 0 },
-    "25000": { "bonus_percent": 0 }
+    "1000":  { "bonus_percent": 2.5 },
+    "5000":  { "bonus_percent": 5 },
+    "10000": { "bonus_percent": 10 }
   }
 }

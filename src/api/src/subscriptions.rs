@@ -27,21 +27,18 @@ pub(crate) fn tier_display_name(id: &str) -> String {
 fn resolved_subscription_values(
     pricing: &crate::PricingConfig,
     tier_id: &str,
-    stored_max_vcpus: i32,
     stored_max_apps: i32,
     stored_price_cents: i64,
-) -> (String, i32, i32, i64) {
+) -> (String, i32, i64) {
     if let Some(tier) = pricing.subscription_tiers.get(tier_id) {
         (
             tier_display_name(tier_id),
-            tier.vcpu,
             tier.enclaves,
             tier.monthly_price_cents(),
         )
     } else {
         (
-            "Unknown".to_string(),
-            stored_max_vcpus,
+            tier_display_name(tier_id),
             stored_max_apps,
             stored_price_cents,
         )
@@ -89,9 +86,6 @@ pub async fn get_subscription_tiers(
                 "id": id,
                 "name": tier_display_name(id),
                 "enclaves": t.enclaves,
-                "vcpu": t.vcpu,
-                "ram_gb": t.ram_gb,
-                "storage_gb": t.storage_gb,
                 "price_cents_per_cycle": t.monthly_price_cents(),
             })
         })
@@ -126,10 +120,9 @@ pub async fn get_subscription(
     };
 
     let tier: String = row.get("tier");
-    let (tier_name, max_vcpus, max_apps, price_cents_per_cycle) = resolved_subscription_values(
+    let (tier_name, max_apps, price_cents_per_cycle) = resolved_subscription_values(
         &state.pricing,
         &tier,
-        row.get("max_vcpus"),
         row.get("max_apps"),
         row.get("price_cents_per_cycle"),
     );
@@ -142,7 +135,7 @@ pub async fn get_subscription(
             "tier": tier,
             "tier_name": tier_name,
             "billing_period": "monthly",
-            "max_vcpus": max_vcpus,
+            "enclaves": max_apps,
             "max_apps": max_apps,
             "price_cents_per_cycle": price_cents_per_cycle,
             "total_price_cents_per_cycle": price_cents_per_cycle,
@@ -164,6 +157,8 @@ pub async fn get_subscription(
 pub struct SubscribeRequest {
     tier_id: String,
 }
+
+const LEGACY_MAX_VCPUS_PLACEHOLDER: i32 = 0;
 
 pub async fn subscribe(
     State(state): State<Arc<AppState>>,
@@ -238,7 +233,7 @@ pub async fn subscribe(
     .bind(auth.user_id)
     .bind(org_id)
     .bind(&req.tier_id)
-    .bind(tier.vcpu)
+    .bind(LEGACY_MAX_VCPUS_PLACEHOLDER)
     .bind(tier.enclaves)
     .bind(price_per_cycle)
     .bind(now)
@@ -400,7 +395,7 @@ pub async fn change_subscription_tier(
         WHERE id = $6",
     )
     .bind(&req.tier_id)
-    .bind(new_tier.vcpu)
+    .bind(LEGACY_MAX_VCPUS_PLACEHOLDER)
     .bind(new_tier.enclaves)
     .bind(new_price)
     .bind(now)

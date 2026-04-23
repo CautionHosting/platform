@@ -15,9 +15,9 @@ use crate::balance::check_balance_thresholds;
 use crate::collection::{
     advisory_unlock, try_advisory_lock, LOCK_MONTHLY_BILLING, LOCK_SUBSCRIPTION_BILLING,
 };
+use crate::cost_explorer;
 use crate::credits::get_ledger_balance_cents;
 use crate::AppState;
-use crate::{cost_explorer, paddle};
 
 /// Monthly billing loop.
 ///
@@ -245,117 +245,14 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
 
         let credits_applied = balance_cents.min(remaining_cost_cents);
         let remainder_cents = remaining_cost_cents - credits_applied;
-        let mut paddle_transaction_id: Option<String> = None;
-
-        let line_items = paddle::PaddleClient::line_items_from_cost_data(
-            org_id_str,
-            remainder_cents as f64 / 100.0,
-            &billing_period,
-            &serde_json::json!(cost_data.costs_by_service),
-        );
 
         if remainder_cents > 0 {
-            if line_items.is_empty() {
-                tracing::warn!(
-                    "Monthly catch-up for org {} has {} cents remaining but no billable line items",
-                    org_id,
-                    remainder_cents
-                );
-                tx.rollback().await?;
-                continue;
-            }
-
-            let paddle_customer_id: Option<String> = sqlx::query_scalar(
-                "SELECT paddle_customer_id
-                 FROM billing_config
-                 WHERE organization_id = $1",
-            )
-            .bind(org_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .flatten();
-
-            let Some(customer_id) = paddle_customer_id else {
-                tracing::warn!(
-                    "Org {} has {} cents due for {} but no paddle_customer_id",
-                    org_id,
-                    remainder_cents,
-                    billing_period
-                );
-                tx.rollback().await?;
-                continue;
-            };
-
-            match state
-                .paddle
-                .create_transaction(&customer_id, line_items)
-                .await
-            {
-                Ok(txn) => {
-                    tracing::info!(
-                        "Created Paddle transaction {} for org {} (${:.2}, credits ${:.2})",
-                        txn.id,
-                        org_id,
-                        remainder_cents as f64 / 100.0,
-                        credits_applied as f64 / 100.0
-                    );
-                    paddle_transaction_id = Some(txn.id);
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to create Paddle transaction for org {} monthly catch-up: {}",
-                        org_id,
-                        e
-                    );
-                    tx.rollback().await?;
-                    continue;
-                }
-            }
+            tracing::info!(
+                "Monthly catch-up for org {} is leaving ${:.2} uncollected; direct remainder charging is disabled",
+                org_id,
+                remainder_cents as f64 / 100.0
+            );
         }
-
-        let invoice_number = paddle_transaction_id
-            .as_ref()
-            .map(|txn_id| format!("INV-{}", &txn_id[4..]))
-            .unwrap_or_else(|| format!("INV-CR-{}-{}", &org_id.to_string()[..8], start_date));
-
-        let invoice_id: uuid::Uuid = if let Some(txn_id) = paddle_transaction_id.as_ref() {
-            sqlx::query_scalar(
-                r#"
-                INSERT INTO invoices (
-                    paddle_transaction_id, user_id, organization_id, invoice_number,
-                    amount_cents, currency, status, payment_status,
-                    billing_provider, created_at
-                )
-                VALUES ($1, $2, $3, $4, $5, 'USD', 'finalized', 'pending', 'paddle', NOW())
-                RETURNING id
-                "#,
-            )
-            .bind(txn_id)
-            .bind(invoice_user_id)
-            .bind(org_id)
-            .bind(&invoice_number)
-            .bind(remainder_cents)
-            .fetch_one(&mut *tx)
-            .await?
-        } else {
-            sqlx::query_scalar(
-                r#"
-                INSERT INTO invoices (
-                    user_id, organization_id, invoice_number,
-                    amount_cents, currency, status, payment_status,
-                    billing_provider, created_at, paid_at
-                )
-                VALUES ($1, $2, $3, $4, 'USD', 'finalized', 'credits_applied', 'credits', NOW(), NOW())
-                RETURNING id
-                "#,
-            )
-            .bind(invoice_user_id)
-            .bind(org_id)
-            .bind(&invoice_number)
-            .bind(remaining_cost_cents)
-            .fetch_one(&mut *tx)
-            .await?
-        };
 
         sqlx::query(
             r#"
@@ -377,8 +274,8 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
                 "end": end_date,
             },
             "services": cost_data.costs_by_service,
-            "billing_status": if paddle_transaction_id.is_some() {
-                "pending_paddle_collection"
+            "billing_status": if remainder_cents > 0 {
+                "charge_disabled"
             } else {
                 "credits_applied"
             },
@@ -386,9 +283,8 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
             "realtime_billed_cents": realtime_billed_cents,
             "remaining_cost_cents": remaining_cost_cents,
             "credits_applied_cents": credits_applied,
-            "charged_amount_cents": remainder_cents,
-            "invoice_id": invoice_id,
-            "paddle_transaction_id": paddle_transaction_id,
+            "charged_amount_cents": 0,
+            "uncollected_amount_cents": remainder_cents,
         }))
         .execute(&mut *tx)
         .await?;
@@ -396,7 +292,7 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
         tx.commit().await?;
     }
 
-    tracing::info!("Monthly billing cycle complete — Paddle will collect payments");
+    tracing::info!("Monthly billing cycle complete — direct remainder charging is disabled");
 
     Ok(())
 }

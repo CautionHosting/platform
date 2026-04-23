@@ -1251,60 +1251,16 @@ make build-cli
               <span class="credits-balance-amount">{{ creditBalance.balance_display }}</span>
               <span class="credits-balance-label">credit balance</span>
             </div>
-            <button @click="showAddCreditsModal = true" class="btn-primary btn-small">Add credits</button>
           </div>
-          <p class="credits-hint">Credits are deducted in real-time as your deployments run. Minimum $5 required to deploy.</p>
-          <div class="redeem-code-row">
-            <input
-              v-model="redeemCode"
-              type="text"
-              class="redeem-code-input"
-              placeholder="Enter credit code"
-              :disabled="redeemingCode"
-              @keyup.enter="redeemCreditCode"
-            />
-            <button
-              @click="redeemCreditCode"
-              class="btn-primary btn-small"
-              :disabled="redeemingCode || !redeemCode.trim()"
-            >
-              {{ redeemingCode ? 'Redeeming...' : 'Redeem' }}
-            </button>
-          </div>
+          <p class="credits-hint">Credits are deducted in real-time as your deployments run. Minimum $10 required to deploy.</p>
+          <button @click="showAddCreditsModal = true" class="btn-primary btn-small credits-add-button">Add credits</button>
         </div>
 
-        <!-- Auto Top-up -->
-        <div class="auto-topup-card">
-          <div class="auto-topup-header">
-            <div>
-              <strong>Auto top-up</strong>
-              <p class="credits-hint" style="margin-top: 0.25rem;">Automatically recharge when your balance gets low.</p>
-            </div>
-            <label class="toggle-switch">
-              <input type="checkbox" v-model="autoTopup.enabled" @change="onAutoTopupToggle" :disabled="savingAutoTopup" />
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
-          <div v-if="autoTopup.enabled" class="auto-topup-settings">
-            <div class="auto-topup-field">
-              <label class="auto-topup-label">Top-up to</label>
-              <div class="auto-topup-input-row">
-                <span class="auto-topup-currency">$</span>
-                <input type="number" v-model.number="autoTopup.amount_dollars" min="10" step="5" class="auto-topup-input" :disabled="savingAutoTopup" />
-              </div>
-              <span class="auto-topup-hint">Triggers when balance drops below 5% of this amount (min $10)</span>
-            </div>
-            <button @click="saveAutoTopup" class="btn-primary btn-small" :disabled="savingAutoTopup || autoTopup.amount_dollars < 10" style="margin-top: 0.5rem;">
-              {{ savingAutoTopup ? 'Saving...' : 'Save' }}
-            </button>
-            <span v-if="autoTopupError" class="auto-topup-error">{{ autoTopupError }}</span>
-          </div>
-        </div>
       </div>
 
       <!-- Subscription Section -->
       <div class="billing-section">
-        <h3 class="billing-section-title" style="margin-top: 2rem;">Managed on-premises subscription</h3>
+        <h3 class="billing-section-title" style="margin-top: 2rem;">Managed enclaves subscription</h3>
         <div v-if="subscription" class="subscription-card">
           <div class="subscription-info">
             <div class="subscription-tier-name">{{ subscription.tier_name }}</div>
@@ -1316,12 +1272,8 @@ make build-cli
               <span class="subscription-detail-value">${{ (subscription.price_cents_per_cycle / 100).toLocaleString() }}/mo</span>
             </div>
             <div class="subscription-detail-item">
-              <span class="subscription-detail-label">vCPUs</span>
-              <span class="subscription-detail-value">Up to {{ subscription.max_vcpus }}</span>
-            </div>
-            <div class="subscription-detail-item">
-              <span class="subscription-detail-label">Enclaves</span>
-              <span class="subscription-detail-value">{{ subscription.max_apps }}</span>
+              <span class="subscription-detail-label">Managed enclaves</span>
+              <span class="subscription-detail-value">{{ subscription.enclaves ?? subscription.max_apps }}</span>
             </div>
             <div class="subscription-detail-item">
               <span class="subscription-detail-label">Started</span>
@@ -1334,7 +1286,7 @@ make build-cli
           </div>
         </div>
         <div v-else class="subscription-empty">
-          <p>No active managed on-premises subscription.</p>
+          <p>No active managed enclaves subscription.</p>
           <button @click="showSelectPlanModal = true" class="btn-primary btn-small">Choose a plan</button>
         </div>
       </div>
@@ -1409,118 +1361,68 @@ make build-cli
         </div>
       </div>
 
-      <!-- Payment Methods -->
       <div class="billing-section">
-        <h3 class="billing-section-title">Payment methods</h3>
-        <div v-if="paymentMethods.length > 0" class="payment-methods-list">
-          <div v-for="pm in paymentMethods" :key="pm.id" class="payment-method-card">
-            <div class="payment-method-info">
-              <span class="payment-method-type">{{ pm.card_brand || pm.type }}</span>
-              <span class="payment-method-details">{{ pm.last4 ? `•••• ${pm.last4}` : pm.email }}</span>
-              <span v-if="pm.is_primary" class="payment-method-badge">Primary</span>
-            </div>
-            <div class="payment-method-actions">
-              <button v-if="!pm.is_primary" @click="setPrimaryPaymentMethod(pm.id)" class="btn-secondary btn-small">Set as primary</button>
-              <button @click="removePaymentMethod(pm.id)" class="btn-secondary btn-small btn-danger-text">Remove</button>
-            </div>
-          </div>
-        </div>
-        <div v-if="paymentMethods.length === 0" class="payment-method-empty">
-          <p>No payment method on file.</p>
-        </div>
-        <button @click="showAddPaymentModal = true" class="btn-secondary" style="margin-top: 0.75rem;">Add payment method</button>
-      </div>
-
-      <!-- Invoices -->
-      <div class="billing-section">
-        <h3 class="billing-section-title">Invoices</h3>
-        <div v-if="loadingInvoices" class="list-item-empty">Loading invoices...</div>
-        <div v-else-if="invoices.length === 0" class="list-item-empty">
-          No invoices yet.
-        </div>
-        <div v-else class="invoices-list">
-          <div v-for="invoice in invoices" :key="invoice.id" class="invoice-item">
-            <div class="invoice-info">
-              <span class="invoice-number">{{ invoice.number }}</span>
-              <span class="invoice-date">{{ formatDate(invoice.date) }}</span>
-            </div>
-            <div class="invoice-amount">
-              <span :class="['invoice-status', `status-${invoice.status}`]">{{ invoice.status }}</span>
-              <span class="invoice-total">${{ (invoice.amount_cents / 100).toFixed(2) }}</span>
-            </div>
-            <a v-if="invoice.pdf_url" :href="invoice.pdf_url" target="_blank" class="btn-secondary btn-small">
-              Download PDF
-            </a>
-          </div>
+        <h3 class="billing-section-title">Redeem credit code</h3>
+        <div class="redeem-code-row redeem-code-row--footer">
+          <input
+            v-model="redeemCode"
+            type="text"
+            class="redeem-code-input"
+            placeholder="Enter credit code"
+            :disabled="redeemingCode"
+            @keyup.enter="redeemCreditCode"
+          />
+          <button
+            @click="redeemCreditCode"
+            class="btn-primary btn-small"
+            :disabled="redeemingCode || !redeemCode.trim()"
+          >
+            {{ redeemingCode ? 'Redeeming...' : 'Redeem' }}
+          </button>
         </div>
       </div>
-    </div>
 
-    <!-- Add Payment Method Modal -->
-    <div v-if="showAddPaymentModal" class="modal-overlay" @click="showAddPaymentModal = false">
-      <div class="modal-content modal-content--wide" @click.stop>
-        <h3 class="modal-title">Add payment method</h3>
-
-        <!-- Paddle Checkout Container -->
-        <div class="paddle-checkout-container"></div>
-
-        <div v-if="cardError" class="card-error">{{ cardError }}</div>
-
-        <div class="modal-actions">
-          <button @click="showAddPaymentModal = false" class="btn-secondary">Cancel</button>
-        </div>
-
-        <p class="card-privacy-notice">
-          Payments are processed securely by
-          <a href="https://www.paddle.com" target="_blank" rel="noopener">Paddle</a>,
-          our merchant of record.
-        </p>
-      </div>
     </div>
 
     <!-- Add Credits Modal -->
     <div v-if="showAddCreditsModal" class="modal-overlay" @click="closeCreditsModal">
       <div class="modal-content" @click.stop>
         <h3 class="modal-title">Add prepaid credits</h3>
-        <p class="modal-description">Choose a discounted bundle or enter a custom amount. Custom purchases are credited 1:1 with no bonus. Credits never expire and are applied automatically at billing time.</p>
+        <p class="modal-description">Choose a prepaid credit bundle or enter a custom amount. Credits never expire and are applied automatically at billing time.</p>
 
         <div class="credit-packages">
           <button
             v-for="(pkg, index) in creditPackages"
             :key="index"
             class="credit-package-card"
-            :class="{ 'credit-package-card--selected': selectedCreditMode === 'package' && selectedPackage === index }"
+            :class="{ 'credit-package-card--selected': selectedPackage === index }"
             @click="selectCreditPackage(index)"
           >
             <span class="credit-package-pay">Pay {{ pkg.purchase_display }}</span>
             <span class="credit-package-get">Get {{ pkg.credit_display }} in credits</span>
             <span class="credit-package-bonus">{{ pkg.bonus_percent }}% bonus</span>
           </button>
+        </div>
 
-          <div
-            class="credit-package-card credit-package-card--custom"
-            :class="{ 'credit-package-card--selected': selectedCreditMode === 'custom' }"
-            @click="selectCustomCreditPurchase"
-          >
-            <div class="credit-package-copy">
-              <span class="credit-package-pay">Custom amount</span>
-              <span class="credit-package-get">Get {{ customCreditAmountPreview }} in credits</span>
-              <span class="credit-custom-hint">Minimum {{ minimumCustomCreditPurchaseDisplay }}. No bonus credits.</span>
-            </div>
-            <label class="credit-custom-input-row" @click.stop>
-              <span class="credit-custom-input-prefix">$</span>
-              <input
-                v-model="customCreditAmountInput"
-                class="credit-custom-input"
-                type="number"
-                min="10"
-                step="10"
-                placeholder="10.00"
-                inputmode="decimal"
-                @focus="selectCustomCreditPurchase"
-              >
-            </label>
+        <div class="credit-custom-amount">
+          <label for="custom-credit-amount" class="credit-custom-label">Or enter a custom amount</label>
+          <div class="credit-custom-input-row">
+            <span class="credit-custom-prefix">$</span>
+            <input
+              id="custom-credit-amount"
+              v-model="customCreditAmount"
+              class="credit-custom-input"
+              type="text"
+              inputmode="decimal"
+              autocomplete="off"
+              placeholder="10.00"
+              @input="onCustomCreditAmountInput"
+            />
           </div>
+          <p class="credit-custom-hint">Minimum $10.00. Custom amounts do not include a bundle bonus.</p>
+          <p v-if="customCreditAmountCents !== null" class="credit-custom-preview">
+            Get {{ customCreditAmountDisplay }} in credits
+          </p>
         </div>
 
         <div v-if="creditPurchaseError" class="card-error">{{ creditPurchaseError }}</div>
@@ -1531,7 +1433,7 @@ make build-cli
             class="btn-primary"
             :disabled="purchasingCredits || !canPurchaseCredits"
           >
-            {{ purchasingCredits ? 'Processing...' : 'Purchase with card on file' }}
+            {{ purchasingCredits ? 'Processing...' : 'Checkout' }}
           </button>
           <button @click="closeCreditsModal" class="btn-secondary">Cancel</button>
         </div>
@@ -1548,7 +1450,7 @@ make build-cli
     <div v-if="showSelectPlanModal" class="modal-overlay" @click="showSelectPlanModal = false">
       <div class="modal-content modal-content--wide" @click.stop>
         <h3 class="modal-title">Choose a plan</h3>
-        <p class="modal-description">Select a managed on-premises subscription tier.</p>
+        <p class="modal-description">Select how many enclaves you want Caution to manage for this organization.</p>
 
         <div class="tier-cards">
           <button
@@ -1560,7 +1462,7 @@ make build-cli
           >
             <span class="tier-card-name">{{ tier.name }}</span>
             <span class="tier-card-price">{{ formatTierPrice(tier) }}<span class="tier-card-period">/mo</span></span>
-            <span class="tier-card-limits">{{ tier.enclaves }} {{ tier.enclaves === 1 ? 'enclave' : 'enclaves' }} &middot; {{ tier.vcpu }} vCPUs &middot; {{ tier.ram_gb }} GB RAM</span>
+            <span class="tier-card-limits">{{ tier.enclaves }} managed {{ tier.enclaves === 1 ? 'enclave' : 'enclaves' }}</span>
           </button>
         </div>
 
@@ -2404,30 +2306,17 @@ export default {
     // Billing state
     const billingData = ref({ totalCost: 0, projectedCost: 0, items: [], subscriptionItems: [] });
     const loadingBilling = ref(false);
-    const invoices = ref([]);
-    const loadingInvoices = ref(false);
-    const paymentMethods = ref([]);
-    const showAddPaymentModal = ref(false);
-    const cardError = ref('');
-
     // Credits state
     const creditBalance = ref({ balance_cents: 0, balance_display: '$0.00' });
     const creditPackages = ref([]);
-    const minimumCustomCreditPurchaseCents = ref(1000);
     const showAddCreditsModal = ref(false);
-    const selectedCreditMode = ref('package');
     const selectedPackage = ref(null);
-    const customCreditAmountInput = ref('');
+    const customCreditAmount = ref('');
     const purchasingCredits = ref(false);
     const creditPurchaseError = ref('');
-    const creditCheckoutOpen = ref(false);
     const redeemCode = ref('');
     const redeemingCode = ref(false);
-
-    // Auto top-up state
-    const autoTopup = ref({ enabled: false, amount_dollars: 0 });
-    const savingAutoTopup = ref(false);
-    const autoTopupError = ref('');
+    let paddleCheckoutContext = null;
 
     // Subscription state
     const subscription = ref(null);
@@ -2452,6 +2341,13 @@ export default {
       const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
       const formatter = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' });
       return `${formatter.format(start)} - ${formatter.format(end)}, ${now.getFullYear()}`;
+    });
+
+    const usdFormatter = new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
     });
 
     const formatBillingUsage = (usage, unit) => {
@@ -2676,30 +2572,6 @@ export default {
     // Alias for template
     const calculateAppMonthlyCost = getAppEstimatedMonthlyCost;
 
-    const loadInvoices = async () => {
-      // only display loading text if we have no invoices
-      if (invoices.value.length === 0) {
-        loadingInvoices.value = true;
-      }
-
-      try {
-        const response = await authFetch("/api/billing/invoices");
-
-        if (response.ok) {
-          const data = await response.json();
-          invoices.value = data.invoices || [];
-        } else if (response.status === 401) {
-          window.location.href = "/login";
-        } else {
-          invoices.value = [];
-        }
-      } catch (err) {
-        invoices.value = [];
-      } finally {
-        loadingInvoices.value = false;
-      }
-    };
-
     const loadUserEmail = async () => {
       try {
         const response = await authFetch("/api/users/me");
@@ -2759,169 +2631,146 @@ export default {
       }
     };
 
-    const loadPaymentMethods = async () => {
-      try {
-        const response = await authFetch("/api/billing/payment-methods");
-
-        if (response.ok) {
-          const data = await response.json();
-          paymentMethods.value = data.payment_methods || [];
-        } else {
-          paymentMethods.value = [];
-        }
-      } catch (err) {
-        paymentMethods.value = [];
-      }
-    };
-
-    const initPaddleCheckout = async () => {
-      // Load Paddle.js if not already loaded
-      if (!window.Paddle) {
-        const script = document.createElement('script');
-        script.src = 'https://cdn.paddle.com/paddle/v2/paddle.js';
-        script.onload = () => openPaddleCheckout();
-        script.onerror = () => {
-          cardError.value = 'Failed to load payment form. Please refresh and try again.';
-        };
-        document.body.appendChild(script);
-      } else {
-        openPaddleCheckout();
-      }
-    };
-
-    const openPaddleCheckout = async () => {
-      if (!window.Paddle) {
-        cardError.value = 'Payment form not available.';
+    const ensurePaddleLoaded = async () => {
+      if (window.Paddle) {
         return;
       }
 
-      try {
-        // Get client token and customer ID from our backend
-        const tokenResponse = await authFetch('/api/billing/paddle/client-token');
-
-        if (!tokenResponse.ok) {
-          throw new Error(await readResponseError(tokenResponse, 'Failed to initialize payment form'));
-        }
-
-        const {
-          client_token,
-          customer_auth_token,
-          checkout_custom_data,
-          paddle_customer_id,
-          setup_price_id,
-        } = await tokenResponse.json();
-
-        const isSandbox = import.meta.env.VITE_PADDLE_SANDBOX === 'true';
-
-        // Set sandbox environment before initializing
-        if (isSandbox) {
-          window.Paddle.Environment.set('sandbox');
-        }
-
-        // Initialize Paddle
-        window.Paddle.Initialize({
-          token: client_token,
-          eventCallback: async (event) => {
-            if (event.name === 'checkout.completed') {
-              const data = event.data;
-              // Transaction data intentionally not logged
-              // Notify our backend about the completed transaction
-              try {
-                const payment = data.payment || {};
-                const card = payment.method_details?.card || {};
-                const response = await authFetch('/api/billing/paddle/transaction-completed', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({
-                    transaction_id: data.transaction_id,
-                    payment_method_id: payment.payment_method_id || payment.stored_payment_method_id || null,
-                    card_last4: card.last4 || null,
-                    card_brand: card.type || null,
-                  }),
-                });
-
-                if (response.ok) {
-                  showToast('Payment method saved successfully');
-                  showAddPaymentModal.value = false;
-                  await loadPaymentMethods();
-                } else {
-                  cardError.value = await readResponseError(response, 'Failed to save payment method. Please try again.');
-                }
-              } catch (err) {
-                console.error('Transaction completed callback error:', err);
-                cardError.value = err?.message || 'Failed to save payment method. Please try again.';
-              }
-            }
-          },
-        });
-
-        // Open inline checkout
-        if (!setup_price_id) {
-          throw new Error('Paddle setup price not configured. Contact support.');
-        }
-
-        const checkoutSettings = {
-          settings: {
-            displayMode: 'inline',
-            frameTarget: 'paddle-checkout-container',
-            frameInitialHeight: 450,
-            frameStyle: 'width: 100%; background-color: transparent; border: none;',
-          },
-          items: [{ priceId: setup_price_id, quantity: 1 }],
-        };
-
-        if (checkout_custom_data) {
-          checkoutSettings.customData = checkout_custom_data;
-        }
-
-        if (customer_auth_token) {
-          checkoutSettings.customerAuthToken = customer_auth_token;
-        } else if (paddle_customer_id) {
-          checkoutSettings.customer = { id: paddle_customer_id };
-        } else if (userEmail.value) {
-          checkoutSettings.customer = { email: userEmail.value };
-        }
-
-        window.Paddle.Checkout.open(checkoutSettings);
-      } catch (err) {
-        console.error('Failed to initialize Paddle checkout:', err);
-        cardError.value = err?.message || 'Failed to initialize payment form. Please try again.';
-      }
+      await new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = 'https://cdn.paddle.com/paddle/v2/paddle.js';
+        script.onload = resolve;
+        script.onerror = () => reject(new Error('Failed to load payment form. Please refresh and try again.'));
+        document.body.appendChild(script);
+      });
     };
 
-    const removePaymentMethod = async (id) => {
-      if (!confirm('Are you sure you want to remove this payment method?')) return;
-
-      try {
-        const response = await authFetch(`/api/billing/payment-methods/${id}`, {
-          method: 'DELETE',
-        });
-
-        if (response.ok || response.status === 204) {
-          await loadPaymentMethods();
-          showToast('Payment method removed');
-        } else {
-          showToast('Failed to remove payment method', 'error');
-        }
-      } catch (err) {
-        showToast('Failed to remove payment method', 'error');
+    const initializePaddle = (clientToken) => {
+      const isSandbox = import.meta.env.VITE_PADDLE_SANDBOX === 'true';
+      if (isSandbox) {
+        window.Paddle.Environment.set('sandbox');
       }
+
+      window.Paddle.Initialize({
+        token: clientToken,
+        eventCallback: handlePaddleEvent,
+      });
     };
 
-    const setPrimaryPaymentMethod = async (id) => {
+    const parseCreditAmountInputToCents = (value) => {
+      if (value === null || value === undefined) {
+        return null;
+      }
+
+      if (typeof value === 'number') {
+        if (!Number.isFinite(value) || value <= 0) {
+          return null;
+        }
+        return Math.round(value * 100);
+      }
+
+      const normalized = String(value).trim().replace(/\$/g, '').replace(/,/g, '');
+      if (!normalized) {
+        return null;
+      }
+      if (!/^\d+(\.\d{0,2})?$/.test(normalized)) {
+        return null;
+      }
+
+      const [dollarsPart, centsPart = ''] = normalized.split('.');
+      return parseInt(dollarsPart, 10) * 100 + parseInt(centsPart.padEnd(2, '0'), 10);
+    };
+
+    const customCreditAmountCents = computed(() => parseCreditAmountInputToCents(customCreditAmount.value));
+    const customCreditAmountDisplay = computed(() => {
+      if (customCreditAmountCents.value === null) {
+        return null;
+      }
+      return usdFormatter.format(customCreditAmountCents.value / 100);
+    });
+
+    const handleCompletedCreditPurchase = async (transactionId, requestPayload, paymentDetails = null) => {
       try {
-        const response = await authFetch(`/api/billing/payment-methods/${id}/set-primary`, {
+        const response = await authFetch('/api/billing/credits/purchase', {
           method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            transaction_id: transactionId,
+            ...requestPayload,
+            payment_method_id: paymentDetails?.payment_method_id || paymentDetails?.stored_payment_method_id || null,
+            card_last4: paymentDetails?.method_details?.card?.last4 || null,
+            card_brand: paymentDetails?.method_details?.card?.type || null,
+          }),
         });
 
         if (response.ok) {
-          await loadPaymentMethods();
-          showToast('Primary payment method updated');
+          const result = await response.json();
+          if (result.pending) {
+            showToast('Payment completed. Credits will appear once Paddle finishes syncing the charge.');
+          } else {
+            creditBalance.value = {
+              balance_cents: result.balance_cents,
+              balance_display: result.balance_display,
+            };
+            showToast('Credits added successfully!');
+          }
         } else {
-          showToast('Failed to update primary payment method', 'error');
+          const errorText = await readResponseError(
+            response,
+            'Payment completed. Credits will appear once billing sync finishes.',
+          );
+          console.error('Credit purchase finalization failed:', errorText);
+          showToast('Payment completed. Credits will appear once billing sync finishes.');
         }
       } catch (err) {
-        showToast('Failed to update primary payment method', 'error');
+        console.error('Credit purchase completion callback error:', err);
+        showToast('Payment completed. Credits will appear once billing sync finishes.');
+      } finally {
+        purchasingCredits.value = false;
+        paddleCheckoutContext = null;
+        closeCreditsModal();
+        void loadCreditBalance();
+        setTimeout(() => {
+          void loadCreditBalance();
+        }, 2000);
+        if (window.Paddle?.Checkout?.close) {
+          window.Paddle.Checkout.close();
+        }
+      }
+    };
+
+    const handlePaddleEvent = async (event) => {
+      const context = paddleCheckoutContext;
+      if (!context) {
+        return;
+      }
+
+      if (event.name === 'checkout.completed') {
+        const data = event.data;
+
+        if (context.kind === 'credit_purchase') {
+          await handleCompletedCreditPurchase(
+            data.transaction_id,
+            context.requestPayload,
+            data.payment || null,
+          );
+        }
+        return;
+      }
+
+      if (context.kind !== 'credit_purchase') {
+        return;
+      }
+
+      if (event.name === 'checkout.closed') {
+        purchasingCredits.value = false;
+        paddleCheckoutContext = null;
+        return;
+      }
+
+      if (event.name === 'checkout.payment.failed' || event.name === 'checkout.error') {
+        purchasingCredits.value = false;
+        creditPurchaseError.value = 'Payment attempt failed. You can retry in the checkout window.';
       }
     };
 
@@ -2941,120 +2790,44 @@ export default {
         const response = await authFetch('/api/billing/credits/packages');
         if (response.ok) {
           const data = await response.json();
-          creditPackages.value = data.packages || [];
-          minimumCustomCreditPurchaseCents.value = data.minimum_custom_purchase_cents || 1000;
+          creditPackages.value = (data.packages || []).map((pkg) => {
+            const formatPackageDisplay = (value) => {
+              if (typeof value !== 'string') {
+                return value;
+              }
+
+              const normalized = value.replace(/\$/g, '').replace(/,/g, '').trim();
+              const amount = Number(normalized);
+              if (!Number.isFinite(amount)) {
+                return value;
+              }
+
+              return usdFormatter.format(amount);
+            };
+
+            return {
+              ...pkg,
+              purchase_display: formatPackageDisplay(pkg.purchase_display),
+              credit_display: formatPackageDisplay(pkg.credit_display),
+            };
+          });
         }
       } catch (err) {
         // silently fail
       }
     };
 
-    const formatCurrencyCents = (cents) => {
-      return new Intl.NumberFormat('en-US', {
-        style: 'currency',
-        currency: 'USD',
-      }).format((cents || 0) / 100);
-    };
-
-    const parseCreditAmountInputToCents = (value) => {
-      if (value === null || value === undefined) return null;
-
-      const normalized = typeof value === 'string' ? value.trim() : value;
-      if (normalized === '') return null;
-
-      const parsed = typeof normalized === 'number'
-        ? normalized
-        : Number(normalized);
-      if (!Number.isFinite(parsed) || parsed <= 0) return null;
-      return Math.round(parsed * 100);
-    };
-
-    const customCreditAmountCents = computed(() => {
-      return parseCreditAmountInputToCents(customCreditAmountInput.value);
-    });
-
-    const customCreditAmountPreview = computed(() => {
-      const cents = customCreditAmountCents.value;
-      return formatCurrencyCents(cents ?? minimumCustomCreditPurchaseCents.value);
-    });
-
-    const minimumCustomCreditPurchaseDisplay = computed(() => {
-      return formatCurrencyCents(minimumCustomCreditPurchaseCents.value);
-    });
-
-    const canPurchaseCredits = computed(() => {
-      if (selectedCreditMode.value === 'custom') {
-        return (
-          customCreditAmountCents.value !== null &&
-          customCreditAmountCents.value >= minimumCustomCreditPurchaseCents.value
-        );
-      }
-      return selectedPackage.value !== null;
-    });
+    const canPurchaseCredits = computed(() => selectedPackage.value !== null || customCreditAmountCents.value !== null);
 
     const selectCreditPackage = (index) => {
-      selectedCreditMode.value = 'package';
       selectedPackage.value = index;
+      customCreditAmount.value = '';
       creditPurchaseError.value = '';
     };
 
-    const selectCustomCreditPurchase = () => {
-      selectedCreditMode.value = 'custom';
+    const onCustomCreditAmountInput = () => {
       selectedPackage.value = null;
       creditPurchaseError.value = '';
-    };
-
-    const loadAutoTopup = async () => {
-      try {
-        const response = await authFetch('/api/billing/auto-topup');
-        if (response.ok) {
-          const data = await response.json();
-          autoTopup.value = { enabled: data.enabled, amount_dollars: data.amount_dollars || 0 };
-        }
-      } catch (err) {
-        // silently fail
-      }
-    };
-
-    const saveAutoTopup = async () => {
-      autoTopupError.value = '';
-      if (autoTopup.value.enabled && autoTopup.value.amount_dollars < 10) {
-        autoTopupError.value = 'Minimum top-up target is $10';
-        return;
-      }
-      savingAutoTopup.value = true;
-      try {
-        const response = await authFetch('/api/billing/auto-topup', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            enabled: autoTopup.value.enabled,
-            amount_dollars: autoTopup.value.enabled ? autoTopup.value.amount_dollars : 0,
-          }),
-        });
-        if (response.ok) {
-          const data = await response.json();
-          autoTopup.value = { enabled: data.enabled, amount_dollars: data.amount_dollars };
-          showToast('Auto top-up settings saved');
-        } else {
-          const err = await response.text();
-          autoTopupError.value = err || 'Failed to save';
-          // Revert toggle if it was a toggle change
-          await loadAutoTopup();
-        }
-      } catch (err) {
-        autoTopupError.value = 'Failed to save auto top-up settings';
-        await loadAutoTopup();
-      } finally {
-        savingAutoTopup.value = false;
-      }
-    };
-
-    // Only auto-save when disabling (no config needed); when enabling, let user set amount first
-    const onAutoTopupToggle = () => {
-      if (!autoTopup.value.enabled) {
-        saveAutoTopup();
-      }
     };
 
     // Balance polling — refresh every 30s when settings tab is active
@@ -3173,38 +2946,35 @@ export default {
 
     const closeCreditsModal = () => {
       showAddCreditsModal.value = false;
-      selectedCreditMode.value = 'package';
       selectedPackage.value = null;
-      customCreditAmountInput.value = '';
+      customCreditAmount.value = '';
       creditPurchaseError.value = '';
-      creditCheckoutOpen.value = false;
     };
 
     const openCreditCheckout = async () => {
       creditPurchaseError.value = '';
-      let payload;
-      if (selectedCreditMode.value === 'custom') {
+      let payload = null;
+
+      if (selectedPackage.value !== null) {
+        payload = { package_index: selectedPackage.value };
+      } else if (customCreditAmount.value.trim()) {
         if (customCreditAmountCents.value === null) {
-          creditPurchaseError.value = 'Enter a custom amount to purchase credits.';
+          creditPurchaseError.value = 'Enter a valid dollar amount.';
           return;
         }
-        if (customCreditAmountCents.value < minimumCustomCreditPurchaseCents.value) {
-          creditPurchaseError.value = `Custom credit purchases must be at least ${minimumCustomCreditPurchaseDisplay.value}.`;
+        if (customCreditAmountCents.value < 1000) {
+          creditPurchaseError.value = 'Custom credit purchase must be at least $10.00.';
           return;
         }
         payload = { amount_cents: customCreditAmountCents.value };
       } else {
-        if (selectedPackage.value === null) {
-          creditPurchaseError.value = 'Select a credit package or enter a custom amount.';
-          return;
-        }
-        payload = { package_index: selectedPackage.value };
+        creditPurchaseError.value = 'Select a credit package or enter a custom amount.';
+        return;
       }
 
       purchasingCredits.value = true;
 
       try {
-        // Try server-side charge using card on file
         const response = await authFetch('/api/billing/credits/purchase', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -3213,13 +2983,32 @@ export default {
 
         if (response.ok) {
           const result = await response.json();
-          if (result.pending) {
-            showToast('Payment submitted. Credits will appear once Paddle confirms the charge.');
-            closeCreditsModal();
-            void loadCreditBalance();
-            setTimeout(() => {
-              void loadCreditBalance();
-            }, 2000);
+          if (result.requires_checkout) {
+            await ensurePaddleLoaded();
+
+            if (!window.Paddle) {
+              throw new Error('Payment form not available.');
+            }
+
+            paddleCheckoutContext = {
+              kind: 'credit_purchase',
+              requestPayload: payload,
+            };
+            initializePaddle(result.client_token);
+
+            const checkoutSettings = {
+              transactionId: result.transaction_id,
+              settings: {
+                displayMode: 'overlay',
+                variant: 'one-page',
+                theme: 'light',
+              },
+            };
+            if (result.customer_auth_token) {
+              checkoutSettings.customerAuthToken = result.customer_auth_token;
+            }
+
+            window.Paddle.Checkout.open(checkoutSettings);
             return;
           }
 
@@ -3230,16 +3019,18 @@ export default {
           showToast('Credits added successfully!');
           closeCreditsModal();
         } else if (response.status === 402) {
-          // No payment method on file
-          creditPurchaseError.value = 'Please add a payment method first, then come back to purchase credits.';
+          creditPurchaseError.value = 'Unable to start credit checkout right now. Please try again.';
         } else {
-          const errData = await response.text().catch(() => '');
-          creditPurchaseError.value = `Payment failed: ${errData || 'Please try again.'}`;
+          const errData = await readResponseError(response, 'Please try again.');
+          creditPurchaseError.value = `Payment failed: ${errData}`;
         }
       } catch (err) {
-        creditPurchaseError.value = 'Failed to process payment. Please try again.';
+        paddleCheckoutContext = null;
+        creditPurchaseError.value = err?.message || 'Failed to process payment. Please try again.';
       } finally {
-        purchasingCredits.value = false;
+        if (!paddleCheckoutContext || paddleCheckoutContext.kind !== 'credit_purchase') {
+          purchasingCredits.value = false;
+        }
       }
     };
 
@@ -3792,11 +3583,8 @@ export default {
       } else if (newTab === "settings") {
         loadUserEmail();
         loadBilling();
-        loadInvoices();
-        loadPaymentMethods();
         loadCreditBalance();
         loadCreditPackages();
-        loadAutoTopup();
         loadSubscription();
         loadSubscriptionTiers();
         startBalancePolling();
@@ -4112,7 +3900,6 @@ export default {
       } else if (activeTab.value === "settings") {
         loadCreditBalance();
         loadBilling();
-        loadPaymentMethods();
         loadSubscription();
       }
     };
@@ -4148,11 +3935,8 @@ export default {
       if (initialTab === "settings") {
         loadUserEmail();
         loadBilling();
-        loadInvoices();
-        loadPaymentMethods();
         loadCreditBalance();
         loadCreditPackages();
-        loadAutoTopup();
         loadSubscription();
         loadSubscriptionTiers();
         startBalancePolling();
@@ -4187,11 +3971,8 @@ export default {
         } else if (activeTab.value === "settings") {
           loadUserEmail();
           loadBilling();
-          loadInvoices();
-          loadPaymentMethods();
           loadCreditBalance();
           loadCreditPackages();
-          loadAutoTopup();
           loadSubscription();
           loadSubscriptionTiers();
           startBalancePolling();
@@ -4206,15 +3987,6 @@ export default {
       if (selectedApp.value) {
         const updated = newApps.find(app => app.id === selectedApp.value.id);
         selectedApp.value = updated || null;
-      }
-    });
-
-    // Initialize Paddle checkout when payment modal opens
-    watch(showAddPaymentModal, (isOpen) => {
-      if (isOpen) {
-        cardError.value = '';
-        // Wait for DOM to update then initialize Paddle checkout
-        setTimeout(() => initPaddleCheckout(), 100);
       }
     });
 
@@ -4317,35 +4089,20 @@ export default {
       currentBillingPeriod,
       formatBillingUsage,
       loadBilling,
-      invoices,
-      loadingInvoices,
-      loadInvoices,
-      paymentMethods,
-      showAddPaymentModal,
-      cardError,
-      removePaymentMethod,
-      setPrimaryPaymentMethod,
       creditBalance,
       creditPackages,
-      minimumCustomCreditPurchaseCents,
-      minimumCustomCreditPurchaseDisplay,
       showAddCreditsModal,
-      selectedCreditMode,
-      autoTopup,
-      savingAutoTopup,
-      autoTopupError,
-      saveAutoTopup,
-      onAutoTopupToggle,
       selectedPackage,
-      customCreditAmountInput,
-      customCreditAmountPreview,
       canPurchaseCredits,
       purchasingCredits,
       creditPurchaseError,
       loadCreditBalance,
       loadCreditPackages,
       selectCreditPackage,
-      selectCustomCreditPurchase,
+      customCreditAmount,
+      customCreditAmountCents,
+      customCreditAmountDisplay,
+      onCustomCreditAmountInput,
       openCreditCheckout,
       closeCreditsModal,
       redeemCode,
@@ -6691,14 +6448,6 @@ export default {
     grid-template-columns: 1fr;
   }
 
-  .credit-package-card--custom {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .credit-custom-input-row {
-    width: 100%;
-  }
 }
 
 /* Email settings */
@@ -6863,10 +6612,18 @@ export default {
   margin-top: 0.5rem;
 }
 
+.credits-add-button {
+  margin-top: 0.75rem;
+}
+
 .redeem-code-row {
   display: flex;
   gap: 0.5rem;
   margin-top: 0.75rem;
+}
+
+.redeem-code-row--footer {
+  margin-top: 0;
 }
 
 .redeem-code-input {
@@ -7028,50 +6785,58 @@ export default {
   border-radius: 4px;
 }
 
-.credit-package-card--custom {
-  align-items: center;
-  gap: 1rem;
+.credit-custom-amount {
+  margin-bottom: 1rem;
 }
 
-.credit-package-copy {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 0.3rem;
-}
-
-.credit-custom-hint {
-  font-size: 0.8125rem;
-  color: #6b7280;
+.credit-custom-label {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #111827;
+  margin-bottom: 0.4rem;
 }
 
 .credit-custom-input-row {
   display: flex;
   align-items: center;
-  gap: 0.35rem;
-  min-width: 132px;
-  padding: 0.6rem 0.75rem;
+  gap: 0.5rem;
   border: 1px solid #d1d5db;
-  border-radius: 6px;
-  background: #ffffff;
+  border-radius: 8px;
+  background: #fff;
+  padding: 0.65rem 0.85rem;
 }
 
-.credit-custom-input-prefix {
-  color: #4b5563;
+.credit-custom-prefix {
+  font-size: 1rem;
   font-weight: 600;
-}
-
-.credit-custom-input {
-  width: 100%;
-  border: none;
-  padding: 0;
-  font-size: 0.95rem;
-  background: transparent;
   color: #111827;
 }
 
-.credit-custom-input:focus {
+.credit-custom-input {
+  flex: 1;
+  border: none;
   outline: none;
+  font-size: 1rem;
+  color: #111827;
+  background: transparent;
+}
+
+.credit-custom-input::placeholder {
+  color: #9ca3af;
+}
+
+.credit-custom-hint {
+  margin-top: 0.45rem;
+  font-size: 0.78rem;
+  color: #6b7280;
+}
+
+.credit-custom-preview {
+  margin-top: 0.35rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #111827;
 }
 
 .modal-description {
