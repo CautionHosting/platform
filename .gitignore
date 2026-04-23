@@ -7,6 +7,7 @@ git-repos/
 build-cache/
 caution-cache/
 tests/e2e/logs/
+containerfiles/macos-sdk/
 
 # Terraform
 .terraform/
