@@ -691,7 +691,7 @@ async fn poll_build_status(
                 // Send milestone if phase changed
                 if status.phase != last_phase {
                     let msg = match status.phase.as_str() {
-                        "starting" => "Builder instance starting...",
+                        "starting" => "Builder ready, downloading source...",
                         "docker_built" => "Docker image built, building EIF...",
                         "eif_built" => "EIF built, uploading to S3...",
                         "completed" => "Build complete",

@@ -1658,7 +1658,7 @@ async fn deploy_logic(
             cached.eif_s3_key
         } else {
             let _ = tx
-                .send(Ok(milestone("Starting build on dedicated instance...")))
+                .send(Ok(milestone("Provisioning dedicated builder...")))
                 .await;
 
             // Archive source and upload to S3
