@@ -6,7 +6,7 @@ export
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-macos-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -81,6 +81,7 @@ build-frontend:
 # CLI release variables
 CLI_VERSION := $(shell grep '^version' src/cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 CLI_BINARY := caution-linux-x86_64
+CLI_MACOS_UNTRUSTED_BINARY := caution-macos-arm64-untrusted
 CLI_OUT_DIR := $(OUT_DIR)/cli
 GIT_REF := $(shell git log -1 --format=%H)
 GIT_AUTHOR := $(shell git log -1 --format=%an)
@@ -109,6 +110,22 @@ build-cli:
 	@docker cp cli-extract:/caution $(CLI_OUT_DIR)/$(CLI_BINARY)
 	@docker rm cli-extract
 	@echo "CLI binary available at $(CLI_OUT_DIR)/$(CLI_BINARY)"
+
+build-cli-macos-untrusted:
+	@echo "Building untrusted macOS CLI binary..."
+	@mkdir -p $(CLI_OUT_DIR)
+	@docker build \
+		--progress=plain \
+		$(NO_CACHE) \
+		-t caution-cli-macos-untrusted \
+		-f ./containerfiles/Containerfile.cli-macos-untrusted \
+		--target export \
+		.
+	@docker rm -f cli-macos-untrusted-extract 2>/dev/null || true
+	@docker create --name cli-macos-untrusted-extract caution-cli-macos-untrusted
+	@docker cp cli-macos-untrusted-extract:/caution $(CLI_OUT_DIR)/$(CLI_MACOS_UNTRUSTED_BINARY)
+	@docker rm cli-macos-untrusted-extract
+	@echo "Untrusted macOS CLI binary available at $(CLI_OUT_DIR)/$(CLI_MACOS_UNTRUSTED_BINARY)"
 
 release-cli:
 	@$(MAKE) build-cli NOCACHE=1

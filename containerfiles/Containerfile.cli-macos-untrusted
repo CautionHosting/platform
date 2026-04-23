@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1@sha256:2780b5c3bab67f1f76c781860de469442999ed1a0d7992a5efdf2cffc0e3d769
+
+ARG CROSS_IMAGE=docker.io/joseluisq/rust-linux-darwin-builder@sha256:a3e69706ba273c08a23ab76be5c2d98a9075c33c2504e4fb17d36a64ae713ff2
+FROM ${CROSS_IMAGE} AS builder
+
+ARG CLI_TARGET=aarch64-apple-darwin
+
+ENV CARGO_HOME=/usr/local/cargo
+ENV CARGO_BUILD_JOBS=4
+ENV PATH="/usr/local/osxcross/target/bin:${PATH}"
+ENV CC_aarch64_apple_darwin=arm64-apple-darwin22.4-clang
+ENV CXX_aarch64_apple_darwin=arm64-apple-darwin22.4-clang++
+ENV AR_aarch64_apple_darwin=arm64-apple-darwin22.4-ar
+ENV PKG_CONFIG_aarch64_apple_darwin=arm64-apple-darwin22.4-pkg-config
+ENV CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=arm64-apple-darwin22.4-clang
+ENV CARGO_TARGET_AARCH64_APPLE_DARWIN_AR=arm64-apple-darwin22.4-ar
+ENV SDKROOT=/usr/local/osxcross/target/SDK/MacOSX13.3.sdk
+ENV BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_darwin="--target=arm64-apple-darwin22.4 --sysroot=/usr/local/osxcross/target/SDK/MacOSX13.3.sdk"
+ENV NETTLE_HAVE_CV448=1
+ENV NETTLE_HAVE_OCB=1
+ENV OPENSSL_DIR=/usr/local/osxcross/target/macports/pkgs/opt/local/libexec/openssl3
+ENV OPENSSL_LIBS=ssl:crypto:z
+ENV OPENSSL_STATIC=1
+ENV RUST_BACKTRACE=1
+ENV RUSTFLAGS="-C codegen-units=1 -L native=/usr/local/osxcross/target/macports/pkgs/opt/local/lib"
+ENV PKG_CONFIG_ALLOW_CROSS=1
+ENV MACOSX_DEPLOYMENT_TARGET=11.0
+ENV TARGET_ARCH=${CLI_TARGET}
+
+RUN osxcross-macports install -s nettle openssl
+
+WORKDIR /build
+
+COPY . .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    find /usr/local/cargo/registry -name '.cargo-ok' -delete 2>/dev/null || true && \
+    cargo fetch --locked --target ${TARGET_ARCH}
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,id=cli-macos-target,target=/build/target \
+    cargo build --release --frozen \
+      -p cli \
+      --target ${TARGET_ARCH} \
+      && install -D -m 0755 /build/target/${TARGET_ARCH}/release/caution /usr/local/bin/caution
+
+FROM scratch AS export
+
+COPY --from=builder /usr/local/bin/caution /caution
+
+CMD ["/caution"]
