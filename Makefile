@@ -186,8 +186,28 @@ install-cli: build-cli
 	@echo "Installed caution to $(HOME)/.local/bin/caution"
 
 install-cli-macos-untrusted: build-cli-macos-untrusted
-	@install -D -m 0755 $(CLI_OUT_DIR)/$(CLI_MACOS_UNTRUSTED_BINARY) $(HOME)/.local/bin/caution
-	@echo "Installed untrusted macOS caution to $(HOME)/.local/bin/caution"
+	@DEST_DIR="/usr/local/bin"; \
+	if [ -d /opt/homebrew/bin ] && printf '%s\n' ":$(PATH):" | grep -Fq ":/opt/homebrew/bin:"; then \
+		DEST_DIR="/opt/homebrew/bin"; \
+	fi; \
+	if [ ! -d "$$DEST_DIR" ]; then \
+		echo "Error: $$DEST_DIR does not exist."; \
+		exit 1; \
+	fi; \
+	if [ ! -w "$$DEST_DIR" ]; then \
+		echo "Error: $$DEST_DIR is not writable."; \
+		exit 1; \
+	fi; \
+	install -m 0755 $(CLI_OUT_DIR)/$(CLI_MACOS_UNTRUSTED_BINARY) "$$DEST_DIR/caution"; \
+	"$$DEST_DIR/caution" --version >/dev/null; \
+	echo "Installed untrusted macOS caution to $$DEST_DIR/caution"; \
+	if printf '%s\n' ":$(PATH):" | grep -Fq ":$$DEST_DIR:"; then \
+		echo "caution is available on PATH in this shell"; \
+	else \
+		echo "Warning: $$DEST_DIR is not on PATH in this shell."; \
+		echo "Add this to your shell profile:"; \
+		echo "  export PATH=\"$$DEST_DIR:\$$PATH\""; \
+	fi
 
 build-all: build-gateway build-api build-email build-metering build-frontend build-cli
 
