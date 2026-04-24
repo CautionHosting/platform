@@ -84,8 +84,6 @@ CLI_BINARY := caution-linux-x86_64
 CLI_MACOS_UNTRUSTED_BINARY := caution-macos-arm64-untrusted
 CLI_OUT_DIR := $(OUT_DIR)/cli
 CLI_MACOS_UNTRUSTED_INSTALL_DIR ?= /usr/local/bin
-MACOS_SDK_PATH ?=
-MACOS_SDK_STAGE_DIR ?= containerfiles/macos-sdk
 GIT_REF := $(shell git log -1 --format=%H)
 GIT_AUTHOR := $(shell git log -1 --format=%an)
 GIT_PUBKEY := $(shell git log -1 --format=%GK)
@@ -115,64 +113,61 @@ build-cli:
 	@echo "CLI binary available at $(CLI_OUT_DIR)/$(CLI_BINARY)"
 
 build-cli-macos-untrusted:
-	@echo "Building untrusted macOS CLI binary..."
-	@macos_sdk_path="$(MACOS_SDK_PATH)"; \
-	macos_sdk_tarball=""; \
-	macos_sdk_dir=""; \
-	if [ -z "$$macos_sdk_path" ] && [ "$$(uname -s)" = "Darwin" ] && command -v xcrun >/dev/null 2>&1; then \
-		macos_sdk_path="$$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"; \
-	fi; \
-	if [ -z "$$macos_sdk_path" ]; then \
-		echo "No trusted local macOS SDK found."; \
-		echo "Run this on a Mac with Xcode or Command Line Tools installed, or set MACOS_SDK_PATH to a trusted local SDK directory."; \
+	@if [ "$$(uname -s)" != "Darwin" ]; then \
+		echo "Error: build-cli-macos-untrusted is only supported on macOS."; \
+		exit 1; \
+	fi
+	@if [ "$$(uname -m)" != "arm64" ]; then \
+		echo "Error: build-cli-macos-untrusted currently builds the arm64 macOS CLI only."; \
+		exit 1; \
+	fi
+	@echo "Building untrusted macOS CLI binary with the local macOS toolchain..."
+	@set -e; \
+	if ! command -v cargo >/dev/null 2>&1; then \
+		echo "Missing cargo."; \
+		echo "Install Rust with:"; \
+		echo "  curl https://sh.rustup.rs -sSf | sh"; \
 		exit 1; \
 	fi; \
-	if [ -L "$$macos_sdk_path" ]; then \
-		link_target="$$(readlink "$$macos_sdk_path")"; \
-		case "$$link_target" in \
-			/*) macos_sdk_path="$$link_target" ;; \
-			*) macos_sdk_path="$$(cd "$$(dirname "$$macos_sdk_path")" && cd "$$(dirname "$$link_target")" && printf '%s/%s' "$$(pwd)" "$$(basename "$$link_target")")" ;; \
-		esac; \
-	fi; \
-	if [ ! -d "$$macos_sdk_path" ]; then \
-		echo "Configured macOS SDK path does not exist: $$macos_sdk_path"; \
+	if ! command -v xcrun >/dev/null 2>&1; then \
+		echo "Missing Xcode Command Line Tools."; \
+		echo "Install them with:"; \
+		echo "  xcode-select --install"; \
 		exit 1; \
 	fi; \
-	macos_sdk_dir="$$(basename "$$macos_sdk_path")"; \
-	if [ "$$macos_sdk_dir" = "MacOSX.sdk" ]; then \
-		resolved_dir="$$(find "$$(dirname "$$macos_sdk_path")" -maxdepth 1 -type d -name 'MacOSX*.sdk' ! -name 'MacOSX.sdk' | sort | tail -n1)"; \
-		if [ -z "$$resolved_dir" ]; then \
-			echo "Could not resolve a versioned macOS SDK directory next to $$macos_sdk_path"; \
-			exit 1; \
-		fi; \
-		macos_sdk_path="$$resolved_dir"; \
-		macos_sdk_dir="$$(basename "$$resolved_dir")"; \
+	if ! command -v pkg-config >/dev/null 2>&1; then \
+		echo "Missing pkg-config."; \
+		echo "Install dependencies with one of:"; \
+		echo "  brew install pkgconf nettle gmp openssl@3"; \
+		echo "  sudo port install pkgconfig nettle gmp openssl"; \
+		exit 1; \
 	fi; \
-	macos_sdk_tarball="$(MACOS_SDK_STAGE_DIR)/$${macos_sdk_dir}.tar.gz"; \
-	echo "Staging trusted local macOS SDK from $$macos_sdk_path"; \
-	mkdir -p "$(MACOS_SDK_STAGE_DIR)"; \
-	rm -f "$(MACOS_SDK_STAGE_DIR)"/MacOSX*.sdk.tar.gz "$(MACOS_SDK_STAGE_DIR)"/MacOSX*.sdk.tar.xz; \
-	tar -C "$$(dirname "$$macos_sdk_path")" -czf "$$macos_sdk_tarball" "$$macos_sdk_dir"; \
-	mkdir -p $(CLI_OUT_DIR); \
-	if command -v sha256sum >/dev/null 2>&1; then \
-		macos_sdk_sha256=$$(sha256sum "$$macos_sdk_tarball" | awk '{print $$1}'); \
+	dep_source=""; \
+	pkg_config_path=""; \
+	openssl_dir=""; \
+	if command -v brew >/dev/null 2>&1 && brew list --versions nettle gmp openssl@3 pkgconf >/dev/null 2>&1; then \
+		dep_source="brew"; \
+		pkg_config_path="$$(brew --prefix gmp)/lib/pkgconfig:$$(brew --prefix nettle)/lib/pkgconfig:$$(brew --prefix openssl@3)/lib/pkgconfig"; \
+		openssl_dir="$$(brew --prefix openssl@3)"; \
+	elif command -v port >/dev/null 2>&1 && port installed nettle gmp openssl pkgconfig 2>/dev/null | grep -q '(active)'; then \
+		dep_source="macports"; \
+		pkg_config_path="/opt/local/lib/pkgconfig"; \
+		openssl_dir="/opt/local"; \
 	else \
-		macos_sdk_sha256=$$(shasum -a 256 "$$macos_sdk_tarball" | awk '{print $$1}'); \
+		echo "Missing required native dependencies."; \
+		echo "Install them with one of:"; \
+		echo "  brew install pkgconf nettle gmp openssl@3"; \
+		echo "  sudo port install pkgconfig nettle gmp openssl"; \
+		exit 1; \
 	fi; \
-	docker build \
-		--progress=plain \
-		$(NO_CACHE) \
-		--build-arg MACOS_SDK_TARBALL="$$macos_sdk_tarball" \
-		--build-arg MACOS_SDK_DIR="$$macos_sdk_dir" \
-		--build-arg MACOS_SDK_SHA256="$$macos_sdk_sha256" \
-		-t caution-cli-macos-untrusted \
-		-f ./containerfiles/Containerfile.cli-macos-untrusted \
-		--target export \
-		.
-	@docker rm -f cli-macos-untrusted-extract 2>/dev/null || true
-	@docker create --name cli-macos-untrusted-extract caution-cli-macos-untrusted
-	@docker cp cli-macos-untrusted-extract:/caution $(CLI_OUT_DIR)/$(CLI_MACOS_UNTRUSTED_BINARY)
-	@docker rm cli-macos-untrusted-extract
+	echo "Using $$dep_source dependencies"; \
+	mkdir -p $(CLI_OUT_DIR); \
+	PKG_CONFIG_PATH="$$pkg_config_path" \
+	OPENSSL_DIR="$$openssl_dir" \
+	OPENSSL_NO_VENDOR=1 \
+	CARGO_NET_GIT_FETCH_WITH_CLI=true \
+	cargo build --release --locked -p cli --target aarch64-apple-darwin; \
+	install -m 0755 target/aarch64-apple-darwin/release/caution $(CLI_OUT_DIR)/$(CLI_MACOS_UNTRUSTED_BINARY)
 	@echo "Untrusted macOS CLI binary available at $(CLI_OUT_DIR)/$(CLI_MACOS_UNTRUSTED_BINARY)"
 
 release-cli:
