@@ -180,7 +180,7 @@
                 {{ selectedApp.state }}
               </span>
             </div>
-            <div class="sidebar-meta">
+            <div v-if="selectedApp.state === 'running'" class="sidebar-meta">
               <div class="sidebar-meta-item">
                 <span class="app-detail-label">vCPUs</span>
                 <span class="app-detail-value">{{ selectedApp.configuration?.cpus || '-' }}</span>
@@ -188,6 +188,12 @@
               <div class="sidebar-meta-item">
                 <span class="app-detail-label">RAM</span>
                 <span class="app-detail-value">{{ selectedApp.configuration?.memory_mb ? formatMemory(selectedApp.configuration.memory_mb) : '-' }}</span>
+              </div>
+            </div>
+            <div v-else class="sidebar-meta">
+              <div class="sidebar-meta-item">
+                <span class="app-detail-label">Runtime sizing</span>
+                <span class="app-detail-value app-detail-muted">Available after successful deployment</span>
               </div>
             </div>
             <div v-if="selectedApp.state === 'running' && calculateAppMonthlyCost(selectedApp)" class="sidebar-cost">
