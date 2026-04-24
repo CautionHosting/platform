@@ -6,7 +6,7 @@ export
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-macos-untrusted install-cli install-cli-macos-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -81,7 +81,9 @@ build-frontend:
 # CLI release variables
 CLI_VERSION := $(shell grep '^version' src/cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 CLI_BINARY := caution-linux-x86_64
+CLI_MACOS_UNTRUSTED_BINARY := caution-macos-arm64-untrusted
 CLI_OUT_DIR := $(OUT_DIR)/cli
+CLI_MACOS_UNTRUSTED_INSTALL_DIR ?= /usr/local/bin
 GIT_REF := $(shell git log -1 --format=%H)
 GIT_AUTHOR := $(shell git log -1 --format=%an)
 GIT_PUBKEY := $(shell git log -1 --format=%GK)
@@ -109,6 +111,64 @@ build-cli:
 	@docker cp cli-extract:/caution $(CLI_OUT_DIR)/$(CLI_BINARY)
 	@docker rm cli-extract
 	@echo "CLI binary available at $(CLI_OUT_DIR)/$(CLI_BINARY)"
+
+build-cli-macos-untrusted:
+	@if [ "$$(uname -s)" != "Darwin" ]; then \
+		echo "Error: build-cli-macos-untrusted is only supported on macOS."; \
+		exit 1; \
+	fi
+	@if [ "$$(uname -m)" != "arm64" ]; then \
+		echo "Error: build-cli-macos-untrusted currently builds the arm64 macOS CLI only."; \
+		exit 1; \
+	fi
+	@echo "Building untrusted macOS CLI binary with the local macOS toolchain..."
+	@set -e; \
+	if ! command -v cargo >/dev/null 2>&1; then \
+		echo "Missing cargo."; \
+		echo "Install Rust with:"; \
+		echo "  curl https://sh.rustup.rs -sSf | sh"; \
+		exit 1; \
+	fi; \
+	if ! command -v xcrun >/dev/null 2>&1; then \
+		echo "Missing Xcode Command Line Tools."; \
+		echo "Install them with:"; \
+		echo "  xcode-select --install"; \
+		exit 1; \
+	fi; \
+	if ! command -v pkg-config >/dev/null 2>&1; then \
+		echo "Missing pkg-config."; \
+		echo "Install dependencies with one of:"; \
+		echo "  brew install pkgconf nettle gmp openssl@3"; \
+		echo "  sudo port install pkgconfig nettle gmp openssl"; \
+		exit 1; \
+	fi; \
+	dep_source=""; \
+	pkg_config_path=""; \
+	openssl_dir=""; \
+	if command -v brew >/dev/null 2>&1 && brew list --versions nettle gmp openssl@3 pkgconf >/dev/null 2>&1; then \
+		dep_source="brew"; \
+		pkg_config_path="$$(brew --prefix gmp)/lib/pkgconfig:$$(brew --prefix nettle)/lib/pkgconfig:$$(brew --prefix openssl@3)/lib/pkgconfig"; \
+		openssl_dir="$$(brew --prefix openssl@3)"; \
+	elif command -v port >/dev/null 2>&1 && port installed nettle gmp openssl pkgconfig 2>/dev/null | grep -q '(active)'; then \
+		dep_source="macports"; \
+		pkg_config_path="/opt/local/lib/pkgconfig"; \
+		openssl_dir="/opt/local"; \
+	else \
+		echo "Missing required native dependencies."; \
+		echo "Install them with one of:"; \
+		echo "  brew install pkgconf nettle gmp openssl@3"; \
+		echo "  sudo port install pkgconfig nettle gmp openssl"; \
+		exit 1; \
+	fi; \
+	echo "Using $$dep_source dependencies"; \
+	mkdir -p $(CLI_OUT_DIR); \
+	PKG_CONFIG_PATH="$$pkg_config_path" \
+	OPENSSL_DIR="$$openssl_dir" \
+	OPENSSL_NO_VENDOR=1 \
+	CARGO_NET_GIT_FETCH_WITH_CLI=true \
+	cargo build --release --locked -p cli --target aarch64-apple-darwin; \
+	install -m 0755 target/aarch64-apple-darwin/release/caution $(CLI_OUT_DIR)/$(CLI_MACOS_UNTRUSTED_BINARY)
+	@echo "Untrusted macOS CLI binary available at $(CLI_OUT_DIR)/$(CLI_MACOS_UNTRUSTED_BINARY)"
 
 release-cli:
 	@$(MAKE) build-cli NOCACHE=1
@@ -167,6 +227,19 @@ reproduce-cli:
 install-cli: build-cli
 	@install -D -m 0755 $(CLI_OUT_DIR)/$(CLI_BINARY) $(HOME)/.local/bin/caution
 	@echo "Installed caution to $(HOME)/.local/bin/caution"
+
+install-cli-macos-untrusted: build-cli-macos-untrusted
+	@DEST_DIR="$(CLI_MACOS_UNTRUSTED_INSTALL_DIR)"; \
+	if [ ! -d "$$DEST_DIR" ]; then \
+		echo "Error: $$DEST_DIR does not exist."; \
+		exit 1; \
+	fi; \
+	if [ ! -w "$$DEST_DIR" ]; then \
+		echo "Error: $$DEST_DIR is not writable."; \
+		exit 1; \
+	fi; \
+	install -m 0755 $(CLI_OUT_DIR)/$(CLI_MACOS_UNTRUSTED_BINARY) "$$DEST_DIR/caution"; \
+	echo "Installed untrusted macOS caution to $$DEST_DIR/caution"
 
 build-all: build-gateway build-api build-email build-metering build-frontend build-cli
 

@@ -1,1 +1,6 @@
 caution-cache
+.git
+dist
+frontend/node_modules
+out
+target
