@@ -869,6 +869,68 @@ fn milestone_error(msg: &str) -> bytes::Bytes {
     bytes::Bytes::from(format!("error: {}\n", msg))
 }
 
+async fn recover_deploy_failure(
+    state: &Arc<AppState>,
+    org_id: Uuid,
+    resource_id: Uuid,
+    resource_name: &str,
+    previous_state: types::ResourceState,
+    should_cleanup: bool,
+    deployment_credentials: Option<deployment::AwsCredentials>,
+    managed_onprem_config: Option<deployment::ManagedOnPremConfig>,
+) {
+    if should_cleanup {
+        tracing::warn!(
+            "Best-effort rollback for failed deploy of resource {} ({})",
+            resource_id,
+            resource_name
+        );
+
+        let asg_name = managed_onprem_config
+            .as_ref()
+            .map(|cfg| cfg.asg_name.clone());
+        if let Err(e) = deployment::destroy_app_with_credentials(
+            org_id,
+            resource_id,
+            resource_name.to_string(),
+            deployment_credentials,
+            asg_name,
+        )
+        .await
+        {
+            tracing::error!(
+                "Rollback destroy failed for resource {} after deploy error: {:#}",
+                resource_id,
+                e
+            );
+        }
+    }
+
+    let target_state = if should_cleanup {
+        types::ResourceState::Failed
+    } else {
+        previous_state
+    };
+
+    if let Err(e) = sqlx::query(
+        "UPDATE compute_resources
+         SET state = $1
+         WHERE id = $2 AND organization_id = $3",
+    )
+    .bind(target_state)
+    .bind(resource_id)
+    .bind(org_id)
+    .execute(&state.db)
+    .await
+    {
+        tracing::error!(
+            "Failed to restore resource {} state after deploy error: {}",
+            resource_id,
+            e
+        );
+    }
+}
+
 #[derive(Clone)]
 struct ResolvedBuilderTarget {
     config: builder::BuilderConfig,
@@ -1278,23 +1340,24 @@ async fn deploy_logic(
         )
     })?;
 
-    let (resource_id, app_name, configuration, was_destroyed) = match &existing_resource {
-        Some((id, name_opt, config_opt, destroyed_at, state)) => {
-            // Reject if a deploy is already in progress
-            if *state == types::ResourceState::Pending {
-                return Err((StatusCode::CONFLICT, "A deployment is already in progress for this app. Please wait for it to complete.".to_string()));
+    let (resource_id, app_name, configuration, was_destroyed, previous_state) =
+        match &existing_resource {
+            Some((id, name_opt, config_opt, destroyed_at, state)) => {
+                // Reject if a deploy is already in progress
+                if *state == types::ResourceState::Pending {
+                    return Err((StatusCode::CONFLICT, "A deployment is already in progress for this app. Please wait for it to complete.".to_string()));
+                }
+                let name = name_opt.clone().unwrap_or_else(|| "unnamed".to_string());
+                let config = config_opt.clone().unwrap_or_else(|| serde_json::json!({}));
+                (*id, name, config, destroyed_at.is_some(), *state)
             }
-            let name = name_opt.clone().unwrap_or_else(|| "unnamed".to_string());
-            let config = config_opt.clone().unwrap_or_else(|| serde_json::json!({}));
-            (*id, name, config, destroyed_at.is_some())
-        }
-        None => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                format!("App with id {} not found", req.app_id),
-            ))
-        }
-    };
+            None => {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!("App with id {} not found", req.app_id),
+                ))
+            }
+        };
 
     tracing::info!("Found resource: id={}, name={}", resource_id, app_name);
 
@@ -1590,6 +1653,11 @@ async fn deploy_logic(
     let managed_onprem_config = managed_onprem_credential
         .as_ref()
         .map(managed_onprem_config_from_credential);
+    let should_cleanup_on_failure = was_destroyed
+        || !matches!(
+            previous_state,
+            types::ResourceState::Running | types::ResourceState::Stopped
+        );
 
     // --- Dedicated builder path ---
     // Builds are always offloaded to an ephemeral EC2 builder instance.
@@ -1866,6 +1934,8 @@ async fn deploy_logic(
         credentials: deployment_credentials,
         managed_onprem: managed_onprem_config,
     };
+    let cleanup_credentials = nitro_request.credentials.clone();
+    let cleanup_managed_onprem = nitro_request.managed_onprem.clone();
 
     let _ = tx.send(Ok(milestone("Uploading and launching..."))).await;
 
@@ -1880,6 +1950,17 @@ async fn deploy_logic(
         }
         Err(e) => {
             tracing::error!("Failed to deploy Nitro Enclave: {:?}", e);
+            recover_deploy_failure(
+                &state,
+                req.org_id,
+                resource_id,
+                &app_name,
+                previous_state,
+                should_cleanup_on_failure,
+                cleanup_credentials.clone(),
+                cleanup_managed_onprem.clone(),
+            )
+            .await;
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Nitro deployment failed: {}", e),
@@ -1892,7 +1973,36 @@ async fn deploy_logic(
         final_config["instance_type"] = serde_json::json!(instance_type);
     }
 
-    sqlx::query(
+    let app_url = if let Some(ref domain) = build_config.domain {
+        format!("https://{}", domain)
+    } else {
+        format!("http://{}", deployment_result.public_ip)
+    };
+    let attestation_url = format!("{}/attestation", app_url);
+
+    let _ = tx.send(Ok(milestone("Waiting for health check..."))).await;
+
+    tracing::info!("Waiting for attestation endpoint to become healthy...");
+    if let Err(e) = wait_for_attestation_health(&deployment_result.public_ip, 120).await {
+        tracing::error!("Attestation health check failed: {}", e);
+        recover_deploy_failure(
+            &state,
+            req.org_id,
+            resource_id,
+            &app_name,
+            previous_state,
+            should_cleanup_on_failure,
+            cleanup_credentials,
+            cleanup_managed_onprem,
+        )
+        .await;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Enclave failed to become healthy: {}", e),
+        ));
+    }
+
+    if let Err(e) = sqlx::query(
         "UPDATE compute_resources
          SET provider_resource_id = $1, state = $2, public_ip = $3, region = $4, configuration = COALESCE(configuration, '{}'::jsonb) || $5::jsonb
          WHERE id = $6 AND organization_id = $7"
@@ -1906,7 +2016,23 @@ async fn deploy_logic(
     .bind(req.org_id)
     .execute(&state.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update resource: {}", e)))?;
+    {
+        recover_deploy_failure(
+            &state,
+            req.org_id,
+            resource_id,
+            &app_name,
+            previous_state,
+            should_cleanup_on_failure,
+            cleanup_credentials.clone(),
+            cleanup_managed_onprem.clone(),
+        )
+        .await;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to update resource: {}", e),
+        ));
+    }
 
     crate::metering::upsert_tracked_resource(
         &state,
@@ -1942,24 +2068,6 @@ async fn deploy_logic(
         deployment_result.public_ip,
         deployment_result.instance_type
     );
-
-    let app_url = if let Some(ref domain) = build_config.domain {
-        format!("https://{}", domain)
-    } else {
-        format!("http://{}", deployment_result.public_ip)
-    };
-    let attestation_url = format!("{}/attestation", app_url);
-
-    let _ = tx.send(Ok(milestone("Waiting for health check..."))).await;
-
-    tracing::info!("Waiting for attestation endpoint to become healthy...");
-    if let Err(e) = wait_for_attestation_health(&deployment_result.public_ip, 120).await {
-        tracing::error!("Attestation health check failed: {}", e);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Enclave failed to become healthy: {}", e),
-        ));
-    }
 
     tracing::info!(
         "Deployment URLs - App: {}, Attestation: {}",
