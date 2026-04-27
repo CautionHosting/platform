@@ -444,7 +444,7 @@
             </p>
 
             <a href="https://docs.caution.co/quickstart/" target="_blank" rel="noopener noreferrer" class="btn-guide">
-              Read the quickstart guide
+              Open quickstart
             </a>
           </div>
         </div>
@@ -1631,6 +1631,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import DashboardLayout from "../components/DashboardLayout.vue";
 import AttestationModal from "../components/AttestationModal.vue";
 import { authFetch } from "../composables/useWebAuthn.js";
+import { formatLocalDate, formatLocalTime } from "../utils/dateTime.js";
 
 async function sha256Hex(message) {
   const msgBuffer = new TextEncoder().encode(message);
@@ -1681,6 +1682,7 @@ export default {
       credentials: "credentials",
       guide: "guide",
     };
+    const LOCATION_CHANGED_EVENT = "caution:location-change";
     const DASHBOARD_HASH_TO_TAB = Object.entries(DASHBOARD_TAB_HASHES).reduce(
       (acc, [tab, hash]) => {
         if (hash) {
@@ -2345,8 +2347,8 @@ export default {
       const now = new Date();
       const start = new Date(now.getFullYear(), now.getMonth(), 1);
       const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-      const formatter = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' });
-      return `${formatter.format(start)} - ${formatter.format(end)}, ${now.getFullYear()}`;
+      const options = { month: 'short', day: 'numeric' };
+      return `${formatLocalDate(start, options)} - ${formatLocalDate(end, options)}, ${now.getFullYear()}`;
     });
 
     const usdFormatter = new Intl.NumberFormat('en-US', {
@@ -3564,6 +3566,7 @@ export default {
 
       const method = replace ? "replaceState" : "pushState";
       window.history[method]({}, "", nextUrl);
+      window.dispatchEvent(new CustomEvent(LOCATION_CHANGED_EVENT));
     };
 
     const loadTabData = (newTab, previousTab) => {
@@ -3675,7 +3678,7 @@ export default {
       const date = parseDate(dateString);
       if (!date || isNaN(date.getTime())) return 'Unknown';
       const options = { year: 'numeric', month: 'short', day: 'numeric' };
-      return date.toLocaleDateString('en-US', options);
+      return formatLocalDate(date, options);
     };
 
     const formatDateTime = (dateString) => {
@@ -3683,8 +3686,8 @@ export default {
       if (!date || isNaN(date.getTime())) return 'Unknown';
       const dateOptions = { year: 'numeric', month: 'short', day: 'numeric' };
       const timeOptions = { hour: 'numeric', minute: '2-digit', hour12: true };
-      const datePart = date.toLocaleDateString('en-US', dateOptions);
-      const timePart = date.toLocaleTimeString('en-US', timeOptions);
+      const datePart = formatLocalDate(date, dateOptions);
+      const timePart = formatLocalTime(date, timeOptions);
       return `${datePart} at ${timePart}`;
     };
 
@@ -3692,9 +3695,9 @@ export default {
       const date = parseDate(dateString);
       if (!date || isNaN(date.getTime())) return 'Unknown';
       const dateOptions = { year: 'numeric', month: 'short', day: 'numeric' };
-      const timeOptions = { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true };
-      const datePart = date.toLocaleDateString('en-US', dateOptions);
-      const timePart = date.toLocaleTimeString('en-US', timeOptions);
+      const timeOptions = { hour: 'numeric', minute: '2-digit', hour12: true, timeZoneName: 'short' };
+      const datePart = formatLocalDate(date, dateOptions);
+      const timePart = formatLocalTime(date, timeOptions);
       return `${datePart} at ${timePart}`;
     };
 
@@ -3702,21 +3705,21 @@ export default {
       const date = parseDate(dateString);
       if (!date || isNaN(date.getTime())) return 'Unknown';
       const dateOptions = { year: 'numeric', month: 'short', day: 'numeric' };
-      return date.toLocaleDateString('en-US', dateOptions);
+      return formatLocalDate(date, dateOptions);
     };
 
     const formatTimeOnly = (dateString) => {
       const date = parseDate(dateString);
       if (!date || isNaN(date.getTime())) return '';
       const timeOptions = { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true };
-      return date.toLocaleTimeString('en-US', timeOptions);
+      return formatLocalTime(date, timeOptions);
     };
 
     const formatTimeWithTimezone = (dateString) => {
       const date = parseDate(dateString);
       if (!date || isNaN(date.getTime())) return '';
       const timeOptions = { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true, timeZoneName: 'short' };
-      return date.toLocaleTimeString('en-US', timeOptions);
+      return formatLocalTime(date, timeOptions);
     };
 
     const formatLastUsed = (dateValue) => {

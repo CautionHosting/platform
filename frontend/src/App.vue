@@ -20,7 +20,7 @@
 </template>
 
 <script>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import Onboarding from './views/Onboarding.vue'
 import Register from './views/Login.vue'
 import AuthLogin from './views/AuthLogin.vue'
@@ -48,52 +48,161 @@ export default {
     const legalActionLoading = ref(null)
     const legalActionError = ref('')
 
-    const currentRoute = ref(window.location.pathname)
+    const locationChangedEvent = 'caution:location-change'
+    const canonicalBaseUrl = 'https://dashboard.caution.co'
+    const previewImageUrl = `${canonicalBaseUrl}/thumbnail.png`
+    const previewImageAlt = 'Caution dashboard preview'
+    const noIndexRobots = 'noindex, nofollow'
+
+    const getCurrentLocation = () => ({
+      path: window.location.pathname,
+      hash: window.location.hash,
+    })
+
+    const currentLocation = ref(getCurrentLocation())
+
+    const refreshCurrentLocation = () => {
+      currentLocation.value = getCurrentLocation()
+    }
 
     const replaceRoute = (path, hash = window.location.hash) => {
       const normalizedHash = hash && hash !== '#' ? hash : ''
       const nextUrl = `${path}${normalizedHash}`
-      if (`${window.location.pathname}${window.location.hash}` === nextUrl) return
+      if (`${window.location.pathname}${window.location.hash}` === nextUrl) {
+        currentLocation.value = { path: window.location.pathname, hash: window.location.hash }
+        return
+      }
       window.history.replaceState({}, '', nextUrl)
-      currentRoute.value = path
+      currentLocation.value = { path, hash: normalizedHash }
     }
 
     // Page metadata by route
     const pageMeta = {
       '/': {
         title: 'Create an account • Caution',
-        description: 'Create a Caution account with your security key. Closed beta with support for verified enclave deployments on AWS Nitro.'
+        description: 'Create a Caution account with an access code and passkey.',
+        path: '/'
       },
       '/login': {
-        title: 'Log in to Caution',
-        description: 'Log in to your Caution account to manage applications and verified enclave deployments.'
+        title: 'Log in • Caution',
+        description: 'Log in to Caution with your passkey.',
+        path: '/login'
       },
       '/onboarding': {
         title: 'Onboarding • Caution',
-        description: 'Complete your Caution account setup.'
-      },
-      '/dashboard': {
-        title: 'Dashboard • Caution',
-        description: 'Manage your applications and verified enclave deployments.'
+        description: 'Complete your Caution account setup.',
+        path: '/onboarding'
       },
       '/qr-login': {
-        title: 'CLI Login • Caution',
-        description: 'Authenticate your CLI session using a security key.'
+        title: 'CLI login • Caution',
+        description: 'Authenticate a Caution CLI login request.',
+        path: '/qr-login'
       },
       '/qr-sign': {
-        title: 'CLI Signing • Caution',
-        description: 'Approve a CLI operation using a security key.'
+        title: 'CLI signing • Caution',
+        description: 'Approve a Caution CLI signing request.',
+        path: '/qr-sign'
       }
     }
 
-    // Update page title and meta description
-    const updatePageMeta = (path) => {
-      const meta = pageMeta[path] || pageMeta['/']
-      document.title = meta.title
-      const metaDesc = document.querySelector('meta[name="description"]')
-      if (metaDesc) {
-        metaDesc.setAttribute('content', meta.description)
+    const dashboardPageMeta = {
+      '': {
+        title: 'Applications • Caution',
+        description: 'Manage Caution applications and verified enclave deployments.',
+        path: '/'
+      },
+      ssh: {
+        title: 'SSH keys • Caution',
+        description: 'Manage SSH keys for Caution CLI access.',
+        path: '/'
+      },
+      keys: {
+        title: 'Key services • Caution',
+        description: 'Manage Caution key services and quorum bundles.',
+        path: '/'
+      },
+      security: {
+        title: 'Security • Caution',
+        description: 'Manage passkeys and authentication requirements.',
+        path: '/'
+      },
+      settings: {
+        title: 'Settings • Caution',
+        description: 'Manage your Caution account, billing, and legal settings.',
+        path: '/'
+      },
+      credentials: {
+        title: 'Cloud credentials • Caution',
+        description: 'Manage AWS credentials for deploying applications to your infrastructure.',
+        path: '/'
+      },
+      guide: {
+        title: 'Quick start • Caution',
+        description: 'Follow the quick start guide for deploying an application with Caution.',
+        path: '/'
       }
+    }
+
+    const dashboardHash = (hash) => {
+      const normalizedHash = (hash || '').replace(/^#/, '')
+      return Object.prototype.hasOwnProperty.call(dashboardPageMeta, normalizedHash)
+        ? normalizedHash
+        : ''
+    }
+
+    const isDashboardLocation = (path, isUserAuthenticated) => {
+      return path === '/dashboard' || (path === '/' && isUserAuthenticated)
+    }
+
+    const metaUrl = (path) => {
+      return `${canonicalBaseUrl}${path === '/' ? '/' : path}`
+    }
+
+    const setMetaContent = (selector, value) => {
+      const element = document.querySelector(selector)
+      if (element) {
+        element.setAttribute('content', value)
+      }
+    }
+
+    const setCanonical = (url) => {
+      let canonical = document.querySelector('link[rel="canonical"]')
+      if (!canonical) {
+        canonical = document.createElement('link')
+        canonical.setAttribute('rel', 'canonical')
+        document.head.appendChild(canonical)
+      }
+      canonical.setAttribute('href', url)
+    }
+
+    const resolvePageMeta = (path, hash, isUserAuthenticated) => {
+      if (isDashboardLocation(path, isUserAuthenticated)) {
+        return dashboardPageMeta[dashboardHash(hash)]
+      }
+      return pageMeta[path] || pageMeta['/']
+    }
+
+    // Update page title and share/search metadata
+    const updatePageMeta = (meta) => {
+      const url = metaUrl(meta.path)
+      document.title = meta.title
+      setMetaContent('meta[name="description"]', meta.description)
+      setMetaContent('meta[name="robots"]', noIndexRobots)
+      setCanonical(url)
+
+      setMetaContent('meta[property="og:type"]', 'website')
+      setMetaContent('meta[property="og:url"]', url)
+      setMetaContent('meta[property="og:title"]', meta.title)
+      setMetaContent('meta[property="og:description"]', meta.description)
+      setMetaContent('meta[property="og:image"]', previewImageUrl)
+      setMetaContent('meta[property="og:image:alt"]', previewImageAlt)
+
+      setMetaContent('meta[name="twitter:card"]', 'summary_large_image')
+      setMetaContent('meta[name="twitter:url"]', url)
+      setMetaContent('meta[name="twitter:title"]', meta.title)
+      setMetaContent('meta[name="twitter:description"]', meta.description)
+      setMetaContent('meta[name="twitter:image"]', previewImageUrl)
+      setMetaContent('meta[name="twitter:image:alt"]', previewImageAlt)
     }
 
     // Check authentication status via API call (session in HTTP-only cookie)
@@ -173,10 +282,10 @@ export default {
 
     // Simple client-side routing
     const currentView = computed(() => {
-      const path = currentRoute.value || window.location.pathname
+      const { path, hash } = currentLocation.value
 
       // Update page metadata
-      updatePageMeta(path === '/' && isAuthenticated.value ? '/dashboard' : path)
+      updatePageMeta(resolvePageMeta(path, hash, isAuthenticated.value))
 
       if (path === '/') {
         if (!authChecked.value) return null
@@ -224,10 +333,16 @@ export default {
       // Check authentication on mount
       checkAuth()
 
-      // Handle browser back/forward buttons
-      window.addEventListener('popstate', () => {
-        currentRoute.value = window.location.pathname
-      })
+      // Handle browser back/forward buttons and dashboard hash changes
+      window.addEventListener('popstate', refreshCurrentLocation)
+      window.addEventListener('hashchange', refreshCurrentLocation)
+      window.addEventListener(locationChangedEvent, refreshCurrentLocation)
+    })
+
+    onUnmounted(() => {
+      window.removeEventListener('popstate', refreshCurrentLocation)
+      window.removeEventListener('hashchange', refreshCurrentLocation)
+      window.removeEventListener(locationChangedEvent, refreshCurrentLocation)
     })
 
     return {
