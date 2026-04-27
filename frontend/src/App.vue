@@ -62,11 +62,11 @@ export default {
     const pageMeta = {
       '/': {
         title: 'Create an account • Caution',
-        description: 'Create a Caution account with your security key. Closed beta with support for verified enclave deployments on AWS Nitro.'
+        description: 'Create a Caution account with your passkey. Closed beta with support for verified enclave deployments on AWS Nitro.'
       },
       '/login': {
         title: 'Log in to Caution',
-        description: 'Log in to your Caution account to manage applications and verified enclave deployments.'
+        description: 'Log in to your Caution account with your passkey to manage applications and verified enclave deployments.'
       },
       '/onboarding': {
         title: 'Onboarding • Caution',
