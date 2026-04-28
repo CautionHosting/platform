@@ -5,6 +5,7 @@ FROM stagex/core-ca-certificates@sha256:d135f1189e9b232eb7316626bf7858534c5540b2
 FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769ff3b37239f3d0 AS git
 FROM stagex/user-docker@sha256:8b9055def1d305374d4f895386339c37a3c922420b148c266c2447fb9186c712 AS docker
 FROM stagex/user-docker-cli-buildx@sha256:e417fa8cc1665e51f4bf1c9f688e8b3b55097afdb1017f96642fd4ca73290519 AS docker-cli
+FROM stagex/core-bash@sha256:c9a256e6e9da26f1e66e5d493e35da70dbb7b03e60d92e721bf469b6cadba73d AS bash
 FROM stagex/core-curl@sha256:bc8bab43d96a9167fbb85022ea773644a45ef335e7a9b747f203078973fa988e AS curl
 FROM stagex/core-user-runtime@sha256:055ae534e1e01259449fb4e0226f035a7474674c7371a136298e8bdac65d90bb AS user-runtime
 FROM stagex/user-opentofu@sha256:81b8970e2b660a44e2074389fa8cd56299522a457e8c27fe512d982d16536673 AS tofu
@@ -63,7 +64,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM scratch AS runtime
 COPY --from=user-runtime . /
 COPY --from=gcc . /
-COPY --from=stagex/core-bash . /
+COPY --from=bash . /
 COPY --from=musl . /
 COPY --from=libunwind . /
 COPY --from=ca-certificates . /

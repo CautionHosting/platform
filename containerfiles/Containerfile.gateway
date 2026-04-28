@@ -7,6 +7,7 @@ FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769f
 FROM stagex/core-zlib@sha256:06f5168e20d85d1eb1d19836cdf96addc069769b40f8f0f4a7a70b2f49fc18f8 AS zlib
 FROM stagex/core-user-runtime@sha256:055ae534e1e01259449fb4e0226f035a7474674c7371a136298e8bdac65d90bb AS user-runtime
 FROM stagex/user-docker-cli-buildx@sha256:e417fa8cc1665e51f4bf1c9f688e8b3b55097afdb1017f96642fd4ca73290519 AS docker-cli
+FROM stagex/docker@sha256:d7e7202ce2b10b13571bd339a921030b0c53ecc4bd50ff8869f004913c4a08df AS docker-runtime
 FROM stagex/user-pcsc-lite@sha256:2e0bb1cbeb9dd97be4e0594bd712dc138ee2710668281d3faa1a18d99a50979d AS pcsc-lite
 FROM stagex/user-nettle@sha256:3b883ec8fb6781acff2517e7485d7e8f79f147f8fa2b3b644cb96da495af52e7 AS nettle
 FROM stagex/core-gmp@sha256:35f1f6f285efd438e7d985dc0538b7a5ca1a228e69f50d39de2bcafe830b4beb AS gmp
@@ -63,7 +64,7 @@ COPY --from=libunwind . /
 COPY --from=zlib . /
 COPY --from=ca-certificates . /
 COPY --from=builder /usr/local/bin/gateway /usr/local/bin/gateway
-COPY --from=stagex/docker . /
+COPY --from=docker-runtime . /
 COPY --from=docker-cli . /
 COPY --from=gitconfig-builder /root/.gitconfig /root/.gitconfig
 
