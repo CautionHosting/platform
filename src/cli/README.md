@@ -76,10 +76,10 @@ more information on these practices.
    Once satisfied, import the keys you trust:
 
    ```sh
-   gpg --fetch-keys https://keyoxide.org/6B61ECD76088748C70590D55E90A401336C8AAA9
-   gpg --fetch-keys https://keyoxide.org/F4BF5C81EC78A5DD341C91EEDC4B7D1F52E0BA4D
-   gpg --fetch-keys https://keyoxide.org/88823A75ECAA786B0FF38B148E401478A3FBEF72
-   gpg --fetch-keys https://keyoxide.org/C92FE5A3FBD58DD3EC5AA26BB10116B8193F2DBD
+   gpg --keyserver hkps://keys.openpgp.org --recv-keys 6B61ECD76088748C70590D55E90A401336C8AAA9
+   gpg --keyserver hkps://keys.openpgp.org --recv-keys F4BF5C81EC78A5DD341C91EEDC4B7D1F52E0BA4D
+   gpg --keyserver hkps://keys.openpgp.org --recv-keys 88823A75ECAA786B0FF38B148E401478A3FBEF72
+   gpg --keyserver hkps://keys.openpgp.org --recv-keys C92FE5A3FBD58DD3EC5AA26BB10116B8193F2DBD
    ```
 
 3. Verify signatures
