@@ -84,6 +84,19 @@ more information on these practices.
 
 3. Verify signatures
 
+> [!NOTE]
+> The `release-cli` step is meant to be completed by maintainers.
+
+   Create release assets in `dist/cli`: The Caution executable binary,
+   `release.env`, which holds information about the commit, author, and public
+   key of the Caution software being built, and `manifest.txt` which lists the
+   hashsums of the assets.
+   ```sh
+   make release-cli
+   ```
+
+   Cryptographically verify the hashsums correctly match the release
+   assets:
    ```sh
    make verify-cli
    ```
