@@ -113,8 +113,8 @@ export function useWebAuthn() {
 
       const beginData = await beginResponse.json();
 
-      // Step 2: Get assertion from security key
-      status.value = "Tap your security key";
+      // Step 2: Get assertion from passkey
+      status.value = "Use your passkey";
 
       const publicKey = beginData.publicKey;
       publicKey.challenge = base64urlToUint8Array(publicKey.challenge);
@@ -227,8 +227,8 @@ export function useWebAuthn() {
 
       const beginData = await beginResponse.json();
 
-      // Step 2: Create credential with security key
-      status.value = "Tap your security key";
+      // Step 2: Create credential with passkey
+      status.value = "Use your passkey";
 
       const publicKey = beginData.publicKey;
       publicKey.challenge = base64urlToUint8Array(publicKey.challenge);
@@ -263,7 +263,7 @@ export function useWebAuthn() {
             );
           }
           throw new Error(
-            "Registration was blocked by your browser. Try using a hardware security key or your device's built-in authenticator. If you are using a password manager, try Chrome or Edge instead of Firefox."
+            "Registration was blocked by your browser. Try using a passkey, hardware security key, or your device's built-in authenticator. If you are using a password manager, try Chrome or Edge instead of Firefox."
           );
         }
         throw credError;

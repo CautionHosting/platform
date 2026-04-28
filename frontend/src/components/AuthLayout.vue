@@ -25,15 +25,16 @@
           <slot name="left-panel">
             <h1 class="info-title">Enclaves you can verify</h1>
             <p class="info">
-              Confidential compute platform for teams deploying enclaves they can verify, not trust. In closed beta.
+              Confidential compute platform for teams deploying verifiable enclaves.
+              <a href="https://caution.co/platform-tour.html" target="_blank" rel="noopener noreferrer">
+                Watch the platform demo.
+              </a>
             </p>
-            <h2 class="info">What's included</h2>
+            <h2 class="info">What you get</h2>
             <ul class="feature-list">
-              <li>Verified enclave deployments</li>
-              <li>Deploy in three commands</li>
               <li>
                 <span class="platform-item"
-                  >AWS Nitro supported today
+                  >Verifiable AWS Nitro enclave deployments
                   <span
                     class="tooltip-trigger"
                     @click="toggleTooltipCloud"
@@ -54,7 +55,7 @@
               </li>
               <li>
                 <span class="platform-item"
-                  >{{ platformText }}
+                  >CLI-first deployment workflow for Linux and macOS
                   <span
                     class="tooltip-trigger"
                     @click="toggleTooltipPlatform"
@@ -67,14 +68,31 @@
                       :class="{ visible: tooltipPlatformVisible }"
                     >
                       <strong>COMING SOON:</strong> <br />
-                      Windows and macOS<br />
+                      CLI support for Windows<br />
                     </span> </span
                 ></span>
               </li>
               <li>
-                <a href="https://caution.co/platform-tour.html" target="_blank" rel="noopener noreferrer">
-                  Platform walkthrough video
-                </a>
+                <span class="platform-item"
+                  >Passkey-based account security
+                  <span
+                    class="tooltip-trigger"
+                    @click="toggleTooltipPasskey"
+                    @mouseenter="showTooltipPasskey"
+                    @mouseleave="hideTooltipPasskey"
+                  >
+                    <InfoIcon />
+                    <span
+                      class="tooltip"
+                      :class="{ visible: tooltipPasskeyVisible }"
+                    >
+                      <strong>SUPPORTED:</strong> <br />
+                      Browser or platform passkeys<br />
+                      Password manager passkeys<br />
+                      Security keys and smart cards<br />
+                      YubiKey, NitroKey, or LibremKey<br />
+                    </span> </span
+                ></span>
               </li>
               <slot name="extra-features"></slot>
             </ul>
@@ -132,15 +150,12 @@ export default {
       type: Boolean,
       default: false,
     },
-    platformText: {
-      type: String,
-      default: "CLI available for Linux x86_64 today",
-    },
   },
   emits: ["login"],
   setup() {
     const tooltipPlatformVisible = ref(false);
     const tooltipCloudVisible = ref(false);
+    const tooltipPasskeyVisible = ref(false);
     const isMobile = ref(false);
 
     const checkMobile = () => {
@@ -182,9 +197,22 @@ export default {
       tooltipCloudVisible.value = !tooltipCloudVisible.value;
     };
 
+    const showTooltipPasskey = () => {
+      tooltipPasskeyVisible.value = true;
+    };
+
+    const hideTooltipPasskey = () => {
+      tooltipPasskeyVisible.value = false;
+    };
+
+    const toggleTooltipPasskey = () => {
+      tooltipPasskeyVisible.value = !tooltipPasskeyVisible.value;
+    };
+
     const closeAllTooltips = () => {
       tooltipPlatformVisible.value = false;
       tooltipCloudVisible.value = false;
+      tooltipPasskeyVisible.value = false;
     };
 
     const handleClickOutside = (event) => {
@@ -214,6 +242,7 @@ export default {
       navbarOnDark,
       tooltipPlatformVisible,
       tooltipCloudVisible,
+      tooltipPasskeyVisible,
       isMobile,
       closeMobileMenu,
       toggleMobileMenu,
@@ -223,6 +252,9 @@ export default {
       showTooltipCloud,
       hideTooltipCloud,
       toggleTooltipCloud,
+      showTooltipPasskey,
+      hideTooltipPasskey,
+      toggleTooltipPasskey,
     };
   },
 };

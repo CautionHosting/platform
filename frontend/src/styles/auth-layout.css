@@ -654,7 +654,7 @@ h2.info {
 
 p.info,
 .feature-list li {
-  font-size: clamp(1.05rem, 2vw, 1.175rem);
+  font-size: clamp(1rem, 1.5vw, 1.095rem);
 }
 
 p.info,
@@ -832,6 +832,31 @@ p.info a:hover,
   text-align: center;
 }
 
+.register-prompt.account-switch {
+  font-size: clamp(0.95rem, 1.5vw, 1.05rem);
+  margin: 96px auto 0 auto;
+  max-width: none;
+  width: 100%;
+}
+
+.register-prompt.account-switch .link-btn {
+  font-size: inherit;
+}
+
+.login-prompt {
+  font-size: clamp(0.95rem, 1.5vw, 1.05rem);
+  line-height: 1.5;
+  margin: 1.5rem auto 0 auto;
+  max-width: 375px;
+  word-spacing: normal;
+}
+
+.login-prompt .link-btn {
+  font-size: inherit;
+  font-weight: 500;
+  margin-left: 4px;
+}
+
 .form-title,
 .login-title {
   font-weight: 600;
@@ -867,7 +892,7 @@ p.info a:hover,
   border: none;
   background: transparent;
   padding: 12px 18px 10px 24px;
-  font-size: clamp(.95rem, 2vw, 1rem);
+  font-size: 0.975rem;
   font-family: inherit;
   outline: none;
   min-width: 0;
@@ -881,6 +906,12 @@ p.info a:hover,
   opacity: 0.6;
 }
 
+.register-submit {
+  font-size: 0.975rem;
+  gap: 8px;
+  padding: 10px 20px;
+}
+
 .btn-icon {
   width: 16px;
   height: 16px;
@@ -889,7 +920,7 @@ p.info a:hover,
 
 .tos-notice {
   text-align: center;
-  font-size: clamp(1rem, 1.5vw, 1.075rem);
+  font-size: clamp(0.95rem, 1.5vw, 1.05rem);
   line-height: 1.5;
   color: oklch(44.4% 0.04 256.788);
   margin: 12px auto 0 auto;
@@ -904,16 +935,6 @@ p.info a:hover,
 
 .tos-notice a:hover {
   color: var(--color-pink);
-}
-
-.tos-notice:has(.link-btn) {
-  margin: 96px 0 0 0;
-  max-width: none;
-  width: 100%;
-}
-
-.tos-notice .link-btn {
-  font-size: inherit;
 }
 
 .link-btn {
@@ -1256,10 +1277,20 @@ p.info a:hover,
   }
 
   p.info,
-  .feature-list li,
+  .feature-list li {
+    font-size: clamp(1rem, 1.5vw, 1.095rem);
+  }
+
   .register-prompt,
   .link-btn {
     font-size: clamp(1rem, 1vw, 1.175rem);
+  }
+
+  .login-prompt,
+  .login-prompt .link-btn,
+  .register-prompt.account-switch,
+  .register-prompt.account-switch .link-btn {
+    font-size: clamp(0.95rem, 1.5vw, 1.05rem);
   }
 }
 
