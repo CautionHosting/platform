@@ -11,15 +11,6 @@
     @logout="logout"
   >
 
-    <!-- Notes sidebar (only show for Cloud credentials) -->
-    <template #aside>
-      <div v-if="activeTab === 'credentials'" class="notes-card">
-        <h3>Cloud credentials</h3>
-        <p>Add your AWS credentials to deploy applications to your own infrastructure.</p>
-        <p>Your credentials are encrypted and stored securely.</p>
-      </div>
-    </template>
-
     <!-- Applications Tab -->
     <template v-if="activeTab === 'apps'">
       <!-- Loading state -->
@@ -799,12 +790,27 @@ make build-cli
 
     <!-- SSH Keys Tab -->
     <div v-if="activeTab === 'ssh'" class="content-card content-card--dashboard-tab">
+      <div class="content-header">
+        <div class="content-header-text">
+          <h2 class="content-header-title">SSH keys</h2>
+          <p class="content-header-description">
+            SSH keys for pushing code via Git. Remove any you don't recognize.
+          </p>
+        </div>
+        <div class="ssh-key-header-action">
+          <button
+            v-if="!showAddKeyForm"
+            class="btn-primary ssh-key-add-btn"
+            @click="showAddKeyForm = true"
+          >
+            Add SSH key
+          </button>
+        </div>
+      </div>
+
       <!-- Show form when adding a key -->
-      <template v-if="showAddKeyForm">
-        <h3 class="form-section-title">Add new SSH key</h3>
-        <p class="form-section-description">
-          Add SSH keys to push code to your applications via git.
-        </p>
+      <div v-if="showAddKeyForm" class="inline-form-panel ssh-key-form-panel">
+        <h3 class="inline-form-panel-title">Add new SSH key</h3>
         <div class="form-group">
           <label class="form-label" for="keyName">Key name</label>
           <input
@@ -849,30 +855,15 @@ make build-cli
             Cancel
           </button>
         </div>
-      </template>
+      </div>
 
       <!-- Show list when not adding a key -->
       <template v-else>
-        <div class="content-header">
-          <div class="content-header-text">
-            <h2 class="content-header-title">SSH keys</h2>
-            <p class="content-header-description">
-              SSH keys for pushing code via Git. Remove any you don't recognize.
-            </p>
-          </div>
-          <button
-            class="btn-primary"
-            @click="showAddKeyForm = true"
-          >
-            Add SSH key
-          </button>
-        </div>
-
         <!-- SSH Keys List -->
         <div class="items-list ssh-keys-list">
           <div v-if="loadingKeys" class="list-item-empty">Loading SSH keys...</div>
-          <div v-else-if="sshKeys.length === 0" class="list-item-empty">
-            No SSH keys yet. Add one to deploy via Git.
+          <div v-else-if="sshKeys.length === 0" class="list-item-empty dashboard-tab-empty">
+            No SSH keys yet. Add an SSH key to deploy via Git.
           </div>
           <div v-else>
             <div v-for="key in sshKeys" :key="key.fingerprint" class="ssh-key-item">
@@ -1052,9 +1043,9 @@ make build-cli
 
       <div class="items-list">
         <div v-if="loadingBundles" class="loading">Loading bundles...</div>
-        <div v-else-if="quorumBundles.length === 0" class="list-item-empty">
+        <div v-else-if="quorumBundles.length === 0" class="list-item-empty dashboard-tab-empty">
           <p class="list-item-empty-copy">
-            No quorum bundles yet. Use <code>caution secret new</code> to create one.
+            No quorum bundles yet. Create a quorum bundle with <code>caution secret new</code>.
           </p>
         </div>
         <div v-else>
@@ -1489,86 +1480,107 @@ make build-cli
     </div>
 
     <!-- Cloud Credentials Tab -->
-    <div v-if="activeTab === 'credentials'" class="content-card">
-      <h2 class="content-card-title">Cloud credentials</h2>
-      <div class="form-section">
-        <h3 class="form-section-title">Add AWS Credentials</h3>
-        <p class="quick-start-description">
-          Add AWS credentials to deploy applications to your own infrastructure.
-        </p>
-        <div class="form-group">
-          <label class="form-label" for="credName">Name</label>
+    <div v-if="activeTab === 'credentials'" class="content-card content-card--dashboard-tab cloud-credentials-card">
+      <div class="cloud-credentials-header">
+        <div class="cloud-credentials-heading">
+          <h2 class="content-card-title cloud-credentials-title">Cloud credentials</h2>
+          <p class="cloud-credentials-description">
+            Manage encrypted AWS credentials for
+            <a
+              href="https://docs.caution.co/reference/bring-your-own-cloud/"
+              target="_blank"
+              rel="noopener noreferrer"
+            >bring your own cloud</a>
+            deployments.
+          </p>
+        </div>
+
+        <div class="cloud-credentials-header-action">
+          <button
+            v-if="!showAddCredentialForm"
+            @click="startAddCredential"
+            class="btn-primary cloud-credentials-add-btn"
+          >
+            Add credential
+          </button>
+        </div>
+      </div>
+
+      <div v-if="showAddCredentialForm" class="inline-form-panel cloud-credential-form-panel">
+        <h3 class="inline-form-panel-title">Add new AWS credential</h3>
+        <div class="cloud-credential-form-group">
+          <label class="form-label cloud-credential-label" for="credName">Name</label>
           <input
             id="credName"
             v-model="newCredName"
             type="text"
-            class="form-input"
+            class="form-input cloud-credential-input"
             placeholder="e.g., Production AWS"
             :disabled="addingCred"
           />
         </div>
-        <div class="form-group">
-          <label class="form-label" for="awsAccessKeyId">Access Key ID</label>
+        <div class="cloud-credential-form-group">
+          <label class="form-label cloud-credential-label" for="awsAccessKeyId">Access key ID</label>
           <input
             id="awsAccessKeyId"
             v-model="newCredAwsKeyId"
             type="text"
-            class="form-input"
+            class="form-input cloud-credential-input"
             placeholder="AKIA..."
             :disabled="addingCred"
           />
         </div>
-        <div class="form-group">
-          <label class="form-label" for="awsSecretKey">Secret Access Key</label>
+        <div class="cloud-credential-form-group">
+          <label class="form-label cloud-credential-label" for="awsSecretKey">Secret access key</label>
           <input
             id="awsSecretKey"
             v-model="newCredAwsSecret"
             type="password"
-            class="form-input"
+            class="form-input cloud-credential-input"
             placeholder="Enter secret access key"
             :disabled="addingCred"
           />
         </div>
-        <div class="form-group">
-          <label
-            style="
-              display: flex;
-              align-items: center;
-              gap: 8px;
-              cursor: pointer;
+        <label class="cloud-credential-checkbox">
+          <input
+            type="checkbox"
+            v-model="newCredIsDefault"
+            :disabled="addingCred"
+          />
+          <span>Set as default</span>
+        </label>
+        <div class="cloud-credential-form-actions">
+          <button
+            @click="addCredential"
+            class="btn-primary cloud-credential-submit-btn"
+            :disabled="
+              addingCred ||
+              !newCredName.trim() ||
+              !newCredAwsKeyId.trim() ||
+              !newCredAwsSecret.trim()
             "
           >
-            <input
-              type="checkbox"
-              v-model="newCredIsDefault"
-              :disabled="addingCred"
-            />
-            Set as default
-          </label>
+            {{ addingCred ? "Adding..." : "Add credential" }}
+          </button>
+          <button
+            @click="cancelCredentialForm"
+            class="btn-secondary cloud-credential-cancel-btn"
+            :disabled="addingCred"
+          >
+            Cancel
+          </button>
         </div>
-        <button
-          @click="addCredential"
-          class="btn-primary"
-          :disabled="
-            addingCred ||
-            !newCredName.trim() ||
-            !newCredAwsKeyId.trim() ||
-            !newCredAwsSecret.trim()
-          "
-        >
-          {{ addingCred ? "Adding..." : "Add Credential" }}
-        </button>
       </div>
 
-      <div class="items-list">
-        <div v-if="loadingCreds" class="loading">Loading credentials...</div>
-        <div v-else-if="credentials.length === 0" class="empty-state">
-          No AWS credentials added yet
+      <div v-else class="items-list cloud-credentials-body">
+        <div v-if="loadingCreds" class="list-item-empty">Loading credentials...</div>
+        <div v-else-if="credentials.length === 0" class="list-item-empty dashboard-tab-empty">
+          No AWS credentials yet. Add a credential to deploy to your AWS account.
         </div>
-        <div v-else>
-          <div v-for="cred in credentials" :key="cred.id" class="list-item">
+        <div v-else class="cloud-credential-list">
+          <div v-for="cred in credentials" :key="cred.id" class="list-item cloud-credential-list-item">
             <div class="item-info">
-              <div style="display: flex; align-items: center; gap: 8px">
+              <div class="cloud-credential-item-title">
                 <span class="item-name">{{ cred.name }}</span>
                 <span
                   v-if="cred.is_default"
@@ -1585,7 +1597,7 @@ make build-cli
                 class="btn-secondary"
                 :disabled="settingDefault === cred.id"
               >
-                {{ settingDefault === cred.id ? "..." : "Set Default" }}
+                {{ settingDefault === cred.id ? "..." : "Set default" }}
               </button>
               <button
                 @click="deleteCredential(cred.id, cred.name)"
@@ -1866,6 +1878,7 @@ export default {
     const addingCred = ref(false);
     const deletingCred = ref(null);
     const settingDefault = ref(null);
+    const showAddCredentialForm = ref(false);
     const newCredName = ref("");
     const newCredAwsKeyId = ref("");
     const newCredAwsSecret = ref("");
@@ -3445,6 +3458,23 @@ export default {
       URL.revokeObjectURL(url);
     };
 
+    const resetCredentialForm = () => {
+      newCredName.value = "";
+      newCredAwsKeyId.value = "";
+      newCredAwsSecret.value = "";
+      newCredIsDefault.value = false;
+    };
+
+    const startAddCredential = () => {
+      showAddCredentialForm.value = true;
+    };
+
+    const cancelCredentialForm = () => {
+      if (addingCred.value) return;
+      resetCredentialForm();
+      showAddCredentialForm.value = false;
+    };
+
     const addCredential = async () => {
       if (
         !newCredName.value.trim() ||
@@ -3474,10 +3504,8 @@ export default {
 
         if (response.ok) {
           showToast("AWS credential added");
-          newCredName.value = "";
-          newCredAwsKeyId.value = "";
-          newCredAwsSecret.value = "";
-          newCredIsDefault.value = false;
+          resetCredentialForm();
+          showAddCredentialForm.value = false;
           await loadCredentials();
         } else {
           const data = await response.json().catch(() => ({}));
@@ -3586,6 +3614,8 @@ export default {
         loadPasskeys();
         loadOrgSettings();
       } else if (newTab === "credentials") {
+        showAddCredentialForm.value = false;
+        resetCredentialForm();
         loadCredentials();
       } else if (newTab === "keys") {
         loadBundles();
@@ -4069,10 +4099,13 @@ export default {
       addingCred,
       deletingCred,
       settingDefault,
+      showAddCredentialForm,
       newCredName,
       newCredAwsKeyId,
       newCredAwsSecret,
       newCredIsDefault,
+      startAddCredential,
+      cancelCredentialForm,
       addCredential,
       deleteCredential,
       setDefaultCredential,
@@ -4180,10 +4213,206 @@ export default {
 .content-card--dashboard-tab .items-list {
   flex: 1;
   min-height: 0;
+  margin-top: 0;
 }
 
 .content-card--dashboard-tab .list-item-empty {
   min-height: 100%;
+}
+
+.ssh-key-header-action {
+  width: 166px;
+  flex: 0 0 166px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ssh-key-add-btn {
+  min-height: 54px;
+  padding: 0 24px;
+  border-radius: 8px;
+  font-size: clamp(0.95rem, 2vw, 1.05rem);
+  width: 100%;
+  white-space: nowrap;
+}
+
+.ssh-key-form-panel .form-message-container {
+  min-height: 0;
+  margin-top: 0;
+}
+
+.ssh-key-form-panel .form-actions {
+  margin-top: 24px;
+}
+
+.dashboard-tab-empty {
+  color: #9a9a9a;
+  font-size: clamp(1rem, 2vw, 1.05rem);
+  line-height: 1.5;
+  text-align: center;
+}
+
+.dashboard-tab-empty code {
+  font-size: 0.925rem;
+}
+
+.inline-form-panel {
+  padding: 24px;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.inline-form-panel-title {
+  margin: 0 0 36px 0;
+  color: #0f0f0f;
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.inline-form-panel .form-input {
+  min-height: 45px;
+}
+
+.cloud-credentials-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 28px;
+  margin-bottom: 24px;
+}
+
+.cloud-credentials-heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.cloud-credentials-title {
+  margin-bottom: 18px;
+}
+
+.cloud-credentials-description {
+  max-width: 650px;
+  margin: 0;
+  color: rgba(102, 102, 102, 0.875);
+  font-size: clamp(1.05rem, 2vw, 1.095rem);
+  line-height: 1.45;
+}
+
+.cloud-credentials-description a {
+  color: inherit;
+  font-weight: 450;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+
+.cloud-credentials-description a:hover {
+  color: var(--color-pink);
+}
+
+.cloud-credentials-header-action {
+  width: 166px;
+  flex: 0 0 166px;
+}
+
+.cloud-credentials-add-btn,
+.cloud-credential-submit-btn {
+  min-height: 54px;
+  padding: 0 24px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.cloud-credentials-add-btn {
+  width: 100%;
+  min-width: 166px;
+}
+
+.cloud-credentials-body {
+  width: 100%;
+}
+
+.cloud-credential-form-panel {
+  margin-top: 0;
+}
+
+.cloud-credential-form-group {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 510px);
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 34px;
+}
+
+.cloud-credential-label {
+  padding-top: 8px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.cloud-credential-form-panel .cloud-credential-input {
+  width: 100%;
+  min-height: 45px;
+  margin-bottom: 0;
+  background: white;
+}
+
+.cloud-credential-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: max-content;
+  max-width: 120px;
+  margin: 3px 0 50px 0;
+  color: #0f0f0f;
+  font-size: 1rem;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.cloud-credential-checkbox input {
+  width: 14px;
+  height: 14px;
+  margin: 4px 0 0 0;
+}
+
+.cloud-credential-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 48px;
+}
+
+.cloud-credential-submit-btn {
+  min-width: 166px;
+}
+
+.cloud-credential-submit-btn:disabled {
+  background: #8a8a8a;
+  opacity: 1;
+}
+
+.cloud-credential-cancel-btn {
+  font-size: 1rem;
+}
+
+.cloud-credential-list {
+  width: 100%;
+  align-self: stretch;
+  margin-top: 48px;
+  border-top: 1px solid #eee;
+}
+
+.cloud-credential-list-item {
+  padding-right: 0;
+  padding-left: 0;
+}
+
+.cloud-credential-item-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .guide-intro-content {
