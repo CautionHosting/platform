@@ -164,7 +164,7 @@
                         <polyline points="20 6 9 17 4 12"></polyline>
                       </svg>
                     </button>
-                  </div>
+                 </div>
                   <span v-else class="app-detail-value app-detail-muted">Not set</span>
                 </div>
               </div>
@@ -1264,6 +1264,27 @@ make build-cli
 
       </div>
 
+      <div class="billing-section">
+        <h3 class="billing-section-title">Redeem credit code</h3>
+        <div class="redeem-code-row redeem-code-row--footer">
+          <input
+            v-model="redeemCode"
+            type="text"
+            class="redeem-code-input"
+            placeholder="Enter credit code"
+            :disabled="redeemingCode"
+            @keyup.enter="redeemCreditCode"
+          />
+          <button
+            @click="redeemCreditCode"
+            class="btn-primary btn-small"
+            :disabled="redeemingCode || !redeemCode.trim()"
+          >
+            {{ redeemingCode ? 'Redeeming...' : 'Redeem' }}
+          </button>
+        </div>
+      </div>
+
       <!-- Subscription Section -->
       <div class="billing-section">
         <h3 class="billing-section-title" style="margin-top: 2rem;">Managed enclaves subscription</h3>
@@ -1364,27 +1385,6 @@ make build-cli
             <span class="billing-col-rate">${{ item.rate }}/{{ item.unit }}</span>
             <span class="billing-col-cost">${{ item.cost.toFixed(2) }}</span>
           </div>
-        </div>
-      </div>
-
-      <div class="billing-section">
-        <h3 class="billing-section-title">Redeem credit code</h3>
-        <div class="redeem-code-row redeem-code-row--footer">
-          <input
-            v-model="redeemCode"
-            type="text"
-            class="redeem-code-input"
-            placeholder="Enter credit code"
-            :disabled="redeemingCode"
-            @keyup.enter="redeemCreditCode"
-          />
-          <button
-            @click="redeemCreditCode"
-            class="btn-primary btn-small"
-            :disabled="redeemingCode || !redeemCode.trim()"
-          >
-            {{ redeemingCode ? 'Redeeming...' : 'Redeem' }}
-          </button>
         </div>
       </div>
 
