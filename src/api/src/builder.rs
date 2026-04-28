@@ -126,6 +126,12 @@ pub struct BuildResult {
     pub pcrs: serde_json::Value,
 }
 
+#[derive(Debug, Clone)]
+pub struct StagedArtifact {
+    pub s3_key: String,
+    pub sha256: String,
+}
+
 /// Input parameters for a build.
 pub struct BuildRequest {
     pub org_id: Uuid,
@@ -135,6 +141,8 @@ pub struct BuildRequest {
     pub branch: String,
     /// S3 key where the source archive was uploaded (e.g., builds/{build_id}/source.tar.gz)
     pub source_s3_key: String,
+    /// SHA-256 of the uploaded source archive bytes.
+    pub source_sha256: String,
     pub procfile_content: String,
     pub run_command: Option<String>,
     pub build_command: Option<String>,
@@ -297,7 +305,7 @@ pub async fn check_build_cache(
 }
 
 /// Archive the source at a given commit and upload to S3 for the builder.
-/// Returns the S3 key of the uploaded archive.
+/// Returns the uploaded artifact metadata.
 pub async fn upload_source_archive(
     s3: &aws_sdk_s3::Client,
     bucket: &str,
@@ -305,7 +313,7 @@ pub async fn upload_source_archive(
     commit_sha: &str,
     build_id: Uuid,
     org_id: Uuid,
-) -> Result<String> {
+) -> Result<StagedArtifact> {
     let s3_key = format!("builds/{}/source.tar.gz", build_id);
 
     // git archive produces a tar.gz of the repo at the given commit
@@ -326,17 +334,20 @@ pub async fn upload_source_archive(
         bail!("git archive failed: {}", stderr);
     }
 
+    let archive_bytes = output.stdout;
+    let sha256 = format!("{:x}", Sha256::digest(&archive_bytes));
+
     s3.put_object()
         .bucket(bucket)
         .key(&s3_key)
         .tagging(format!("org_id={}&build_id={}", org_id, build_id))
-        .body(aws_sdk_s3::primitives::ByteStream::from(output.stdout))
+        .body(aws_sdk_s3::primitives::ByteStream::from(archive_bytes))
         .send()
         .await
         .context("Failed to upload source archive to S3")?;
 
     tracing::info!("Source archive uploaded to s3://{}/{}", bucket, s3_key);
-    Ok(s3_key)
+    Ok(StagedArtifact { s3_key, sha256 })
 }
 
 fn resolve_remote_builder_helper_path() -> Result<PathBuf> {
@@ -373,11 +384,12 @@ async fn upload_remote_builder_helper(
     bucket: &str,
     build_id: Uuid,
     org_id: Uuid,
-) -> Result<String> {
+) -> Result<StagedArtifact> {
     let helper_path = resolve_remote_builder_helper_path()?;
     let helper_bytes = std::fs::read(&helper_path)
         .with_context(|| format!("Failed to read {}", helper_path.display()))?;
     let s3_key = format!("builds/{}/{}", build_id, REMOTE_BUILDER_HELPER);
+    let sha256 = format!("{:x}", Sha256::digest(&helper_bytes));
 
     s3.put_object()
         .bucket(bucket)
@@ -393,7 +405,7 @@ async fn upload_remote_builder_helper(
         bucket,
         s3_key
     );
-    Ok(s3_key)
+    Ok(StagedArtifact { s3_key, sha256 })
 }
 
 async fn ensure_managed_onprem_builder_security_group(
@@ -474,7 +486,7 @@ pub async fn execute_remote_build(
     }
 
     // 2. Generate user-data and launch EC2 instance
-    let helper_s3_key =
+    let helper_artifact =
         upload_remote_builder_helper(s3, &config.eif_s3_bucket, build_id, request.org_id)
             .await
             .context("Failed to stage remote builder helper")?;
@@ -484,7 +496,8 @@ pub async fn execute_remote_build(
         config,
         request,
         &eif_s3_key,
-        &helper_s3_key,
+        &helper_artifact.s3_key,
+        &helper_artifact.sha256,
         framework_commit,
     )?;
     let mut instance_tags = vec![
@@ -749,11 +762,13 @@ fn generate_builder_userdata(
     request: &BuildRequest,
     eif_s3_key: &str,
     helper_s3_key: &str,
+    helper_sha256: &str,
     framework_commit: Option<String>,
 ) -> anyhow::Result<String> {
     let status_key = format!("builds/{}/status.json", build_id);
     let bucket = &config.eif_s3_bucket;
     let source_s3_key = &request.source_s3_key;
+    let source_sha256 = &request.source_sha256;
     let ports_csv = request
         .ports
         .iter()
@@ -825,7 +840,9 @@ S3_BUCKET="{bucket}"
 STATUS_KEY="{status_key}"
 EIF_S3_KEY="{eif_s3_key}"
 SOURCE_S3_KEY="{source_s3_key}"
+SOURCE_SHA256="{source_sha256}"
 HELPER_S3_KEY="{helper_s3_key}"
+HELPER_SHA256="{helper_sha256}"
 COMMIT_SHA="{commit_sha}"
 ENCLAVEOS_COMMIT="{enclaveos_commit}"
 BUILD_CMD='{build_cmd}'
@@ -861,10 +878,12 @@ write_status "starting"
 echo "Downloading source archive..."
 mkdir -p /build/repo
 aws s3 cp "s3://$S3_BUCKET/$SOURCE_S3_KEY" /build/source.tar.gz
+echo "$SOURCE_SHA256  /build/source.tar.gz" | sha256sum -c -
 tar -xzf /build/source.tar.gz -C /build/repo
 
 echo "Downloading remote build helper..."
 aws s3 cp "s3://$S3_BUCKET/$HELPER_S3_KEY" /usr/local/bin/remote-build-helper
+echo "$HELPER_SHA256  /usr/local/bin/remote-build-helper" | sha256sum -c -
 chmod +x /usr/local/bin/remote-build-helper
 
 # Build Docker image
@@ -927,7 +946,9 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
         status_key = status_key,
         eif_s3_key = eif_s3_key,
         source_s3_key = source_s3_key,
+        source_sha256 = source_sha256,
         helper_s3_key = helper_s3_key,
+        helper_sha256 = helper_sha256,
         commit_sha = request.commit_sha,
         enclaveos_commit = request.enclaveos_commit,
         build_cmd = build_cmd,
@@ -1293,6 +1314,8 @@ mod tests {
             commit_sha: "abc123def456".to_string(),
             branch: "main".to_string(),
             source_s3_key: "builds/test-id/source.tar.gz".to_string(),
+            source_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
             build_command: Some("docker build -t app-image .".to_string()),
@@ -1313,6 +1336,7 @@ mod tests {
             &request,
             "eifs/org/key.eif",
             "builds/test-id/remote-build-helper",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             None,
         )
         .unwrap();
@@ -1334,6 +1358,18 @@ mod tests {
         assert!(
             userdata.contains("source.tar.gz"),
             "should reference source archive"
+        );
+        assert!(
+            userdata.contains("SOURCE_SHA256=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""),
+            "should include source archive digest"
+        );
+        assert!(
+            userdata.contains("HELPER_SHA256=\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\""),
+            "should include helper digest"
+        );
+        assert!(
+            userdata.contains("sha256sum -c -"),
+            "should verify downloaded artifacts before use"
         );
         // User source comes from S3, not git clone (Containerfile.eif still clones bootproof/steve deps)
         assert!(
@@ -1401,6 +1437,8 @@ mod tests {
             commit_sha: "abc123".to_string(),
             branch: "main".to_string(),
             source_s3_key: "builds/test/source.tar.gz".to_string(),
+            source_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
             build_command: None,
@@ -1420,6 +1458,7 @@ mod tests {
             &request,
             "eifs/test.eif",
             "builds/test/remote-build-helper",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             None,
         )
         .unwrap();

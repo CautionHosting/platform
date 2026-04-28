@@ -1754,7 +1754,7 @@ async fn deploy_logic(
             }
 
             let build_id = uuid::Uuid::new_v4();
-            let source_s3_key = builder::upload_source_archive(
+            let source_artifact = builder::upload_source_archive(
                 &s3_client,
                 &builder_target.config.eif_s3_bucket,
                 &git_dir,
@@ -1784,7 +1784,8 @@ async fn deploy_logic(
                 app_name: app_name.clone(),
                 commit_sha: commit_sha.clone(),
                 branch: req.branch.clone(),
-                source_s3_key,
+                source_s3_key: source_artifact.s3_key,
+                source_sha256: source_artifact.sha256,
                 procfile_content,
                 run_command: build_config.run.clone(),
                 build_command: Some(build_command.clone()),
