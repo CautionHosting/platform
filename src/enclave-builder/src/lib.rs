@@ -8,6 +8,14 @@ pub fn enclave_source_url(commit: &str) -> String {
     format!("{}/{}.tar.gz", ENCLAVE_SOURCE_BASE, commit)
 }
 
+pub fn pin_archive_url_to_commit(url: &str, commit: &str) -> String {
+    if let Some(archive_pos) = url.find("/archive/") {
+        format!("{}/archive/{}.tar.gz", &url[..archive_pos], commit)
+    } else {
+        url.to_string()
+    }
+}
+
 pub mod build;
 pub mod compile;
 pub mod docker;
@@ -814,5 +822,22 @@ mod tests {
             EnclaveBuilder::new("test", "v1", "./enclave", "local", "http://test").unwrap();
         assert!(builder.compare_pcrs(&pcrs1, &pcrs2));
         assert!(!builder.compare_pcrs(&pcrs1, &pcrs3));
+    }
+
+    #[test]
+    fn test_pin_archive_url_to_commit_rewrites_archive_urls() {
+        let url = "https://codeberg.org/caution/platform/archive/main.tar.gz";
+
+        assert_eq!(
+            pin_archive_url_to_commit(url, "abc123"),
+            "https://codeberg.org/caution/platform/archive/abc123.tar.gz"
+        );
+    }
+
+    #[test]
+    fn test_pin_archive_url_to_commit_leaves_non_archive_urls_unchanged() {
+        let url = "https://codeberg.org/caution/platform.git";
+
+        assert_eq!(pin_archive_url_to_commit(url, "abc123"), url);
     }
 }

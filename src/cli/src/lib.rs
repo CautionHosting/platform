@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use authenticator::{
+    Pin, RegisterResult, SignResult, StatusPinUv, StatusUpdate,
     authenticatorservice::{AuthenticatorService, RegisterArgs, SignArgs},
     crypto::COSEAlgorithm,
     ctap2::server::{
@@ -11,15 +12,14 @@ use authenticator::{
     },
     errors::AuthenticatorError,
     statecallback::StateCallback,
-    Pin, RegisterResult, SignResult, StatusPinUv, StatusUpdate,
 };
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use bootproof_sdk::{
-    format::nitro::{Nitro, NitroPcrs},
     VerifiableSignedAttestationFormat,
+    format::nitro::{Nitro, NitroPcrs},
 };
 use clap::{Parser, Subcommand};
-use enclave_builder::{build_user_image, BuildConfig};
+use enclave_builder::{BuildConfig, build_user_image};
 use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_cbor;
@@ -3727,14 +3727,6 @@ build: docker build -t app .
         Ok(())
     }
 
-    fn pin_archive_url_to_commit(url: &str, commit: &str) -> String {
-        if let Some(archive_pos) = url.find("/archive/") {
-            format!("{}/archive/{}.tar.gz", &url[..archive_pos], commit)
-        } else {
-            url.to_string()
-        }
-    }
-
     async fn build_and_get_pcrs(
         &self,
         external_manifest: Option<enclave_builder::EnclaveManifest>,
@@ -3745,7 +3737,7 @@ build: docker build -t app .
                 enclave_builder::EnclaveSource::GitArchive { urls, commit } => {
                     let url = urls.first().cloned().unwrap_or_default();
                     let pinned = if let Some(commit) = commit {
-                        Self::pin_archive_url_to_commit(&url, commit)
+                        enclave_builder::pin_archive_url_to_commit(&url, commit)
                     } else {
                         url
                     };
@@ -3782,7 +3774,7 @@ build: docker build -t app .
             match &manifest.framework_source {
                 enclave_builder::FrameworkSource::GitArchive { url, commit } => {
                     if let Some(commit) = commit {
-                        Self::pin_archive_url_to_commit(url, commit)
+                        enclave_builder::pin_archive_url_to_commit(url, commit)
                     } else {
                         url.clone()
                     }

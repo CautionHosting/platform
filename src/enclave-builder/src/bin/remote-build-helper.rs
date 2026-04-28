@@ -42,8 +42,12 @@ fn enclave_source_from_manifest(manifest: &EnclaveManifest) -> Result<(String, S
                 .first()
                 .cloned()
                 .context("manifest enclave_source.urls is empty")?;
+            let pinned_url = commit
+                .as_deref()
+                .map(|commit| enclave_builder::pin_archive_url_to_commit(&url, commit))
+                .unwrap_or(url);
             let version = commit.clone().unwrap_or_else(|| "main".to_string());
-            Ok((url, version))
+            Ok((pinned_url, version))
         }
         EnclaveSource::GitRepository {
             url,
@@ -59,7 +63,10 @@ fn enclave_source_from_manifest(manifest: &EnclaveManifest) -> Result<(String, S
 
 fn framework_source_from_manifest(manifest: &EnclaveManifest) -> String {
     match &manifest.framework_source {
-        FrameworkSource::GitArchive { url, .. } => url.clone(),
+        FrameworkSource::GitArchive { url, commit } => commit
+            .as_deref()
+            .map(|commit| enclave_builder::pin_archive_url_to_commit(url, commit))
+            .unwrap_or_else(|| url.clone()),
     }
 }
 
@@ -168,4 +175,54 @@ async fn main() -> Result<()> {
     println!("EIF written to {}", output_eif.display());
     println!("PCRs written to {}", output_pcrs.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_enclave_archive_source_is_pinned_to_manifest_commit() {
+        let manifest = EnclaveManifest::new(
+            None,
+            EnclaveSource::GitArchive {
+                urls: vec!["https://example.com/repo/archive/main.tar.gz".to_string()],
+                commit: Some("abc123".to_string()),
+            },
+            FrameworkSource::GitArchive {
+                url: "https://example.com/framework/archive/main.tar.gz".to_string(),
+                commit: None,
+            },
+            None,
+            None,
+            None,
+        );
+
+        let (url, version) = enclave_source_from_manifest(&manifest).unwrap();
+
+        assert_eq!(url, "https://example.com/repo/archive/abc123.tar.gz");
+        assert_eq!(version, "abc123");
+    }
+
+    #[test]
+    fn test_framework_archive_source_is_pinned_to_manifest_commit() {
+        let manifest = EnclaveManifest::new(
+            None,
+            EnclaveSource::Local {
+                path: ".".to_string(),
+            },
+            FrameworkSource::GitArchive {
+                url: "https://example.com/framework/archive/main.tar.gz".to_string(),
+                commit: Some("def456".to_string()),
+            },
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            framework_source_from_manifest(&manifest),
+            "https://example.com/framework/archive/def456.tar.gz"
+        );
+    }
 }
