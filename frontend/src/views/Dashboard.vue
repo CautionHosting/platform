@@ -1258,7 +1258,7 @@ make build-cli
               <span class="credits-balance-label">credit balance</span>
             </div>
           </div>
-          <p class="credits-hint">Credits are deducted in real-time as your deployments run. Minimum $10 required to deploy.</p>
+          <p class="credits-hint">Credits are deducted in real-time as your deployments run. Minimum $10 required to deploy.<br>Credits will update every 5 Minutes upon every full accumulated hour.</p>
           <button @click="showAddCreditsModal = true" class="btn-primary btn-small credits-add-button">Add credits</button>
         </div>
 
