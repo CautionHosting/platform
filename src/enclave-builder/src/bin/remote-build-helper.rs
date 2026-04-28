@@ -113,15 +113,9 @@ async fn main() -> Result<()> {
     let run_command = manifest.run_command.clone();
     let metadata = manifest.metadata.clone();
 
-    let builder = EnclaveBuilder::new(
-        "unused-template",
-        "local",
-        enclave_source,
-        enclave_version,
-        framework_source,
-    )?
-    .with_work_dir(work_dir.clone())
-    .with_no_cache(no_cache);
+    let builder = EnclaveBuilder::new(enclave_source, enclave_version, framework_source)?
+        .with_work_dir(work_dir.clone())
+        .with_no_cache(no_cache);
 
     let user_image = UserImage {
         reference: image_ref,

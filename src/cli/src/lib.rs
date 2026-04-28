@@ -3650,8 +3650,6 @@ build: docker build -t app .
         println!("✓ Application image built: {}\n", image_ref);
 
         let builder = enclave_builder::EnclaveBuilder::new_with_cache(
-            "unused-template",
-            "local",
             enclave_builder::enclave_source_url(&enclave_builder::build::resolve_enclaveos_commit()),
             "unused",
             enclave_builder::FRAMEWORK_SOURCE,
@@ -3806,8 +3804,6 @@ build: docker build -t app .
         };
 
         let builder = enclave_builder::EnclaveBuilder::new_with_cache(
-            "unused-template",
-            "local",
             &enclave_source,
             &enclave_version,
             &framework_source,

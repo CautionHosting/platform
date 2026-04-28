@@ -21,7 +21,6 @@ pub mod compile;
 pub mod docker;
 pub mod extract;
 pub mod manifest;
-pub mod merge;
 pub mod pcrs;
 
 use anyhow::{Context, Result};
@@ -36,10 +35,6 @@ pub use CacheType as BuildCacheType;
 
 #[derive(Debug, Clone)]
 pub struct EnclaveBuilder {
-    /// Template repository URL or local path
-    pub template_source: String,
-    /// Template version (git tag, commit, or "local")
-    pub template_version: String,
     /// Enclave source code location (git URL or local path to enclave/ directory)
     pub enclave_source: String,
     /// Enclave version (git tag, commit, or "local")
@@ -97,8 +92,6 @@ impl CacheType {
 
 impl EnclaveBuilder {
     pub fn new_with_cache(
-        template_source: impl Into<String>,
-        template_version: impl Into<String>,
         enclave_source: impl Into<String>,
         enclave_version: impl Into<String>,
         framework_source: impl Into<String>,
@@ -151,8 +144,6 @@ impl EnclaveBuilder {
         tracing::info!("{:?} cache directory: {}", cache_type, work_dir.display());
 
         Ok(Self {
-            template_source: template_source.into(),
-            template_version: template_version.into(),
             enclave_source: enclave_source.into(),
             enclave_version: enclave_version.into(),
             framework_source: framework_source.into(),
@@ -163,8 +154,6 @@ impl EnclaveBuilder {
 
     #[allow(deprecated)]
     pub fn new(
-        template_source: impl Into<String>,
-        template_version: impl Into<String>,
         enclave_source: impl Into<String>,
         enclave_version: impl Into<String>,
         framework_source: impl Into<String>,
@@ -177,8 +166,6 @@ impl EnclaveBuilder {
         let work_dir = tempfile::tempdir_in(&cache_dir)?.into_path();
 
         Ok(Self {
-            template_source: template_source.into(),
-            template_version: template_version.into(),
             enclave_source: enclave_source.into(),
             enclave_version: enclave_version.into(),
             framework_source: framework_source.into(),
@@ -282,21 +269,6 @@ impl EnclaveBuilder {
     ) -> Result<PathBuf> {
         tracing::info!("Extracting static binary: {}", binary_path);
         extract::extract_static_binary(&image.reference, binary_path, &self.work_dir).await
-    }
-
-    pub async fn build_combined_image(
-        &self,
-        user_fs_path: PathBuf,
-        output_image_tag: &str,
-    ) -> Result<String> {
-        merge::build_combined_image(
-            &self.template_source,
-            &self.template_version,
-            user_fs_path,
-            output_image_tag,
-            &self.work_dir,
-        )
-        .await
     }
 
     pub async fn build_eif_native(
@@ -818,8 +790,7 @@ mod tests {
             ..pcrs1.clone()
         };
 
-        let builder =
-            EnclaveBuilder::new("test", "v1", "./enclave", "local", "http://test").unwrap();
+        let builder = EnclaveBuilder::new("./enclave", "local", "http://test").unwrap();
         assert!(builder.compare_pcrs(&pcrs1, &pcrs2));
         assert!(!builder.compare_pcrs(&pcrs1, &pcrs3));
     }
