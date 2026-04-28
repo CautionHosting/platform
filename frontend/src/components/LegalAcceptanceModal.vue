@@ -137,6 +137,7 @@
 
 <script>
 import { computed, ref } from "vue";
+import { formatLocalDate } from "../utils/dateTime.js";
 
 const DOCUMENT_META = {
   terms_of_service: {
@@ -173,11 +174,11 @@ export default {
       if (!value) return null;
       const parsed = new Date(`${value}T00:00:00`);
       if (Number.isNaN(parsed.getTime())) return value;
-      return new Intl.DateTimeFormat("en-US", {
+      return formatLocalDate(parsed, {
         month: "short",
         day: "numeric",
         year: "numeric",
-      }).format(parsed);
+      });
     };
 
     const pendingDocuments = computed(() =>

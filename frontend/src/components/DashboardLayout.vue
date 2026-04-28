@@ -206,7 +206,7 @@ export default {
   props: {
     title: {
       type: String,
-      default: "Welcome to Caution Alpha!",
+      default: "Welcome to Caution",
     },
     activeTab: {
       type: String,
