@@ -129,7 +129,7 @@ to attempt to force one or more of us to tamper with the software.
 2. Review source
 
    - Ideal: Review the entire supply chain for high risk uses
-   - Minimal: Review the build targets in the Makefile and Containerfile
+   - Minimal: Review the build targets in the Makefile and [Containerfile](https://codeberg.org/caution/platform/src/branch/main/containerfiles/Containerfile.cli)
 
 3. Reproduce binaries
 
