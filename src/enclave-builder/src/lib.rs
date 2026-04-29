@@ -28,7 +28,10 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub use compile::{resolve_ref_to_commit, EnclaveSourceResult};
-pub use docker::{build_user_image, BuildConfig};
+pub use docker::{
+    build_user_image, has_explicit_build_command, resolve_build_command,
+    resolve_build_command_in_dir, validate_explicit_containerfile_path, BuildConfig,
+};
 pub use manifest::{AppSource, EnclaveManifest, EnclaveSource, FrameworkSource};
 
 pub use CacheType as BuildCacheType;

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use anyhow::{bail, Context, Result};
-use std::path::Path;
+use std::path::{Component, Path};
 use tokio::process::Command;
 
 /// Configuration for building a Docker image from Procfile fields
@@ -18,10 +18,98 @@ pub struct BuildConfig {
     pub no_cache: bool,
 }
 
+pub fn has_explicit_build_command(build_command: Option<&str>) -> bool {
+    build_command
+        .map(str::trim)
+        .is_some_and(|cmd| !cmd.is_empty())
+}
+
+pub fn validate_explicit_containerfile_path(containerfile: &str) -> Result<String> {
+    let containerfile = containerfile.trim();
+    if containerfile.is_empty() {
+        bail!("Procfile field `containerfile:` cannot be empty");
+    }
+
+    let path = Path::new(containerfile);
+    if path.is_absolute() {
+        bail!("Procfile field `containerfile:` must be a relative path within the repository");
+    }
+
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        bail!("Procfile field `containerfile:` must stay within the repository");
+    }
+
+    Ok(containerfile.to_string())
+}
+
+fn resolve_build_command_with_selected_containerfile(
+    build_command: Option<&str>,
+    containerfile: Option<&str>,
+) -> String {
+    if has_explicit_build_command(build_command) {
+        let cmd = build_command.expect("checked above").trim();
+        tracing::info!("Using build command from Procfile: {}", cmd);
+        return cmd.to_string();
+    }
+
+    let containerfile = containerfile
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Dockerfile");
+    tracing::info!(
+        "No explicit build command, resolving via containerfile precedence: {}",
+        containerfile
+    );
+
+    format!("docker build -f {} .", containerfile)
+}
+
+/// Resolve the build command using the shared Procfile precedence:
+/// 1. explicit `build:`
+/// 2. explicit `containerfile:`
+/// 3. `Dockerfile`
+pub fn resolve_build_command(build_command: Option<&str>, containerfile: Option<&str>) -> String {
+    resolve_build_command_with_selected_containerfile(build_command, containerfile)
+}
+
+/// Resolve the build command for a checked-out repository directory using the
+/// shared Procfile precedence:
+/// 1. explicit `build:`
+/// 2. explicit `containerfile:`
+/// 3. auto-detected `Containerfile`
+/// 4. `Dockerfile`
+pub fn resolve_build_command_in_dir(
+    build_command: Option<&str>,
+    containerfile: Option<&str>,
+    work_dir: &Path,
+) -> String {
+    if has_explicit_build_command(build_command) {
+        return resolve_build_command_with_selected_containerfile(build_command, None);
+    }
+
+    let containerfile = containerfile
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            work_dir
+                .join("Containerfile")
+                .is_file()
+                .then_some("Containerfile".to_string())
+        });
+
+    resolve_build_command_with_selected_containerfile(build_command, containerfile.as_deref())
+}
+
 /// Build a Docker image from a Procfile configuration.
 ///
 /// This function handles the full build workflow:
-/// 1. Determines the build command (from `build:` field or generates one from `containerfile:`)
+/// 1. Resolves the build command using `build:` -> `containerfile:` -> `Containerfile` -> `Dockerfile`
 /// 2. Adds image tag to docker build commands
 /// 3. Runs the build
 /// 4. Optionally loads OCI tarball for containerd-style builds
@@ -34,25 +122,29 @@ pub async fn build_user_image(
 ) -> Result<String> {
     tracing::info!("Building Docker image with tag: {}", image_tag);
 
-    // Determine build command
-    let build_command = match &config.build_command {
-        Some(cmd) if !cmd.trim().is_empty() => {
-            tracing::info!("Using build command from Procfile: {}", cmd);
-            cmd.clone()
-        }
-        _ => {
-            // Fall back to containerfile or Dockerfile
-            let containerfile = config.containerfile.clone().unwrap_or_else(|| {
-                if work_dir.join("Containerfile").exists() {
-                    "Containerfile".to_string()
-                } else {
-                    "Dockerfile".to_string()
+    let containerfile = if !has_explicit_build_command(config.build_command.as_deref()) {
+        match config.containerfile.as_deref() {
+            Some(containerfile) => {
+                let containerfile = validate_explicit_containerfile_path(containerfile)?;
+                if !work_dir.join(&containerfile).is_file() {
+                    bail!(
+                        "Procfile field `containerfile:` points to missing file: {}",
+                        containerfile
+                    );
                 }
-            });
-            tracing::info!("No build command, using containerfile: {}", containerfile);
-            format!("docker build -f {} .", containerfile)
+                Some(containerfile)
+            }
+            None => None,
         }
+    } else {
+        None
     };
+
+    let build_command = resolve_build_command_in_dir(
+        config.build_command.as_deref(),
+        containerfile.as_deref(),
+        work_dir,
+    );
 
     // Add -t <tag> and optionally --no-cache if it's a docker build command
     let build_command_with_tag = if build_command.starts_with("docker build") {
@@ -160,6 +252,7 @@ pub async fn build_user_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_build_config_default() {
@@ -167,5 +260,79 @@ mod tests {
         assert!(config.build_command.is_none());
         assert!(config.containerfile.is_none());
         assert!(config.oci_tarball.is_none());
+    }
+
+    #[test]
+    fn test_resolve_build_command_prefers_explicit_build() {
+        assert_eq!(
+            resolve_build_command(
+                Some("docker build -f Custom.Containerfile ."),
+                Some("Ignored.Containerfile"),
+            ),
+            "docker build -f Custom.Containerfile ."
+        );
+    }
+
+    #[test]
+    fn test_resolve_build_command_prefers_explicit_containerfile() {
+        assert_eq!(
+            resolve_build_command(None, Some("Custom.Containerfile")),
+            "docker build -f Custom.Containerfile ."
+        );
+    }
+
+    #[test]
+    fn test_resolve_build_command_falls_back_to_dockerfile() {
+        assert_eq!(
+            resolve_build_command(None, None),
+            "docker build -f Dockerfile ."
+        );
+    }
+
+    #[test]
+    fn test_resolve_build_command_in_dir_auto_detects_containerfile_before_dockerfile() {
+        let work_dir = tempdir().unwrap();
+        std::fs::write(work_dir.path().join("Containerfile"), "").unwrap();
+        std::fs::write(work_dir.path().join("Dockerfile"), "").unwrap();
+
+        assert_eq!(
+            resolve_build_command_in_dir(None, None, work_dir.path()),
+            "docker build -f Containerfile ."
+        );
+    }
+
+    #[test]
+    fn test_validate_explicit_containerfile_path_rejects_absolute_paths() {
+        let err = validate_explicit_containerfile_path("/tmp/Containerfile").unwrap_err();
+        assert!(
+            err.to_string().contains("relative path"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_explicit_containerfile_path_rejects_parent_dir_traversal() {
+        let err = validate_explicit_containerfile_path("../Containerfile").unwrap_err();
+        assert!(
+            err.to_string().contains("within the repository"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_user_image_rejects_missing_explicit_containerfile() {
+        let work_dir = tempdir().unwrap();
+        let config = BuildConfig {
+            containerfile: Some("Missing.Containerfile".to_string()),
+            ..BuildConfig::default()
+        };
+
+        let err = build_user_image(work_dir.path(), "test-image", &config)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("missing file"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -19,7 +19,10 @@ use bootproof_sdk::{
     format::nitro::{Nitro, NitroPcrs},
 };
 use clap::{Parser, Subcommand};
-use enclave_builder::{BuildConfig, build_user_image};
+use enclave_builder::{
+    BuildConfig, build_user_image, has_explicit_build_command, resolve_build_command_in_dir,
+    validate_explicit_containerfile_path,
+};
 use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_cbor;
@@ -944,46 +947,26 @@ impl ApiClient {
     }
 
     fn read_procfile(&self) -> Result<String> {
-        let procfile_path = PathBuf::from("Procfile");
+        let work_dir = Path::new(".");
 
-        if !procfile_path.exists() {
+        if !work_dir.join("Procfile").exists() {
             println!("Procfile not found in current directory");
-            println!("Add a Procfile with a build command like this:");
+            println!("Add a Procfile with a run command and one of these build options:");
             println!();
+            println!("run: /app/myapp");
             println!("build: docker build -t myapp .");
+            println!("# or");
+            println!("# containerfile: Containerfile");
+            println!();
+            println!(
+                "If both 'build:' and 'containerfile:' are absent, Caution auto-detects a repo-root Containerfile before Dockerfile."
+            );
             println!();
             println!("To learn more visit https://docs.caution.co/quickstart");
             std::process::exit(1);
         }
 
-        let content = fs::read_to_string(&procfile_path).context("Failed to read Procfile")?;
-
-        // Parse the Procfile to find the build command
-        for line in content.lines() {
-            let line = line.trim();
-
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            if let Some(build_cmd) = line.strip_prefix("build:") {
-                let cmd = build_cmd.trim();
-                if cmd.is_empty() {
-                    bail!(
-                        "Procfile has empty build command. Expected format: build: docker build -t myapp ."
-                    );
-                }
-                return Ok(cmd.to_string());
-            }
-        }
-
-        // Auto-detect containerfile: prefer Containerfile, fall back to Dockerfile
-        let containerfile = if PathBuf::from("Containerfile").exists() {
-            "Containerfile"
-        } else {
-            "Dockerfile"
-        };
-        Ok(format!("docker build -f {} -t app .", containerfile))
+        resolve_local_build_command_from_dir(work_dir, false)
     }
 
     fn read_procfile_field(&self, field: &str) -> Option<String> {
@@ -1114,6 +1097,8 @@ aws_region: us-east-1
 
 # Build configuration
 run: /app/myapp
+# Use `build:` for a custom command, `containerfile:` for an explicit file,
+# or rely on automatic repo-root `Containerfile` detection before `Dockerfile`.
 build: docker build -t app .
 # containerfile: Containerfile
 # oci_tarball: image.tar
@@ -1144,6 +1129,9 @@ build: docker build -t app .
 
         println!("\nCreated Procfile in current directory");
         println!("Edit the required 'run' field to match your application");
+        println!(
+            "Build precedence: build: -> containerfile: -> repo-root Containerfile -> Dockerfile"
+        );
         if byoc {
             println!("Configure AWS deployment settings in the BYOC section");
         }
@@ -3290,15 +3278,7 @@ build: docker build -t app .
         // Authenticate with Caution
         let auth_config = self.ensure_authenticated().await?;
 
-        let create_cmd = if PathBuf::from("Procfile").exists() {
-            self.read_procfile()?
-        } else if PathBuf::from("Containerfile").exists() {
-            "docker build -f Containerfile -t app .".to_string()
-        } else if PathBuf::from("Dockerfile").exists() {
-            "docker build -f Dockerfile -t app .".to_string()
-        } else {
-            "echo 'Please configure your Procfile'".to_string()
-        };
+        let create_cmd = resolve_local_build_command_from_dir(Path::new("."), true)?;
 
         // Create app on Caution
         println!("\nCreating app on Caution...");
@@ -3406,7 +3386,10 @@ build: docker build -t app .
         println!("Git URL: {}", git_url);
         println!("\nState saved to: {}", caution_dir.display());
         println!("\nNext steps:");
-        println!("  1. Create your Procfile with 'build:' and 'run:' commands");
+        println!("  1. Create your Procfile with 'run:' plus either 'build:' or 'containerfile:'");
+        println!(
+            "     If both are absent, Caution auto-detects a repo-root Containerfile before Dockerfile"
+        );
         println!("  2. Push to deploy: git push caution main");
         println!("\nTo tear down this deployment:");
         println!("  caution teardown --byoc");
@@ -5846,6 +5829,92 @@ build: docker build -t app .
     }
 }
 
+fn resolve_procfile_build_command(content: &str, work_dir: &Path) -> Result<String> {
+    let mut build_command = None;
+    let mut containerfile = None;
+
+    for line in content.lines() {
+        let line = line.trim();
+
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if let Some((key, value)) = line.split_once(':') {
+            let key = key.trim();
+            let value = value.trim();
+
+            match key {
+                "build" => {
+                    if value.is_empty() {
+                        bail!(
+                            "Procfile has empty build command. Expected format: build: docker build -t myapp ."
+                        );
+                    }
+                    build_command = Some(value.to_string());
+                }
+                "containerfile" => {
+                    if value.is_empty() {
+                        bail!(
+                            "Procfile has empty containerfile path. Expected format: containerfile: Containerfile"
+                        );
+                    }
+                    containerfile = Some(value.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let containerfile = if !has_explicit_build_command(build_command.as_deref()) {
+        match containerfile.as_deref() {
+            Some(containerfile) => {
+                let containerfile = validate_explicit_containerfile_path(containerfile)?;
+                if !work_dir.join(&containerfile).is_file() {
+                    bail!(
+                        "Procfile field `containerfile:` points to missing file: {}",
+                        containerfile
+                    );
+                }
+                Some(containerfile)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    Ok(resolve_build_command_in_dir(
+        build_command.as_deref(),
+        containerfile.as_deref(),
+        work_dir,
+    ))
+}
+
+fn resolve_local_build_command_from_dir(
+    work_dir: &Path,
+    allow_missing_procfile: bool,
+) -> Result<String> {
+    let procfile_path = work_dir.join("Procfile");
+    let has_containerfile = work_dir.join("Containerfile").is_file();
+    let has_dockerfile = work_dir.join("Dockerfile").is_file();
+
+    if procfile_path.exists() {
+        let content = fs::read_to_string(&procfile_path).context("Failed to read Procfile")?;
+        return resolve_procfile_build_command(&content, work_dir);
+    }
+
+    if !allow_missing_procfile {
+        bail!("Procfile not found in current directory");
+    }
+
+    if has_containerfile || has_dockerfile {
+        return Ok(resolve_build_command_in_dir(None, None, work_dir));
+    }
+
+    Ok("echo 'Please configure your Procfile'".to_string())
+}
+
 struct AssertionResult {
     response_json: Vec<u8>,
 }
@@ -6050,4 +6119,112 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_local_build_command_from_dir, resolve_procfile_build_command};
+    use tempfile::tempdir;
+
+    #[test]
+    fn resolve_procfile_build_command_prefers_explicit_build_over_containerfile() {
+        let work_dir = tempdir().unwrap();
+        std::fs::write(work_dir.path().join("Containerfile"), "").unwrap();
+
+        let command = resolve_procfile_build_command(
+            "\
+build: docker build -f Custom.Containerfile .\n\
+containerfile: Missing.Containerfile\n",
+            work_dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(command, "docker build -f Custom.Containerfile .");
+    }
+
+    #[test]
+    fn resolve_procfile_build_command_uses_explicit_containerfile() {
+        let work_dir = tempdir().unwrap();
+        std::fs::write(work_dir.path().join("Custom.Containerfile"), "").unwrap();
+        let command = resolve_procfile_build_command(
+            "containerfile: Custom.Containerfile\n",
+            work_dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(command, "docker build -f Custom.Containerfile .");
+    }
+
+    #[test]
+    fn resolve_procfile_build_command_prefers_explicit_containerfile_over_auto_detected_containerfile()
+     {
+        let work_dir = tempdir().unwrap();
+        std::fs::write(work_dir.path().join("Custom.Containerfile"), "").unwrap();
+        std::fs::write(work_dir.path().join("Containerfile"), "").unwrap();
+        std::fs::write(work_dir.path().join("Dockerfile"), "").unwrap();
+
+        let command = resolve_procfile_build_command(
+            "containerfile: Custom.Containerfile\n",
+            work_dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(command, "docker build -f Custom.Containerfile .");
+    }
+
+    #[test]
+    fn resolve_procfile_build_command_rejects_empty_explicit_containerfile() {
+        let work_dir = tempdir().unwrap();
+        let err = resolve_procfile_build_command("containerfile:\n", work_dir.path()).unwrap_err();
+
+        assert!(
+            err.to_string().contains("empty containerfile"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_procfile_build_command_rejects_missing_explicit_containerfile() {
+        let work_dir = tempdir().unwrap();
+        let err = resolve_procfile_build_command(
+            "containerfile: Missing.Containerfile\n",
+            work_dir.path(),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("missing file"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_local_build_command_without_procfile_prefers_containerfile() {
+        let work_dir = tempdir().unwrap();
+        std::fs::write(work_dir.path().join("Containerfile"), "").unwrap();
+        std::fs::write(work_dir.path().join("Dockerfile"), "").unwrap();
+
+        let command = resolve_local_build_command_from_dir(work_dir.path(), true).unwrap();
+
+        assert_eq!(command, "docker build -f Containerfile .");
+    }
+
+    #[test]
+    fn resolve_local_build_command_without_procfile_falls_back_to_dockerfile() {
+        let work_dir = tempdir().unwrap();
+        std::fs::write(work_dir.path().join("Dockerfile"), "").unwrap();
+
+        let command = resolve_local_build_command_from_dir(work_dir.path(), true).unwrap();
+
+        assert_eq!(command, "docker build -f Dockerfile .");
+    }
+
+    #[test]
+    fn resolve_local_build_command_without_build_files_returns_placeholder() {
+        let work_dir = tempdir().unwrap();
+
+        let command = resolve_local_build_command_from_dir(work_dir.path(), true).unwrap();
+
+        assert_eq!(command, "echo 'Please configure your Procfile'");
+    }
 }

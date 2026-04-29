@@ -324,9 +324,10 @@ impl BuildConfig {
 
                 match key {
                     "containerfile" => {
-                        if !value.is_empty() {
-                            containerfile = Some(value);
+                        if value.is_empty() {
+                            return Err("containerfile field cannot be empty".to_string());
                         }
+                        containerfile = Some(value);
                     }
                     "build" => {
                         if !value.is_empty() {
@@ -724,5 +725,31 @@ mod tests {
         let result = BuildConfig::from_procfile(procfile);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("empty labels"));
+    }
+
+    #[test]
+    fn test_parse_build_and_containerfile_fields_together() {
+        let procfile = "\
+build: docker build -f Custom.Containerfile .\n\
+containerfile: Custom.Containerfile\n\
+run: /app/server\n";
+        let config = BuildConfig::from_procfile(procfile).unwrap();
+
+        assert_eq!(
+            config.build.as_deref(),
+            Some("docker build -f Custom.Containerfile .")
+        );
+        assert_eq!(
+            config.containerfile.as_deref(),
+            Some("Custom.Containerfile")
+        );
+    }
+
+    #[test]
+    fn test_rejects_empty_containerfile() {
+        let procfile = "run: /app/server\ncontainerfile:\n";
+        let result = BuildConfig::from_procfile(procfile);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("containerfile"));
     }
 }

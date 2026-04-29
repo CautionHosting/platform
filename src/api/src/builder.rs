@@ -1417,6 +1417,112 @@ mod tests {
     }
 
     #[test]
+    fn test_userdata_preserves_resolved_containerfile_build_command() {
+        let config = BuilderConfig {
+            ami_id: "ami-test".to_string(),
+            security_group_id: "sg-test".to_string(),
+            subnet_id: "subnet-test".to_string(),
+            instance_profile: "profile-test".to_string(),
+            region: "us-west-2".to_string(),
+            timeout_secs: 1200,
+            eif_s3_bucket: "test-bucket".to_string(),
+            git_hostname: "git.example.com".to_string(),
+            additional_instance_tags: Vec::new(),
+        };
+
+        let request = BuildRequest {
+            org_id: Uuid::new_v4(),
+            app_id: Uuid::new_v4(),
+            app_name: "test-app".to_string(),
+            commit_sha: "abc123".to_string(),
+            branch: "main".to_string(),
+            source_s3_key: "builds/test/source.tar.gz".to_string(),
+            source_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            procfile_content: "run: /app\n".to_string(),
+            run_command: Some("/app".to_string()),
+            build_command: Some("docker build -f Containerfile .".to_string()),
+            binary_path: None,
+            ports: vec![],
+            e2e: false,
+            locksmith: false,
+            enclaveos_commit: "abc".to_string(),
+            builder_size: "small".to_string(),
+            builder_instance_type: "c5.xlarge".to_string(),
+            app_sources: vec![],
+        };
+
+        let userdata = generate_builder_userdata(
+            Uuid::new_v4(),
+            &config,
+            &request,
+            "eifs/test.eif",
+            "builds/test/remote-build-helper",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            userdata.contains("BUILD_CMD='docker build -f Containerfile .'"),
+            "should preserve the resolved Containerfile build command verbatim"
+        );
+    }
+
+    #[test]
+    fn test_userdata_preserves_explicit_custom_containerfile_build_command() {
+        let config = BuilderConfig {
+            ami_id: "ami-test".to_string(),
+            security_group_id: "sg-test".to_string(),
+            subnet_id: "subnet-test".to_string(),
+            instance_profile: "profile-test".to_string(),
+            region: "us-west-2".to_string(),
+            timeout_secs: 1200,
+            eif_s3_bucket: "test-bucket".to_string(),
+            git_hostname: "git.example.com".to_string(),
+            additional_instance_tags: Vec::new(),
+        };
+
+        let request = BuildRequest {
+            org_id: Uuid::new_v4(),
+            app_id: Uuid::new_v4(),
+            app_name: "test-app".to_string(),
+            commit_sha: "abc123".to_string(),
+            branch: "main".to_string(),
+            source_s3_key: "builds/test/source.tar.gz".to_string(),
+            source_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            procfile_content: "containerfile: Custom.Containerfile\nrun: /app\n".to_string(),
+            run_command: Some("/app".to_string()),
+            build_command: Some("docker build -f Custom.Containerfile .".to_string()),
+            binary_path: None,
+            ports: vec![],
+            e2e: false,
+            locksmith: false,
+            enclaveos_commit: "abc".to_string(),
+            builder_size: "small".to_string(),
+            builder_instance_type: "c5.xlarge".to_string(),
+            app_sources: vec![],
+        };
+
+        let userdata = generate_builder_userdata(
+            Uuid::new_v4(),
+            &config,
+            &request,
+            "eifs/test.eif",
+            "builds/test/remote-build-helper",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            userdata.contains("BUILD_CMD='docker build -f Custom.Containerfile .'"),
+            "should preserve the explicit custom containerfile build command verbatim"
+        );
+    }
+
+    #[test]
     fn test_userdata_size_under_16kb_limit() {
         let config = BuilderConfig {
             ami_id: "ami-test".to_string(),

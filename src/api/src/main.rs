@@ -1206,14 +1206,314 @@ async fn deploy_handler(
         .unwrap()
 }
 
+async fn repo_has_file_at_commit(
+    git_dir: &str,
+    commit_sha: &str,
+    path: &str,
+) -> Result<bool, (StatusCode, String)> {
+    use tokio::process::Command;
+
+    let output = Command::new("git")
+        .args(["--git-dir", git_dir, "ls-tree", commit_sha, "--", path])
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to inspect repository contents for {}: {}", path, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Git command failed while inspecting {}: {}", path, e),
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::error!(
+            "git ls-tree failed while inspecting {} at {}: {}",
+            path,
+            commit_sha,
+            stderr
+        );
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "Failed to inspect repository for {}: {}",
+                path,
+                stderr.trim()
+            ),
+        ));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        let Some((metadata, output_path)) = line.split_once('\t') else {
+            return false;
+        };
+        let mut parts = metadata.split_whitespace();
+        let _mode = parts.next();
+        let file_type = parts.next();
+
+        output_path.trim() == path && file_type == Some("blob")
+    }))
+}
+
+async fn validate_explicit_containerfile_for_deploy(
+    git_dir: &str,
+    commit_sha: &str,
+    build_command: Option<&str>,
+    containerfile: Option<&str>,
+) -> Result<Option<String>, (StatusCode, String)> {
+    if enclave_builder::has_explicit_build_command(build_command) {
+        return Ok(None);
+    }
+
+    let Some(containerfile) = containerfile else {
+        return Ok(None);
+    };
+
+    let containerfile = enclave_builder::validate_explicit_containerfile_path(containerfile)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    if !repo_has_file_at_commit(git_dir, commit_sha, &containerfile).await? {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Procfile field `containerfile:` points to missing file: {}",
+                containerfile
+            ),
+        ));
+    }
+
+    Ok(Some(containerfile))
+}
+
+async fn load_build_config_for_deploy(
+    git_dir: &str,
+    commit_sha: &str,
+) -> Result<(String, types::BuildConfig), (StatusCode, String)> {
+    use tokio::process::Command;
+
+    let procfile_output = Command::new("git")
+        .args(&[
+            "--git-dir",
+            git_dir,
+            "show",
+            &format!("{}:Procfile", commit_sha),
+        ])
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to run git show for Procfile: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Git command failed: {}", e),
+            )
+        })?;
+
+    if !procfile_output.status.success() {
+        tracing::error!("Procfile not found in repository at commit {}", commit_sha);
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "No Procfile found in repository root. Please add a Procfile with a required `run:` field and either `build:` or `containerfile:`. If both are absent, Caution auto-detects a repo-root `Containerfile` before `Dockerfile`.".to_string(),
+        ));
+    }
+
+    let procfile_content = String::from_utf8_lossy(&procfile_output.stdout).to_string();
+    let build_config = types::BuildConfig::from_procfile(&procfile_content).map_err(|e| {
+        tracing::error!("Failed to parse Procfile: {}", e);
+        (StatusCode::BAD_REQUEST, format!("Invalid Procfile: {}", e))
+    })?;
+
+    tracing::info!(
+        "Loaded build config from Procfile: containerfile={:?}, binary={:?}, build={:?}, oci_tarball={:?}",
+        build_config.containerfile,
+        build_config.binary,
+        build_config.build,
+        build_config.oci_tarball
+    );
+
+    Ok((procfile_content, build_config))
+}
+
+async fn resolve_build_command_for_deploy(
+    git_dir: &str,
+    commit_sha: &str,
+    build_config: &types::BuildConfig,
+) -> Result<String, (StatusCode, String)> {
+    let containerfile = validate_explicit_containerfile_for_deploy(
+        git_dir,
+        commit_sha,
+        build_config.build.as_deref(),
+        build_config.containerfile.as_deref(),
+    )
+    .await?;
+    let containerfile = if containerfile.is_none()
+        && !enclave_builder::has_explicit_build_command(build_config.build.as_deref())
+        && repo_has_file_at_commit(git_dir, commit_sha, "Containerfile").await?
+    {
+        Some("Containerfile".to_string())
+    } else {
+        containerfile
+    };
+
+    Ok(enclave_builder::resolve_build_command(
+        build_config.build.as_deref(),
+        containerfile.as_deref(),
+    ))
+}
+
+#[cfg(test)]
+mod deploy_build_command_tests {
+    use super::{load_build_config_for_deploy, resolve_build_command_for_deploy};
+    use enclave_builder::resolve_build_command;
+    use std::{path::Path, process::Command};
+    use tempfile::TempDir;
+
+    fn run_git(repo_dir: &Path, args: &[&str]) -> std::process::Output {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo_dir)
+            .args(args)
+            .output()
+            .unwrap_or_else(|err| panic!("git {:?} failed to start: {}", args, err));
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        output
+    }
+
+    fn commit_test_repo(files: &[(&str, &str)]) -> (TempDir, String) {
+        let repo_dir = tempfile::tempdir().unwrap();
+        run_git(repo_dir.path(), &["init"]);
+
+        for (path, contents) in files {
+            let full_path = repo_dir.path().join(path);
+            if let Some(parent) = full_path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(full_path, contents).unwrap();
+        }
+
+        run_git(repo_dir.path(), &["add", "."]);
+        run_git(
+            repo_dir.path(),
+            &[
+                "-c",
+                "user.name=Test User",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "initial commit",
+            ],
+        );
+        let output = run_git(repo_dir.path(), &["rev-parse", "HEAD"]);
+        let commit_sha = String::from_utf8(output.stdout).unwrap().trim().to_string();
+
+        (repo_dir, commit_sha)
+    }
+
+    #[test]
+    fn explicit_build_wins() {
+        assert_eq!(
+            resolve_build_command(
+                Some("docker build -f Custom.Containerfile ."),
+                Some("Ignored.Containerfile"),
+            ),
+            "docker build -f Custom.Containerfile ."
+        );
+    }
+
+    #[test]
+    fn explicit_containerfile_wins() {
+        assert_eq!(
+            resolve_build_command(None, Some("Custom.Containerfile")),
+            "docker build -f Custom.Containerfile ."
+        );
+    }
+
+    #[test]
+    fn selected_containerfile_builds_with_containerfile_flag() {
+        assert_eq!(
+            resolve_build_command(None, Some("Containerfile")),
+            "docker build -f Containerfile ."
+        );
+    }
+
+    #[test]
+    fn dockerfile_is_final_fallback() {
+        assert_eq!(
+            resolve_build_command(None, None),
+            "docker build -f Dockerfile ."
+        );
+    }
+
+    #[tokio::test]
+    async fn deploy_path_auto_detects_committed_containerfile() {
+        let (repo_dir, commit_sha) = commit_test_repo(&[
+            ("Procfile", "run: /app\n"),
+            ("Containerfile", "FROM alpine:3.20\n"),
+        ]);
+        let git_dir = repo_dir.path().join(".git");
+        let (procfile_content, build_config) =
+            load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
+                .await
+                .unwrap();
+        assert_eq!(procfile_content, "run: /app\n");
+        assert!(build_config.build.is_none());
+        assert!(build_config.containerfile.is_none());
+
+        let build_command =
+            resolve_build_command_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &build_config)
+                .await
+                .unwrap();
+
+        assert_eq!(build_command, "docker build -f Containerfile .");
+    }
+
+    #[tokio::test]
+    async fn deploy_path_honors_explicit_custom_containerfile() {
+        let (repo_dir, commit_sha) = commit_test_repo(&[
+            (
+                "Procfile",
+                "containerfile: Custom.Containerfile\nrun: /app\n",
+            ),
+            ("Containerfile", "FROM alpine:3.20\n"),
+            ("Custom.Containerfile", "FROM debian:bookworm-slim\n"),
+        ]);
+        let git_dir = repo_dir.path().join(".git");
+        let (procfile_content, build_config) =
+            load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
+                .await
+                .unwrap();
+        assert_eq!(
+            procfile_content,
+            "containerfile: Custom.Containerfile\nrun: /app\n"
+        );
+        assert!(build_config.build.is_none());
+        assert_eq!(
+            build_config.containerfile.as_deref(),
+            Some("Custom.Containerfile")
+        );
+
+        let build_command =
+            resolve_build_command_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &build_config)
+                .await
+                .unwrap();
+
+        assert_eq!(build_command, "docker build -f Custom.Containerfile .");
+    }
+}
+
 async fn deploy_logic(
     state: Arc<AppState>,
     auth: AuthContext,
     req: DeployRequest,
     tx: tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
 ) -> Result<DeployResponse, (StatusCode, String)> {
-    use tokio::process::Command;
-
     tracing::info!(
         "Deployment request: user_id={}, org_id={}, app_id={}",
         auth.user_id,
@@ -1560,53 +1860,15 @@ async fn deploy_logic(
     };
 
     let git_dir = format!("{}/git-repos/{}.git", state.data_dir, app_id_str);
-    let procfile_output = Command::new("git")
-        .args(&[
-            "--git-dir",
-            &git_dir,
-            "show",
-            &format!("{}:Procfile", commit_sha),
-        ])
-        .output()
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to run git show for Procfile: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Git command failed: {}", e),
-            )
-        })?;
+    let (procfile_content, build_config) =
+        load_build_config_for_deploy(&git_dir, &commit_sha).await?;
 
-    let build_config = if procfile_output.status.success() {
-        let content = String::from_utf8_lossy(&procfile_output.stdout);
-        match types::BuildConfig::from_procfile(&content) {
-            Ok(config) => {
-                tracing::info!("Loaded build config from Procfile: containerfile={:?}, binary={:?}, build={:?}, oci_tarball={:?}",
-                               config.containerfile, config.binary, config.build, config.oci_tarball);
-                config
-            }
-            Err(e) => {
-                tracing::error!("Failed to parse Procfile: {}", e);
-                return Err((StatusCode::BAD_REQUEST, format!("Invalid Procfile: {}", e)));
-            }
-        }
-    } else {
-        tracing::error!("Procfile not found in repository at commit {}", commit_sha);
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "No Procfile found in repository root. Please add a Procfile with 'containerfile', 'binary', and 'run' fields.".to_string(),
-        ));
-    };
-
-    // Get build command from the resource configuration
-    let build_command = configuration
-        .get("cmd")
-        .and_then(|v| v.as_str())
-        .unwrap_or("docker build -t app .")
-        .to_string();
+    let build_command =
+        resolve_build_command_for_deploy(&git_dir, &commit_sha, &build_config).await?;
     tracing::info!(
-        "Using resource {} with build command: {}",
+        "Resolved build command for resource {} at commit {}: {}",
         resource_id,
+        commit_sha,
         build_command
     );
 
@@ -1670,7 +1932,6 @@ async fn deploy_logic(
     )
     .await?;
     let builder_eif_s3_key = {
-        let procfile_content = String::from_utf8_lossy(&procfile_output.stdout).to_string();
         let enclaveos_commit = enclave_builder::build::resolve_enclaveos_commit();
         let cache_key = builder::compute_cache_key(
             &commit_sha,

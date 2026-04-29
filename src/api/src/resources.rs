@@ -123,9 +123,10 @@ pub async fn create_resource(
         format!("app-{}", &provider_resource_id[..8])
     };
 
-    let configuration = serde_json::json!({
-        "cmd": payload.cmd
-    });
+    // `cmd` is still accepted at the API boundary for backward compatibility, but
+    // deploys now derive build commands from the current repository state rather
+    // than persisted resource configuration.
+    let configuration = initial_resource_configuration();
 
     tracing::debug!("Creating resource with slug: {}", resource_slug);
 
@@ -179,6 +180,10 @@ pub async fn create_resource(
     }))
 }
 
+fn initial_resource_configuration() -> serde_json::Value {
+    serde_json::json!({})
+}
+
 pub async fn list_resources(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -228,6 +233,19 @@ pub async fn list_resources(
         .collect();
 
     Ok(Json(resources_with_git_url))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::initial_resource_configuration;
+
+    #[test]
+    fn initial_resource_configuration_does_not_store_legacy_cmd() {
+        let configuration = initial_resource_configuration();
+
+        assert_eq!(configuration, serde_json::json!({}));
+        assert!(configuration.get("cmd").is_none());
+    }
 }
 
 pub async fn get_resource(
