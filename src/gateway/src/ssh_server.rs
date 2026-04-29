@@ -601,6 +601,12 @@ async fn handle_git_push(
             domain: Option<String>,
         }
 
+        let eta =
+            "Deployments usually complete in 5-10 minutes. First deployments and BYOC deployments can take up to 15 minutes.\n";
+        let _ = session_handle
+            .extended_data(channel, 1, eta.as_bytes().to_vec().into())
+            .await;
+
         // Stream the response to the SSH client with spinner animation for milestones
         let mut stream = response.bytes_stream();
         let mut last_line = String::new();
