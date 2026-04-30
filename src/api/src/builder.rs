@@ -887,7 +887,9 @@ heartbeat() {{
 
 fail() {{
     local msg="$1"
-    echo '{{"phase":"failed","error":"'"$(echo "$msg" | sed 's/"/\\"/g')"'"}}' | aws s3 cp - "s3://$S3_BUCKET/$STATUS_KEY" --content-type application/json
+    set_phase "fail"
+    set_template $(jq -cn --arg error "$msg" '{{"error": $error}}')
+    heartbeat
     exit 1
 }}
 
