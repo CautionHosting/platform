@@ -144,6 +144,8 @@
 .development-banner-content {
   max-width: 1550px;
   margin: 0 auto;
+  padding: 0 40px;
+  position: relative;
   text-align: center;
 }
 
@@ -196,6 +198,35 @@
 
 .development-banner-link:hover {
   opacity: 0.8;
+}
+
+.development-banner-dismiss {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+  transform: translateY(-50%);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.development-banner-dismiss:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+}
+
+.development-banner-dismiss:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.55);
+  outline-offset: 2px;
 }
 
 /* ==========================================================================
@@ -649,9 +680,10 @@
    ========================================================================== */
 
 .dashboard-footer {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
+  gap: 16px;
   padding: 96px 40px 24px 40px;
   margin-top: auto;
   max-width: 1550px;
@@ -661,21 +693,35 @@
 }
 
 .footer-left,
+.footer-center a,
 .footer-right a {
   color: #666;
   font-size: 0.95rem;
 }
 
+.footer-left {
+  justify-self: start;
+}
+
+.footer-center {
+  display: flex;
+  gap: 16px;
+  justify-self: center;
+}
+
 .footer-right {
   display: flex;
   gap: 16px;
+  justify-self: end;
 }
 
+.footer-center a,
 .footer-right a {
   text-decoration: none;
   transition: color 0.15s ease;
 }
 
+.footer-center a:hover,
 .footer-right a:hover {
   color: var(--color-pink);
 }

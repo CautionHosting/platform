@@ -1211,31 +1211,40 @@ make build-cli
 
       <!-- Email Section -->
       <div class="billing-section">
-        <h3 class="billing-section-title">Email</h3>
-        <div class="email-settings">
-          <div v-if="!editingEmail" class="email-display">
-            <span v-if="userEmail" class="email-current">{{ userEmail }}</span>
-            <span v-else class="email-not-set">No email set</span>
-            <button @click="startEditEmail" class="btn-secondary btn-small">{{ userEmail ? 'Change' : 'Set email' }}</button>
+        <div class="billing-section-heading">
+          <h3 class="billing-section-title">Email</h3>
+          <span class="email-status-pill" :class="`email-status-pill--${emailSettingsStatusVariant}`">
+            {{ emailSettingsStatus }}
+          </span>
+        </div>
+        <div class="email-settings-card">
+          <div class="email-settings-copy">
+            <p class="email-settings-description">{{ emailSettingsDescription }}</p>
           </div>
-          <div v-else class="email-edit">
-            <input
-              v-model="emailInput"
-              type="email"
-              placeholder="you@example.com"
-              class="email-input"
-              @keyup.enter="saveEmail"
-            />
-            <div class="email-edit-actions">
-              <button @click="saveEmail" :disabled="savingEmail" class="btn-primary btn-small">
-                {{ savingEmail ? 'Saving...' : 'Save' }}
+          <div class="email-settings-controls">
+            <label class="email-settings-label" for="settingsEmail">Email notifications (No marketing)</label>
+            <div class="email-settings-row">
+              <input
+                id="settingsEmail"
+                v-model="emailInput"
+                type="email"
+                placeholder="Enter your email"
+                class="email-input"
+                :disabled="savingEmail"
+                @keyup.enter="saveEmail"
+              />
+              <button @click="saveEmail" :disabled="savingEmail" class="btn-primary email-action-button">
+                {{ emailActionLabel }}
               </button>
-              <button @click="editingEmail = false" class="btn-secondary btn-small">Cancel</button>
             </div>
-            <div v-if="emailError" class="card-error">{{ emailError }}</div>
+            <div v-if="emailError" class="card-error email-form-message">{{ emailError }}</div>
+            <div v-else-if="emailVerificationSendError" class="card-error email-form-message">
+              {{ emailVerificationSendError }}
+            </div>
+            <p v-if="userEmail && emailVerified === false && emailVerificationDeliveryStatus !== 'failed'" class="email-unverified-warning">
+              Verification links expire after 24 hours.
+            </p>
           </div>
-          <p v-if="userEmail && emailVerified === false" class="email-unverified-warning">Email not verified — check your inbox for a verification link.</p>
-          <p class="email-hint">Used for invoice and payment notifications.</p>
         </div>
       </div>
 
@@ -1541,34 +1550,40 @@ make build-cli
             :disabled="addingCred"
           />
         </div>
-        <label class="cloud-credential-checkbox">
-          <input
-            type="checkbox"
-            v-model="newCredIsDefault"
-            :disabled="addingCred"
-          />
-          <span>Set as default</span>
-        </label>
-        <div class="cloud-credential-form-actions">
-          <button
-            @click="addCredential"
-            class="btn-primary cloud-credential-submit-btn"
-            :disabled="
-              addingCred ||
-              !newCredName.trim() ||
-              !newCredAwsKeyId.trim() ||
-              !newCredAwsSecret.trim()
-            "
-          >
-            {{ addingCred ? "Adding..." : "Add credential" }}
-          </button>
-          <button
-            @click="cancelCredentialForm"
-            class="btn-secondary cloud-credential-cancel-btn"
-            :disabled="addingCred"
-          >
-            Cancel
-          </button>
+        <div class="cloud-credential-form-row">
+          <div></div>
+          <label class="cloud-credential-checkbox">
+            <input
+              type="checkbox"
+              v-model="newCredIsDefault"
+              :disabled="addingCred"
+            />
+            <span>Set as default</span>
+          </label>
+        </div>
+        <div class="cloud-credential-form-row">
+          <div></div>
+          <div class="cloud-credential-form-actions">
+            <button
+              @click="addCredential"
+              class="btn-primary cloud-credential-submit-btn"
+              :disabled="
+                addingCred ||
+                !newCredName.trim() ||
+                !newCredAwsKeyId.trim() ||
+                !newCredAwsSecret.trim()
+              "
+            >
+              {{ addingCred ? "Adding..." : "Add credential" }}
+            </button>
+            <button
+              @click="cancelCredentialForm"
+              class="btn-secondary cloud-credential-cancel-btn"
+              :disabled="addingCred"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       </div>
 
@@ -2355,6 +2370,74 @@ export default {
     const emailInput = ref('');
     const savingEmail = ref(false);
     const emailError = ref('');
+    const emailVerificationDeliveryStatus = ref(null);
+
+    const emailSettingsStatus = computed(() => {
+      if (!userEmail.value) {
+        return 'No email added';
+      }
+      if (emailVerified.value) {
+        return 'Verified email';
+      }
+      if (emailVerificationDeliveryStatus.value === 'sent') {
+        return 'Verification pending';
+      }
+      return 'Verification needed';
+    });
+
+    const emailSettingsStatusVariant = computed(() => {
+      if (!userEmail.value) {
+        return 'danger';
+      }
+      if (emailVerified.value) {
+        return 'success';
+      }
+      return 'warning';
+    });
+
+    const emailSettingsDescription = computed(() => {
+      if (!userEmail.value) {
+        return "Without an email, check your account directly for legal notice changes and important account updates.";
+      }
+      if (emailVerified.value === false) {
+        return "Verify this email to receive legal notice changes and important account updates. Until then, check your account directly.";
+      }
+      return "We'll use this verified address for legal notice changes and important account updates. We won't use it for marketing.";
+    });
+
+    const emailInputMatchesSavedEmail = computed(() => {
+      return emailInput.value.trim() === userEmail.value;
+    });
+
+    const emailInputIsEmpty = computed(() => {
+      return emailInput.value.trim() === '';
+    });
+
+    const emailVerificationSendError = computed(() => {
+      if (
+        emailVerificationDeliveryStatus.value !== 'failed' ||
+        !emailInputMatchesSavedEmail.value
+      ) {
+        return '';
+      }
+      return "Email saved, but we couldn't send the verification link. Try again in a moment.";
+    });
+
+    const emailActionLabel = computed(() => {
+      if (savingEmail.value) {
+        return 'Saving...';
+      }
+      if (!userEmail.value) {
+        return 'Subscribe';
+      }
+      if (emailInputIsEmpty.value) {
+        return 'Remove email';
+      }
+      if (emailVerified.value === false && emailInputMatchesSavedEmail.value) {
+        return 'Resend link';
+      }
+      return 'Save email';
+    });
 
     const currentBillingPeriod = computed(() => {
       const now = new Date();
@@ -2599,6 +2682,9 @@ export default {
         if (response.ok) {
           const data = await response.json();
           userEmail.value = data.email || '';
+          emailInput.value = userEmail.value;
+          emailVerified.value = Boolean(data.email_verified);
+          emailVerificationDeliveryStatus.value = null;
         }
       } catch (err) {
         // ignore
@@ -2607,7 +2693,6 @@ export default {
         const statusRes = await authFetch("/api/user/status");
         if (statusRes.ok) {
           const status = await statusRes.json();
-          emailVerified.value = status.email_verified;
           legalStatus.value = status.legal || null;
         }
       } catch (err) {
@@ -2623,10 +2708,15 @@ export default {
 
     const saveEmail = async () => {
       const email = emailInput.value.trim();
-      if (!email) {
-        emailError.value = 'Email is required';
+      const isRemovingEmail = Boolean(userEmail.value) && !email;
+      if (!email && !isRemovingEmail) {
+        emailError.value = 'Enter an email address to add one.';
         return;
       }
+      const isResendingVerificationLink =
+        Boolean(userEmail.value) &&
+        emailVerified.value === false &&
+        email === userEmail.value;
       savingEmail.value = true;
       emailError.value = '';
       try {
@@ -2637,10 +2727,27 @@ export default {
         });
         if (response.ok) {
           const data = await response.json();
-          userEmail.value = data.email || email;
-          emailVerified.value = false;
+          userEmail.value = data.email || '';
+          emailInput.value = userEmail.value;
+          emailVerified.value = Boolean(data.email_verified);
           editingEmail.value = false;
-          showToast('Verification email sent — check your inbox');
+          if (isRemovingEmail) {
+            emailVerificationDeliveryStatus.value = null;
+            showToast('Email removed');
+          } else if (data.verification_email_sent === true) {
+            emailVerificationDeliveryStatus.value = 'sent';
+            showToast(
+              isResendingVerificationLink
+                ? 'Verification link sent.'
+                : 'Email saved. Verification link sent.'
+            );
+          } else if (data.verification_email_sent === false) {
+            emailVerificationDeliveryStatus.value = 'failed';
+            showToast("Email saved, but we couldn't send the verification link.", 'error');
+          } else {
+            emailVerificationDeliveryStatus.value = null;
+            showToast('Email saved');
+          }
         } else {
           const data = await response.json().catch(() => ({}));
           emailError.value = data.error || 'Failed to update email';
@@ -4168,6 +4275,12 @@ export default {
       emailInput,
       savingEmail,
       emailError,
+      emailVerificationDeliveryStatus,
+      emailSettingsStatus,
+      emailSettingsStatusVariant,
+      emailSettingsDescription,
+      emailVerificationSendError,
+      emailActionLabel,
       startEditEmail,
       saveEmail,
       calculateAppMonthlyCost,
@@ -4260,6 +4373,7 @@ export default {
   padding: 24px;
   border-radius: 8px;
   background: #fafafa;
+  box-shadow: 0 0 0 1px rgba(15, 15, 15, 0.025), 0 2px 6px rgba(15, 15, 15, 0.04);
 }
 
 .inline-form-panel-title {
@@ -4337,11 +4451,15 @@ export default {
   margin-top: 0;
 }
 
-.cloud-credential-form-group {
+.cloud-credential-form-group,
+.cloud-credential-form-row {
   display: grid;
   grid-template-columns: 150px minmax(0, 510px);
   gap: 16px;
   align-items: start;
+}
+
+.cloud-credential-form-group {
   margin-bottom: 34px;
 }
 
@@ -4363,8 +4481,7 @@ export default {
   align-items: flex-start;
   gap: 8px;
   width: max-content;
-  max-width: 120px;
-  margin: 3px 0 50px 0;
+  margin: -4px 0 48px 0;
   color: #0f0f0f;
   font-size: 1rem;
   line-height: 1.5;
@@ -4381,7 +4498,6 @@ export default {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-top: 48px;
 }
 
 .cloud-credential-submit-btn {
@@ -4445,7 +4561,7 @@ export default {
   color: rgba(15, 15, 15, 0.875);
   margin: 0 auto;
   line-height: 1.6;
-  max-width: 550px;
+  max-width: 440px;
   margin: 32px auto;
 }
 
@@ -6087,6 +6203,17 @@ export default {
   margin-bottom: 1rem;
 }
 
+.billing-section-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 1rem;
+}
+
+.billing-section-heading .billing-section-title {
+  margin-bottom: 0;
+}
+
 .billing-table {
   border: 1px solid #e5e7eb;
   border-radius: 8px;
@@ -6688,7 +6815,7 @@ export default {
 
 }
 
-/* Email settings */
+/* Settings sections */
 .legal-settings-card {
   display: flex;
   flex-direction: column;
@@ -6754,63 +6881,144 @@ export default {
   opacity: 1;
 }
 
-.email-settings {
-  padding: 0.5rem 0;
+.email-settings-card {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.85fr) minmax(360px, 1.15fr);
+  align-items: start;
+  gap: 56px;
+  padding: 18px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
 }
 
-.email-display {
-  display: flex;
+.email-settings-copy {
+  max-width: 440px;
+  padding-top: 2px;
+}
+
+.email-settings-description {
+  margin: 0;
+  color: var(--color-text-secondary, #666);
+  font-size: 0.95rem;
+  line-height: 1.55;
+}
+
+.email-status-pill {
+  display: inline-flex;
   align-items: center;
-  gap: 1rem;
+  min-height: 24px;
+  padding: 0 10px 1px 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 0.775rem;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
 }
 
-.email-current {
+.email-status-pill--danger {
+  color: var(--color-danger, #dc3545);
+  background: var(--color-danger-bg, #fff5f5);
+  border-color: var(--color-danger-border, #ffcdd2);
+}
+
+.email-status-pill--warning {
+  color: var(--color-warning, #e65100);
+  background: var(--color-warning-bg, #fff3e0);
+  border-color: #ffe0b2;
+}
+
+.email-status-pill--success {
+  color: var(--color-success, #2e7d32);
+  background: var(--color-success-bg, #e8f5e9);
+  border-color: #c8e6c9;
+}
+
+.email-settings-controls {
+  min-width: 0;
+  max-width: 395px;
+}
+
+.email-settings-label {
+  display: block;
+  margin: 0 0 12px 0;
+  color: #1f2937;
   font-size: 0.95rem;
-  color: var(--color-text);
+  font-weight: 600;
+  line-height: 1.3;
 }
 
-.email-not-set {
-  font-size: 0.95rem;
-  color: var(--color-text-muted, #888);
-  font-style: italic;
-}
-
-.email-edit {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  max-width: 400px;
+.email-settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
 }
 
 .email-input {
-  padding: 0.5rem 0.75rem;
-  border: 1px solid var(--color-border, #ddd);
+  flex: 1;
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 14px 3px 14px;
+  border: 1px solid #d1d5db;
   border-radius: 6px;
+  background: white;
+  color: #1f2937;
+  font-family: inherit;
   font-size: 0.95rem;
-  background: var(--color-bg, #fff);
-  color: var(--color-text);
+  box-sizing: border-box;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.email-input::placeholder {
+  color: #8a8f98;
 }
 
 .email-input:focus {
   outline: none;
-  border-color: var(--color-primary, #000);
+  border-color: #0f0f0f;
+  box-shadow: 0 0 0 3px rgba(15, 15, 15, 0.08);
 }
 
-.email-edit-actions {
-  display: flex;
-  gap: 0.5rem;
+.email-input:disabled {
+  background: #f5f5f5;
+  cursor: not-allowed;
+}
+
+.email-action-button {
+  min-height: 40px;
+  padding: 0 20px 1px 20px;
+  border-radius: 8px;
+  font-size: 1rem;
+  white-space: nowrap;
+}
+
+.email-form-message {
+  margin: 10px 0 0 0;
 }
 
 .email-unverified-warning {
-  font-size: 0.8rem;
-  color: #e8a735;
-  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: #8a5a00;
+  margin: 10px 0 0 0;
 }
 
-.email-hint {
-  font-size: 0.8rem;
-  color: var(--color-text-muted, #888);
-  margin-top: 0.5rem;
+@media (max-width: 900px) {
+  .email-settings-card {
+    grid-template-columns: 1fr;
+    gap: 18px;
+  }
+}
+
+@media (max-width: 600px) {
+  .email-settings-row {
+    grid-template-columns: 1fr;
+  }
+
+  .email-action-button {
+    width: 100%;
+  }
 }
 
 /* Prepaid Credits */

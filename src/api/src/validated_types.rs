@@ -82,7 +82,9 @@ impl Validate for UpdateUserRequest {
         }
 
         if let Some(email) = &self.email {
-            validation::validate_email(email).map_err(|e| e.to_string())?;
+            if !email.trim().is_empty() {
+                validation::validate_email(email).map_err(|e| e.to_string())?;
+            }
         }
 
         Ok(())
