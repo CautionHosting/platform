@@ -701,7 +701,7 @@ async fn poll_build_status(
                     .to_vec();
                 let status: BuildStatus = match serde_json::from_slice(&body) {
                     Ok(o) => {
-                        tracing::info!("Received status: {o:?}");
+                        tracing::info!("Received status: {o:?} ({:?})", String::from_utf8(body));
                         o
                     },
                     Err(e) => {
@@ -868,19 +868,19 @@ dnf install -y jq
 # Global state tracking for heartbeat and metadata accumulation
 # Phase must be persisted to a file to exist in a subshell
 PHASEFILE="$(mktemp build-status.XXXX)"
-echo "starting" > $PHASEFILE
 TEMPLATEFILE="$(mktemp build-template.XXXX)"
-echo "{{}}" > $TEMPLATEFILE
+
+set_template() {{
+    echo "$1" > $TEMPLATEFILE
+}}
 
 set_phase() {{
     echo "$1" > $PHASEFILE
     heartbeat
 }}
 
-set_template() {{
-    echo "$1" > $TEMPLATEFILE
-    heartbeat
-}}
+set_template "{{}}"
+set_phase "starting"
 
 heartbeat() {{
     # PHASEFILE contains a newline, but storing as a variable trims newlines
