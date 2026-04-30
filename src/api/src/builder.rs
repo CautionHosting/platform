@@ -883,11 +883,11 @@ heartbeat() {{
         heartbeat
         sleep 30
     done
-)
+) &
 
 fail() {{
     local msg="$1"
-    set_phase "fail"
+    set_phase "failed"
     set_template $(jq -cn --arg error "$msg" '{{"error": $error}}')
     heartbeat
     exit 1
@@ -970,7 +970,7 @@ set_template "$(jq -cn \
     --arg eif_sha256 "$EIF_SHA256" \
     --arg eif_size_bytes "$EIF_SIZE" \
     --argjson pcrs "$PCRS_JSON" \
-    '{{"eif_sha256": $eif_sha256, "eif_size": $eif_size, "pcrs": $pcrs}}')"
+    '{{"eif_sha256": $eif_sha256, "eif_size_bytes": $eif_size_bytes, "pcrs": $pcrs}}')"
 set_phase "completed"
 
 echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
