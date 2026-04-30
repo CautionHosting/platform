@@ -870,6 +870,16 @@ dnf install -y jq
 PHASEFILE="$(mktemp build-status.XXXX)"
 TEMPLATEFILE="$(mktemp build-template.XXXX)"
 
+heartbeat() {{
+    # PHASEFILE contains a newline, but storing as a variable trims newlines
+    phase="$(cat $PHASEFILE)"
+    timestamp="$(date -u +%s)"
+    s3_url="s3://$S3_BUCKET/$STATUS_KEY"
+    cat "$TEMPLATEFILE" | \
+        jq -c --arg phase "$phase" --arg timestamp "$timestamp" '.phase = $phase | .timestamp = $timestamp' | \
+        aws s3 cp - "$s3_url" --content-type application/json
+}}
+
 set_template() {{
     echo "$1" > $TEMPLATEFILE
 }}
@@ -881,16 +891,6 @@ set_phase() {{
 
 set_template "{{}}"
 set_phase "starting"
-
-heartbeat() {{
-    # PHASEFILE contains a newline, but storing as a variable trims newlines
-    phase="$(cat $PHASEFILE)"
-    timestamp="$(date -u +%s)"
-    s3_url="s3://$S3_BUCKET/$STATUS_KEY"
-    cat "$TEMPLATEFILE" | \
-        jq -c --arg phase "$phase" --arg timestamp "$timestamp" '.phase = $phase | .timestamp = $timestamp' | \
-        aws s3 cp - "$s3_url" --content-type application/json
-}}
 
 # Run heartbeat periodically to ensure timestamp is always fresh
 (
