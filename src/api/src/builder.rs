@@ -699,8 +699,14 @@ async fn poll_build_status(
                     .await
                     .context("Failed to read status body")?
                     .to_vec();
-                let status: BuildStatus = serde_json::from_slice(&body)
-                    .context("Failed to parse status.json")?;
+                let status: BuildStatus = match serde_json::from_slice(&body) {
+                    Ok(o) => o,
+                    Err(e) => {
+                        tracing::error!("Could not parse status.json: {e}");
+                        tracing::error!("Received body: {:?}", String::from_utf8(body));
+                        return Err(e).context("Failed to parse status.json");
+                    }
+                };
 
                 // Send milestone if phase changed
                 if status.phase != last_phase {
