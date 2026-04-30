@@ -902,9 +902,8 @@ set_phase "starting"
 
 fail() {{
     local msg="$1"
+    set_template "$(jq -cn --arg error "$msg" '{{"error": $error}}')"
     set_phase "failed"
-    set_template $(jq -cn --arg error "$msg" '{{"error": $error}}')
-    heartbeat
     exit 1
 }}
 
