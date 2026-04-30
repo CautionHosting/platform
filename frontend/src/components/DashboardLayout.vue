@@ -3,7 +3,7 @@
 
 <template>
   <div class="dashboard-page">
-    <div v-if="showDevelopmentWarning" class="development-banner">
+    <div v-if="showDevelopmentBanner" class="development-banner">
       <div class="development-banner-content">
         <span>
           <strong>Development mode:</strong> PIN verification is disabled.
@@ -12,6 +12,28 @@
           </button>
           for production use.
         </span>
+        <button
+          type="button"
+          class="development-banner-dismiss"
+          aria-label="Dismiss development mode banner"
+          title="Dismiss"
+          @click="dismissDevelopmentBanner"
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M18 6 6 18" />
+            <path d="m6 6 12 12" />
+          </svg>
+        </button>
       </div>
     </div>
 
@@ -66,41 +88,6 @@
               class="nav-icon"
             />
             <span>Applications</span>
-          </button>
-
-          <button
-            :class="['nav-item', { active: activeTab === 'credentials' }]"
-            @click="$emit('tab-change', 'credentials')"
-          >
-            <svg
-              class="nav-icon"
-              width="30"
-              height="30"
-              viewBox="0 0 30 30"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-              aria-hidden="true"
-            >
-              <rect v-if="activeTab === 'credentials'" width="30" height="30" rx="15" fill="white"/>
-              <g
-                transform="translate(5,5) scale(0.833)"
-                :stroke="activeTab === 'credentials' ? '#0F0F0F' : '#535455'"
-                stroke-width="1.8"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <path d="m10.852 19.772-.383.924"/>
-                <path d="m13.148 14.228.383-.923"/>
-                <path d="M13.148 19.772a3 3 0 1 0-2.296-5.544l-.383-.923"/>
-                <path d="m13.53 20.696-.382-.924a3 3 0 1 1-2.296-5.544"/>
-                <path d="m14.772 15.852.923-.383"/>
-                <path d="m14.772 18.148.923.383"/>
-                <path d="M4.2 15.1a7 7 0 1 1 9.93-9.858A7 7 0 0 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.2"/>
-                <path d="m9.228 15.852-.923-.383"/>
-                <path d="m9.228 18.148-.923.383"/>
-              </g>
-            </svg>
-            <span>Cloud credentials</span>
           </button>
 
           <button
@@ -199,7 +186,7 @@
       <div class="footer-left">
         {{ copyrightLabel }}
       </div>
-      <div class="footer-right">
+      <div class="footer-center">
         <a
           href="https://caution.co/terms.html"
           target="_blank"
@@ -212,6 +199,8 @@
           rel="noopener noreferrer"
           >Privacy</a
         >
+      </div>
+      <div class="footer-right">
         <a
           href="https://docs.caution.co/"
           target="_blank"
@@ -234,7 +223,11 @@
 </template>
 
 <script>
-import { computed } from "vue";
+import { computed, ref } from "vue";
+import {
+  dismissDevelopmentBannerForSession,
+  isDevelopmentBannerDismissed,
+} from "../utils/developmentBanner.js";
 
 export default {
   name: "DashboardLayout",
@@ -257,13 +250,25 @@ export default {
     },
   },
   emits: ["tab-change", "logout"],
-  setup() {
+  setup(props) {
+    const developmentBannerDismissed = ref(isDevelopmentBannerDismissed());
+    const showDevelopmentBanner = computed(() => {
+      return props.showDevelopmentWarning && !developmentBannerDismissed.value;
+    });
+
+    const dismissDevelopmentBanner = () => {
+      developmentBannerDismissed.value = true;
+      dismissDevelopmentBannerForSession();
+    };
+
     const copyrightLabel = computed(() => {
       return `© ${new Date().getFullYear()} Caution SEZC. All rights reserved.`;
     });
 
     return {
       copyrightLabel,
+      dismissDevelopmentBanner,
+      showDevelopmentBanner,
     };
   },
 };

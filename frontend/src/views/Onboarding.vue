@@ -81,12 +81,12 @@ export default {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email: email.value }),
         })
-        if (response.ok) {
+        const data = await response.json().catch(() => ({}))
+        if (response.ok && data.success !== false) {
           emailSent.value = true
           pollEmailVerification()
         } else {
-          const data = await response.json()
-          error.value = data.error || 'Failed to send verification email'
+          error.value = data.error || data.message || 'Failed to send verification email'
         }
       } catch {
         error.value = 'Failed to connect to server'
