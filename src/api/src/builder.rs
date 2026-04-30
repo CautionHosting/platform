@@ -850,13 +850,40 @@ PORTS="{ports_csv}"
 E2E="{e2e_flag}"
 LOCKSMITH="{locksmith_flag}"
 
-write_status() {{
-    local phase="$1"
-    shift
-    local extra=""
-    if [ $# -gt 0 ]; then extra=",$@"; fi
-    echo '{{"phase":"'"$phase"'"'"$extra"'}}' | aws s3 cp - "s3://$S3_BUCKET/$STATUS_KEY" --content-type application/json
+# Install script dependencies
+# We won't have status tracking for these, but we also can't build status without these.
+
+dnf install -y jq
+
+# Global state tracking for heartbeat and metadata accumulation
+PHASE="starting"
+TEMPLATE="{}"
+
+set_phase() {{
+    PHASE="$1"
+    heartbeat
 }}
+
+set_template() {{
+    TEMPLATE="$1"
+    heartbeat
+}}
+
+heartbeat() {{
+    timestamp="$(date -u +%s)"
+    s3_url="s3://$S3_BUCKET/$STATUS_KEY"
+    echo "$TEMPLATE" | \
+        jq -c --arg phase "$PHASE" --arg timestamp "$timestamp" '.phase = $phase | .timestamp = $timestamp' | \
+        aws s3 cp - "$s3_url" --content-type application/json
+}}
+
+# Run heartbeat periodically to ensure timestamp is always fresh
+(
+    while true; do
+        heartbeat
+        sleep 30
+    done
+)
 
 fail() {{
     local msg="$1"
@@ -872,7 +899,7 @@ dnf install -y docker
 systemctl start docker
 systemctl enable docker
 
-write_status "starting"
+set_phase "starting"
 
 # Download source archive from S3
 echo "Downloading source archive..."
@@ -893,7 +920,7 @@ eval "$BUILD_CMD"
 # Re-tag to a known name so we can reference it consistently
 BUILT_IMAGE=$(docker images -q --no-trunc | head -1)
 docker tag "$BUILT_IMAGE" app-image 2>/dev/null || true
-write_status "docker_built"
+set_phase "docker_built"
 
 # Write manifest for remote-build-helper
 cat > /build/manifest.json << 'MANIFEST_EOF'
@@ -919,7 +946,7 @@ if [ ! -f "$EIF_PATH" ]; then
     fail "EIF file not found after build"
 fi
 
-write_status "eif_built"
+set_phase "eif_built"
 
 # Compute SHA256
 EIF_SHA256=$(sha256sum "$EIF_PATH" | awk '{{print $1}}')
@@ -937,7 +964,12 @@ fi
 echo "Uploading EIF to S3..."
 aws s3 cp "$EIF_PATH" "s3://$S3_BUCKET/$EIF_S3_KEY"
 
-write_status "completed" '"eif_sha256":"'"$EIF_SHA256"'","eif_size_bytes":'"$EIF_SIZE"',"pcrs":'"$PCRS_JSON"
+set_template "$(jq -cn \
+    --arg eif_sha256 "$EIF_SHA256" \
+    --arg eif_size_bytes "$EIF_SIZE" \
+    --argjson pcrs "$PCRS_JSON" \
+    '{{"eif_sha256": $eif_sha256, "eif_size": $eif_size, "pcrs": $pcrs}}')"
+set_phase "completed"
 
 echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
 "##,
