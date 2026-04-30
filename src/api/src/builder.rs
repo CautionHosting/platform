@@ -867,8 +867,8 @@ dnf install -y jq
 
 # Global state tracking for heartbeat and metadata accumulation
 # Phase must be persisted to a file to exist in a subshell
-PHASEFILE="$(mktemp build-status.XXXX)"
-TEMPLATEFILE="$(mktemp build-template.XXXX)"
+PHASEFILE="$(mktemp /tmp/build-status.XXXX)"
+TEMPLATEFILE="$(mktemp /tmp/build-template.XXXX)"
 
 heartbeat() {{
     # PHASEFILE contains a newline, but storing as a variable trims newlines
