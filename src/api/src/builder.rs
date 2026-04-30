@@ -697,8 +697,13 @@ async fn poll_build_status(
                     .body
                     .collect()
                     .await
-                    .context("Failed to read status body")?;
-                let status: BuildStatus = serde_json::from_slice(&body.into_bytes())
+                    .context("Failed to read status body")?
+                    .to_vec();
+                match String::from_utf8(body.clone()) {
+                    Ok(body) => tracing::info!("Received status body?: {body}"),
+                    Err(e) => tracing::info!("Received invalid body: {e} ({body:?})"),
+                }
+                let status: BuildStatus = serde_json::from_slice(&body)
                     .context("Failed to parse status.json")?;
 
                 // Send milestone if phase changed
@@ -857,7 +862,7 @@ dnf install -y jq
 
 # Global state tracking for heartbeat and metadata accumulation
 PHASE="starting"
-TEMPLATE="{}"
+TEMPLATE="{{}}"
 
 set_phase() {{
     PHASE="$1"
