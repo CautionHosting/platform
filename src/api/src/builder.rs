@@ -699,10 +699,6 @@ async fn poll_build_status(
                     .await
                     .context("Failed to read status body")?
                     .to_vec();
-                match String::from_utf8(body.clone()) {
-                    Ok(body) => tracing::info!("Received status body?: {body}"),
-                    Err(e) => tracing::info!("Received invalid body: {e} ({body:?})"),
-                }
                 let status: BuildStatus = serde_json::from_slice(&body)
                     .context("Failed to parse status.json")?;
 
