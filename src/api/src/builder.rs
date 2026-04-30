@@ -857,24 +857,29 @@ LOCKSMITH="{locksmith_flag}"
 dnf install -y jq
 
 # Global state tracking for heartbeat and metadata accumulation
-PHASE="starting"
-TEMPLATE="{{}}"
+# Phase must be persisted to a file to exist in a subshell
+PHASEFILE="$(mktemp build-status.XXXX)"
+echo "starting" > $PHASEFILE
+TEMPLATEFILE="$(mktemp build-template.XXXX)"
+echo "{{}}" > $TEMPLATEFILE
 
 set_phase() {{
-    PHASE="$1"
+    echo "$1" > $PHASEFILE
     heartbeat
 }}
 
 set_template() {{
-    TEMPLATE="$1"
+    echo "$1" > $TEMPLATEFILE
     heartbeat
 }}
 
 heartbeat() {{
+    # PHASEFILE contains a newline, but storing as a variable trims newlines
+    phase="$(cat $PHASEFILE)"
     timestamp="$(date -u +%s)"
     s3_url="s3://$S3_BUCKET/$STATUS_KEY"
-    echo "$TEMPLATE" | \
-        jq -c --arg phase "$PHASE" --arg timestamp "$timestamp" '.phase = $phase | .timestamp = $timestamp' | \
+    cat "$TEMPLATEFILE" | \
+        jq -c --arg phase "$phase" --arg timestamp "$timestamp" '.phase = $phase | .timestamp = $timestamp' | \
         aws s3 cp - "$s3_url" --content-type application/json
 }}
 
@@ -969,7 +974,7 @@ aws s3 cp "$EIF_PATH" "s3://$S3_BUCKET/$EIF_S3_KEY"
 
 set_template "$(jq -cn \
     --arg eif_sha256 "$EIF_SHA256" \
-    --arg eif_size_bytes "$EIF_SIZE" \
+    --argjson eif_size_bytes "$EIF_SIZE" \
     --argjson pcrs "$PCRS_JSON" \
     '{{"eif_sha256": $eif_sha256, "eif_size_bytes": $eif_size_bytes, "pcrs": $pcrs}}')"
 set_phase "completed"
