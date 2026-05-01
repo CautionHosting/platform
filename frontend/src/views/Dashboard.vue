@@ -1159,92 +1159,125 @@ make build-cli
       </div>
     </div>
 
-    <!-- Billing Tab -->
+    <!-- Account Tab -->
+    <div v-if="activeTab === 'account'" class="content-card">
+      <div class="content-header">
+        <div class="content-header-text">
+          <h2 class="content-header-title">Account</h2>
+          <p class="content-header-description">
+            Manage account-level settings and review legal documents.
+          </p>
+        </div>
+      </div>
+
+      <div class="account-settings-list">
+        <!-- Email Section -->
+        <section class="account-settings-section">
+          <div class="account-settings-title-row">
+            <h3 class="billing-section-title">Email notifications</h3>
+            <span class="email-status-pill" :class="`email-status-pill--${emailSettingsStatusVariant}`">
+              {{ emailSettingsStatus }}
+            </span>
+          </div>
+          <div class="account-settings-row">
+            <div class="account-settings-label">
+              <p class="account-settings-description">{{ emailSettingsDescription }}</p>
+            </div>
+            <div class="account-settings-content">
+              <div class="email-settings-controls">
+                <label class="sr-only" for="accountEmail">Notification email</label>
+                <div class="email-settings-row">
+                  <input
+                    id="accountEmail"
+                    v-model="emailInput"
+                    type="email"
+                    placeholder="Enter your email"
+                    class="email-input"
+                    :disabled="savingEmail"
+                    @keyup.enter="saveEmail"
+                  />
+                  <button @click="saveEmail" :disabled="savingEmail" class="btn-primary email-action-button">
+                    {{ emailActionLabel }}
+                  </button>
+                </div>
+                <div v-if="emailError" class="card-error email-form-message">{{ emailError }}</div>
+                <div v-else-if="emailVerificationSendError" class="card-error email-form-message">
+                  {{ emailVerificationSendError }}
+                </div>
+                <p v-if="userEmail && emailVerified === false && emailVerificationDeliveryStatus !== 'failed'" class="email-unverified-warning">
+                  Verification links expire after 24 hours.
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Legal Section -->
+        <section class="account-settings-section">
+          <h3 class="billing-section-title">Legal</h3>
+          <div class="account-settings-row">
+            <div class="account-settings-label">
+              <p class="account-settings-description">
+                Review your account legal documents.
+              </p>
+            </div>
+            <div class="account-settings-content">
+              <div class="legal-settings-card">
+                <a
+                  href="https://caution.co/terms.html"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="legal-settings-row"
+                  aria-label="Review Terms of Service"
+                >
+                  <div class="legal-settings-copy">
+                    <div class="legal-settings-name">Terms of Service</div>
+                    <div class="legal-settings-meta">
+                      <span>{{ getLegalStatusDatePrefix(legalStatus?.terms_of_service) }}</span>
+                      <span class="legal-settings-meta-time">{{ getLegalStatusDateTime(legalStatus?.terms_of_service) }}</span>
+                    </div>
+                  </div>
+                  <svg class="legal-settings-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M15 3h6v6"/>
+                    <path d="M10 14 21 3"/>
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                  </svg>
+                </a>
+                <a
+                  href="https://caution.co/privacy.html"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="legal-settings-row"
+                  aria-label="Review Privacy Notice"
+                >
+                  <div class="legal-settings-copy">
+                    <div class="legal-settings-name">Privacy Notice</div>
+                    <div class="legal-settings-meta">
+                      <span>{{ getLegalStatusDatePrefix(legalStatus?.privacy_notice) }}</span>
+                      <span class="legal-settings-meta-time">{{ getLegalStatusDateTime(legalStatus?.privacy_notice) }}</span>
+                    </div>
+                  </div>
+                  <svg class="legal-settings-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M15 3h6v6"/>
+                    <path d="M10 14 21 3"/>
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                  </svg>
+                </a>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Settings Tab -->
     <div v-if="activeTab === 'settings'" class="content-card">
       <div class="content-header">
         <div class="content-header-text">
           <h2 class="content-header-title">Settings</h2>
           <p class="content-header-description">
-            Manage your account email and billing.
+            Manage credits, subscriptions, and billing.
           </p>
-        </div>
-      </div>
-
-      <!-- Email Section -->
-      <div class="billing-section">
-        <h3 class="billing-section-title">Legal</h3>
-        <div class="legal-settings-card">
-          <div class="legal-settings-row">
-            <div class="legal-settings-copy">
-              <div class="legal-settings-name">Terms of Service</div>
-              <div class="legal-settings-meta">
-                <span>{{ getLegalStatusLabel(legalStatus?.terms_of_service) }}</span>
-              </div>
-            </div>
-            <a href="https://caution.co/terms.html" target="_blank" rel="noopener noreferrer" class="legal-settings-link">
-              <span>Review</span>
-              <svg class="legal-settings-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M15 3h6v6"/>
-                <path d="M10 14 21 3"/>
-                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-              </svg>
-            </a>
-          </div>
-          <div class="legal-settings-row">
-            <div class="legal-settings-copy">
-              <div class="legal-settings-name">Privacy Notice</div>
-              <div class="legal-settings-meta">
-                <span>{{ getLegalStatusLabel(legalStatus?.privacy_notice) }}</span>
-              </div>
-            </div>
-            <a href="https://caution.co/privacy.html" target="_blank" rel="noopener noreferrer" class="legal-settings-link">
-              <span>Review</span>
-              <svg class="legal-settings-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M15 3h6v6"/>
-                <path d="M10 14 21 3"/>
-                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-              </svg>
-            </a>
-          </div>
-        </div>
-      </div>
-
-      <!-- Email Section -->
-      <div class="billing-section">
-        <div class="billing-section-heading">
-          <h3 class="billing-section-title">Email</h3>
-          <span class="email-status-pill" :class="`email-status-pill--${emailSettingsStatusVariant}`">
-            {{ emailSettingsStatus }}
-          </span>
-        </div>
-        <div class="email-settings-card">
-          <div class="email-settings-copy">
-            <p class="email-settings-description">{{ emailSettingsDescription }}</p>
-          </div>
-          <div class="email-settings-controls">
-            <label class="email-settings-label" for="settingsEmail">Email notifications (No marketing)</label>
-            <div class="email-settings-row">
-              <input
-                id="settingsEmail"
-                v-model="emailInput"
-                type="email"
-                placeholder="Enter your email"
-                class="email-input"
-                :disabled="savingEmail"
-                @keyup.enter="saveEmail"
-              />
-              <button @click="saveEmail" :disabled="savingEmail" class="btn-primary email-action-button">
-                {{ emailActionLabel }}
-              </button>
-            </div>
-            <div v-if="emailError" class="card-error email-form-message">{{ emailError }}</div>
-            <div v-else-if="emailVerificationSendError" class="card-error email-form-message">
-              {{ emailVerificationSendError }}
-            </div>
-            <p v-if="userEmail && emailVerified === false && emailVerificationDeliveryStatus !== 'failed'" class="email-unverified-warning">
-              Verification links expire after 24 hours.
-            </p>
-          </div>
         </div>
       </div>
 
@@ -1705,6 +1738,7 @@ export default {
       ssh: "ssh",
       keys: "keys",
       security: "security",
+      account: "account",
       settings: "settings",
       credentials: "credentials",
       guide: "guide",
@@ -2377,17 +2411,17 @@ export default {
         return 'No email added';
       }
       if (emailVerified.value) {
-        return 'Verified email';
+        return 'Verified';
       }
       if (emailVerificationDeliveryStatus.value === 'sent') {
-        return 'Verification pending';
+        return 'Verification sent';
       }
       return 'Verification needed';
     });
 
     const emailSettingsStatusVariant = computed(() => {
       if (!userEmail.value) {
-        return 'danger';
+        return 'neutral';
       }
       if (emailVerified.value) {
         return 'success';
@@ -2397,12 +2431,15 @@ export default {
 
     const emailSettingsDescription = computed(() => {
       if (!userEmail.value) {
-        return "Without an email, check your account directly for legal notice changes and important account updates.";
+        return "Add an email to receive legal notices and important account updates (no marketing). Without one, you're responsible for checking your account directly.";
+      }
+      if (emailVerified.value === false && emailVerificationDeliveryStatus.value === 'sent') {
+        return "We sent a verification link to your inbox. Until the email is verified, check your account directly.";
       }
       if (emailVerified.value === false) {
-        return "Verify this email to receive legal notice changes and important account updates. Until then, check your account directly.";
+        return "Verify this email before we use it for legal notices and important account updates. Until then, check your account directly.";
       }
-      return "We'll use this verified address for legal notice changes and important account updates. We won't use it for marketing.";
+      return "We'll use this email for legal notices and important account updates.";
     });
 
     const emailInputMatchesSavedEmail = computed(() => {
@@ -2420,7 +2457,7 @@ export default {
       ) {
         return '';
       }
-      return "Email saved, but we couldn't send the verification link. Try again in a moment.";
+      return "Email saved, but we couldn't send the verification link. Check the address or try again in a moment.";
     });
 
     const emailActionLabel = computed(() => {
@@ -2428,7 +2465,7 @@ export default {
         return 'Saving...';
       }
       if (!userEmail.value) {
-        return 'Subscribe';
+        return 'Add email';
       }
       if (emailInputIsEmpty.value) {
         return 'Remove email';
@@ -2436,8 +2473,22 @@ export default {
       if (emailVerified.value === false && emailInputMatchesSavedEmail.value) {
         return 'Resend link';
       }
-      return 'Save email';
+      return 'Save changes';
     });
+
+    const formatEmailUpdateError = (message = '') => {
+      const normalizedMessage = String(message).toLowerCase();
+      if (
+        normalizedMessage.includes('invalid email') ||
+        normalizedMessage.includes('email address format')
+      ) {
+        return 'Enter a valid email address.';
+      }
+      if (normalizedMessage.includes('at least one field')) {
+        return 'Enter an email address.';
+      }
+      return "We couldn't update your email. Try again.";
+    };
 
     const currentBillingPeriod = computed(() => {
       const now = new Date();
@@ -2710,7 +2761,7 @@ export default {
       const email = emailInput.value.trim();
       const isRemovingEmail = Boolean(userEmail.value) && !email;
       if (!email && !isRemovingEmail) {
-        emailError.value = 'Enter an email address to add one.';
+        emailError.value = 'Enter an email address.';
         return;
       }
       const isResendingVerificationLink =
@@ -2743,17 +2794,17 @@ export default {
             );
           } else if (data.verification_email_sent === false) {
             emailVerificationDeliveryStatus.value = 'failed';
-            showToast("Email saved, but we couldn't send the verification link.", 'error');
+            showToast("Email saved, but we couldn't send the verification link. Check the address or try again in a moment.", 'error');
           } else {
             emailVerificationDeliveryStatus.value = null;
             showToast('Email saved');
           }
         } else {
           const data = await response.json().catch(() => ({}));
-          emailError.value = data.error || 'Failed to update email';
+          emailError.value = formatEmailUpdateError(data.error);
         }
       } catch (err) {
-        emailError.value = 'Failed to connect to server';
+        emailError.value = "We couldn't connect to the server. Try again.";
       } finally {
         savingEmail.value = false;
       }
@@ -3726,8 +3777,9 @@ export default {
         loadCredentials();
       } else if (newTab === "keys") {
         loadBundles();
-      } else if (newTab === "settings") {
+      } else if (newTab === "account") {
         loadUserEmail();
+      } else if (newTab === "settings") {
         loadBilling();
         loadCreditBalance();
         loadCreditPackages();
@@ -4043,6 +4095,8 @@ export default {
         loadOrgSettings();
       } else if (activeTab.value === "keys") {
         loadBundles();
+      } else if (activeTab.value === "account") {
+        loadUserEmail();
       } else if (activeTab.value === "settings") {
         loadCreditBalance();
         loadBilling();
@@ -4066,6 +4120,25 @@ export default {
       return 'Acceptance recorded before tracking';
     };
 
+    const getLegalStatusDatePrefix = (documentStatus) => {
+      if (documentStatus?.accepted_at) {
+        return `Accepted on ${formatDateOnly(documentStatus.accepted_at)}`;
+      }
+
+      return getLegalStatusLabel(documentStatus);
+    };
+
+    const getLegalStatusDateTime = (documentStatus) => {
+      if (documentStatus?.accepted_at) {
+        const date = parseDate(documentStatus.accepted_at);
+        if (!date || isNaN(date.getTime())) return '';
+        const timeOptions = { hour: 'numeric', minute: '2-digit', hour12: true, timeZoneName: 'short' };
+        return `at ${formatLocalTime(date, timeOptions)}`;
+      }
+
+      return '';
+    };
+
     onMounted(async () => {
       const initialTab = getTabFromLocation();
       activeTab.value = initialTab;
@@ -4078,8 +4151,11 @@ export default {
 
       await Promise.all([loadApps(), loadKeys(), loadCredentials(), loadBundles(), loadOrgSettings(), loadPasskeys()]);
 
-      if (initialTab === "settings") {
+      if (initialTab === "account") {
         loadUserEmail();
+      }
+
+      if (initialTab === "settings") {
         loadBilling();
         loadCreditBalance();
         loadCreditPackages();
@@ -4114,8 +4190,9 @@ export default {
           loadCredentials();
         } else if (activeTab.value === "keys") {
           loadBundles();
-        } else if (activeTab.value === "settings") {
+        } else if (activeTab.value === "account") {
           loadUserEmail();
+        } else if (activeTab.value === "settings") {
           loadBilling();
           loadCreditBalance();
           loadCreditPackages();
@@ -4291,6 +4368,8 @@ export default {
       formatDateTime,
       formatDateTimeFull,
       getLegalStatusLabel,
+      getLegalStatusDatePrefix,
+      getLegalStatusDateTime,
       formatDateOnly,
       formatTimeOnly,
       formatTimeWithTimezone,
@@ -6815,12 +6894,77 @@ export default {
 
 }
 
-/* Settings sections */
-.legal-settings-card {
+/* Account settings */
+.account-settings-list {
   display: flex;
   flex-direction: column;
+  margin-top: 48px;
+  gap: 56px;
+}
+
+.account-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.account-settings-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.account-settings-section > .billing-section-title,
+.account-settings-title-row .billing-section-title {
+  font-size: clamp(1.075rem, 2vw, 1.15rem);
+  margin: 0;
+}
+
+.account-settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  align-items: start;
+  gap: 56px;
+}
+
+.account-settings-label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.account-settings-description {
+  margin: 0;
+  max-width: 420px;
+  color: var(--color-text-secondary, #666);
+  font-size: clamp(1rem, 2vw, 1.05rem);
+  line-height: 1.55;
+}
+
+.account-settings-content {
+  min-width: 0;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.legal-settings-card {
+  display: grid;
+  grid-template-columns: 1fr;
   gap: 0.75rem;
-  padding: 0.5rem 0;
+  padding: 0;
 }
 
 .legal-settings-row {
@@ -6828,68 +6972,63 @@ export default {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  padding: 1rem 1.1rem;
+  padding: 12px 18px;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   background: #f9fafb;
+  color: inherit;
+  text-decoration: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.legal-settings-row:hover {
+  border-color: #d1d5db;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
+}
+
+.legal-settings-row:focus-visible {
+  outline: 2px solid rgba(240, 72, 181, 0.32);
+  outline-offset: 3px;
 }
 
 .legal-settings-copy {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.15rem;
 }
 
 .legal-settings-name {
-  font-size: 0.95rem;
-  font-weight: 600;
+  font-size: clamp(0.95rem, 2vw, 1rem);
+  font-weight: 500;
   color: #111827;
 }
 
 .legal-settings-meta {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  flex-wrap: wrap;
-  font-size: 0.82rem;
+  gap: 0.25rem;
+  flex-wrap: nowrap;
+  font-size: clamp(0.85rem, 2vw, 0.9rem);
   color: #6b7280;
-}
-
-.legal-settings-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  color: #111827;
-  font-size: 0.9rem;
-  font-weight: 500;
-  text-decoration: none;
   white-space: nowrap;
 }
 
-.legal-settings-link:hover {
-  color: var(--color-pink);
+.legal-settings-meta-time {
+  display: block;
 }
 
 .legal-settings-link-icon {
-  width: 0.95rem;
-  height: 0.95rem;
-  opacity: 0.95;
-  transition: opacity 0.2s ease;
+  width: 1.2rem;
+  height: 1.2rem;
+  flex-shrink: 0;
+  color: #6b7280;
+  opacity: 0.78;
+  transition: color 0.15s ease, opacity 0.15s ease;
 }
 
-.legal-settings-link:hover .legal-settings-link-icon {
+.legal-settings-row:hover .legal-settings-link-icon {
+  color: #0f0f0f;
   opacity: 1;
-}
-
-.email-settings-card {
-  display: grid;
-  grid-template-columns: minmax(220px, 0.85fr) minmax(360px, 1.15fr);
-  align-items: start;
-  gap: 56px;
-  padding: 18px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: #f9fafb;
 }
 
 .email-settings-copy {
@@ -6908,19 +7047,19 @@ export default {
   display: inline-flex;
   align-items: center;
   min-height: 24px;
-  padding: 0 10px 1px 10px;
+  padding: 0 11px 2px 11px;
   border: 1px solid transparent;
   border-radius: 999px;
-  font-size: 0.775rem;
+  font-size: 0.85rem;
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
 }
 
-.email-status-pill--danger {
-  color: var(--color-danger, #dc3545);
-  background: var(--color-danger-bg, #fff5f5);
-  border-color: var(--color-danger-border, #ffcdd2);
+.email-status-pill--neutral {
+  color: #7a4f00;
+  background: #fff8e6;
+  border-color: #f5d99a;
 }
 
 .email-status-pill--warning {
@@ -6937,7 +7076,7 @@ export default {
 
 .email-settings-controls {
   min-width: 0;
-  max-width: 395px;
+  max-width: 540px;
 }
 
 .email-settings-label {
@@ -6959,14 +7098,14 @@ export default {
 .email-input {
   flex: 1;
   min-width: 0;
-  min-height: 40px;
-  padding: 0 14px 3px 14px;
+  min-height: 54px;
+  padding: 0 14px 2px 18px;
   border: 1px solid #d1d5db;
   border-radius: 6px;
   background: white;
   color: #1f2937;
   font-family: inherit;
-  font-size: 0.95rem;
+  font-size: 1rem;
   box-sizing: border-box;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
@@ -6987,10 +7126,10 @@ export default {
 }
 
 .email-action-button {
-  min-height: 40px;
-  padding: 0 20px 1px 20px;
+  min-height: 54px;
+  padding: 0 28px;
   border-radius: 8px;
-  font-size: 1rem;
+  font-size: clamp(0.95rem, 2vw, 1.05rem);
   white-space: nowrap;
 }
 
@@ -7005,10 +7144,23 @@ export default {
 }
 
 @media (max-width: 900px) {
-  .email-settings-card {
-    grid-template-columns: 1fr;
-    gap: 18px;
+  .account-settings-list {
+    gap: 32px;
   }
+
+  .account-settings-row {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .account-settings-description {
+    max-width: 520px;
+  }
+
+  .legal-settings-card {
+    grid-template-columns: 1fr;
+  }
+
 }
 
 @media (max-width: 600px) {

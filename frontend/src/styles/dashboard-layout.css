@@ -179,7 +179,7 @@
 
 .desktop-required-text {
   font-size: 1.125rem;
-  color: #666;
+  color: #777;
   line-height: 1.6;
   margin: 0;
 }
@@ -268,7 +268,8 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  width: 220px;
+  gap: 20px;
+  width: 260px;
   margin-left: auto;
 }
 
@@ -300,10 +301,11 @@
   line-height: 1;
 }
 
-.header-logout-button {
+.header-action-button {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  min-height: 20px;
   padding: 0;
   background: transparent;
   border: none;
@@ -311,19 +313,35 @@
   font-family: inherit;
   font-size: 1rem;
   font-weight: 450;
+  line-height: 20px;
   cursor: pointer;
   transition: color 0.15s ease;
 }
 
-.header-logout-button:hover {
+.header-action-button span {
+  display: block;
+  line-height: 20px;
+}
+
+.header-action-button:hover {
   color: var(--color-pink);
 }
 
-.header-logout-icon {
+.header-action-button.active {
+  color: #0f0f0f;
+  font-weight: 500;
+}
+
+.header-action-button.active:hover {
+  color: var(--color-pink);
+}
+
+.header-action-icon {
+  display: block;
   width: 18px;
   height: 18px;
+  flex-shrink: 0;
   color: currentColor;
-  transform: translateY(3px);
   transition: color 0.15s ease;
 }
 
@@ -418,7 +436,7 @@
 .main-content {
   flex: 1;
   min-width: 0;
-  margin: 0 0 0 42px;
+  margin: 0 0 0 24px;
   display: flex;
   gap: 36px;
   align-items: flex-start;
