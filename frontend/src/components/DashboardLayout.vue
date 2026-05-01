@@ -167,15 +167,44 @@
           </button>
 
           <button
-            :class="['nav-item', { active: activeTab === 'settings' }]"
-            @click="$emit('tab-change', 'settings')"
+            :class="['nav-item', { active: activeTab === 'billing' }]"
+            @click="$emit('tab-change', 'billing')"
           >
-            <img
-              :src="activeTab === 'settings' ? '/assets/icons/settings--act.svg' : '/assets/icons/settings--inact.svg'"
-              alt=""
+            <svg
               class="nav-icon"
-            />
-            <span>Settings</span>
+              width="30"
+              height="30"
+              viewBox="0 0 30 30"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+              aria-hidden="true"
+            >
+              <rect v-if="activeTab === 'billing'" width="30" height="30" rx="15" fill="white"/>
+              <g transform="translate(5,5) scale(0.85)">
+                <rect
+                  width="20"
+                  height="14"
+                  x="2"
+                  y="5"
+                  rx="2"
+                  :stroke="activeTab === 'billing' ? '#0F0F0F' : '#535455'"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <line
+                  x1="2"
+                  x2="22"
+                  y1="10"
+                  y2="10"
+                  :stroke="activeTab === 'billing' ? '#0F0F0F' : '#535455'"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </g>
+            </svg>
+            <span>Billing</span>
           </button>
 
           <!-- Hidden for now - docs site covers this
