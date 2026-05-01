@@ -131,8 +131,13 @@ export default {
         description: 'Manage Caution account notifications and legal documents.',
         path: '/'
       },
+      billing: {
+        title: 'Billing • Caution',
+        description: 'Manage Caution credits, subscriptions, and billing.',
+        path: '/'
+      },
       settings: {
-        title: 'Settings • Caution',
+        title: 'Billing • Caution',
         description: 'Manage Caution credits, subscriptions, and billing.',
         path: '/'
       },

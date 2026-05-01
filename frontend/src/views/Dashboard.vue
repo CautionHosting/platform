@@ -1174,7 +1174,7 @@ make build-cli
         <!-- Email Section -->
         <section class="account-settings-section">
           <div class="account-settings-title-row">
-            <h3 class="billing-section-title">Email notifications</h3>
+            <h3 class="billing-section-title">Notification email</h3>
             <span class="email-status-pill" :class="`email-status-pill--${emailSettingsStatusVariant}`">
               {{ emailSettingsStatus }}
             </span>
@@ -1192,18 +1192,16 @@ make build-cli
                     v-model="emailInput"
                     type="email"
                     placeholder="Enter your email"
-                    class="email-input"
+                    :class="['email-input', { 'email-input--readonly': emailIsVerifiedReadOnly }]"
                     :disabled="savingEmail"
-                    @keyup.enter="saveEmail"
+                    :readonly="emailIsVerifiedReadOnly"
+                    @keyup.enter="handleEmailAction"
                   />
-                  <button @click="saveEmail" :disabled="savingEmail" class="btn-primary email-action-button">
+                  <button @click="handleEmailAction" :disabled="savingEmail" class="btn-primary email-action-button">
                     {{ emailActionLabel }}
                   </button>
                 </div>
                 <div v-if="emailError" class="card-error email-form-message">{{ emailError }}</div>
-                <div v-else-if="emailVerificationSendError" class="card-error email-form-message">
-                  {{ emailVerificationSendError }}
-                </div>
                 <p v-if="userEmail && emailVerified === false && emailVerificationDeliveryStatus !== 'failed'" class="email-unverified-warning">
                   Verification links expire after 24 hours.
                 </p>
@@ -1214,7 +1212,7 @@ make build-cli
 
         <!-- Legal Section -->
         <section class="account-settings-section">
-          <h3 class="billing-section-title">Legal</h3>
+          <h3 class="billing-section-title">Legal documents</h3>
           <div class="account-settings-row">
             <div class="account-settings-label">
               <p class="account-settings-description">
@@ -1270,11 +1268,11 @@ make build-cli
       </div>
     </div>
 
-    <!-- Settings Tab -->
-    <div v-if="activeTab === 'settings'" class="content-card">
+    <!-- Billing Tab -->
+    <div v-if="activeTab === 'billing'" class="content-card">
       <div class="content-header">
         <div class="content-header-text">
-          <h2 class="content-header-title">Settings</h2>
+          <h2 class="content-header-title">Billing</h2>
           <p class="content-header-description">
             Manage credits, subscriptions, and billing.
           </p>
@@ -1739,7 +1737,7 @@ export default {
       keys: "keys",
       security: "security",
       account: "account",
-      settings: "settings",
+      billing: "billing",
       credentials: "credentials",
       guide: "guide",
     };
@@ -1751,7 +1749,7 @@ export default {
         }
         return acc;
       },
-      {}
+      { settings: "billing" }
     );
     const error = ref(null);
     const activeTab = ref("apps");
@@ -2436,10 +2434,13 @@ export default {
       if (emailVerified.value === false && emailVerificationDeliveryStatus.value === 'sent') {
         return "We sent a verification link to your inbox. Until the email is verified, check your account directly.";
       }
+      if (emailVerified.value === false && emailVerificationDeliveryStatus.value === 'failed') {
+        return "We saved this email, but couldn't send the verification link. Check the address or try again in a moment. Until verified, check your account directly.";
+      }
       if (emailVerified.value === false) {
         return "Verify this email before we use it for legal notices and important account updates. Until then, check your account directly.";
       }
-      return "We'll use this email for legal notices and important account updates.";
+      return "We'll send legal notices and important account updates to this email. We won't use it for marketing.";
     });
 
     const emailInputMatchesSavedEmail = computed(() => {
@@ -2450,19 +2451,16 @@ export default {
       return emailInput.value.trim() === '';
     });
 
-    const emailVerificationSendError = computed(() => {
-      if (
-        emailVerificationDeliveryStatus.value !== 'failed' ||
-        !emailInputMatchesSavedEmail.value
-      ) {
-        return '';
-      }
-      return "Email saved, but we couldn't send the verification link. Check the address or try again in a moment.";
+    const emailIsVerifiedReadOnly = computed(() => {
+      return Boolean(userEmail.value) && emailVerified.value && !editingEmail.value;
     });
 
     const emailActionLabel = computed(() => {
       if (savingEmail.value) {
         return 'Saving...';
+      }
+      if (emailIsVerifiedReadOnly.value) {
+        return 'Change email';
       }
       if (!userEmail.value) {
         return 'Add email';
@@ -2471,9 +2469,12 @@ export default {
         return 'Remove email';
       }
       if (emailVerified.value === false && emailInputMatchesSavedEmail.value) {
+        if (emailVerificationDeliveryStatus.value === 'failed') {
+          return 'Send link';
+        }
         return 'Resend link';
       }
-      return 'Save changes';
+      return 'Send verification link';
     });
 
     const formatEmailUpdateError = (message = '') => {
@@ -2736,6 +2737,7 @@ export default {
           emailInput.value = userEmail.value;
           emailVerified.value = Boolean(data.email_verified);
           emailVerificationDeliveryStatus.value = null;
+          editingEmail.value = false;
         }
       } catch (err) {
         // ignore
@@ -2755,6 +2757,15 @@ export default {
       emailInput.value = userEmail.value;
       emailError.value = '';
       editingEmail.value = true;
+    };
+
+    const handleEmailAction = () => {
+      if (emailIsVerifiedReadOnly.value) {
+        startEditEmail();
+        return;
+      }
+
+      saveEmail();
     };
 
     const saveEmail = async () => {
@@ -3009,7 +3020,7 @@ export default {
       creditPurchaseError.value = '';
     };
 
-    // Balance polling — refresh every 30s when settings tab is active
+    // Balance polling - refresh every 30s when billing tab is active
     let balancePollingInterval = null;
     const startBalancePolling = () => {
       stopBalancePolling();
@@ -3779,7 +3790,7 @@ export default {
         loadBundles();
       } else if (newTab === "account") {
         loadUserEmail();
-      } else if (newTab === "settings") {
+      } else if (newTab === "billing") {
         loadBilling();
         loadCreditBalance();
         loadCreditPackages();
@@ -3788,8 +3799,8 @@ export default {
         startBalancePolling();
       }
 
-      // Stop polling when leaving settings tab
-      if (previousTab === "settings" && newTab !== "settings") {
+      // Stop polling when leaving billing tab
+      if (previousTab === "billing" && newTab !== "billing") {
         stopBalancePolling();
       }
     };
@@ -4097,7 +4108,7 @@ export default {
         loadBundles();
       } else if (activeTab.value === "account") {
         loadUserEmail();
-      } else if (activeTab.value === "settings") {
+      } else if (activeTab.value === "billing") {
         loadCreditBalance();
         loadBilling();
         loadSubscription();
@@ -4155,7 +4166,7 @@ export default {
         loadUserEmail();
       }
 
-      if (initialTab === "settings") {
+      if (initialTab === "billing") {
         loadBilling();
         loadCreditBalance();
         loadCreditPackages();
@@ -4192,7 +4203,7 @@ export default {
           loadBundles();
         } else if (activeTab.value === "account") {
           loadUserEmail();
-        } else if (activeTab.value === "settings") {
+        } else if (activeTab.value === "billing") {
           loadBilling();
           loadCreditBalance();
           loadCreditPackages();
@@ -4356,9 +4367,10 @@ export default {
       emailSettingsStatus,
       emailSettingsStatusVariant,
       emailSettingsDescription,
-      emailVerificationSendError,
+      emailIsVerifiedReadOnly,
       emailActionLabel,
       startEditEmail,
+      handleEmailAction,
       saveEmail,
       calculateAppMonthlyCost,
       logout,
@@ -7057,15 +7069,15 @@ export default {
 }
 
 .email-status-pill--neutral {
-  color: #7a4f00;
-  background: #fff8e6;
-  border-color: #f5d99a;
+  color: #6b7280;
+  background: #f9fafb;
+  border-color: #d1d5db;
 }
 
 .email-status-pill--warning {
-  color: var(--color-warning, #e65100);
-  background: var(--color-warning-bg, #fff3e0);
-  border-color: #ffe0b2;
+  color: #7a4f00;
+  background: #fff8e6;
+  border-color: #f5d99a;
 }
 
 .email-status-pill--success {
@@ -7120,6 +7132,16 @@ export default {
   box-shadow: 0 0 0 3px rgba(15, 15, 15, 0.08);
 }
 
+.email-input--readonly {
+  background: #f9fafb;
+  cursor: default;
+}
+
+.email-input--readonly:focus {
+  border-color: #d1d5db;
+  box-shadow: none;
+}
+
 .email-input:disabled {
   background: #f5f5f5;
   cursor: not-allowed;
@@ -7138,9 +7160,9 @@ export default {
 }
 
 .email-unverified-warning {
-  font-size: 0.85rem;
-  color: #8a5a00;
-  margin: 10px 0 0 0;
+  font-size: 0.5rem;
+  color: #666;
+  margin: 8px 0 0 2px;
 }
 
 @media (max-width: 900px) {
