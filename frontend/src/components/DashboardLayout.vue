@@ -44,9 +44,33 @@
       </button>
       <h2 v-if="showTitle" class="page-title">{{ title }}</h2>
       <div class="header-actions">
-        <button class="header-logout-button" @click="$emit('logout')">
+        <button
+          :class="['header-action-button', { active: activeTab === 'account' }]"
+          :aria-current="activeTab === 'account' ? 'page' : undefined"
+          @click="$emit('tab-change', 'account')"
+        >
           <svg
-            class="header-logout-icon"
+            class="header-action-icon lucide lucide-circle-user-round-icon lucide-circle-user-round"
+            xmlns="http://www.w3.org/2000/svg"
+            width="24"
+            height="24"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M17.925 20.056a6 6 0 0 0-11.851.001" />
+            <circle cx="12" cy="11" r="4" />
+            <circle cx="12" cy="12" r="10" />
+          </svg>
+          <span>Account</span>
+        </button>
+        <button class="header-action-button header-logout-button" @click="$emit('logout')">
+          <svg
+            class="header-action-icon header-logout-icon"
             xmlns="http://www.w3.org/2000/svg"
             width="24"
             height="24"

@@ -126,9 +126,14 @@ export default {
         description: 'Manage passkeys and authentication requirements.',
         path: '/'
       },
+      account: {
+        title: 'Account • Caution',
+        description: 'Manage Caution account notifications and legal documents.',
+        path: '/'
+      },
       settings: {
         title: 'Settings • Caution',
-        description: 'Manage your Caution account, billing, and legal settings.',
+        description: 'Manage Caution credits, subscriptions, and billing.',
         path: '/'
       },
       credentials: {
