@@ -1202,8 +1202,8 @@ make build-cli
                   </button>
                 </div>
                 <div v-if="emailError" class="card-error email-form-message">{{ emailError }}</div>
-                <p v-if="userEmail && emailVerified === false && emailVerificationDeliveryStatus !== 'failed'" class="email-unverified-warning">
-                  Verification links expire after 24 hours.
+                <p v-if="emailSettingsHelperText" class="email-settings-helper">
+                  {{ emailSettingsHelperText }}
                 </p>
               </div>
             </div>
@@ -2428,19 +2428,20 @@ export default {
     });
 
     const emailSettingsDescription = computed(() => {
-      if (!userEmail.value) {
-        return "Add an email to receive legal notices and important account updates (no marketing). Without one, you're responsible for checking your account directly.";
+      return "Add an email to receive legal notices and important account updates (no marketing). Without one, you're responsible for checking your account directly.";
+    });
+
+    const emailSettingsHelperText = computed(() => {
+      if (!userEmail.value || emailVerified.value) {
+        return '';
       }
-      if (emailVerified.value === false && emailVerificationDeliveryStatus.value === 'sent') {
-        return "We sent a verification link to your inbox. Until the email is verified, check your account directly.";
+      if (emailVerificationDeliveryStatus.value === 'sent') {
+        return 'Check your inbox for the verification link. Verification links expire after 24 hours.';
       }
-      if (emailVerified.value === false && emailVerificationDeliveryStatus.value === 'failed') {
-        return "We saved this email, but couldn't send the verification link. Check the address or try again in a moment. Until verified, check your account directly.";
+      if (emailVerificationDeliveryStatus.value === 'failed') {
+        return "We couldn't send the verification link. Check the address or try again in a moment.";
       }
-      if (emailVerified.value === false) {
-        return "Verify this email before we use it for legal notices and important account updates. Until then, check your account directly.";
-      }
-      return "We'll send legal notices and important account updates to this email. We won't use it for marketing.";
+      return 'Send a verification link before relying on this address.';
     });
 
     const emailInputMatchesSavedEmail = computed(() => {
@@ -2470,6 +2471,9 @@ export default {
       }
       if (emailVerified.value === false && emailInputMatchesSavedEmail.value) {
         if (emailVerificationDeliveryStatus.value === 'failed') {
+          return 'Send link';
+        }
+        if (emailVerificationDeliveryStatus.value !== 'sent') {
           return 'Send link';
         }
         return 'Resend link';
@@ -2773,6 +2777,16 @@ export default {
       const isRemovingEmail = Boolean(userEmail.value) && !email;
       if (!email && !isRemovingEmail) {
         emailError.value = 'Enter an email address.';
+        return;
+      }
+      if (
+        editingEmail.value &&
+        emailVerified.value &&
+        email === userEmail.value
+      ) {
+        editingEmail.value = false;
+        emailError.value = '';
+        emailInput.value = userEmail.value;
         return;
       }
       const isResendingVerificationLink =
@@ -4367,6 +4381,7 @@ export default {
       emailSettingsStatus,
       emailSettingsStatusVariant,
       emailSettingsDescription,
+      emailSettingsHelperText,
       emailIsVerifiedReadOnly,
       emailActionLabel,
       startEditEmail,
@@ -7159,10 +7174,11 @@ export default {
   margin: 10px 0 0 0;
 }
 
-.email-unverified-warning {
-  font-size: 0.5rem;
+.email-settings-helper {
+  font-size: 0.85rem;
   color: #666;
   margin: 8px 0 0 2px;
+  line-height: 1.4;
 }
 
 @media (max-width: 900px) {

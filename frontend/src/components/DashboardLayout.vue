@@ -188,7 +188,7 @@
                   y="5"
                   rx="2"
                   :stroke="activeTab === 'billing' ? '#0F0F0F' : '#535455'"
-                  stroke-width="2"
+                  stroke-width="1.8"
                   stroke-linecap="round"
                   stroke-linejoin="round"
                 />
@@ -198,7 +198,7 @@
                   y1="10"
                   y2="10"
                   :stroke="activeTab === 'billing' ? '#0F0F0F' : '#535455'"
-                  stroke-width="2"
+                  stroke-width="1.8"
                   stroke-linecap="round"
                   stroke-linejoin="round"
                 />
