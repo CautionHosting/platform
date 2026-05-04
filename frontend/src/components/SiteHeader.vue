@@ -41,16 +41,6 @@
               </svg>
             </button>
             <div class="nav-dropdown__menu">
-              <a href="https://caution.co/about.html" class="nav-dropdown__item">
-                <span class="nav-dropdown__icon">
-                  <img
-                    src="/assets/favicons/caution-icon.svg"
-                    alt=""
-                    class="nav-dropdown__icon-img"
-                  />
-                </span>
-                About
-              </a>
               <a href="https://caution.co/platform-tour.html" class="nav-dropdown__item">
                 <svg
                   class="nav-dropdown__icon"
@@ -150,7 +140,6 @@
             </button>
             <div class="mobile-menu-section__content" :class="{ 'is-expanded': platformAccordionOpen }">
               <div class="mobile-menu-section__inner">
-                <a href="https://caution.co/about.html" class="mobile-menu-link">About</a>
                 <a href="https://caution.co/platform-tour.html" class="mobile-menu-link">Platform demo</a>
                 <a href="https://dashboard.caution.co/" class="mobile-menu-link">Early access</a>
               </div>

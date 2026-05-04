@@ -1197,7 +1197,7 @@ make build-cli
                     :readonly="emailIsVerifiedReadOnly"
                     @keyup.enter="handleEmailAction"
                   />
-                  <button @click="handleEmailAction" :disabled="savingEmail" class="btn-primary email-action-button">
+                  <button @click="handleEmailAction" :disabled="emailActionDisabled" class="btn-primary email-action-button">
                     {{ emailActionLabel }}
                   </button>
                 </div>
@@ -2432,6 +2432,13 @@ export default {
     });
 
     const emailSettingsHelperText = computed(() => {
+      if (
+        editingEmail.value &&
+        emailVerified.value &&
+        emailInputMatchesSavedEmail.value
+      ) {
+        return 'Enter a different email to update your notification email.';
+      }
       if (!userEmail.value || emailVerified.value) {
         return '';
       }
@@ -2454,6 +2461,19 @@ export default {
 
     const emailIsVerifiedReadOnly = computed(() => {
       return Boolean(userEmail.value) && emailVerified.value && !editingEmail.value;
+    });
+
+    const emailVerifiedEditHasNoChange = computed(() => {
+      return (
+        editingEmail.value &&
+        Boolean(userEmail.value) &&
+        emailVerified.value &&
+        emailInputMatchesSavedEmail.value
+      );
+    });
+
+    const emailActionDisabled = computed(() => {
+      return savingEmail.value || emailVerifiedEditHasNoChange.value;
     });
 
     const emailActionLabel = computed(() => {
@@ -2764,6 +2784,9 @@ export default {
     };
 
     const handleEmailAction = () => {
+      if (emailActionDisabled.value) {
+        return;
+      }
       if (emailIsVerifiedReadOnly.value) {
         startEditEmail();
         return;
@@ -4383,6 +4406,7 @@ export default {
       emailSettingsDescription,
       emailSettingsHelperText,
       emailIsVerifiedReadOnly,
+      emailActionDisabled,
       emailActionLabel,
       startEditEmail,
       handleEmailAction,

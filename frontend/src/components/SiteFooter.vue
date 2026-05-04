@@ -24,9 +24,10 @@
           <div class="footer-links">
             <div class="footer-column">
               <h3 class="footer-column-title">Platform</h3>
-              <a href="https://caution.co/platform-tour.html" class="footer-link">Platform demo</a>
+              <a href="https://dashboard.caution.co/" class="footer-link">Dashboard</a>
+              <a href="https://caution.co/" class="footer-link">Platform</a>
+              <a href="https://caution.co/platform-tour.html" class="footer-link">Demo</a>
               <a href="https://caution.co/cloud/aws.html" class="footer-link">AWS Nitro</a>
-              <a href="/login" class="footer-link">Early access</a>
               <a href="https://caution.co/faq.html" class="footer-link">FAQ</a>
             </div>
 
