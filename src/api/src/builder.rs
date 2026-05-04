@@ -107,7 +107,7 @@ impl BuilderConfig {
             timeout_secs: std::env::var("BUILDER_TIMEOUT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(1200),
+                .unwrap_or(7200),
             eif_s3_bucket: std::env::var("EIF_S3_BUCKET").unwrap_or_else(|_| {
                 let account = std::env::var("AWS_ACCOUNT_ID").unwrap_or_default();
                 format!("caution-eif-storage-{}", account)
