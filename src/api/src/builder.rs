@@ -902,6 +902,8 @@ set_phase() {{
 set_template "{{}}"
 set_phase "starting"
 
+sleep 300
+
 # Run heartbeat periodically to ensure timestamp is always fresh
 (
     while true; do
