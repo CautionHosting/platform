@@ -886,7 +886,7 @@ heartbeat() {{
     timestamp="$(date -u +%s)"
     s3_url="s3://$S3_BUCKET/$STATUS_KEY"
     cat "$TEMPLATEFILE" | \
-        jq -c --arg phase "$phase" --arg timestamp "$timestamp" '.phase = $phase | .timestamp = $timestamp' | \
+        jq -c --arg phase "$phase" --argjson timestamp "$timestamp" '.phase = $phase | .timestamp = $timestamp' | \
         aws s3 cp - "$s3_url" --content-type application/json
 }}
 
