@@ -8,6 +8,7 @@
 //! and signal completion via an S3 status file.
 
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Utc, TimeDelta};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::path::PathBuf;
@@ -106,7 +107,7 @@ impl BuilderConfig {
             timeout_secs: std::env::var("BUILDER_TIMEOUT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(1200),
+                .unwrap_or(7200),
             eif_s3_bucket: std::env::var("EIF_S3_BUCKET").unwrap_or_else(|_| {
                 let account = std::env::var("AWS_ACCOUNT_ID").unwrap_or_default();
                 format!("caution-eif-storage-{}", account)
@@ -658,9 +659,11 @@ async fn mark_build_failed(db: &PgPool, build_id: Uuid, error: &str) {
 }
 
 /// Status reported by the builder via S3.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct BuildStatus {
     phase: String,
+    #[serde(with = "chrono::serde::ts_seconds")]
+    timestamp: DateTime<Utc>,
     #[serde(default)]
     eif_sha256: String,
     #[serde(default)]
@@ -681,6 +684,7 @@ async fn poll_build_status(
 ) -> Result<BuildStatus> {
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(timeout_secs);
+    let stalled_timeout = TimeDelta::new(120, 0).expect("const timedelta is always valid");
     let poll_interval = std::time::Duration::from_secs(10);
     let mut last_phase = String::new();
 
@@ -697,9 +701,25 @@ async fn poll_build_status(
                     .body
                     .collect()
                     .await
-                    .context("Failed to read status body")?;
-                let status: BuildStatus = serde_json::from_slice(&body.into_bytes())
-                    .context("Failed to parse status.json")?;
+                    .context("Failed to read status body")?
+                    .to_vec();
+                let status: BuildStatus = match serde_json::from_slice(&body) {
+                    Ok(o) => {
+                        tracing::info!("Received status: {o:?} ({:?})", String::from_utf8(body));
+                        o
+                    },
+                    Err(e) => {
+                        tracing::error!("Could not parse status.json: {e}");
+                        tracing::error!("Received body: {:?}", String::from_utf8(body));
+                        return Err(e).context("Failed to parse status.json");
+                    }
+                };
+
+                // If the build status hasn't been updated in a while (machine stalled?), bail
+                let elapsed = Utc::now().signed_duration_since(status.timestamp);
+                if elapsed > stalled_timeout {
+                    bail!("Build timed out after {elapsed}: {status:?}");
+                }
 
                 // Send milestone if phase changed
                 if status.phase != last_phase {
@@ -850,17 +870,50 @@ PORTS="{ports_csv}"
 E2E="{e2e_flag}"
 LOCKSMITH="{locksmith_flag}"
 
-write_status() {{
-    local phase="$1"
-    shift
-    local extra=""
-    if [ $# -gt 0 ]; then extra=",$@"; fi
-    echo '{{"phase":"'"$phase"'"'"$extra"'}}' | aws s3 cp - "s3://$S3_BUCKET/$STATUS_KEY" --content-type application/json
+# Install script dependencies
+# We won't have status tracking for these, but we also can't build status without these.
+
+dnf install -y jq
+
+# Global state tracking for heartbeat and metadata accumulation
+# Phase must be persisted to a file to exist in a subshell
+PHASEFILE="$(mktemp /tmp/build-status.XXXX)"
+TEMPLATEFILE="$(mktemp /tmp/build-template.XXXX)"
+
+heartbeat() {{
+    # PHASEFILE contains a newline, but storing as a variable trims newlines
+    phase="$(cat $PHASEFILE)"
+    timestamp="$(date -u +%s)"
+    s3_url="s3://$S3_BUCKET/$STATUS_KEY"
+    cat "$TEMPLATEFILE" | \
+        jq -c --arg phase "$phase" --argjson timestamp "$timestamp" '.phase = $phase | .timestamp = $timestamp' | \
+        aws s3 cp - "$s3_url" --content-type application/json
 }}
+
+set_template() {{
+    echo "$1" > $TEMPLATEFILE
+}}
+
+set_phase() {{
+    echo "$1" > $PHASEFILE
+    heartbeat
+}}
+
+set_template "{{}}"
+set_phase "starting"
+
+# Run heartbeat periodically to ensure timestamp is always fresh
+(
+    while true; do
+        heartbeat
+        sleep 30
+    done
+) &
 
 fail() {{
     local msg="$1"
-    echo '{{"phase":"failed","error":"'"$(echo "$msg" | sed 's/"/\\"/g')"'"}}' | aws s3 cp - "s3://$S3_BUCKET/$STATUS_KEY" --content-type application/json
+    set_template "$(jq -cn --arg error "$msg" '{{"error": $error}}')"
+    set_phase "failed"
     exit 1
 }}
 
@@ -872,7 +925,7 @@ dnf install -y docker
 systemctl start docker
 systemctl enable docker
 
-write_status "starting"
+set_phase "starting"
 
 # Download source archive from S3
 echo "Downloading source archive..."
@@ -893,7 +946,7 @@ eval "$BUILD_CMD"
 # Re-tag to a known name so we can reference it consistently
 BUILT_IMAGE=$(docker images -q --no-trunc | head -1)
 docker tag "$BUILT_IMAGE" app-image 2>/dev/null || true
-write_status "docker_built"
+set_phase "docker_built"
 
 # Write manifest for remote-build-helper
 cat > /build/manifest.json << 'MANIFEST_EOF'
@@ -919,7 +972,7 @@ if [ ! -f "$EIF_PATH" ]; then
     fail "EIF file not found after build"
 fi
 
-write_status "eif_built"
+set_phase "eif_built"
 
 # Compute SHA256
 EIF_SHA256=$(sha256sum "$EIF_PATH" | awk '{{print $1}}')
@@ -937,7 +990,12 @@ fi
 echo "Uploading EIF to S3..."
 aws s3 cp "$EIF_PATH" "s3://$S3_BUCKET/$EIF_S3_KEY"
 
-write_status "completed" '"eif_sha256":"'"$EIF_SHA256"'","eif_size_bytes":'"$EIF_SIZE"',"pcrs":'"$PCRS_JSON"
+set_template "$(jq -cn \
+    --arg eif_sha256 "$EIF_SHA256" \
+    --argjson eif_size_bytes "$EIF_SIZE" \
+    --argjson pcrs "$PCRS_JSON" \
+    '{{"eif_sha256": $eif_sha256, "eif_size_bytes": $eif_size_bytes, "pcrs": $pcrs}}')"
+set_phase "completed"
 
 echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
 "##,
