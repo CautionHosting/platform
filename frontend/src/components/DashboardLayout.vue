@@ -3,7 +3,7 @@
 
 <template>
   <div class="dashboard-page">
-    <div v-if="showDevelopmentWarning" class="development-banner">
+    <div v-if="showDevelopmentBanner" class="development-banner">
       <div class="development-banner-content">
         <span>
           <strong>Development mode:</strong> PIN verification is disabled.
@@ -12,6 +12,28 @@
           </button>
           for production use.
         </span>
+        <button
+          type="button"
+          class="development-banner-dismiss"
+          aria-label="Dismiss development mode banner"
+          title="Dismiss"
+          @click="dismissDevelopmentBanner"
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M18 6 6 18" />
+            <path d="m6 6 12 12" />
+          </svg>
+        </button>
       </div>
     </div>
 
@@ -22,9 +44,33 @@
       </button>
       <h2 v-if="showTitle" class="page-title">{{ title }}</h2>
       <div class="header-actions">
-        <button class="header-logout-button" @click="$emit('logout')">
+        <button
+          :class="['header-action-button', { active: activeTab === 'account' }]"
+          :aria-current="activeTab === 'account' ? 'page' : undefined"
+          @click="$emit('tab-change', 'account')"
+        >
           <svg
-            class="header-logout-icon"
+            class="header-action-icon lucide lucide-circle-user-round-icon lucide-circle-user-round"
+            xmlns="http://www.w3.org/2000/svg"
+            width="24"
+            height="24"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M17.925 20.056a6 6 0 0 0-11.851.001" />
+            <circle cx="12" cy="11" r="4" />
+            <circle cx="12" cy="12" r="10" />
+          </svg>
+          <span>Account</span>
+        </button>
+        <button class="header-action-button header-logout-button" @click="$emit('logout')">
+          <svg
+            class="header-action-icon header-logout-icon"
             xmlns="http://www.w3.org/2000/svg"
             width="24"
             height="24"
@@ -121,15 +167,44 @@
           </button>
 
           <button
-            :class="['nav-item', { active: activeTab === 'settings' }]"
-            @click="$emit('tab-change', 'settings')"
+            :class="['nav-item', { active: activeTab === 'billing' }]"
+            @click="$emit('tab-change', 'billing')"
           >
-            <img
-              :src="activeTab === 'settings' ? '/assets/icons/settings--act.svg' : '/assets/icons/settings--inact.svg'"
-              alt=""
+            <svg
               class="nav-icon"
-            />
-            <span>Settings</span>
+              width="30"
+              height="30"
+              viewBox="0 0 30 30"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+              aria-hidden="true"
+            >
+              <rect v-if="activeTab === 'billing'" width="30" height="30" rx="15" fill="white"/>
+              <g transform="translate(5,5) scale(0.85)">
+                <rect
+                  width="20"
+                  height="14"
+                  x="2"
+                  y="5"
+                  rx="2"
+                  :stroke="activeTab === 'billing' ? '#0F0F0F' : '#535455'"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <line
+                  x1="2"
+                  x2="22"
+                  y1="10"
+                  y2="10"
+                  :stroke="activeTab === 'billing' ? '#0F0F0F' : '#535455'"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </g>
+            </svg>
+            <span>Billing</span>
           </button>
 
           <!-- Hidden for now - docs site covers this
@@ -164,7 +239,7 @@
       <div class="footer-left">
         {{ copyrightLabel }}
       </div>
-      <div class="footer-right">
+      <div class="footer-center">
         <a
           href="https://caution.co/terms.html"
           target="_blank"
@@ -177,6 +252,8 @@
           rel="noopener noreferrer"
           >Privacy</a
         >
+      </div>
+      <div class="footer-right">
         <a
           href="https://docs.caution.co/"
           target="_blank"
@@ -199,7 +276,11 @@
 </template>
 
 <script>
-import { computed } from "vue";
+import { computed, ref } from "vue";
+import {
+  dismissDevelopmentBannerForSession,
+  isDevelopmentBannerDismissed,
+} from "../utils/developmentBanner.js";
 
 export default {
   name: "DashboardLayout",
@@ -222,13 +303,25 @@ export default {
     },
   },
   emits: ["tab-change", "logout"],
-  setup() {
+  setup(props) {
+    const developmentBannerDismissed = ref(isDevelopmentBannerDismissed());
+    const showDevelopmentBanner = computed(() => {
+      return props.showDevelopmentWarning && !developmentBannerDismissed.value;
+    });
+
+    const dismissDevelopmentBanner = () => {
+      developmentBannerDismissed.value = true;
+      dismissDevelopmentBannerForSession();
+    };
+
     const copyrightLabel = computed(() => {
       return `© ${new Date().getFullYear()} Caution SEZC. All rights reserved.`;
     });
 
     return {
       copyrightLabel,
+      dismissDevelopmentBanner,
+      showDevelopmentBanner,
     };
   },
 };

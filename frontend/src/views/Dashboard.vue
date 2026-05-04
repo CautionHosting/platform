@@ -11,15 +11,6 @@
     @logout="logout"
   >
 
-    <!-- Notes sidebar (only show for Cloud credentials) -->
-    <template #aside>
-      <div v-if="activeTab === 'credentials'" class="notes-card">
-        <h3>Cloud credentials</h3>
-        <p>Add your AWS credentials to deploy applications to your own infrastructure.</p>
-        <p>Your credentials are encrypted and stored securely.</p>
-      </div>
-    </template>
-
     <!-- Applications Tab -->
     <template v-if="activeTab === 'apps'">
       <!-- Loading state -->
@@ -799,12 +790,27 @@ make build-cli
 
     <!-- SSH Keys Tab -->
     <div v-if="activeTab === 'ssh'" class="content-card content-card--dashboard-tab">
+      <div class="content-header">
+        <div class="content-header-text">
+          <h2 class="content-header-title">SSH keys</h2>
+          <p class="content-header-description">
+            SSH keys for pushing code via Git. Remove any you don't recognize.
+          </p>
+        </div>
+        <div class="ssh-key-header-action">
+          <button
+            v-if="!showAddKeyForm"
+            class="btn-primary ssh-key-add-btn"
+            @click="showAddKeyForm = true"
+          >
+            Add SSH key
+          </button>
+        </div>
+      </div>
+
       <!-- Show form when adding a key -->
-      <template v-if="showAddKeyForm">
-        <h3 class="form-section-title">Add new SSH key</h3>
-        <p class="form-section-description">
-          Add SSH keys to push code to your applications via git.
-        </p>
+      <div v-if="showAddKeyForm" class="inline-form-panel ssh-key-form-panel">
+        <h3 class="inline-form-panel-title">Add new SSH key</h3>
         <div class="form-group">
           <label class="form-label" for="keyName">Key name</label>
           <input
@@ -849,30 +855,15 @@ make build-cli
             Cancel
           </button>
         </div>
-      </template>
+      </div>
 
       <!-- Show list when not adding a key -->
       <template v-else>
-        <div class="content-header">
-          <div class="content-header-text">
-            <h2 class="content-header-title">SSH keys</h2>
-            <p class="content-header-description">
-              SSH keys for pushing code via Git. Remove any you don't recognize.
-            </p>
-          </div>
-          <button
-            class="btn-primary"
-            @click="showAddKeyForm = true"
-          >
-            Add SSH key
-          </button>
-        </div>
-
         <!-- SSH Keys List -->
         <div class="items-list ssh-keys-list">
           <div v-if="loadingKeys" class="list-item-empty">Loading SSH keys...</div>
-          <div v-else-if="sshKeys.length === 0" class="list-item-empty">
-            No SSH keys yet. Add one to deploy via Git.
+          <div v-else-if="sshKeys.length === 0" class="list-item-empty dashboard-tab-empty">
+            No SSH keys yet. Add an SSH key to deploy via Git.
           </div>
           <div v-else>
             <div v-for="key in sshKeys" :key="key.fingerprint" class="ssh-key-item">
@@ -1052,9 +1043,9 @@ make build-cli
 
       <div class="items-list">
         <div v-if="loadingBundles" class="loading">Loading bundles...</div>
-        <div v-else-if="quorumBundles.length === 0" class="list-item-empty">
+        <div v-else-if="quorumBundles.length === 0" class="list-item-empty dashboard-tab-empty">
           <p class="list-item-empty-copy">
-            No quorum bundles yet. Use <code>caution secret new</code> to create one.
+            No quorum bundles yet. Create a quorum bundle with <code>caution secret new</code>.
           </p>
         </div>
         <div v-else>
@@ -1168,83 +1159,123 @@ make build-cli
       </div>
     </div>
 
-    <!-- Billing Tab -->
-    <div v-if="activeTab === 'settings'" class="content-card">
+    <!-- Account Tab -->
+    <div v-if="activeTab === 'account'" class="content-card">
       <div class="content-header">
         <div class="content-header-text">
-          <h2 class="content-header-title">Settings</h2>
+          <h2 class="content-header-title">Account</h2>
           <p class="content-header-description">
-            Manage your account email and billing.
+            Manage account-level settings and review legal documents.
           </p>
         </div>
       </div>
 
-      <!-- Email Section -->
-      <div class="billing-section">
-        <h3 class="billing-section-title">Legal</h3>
-        <div class="legal-settings-card">
-          <div class="legal-settings-row">
-            <div class="legal-settings-copy">
-              <div class="legal-settings-name">Terms of Service</div>
-              <div class="legal-settings-meta">
-                <span>{{ getLegalStatusLabel(legalStatus?.terms_of_service) }}</span>
+      <div class="account-settings-list">
+        <!-- Email Section -->
+        <section class="account-settings-section">
+          <div class="account-settings-title-row">
+            <h3 class="billing-section-title">Notification email</h3>
+            <span class="email-status-pill" :class="`email-status-pill--${emailSettingsStatusVariant}`">
+              {{ emailSettingsStatus }}
+            </span>
+          </div>
+          <div class="account-settings-row">
+            <div class="account-settings-label">
+              <p class="account-settings-description">{{ emailSettingsDescription }}</p>
+            </div>
+            <div class="account-settings-content">
+              <div class="email-settings-controls">
+                <label class="sr-only" for="accountEmail">Notification email</label>
+                <div class="email-settings-row">
+                  <input
+                    id="accountEmail"
+                    v-model="emailInput"
+                    type="email"
+                    placeholder="Enter your email"
+                    :class="['email-input', { 'email-input--readonly': emailIsVerifiedReadOnly }]"
+                    :disabled="savingEmail"
+                    :readonly="emailIsVerifiedReadOnly"
+                    @keyup.enter="handleEmailAction"
+                  />
+                  <button @click="handleEmailAction" :disabled="emailActionDisabled" class="btn-primary email-action-button">
+                    {{ emailActionLabel }}
+                  </button>
+                </div>
+                <div v-if="emailError" class="card-error email-form-message">{{ emailError }}</div>
+                <p v-if="emailSettingsHelperText" class="email-settings-helper">
+                  {{ emailSettingsHelperText }}
+                </p>
               </div>
             </div>
-            <a href="https://caution.co/terms.html" target="_blank" rel="noopener noreferrer" class="legal-settings-link">
-              <span>Review</span>
-              <svg class="legal-settings-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M15 3h6v6"/>
-                <path d="M10 14 21 3"/>
-                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-              </svg>
-            </a>
           </div>
-          <div class="legal-settings-row">
-            <div class="legal-settings-copy">
-              <div class="legal-settings-name">Privacy Notice</div>
-              <div class="legal-settings-meta">
-                <span>{{ getLegalStatusLabel(legalStatus?.privacy_notice) }}</span>
-              </div>
-            </div>
-            <a href="https://caution.co/privacy.html" target="_blank" rel="noopener noreferrer" class="legal-settings-link">
-              <span>Review</span>
-              <svg class="legal-settings-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="M15 3h6v6"/>
-                <path d="M10 14 21 3"/>
-                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-              </svg>
-            </a>
-          </div>
-        </div>
-      </div>
+        </section>
 
-      <!-- Email Section -->
-      <div class="billing-section">
-        <h3 class="billing-section-title">Email</h3>
-        <div class="email-settings">
-          <div v-if="!editingEmail" class="email-display">
-            <span v-if="userEmail" class="email-current">{{ userEmail }}</span>
-            <span v-else class="email-not-set">No email set</span>
-            <button @click="startEditEmail" class="btn-secondary btn-small">{{ userEmail ? 'Change' : 'Set email' }}</button>
-          </div>
-          <div v-else class="email-edit">
-            <input
-              v-model="emailInput"
-              type="email"
-              placeholder="you@example.com"
-              class="email-input"
-              @keyup.enter="saveEmail"
-            />
-            <div class="email-edit-actions">
-              <button @click="saveEmail" :disabled="savingEmail" class="btn-primary btn-small">
-                {{ savingEmail ? 'Saving...' : 'Save' }}
-              </button>
-              <button @click="editingEmail = false" class="btn-secondary btn-small">Cancel</button>
+        <!-- Legal Section -->
+        <section class="account-settings-section">
+          <h3 class="billing-section-title">Legal documents</h3>
+          <div class="account-settings-row">
+            <div class="account-settings-label">
+              <p class="account-settings-description">
+                Review your account legal documents.
+              </p>
             </div>
-            <div v-if="emailError" class="card-error">{{ emailError }}</div>
+            <div class="account-settings-content">
+              <div class="legal-settings-card">
+                <a
+                  href="https://caution.co/terms.html"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="legal-settings-row"
+                  aria-label="Review Terms of Service"
+                >
+                  <div class="legal-settings-copy">
+                    <div class="legal-settings-name">Terms of Service</div>
+                    <div class="legal-settings-meta">
+                      <span>{{ getLegalStatusDatePrefix(legalStatus?.terms_of_service) }}</span>
+                      <span class="legal-settings-meta-time">{{ getLegalStatusDateTime(legalStatus?.terms_of_service) }}</span>
+                    </div>
+                  </div>
+                  <svg class="legal-settings-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M15 3h6v6"/>
+                    <path d="M10 14 21 3"/>
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                  </svg>
+                </a>
+                <a
+                  href="https://caution.co/privacy.html"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="legal-settings-row"
+                  aria-label="Review Privacy Notice"
+                >
+                  <div class="legal-settings-copy">
+                    <div class="legal-settings-name">Privacy Notice</div>
+                    <div class="legal-settings-meta">
+                      <span>{{ getLegalStatusDatePrefix(legalStatus?.privacy_notice) }}</span>
+                      <span class="legal-settings-meta-time">{{ getLegalStatusDateTime(legalStatus?.privacy_notice) }}</span>
+                    </div>
+                  </div>
+                  <svg class="legal-settings-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M15 3h6v6"/>
+                    <path d="M10 14 21 3"/>
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                  </svg>
+                </a>
+              </div>
+            </div>
           </div>
-          <p v-if="userEmail && emailVerified === false" class="email-unverified-warning">Email not verified — check your inbox for a verification link.</p>
-          <p class="email-hint">Used for invoice and payment notifications.</p>
+        </section>
+      </div>
+    </div>
+
+    <!-- Billing Tab -->
+    <div v-if="activeTab === 'billing'" class="content-card">
+      <div class="content-header">
+        <div class="content-header-text">
+          <h2 class="content-header-title">Billing</h2>
+          <p class="content-header-description">
+            Manage credits, subscriptions, and billing.
+          </p>
         </div>
       </div>
 
@@ -1489,86 +1520,113 @@ make build-cli
     </div>
 
     <!-- Cloud Credentials Tab -->
-    <div v-if="activeTab === 'credentials'" class="content-card">
-      <h2 class="content-card-title">Cloud credentials</h2>
-      <div class="form-section">
-        <h3 class="form-section-title">Add AWS Credentials</h3>
-        <p class="quick-start-description">
-          Add AWS credentials to deploy applications to your own infrastructure.
-        </p>
-        <div class="form-group">
-          <label class="form-label" for="credName">Name</label>
+    <div v-if="activeTab === 'credentials'" class="content-card content-card--dashboard-tab cloud-credentials-card">
+      <div class="cloud-credentials-header">
+        <div class="cloud-credentials-heading">
+          <h2 class="content-card-title cloud-credentials-title">Cloud credentials</h2>
+          <p class="cloud-credentials-description">
+            Manage encrypted AWS credentials for
+            <a
+              href="https://docs.caution.co/reference/bring-your-own-cloud/"
+              target="_blank"
+              rel="noopener noreferrer"
+            >bring your own cloud</a>
+            deployments.
+          </p>
+        </div>
+
+        <div class="cloud-credentials-header-action">
+          <button
+            v-if="!showAddCredentialForm"
+            @click="startAddCredential"
+            class="btn-primary cloud-credentials-add-btn"
+          >
+            Add credential
+          </button>
+        </div>
+      </div>
+
+      <div v-if="showAddCredentialForm" class="inline-form-panel cloud-credential-form-panel">
+        <h3 class="inline-form-panel-title">Add new AWS credential</h3>
+        <div class="cloud-credential-form-group">
+          <label class="form-label cloud-credential-label" for="credName">Name</label>
           <input
             id="credName"
             v-model="newCredName"
             type="text"
-            class="form-input"
+            class="form-input cloud-credential-input"
             placeholder="e.g., Production AWS"
             :disabled="addingCred"
           />
         </div>
-        <div class="form-group">
-          <label class="form-label" for="awsAccessKeyId">Access Key ID</label>
+        <div class="cloud-credential-form-group">
+          <label class="form-label cloud-credential-label" for="awsAccessKeyId">Access key ID</label>
           <input
             id="awsAccessKeyId"
             v-model="newCredAwsKeyId"
             type="text"
-            class="form-input"
+            class="form-input cloud-credential-input"
             placeholder="AKIA..."
             :disabled="addingCred"
           />
         </div>
-        <div class="form-group">
-          <label class="form-label" for="awsSecretKey">Secret Access Key</label>
+        <div class="cloud-credential-form-group">
+          <label class="form-label cloud-credential-label" for="awsSecretKey">Secret access key</label>
           <input
             id="awsSecretKey"
             v-model="newCredAwsSecret"
             type="password"
-            class="form-input"
+            class="form-input cloud-credential-input"
             placeholder="Enter secret access key"
             :disabled="addingCred"
           />
         </div>
-        <div class="form-group">
-          <label
-            style="
-              display: flex;
-              align-items: center;
-              gap: 8px;
-              cursor: pointer;
-            "
-          >
+        <div class="cloud-credential-form-row">
+          <div></div>
+          <label class="cloud-credential-checkbox">
             <input
               type="checkbox"
               v-model="newCredIsDefault"
               :disabled="addingCred"
             />
-            Set as default
+            <span>Set as default</span>
           </label>
         </div>
-        <button
-          @click="addCredential"
-          class="btn-primary"
-          :disabled="
-            addingCred ||
-            !newCredName.trim() ||
-            !newCredAwsKeyId.trim() ||
-            !newCredAwsSecret.trim()
-          "
-        >
-          {{ addingCred ? "Adding..." : "Add Credential" }}
-        </button>
+        <div class="cloud-credential-form-row">
+          <div></div>
+          <div class="cloud-credential-form-actions">
+            <button
+              @click="addCredential"
+              class="btn-primary cloud-credential-submit-btn"
+              :disabled="
+                addingCred ||
+                !newCredName.trim() ||
+                !newCredAwsKeyId.trim() ||
+                !newCredAwsSecret.trim()
+              "
+            >
+              {{ addingCred ? "Adding..." : "Add credential" }}
+            </button>
+            <button
+              @click="cancelCredentialForm"
+              class="btn-secondary cloud-credential-cancel-btn"
+              :disabled="addingCred"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
       </div>
 
-      <div class="items-list">
-        <div v-if="loadingCreds" class="loading">Loading credentials...</div>
-        <div v-else-if="credentials.length === 0" class="empty-state">
-          No AWS credentials added yet
+      <div v-else class="items-list cloud-credentials-body">
+        <div v-if="loadingCreds" class="list-item-empty">Loading credentials...</div>
+        <div v-else-if="credentials.length === 0" class="list-item-empty dashboard-tab-empty">
+          No AWS credentials yet. Add a credential to deploy to your AWS account.
         </div>
-        <div v-else>
-          <div v-for="cred in credentials" :key="cred.id" class="list-item">
+        <div v-else class="cloud-credential-list">
+          <div v-for="cred in credentials" :key="cred.id" class="list-item cloud-credential-list-item">
             <div class="item-info">
-              <div style="display: flex; align-items: center; gap: 8px">
+              <div class="cloud-credential-item-title">
                 <span class="item-name">{{ cred.name }}</span>
                 <span
                   v-if="cred.is_default"
@@ -1585,7 +1643,7 @@ make build-cli
                 class="btn-secondary"
                 :disabled="settingDefault === cred.id"
               >
-                {{ settingDefault === cred.id ? "..." : "Set Default" }}
+                {{ settingDefault === cred.id ? "..." : "Set default" }}
               </button>
               <button
                 @click="deleteCredential(cred.id, cred.name)"
@@ -1678,7 +1736,8 @@ export default {
       ssh: "ssh",
       keys: "keys",
       security: "security",
-      settings: "settings",
+      account: "account",
+      billing: "billing",
       credentials: "credentials",
       guide: "guide",
     };
@@ -1690,7 +1749,7 @@ export default {
         }
         return acc;
       },
-      {}
+      { settings: "billing" }
     );
     const error = ref(null);
     const activeTab = ref("apps");
@@ -1866,6 +1925,7 @@ export default {
     const addingCred = ref(false);
     const deletingCred = ref(null);
     const settingDefault = ref(null);
+    const showAddCredentialForm = ref(false);
     const newCredName = ref("");
     const newCredAwsKeyId = ref("");
     const newCredAwsSecret = ref("");
@@ -2342,6 +2402,118 @@ export default {
     const emailInput = ref('');
     const savingEmail = ref(false);
     const emailError = ref('');
+    const emailVerificationDeliveryStatus = ref(null);
+
+    const emailSettingsStatus = computed(() => {
+      if (!userEmail.value) {
+        return 'No email added';
+      }
+      if (emailVerified.value) {
+        return 'Verified';
+      }
+      if (emailVerificationDeliveryStatus.value === 'sent') {
+        return 'Verification sent';
+      }
+      return 'Verification needed';
+    });
+
+    const emailSettingsStatusVariant = computed(() => {
+      if (!userEmail.value) {
+        return 'neutral';
+      }
+      if (emailVerified.value) {
+        return 'success';
+      }
+      return 'warning';
+    });
+
+    const emailSettingsDescription = computed(() => {
+      return "Add an email to receive legal notices and important account updates (no marketing). Without one, you're responsible for checking your account directly.";
+    });
+
+    const emailSettingsHelperText = computed(() => {
+      if (
+        editingEmail.value &&
+        emailVerified.value &&
+        emailInputMatchesSavedEmail.value
+      ) {
+        return 'Enter a different email to update your notification email.';
+      }
+      if (!userEmail.value || emailVerified.value) {
+        return '';
+      }
+      if (emailVerificationDeliveryStatus.value === 'sent') {
+        return 'Check your inbox for the verification link. Verification links expire after 24 hours.';
+      }
+      if (emailVerificationDeliveryStatus.value === 'failed') {
+        return "We couldn't send the verification link. Check the address or try again in a moment.";
+      }
+      return 'Send a verification link before relying on this address.';
+    });
+
+    const emailInputMatchesSavedEmail = computed(() => {
+      return emailInput.value.trim() === userEmail.value;
+    });
+
+    const emailInputIsEmpty = computed(() => {
+      return emailInput.value.trim() === '';
+    });
+
+    const emailIsVerifiedReadOnly = computed(() => {
+      return Boolean(userEmail.value) && emailVerified.value && !editingEmail.value;
+    });
+
+    const emailVerifiedEditHasNoChange = computed(() => {
+      return (
+        editingEmail.value &&
+        Boolean(userEmail.value) &&
+        emailVerified.value &&
+        emailInputMatchesSavedEmail.value
+      );
+    });
+
+    const emailActionDisabled = computed(() => {
+      return savingEmail.value || emailVerifiedEditHasNoChange.value;
+    });
+
+    const emailActionLabel = computed(() => {
+      if (savingEmail.value) {
+        return 'Saving...';
+      }
+      if (emailIsVerifiedReadOnly.value) {
+        return 'Change email';
+      }
+      if (!userEmail.value) {
+        return 'Add email';
+      }
+      if (emailInputIsEmpty.value) {
+        return 'Remove email';
+      }
+      if (emailVerified.value === false && emailInputMatchesSavedEmail.value) {
+        if (emailVerificationDeliveryStatus.value === 'failed') {
+          return 'Send link';
+        }
+        if (emailVerificationDeliveryStatus.value !== 'sent') {
+          return 'Send link';
+        }
+        return 'Resend link';
+      }
+      return 'Send verification link';
+    });
+
+    const formatEmailUpdateError = (message = '') => {
+      const normalizedMessage = String(message).toLowerCase();
+      if (
+        normalizedMessage.includes('invalid email') ||
+        normalizedMessage.includes('email address format')
+      ) {
+        return 'Enter a valid email address.';
+      }
+      if (normalizedMessage.includes('at least one field')) {
+        return 'Enter an email address.';
+      }
+      return "We couldn't update your email. Try again.";
+    };
 
     const currentBillingPeriod = computed(() => {
       const now = new Date();
@@ -2586,6 +2758,10 @@ export default {
         if (response.ok) {
           const data = await response.json();
           userEmail.value = data.email || '';
+          emailInput.value = userEmail.value;
+          emailVerified.value = Boolean(data.email_verified);
+          emailVerificationDeliveryStatus.value = null;
+          editingEmail.value = false;
         }
       } catch (err) {
         // ignore
@@ -2594,7 +2770,6 @@ export default {
         const statusRes = await authFetch("/api/user/status");
         if (statusRes.ok) {
           const status = await statusRes.json();
-          emailVerified.value = status.email_verified;
           legalStatus.value = status.legal || null;
         }
       } catch (err) {
@@ -2608,12 +2783,39 @@ export default {
       editingEmail.value = true;
     };
 
-    const saveEmail = async () => {
-      const email = emailInput.value.trim();
-      if (!email) {
-        emailError.value = 'Email is required';
+    const handleEmailAction = () => {
+      if (emailActionDisabled.value) {
         return;
       }
+      if (emailIsVerifiedReadOnly.value) {
+        startEditEmail();
+        return;
+      }
+
+      saveEmail();
+    };
+
+    const saveEmail = async () => {
+      const email = emailInput.value.trim();
+      const isRemovingEmail = Boolean(userEmail.value) && !email;
+      if (!email && !isRemovingEmail) {
+        emailError.value = 'Enter an email address.';
+        return;
+      }
+      if (
+        editingEmail.value &&
+        emailVerified.value &&
+        email === userEmail.value
+      ) {
+        editingEmail.value = false;
+        emailError.value = '';
+        emailInput.value = userEmail.value;
+        return;
+      }
+      const isResendingVerificationLink =
+        Boolean(userEmail.value) &&
+        emailVerified.value === false &&
+        email === userEmail.value;
       savingEmail.value = true;
       emailError.value = '';
       try {
@@ -2624,16 +2826,33 @@ export default {
         });
         if (response.ok) {
           const data = await response.json();
-          userEmail.value = data.email || email;
-          emailVerified.value = false;
+          userEmail.value = data.email || '';
+          emailInput.value = userEmail.value;
+          emailVerified.value = Boolean(data.email_verified);
           editingEmail.value = false;
-          showToast('Verification email sent — check your inbox');
+          if (isRemovingEmail) {
+            emailVerificationDeliveryStatus.value = null;
+            showToast('Email removed');
+          } else if (data.verification_email_sent === true) {
+            emailVerificationDeliveryStatus.value = 'sent';
+            showToast(
+              isResendingVerificationLink
+                ? 'Verification link sent.'
+                : 'Email saved. Verification link sent.'
+            );
+          } else if (data.verification_email_sent === false) {
+            emailVerificationDeliveryStatus.value = 'failed';
+            showToast("Email saved, but we couldn't send the verification link. Check the address or try again in a moment.", 'error');
+          } else {
+            emailVerificationDeliveryStatus.value = null;
+            showToast('Email saved');
+          }
         } else {
           const data = await response.json().catch(() => ({}));
-          emailError.value = data.error || 'Failed to update email';
+          emailError.value = formatEmailUpdateError(data.error);
         }
       } catch (err) {
-        emailError.value = 'Failed to connect to server';
+        emailError.value = "We couldn't connect to the server. Try again.";
       } finally {
         savingEmail.value = false;
       }
@@ -2838,7 +3057,7 @@ export default {
       creditPurchaseError.value = '';
     };
 
-    // Balance polling — refresh every 30s when settings tab is active
+    // Balance polling - refresh every 30s when billing tab is active
     let balancePollingInterval = null;
     const startBalancePolling = () => {
       stopBalancePolling();
@@ -3445,6 +3664,23 @@ export default {
       URL.revokeObjectURL(url);
     };
 
+    const resetCredentialForm = () => {
+      newCredName.value = "";
+      newCredAwsKeyId.value = "";
+      newCredAwsSecret.value = "";
+      newCredIsDefault.value = false;
+    };
+
+    const startAddCredential = () => {
+      showAddCredentialForm.value = true;
+    };
+
+    const cancelCredentialForm = () => {
+      if (addingCred.value) return;
+      resetCredentialForm();
+      showAddCredentialForm.value = false;
+    };
+
     const addCredential = async () => {
       if (
         !newCredName.value.trim() ||
@@ -3474,10 +3710,8 @@ export default {
 
         if (response.ok) {
           showToast("AWS credential added");
-          newCredName.value = "";
-          newCredAwsKeyId.value = "";
-          newCredAwsSecret.value = "";
-          newCredIsDefault.value = false;
+          resetCredentialForm();
+          showAddCredentialForm.value = false;
           await loadCredentials();
         } else {
           const data = await response.json().catch(() => ({}));
@@ -3586,11 +3820,14 @@ export default {
         loadPasskeys();
         loadOrgSettings();
       } else if (newTab === "credentials") {
+        showAddCredentialForm.value = false;
+        resetCredentialForm();
         loadCredentials();
       } else if (newTab === "keys") {
         loadBundles();
-      } else if (newTab === "settings") {
+      } else if (newTab === "account") {
         loadUserEmail();
+      } else if (newTab === "billing") {
         loadBilling();
         loadCreditBalance();
         loadCreditPackages();
@@ -3599,8 +3836,8 @@ export default {
         startBalancePolling();
       }
 
-      // Stop polling when leaving settings tab
-      if (previousTab === "settings" && newTab !== "settings") {
+      // Stop polling when leaving billing tab
+      if (previousTab === "billing" && newTab !== "billing") {
         stopBalancePolling();
       }
     };
@@ -3906,7 +4143,9 @@ export default {
         loadOrgSettings();
       } else if (activeTab.value === "keys") {
         loadBundles();
-      } else if (activeTab.value === "settings") {
+      } else if (activeTab.value === "account") {
+        loadUserEmail();
+      } else if (activeTab.value === "billing") {
         loadCreditBalance();
         loadBilling();
         loadSubscription();
@@ -3929,6 +4168,25 @@ export default {
       return 'Acceptance recorded before tracking';
     };
 
+    const getLegalStatusDatePrefix = (documentStatus) => {
+      if (documentStatus?.accepted_at) {
+        return `Accepted on ${formatDateOnly(documentStatus.accepted_at)}`;
+      }
+
+      return getLegalStatusLabel(documentStatus);
+    };
+
+    const getLegalStatusDateTime = (documentStatus) => {
+      if (documentStatus?.accepted_at) {
+        const date = parseDate(documentStatus.accepted_at);
+        if (!date || isNaN(date.getTime())) return '';
+        const timeOptions = { hour: 'numeric', minute: '2-digit', hour12: true, timeZoneName: 'short' };
+        return `at ${formatLocalTime(date, timeOptions)}`;
+      }
+
+      return '';
+    };
+
     onMounted(async () => {
       const initialTab = getTabFromLocation();
       activeTab.value = initialTab;
@@ -3941,8 +4199,11 @@ export default {
 
       await Promise.all([loadApps(), loadKeys(), loadCredentials(), loadBundles(), loadOrgSettings(), loadPasskeys()]);
 
-      if (initialTab === "settings") {
+      if (initialTab === "account") {
         loadUserEmail();
+      }
+
+      if (initialTab === "billing") {
         loadBilling();
         loadCreditBalance();
         loadCreditPackages();
@@ -3977,8 +4238,9 @@ export default {
           loadCredentials();
         } else if (activeTab.value === "keys") {
           loadBundles();
-        } else if (activeTab.value === "settings") {
+        } else if (activeTab.value === "account") {
           loadUserEmail();
+        } else if (activeTab.value === "billing") {
           loadBilling();
           loadCreditBalance();
           loadCreditPackages();
@@ -4069,10 +4331,13 @@ export default {
       addingCred,
       deletingCred,
       settingDefault,
+      showAddCredentialForm,
       newCredName,
       newCredAwsKeyId,
       newCredAwsSecret,
       newCredIsDefault,
+      startAddCredential,
+      cancelCredentialForm,
       addCredential,
       deleteCredential,
       setDefaultCredential,
@@ -4135,7 +4400,16 @@ export default {
       emailInput,
       savingEmail,
       emailError,
+      emailVerificationDeliveryStatus,
+      emailSettingsStatus,
+      emailSettingsStatusVariant,
+      emailSettingsDescription,
+      emailSettingsHelperText,
+      emailIsVerifiedReadOnly,
+      emailActionDisabled,
+      emailActionLabel,
       startEditEmail,
+      handleEmailAction,
       saveEmail,
       calculateAppMonthlyCost,
       logout,
@@ -4145,6 +4419,8 @@ export default {
       formatDateTime,
       formatDateTimeFull,
       getLegalStatusLabel,
+      getLegalStatusDatePrefix,
+      getLegalStatusDateTime,
       formatDateOnly,
       formatTimeOnly,
       formatTimeWithTimezone,
@@ -4180,10 +4456,209 @@ export default {
 .content-card--dashboard-tab .items-list {
   flex: 1;
   min-height: 0;
+  margin-top: 0;
 }
 
 .content-card--dashboard-tab .list-item-empty {
   min-height: 100%;
+}
+
+.ssh-key-header-action {
+  width: 166px;
+  flex: 0 0 166px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ssh-key-add-btn {
+  min-height: 54px;
+  padding: 0 24px;
+  border-radius: 8px;
+  font-size: clamp(0.95rem, 2vw, 1.05rem);
+  width: 100%;
+  white-space: nowrap;
+}
+
+.ssh-key-form-panel .form-message-container {
+  min-height: 0;
+  margin-top: 0;
+}
+
+.ssh-key-form-panel .form-actions {
+  margin-top: 24px;
+}
+
+.dashboard-tab-empty {
+  color: #9a9a9a;
+  font-size: clamp(1rem, 2vw, 1.05rem);
+  line-height: 1.5;
+  text-align: center;
+}
+
+.dashboard-tab-empty code {
+  font-size: 0.925rem;
+}
+
+.inline-form-panel {
+  padding: 24px;
+  border-radius: 8px;
+  background: #fafafa;
+  box-shadow: 0 0 0 1px rgba(15, 15, 15, 0.025), 0 2px 6px rgba(15, 15, 15, 0.04);
+}
+
+.inline-form-panel-title {
+  margin: 0 0 36px 0;
+  color: #0f0f0f;
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.inline-form-panel .form-input {
+  min-height: 45px;
+}
+
+.cloud-credentials-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 28px;
+  margin-bottom: 24px;
+}
+
+.cloud-credentials-heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.cloud-credentials-title {
+  margin-bottom: 18px;
+}
+
+.cloud-credentials-description {
+  max-width: 650px;
+  margin: 0;
+  color: rgba(102, 102, 102, 0.875);
+  font-size: clamp(1.05rem, 2vw, 1.095rem);
+  line-height: 1.45;
+}
+
+.cloud-credentials-description a {
+  color: inherit;
+  font-weight: 450;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+
+.cloud-credentials-description a:hover {
+  color: var(--color-pink);
+}
+
+.cloud-credentials-header-action {
+  width: 166px;
+  flex: 0 0 166px;
+}
+
+.cloud-credentials-add-btn,
+.cloud-credential-submit-btn {
+  min-height: 54px;
+  padding: 0 24px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.cloud-credentials-add-btn {
+  width: 100%;
+  min-width: 166px;
+}
+
+.cloud-credentials-body {
+  width: 100%;
+}
+
+.cloud-credential-form-panel {
+  margin-top: 0;
+}
+
+.cloud-credential-form-group,
+.cloud-credential-form-row {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 510px);
+  gap: 16px;
+  align-items: start;
+}
+
+.cloud-credential-form-group {
+  margin-bottom: 34px;
+}
+
+.cloud-credential-label {
+  padding-top: 8px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.cloud-credential-form-panel .cloud-credential-input {
+  width: 100%;
+  min-height: 45px;
+  margin-bottom: 0;
+  background: white;
+}
+
+.cloud-credential-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: max-content;
+  margin: -4px 0 48px 0;
+  color: #0f0f0f;
+  font-size: 1rem;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.cloud-credential-checkbox input {
+  width: 14px;
+  height: 14px;
+  margin: 4px 0 0 0;
+}
+
+.cloud-credential-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.cloud-credential-submit-btn {
+  min-width: 166px;
+}
+
+.cloud-credential-submit-btn:disabled {
+  background: #8a8a8a;
+  opacity: 1;
+}
+
+.cloud-credential-cancel-btn {
+  font-size: 1rem;
+}
+
+.cloud-credential-list {
+  width: 100%;
+  align-self: stretch;
+  margin-top: 48px;
+  border-top: 1px solid #eee;
+}
+
+.cloud-credential-list-item {
+  padding-right: 0;
+  padding-left: 0;
+}
+
+.cloud-credential-item-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .guide-intro-content {
@@ -4216,7 +4691,7 @@ export default {
   color: rgba(15, 15, 15, 0.875);
   margin: 0 auto;
   line-height: 1.6;
-  max-width: 550px;
+  max-width: 440px;
   margin: 32px auto;
 }
 
@@ -5858,6 +6333,17 @@ export default {
   margin-bottom: 1rem;
 }
 
+.billing-section-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 1rem;
+}
+
+.billing-section-heading .billing-section-title {
+  margin-bottom: 0;
+}
+
 .billing-table {
   border: 1px solid #e5e7eb;
   border-radius: 8px;
@@ -6459,12 +6945,77 @@ export default {
 
 }
 
-/* Email settings */
-.legal-settings-card {
+/* Account settings */
+.account-settings-list {
   display: flex;
   flex-direction: column;
+  margin-top: 48px;
+  gap: 56px;
+}
+
+.account-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.account-settings-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.account-settings-section > .billing-section-title,
+.account-settings-title-row .billing-section-title {
+  font-size: clamp(1.075rem, 2vw, 1.15rem);
+  margin: 0;
+}
+
+.account-settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  align-items: start;
+  gap: 56px;
+}
+
+.account-settings-label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.account-settings-description {
+  margin: 0;
+  max-width: 420px;
+  color: var(--color-text-secondary, #666);
+  font-size: clamp(1rem, 2vw, 1.05rem);
+  line-height: 1.55;
+}
+
+.account-settings-content {
+  min-width: 0;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.legal-settings-card {
+  display: grid;
+  grid-template-columns: 1fr;
   gap: 0.75rem;
-  padding: 0.5rem 0;
+  padding: 0;
 }
 
 .legal-settings-row {
@@ -6472,116 +7023,216 @@ export default {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  padding: 1rem 1.1rem;
+  padding: 12px 18px;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   background: #f9fafb;
+  color: inherit;
+  text-decoration: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.legal-settings-row:hover {
+  border-color: #d1d5db;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
+}
+
+.legal-settings-row:focus-visible {
+  outline: 2px solid rgba(240, 72, 181, 0.32);
+  outline-offset: 3px;
 }
 
 .legal-settings-copy {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.15rem;
 }
 
 .legal-settings-name {
-  font-size: 0.95rem;
-  font-weight: 600;
+  font-size: clamp(0.95rem, 2vw, 1rem);
+  font-weight: 500;
   color: #111827;
 }
 
 .legal-settings-meta {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  flex-wrap: wrap;
-  font-size: 0.82rem;
+  gap: 0.25rem;
+  flex-wrap: nowrap;
+  font-size: clamp(0.85rem, 2vw, 0.9rem);
   color: #6b7280;
-}
-
-.legal-settings-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  color: #111827;
-  font-size: 0.9rem;
-  font-weight: 500;
-  text-decoration: none;
   white-space: nowrap;
 }
 
-.legal-settings-link:hover {
-  color: var(--color-pink);
+.legal-settings-meta-time {
+  display: block;
 }
 
 .legal-settings-link-icon {
-  width: 0.95rem;
-  height: 0.95rem;
-  opacity: 0.95;
-  transition: opacity 0.2s ease;
+  width: 1.2rem;
+  height: 1.2rem;
+  flex-shrink: 0;
+  color: #6b7280;
+  opacity: 0.78;
+  transition: color 0.15s ease, opacity 0.15s ease;
 }
 
-.legal-settings-link:hover .legal-settings-link-icon {
+.legal-settings-row:hover .legal-settings-link-icon {
+  color: #0f0f0f;
   opacity: 1;
 }
 
-.email-settings {
-  padding: 0.5rem 0;
+.email-settings-copy {
+  max-width: 440px;
+  padding-top: 2px;
 }
 
-.email-display {
-  display: flex;
+.email-settings-description {
+  margin: 0;
+  color: var(--color-text-secondary, #666);
+  font-size: 0.95rem;
+  line-height: 1.55;
+}
+
+.email-status-pill {
+  display: inline-flex;
   align-items: center;
-  gap: 1rem;
+  min-height: 24px;
+  padding: 0 11px 2px 11px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
 }
 
-.email-current {
+.email-status-pill--neutral {
+  color: #6b7280;
+  background: #f9fafb;
+  border-color: #d1d5db;
+}
+
+.email-status-pill--warning {
+  color: #7a4f00;
+  background: #fff8e6;
+  border-color: #f5d99a;
+}
+
+.email-status-pill--success {
+  color: var(--color-success, #2e7d32);
+  background: var(--color-success-bg, #e8f5e9);
+  border-color: #c8e6c9;
+}
+
+.email-settings-controls {
+  min-width: 0;
+  max-width: 540px;
+}
+
+.email-settings-label {
+  display: block;
+  margin: 0 0 12px 0;
+  color: #1f2937;
   font-size: 0.95rem;
-  color: var(--color-text);
+  font-weight: 600;
+  line-height: 1.3;
 }
 
-.email-not-set {
-  font-size: 0.95rem;
-  color: var(--color-text-muted, #888);
-  font-style: italic;
-}
-
-.email-edit {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  max-width: 400px;
+.email-settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
 }
 
 .email-input {
-  padding: 0.5rem 0.75rem;
-  border: 1px solid var(--color-border, #ddd);
+  flex: 1;
+  min-width: 0;
+  min-height: 54px;
+  padding: 0 14px 2px 18px;
+  border: 1px solid #d1d5db;
   border-radius: 6px;
-  font-size: 0.95rem;
-  background: var(--color-bg, #fff);
-  color: var(--color-text);
+  background: white;
+  color: #1f2937;
+  font-family: inherit;
+  font-size: 1rem;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.email-input::placeholder {
+  color: #8a8f98;
 }
 
 .email-input:focus {
   outline: none;
-  border-color: var(--color-primary, #000);
+  border-color: #0f0f0f;
+  box-shadow: 0 0 0 3px rgba(15, 15, 15, 0.08);
 }
 
-.email-edit-actions {
-  display: flex;
-  gap: 0.5rem;
+.email-input--readonly {
+  background: #f9fafb;
+  cursor: default;
 }
 
-.email-unverified-warning {
-  font-size: 0.8rem;
-  color: #e8a735;
-  margin-top: 0.5rem;
+.email-input--readonly:focus {
+  border-color: #d1d5db;
+  box-shadow: none;
 }
 
-.email-hint {
-  font-size: 0.8rem;
-  color: var(--color-text-muted, #888);
-  margin-top: 0.5rem;
+.email-input:disabled {
+  background: #f5f5f5;
+  cursor: not-allowed;
+}
+
+.email-action-button {
+  min-height: 54px;
+  padding: 0 28px;
+  border-radius: 8px;
+  font-size: clamp(0.95rem, 2vw, 1.05rem);
+  white-space: nowrap;
+}
+
+.email-form-message {
+  margin: 10px 0 0 0;
+}
+
+.email-settings-helper {
+  font-size: 0.85rem;
+  color: #666;
+  margin: 8px 0 0 2px;
+  line-height: 1.4;
+}
+
+@media (max-width: 900px) {
+  .account-settings-list {
+    gap: 32px;
+  }
+
+  .account-settings-row {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .account-settings-description {
+    max-width: 520px;
+  }
+
+  .legal-settings-card {
+    grid-template-columns: 1fr;
+  }
+
+}
+
+@media (max-width: 600px) {
+  .email-settings-row {
+    grid-template-columns: 1fr;
+  }
+
+  .email-action-button {
+    width: 100%;
+  }
 }
 
 /* Prepaid Credits */

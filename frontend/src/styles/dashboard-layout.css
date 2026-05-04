@@ -144,6 +144,8 @@
 .development-banner-content {
   max-width: 1550px;
   margin: 0 auto;
+  padding: 0 40px;
+  position: relative;
   text-align: center;
 }
 
@@ -177,7 +179,7 @@
 
 .desktop-required-text {
   font-size: 1.125rem;
-  color: #666;
+  color: #777;
   line-height: 1.6;
   margin: 0;
 }
@@ -196,6 +198,35 @@
 
 .development-banner-link:hover {
   opacity: 0.8;
+}
+
+.development-banner-dismiss {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.75);
+  cursor: pointer;
+  transform: translateY(-50%);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.development-banner-dismiss:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: white;
+}
+
+.development-banner-dismiss:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.55);
+  outline-offset: 2px;
 }
 
 /* ==========================================================================
@@ -237,7 +268,8 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  width: 220px;
+  gap: 20px;
+  width: 260px;
   margin-left: auto;
 }
 
@@ -269,10 +301,11 @@
   line-height: 1;
 }
 
-.header-logout-button {
+.header-action-button {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  min-height: 20px;
   padding: 0;
   background: transparent;
   border: none;
@@ -280,19 +313,35 @@
   font-family: inherit;
   font-size: 1rem;
   font-weight: 450;
+  line-height: 20px;
   cursor: pointer;
   transition: color 0.15s ease;
 }
 
-.header-logout-button:hover {
+.header-action-button span {
+  display: block;
+  line-height: 20px;
+}
+
+.header-action-button:hover {
   color: var(--color-pink);
 }
 
-.header-logout-icon {
+.header-action-button.active {
+  color: #0f0f0f;
+  font-weight: 500;
+}
+
+.header-action-button.active:hover {
+  color: var(--color-pink);
+}
+
+.header-action-icon {
+  display: block;
   width: 18px;
   height: 18px;
+  flex-shrink: 0;
   color: currentColor;
-  transform: translateY(3px);
   transition: color 0.15s ease;
 }
 
@@ -316,7 +365,7 @@
 .sidebar {
   width: 250px;
   flex-shrink: 0;
-  padding-right: 32px;
+  padding-right: 36px;
 }
 
 /* ==========================================================================
@@ -340,7 +389,7 @@
   background: transparent;
   color: #555;
   font-family: inherit;
-  font-size: 1.095rem;
+  font-size: 1.025rem;
   font-weight: 450;
   line-height: 20px;
   text-align: left;
@@ -387,7 +436,7 @@
 .main-content {
   flex: 1;
   min-width: 0;
-  margin: 0 0 0 42px;
+  margin: 0 0 0 24px;
   display: flex;
   gap: 36px;
   align-items: flex-start;
@@ -508,6 +557,7 @@
 .list-item-empty code {
   background: var(--color-grey-light);
   color: #333;
+  opacity: 0.8;
   padding: 0.15em 0.4em;
   border-radius: 4px;
   font-size: clamp(0.85rem, 2vw, 1rem);
@@ -648,9 +698,10 @@
    ========================================================================== */
 
 .dashboard-footer {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
+  gap: 16px;
   padding: 96px 40px 24px 40px;
   margin-top: auto;
   max-width: 1550px;
@@ -660,21 +711,35 @@
 }
 
 .footer-left,
+.footer-center a,
 .footer-right a {
   color: #666;
   font-size: 0.95rem;
 }
 
+.footer-left {
+  justify-self: start;
+}
+
+.footer-center {
+  display: flex;
+  gap: 16px;
+  justify-self: center;
+}
+
 .footer-right {
   display: flex;
   gap: 16px;
+  justify-self: end;
 }
 
+.footer-center a,
 .footer-right a {
   text-decoration: none;
   transition: color 0.15s ease;
 }
 
+.footer-center a:hover,
 .footer-right a:hover {
   color: var(--color-pink);
 }
@@ -737,8 +802,8 @@
 
 .form-label {
   display: block;
-  font-size: clamp(1.05rem, 2vw, 1.095rem);
-  font-weight: 600;
+  font-size: clamp(1.015rem, 2vw, 1.05rem);
+  font-weight: 500;
   color: #333;
   padding-top: 0;
 }
@@ -770,7 +835,7 @@
   border: 1px solid #ddd;
   border-radius: 12px;
   font-family: inherit;
-  font-size: clamp(1.05rem, 2vw, 1.095rem);
+  font-size: 1rem;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
   box-sizing: border-box;
 }
@@ -2179,7 +2244,7 @@
   }
 
   .sidebar {
-    padding-right: 30px;
+    padding-right: 36px;
     width: 225px;
   }
 

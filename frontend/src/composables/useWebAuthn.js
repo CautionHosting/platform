@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 import { ref } from "vue";
+import { resetDevelopmentBannerDismissal } from "../utils/developmentBanner.js";
 
 // Helper to convert base64url to Uint8Array
 export function base64urlToUint8Array(base64url) {
@@ -70,6 +71,7 @@ export function useWebAuthn() {
       });
 
       if (response.ok) {
+        resetDevelopmentBannerDismissal();
         authenticated.value = true;
         window.location.href = "/";
         return true;
@@ -185,6 +187,7 @@ export function useWebAuthn() {
       }
 
       await finishResponse.json();
+      resetDevelopmentBannerDismissal();
       authenticated.value = true;
       status.value = "Login successful!";
 
@@ -303,6 +306,7 @@ export function useWebAuthn() {
       }
 
       await finishResponse.json();
+      resetDevelopmentBannerDismissal();
       authenticated.value = true;
       status.value = "Registration successful!";
 
