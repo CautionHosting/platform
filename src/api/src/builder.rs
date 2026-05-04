@@ -8,6 +8,7 @@
 //! and signal completion via an S3 status file.
 
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Utc, TimeDelta};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::path::PathBuf;
@@ -658,9 +659,11 @@ async fn mark_build_failed(db: &PgPool, build_id: Uuid, error: &str) {
 }
 
 /// Status reported by the builder via S3.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct BuildStatus {
     phase: String,
+    #[serde(with = "chrono::serde::ts_seconds")]
+    timestamp: DateTime<Utc>,
     #[serde(default)]
     eif_sha256: String,
     #[serde(default)]
@@ -681,6 +684,7 @@ async fn poll_build_status(
 ) -> Result<BuildStatus> {
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(timeout_secs);
+    let stalled_timeout = TimeDelta::new(120, 0).expect("const timedelta is always valid");
     let poll_interval = std::time::Duration::from_secs(10);
     let mut last_phase = String::new();
 
@@ -710,6 +714,12 @@ async fn poll_build_status(
                         return Err(e).context("Failed to parse status.json");
                     }
                 };
+
+                // If the build status hasn't been updated in a while (machine stalled?), bail
+                let elapsed = Utc::now().signed_duration_since(status.timestamp);
+                if elapsed > stalled_timeout {
+                    bail!("Build timed out after {elapsed}: {status:?}");
+                }
 
                 // Send milestone if phase changed
                 if status.phase != last_phase {
