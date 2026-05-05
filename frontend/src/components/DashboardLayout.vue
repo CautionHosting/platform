@@ -114,16 +114,98 @@
             <span>Applications</span>
           </button>
 
+          <div class="nav-group" :class="{ 'is-open': securityNavOpen }">
+            <button
+              :class="['nav-item', 'nav-item--parent', { active: isSecurityNavActive }]"
+              :aria-expanded="securityNavOpen ? 'true' : 'false'"
+              aria-controls="security-nav-submenu"
+              @click="toggleSecurityNav"
+            >
+              <svg
+                class="nav-icon"
+                width="30" height="30" viewBox="0 0 30 30"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <rect v-if="isSecurityNavActive" width="30" height="30" rx="15" fill="white"/>
+                <g transform="translate(5,5) scale(0.833)">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+                    :stroke="isSecurityNavActive ? '#0F0F0F' : '#535455'"
+                  />
+                </g>
+              </svg>
+              <span>Security</span>
+              <svg
+                class="nav-chevron"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="m6 9 6 6 6-6" />
+              </svg>
+            </button>
+
+            <div
+              v-show="securityNavOpen"
+              id="security-nav-submenu"
+              class="nav-submenu"
+            >
+              <button
+                :class="['nav-subitem', { active: activeTab === 'ssh' }]"
+                :aria-current="activeTab === 'ssh' ? 'page' : undefined"
+                @click="$emit('tab-change', 'ssh')"
+              >
+                SSH keys
+              </button>
+              <button
+                :class="['nav-subitem', { active: activeTab === 'security' }]"
+                :aria-current="activeTab === 'security' ? 'page' : undefined"
+                @click="$emit('tab-change', 'security')"
+              >
+                Authentication
+              </button>
+            </div>
+          </div>
+
           <button
-            :class="['nav-item', { active: activeTab === 'ssh' }]"
-            @click="$emit('tab-change', 'ssh')"
+            :class="['nav-item', { active: activeTab === 'credentials' }]"
+            @click="$emit('tab-change', 'credentials')"
           >
-            <img
-              :src="activeTab === 'ssh' ? '/assets/icons/ssh--act.svg' : '/assets/icons/ssh--inact.svg'"
-              alt=""
+            <svg
               class="nav-icon"
-            />
-            <span>SSH keys</span>
+              width="30" height="30" viewBox="0 0 30 30"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <rect v-if="activeTab === 'credentials'" width="30" height="30" rx="15" fill="white"/>
+              <g transform="translate(4,5) scale(0.9)">
+                <path
+                  d="M18 18h1.2a4.15 4.15 0 0 0 .72-8.24A7 7 0 0 0 6.7 7.85 5.35 5.35 0 0 0 7 18h1.15"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  :stroke="activeTab === 'credentials' ? '#0F0F0F' : '#535455'"
+                />
+                <circle
+                  cx="13"
+                  cy="18"
+                  r="2"
+                  stroke-width="1.8"
+                  :stroke="activeTab === 'credentials' ? '#0F0F0F' : '#535455'"
+                />
+                <path
+                  d="M13 14.4v-1.1M13 22.7v-1.1M16.1 16.2l.95-.55M8.95 20.35l.95-.55M16.1 19.8l.95.55M8.95 15.65l.95.55"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  :stroke="activeTab === 'credentials' ? '#0F0F0F' : '#535455'"
+                />
+              </g>
+            </svg>
+            <span>Cloud credentials</span>
           </button>
 
           <button
@@ -143,27 +225,7 @@
                 />
               </g>
             </svg>
-            <span>Key services</span>
-          </button>
-
-          <button
-            :class="['nav-item', { active: activeTab === 'security' }]"
-            @click="$emit('tab-change', 'security')"
-          >
-            <svg
-              class="nav-icon"
-              width="30" height="30" viewBox="0 0 30 30"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <rect v-if="activeTab === 'security'" width="30" height="30" rx="15" fill="white"/>
-              <g transform="translate(5,5) scale(0.833)">
-                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
-                  :stroke="activeTab === 'security' ? '#0F0F0F' : '#535455'"
-                />
-              </g>
-            </svg>
-            <span>Security</span>
+            <span>Secrets</span>
           </button>
 
           <button
@@ -276,7 +338,7 @@
 </template>
 
 <script>
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import {
   dismissDevelopmentBannerForSession,
   isDevelopmentBannerDismissed,
@@ -304,10 +366,17 @@ export default {
   },
   emits: ["tab-change", "logout"],
   setup(props) {
+    const securityTabs = ["ssh", "security"];
+    const isSecurityNavActive = computed(() => securityTabs.includes(props.activeTab));
+    const securityNavOpen = ref(isSecurityNavActive.value);
     const developmentBannerDismissed = ref(isDevelopmentBannerDismissed());
     const showDevelopmentBanner = computed(() => {
       return props.showDevelopmentWarning && !developmentBannerDismissed.value;
     });
+
+    const toggleSecurityNav = () => {
+      securityNavOpen.value = !securityNavOpen.value;
+    };
 
     const dismissDevelopmentBanner = () => {
       developmentBannerDismissed.value = true;
@@ -318,10 +387,22 @@ export default {
       return `© ${new Date().getFullYear()} Caution SEZC. All rights reserved.`;
     });
 
+    watch(
+      () => props.activeTab,
+      (activeTab) => {
+        if (securityTabs.includes(activeTab)) {
+          securityNavOpen.value = true;
+        }
+      }
+    );
+
     return {
       copyrightLabel,
       dismissDevelopmentBanner,
+      isSecurityNavActive,
+      securityNavOpen,
       showDevelopmentBanner,
+      toggleSecurityNav,
     };
   },
 };

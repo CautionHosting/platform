@@ -117,12 +117,22 @@ export default {
         path: '/'
       },
       keys: {
-        title: 'Key services • Caution',
-        description: 'Manage Caution key services and quorum bundles.',
+        title: 'Secrets • Caution',
+        description: 'Manage Caution secrets and quorum bundles.',
+        path: '/'
+      },
+      secrets: {
+        title: 'Secrets • Caution',
+        description: 'Manage Caution secrets and quorum bundles.',
         path: '/'
       },
       security: {
-        title: 'Security • Caution',
+        title: 'Authentication • Caution',
+        description: 'Manage passkeys and authentication requirements.',
+        path: '/'
+      },
+      authentication: {
+        title: 'Authentication • Caution',
         description: 'Manage passkeys and authentication requirements.',
         path: '/'
       },

@@ -899,13 +899,13 @@ make build-cli
       </template>
     </div>
 
-    <!-- Security Tab -->
+    <!-- Authentication Tab -->
     <div v-if="activeTab === 'security'" class="content-card content-card--dashboard-tab">
       <div class="content-header">
         <div class="content-header-text">
-          <h2 class="content-header-title">Security settings</h2>
+          <h2 class="content-header-title">Authentication</h2>
           <p class="content-header-description">
-            Configure authentication requirements for your organization.
+            Manage passkeys and PIN requirements for sign-in and sensitive operations.
           </p>
         </div>
         <button
@@ -1030,11 +1030,11 @@ make build-cli
       </div>
     </div>
 
-    <!-- Key Services Tab -->
+    <!-- Secrets Tab -->
     <div v-if="activeTab === 'keys'" class="content-card content-card--dashboard-tab">
       <div class="content-header">
         <div class="content-header-text">
-          <h2 class="content-header-title">Key services</h2>
+          <h2 class="content-header-title">Secrets</h2>
           <p class="content-header-description">
             Manage quorum bundles created via <code>caution secret new</code>.
           </p>
@@ -1045,7 +1045,7 @@ make build-cli
         <div v-if="loadingBundles" class="loading">Loading bundles...</div>
         <div v-else-if="quorumBundles.length === 0" class="list-item-empty dashboard-tab-empty">
           <p class="list-item-empty-copy">
-            No quorum bundles yet. Create a quorum bundle with <code>caution secret new</code>.
+            No secret bundles yet. Create one with <code>caution secret new</code>.
           </p>
         </div>
         <div v-else>
@@ -1749,7 +1749,7 @@ export default {
         }
         return acc;
       },
-      { settings: "billing" }
+      { authentication: "security", secrets: "keys", settings: "billing" }
     );
     const error = ref(null);
     const activeTab = ref("apps");
