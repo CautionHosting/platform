@@ -8,11 +8,6 @@ export DOCKER_BUILDKIT=1
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
 NETWORK := caution-network
-DB_NAME ?= caution
-DB_USER ?= postgres
-DB_PASSWORD ?= postgres
-DB_HOST ?= postgres
-DATABASE_URL ?= postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):5432/$(DB_NAME)
 DB_VOLUME := caution-postgres-data
 CAUTION_DATA_DIR ?= $(PWD)/caution-cache
 CONTAINER_DATA_DIR := /var/cache/caution
@@ -262,9 +257,9 @@ migrate: postgres
 		docker run --rm \
 			--network $(NETWORK) \
 			-v $(PWD)/src/api/migrations:/migrations:ro \
-			-e PGPASSWORD=$(DB_PASSWORD) \
+			-e PGPASSWORD=password \
 			postgres:16-alpine \
-			psql -h $(DB_HOST) -U $(DB_USER) -d $(DB_NAME) -f /migrations/$$(basename $$migration) || true; \
+			psql -h postgres -U postgres -d caution -f /migrations/$$(basename $$migration) || true; \
 	done
 	@echo "Migrations complete"
 
@@ -431,7 +426,7 @@ status:
 TEST_DB_NAME := caution_test
 TEST_DB_VOLUME := caution-test-postgres-data
 TEST_DB_HOST := postgres-test
-TEST_DATABASE_URL := postgresql://$(DB_USER):$(DB_PASSWORD)@$(TEST_DB_HOST):5432/$(TEST_DB_NAME)
+TEST_DATABASE_URL := postgresql://postgres:postgres@$(TEST_DB_HOST):5432/$(TEST_DB_NAME)
 E2E_LOCK_FILE ?= /tmp/caution-platform-e2e.lock
 ONPREM_PROVISIONER_DIR ?= ../bring-your-own-cloud-setup
 ONPREM_PROVISIONER_IMAGE ?= codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest
