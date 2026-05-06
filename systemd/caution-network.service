@@ -1,0 +1,11 @@
+# user systemd file for Caution's Docker network
+
+[Unit]
+Description=Caution Docker network
+
+[Service]
+ExecStart=/usr/bin/docker network create caution-network
+Type=oneshot
+
+[Install]
+WantedBy=default.target
