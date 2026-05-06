@@ -4,8 +4,9 @@
 Description=Caution Docker network
 
 [Service]
-ExecStart=/usr/bin/docker network create caution-network
 Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '/usr/bin/docker network inspect caution-network >/dev/null 2>&1 || /usr/bin/docker network create caution-network'
 
 [Install]
 WantedBy=default.target
