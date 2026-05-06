@@ -459,7 +459,7 @@ volume:
 
 postgres: network volume
 	systemctl restart --user caution-postgres
-	until docker exec postgres pg_isready -U $(DB_USER) > /dev/null 2>&1; do \
+	until docker exec postgres pg_isready -U postgres > /dev/null 2>&1; do \
 		echo "   Waiting for postgres..."; \
 		sleep 1; \
 	done && \
@@ -631,7 +631,7 @@ clean-enclave:
 	@echo "Enclave artifacts cleaned"
 
 db-shell:
-	@docker exec -it postgres psql -U $(DB_USER) -d $(DB_NAME)
+	@docker exec -it postgres psql -U postgres -d caution
 
 db-reset: down-clean
 	@echo "Resetting database..."
@@ -665,12 +665,12 @@ postgres-test: network
 		--network $(NETWORK) \
 		-v $(TEST_DB_VOLUME):/var/lib/postgresql/data \
 		-e POSTGRES_DB=$(TEST_DB_NAME) \
-		-e POSTGRES_USER=$(DB_USER) \
-		-e POSTGRES_PASSWORD=$(DB_PASSWORD) \
+		-e POSTGRES_USER=postgres \
+		-e POSTGRES_PASSWORD=postgres \
 		postgres:16-alpine >/dev/null && \
 	echo "Test postgres started, waiting for ready..." && \
 	sleep 3 && \
-	until docker exec $(TEST_DB_HOST) pg_isready -U $(DB_USER) > /dev/null 2>&1; do \
+	until docker exec $(TEST_DB_HOST) pg_isready -U postgres > /dev/null 2>&1; do \
 		sleep 1; \
 	done && \
 	echo "Test postgres ready"
@@ -681,9 +681,9 @@ migrate-test: postgres-test
 		docker run --rm \
 			--network $(NETWORK) \
 			-v $(PWD)/src/api/migrations:/migrations:ro \
-			-e PGPASSWORD=$(DB_PASSWORD) \
+			-e PGPASSWORD=postgres \
 			postgres:16-alpine \
-			psql -h $(TEST_DB_HOST) -U $(DB_USER) -d $(TEST_DB_NAME) -f /migrations/$$(basename $$migration) 2>&1 | grep -v "^$$" || true; \
+			psql -h $(TEST_DB_HOST) -U postgres -d $(TEST_DB_NAME) -f /migrations/$$(basename $$migration) 2>&1 | grep -v "^$$" || true; \
 	done
 	@echo "Test migrations complete"
 
@@ -849,8 +849,8 @@ test-e2e-legal:
 	DB_NAME=$(TEST_DB_NAME) \
 	DB_HOST=$(TEST_DB_HOST) \
 	DB_PORT=5432 \
-	DB_USER=$(DB_USER) \
-	DB_PASSWORD=$(DB_PASSWORD) \
+	DB_USER=postgres \
+	DB_PASSWORD=postgres \
 	DATABASE_URL=$(TEST_DATABASE_URL) \
 	bash tests/e2e/test_legal_tracking.sh; \
 	status=$$?; \
