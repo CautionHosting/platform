@@ -1141,7 +1141,7 @@ pub async fn reap_orphaned_builders(
                 .bind(iid)
                 .execute(db)
                 .await;
-            } else if let (Some(ref itype), Some(started)) = (&instance_type, started_at) {
+            } else if let (Some(itype), Some(started)) = (&instance_type, started_at) {
                 // Fallback: metering tracking failed, bill directly for the full duration
                 if let Some(pricing) = instance_pricing(itype) {
                     bill_builder_usage(db, build_id, iid, org_id, app_id, itype, started, pricing)
