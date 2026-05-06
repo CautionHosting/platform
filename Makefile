@@ -689,11 +689,11 @@ setup-builder:
 	SUBNET=$$(terraform output -raw builder_subnet_id) && \
 	PROFILE=$$(terraform output -raw builder_instance_profile) && \
 	cd .. && \
-	grep -q "^BUILDER_AMI_ID" .env 2>/dev/null && sed -i "s/^BUILDER_AMI_ID=.*/BUILDER_AMI_ID=$$AMI/" .env || echo "BUILDER_AMI_ID=$$AMI" >> .env && \
-	grep -q "^BUILDER_SECURITY_GROUP_ID" .env 2>/dev/null && sed -i "s/^BUILDER_SECURITY_GROUP_ID=.*/BUILDER_SECURITY_GROUP_ID=$$SG/" .env || echo "BUILDER_SECURITY_GROUP_ID=$$SG" >> .env && \
-	grep -q "^BUILDER_SUBNET_ID" .env 2>/dev/null && sed -i "s/^BUILDER_SUBNET_ID=.*/BUILDER_SUBNET_ID=$$SUBNET/" .env || echo "BUILDER_SUBNET_ID=$$SUBNET" >> .env && \
-	grep -q "^BUILDER_INSTANCE_PROFILE" .env 2>/dev/null && sed -i "s/^BUILDER_INSTANCE_PROFILE=.*/BUILDER_INSTANCE_PROFILE=$$PROFILE/" .env || echo "BUILDER_INSTANCE_PROFILE=$$PROFILE" >> .env
-	@echo "Builder env vars written to .env"
+	grep -q "^BUILDER_AMI_ID" .env 2>/dev/null && sed -i "s/^BUILDER_AMI_ID=.*/BUILDER_AMI_ID=$$AMI/" .env || echo "BUILDER_AMI_ID=$$AMI" >> $(HOME)/.config/caution/.env && \
+	grep -q "^BUILDER_SECURITY_GROUP_ID" .env 2>/dev/null && sed -i "s/^BUILDER_SECURITY_GROUP_ID=.*/BUILDER_SECURITY_GROUP_ID=$$SG/" .env || echo "BUILDER_SECURITY_GROUP_ID=$$SG" >> $(HOME)/.config/caution/.env && \
+	grep -q "^BUILDER_SUBNET_ID" .env 2>/dev/null && sed -i "s/^BUILDER_SUBNET_ID=.*/BUILDER_SUBNET_ID=$$SUBNET/" .env || echo "BUILDER_SUBNET_ID=$$SUBNET" >> $(HOME)/.config/caution/.env && \
+	grep -q "^BUILDER_INSTANCE_PROFILE" .env 2>/dev/null && sed -i "s/^BUILDER_INSTANCE_PROFILE=.*/BUILDER_INSTANCE_PROFILE=$$PROFILE/" .env || echo "BUILDER_INSTANCE_PROFILE=$$PROFILE" >> $(HOME)/.config/caution/.env
+	@echo "Builder env vars written to $(HOME)/.config/caution/.env"
 
 test-e2e-builder:
 	@echo "Reading builder config from infra-bootstrap state..."
