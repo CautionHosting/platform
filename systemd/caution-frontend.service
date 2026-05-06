@@ -2,6 +2,7 @@
 
 [Unit]
 Description=Caution frontend service
+Requires=caution-network.service
 After=caution-network.service
 
 [Service]

@@ -2,6 +2,7 @@
 
 [Unit]
 Description=Caution Metering service
+Requires=caution-network.service
 After=caution-postgres.service caution-network.service
 
 [Service]
