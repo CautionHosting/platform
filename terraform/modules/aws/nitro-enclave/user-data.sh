@@ -223,6 +223,8 @@ https://${domain} {
         on_demand
     }
 
+    respond /.well-known/caution/health "OK" 200
+
     handle /steve* {
         reverse_proxy localhost:8081
     }
@@ -237,6 +239,8 @@ https://${domain} {
 
 # HTTP fallback on port 80
 :80 {
+    respond /.well-known/caution/health "OK" 200
+
     handle /steve* {
         reverse_proxy localhost:8081
     }
@@ -268,6 +272,8 @@ cat > /etc/caddy/Caddyfile <<EOF
 :443 {
     tls /etc/caddy/server.crt /etc/caddy/server.key
 
+    respond /.well-known/caution/health "OK" 200
+
     handle /steve* {
         reverse_proxy localhost:8081
     }
@@ -282,6 +288,8 @@ cat > /etc/caddy/Caddyfile <<EOF
 
 # HTTP fallback on port 80
 :80 {
+    respond /.well-known/caution/health "OK" 200
+
     handle /steve* {
         reverse_proxy localhost:8081
     }
