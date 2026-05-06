@@ -500,12 +500,12 @@ run-api: network postgres
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
 		-e DATABASE_URL=$(DATABASE_URL) \
-		--env-file .env \
+		--env-file $(HOME)/.config/caution/.env \
+		-v $(HOME)/.config/caution/prices.json:/app/prices.json:ro \
+		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
-		$(if $(wildcard $(PWD)/prices.json),-v $(PWD)/prices.json:/app/prices.json:ro) \
-		-v $(PWD)/config.json:/app/config.json:ro \
 		caution-api
 	@echo "API service started (internal port 8080)"
 
@@ -517,7 +517,7 @@ run-gateway: network
 		--network $(NETWORK) \
 		-p 8000:8080 \
 		-p $(SSH_PORT):$(SSH_PORT) \
-		--env-file .env \
+		--env-file $(HOME)/.config/caution/.env \
 		-e DATABASE_URL=$(DATABASE_URL) \
 		-e SSH_PORT=$(SSH_PORT) \
 		-e SSH_HOST_KEY_PATH=$(CONTAINER_DATA_DIR)/ssh_host_ed25519_key \
@@ -532,7 +532,7 @@ run-email: network
 	@docker run -d \
 		--name email \
 		--network $(NETWORK) \
-		--env-file .env \
+		--env-file $(HOME)/.config/caution/.env \
 		-e EMAIL_BIND_ADDR=0.0.0.0:8082 \
 		-p 127.0.0.1:8082:8082 \
 		caution-email
@@ -543,10 +543,11 @@ run-metering: network postgres
 	@docker run -d \
 		--name metering \
 		--network $(NETWORK) \
-		--env-file .env \
+		--env-file $(HOME)/.config/caution/.env \
+		-v $(HOME)/.config/caution/prices.json:/app/prices.json:ro \
+		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		-e DATABASE_URL=$(DATABASE_URL) \
 		-e METERING_INTERVAL_SECS=60 \
-		$(if $(wildcard $(PWD)/prices.json),-v $(PWD)/prices.json:/app/prices.json:ro) \
 		caution-metering
 	@echo "Metering service started (internal port 8083)"
 
@@ -564,6 +565,7 @@ else
 		-e VITE_PROXY_TARGET=$(VITE_PROXY_TARGET) \
 		-e VITE_ALLOWED_HOSTS=$(VITE_ALLOWED_HOSTS) \
 		-e VITE_PADDLE_SANDBOX=$(VITE_PADDLE_SANDBOX) \
+		--env-file $(HOME)/.config/caution/.env \
 		caution-frontend
 	@echo "Frontend started on port 3000"
 endif
@@ -718,8 +720,9 @@ run-api-test: network
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
-		$(if $(wildcard $(PWD)/prices.json),-v $(PWD)/prices.json:/app/prices.json:ro) \
-		-v $(PWD)/config.json:/app/config.json:ro \
+		--env-file $(HOME)/.config/caution/.env \
+		-v $(HOME)/.config/caution/prices.json:/app/prices.json:ro \
+		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		caution-api
 	@echo "API service started in test mode"
 
@@ -731,7 +734,7 @@ run-gateway-test: network
 		--network $(NETWORK) \
 		-p 127.0.0.1:8000:8080 \
 		-p 127.0.0.1:$(SSH_PORT):$(SSH_PORT) \
-		--env-file .env \
+		--env-file $(HOME)/.config/caution/.env \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
 		-e SSH_PORT=$(SSH_PORT) \
 		-e SSH_HOST_KEY_PATH=$(CONTAINER_DATA_DIR)/ssh_host_ed25519_key \
@@ -745,7 +748,7 @@ run-email-test: network
 	@docker run -d \
 		--name email \
 		--network $(NETWORK) \
-		--env-file .env \
+		--env-file $(HOME)/.config/caution/.env \
 		-e FRONTEND_URL=http://localhost:3000 \
 		-e EMAIL_TEST_MODE=true \
 		-e EMAIL_BIND_ADDR=0.0.0.0:8082 \
@@ -763,6 +766,7 @@ run-frontend-test: network
 		-e VITE_PROXY_TARGET=$(VITE_PROXY_TARGET) \
 		-e VITE_ALLOWED_HOSTS=$(VITE_ALLOWED_HOSTS) \
 		-e VITE_PADDLE_SANDBOX=$(VITE_PADDLE_SANDBOX) \
+		--env-file $(HOME)/.config/caution/.env \
 		caution-frontend
 	@echo "Frontend started on 127.0.0.1:3000"
 
@@ -772,7 +776,9 @@ run-metering-test: network
 		--name metering \
 		--network $(NETWORK) \
 		-p 127.0.0.1:8083:8083 \
-		--env-file .env \
+		--env-file $(HOME)/.config/caution/.env \
+		-v $(HOME)/.config/caution/prices.json:/app/prices.json:ro \
+		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
 		-e METERING_INTERVAL_SECS=9999 \
 		-e ENABLE_TEST_ENDPOINTS=true \
