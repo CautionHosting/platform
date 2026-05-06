@@ -303,6 +303,51 @@ async fn health_check() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
+async fn wait_for_health(public_ip: &str, timeout_secs: u64) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let url = format!("http://{public_ip}/.well-known/caution/health");
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    let mut attempt = 0u32;
+
+    loop {
+        attempt += 1;
+        tracing::info!(
+            "Polling endpoint (attempt {}): {}",
+            attempt,
+            url
+        );
+
+        let result = client
+            .get(&url)
+            .send()
+            .await;
+
+        match result {
+            Ok(_resp) => {
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::debug!("Health endpoint not ready: {}", e);
+            }
+        }
+
+        if start.elapsed() >= timeout {
+            return Err(format!(
+                "Attestation endpoint did not become healthy within {} seconds",
+                timeout_secs
+            ));
+        }
+
+        let delay = std::cmp::min(2u64.pow(attempt.min(4)), 30);
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+    }
+}
+
 async fn wait_for_attestation_health(public_ip: &str, timeout_secs: u64) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -2243,6 +2288,26 @@ async fn deploy_logic(
     let attestation_url = format!("{}/attestation", app_url);
 
     let _ = tx.send(Ok(milestone("Waiting for health check..."))).await;
+
+    tracing::info!("Waiting for health endpoint to become healthy...");
+    if let Err(e) = wait_for_health(&deployment_result.public_ip, 120).await {
+        tracing::error!("Attestation health check failed: {}", e);
+        recover_deploy_failure(
+            &state,
+            req.org_id,
+            resource_id,
+            &app_name,
+            previous_state,
+            should_cleanup_on_failure,
+            cleanup_credentials,
+            cleanup_managed_onprem,
+        )
+        .await;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Enclave failed to become healthy: {}", e),
+        ));
+    }
 
     tracing::info!("Waiting for attestation endpoint to become healthy...");
     if let Err(e) = wait_for_attestation_health(&deployment_result.public_ip, 120).await {
