@@ -352,7 +352,7 @@ run-frontend: network
 up: migrate
 	@echo "Building all images in parallel..."
 	@$(MAKE) build-api build-gateway build-email build-metering build-frontend
-	systemctl restart caution-email caution-metering caution-api caution-frontend caution-gateway
+	systemctl restart --user caution-email caution-metering caution-api caution-frontend caution-gateway
 	@echo "  All services running"
 	@echo "  Frontend: http://localhost:3000 (dev server with hot reload)"
 	@echo "  Gateway: http://localhost:8000"
