@@ -96,6 +96,67 @@ resource "aws_s3_bucket_public_access_block" "eif_storage" {
   restrict_public_buckets = true
 }
 
+# --- S3: PostgreSQL backups ---
+
+resource "aws_s3_bucket" "postgres_backups" {
+  bucket = "${var.postgres_backups_bucket_prefix}-${data.aws_caller_identity.current.account_id}"
+
+  tags = {
+    Name      = "Database Backups Storage"
+    Purpose   = "database-backups"
+    ManagedBy = "infra-bootstrap"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "postgres_backups" {
+  bucket = aws_s3_bucket.postgres_backups.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "postgres_backups" {
+  bucket = aws_s3_bucket.postgres_backups.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "postgres_backups" {
+  bucket = aws_s3_bucket.postgres_backups.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "postgres_backups" {
+  bucket = aws_s3_bucket.postgres_backups.id
+
+  rule {
+    id     = "retain-database-backups-forever"
+    status = "Enabled"
+
+    filter {
+      prefix = ""
+    }
+
+    noncurrent_version_expiration {
+      days = 0
+    }
+
+    noncurrent_version_transition {
+      days         = 0
+      storage_class = "STANDARD_IA"
+    }
+  }
+}
+
 # --- DynamoDB: Terraform state locking ---
 
 resource "aws_dynamodb_table" "terraform_state_lock" {
@@ -265,6 +326,20 @@ resource "aws_iam_policy" "platform_deploy" {
         Resource = [
           aws_s3_bucket.terraform_state.arn,
           "${aws_s3_bucket.terraform_state.arn}/*",
+        ]
+      },
+      {
+        Sid    = "S3DatabaseBackups"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:ListBucket",
+          "s3:DeleteObject",
+        ]
+        Resource = [
+          aws_s3_bucket.postgres_backups.arn,
+          "${aws_s3_bucket.postgres_backups.arn}/*",
         ]
       },
       {
@@ -455,6 +530,11 @@ output "eif_bucket_name" {
   value       = aws_s3_bucket.eif_storage.id
 }
 
+output "postgres_backups_bucket_name" {
+  description = "Name of the S3 bucket for PostgreSQL backups"
+  value       = aws_s3_bucket.postgres_backups.id
+}
+
 output "dynamodb_table_name" {
   description = "Name of the DynamoDB table for state locking"
   value       = aws_dynamodb_table.terraform_state_lock.id
@@ -515,16 +595,17 @@ output "builder_subnet_id" {
 output "configuration_summary" {
   description = "Summary of created resources"
   value = {
-    s3_state_bucket = aws_s3_bucket.terraform_state.id
-    s3_eif_bucket   = aws_s3_bucket.eif_storage.id
-    dynamodb_table  = aws_dynamodb_table.terraform_state_lock.id
-    iam_user        = aws_iam_user.platform.name
-    account_id      = data.aws_caller_identity.current.account_id
-    region          = var.aws_region
-    builder_ami     = data.aws_ami.al2023.id
-    builder_vpc     = local.builder_vpc_id
-    builder_sg      = aws_security_group.builder.id
-    builder_profile = aws_iam_instance_profile.builder.name
-    builder_subnet  = local.builder_subnet_id
+    s3_state_bucket       = aws_s3_bucket.terraform_state.id
+    s3_eif_bucket         = aws_s3_bucket.eif_storage.id
+    s3_database_backups   = aws_s3_bucket.postgres_backups.id
+    dynamodb_table        = aws_dynamodb_table.terraform_state_lock.id
+    iam_user              = aws_iam_user.platform.name
+    account_id            = data.aws_caller_identity.current.account_id
+    region                = var.aws_region
+    builder_ami           = data.aws_ami.al2023.id
+    builder_vpc           = local.builder_vpc_id
+    builder_sg            = aws_security_group.builder.id
+    builder_profile       = aws_iam_instance_profile.builder.name
+    builder_subnet        = local.builder_subnet_id
   }
 }

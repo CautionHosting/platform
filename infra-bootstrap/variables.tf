@@ -66,3 +66,14 @@ variable "builder_subnet_id" {
   default     = null
   nullable    = true
 }
+
+variable "postgres_backups_bucket_prefix" {
+  description = "Prefix for the PostgreSQL backups bucket (must be globally unique when combined with account ID)"
+  type        = string
+  default     = "caution-database-backups"
+
+  validation {
+    condition     = can(regex("^[a-z0-9-]+$", var.postgres_backups_bucket_prefix))
+    error_message = "Prefix must be lowercase alphanumeric with hyphens only"
+  }
+}
