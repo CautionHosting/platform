@@ -14,7 +14,6 @@ DB_PASSWORD ?= postgres
 DB_HOST ?= postgres
 DATABASE_URL ?= postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):5432/$(DB_NAME)
 DB_VOLUME := caution-postgres-data
-SSH_PORT ?= 2222
 CAUTION_DATA_DIR ?= $(PWD)/caution-cache
 CONTAINER_DATA_DIR := /var/cache/caution
 
@@ -297,12 +296,12 @@ run-gateway: network
 		--name gateway \
 		--network $(NETWORK) \
 		-p 8000:8080 \
-		-p $(SSH_PORT):$(SSH_PORT) \
+		-p 2222:2222 \
 		--env-file $(HOME)/.config/caution/.env \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		caution-gateway
-	@echo "Gateway started on port 8000 (HTTP) and $(SSH_PORT) (SSH)"
+	@echo "Gateway started on port 8000 (HTTP) and 2222 (SSH)"
 
 run-email: network
 	@docker rm -f email 2>/dev/null || true
@@ -499,13 +498,13 @@ run-gateway-test: network
 		--name gateway \
 		--network $(NETWORK) \
 		-p 127.0.0.1:8000:8080 \
-		-p 127.0.0.1:$(SSH_PORT):$(SSH_PORT) \
+		-p 127.0.0.1:2222:2222 \
 		--env-file $(HOME)/.config/caution/.env \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		caution-gateway
-	@echo "Gateway started on 127.0.0.1:8000 (HTTP) and 127.0.0.1:$(SSH_PORT) (SSH)"
+	@echo "Gateway started on 127.0.0.1:8000 (HTTP) and 127.0.0.1:2222 (SSH)"
 
 run-email-test: network
 	@docker rm -f email 2>/dev/null || true
@@ -557,7 +556,7 @@ up-test: down migrate-test
 	@echo "  All ports bound to 127.0.0.1 only (not externally accessible)"
 	@echo "  Test DB: $(TEST_DB_HOST) (ephemeral)"
 	@echo "  Gateway: http://127.0.0.1:8000"
-	@echo "  SSH: 127.0.0.1:$(SSH_PORT)"
+	@echo "  SSH: 127.0.0.1:2222"
 	@echo ""
 	@echo "  E2E login: POST http://127.0.0.1:8000/auth/e2e-login"
 
