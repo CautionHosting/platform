@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: 2025 Caution SEZC
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
--include .env
-export
-
 export DOCKER_BUILDKIT=1
 
 .PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-platform-ports test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist
@@ -499,7 +496,6 @@ run-api: network postgres
 		-e AWS_REGION=us-west-2 \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
-		-e DATABASE_URL=$(DATABASE_URL) \
 		--env-file $(HOME)/.config/caution/.env \
 		-v $(HOME)/.config/caution/prices.json:/app/prices.json:ro \
 		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
@@ -518,9 +514,6 @@ run-gateway: network
 		-p 8000:8080 \
 		-p $(SSH_PORT):$(SSH_PORT) \
 		--env-file $(HOME)/.config/caution/.env \
-		-e DATABASE_URL=$(DATABASE_URL) \
-		-e SSH_PORT=$(SSH_PORT) \
-		-e SSH_HOST_KEY_PATH=$(CONTAINER_DATA_DIR)/ssh_host_ed25519_key \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		$(if $(wildcard $(OUT_DIR)/frontend/index.html),-v $(PWD)/$(OUT_DIR)/frontend:/app/frontend:ro) \
@@ -546,7 +539,6 @@ run-metering: network postgres
 		--env-file $(HOME)/.config/caution/.env \
 		-v $(HOME)/.config/caution/prices.json:/app/prices.json:ro \
 		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
-		-e DATABASE_URL=$(DATABASE_URL) \
 		-e METERING_INTERVAL_SECS=60 \
 		caution-metering
 	@echo "Metering service started (internal port 8083)"
@@ -736,8 +728,6 @@ run-gateway-test: network
 		-p 127.0.0.1:$(SSH_PORT):$(SSH_PORT) \
 		--env-file $(HOME)/.config/caution/.env \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
-		-e SSH_PORT=$(SSH_PORT) \
-		-e SSH_HOST_KEY_PATH=$(CONTAINER_DATA_DIR)/ssh_host_ed25519_key \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		caution-gateway
