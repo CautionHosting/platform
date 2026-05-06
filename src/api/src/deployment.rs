@@ -206,7 +206,7 @@ pub async fn destroy_app_with_credentials(
 
     // For managed on-prem: scale ASG to 0 first so instance terminates cleanly
     // This ensures the EIP gets disassociated and security group can be deleted
-    if let (Some(ref creds), Some(ref asg)) = (&credentials, &asg_name) {
+    if let (Some(creds), Some(asg)) = (&credentials, &asg_name) {
         tracing::info!("Managed on-prem destroy - scaling ASG {} to 0", asg);
         if let Err(e) = scale_down_asg(asg, creds).await {
             tracing::warn!("Failed to scale down ASG: {} (continuing with destroy)", e);
