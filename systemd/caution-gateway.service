@@ -6,7 +6,7 @@ After=caution-api.service caution-postgres.service
 
 [Service]
 ExecStartPre=-/usr/bin/docker rm -f gateway
-ExecStart=/usr/bin/docker run --name gateway -p 8000:8080 -p 2222:2222 --network caution-network -e SSH_PORT=2222 --env-file %h/.config/caution/.env caution-gateway
+ExecStart=/usr/bin/docker run --name gateway -p 8000:8080 -p 2222:2222 --network caution-network -e SSH_PORT=2222 --env-file %h/.config/caution/.env -v caution-data-dir:/var/cache/caution caution-gateway
 ExecStop=/usr/bin/docker stop gateway
 
 [Install]
