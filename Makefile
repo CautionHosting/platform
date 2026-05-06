@@ -575,8 +575,8 @@ endif
 
 up: migrate
 	@echo "Building all images in parallel..."
-	@$(MAKE) build-api build-gateway build-email build-metering $(FRONTEND_BUILD_TARGET)
-	systemctl restart caution-email caution-metering caution-api caution-frontend caution-gateway
+	@$(MAKE) build-api build-gateway build-email build-metering build-frontend
+	systemctl restart --user caution-email caution-metering caution-api caution-frontend caution-gateway
 	@echo "  All services running"
 	@echo "  $(FRONTEND_STATUS)"
 	@echo "  Gateway: http://localhost:8000"
