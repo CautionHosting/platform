@@ -624,7 +624,7 @@ pub async fn execute_remote_build(
                 pcrs: status.pcrs.clone(),
             };
 
-            sqlx::query(
+            if let Err(e) = sqlx::query(
                 "UPDATE eif_builds SET status = 'completed', eif_s3_key = $1, eif_sha256 = $2, eif_size_bytes = $3, pcrs = $4, completed_at = NOW()
                  WHERE id = $5"
             )
@@ -634,8 +634,19 @@ pub async fn execute_remote_build(
             .bind(&status.pcrs)
             .bind(build_id)
             .execute(db)
-            .await
-            .context("Failed to update eif_builds with result")?;
+            .await {
+                if let Some(database_error) = e.as_database_error() &&
+                database_error.is_unique_violation() {
+                    // We matched an existing EIF
+                    tracing::warn!(
+                        eif_s3_key = eif_s3_key,
+                        ?database_error,
+                        "Duplicate EIF, ignoring error..."
+                    );
+                } else {
+                    bail!("Unable to insert EIF: {e}");
+                }
+            }
 
             // Billing is handled by the metering collection loop via tracked_resources.
 
