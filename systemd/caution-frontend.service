@@ -1,0 +1,12 @@
+# user systemd file for managing Caution frontend
+
+[Unit]
+Description=Caution frontend service
+
+[Service]
+ExecStartPre=-/usr/bin/docker rm -f frontend
+ExecStart=/usr/bin/docker run --name frontend --network caution-network -p 3000:3000 --env-file %h/.config/caution/.env caution-frontend
+ExecStop=/usr/bin/docker stop frontend
+
+[Install]
+WantedBy=default.target

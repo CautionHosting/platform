@@ -467,33 +467,12 @@ volume:
 		(docker volume create $(DB_VOLUME) && echo "✓ Volume $(DB_VOLUME) created")
 
 postgres: network volume
-	@if docker ps -a --format '{{.Names}}' | grep -q '^postgres$$'; then \
-		if docker ps --format '{{.Names}}' | grep -q '^postgres$$'; then \
-			echo "Postgres already running"; \
-		else \
-			echo "Starting existing postgres container..."; \
-			docker start postgres; \
-			sleep 2; \
-			echo "Postgres started"; \
-		fi \
-	else \
-		docker run -d \
-			--name postgres \
-			--network $(NETWORK) \
-			-v $(DB_VOLUME):/var/lib/postgresql/data \
-			-e POSTGRES_DB=$(DB_NAME) \
-			-e POSTGRES_USER=$(DB_USER) \
-			-e POSTGRES_PASSWORD=$(DB_PASSWORD) \
-			-p 127.0.0.1:5432:5432 \
-			postgres:16-alpine && \
-		echo "Postgres started, waiting for ready..." && \
-		sleep 5 && \
-		until docker exec postgres pg_isready -U $(DB_USER) > /dev/null 2>&1; do \
-			echo "   Waiting for postgres..."; \
-			sleep 1; \
-		done && \
-		echo "Postgres ready"; \
-	fi
+	systemctl restart --user caution-postgres
+	until docker exec postgres pg_isready -U $(DB_USER) > /dev/null 2>&1; do \
+		echo "   Waiting for postgres..."; \
+		sleep 1; \
+	done && \
+	echo "Postgres ready"
 
 migrate: postgres
 	@echo "Running migrations..."
@@ -597,10 +576,7 @@ endif
 up: migrate
 	@echo "Building all images in parallel..."
 	@$(MAKE) build-api build-gateway build-email build-metering $(FRONTEND_BUILD_TARGET)
-	@$(MAKE) run-email run-metering run-api run-frontend
-	@echo "Waiting for API to be ready..."
-	@sleep 2
-	@$(MAKE) run-gateway
+	systemctl restart caution-email caution-metering caution-api caution-frontend caution-gateway
 	@echo "  All services running"
 	@echo "  $(FRONTEND_STATUS)"
 	@echo "  Gateway: http://localhost:8000"
