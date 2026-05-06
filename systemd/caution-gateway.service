@@ -2,7 +2,7 @@
 
 [Unit]
 Description=Caution gateway service
-After=caution-api.service caution-postgres.service
+After=caution-api.service caution-postgres.service caution-network.service
 
 [Service]
 ExecStartPre=-/usr/bin/docker rm -f gateway

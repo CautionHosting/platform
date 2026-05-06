@@ -2,7 +2,7 @@
 
 [Unit]
 Description=Caution API service
-After=caution-postgres.service
+After=caution-postgres.service caution-network.service
 
 [Service]
 ExecStartPre=-/usr/bin/docker rm -f api

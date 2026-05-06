@@ -2,6 +2,7 @@
 
 [Unit]
 Description=Caution postgres instance
+After=caution-network.service
 
 [Service]
 ExecStartPre=-/usr/bin/docker rm -f postgres
