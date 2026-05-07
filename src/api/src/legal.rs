@@ -21,6 +21,23 @@ struct LegalDocumentIdentity {
     occurred_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, FromRow)]
+struct LegalNoticeDocument {
+    id: Uuid,
+    document_type: String,
+    version: String,
+    url: String,
+    effective_at: DateTime<Utc>,
+    requires_blocking_reacceptance: bool,
+    requires_acknowledgment: bool,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct LegalNoticeRecipient {
+    id: Uuid,
+    email: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct LegalDocumentStatus {
     pub active_version: Option<String>,
@@ -35,12 +52,72 @@ pub struct UserLegalStatus {
     pub privacy_notice: LegalDocumentStatus,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SendLegalNoticesRequest {
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub document_ids: Option<Vec<Uuid>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LegalNoticeDocumentResponse {
+    pub id: Uuid,
+    pub document_type: String,
+    pub title: String,
+    pub version: String,
+    pub url: String,
+    pub effective_at: DateTime<Utc>,
+    pub requires_action: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SendLegalNoticesResponse {
+    pub dry_run: bool,
+    pub batch_id: Option<Uuid>,
+    pub documents: Vec<LegalNoticeDocumentResponse>,
+    pub eligible_recipient_count: i64,
+    pub already_sent_count: i64,
+    pub pending_recipient_count: i64,
+    pub sent_count: i64,
+    pub failed_count: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmailServiceResponse {
+    success: bool,
+    message: Option<String>,
+}
+
 fn expected_event_type(document_type: &str) -> Option<&'static str> {
     match document_type {
         "terms_of_service" => Some("accepted"),
         "privacy_notice" => Some("acknowledged"),
         _ => None,
     }
+}
+
+fn legal_document_title(document_type: &str) -> &'static str {
+    match document_type {
+        "terms_of_service" => "Terms of Service",
+        "privacy_notice" => "Privacy Notice",
+        _ => "Legal Document",
+    }
+}
+
+fn legal_notice_dedupe_key(
+    terms_document_id: Option<Uuid>,
+    privacy_document_id: Option<Uuid>,
+) -> String {
+    format!(
+        "terms={};privacy={}",
+        terms_document_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        privacy_document_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    )
 }
 
 /// Get the active version for a document type, or None if no active version exists.
@@ -270,9 +347,496 @@ pub async fn accept_legal_document(
     }))
 }
 
+pub async fn send_legal_notices(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SendLegalNoticesRequest>,
+) -> Result<Json<SendLegalNoticesResponse>, (StatusCode, String)> {
+    let documents = load_legal_notice_documents(&state.db, payload.document_ids.as_deref()).await?;
+    let (terms_document_id, privacy_document_id) = legal_notice_document_ids(&documents)?;
+    let dedupe_key = legal_notice_dedupe_key(terms_document_id, privacy_document_id);
+
+    let existing_batch_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM legal_notice_batches WHERE dedupe_key = $1")
+            .bind(&dedupe_key)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to query legal notice batch: {:?}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to query legal notice batch".to_string(),
+                )
+            })?;
+
+    let dry_run_batch_id = existing_batch_id;
+    let batch_id = if payload.dry_run {
+        dry_run_batch_id
+    } else {
+        Some(
+            upsert_legal_notice_batch(
+                &state.db,
+                &dedupe_key,
+                terms_document_id,
+                privacy_document_id,
+            )
+            .await?,
+        )
+    };
+
+    let eligible_recipient_count = count_legal_notice_recipients(&state.db).await?;
+    let already_sent_count =
+        count_sent_legal_notice_deliveries(&state.db, batch_id.or(existing_batch_id)).await?;
+    let recipients =
+        load_pending_legal_notice_recipients(&state.db, batch_id.or(existing_batch_id)).await?;
+    let pending_recipient_count = recipients.len() as i64;
+
+    let response_documents = documents
+        .iter()
+        .map(|doc| LegalNoticeDocumentResponse {
+            id: doc.id,
+            document_type: doc.document_type.clone(),
+            title: legal_document_title(&doc.document_type).to_string(),
+            version: doc.version.clone(),
+            url: doc.url.clone(),
+            effective_at: doc.effective_at.clone(),
+            requires_action: doc.requires_blocking_reacceptance || doc.requires_acknowledgment,
+        })
+        .collect();
+
+    if payload.dry_run {
+        return Ok(Json(SendLegalNoticesResponse {
+            dry_run: true,
+            batch_id,
+            documents: response_documents,
+            eligible_recipient_count,
+            already_sent_count,
+            pending_recipient_count,
+            sent_count: 0,
+            failed_count: 0,
+        }));
+    }
+
+    let batch_id = batch_id.ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to create legal notice batch".to_string(),
+        )
+    })?;
+
+    let email_service_url =
+        std::env::var("EMAIL_SERVICE_URL").unwrap_or_else(|_| "http://email:8082".to_string());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let email_data = build_legal_notice_email_data(&documents);
+    let mut sent_count = 0;
+    let mut failed_count = 0;
+
+    for recipient in recipients {
+        let email_request = serde_json::json!({
+            "to": &recipient.email,
+            "template": "legal_notice",
+            "data": email_data.clone(),
+        });
+
+        let delivery_result = send_legal_notice_email(&client, &email_service_url, &email_request)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    "Failed to send legal notice email to user {}: {}",
+                    recipient.id,
+                    e
+                );
+                e
+            });
+
+        match delivery_result {
+            Ok(()) => {
+                sent_count += 1;
+                record_legal_notice_delivery(
+                    &state.db,
+                    batch_id,
+                    recipient.id,
+                    &recipient.email,
+                    "sent",
+                    None,
+                )
+                .await?;
+            }
+            Err(e) => {
+                failed_count += 1;
+                record_legal_notice_delivery(
+                    &state.db,
+                    batch_id,
+                    recipient.id,
+                    &recipient.email,
+                    "failed",
+                    Some(&e),
+                )
+                .await?;
+            }
+        }
+    }
+
+    Ok(Json(SendLegalNoticesResponse {
+        dry_run: false,
+        batch_id: Some(batch_id),
+        documents: response_documents,
+        eligible_recipient_count,
+        already_sent_count,
+        pending_recipient_count,
+        sent_count,
+        failed_count,
+    }))
+}
+
+async fn load_legal_notice_documents(
+    pool: &PgPool,
+    document_ids: Option<&[Uuid]>,
+) -> Result<Vec<LegalNoticeDocument>, (StatusCode, String)> {
+    let documents = if let Some(document_ids) = document_ids {
+        if document_ids.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "document_ids must not be empty".to_string(),
+            ));
+        }
+
+        sqlx::query_as::<_, LegalNoticeDocument>(
+            "SELECT id,
+                    document_type,
+                    version,
+                    url,
+                    effective_at,
+                    requires_blocking_reacceptance,
+                    requires_acknowledgment
+             FROM legal_documents
+             WHERE id = ANY($1)
+             ORDER BY CASE document_type
+                 WHEN 'terms_of_service' THEN 1
+                 WHEN 'privacy_notice' THEN 2
+                 ELSE 3
+             END",
+        )
+        .bind(document_ids)
+        .fetch_all(pool)
+        .await
+    } else {
+        sqlx::query_as::<_, LegalNoticeDocument>(
+            "SELECT id,
+                    document_type,
+                    version,
+                    url,
+                    effective_at,
+                    requires_blocking_reacceptance,
+                    requires_acknowledgment
+             FROM legal_documents
+             WHERE is_active = true
+               AND document_type IN ('terms_of_service', 'privacy_notice')
+             ORDER BY CASE document_type
+                 WHEN 'terms_of_service' THEN 1
+                 WHEN 'privacy_notice' THEN 2
+                 ELSE 3
+             END",
+        )
+        .fetch_all(pool)
+        .await
+    }
+    .map_err(|e| {
+        tracing::error!("Failed to load legal notice documents: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to load legal notice documents".to_string(),
+        )
+    })?;
+
+    if documents.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "No legal documents selected for notice".to_string(),
+        ));
+    }
+
+    if let Some(document_ids) = document_ids {
+        if documents.len() != document_ids.len() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "One or more document_ids were not found".to_string(),
+            ));
+        }
+    }
+
+    Ok(documents)
+}
+
+fn legal_notice_document_ids(
+    documents: &[LegalNoticeDocument],
+) -> Result<(Option<Uuid>, Option<Uuid>), (StatusCode, String)> {
+    let mut terms_document_id = None;
+    let mut privacy_document_id = None;
+
+    for document in documents {
+        match document.document_type.as_str() {
+            "terms_of_service" if terms_document_id.is_none() => {
+                terms_document_id = Some(document.id);
+            }
+            "privacy_notice" if privacy_document_id.is_none() => {
+                privacy_document_id = Some(document.id);
+            }
+            "terms_of_service" | "privacy_notice" => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Legal notice batches can include at most one document of each type"
+                        .to_string(),
+                ));
+            }
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "Unsupported legal document type: {}",
+                        document.document_type
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok((terms_document_id, privacy_document_id))
+}
+
+async fn upsert_legal_notice_batch(
+    pool: &PgPool,
+    dedupe_key: &str,
+    terms_document_id: Option<Uuid>,
+    privacy_document_id: Option<Uuid>,
+) -> Result<Uuid, (StatusCode, String)> {
+    sqlx::query_scalar(
+        "INSERT INTO legal_notice_batches (
+            dedupe_key, terms_document_id, privacy_document_id
+         )
+         VALUES ($1, $2, $3)
+         ON CONFLICT (dedupe_key) DO UPDATE
+            SET dedupe_key = EXCLUDED.dedupe_key
+         RETURNING id",
+    )
+    .bind(dedupe_key)
+    .bind(terms_document_id)
+    .bind(privacy_document_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to upsert legal notice batch: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to create legal notice batch".to_string(),
+        )
+    })
+}
+
+async fn count_legal_notice_recipients(pool: &PgPool) -> Result<i64, (StatusCode, String)> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM users
+         WHERE is_active = true
+           AND email IS NOT NULL
+           AND email_verified_at IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to count legal notice recipients: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to count legal notice recipients".to_string(),
+        )
+    })
+}
+
+async fn count_sent_legal_notice_deliveries(
+    pool: &PgPool,
+    batch_id: Option<Uuid>,
+) -> Result<i64, (StatusCode, String)> {
+    let Some(batch_id) = batch_id else {
+        return Ok(0);
+    };
+
+    sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM legal_email_deliveries
+         WHERE batch_id = $1
+           AND status = 'sent'",
+    )
+    .bind(batch_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to count legal notice deliveries: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to count legal notice deliveries".to_string(),
+        )
+    })
+}
+
+async fn load_pending_legal_notice_recipients(
+    pool: &PgPool,
+    batch_id: Option<Uuid>,
+) -> Result<Vec<LegalNoticeRecipient>, (StatusCode, String)> {
+    sqlx::query_as::<_, LegalNoticeRecipient>(
+        "SELECT id, email
+         FROM users
+         WHERE is_active = true
+           AND email IS NOT NULL
+           AND email_verified_at IS NOT NULL
+           AND (
+                $1::uuid IS NULL
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM legal_email_deliveries led
+                    WHERE led.batch_id = $1
+                      AND led.user_id = users.id
+                      AND led.status = 'sent'
+                )
+           )
+         ORDER BY created_at ASC, id ASC",
+    )
+    .bind(batch_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to load legal notice recipients: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to load legal notice recipients".to_string(),
+        )
+    })
+}
+
+fn build_legal_notice_email_data(documents: &[LegalNoticeDocument]) -> serde_json::Value {
+    let email_documents: Vec<serde_json::Value> = documents
+        .iter()
+        .map(|document| {
+            let requires_action =
+                document.requires_blocking_reacceptance || document.requires_acknowledgment;
+            serde_json::json!({
+                "document_type": &document.document_type,
+                "document_title": legal_document_title(&document.document_type),
+                "version": &document.version,
+                "effective_at": document.effective_at.format("%Y-%m-%d").to_string(),
+                "url": &document.url,
+                "requires_action": requires_action,
+            })
+        })
+        .collect();
+
+    let action_required = documents.iter().any(|document| {
+        document.requires_blocking_reacceptance || document.requires_acknowledgment
+    });
+
+    serde_json::json!({
+        "documents": email_documents,
+        "action_required": action_required,
+    })
+}
+
+async fn send_legal_notice_email(
+    client: &reqwest::Client,
+    email_service_url: &str,
+    email_request: &serde_json::Value,
+) -> Result<(), String> {
+    let response = client
+        .post(format!("{}/send", email_service_url))
+        .json(email_request)
+        .send()
+        .await
+        .map_err(|e| format!("Email service request failed: {}", e))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("Email service returned {}", status));
+    }
+
+    let email_response = response
+        .json::<EmailServiceResponse>()
+        .await
+        .map_err(|e| format!("Failed to parse email service response: {}", e))?;
+
+    if email_response.success {
+        Ok(())
+    } else {
+        Err(email_response
+            .message
+            .unwrap_or_else(|| "Email service reported unsuccessful delivery".to_string()))
+    }
+}
+
+async fn record_legal_notice_delivery(
+    pool: &PgPool,
+    batch_id: Uuid,
+    user_id: Uuid,
+    email: &str,
+    status: &str,
+    error: Option<&str>,
+) -> Result<(), (StatusCode, String)> {
+    sqlx::query(
+        "INSERT INTO legal_email_deliveries (
+            batch_id, user_id, email, status, error, sent_at, updated_at
+         )
+         VALUES (
+            $1, $2, $3, $4, $5,
+            CASE WHEN $4 = 'sent' THEN NOW() ELSE NULL END,
+            NOW()
+         )
+         ON CONFLICT (batch_id, user_id) DO UPDATE SET
+            email = EXCLUDED.email,
+            status = EXCLUDED.status,
+            error = EXCLUDED.error,
+            sent_at = EXCLUDED.sent_at,
+            updated_at = NOW()",
+    )
+    .bind(batch_id)
+    .bind(user_id)
+    .bind(email)
+    .bind(status)
+    .bind(error)
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to record legal notice delivery: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to record legal notice delivery".to_string(),
+        )
+    })?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_legal_notice_dedupe_key_includes_selected_documents() {
+        let terms_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let privacy_id = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+
+        assert_eq!(
+            legal_notice_dedupe_key(Some(terms_id), Some(privacy_id)),
+            "terms=11111111-1111-1111-1111-111111111111;privacy=22222222-2222-2222-2222-222222222222"
+        );
+        assert_eq!(
+            legal_notice_dedupe_key(Some(terms_id), None),
+            "terms=11111111-1111-1111-1111-111111111111;privacy=none"
+        );
+        assert_eq!(
+            legal_notice_dedupe_key(None, Some(privacy_id)),
+            "terms=none;privacy=22222222-2222-2222-2222-222222222222"
+        );
+    }
 
     #[test]
     fn test_current_user_requires_no_action() {

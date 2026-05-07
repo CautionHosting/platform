@@ -2669,6 +2669,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/internal/org/{org_id}/unsuspend",
             post(suspension::unsuspend_org_resources),
         )
+        .route(
+            "/internal/legal-notices/send",
+            post(legal::send_legal_notices),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::internal_auth_middleware,

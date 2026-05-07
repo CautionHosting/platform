@@ -61,6 +61,8 @@ Commands:
                          caution/website repo path and commit
   activate-legal-doc     Activate a legal document version
                          (deactivates prior active version of same type)
+  send-legal-notices     Dry-run legal notice email delivery for active docs
+                         Use --send to send; optional doc IDs limit scope
   user-legal-status <id> Show legal status for a user
 
 Examples:
@@ -70,6 +72,8 @@ Examples:
   ./utils/admin apps-by-code abc123def456
   ./utils/admin add-legal-doc
   ./utils/admin activate-legal-doc 123e4567-e89b-12d3-a456-426614174000
+  ./utils/admin send-legal-notices
+  ./utils/admin send-legal-notices --send 123e4567-e89b-12d3-a456-426614174000
 EOF
 }
 
@@ -452,6 +456,72 @@ cmd_user_legal_status() {
     "
 }
 
+cmd_send_legal_notices() {
+    local dry_run="true"
+    local api_url="${API_URL:-http://localhost:8080}"
+    local doc_ids=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --send)
+                dry_run="false"
+                shift
+                ;;
+            --dry-run)
+                dry_run="true"
+                shift
+                ;;
+            --api-url)
+                api_url="${2:-}"
+                shift 2
+                ;;
+            *)
+                validate_uuid "$1"
+                doc_ids+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -z "${INTERNAL_SERVICE_SECRET:-}" ]]; then
+        echo "Error: INTERNAL_SERVICE_SECRET must be set"
+        exit 1
+    fi
+
+    local payload
+    if [[ ${#doc_ids[@]} -eq 0 ]]; then
+        payload="{\"dry_run\":$dry_run}"
+    else
+        local ids_json=""
+        for doc_id in "${doc_ids[@]}"; do
+            if [[ -n "$ids_json" ]]; then
+                ids_json+=","
+            fi
+            ids_json+="\"$doc_id\""
+        done
+        payload="{\"dry_run\":$dry_run,\"document_ids\":[$ids_json]}"
+    fi
+
+    if [[ "$dry_run" == "true" ]]; then
+        echo "Dry-running legal notice email delivery..."
+    else
+        echo "Sending legal notice emails..."
+    fi
+
+    local response
+    response="$(curl -sf \
+        -H "Content-Type: application/json" \
+        -H "x-internal-service-secret: $INTERNAL_SERVICE_SECRET" \
+        -d "$payload" \
+        "$api_url/internal/legal-notices/send")"
+
+    if command -v jq >/dev/null 2>&1; then
+        echo "$response" | jq .
+    else
+        echo "$response"
+    fi
+}
+
 main() {
     local cmd="${1:-help}"
     shift || true
@@ -508,6 +578,9 @@ main() {
         user-legal-status)
             [[ $# -lt 1 ]] && { echo "Error: Missing user ID"; exit 1; }
             cmd_user_legal_status "$1"
+            ;;
+        send-legal-notices)
+            cmd_send_legal_notices "$@"
             ;;
         *)
             echo "Unknown command: $cmd"

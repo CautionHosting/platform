@@ -13,10 +13,14 @@
 #   5. Outdated TOS triggers requires_action=true
 #   6. Outdated privacy notice triggers requires_action=true
 #   7. Re-acceptance endpoint clears requires_action
+#   8. Legal notice email sender dry-runs, sends once, and dedupes
 
 set -euo pipefail
 
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
+API_URL="${API_URL:-http://localhost:8080}"
+EMAIL_EXTERNAL_URL="${EMAIL_EXTERNAL_URL:-http://localhost:8082}"
+INTERNAL_SERVICE_SECRET="${INTERNAL_SERVICE_SECRET:-$(docker exec api printenv INTERNAL_SERVICE_SECRET 2>/dev/null || true)}"
 DB_CONTAINER="${DB_CONTAINER:-postgres-test}"
 DB_NAME="${DB_NAME:-caution_test}"
 LOG_DIR="tests/e2e/logs"
@@ -36,6 +40,16 @@ cleanup() {
     # Remove test document versions and restore originals
     docker exec "$DB_CONTAINER" psql -U postgres -d "$DB_NAME" -c "
         BEGIN;
+        DELETE FROM legal_email_deliveries
+        WHERE batch_id IN (
+            SELECT lnb.id
+            FROM legal_notice_batches lnb
+            WHERE lnb.terms_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01')
+               OR lnb.privacy_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01')
+        );
+        DELETE FROM legal_notice_batches
+        WHERE terms_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01')
+           OR privacy_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01');
         UPDATE legal_documents SET is_active = false WHERE version = '2099-06-01';
         UPDATE legal_documents SET is_active = true WHERE version = '$SEED_TOS_VERSION' AND document_type = 'terms_of_service';
         UPDATE legal_documents SET is_active = true WHERE version = '$SEED_PN_VERSION' AND document_type = 'privacy_notice';
@@ -148,7 +162,7 @@ if [ -z "$SESSION_ID" ] || [ "$SESSION_ID" = "null" ]; then
     exit 1
 fi
 
-db_query "UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';" >/dev/null
+db_query "UPDATE users SET email = 'legal-e2e@example.com', email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';" >/dev/null
 
 STATUS_RESPONSE=$(curl -sf "$GATEWAY_URL/api/user/status" -H "X-Session-ID: $SESSION_ID")
 HAS_LEGAL=$(echo "$STATUS_RESPONSE" | jq 'has("legal")')
@@ -285,6 +299,46 @@ if [[ "$ACCEPT_SUCCESS" == "true" && "$ACCEPT_VERSION" == "2099-06-01" && "$PN_A
     step_pass "Re-acceptance: privacy notice accepted, requires_action cleared"
 else
     step_fail "Re-acceptance: success=$ACCEPT_SUCCESS version=$ACCEPT_VERSION action=$PN_ACTION5"
+fi
+
+# ── Step 8: Legal notice email sender ──────────────────────────────
+
+STEP_NUM=8
+log "Testing legal notice email sender..."
+
+if [[ -z "$INTERNAL_SERVICE_SECRET" ]]; then
+    step_fail "Legal notice sender: INTERNAL_SERVICE_SECRET unavailable"
+else
+    curl -sf -X DELETE "$EMAIL_EXTERNAL_URL/sent" >/dev/null 2>&1 || true
+
+    DRY_RUN_RESPONSE=$(curl -sf -X POST "$API_URL/internal/legal-notices/send" \
+        -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
+        -H "Content-Type: application/json" \
+        -d '{"dry_run": true}')
+
+    DRY_RUN_PENDING=$(echo "$DRY_RUN_RESPONSE" | jq -r '.pending_recipient_count')
+    DRY_RUN_DOCS=$(echo "$DRY_RUN_RESPONSE" | jq -r '.documents | length')
+
+    SEND_RESPONSE=$(curl -sf -X POST "$API_URL/internal/legal-notices/send" \
+        -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
+        -H "Content-Type: application/json" \
+        -d '{"dry_run": false}')
+
+    SENT_COUNT=$(echo "$SEND_RESPONSE" | jq -r '.sent_count')
+    FAILED_COUNT=$(echo "$SEND_RESPONSE" | jq -r '.failed_count')
+    LEGAL_EMAIL_COUNT=$(curl -sf "$EMAIL_EXTERNAL_URL/sent?template=legal_notice" 2>/dev/null | jq '.count // 0')
+
+    SECOND_DRY_RUN_RESPONSE=$(curl -sf -X POST "$API_URL/internal/legal-notices/send" \
+        -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
+        -H "Content-Type: application/json" \
+        -d '{"dry_run": true}')
+    SECOND_DRY_RUN_PENDING=$(echo "$SECOND_DRY_RUN_RESPONSE" | jq -r '.pending_recipient_count')
+
+    if [[ "$DRY_RUN_PENDING" -ge 1 && "$DRY_RUN_DOCS" -eq 2 && "$SENT_COUNT" -ge 1 && "$FAILED_COUNT" -eq 0 && "$LEGAL_EMAIL_COUNT" -ge 1 && "$SECOND_DRY_RUN_PENDING" -eq 0 ]]; then
+        step_pass "Legal notice sender: dry-run=$DRY_RUN_PENDING sent=$SENT_COUNT emails=$LEGAL_EMAIL_COUNT deduped"
+    else
+        step_fail "Legal notice sender: dry_run=$DRY_RUN_PENDING docs=$DRY_RUN_DOCS sent=$SENT_COUNT failed=$FAILED_COUNT emails=$LEGAL_EMAIL_COUNT second_pending=$SECOND_DRY_RUN_PENDING"
+    fi
 fi
 
 log "All legal tracking tests complete."
