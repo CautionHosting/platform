@@ -7,7 +7,7 @@
       <div class="development-banner-content">
         <span>
           <strong>Development mode:</strong> PIN verification is disabled.
-          <button class="development-banner-link" @click="$emit('tab-change', 'security')">
+          <button class="development-banner-link" @click="selectTab('security')">
             Enable PIN requirement
           </button>
           for production use.
@@ -39,7 +39,7 @@
 
     <!-- Top Header Row -->
     <div class="dashboard-header">
-      <button class="sidebar-logo" @click="$emit('tab-change', 'apps')">
+      <button class="sidebar-logo" @click="selectTab('apps')">
         <img src="/assets/caution-logo-black.svg" alt="Caution" />
       </button>
       <h2 v-if="showTitle" class="page-title">{{ title }}</h2>
@@ -47,7 +47,7 @@
         <button
           :class="['header-action-button', { active: activeTab === 'account' }]"
           :aria-current="activeTab === 'account' ? 'page' : undefined"
-          @click="$emit('tab-change', 'account')"
+          @click="selectTab('account')"
         >
           <svg
             class="header-action-icon lucide lucide-circle-user-round-icon lucide-circle-user-round"
@@ -104,7 +104,7 @@
         <nav class="sidebar-nav">
           <button
             :class="['nav-item', { active: activeTab === 'apps' }]"
-            @click="$emit('tab-change', 'apps')"
+            @click="selectTab('apps')"
           >
             <img
               :src="activeTab === 'apps' ? '/assets/icons/apps--act.svg' : '/assets/icons/apps--inact.svg'"
@@ -114,21 +114,66 @@
             <span>Applications</span>
           </button>
 
-          <button
-            :class="['nav-item', { active: activeTab === 'ssh' }]"
-            @click="$emit('tab-change', 'ssh')"
-          >
-            <img
-              :src="activeTab === 'ssh' ? '/assets/icons/ssh--act.svg' : '/assets/icons/ssh--inact.svg'"
-              alt=""
-              class="nav-icon"
-            />
-            <span>SSH keys</span>
-          </button>
+          <div class="nav-group" :class="{ 'is-open': securityNavOpen }">
+            <button
+              :class="['nav-item', 'nav-item--parent', { active: isSecurityNavActive }]"
+              :aria-expanded="securityNavOpen ? 'true' : 'false'"
+              aria-controls="security-nav-submenu"
+              @click="selectTab('ssh')"
+            >
+              <svg
+                class="nav-icon"
+                width="30" height="30" viewBox="0 0 30 30"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <rect v-if="isSecurityNavActive" width="30" height="30" rx="15" fill="white"/>
+                <g transform="translate(5,5) scale(0.833)">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+                    :stroke="isSecurityNavActive ? '#0F0F0F' : '#535455'"
+                  />
+                </g>
+              </svg>
+              <span>Security</span>
+              <svg
+                class="nav-chevron"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="m6 9 6 6 6-6" />
+              </svg>
+            </button>
+
+            <div
+              v-show="securityNavOpen"
+              id="security-nav-submenu"
+              class="nav-submenu"
+            >
+              <button
+                :class="['nav-subitem', { active: activeTab === 'ssh' }]"
+                :aria-current="activeTab === 'ssh' ? 'page' : undefined"
+                @click="selectTab('ssh')"
+              >
+                SSH keys
+              </button>
+              <button
+                :class="['nav-subitem', { active: activeTab === 'security' }]"
+                :aria-current="activeTab === 'security' ? 'page' : undefined"
+                @click="selectTab('security')"
+              >
+                Authentication
+              </button>
+            </div>
+          </div>
 
           <button
             :class="['nav-item', { active: activeTab === 'keys' }]"
-            @click="$emit('tab-change', 'keys')"
+            @click="selectTab('keys')"
           >
             <svg
               class="nav-icon"
@@ -143,32 +188,12 @@
                 />
               </g>
             </svg>
-            <span>Key services</span>
-          </button>
-
-          <button
-            :class="['nav-item', { active: activeTab === 'security' }]"
-            @click="$emit('tab-change', 'security')"
-          >
-            <svg
-              class="nav-icon"
-              width="30" height="30" viewBox="0 0 30 30"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <rect v-if="activeTab === 'security'" width="30" height="30" rx="15" fill="white"/>
-              <g transform="translate(5,5) scale(0.833)">
-                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
-                  :stroke="activeTab === 'security' ? '#0F0F0F' : '#535455'"
-                />
-              </g>
-            </svg>
-            <span>Security</span>
+            <span>Secrets</span>
           </button>
 
           <button
             :class="['nav-item', { active: activeTab === 'billing' }]"
-            @click="$emit('tab-change', 'billing')"
+            @click="selectTab('billing')"
           >
             <svg
               class="nav-icon"
@@ -276,7 +301,7 @@
 </template>
 
 <script>
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import {
   dismissDevelopmentBannerForSession,
   isDevelopmentBannerDismissed,
@@ -303,11 +328,19 @@ export default {
     },
   },
   emits: ["tab-change", "logout"],
-  setup(props) {
+  setup(props, { emit }) {
+    const securityTabs = ["ssh", "security"];
+    const isSecurityNavActive = computed(() => securityTabs.includes(props.activeTab));
+    const securityNavOpen = ref(isSecurityNavActive.value);
     const developmentBannerDismissed = ref(isDevelopmentBannerDismissed());
     const showDevelopmentBanner = computed(() => {
       return props.showDevelopmentWarning && !developmentBannerDismissed.value;
     });
+
+    const selectTab = (tab) => {
+      securityNavOpen.value = securityTabs.includes(tab);
+      emit("tab-change", tab);
+    };
 
     const dismissDevelopmentBanner = () => {
       developmentBannerDismissed.value = true;
@@ -318,10 +351,20 @@ export default {
       return `© ${new Date().getFullYear()} Caution SEZC. All rights reserved.`;
     });
 
+    watch(
+      () => props.activeTab,
+      (activeTab) => {
+        securityNavOpen.value = securityTabs.includes(activeTab);
+      }
+    );
+
     return {
       copyrightLabel,
       dismissDevelopmentBanner,
+      isSecurityNavActive,
+      securityNavOpen,
       showDevelopmentBanner,
+      selectTab,
     };
   },
 };

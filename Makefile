@@ -509,12 +509,12 @@ run-api-test: network
 		--dns 8.8.4.4 \
 		-p 127.0.0.1:8080:8080 \
 		--group-add $$(stat -c '%g' /var/run/docker.sock) \
+		--env-file .env \
 		-e AWS_REGION=us-west-2 \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
 		-e GIT_HOSTNAME=localhost \
-		--env-file .env \
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \

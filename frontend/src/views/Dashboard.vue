@@ -899,13 +899,13 @@ make build-cli
       </template>
     </div>
 
-    <!-- Security Tab -->
+    <!-- Authentication Tab -->
     <div v-if="activeTab === 'security'" class="content-card content-card--dashboard-tab">
       <div class="content-header">
         <div class="content-header-text">
-          <h2 class="content-header-title">Security settings</h2>
+          <h2 class="content-header-title">Authentication</h2>
           <p class="content-header-description">
-            Configure authentication requirements for your organization.
+            Manage passkeys and PIN requirements for sign-in and sensitive operations.
           </p>
         </div>
         <button
@@ -1030,11 +1030,11 @@ make build-cli
       </div>
     </div>
 
-    <!-- Key Services Tab -->
+    <!-- Secrets Tab -->
     <div v-if="activeTab === 'keys'" class="content-card content-card--dashboard-tab">
       <div class="content-header">
         <div class="content-header-text">
-          <h2 class="content-header-title">Key services</h2>
+          <h2 class="content-header-title">Secrets</h2>
           <p class="content-header-description">
             Manage quorum bundles created via <code>caution secret new</code>.
           </p>
@@ -1045,7 +1045,7 @@ make build-cli
         <div v-if="loadingBundles" class="loading">Loading bundles...</div>
         <div v-else-if="quorumBundles.length === 0" class="list-item-empty dashboard-tab-empty">
           <p class="list-item-empty-copy">
-            No quorum bundles yet. Create a quorum bundle with <code>caution secret new</code>.
+            No secret bundles yet. Create one with <code>caution secret new</code>.
           </p>
         </div>
         <div v-else>
@@ -1372,7 +1372,7 @@ make build-cli
       <div class="billing-section">
         <h3 class="billing-section-title">Managed Resource Usage Breakdown</h3>
         <div v-if="loadingBilling" class="list-item-empty">Loading billing data...</div>
-        <div v-else-if="billingData.items?.length === 0" class="list-item-empty">
+        <div v-else-if="billingData.items?.length === 0" class="list-item-empty dashboard-tab-empty">
           No usage this billing period.
         </div>
         <div v-else class="billing-table">
@@ -1397,7 +1397,7 @@ make build-cli
       <div class="billing-section">
         <h3 class="billing-section-title">Subscription Spend</h3>
         <div v-if="loadingBilling" class="list-item-empty">Loading billing data...</div>
-        <div v-else-if="billingData.subscriptionItems?.length === 0" class="list-item-empty">
+        <div v-else-if="billingData.subscriptionItems?.length === 0" class="list-item-empty dashboard-tab-empty">
           No subscription charges this billing period.
         </div>
         <div v-else class="billing-table">
@@ -1749,7 +1749,7 @@ export default {
         }
         return acc;
       },
-      { settings: "billing" }
+      { authentication: "security", secrets: "keys", settings: "billing" }
     );
     const error = ref(null);
     const activeTab = ref("apps");
@@ -4490,7 +4490,7 @@ export default {
 
 .dashboard-tab-empty {
   color: #9a9a9a;
-  font-size: clamp(1rem, 2vw, 1.05rem);
+  font-size: clamp(1rem, 2vw, 1.025rem);
   line-height: 1.5;
   text-align: center;
 }

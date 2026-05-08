@@ -8,6 +8,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use chrono::Datelike;
 use lettre::{
     message::{header::ContentType, Message},
     transport::smtp::{authentication::Credentials, response::Response as SmtpResponse},
@@ -218,13 +219,14 @@ async fn send_verification_handler(
         </p>
     </div>
 
-    <p style="color: #95a5a6; font-size: 12px; text-align: center; margin-top: 20px;">
-        &copy; 2025 Caution. All rights reserved.
-    </p>
+{}
 </body>
 </html>
         "#,
-        verification_url, verification_url, verification_url
+        verification_url,
+        verification_url,
+        verification_url,
+        html_email_footer()
     );
 
     let text_body = format!(
@@ -297,6 +299,7 @@ async fn send_email_handler(
         "insufficient_balance" => generate_insufficient_balance_email(&req.data),
         "suspension_warning" => generate_suspension_warning_email(&req.data),
         "suspension_notice" => generate_suspension_notice_email(&req.data),
+        "legal_notice" => generate_legal_notice_email(&req.data),
         _ => {
             return Ok(Json(SendEmailResponse {
                 success: false,
@@ -389,6 +392,160 @@ fn html_escape(s: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
+fn current_year() -> i32 {
+    chrono::Utc::now().year()
+}
+
+fn html_email_footer() -> String {
+    format!(
+        r#"    <p style="color: #95a5a6; font-size: 12px; text-align: center; margin-top: 20px;">
+        &copy; {} Caution. All rights reserved.
+    </p>"#,
+        current_year()
+    )
+}
+
+fn legal_document_title(document_type: &str) -> &'static str {
+    match document_type {
+        "terms_of_service" => "Terms of Service",
+        "privacy_notice" => "Privacy Notice",
+        _ => "Legal Document",
+    }
+}
+
+fn generate_legal_notice_email(data: &serde_json::Value) -> (String, String, String) {
+    let documents = data["documents"].as_array().cloned().unwrap_or_default();
+
+    let has_terms = documents
+        .iter()
+        .any(|doc| doc["document_type"].as_str() == Some("terms_of_service"));
+    let has_privacy = documents
+        .iter()
+        .any(|doc| doc["document_type"].as_str() == Some("privacy_notice"));
+
+    let subject = match (has_terms, has_privacy) {
+        (true, true) => "Updated Terms of Service and Privacy Notice - Caution".to_string(),
+        (true, false) => "Updated Terms of Service - Caution".to_string(),
+        (false, true) => "Updated Privacy Notice - Caution".to_string(),
+        (false, false) => "Updated Legal Documents - Caution".to_string(),
+    };
+
+    let action_required = data["action_required"].as_bool().unwrap_or_else(|| {
+        documents
+            .iter()
+            .any(|doc| doc["requires_action"].as_bool().unwrap_or(false))
+    });
+
+    let action_text = if action_required {
+        if documents.len() == 1 {
+            "You'll need to review and accept or acknowledge the updated document the next time you sign in before continuing to use Caution."
+        } else {
+            "You'll need to review and accept or acknowledge the updated documents the next time you sign in before continuing to use Caution."
+        }
+    } else {
+        "No immediate action is required, but we encourage you to review the updated documents."
+    };
+
+    let mut html_documents = String::new();
+    let mut text_documents = String::new();
+
+    for doc in &documents {
+        let document_type = doc["document_type"].as_str().unwrap_or_default();
+        let title_raw = doc["document_title"]
+            .as_str()
+            .unwrap_or_else(|| legal_document_title(document_type));
+        let effective_at_raw = doc["effective_at"].as_str().unwrap_or("N/A");
+        let url_raw = doc["url"].as_str().unwrap_or("https://caution.co");
+
+        let title = html_escape(title_raw);
+        let effective_at = html_escape(effective_at_raw);
+        let url = html_escape(url_raw);
+
+        html_documents.push_str(&format!(
+            r#"
+            <tr>
+                <td style="padding: 12px 0; border-top: 1px solid #eee;">
+                    <strong>{}</strong><br>
+                    <span style="color: #7f8c8d; font-size: 14px;">Effective: {}</span>
+                </td>
+                <td style="padding: 12px 0; border-top: 1px solid #eee; text-align: right;">
+                    <a href="{}" style="color: #3498db;">Review</a>
+                </td>
+            </tr>"#,
+            title, effective_at, url
+        ));
+
+        text_documents.push_str(&format!(
+            "- {}\n  Effective: {}\n  Review: {}\n\n",
+            title_raw, effective_at_raw, url_raw
+        ));
+    }
+
+    if documents.is_empty() {
+        html_documents.push_str(
+            r#"
+            <tr>
+                <td style="padding: 12px 0; border-top: 1px solid #eee;">
+                    <strong>Legal documents</strong>
+                </td>
+                <td style="padding: 12px 0; border-top: 1px solid #eee; text-align: right;">
+                    <a href="https://caution.co" style="color: #3498db;">Review</a>
+                </td>
+            </tr>"#,
+        );
+        text_documents.push_str("- Legal documents\n  Review: https://caution.co\n\n");
+    }
+
+    let html_body = format!(
+        r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Updated Legal Documents</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background-color: #f4f4f4; padding: 20px; border-radius: 10px;">
+        <h1 style="color: #2c3e50; margin-top: 0;">We updated our legal documents</h1>
+
+        <p>We've updated the following Caution legal documents:</p>
+
+        <div style="background-color: white; padding: 8px 20px; border-radius: 5px; margin: 20px 0;">
+            <table style="width: 100%; border-collapse: collapse;">
+                {}
+            </table>
+        </div>
+
+        <p>{}</p>
+
+        <p style="color: #7f8c8d; font-size: 14px;">
+            This is an account and legal notice, not a marketing email.
+        </p>
+    </div>
+
+{}
+</body>
+</html>
+        "#,
+        html_documents,
+        html_escape(action_text),
+        html_email_footer()
+    );
+
+    let text_body = format!(
+        "We updated our legal documents\n\n\
+         We've updated the following Caution legal documents:\n\n\
+         {}\
+         {}\n\n\
+         This is an account and legal notice, not a marketing email.\n\n\
+         --\n\
+         Caution Team",
+        text_documents, action_text
+    );
+
+    (subject, html_body, text_body)
+}
+
 fn generate_invoice_email(data: &serde_json::Value) -> (String, String, String) {
     let invoice_number_raw = data["invoice_number"].as_str().unwrap_or("N/A");
     let amount_raw = data["amount"].as_str().unwrap_or("$0.00");
@@ -448,13 +605,16 @@ fn generate_invoice_email(data: &serde_json::Value) -> (String, String, String) 
         </p>
     </div>
 
-    <p style="color: #95a5a6; font-size: 12px; text-align: center; margin-top: 20px;">
-        &copy; 2025 Caution. All rights reserved.
-    </p>
+{}
 </body>
 </html>
         "#,
-        invoice_number, invoice_number, date, amount, pdf_link
+        invoice_number,
+        invoice_number,
+        date,
+        amount,
+        pdf_link,
+        html_email_footer()
     );
 
     let text_body = format!(
@@ -513,13 +673,13 @@ fn generate_payment_confirmation_email(data: &serde_json::Value) -> (String, Str
         </p>
     </div>
 
-    <p style="color: #95a5a6; font-size: 12px; text-align: center; margin-top: 20px;">
-        &copy; 2025 Caution. All rights reserved.
-    </p>
+{}
 </body>
 </html>
         "#,
-        invoice_number, amount
+        invoice_number,
+        amount,
+        html_email_footer()
     );
 
     let text_body = format!(
@@ -585,13 +745,13 @@ fn generate_payment_failure_email(data: &serde_json::Value) -> (String, String, 
         </p>
     </div>
 
-    <p style="color: #95a5a6; font-size: 12px; text-align: center; margin-top: 20px;">
-        &copy; 2025 Caution. All rights reserved.
-    </p>
+{}
 </body>
 </html>
         "#,
-        invoice_number, amount
+        invoice_number,
+        amount,
+        html_email_footer()
     );
 
     let text_body = format!(
@@ -665,13 +825,14 @@ fn generate_insufficient_balance_email(data: &serde_json::Value) -> (String, Str
         </p>
     </div>
 
-    <p style="color: #95a5a6; font-size: 12px; text-align: center; margin-top: 20px;">
-        &copy; 2025 Caution. All rights reserved.
-    </p>
+{}
 </body>
 </html>
         "#,
-        invoice_number, amount, topup_url
+        invoice_number,
+        amount,
+        topup_url,
+        html_email_footer()
     );
 
     let text_body = format!(
@@ -727,13 +888,13 @@ fn generate_suspension_warning_email(data: &serde_json::Value) -> (String, Strin
         </p>
     </div>
 
-    <p style="color: #95a5a6; font-size: 12px; text-align: center; margin-top: 20px;">
-        &copy; 2025 Caution. All rights reserved.
-    </p>
+{}
 </body>
 </html>
         "#,
-        amount, days_remaining
+        amount,
+        days_remaining,
+        html_email_footer()
     );
 
     let text_body = format!(
@@ -787,13 +948,13 @@ fn generate_suspension_notice_email(data: &serde_json::Value) -> (String, String
         </p>
     </div>
 
-    <p style="color: #95a5a6; font-size: 12px; text-align: center; margin-top: 20px;">
-        &copy; 2025 Caution. All rights reserved.
-    </p>
+{}
 </body>
 </html>
         "#,
-        amount, app_count
+        amount,
+        app_count,
+        html_email_footer()
     );
 
     let text_body = format!(
@@ -834,9 +995,17 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let from_email =
-        std::env::var("FROM_EMAIL").unwrap_or_else(|_| "noreply@localhost".to_string());
     let from_name = std::env::var("FROM_NAME").unwrap_or_else(|_| "Caution".to_string());
+    let from_email = if test_mode {
+        std::env::var("FROM_EMAIL").unwrap_or_else(|_| "noreply@localhost".to_string())
+    } else {
+        let value = std::env::var("FROM_EMAIL")
+            .map_err(|_| anyhow::anyhow!("FROM_EMAIL must be set when EMAIL_TEST_MODE=false"))?;
+        value
+            .parse::<lettre::Address>()
+            .map_err(|e| anyhow::anyhow!("FROM_EMAIL must be a valid email address: {}", e))?;
+        value
+    };
     let base_url =
         std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
 
@@ -1011,6 +1180,53 @@ mod tests {
     // ---- template dispatch ----
 
     #[test]
+    fn test_html_email_footer_uses_current_year() {
+        let footer = html_email_footer();
+
+        assert!(footer.contains(&format!(
+            "&copy; {} Caution. All rights reserved.",
+            current_year()
+        )));
+    }
+
+    #[test]
+    fn test_legal_notice_email_content_for_both_documents() {
+        let data = serde_json::json!({
+            "action_required": true,
+            "documents": [
+                {
+                    "document_type": "terms_of_service",
+                    "document_title": "Terms of Service",
+                    "effective_at": "2026-05-05",
+                    "url": "https://caution.co/terms.html",
+                    "requires_action": true
+                },
+                {
+                    "document_type": "privacy_notice",
+                    "document_title": "Privacy Notice",
+                    "effective_at": "2026-05-05",
+                    "url": "https://caution.co/privacy.html",
+                    "requires_action": true
+                }
+            ]
+        });
+
+        let (subject, html, text) = generate_legal_notice_email(&data);
+
+        assert_eq!(
+            subject,
+            "Updated Terms of Service and Privacy Notice - Caution"
+        );
+        assert!(html.contains("We updated our legal documents"));
+        assert!(html.contains("Terms of Service"));
+        assert!(html.contains("Privacy Notice"));
+        assert!(html.contains("not a marketing email"));
+        assert!(text.contains("You'll need to review"));
+        assert!(text.contains("https://caution.co/terms.html"));
+        assert!(text.contains("https://caution.co/privacy.html"));
+    }
+
+    #[test]
     fn test_all_templates_dispatched() {
         // Verify the template names match what the dunning loop sends
         let templates = vec![
@@ -1020,6 +1236,7 @@ mod tests {
             "insufficient_balance",
             "suspension_warning",
             "suspension_notice",
+            "legal_notice",
         ];
 
         for template in templates {
@@ -1038,6 +1255,18 @@ mod tests {
                 "insufficient_balance" => generate_insufficient_balance_email(&data),
                 "suspension_warning" => generate_suspension_warning_email(&data),
                 "suspension_notice" => generate_suspension_notice_email(&data),
+                "legal_notice" => generate_legal_notice_email(&serde_json::json!({
+                    "documents": [
+                        {
+                            "document_type": "terms_of_service",
+                            "document_title": "Terms of Service",
+                            "effective_at": "2026-05-05",
+                            "url": "https://caution.co/terms.html",
+                            "requires_action": true,
+                        }
+                    ],
+                    "action_required": true,
+                })),
                 _ => panic!("Unknown template: {}", template),
             };
 
