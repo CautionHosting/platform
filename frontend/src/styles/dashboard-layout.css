@@ -454,8 +454,8 @@
 .nav-submenu {
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  padding-left: 74px;
+  gap: 36px;
+  padding: 20px 0 0 74px;
 }
 
 .nav-subitem {
@@ -466,7 +466,7 @@
   padding: 0;
   border: none;
   background: transparent;
-  color: #555;
+  color: #76777a;
   font-family: inherit;
   font-size: 1rem;
   font-weight: 450;
@@ -477,12 +477,12 @@
 }
 
 .nav-subitem:hover {
-  color: #333;
+  color: #4b4c4f;
 }
 
 .nav-subitem.active {
   color: #0f0f0f;
-  font-weight: 500;
+  font-weight: 550;
 }
 
 .nav-subitem:focus-visible {
@@ -596,7 +596,7 @@
 }
 
 .content-header-description {
-  font-size: clamp(1.05rem, 2vw, 1.095rem);
+  font-size: clamp(1.025rem, 2vw, 1.05rem);
   color: rgba(102, 102, 102, 0.875);
   margin: 0;
   line-height: 1.5;

@@ -12,7 +12,7 @@ use sqlx::{FromRow, PgPool};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{AppState, AuthContext};
+use crate::{validation::validate_email, AppState, AuthContext};
 
 #[derive(Debug, Clone, FromRow)]
 struct LegalDocumentIdentity {
@@ -58,6 +58,12 @@ pub struct SendLegalNoticesRequest {
     pub dry_run: bool,
     #[serde(default)]
     pub document_ids: Option<Vec<Uuid>>,
+    #[serde(default)]
+    pub recipient_ids: Option<Vec<Uuid>>,
+    #[serde(default)]
+    pub recipient_emails: Option<Vec<String>>,
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,14 +85,94 @@ pub struct SendLegalNoticesResponse {
     pub eligible_recipient_count: i64,
     pub already_sent_count: i64,
     pub pending_recipient_count: i64,
+    pub selected_recipient_count: i64,
     pub sent_count: i64,
     pub failed_count: i64,
+    pub has_more: bool,
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct EmailServiceResponse {
     success: bool,
     message: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RecipientSelection {
+    recipient_ids: Option<Vec<Uuid>>,
+    recipient_emails: Option<Vec<String>>,
+    limit: Option<i64>,
+}
+
+impl RecipientSelection {
+    fn from_request(
+        request: &SendLegalNoticesRequest,
+    ) -> Result<Self, (StatusCode, String)> {
+        let recipient_ids = match request.recipient_ids.as_ref() {
+            Some(ids) if ids.is_empty() => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "recipient_ids must not be empty".to_string(),
+                ));
+            }
+            Some(ids) => Some(ids.clone()),
+            None => None,
+        };
+
+        let recipient_emails = match request.recipient_emails.as_ref() {
+            Some(emails) if emails.is_empty() => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "recipient_emails must not be empty".to_string(),
+                ));
+            }
+            Some(emails) => {
+                let mut normalized = Vec::with_capacity(emails.len());
+                for email in emails {
+                    let trimmed = email.trim().to_lowercase();
+                    if trimmed.is_empty() {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            "recipient_emails must not contain empty values".to_string(),
+                        ));
+                    }
+                    validate_email(&trimmed).map_err(|e| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            format!("Invalid recipient email '{}': {}", email, e),
+                        )
+                    })?;
+                    normalized.push(trimmed);
+                }
+                normalized.sort_unstable();
+                normalized.dedup();
+                Some(normalized)
+            }
+            None => None,
+        };
+
+        let limit = match request.limit {
+            Some(0) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "limit must be greater than zero".to_string(),
+                ));
+            }
+            Some(limit) => Some(i64::from(limit)),
+            None => None,
+        };
+
+        Ok(Self {
+            recipient_ids,
+            recipient_emails,
+            limit,
+        })
+    }
+
+    fn limit_or_max(&self) -> i64 {
+        self.limit.unwrap_or(i64::MAX)
+    }
 }
 
 fn expected_event_type(document_type: &str) -> Option<&'static str> {
@@ -351,6 +437,7 @@ pub async fn send_legal_notices(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<SendLegalNoticesRequest>,
 ) -> Result<Json<SendLegalNoticesResponse>, (StatusCode, String)> {
+    let recipient_selection = RecipientSelection::from_request(&payload)?;
     let documents = load_legal_notice_documents(&state.db, payload.document_ids.as_deref()).await?;
     let (terms_document_id, privacy_document_id) = legal_notice_document_ids(&documents)?;
     let dedupe_key = legal_notice_dedupe_key(terms_document_id, privacy_document_id);
@@ -383,12 +470,28 @@ pub async fn send_legal_notices(
         )
     };
 
-    let eligible_recipient_count = count_legal_notice_recipients(&state.db).await?;
-    let already_sent_count =
-        count_sent_legal_notice_deliveries(&state.db, batch_id.or(existing_batch_id)).await?;
-    let recipients =
-        load_pending_legal_notice_recipients(&state.db, batch_id.or(existing_batch_id)).await?;
-    let pending_recipient_count = recipients.len() as i64;
+    let eligible_recipient_count =
+        count_legal_notice_recipients(&state.db, &recipient_selection).await?;
+    let already_sent_count = count_sent_legal_notice_deliveries(
+        &state.db,
+        batch_id.or(existing_batch_id),
+        &recipient_selection,
+    )
+    .await?;
+    let pending_recipient_count = count_pending_legal_notice_recipients(
+        &state.db,
+        batch_id.or(existing_batch_id),
+        &recipient_selection,
+    )
+    .await?;
+    let recipients = load_pending_legal_notice_recipients(
+        &state.db,
+        batch_id.or(existing_batch_id),
+        &recipient_selection,
+    )
+    .await?;
+    let selected_recipient_count = recipients.len() as i64;
+    let has_more = pending_recipient_count > selected_recipient_count;
 
     let response_documents = documents
         .iter()
@@ -411,8 +514,11 @@ pub async fn send_legal_notices(
             eligible_recipient_count,
             already_sent_count,
             pending_recipient_count,
+            selected_recipient_count,
             sent_count: 0,
             failed_count: 0,
+            has_more,
+            limit: recipient_selection.limit,
         }));
     }
 
@@ -487,8 +593,11 @@ pub async fn send_legal_notices(
         eligible_recipient_count,
         already_sent_count,
         pending_recipient_count,
+        selected_recipient_count,
         sent_count,
         failed_count,
+        has_more,
+        limit: recipient_selection.limit,
     }))
 }
 
@@ -636,14 +745,24 @@ async fn upsert_legal_notice_batch(
     })
 }
 
-async fn count_legal_notice_recipients(pool: &PgPool) -> Result<i64, (StatusCode, String)> {
+async fn count_legal_notice_recipients(
+    pool: &PgPool,
+    recipient_selection: &RecipientSelection,
+) -> Result<i64, (StatusCode, String)> {
     sqlx::query_scalar(
         "SELECT COUNT(*)
          FROM users
          WHERE is_active = true
            AND email IS NOT NULL
-           AND email_verified_at IS NOT NULL",
+           AND email_verified_at IS NOT NULL
+           AND (
+                ($1::uuid[] IS NULL AND $2::text[] IS NULL)
+                OR ($1::uuid[] IS NOT NULL AND id = ANY($1))
+                OR ($2::text[] IS NOT NULL AND lower(email) = ANY($2))
+           )",
     )
+    .bind(recipient_selection.recipient_ids.clone())
+    .bind(recipient_selection.recipient_emails.clone())
     .fetch_one(pool)
     .await
     .map_err(|e| {
@@ -658,6 +777,7 @@ async fn count_legal_notice_recipients(pool: &PgPool) -> Result<i64, (StatusCode
 async fn count_sent_legal_notice_deliveries(
     pool: &PgPool,
     batch_id: Option<Uuid>,
+    recipient_selection: &RecipientSelection,
 ) -> Result<i64, (StatusCode, String)> {
     let Some(batch_id) = batch_id else {
         return Ok(0);
@@ -665,11 +785,22 @@ async fn count_sent_legal_notice_deliveries(
 
     sqlx::query_scalar(
         "SELECT COUNT(*)
-         FROM legal_email_deliveries
-         WHERE batch_id = $1
-           AND status = 'sent'",
+         FROM legal_email_deliveries led
+         JOIN users ON users.id = led.user_id
+         WHERE led.batch_id = $1
+           AND led.status = 'sent'
+           AND users.is_active = true
+           AND users.email IS NOT NULL
+           AND users.email_verified_at IS NOT NULL
+           AND (
+                ($2::uuid[] IS NULL AND $3::text[] IS NULL)
+                OR ($2::uuid[] IS NOT NULL AND users.id = ANY($2))
+                OR ($3::text[] IS NOT NULL AND lower(users.email) = ANY($3))
+           )",
     )
     .bind(batch_id)
+    .bind(recipient_selection.recipient_ids.clone())
+    .bind(recipient_selection.recipient_emails.clone())
     .fetch_one(pool)
     .await
     .map_err(|e| {
@@ -681,9 +812,51 @@ async fn count_sent_legal_notice_deliveries(
     })
 }
 
+async fn count_pending_legal_notice_recipients(
+    pool: &PgPool,
+    batch_id: Option<Uuid>,
+    recipient_selection: &RecipientSelection,
+) -> Result<i64, (StatusCode, String)> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM users
+         WHERE is_active = true
+           AND email IS NOT NULL
+           AND email_verified_at IS NOT NULL
+           AND (
+                ($1::uuid[] IS NULL AND $2::text[] IS NULL)
+                OR ($1::uuid[] IS NOT NULL AND id = ANY($1))
+                OR ($2::text[] IS NOT NULL AND lower(email) = ANY($2))
+           )
+           AND (
+                $3::uuid IS NULL
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM legal_email_deliveries led
+                    WHERE led.batch_id = $3
+                      AND led.user_id = users.id
+                      AND led.status = 'sent'
+                )
+           )",
+    )
+    .bind(recipient_selection.recipient_ids.clone())
+    .bind(recipient_selection.recipient_emails.clone())
+    .bind(batch_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to count pending legal notice recipients: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to count pending legal notice recipients".to_string(),
+        )
+    })
+}
+
 async fn load_pending_legal_notice_recipients(
     pool: &PgPool,
     batch_id: Option<Uuid>,
+    recipient_selection: &RecipientSelection,
 ) -> Result<Vec<LegalNoticeRecipient>, (StatusCode, String)> {
     sqlx::query_as::<_, LegalNoticeRecipient>(
         "SELECT id, email
@@ -692,18 +865,27 @@ async fn load_pending_legal_notice_recipients(
            AND email IS NOT NULL
            AND email_verified_at IS NOT NULL
            AND (
-                $1::uuid IS NULL
+                ($1::uuid[] IS NULL AND $2::text[] IS NULL)
+                OR ($1::uuid[] IS NOT NULL AND id = ANY($1))
+                OR ($2::text[] IS NOT NULL AND lower(email) = ANY($2))
+           )
+           AND (
+                $3::uuid IS NULL
                 OR NOT EXISTS (
                     SELECT 1
                     FROM legal_email_deliveries led
-                    WHERE led.batch_id = $1
+                    WHERE led.batch_id = $3
                       AND led.user_id = users.id
                       AND led.status = 'sent'
                 )
            )
-         ORDER BY created_at ASC, id ASC",
+         ORDER BY created_at ASC, id ASC
+         LIMIT $4",
     )
+    .bind(recipient_selection.recipient_ids.clone())
+    .bind(recipient_selection.recipient_emails.clone())
     .bind(batch_id)
+    .bind(recipient_selection.limit_or_max())
     .fetch_all(pool)
     .await
     .map_err(|e| {
@@ -912,5 +1094,76 @@ mod tests {
             }),
         );
         assert!(!status.requires_action);
+    }
+
+    #[test]
+    fn test_recipient_selection_normalizes_emails_and_limit() {
+        let request = SendLegalNoticesRequest {
+            dry_run: true,
+            document_ids: None,
+            recipient_ids: None,
+            recipient_emails: Some(vec![
+                " User@example.com ".to_string(),
+                "other@example.com".to_string(),
+                "user@example.com".to_string(),
+            ]),
+            limit: Some(25),
+        };
+
+        let selection = RecipientSelection::from_request(&request).unwrap();
+
+        assert_eq!(
+            selection.recipient_emails,
+            Some(vec![
+                "other@example.com".to_string(),
+                "user@example.com".to_string(),
+            ])
+        );
+        assert_eq!(selection.limit, Some(25));
+    }
+
+    #[test]
+    fn test_recipient_selection_rejects_empty_ids() {
+        let request = SendLegalNoticesRequest {
+            dry_run: true,
+            document_ids: None,
+            recipient_ids: Some(Vec::new()),
+            recipient_emails: None,
+            limit: None,
+        };
+
+        let error = RecipientSelection::from_request(&request).unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("recipient_ids"));
+    }
+
+    #[test]
+    fn test_recipient_selection_rejects_invalid_email() {
+        let request = SendLegalNoticesRequest {
+            dry_run: true,
+            document_ids: None,
+            recipient_ids: None,
+            recipient_emails: Some(vec!["not-an-email".to_string()]),
+            limit: None,
+        };
+
+        let error = RecipientSelection::from_request(&request).unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("Invalid recipient email"));
+    }
+
+    #[test]
+    fn test_recipient_selection_rejects_zero_limit() {
+        let request = SendLegalNoticesRequest {
+            dry_run: true,
+            document_ids: None,
+            recipient_ids: None,
+            recipient_emails: None,
+            limit: Some(0),
+        };
+
+        let error = RecipientSelection::from_request(&request).unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("limit"));
     }
 }

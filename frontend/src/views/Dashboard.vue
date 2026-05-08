@@ -1372,7 +1372,7 @@ make build-cli
       <div class="billing-section">
         <h3 class="billing-section-title">Managed Resource Usage Breakdown</h3>
         <div v-if="loadingBilling" class="list-item-empty">Loading billing data...</div>
-        <div v-else-if="billingData.items?.length === 0" class="list-item-empty">
+        <div v-else-if="billingData.items?.length === 0" class="list-item-empty dashboard-tab-empty">
           No usage this billing period.
         </div>
         <div v-else class="billing-table">
@@ -1397,7 +1397,7 @@ make build-cli
       <div class="billing-section">
         <h3 class="billing-section-title">Subscription Spend</h3>
         <div v-if="loadingBilling" class="list-item-empty">Loading billing data...</div>
-        <div v-else-if="billingData.subscriptionItems?.length === 0" class="list-item-empty">
+        <div v-else-if="billingData.subscriptionItems?.length === 0" class="list-item-empty dashboard-tab-empty">
           No subscription charges this billing period.
         </div>
         <div v-else class="billing-table">
@@ -4490,7 +4490,7 @@ export default {
 
 .dashboard-tab-empty {
   color: #9a9a9a;
-  font-size: clamp(1rem, 2vw, 1.05rem);
+  font-size: clamp(1rem, 2vw, 1.025rem);
   line-height: 1.5;
   text-align: center;
 }

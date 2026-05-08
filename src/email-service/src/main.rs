@@ -995,9 +995,17 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let from_email =
-        std::env::var("FROM_EMAIL").unwrap_or_else(|_| "noreply@localhost".to_string());
     let from_name = std::env::var("FROM_NAME").unwrap_or_else(|_| "Caution".to_string());
+    let from_email = if test_mode {
+        std::env::var("FROM_EMAIL").unwrap_or_else(|_| "noreply@localhost".to_string())
+    } else {
+        let value = std::env::var("FROM_EMAIL")
+            .map_err(|_| anyhow::anyhow!("FROM_EMAIL must be set when EMAIL_TEST_MODE=false"))?;
+        value
+            .parse::<lettre::Address>()
+            .map_err(|e| anyhow::anyhow!("FROM_EMAIL must be a valid email address: {}", e))?;
+        value
+    };
     let base_url =
         std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
 

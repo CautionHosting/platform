@@ -35,6 +35,26 @@ psql_pretty() {
     psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" "$@"
 }
 
+validate_positive_integer() {
+    local value="$1"
+    if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Error: Expected a positive integer, got: $value"
+        exit 1
+    fi
+}
+
+validate_email_arg() {
+    local email="$1"
+    if ! [[ "$email" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]]; then
+        echo "Error: Invalid email format: $email"
+        exit 1
+    fi
+}
+
+json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
 cmd_help() {
     cat <<EOF
 Caution Admin CLI
@@ -62,7 +82,10 @@ Commands:
   activate-legal-doc     Activate a legal document version
                          (deactivates prior active version of same type)
   send-legal-notices     Dry-run legal notice email delivery for active docs
-                         Use --send to send; optional doc IDs limit scope
+                         Use --send to send; supports recipient scoping,
+                         batching, and explicit confirmation
+                         Flags: --recipient-id <uuid>, --recipient-email <email>,
+                         --limit <n>, --confirm, --api-url <url>
   user-legal-status <id> Show legal status for a user
 
 Examples:
@@ -73,7 +96,8 @@ Examples:
   ./utils/admin add-legal-doc
   ./utils/admin activate-legal-doc 123e4567-e89b-12d3-a456-426614174000
   ./utils/admin send-legal-notices
-  ./utils/admin send-legal-notices --send 123e4567-e89b-12d3-a456-426614174000
+  ./utils/admin send-legal-notices --send --limit 25 --recipient-email ops@caution.co
+  ./utils/admin send-legal-notices --send --confirm 123e4567-e89b-12d3-a456-426614174000
 EOF
 }
 
@@ -458,21 +482,47 @@ cmd_user_legal_status() {
 
 cmd_send_legal_notices() {
     local dry_run="true"
+    local send_requested="false"
+    local confirm_send="false"
     local api_url="${API_URL:-http://localhost:8080}"
     local doc_ids=()
+    local recipient_ids=()
+    local recipient_emails=()
+    local limit=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --send)
+                send_requested="true"
                 dry_run="false"
                 shift
                 ;;
             --dry-run)
+                send_requested="false"
                 dry_run="true"
+                shift
+                ;;
+            --confirm)
+                confirm_send="true"
                 shift
                 ;;
             --api-url)
                 api_url="${2:-}"
+                shift 2
+                ;;
+            --recipient-id)
+                validate_uuid "${2:-}"
+                recipient_ids+=("${2:-}")
+                shift 2
+                ;;
+            --recipient-email)
+                validate_email_arg "${2:-}"
+                recipient_emails+=("${2:-}")
+                shift 2
+                ;;
+            --limit)
+                validate_positive_integer "${2:-}"
+                limit="${2:-}"
                 shift 2
                 ;;
             *)
@@ -488,38 +538,115 @@ cmd_send_legal_notices() {
         exit 1
     fi
 
-    local payload
-    if [[ ${#doc_ids[@]} -eq 0 ]]; then
-        payload="{\"dry_run\":$dry_run}"
-    else
-        local ids_json=""
-        for doc_id in "${doc_ids[@]}"; do
-            if [[ -n "$ids_json" ]]; then
-                ids_json+=","
-            fi
-            ids_json+="\"$doc_id\""
-        done
-        payload="{\"dry_run\":$dry_run,\"document_ids\":[$ids_json]}"
-    fi
+    build_payload() {
+        local payload_dry_run="$1"
+        local payload="{\"dry_run\":$payload_dry_run}"
 
-    if [[ "$dry_run" == "true" ]]; then
+        if [[ ${#doc_ids[@]} -gt 0 ]]; then
+            local ids_json=""
+            local doc_id
+            for doc_id in "${doc_ids[@]}"; do
+                if [[ -n "$ids_json" ]]; then
+                    ids_json+=","
+                fi
+                ids_json+="\"$doc_id\""
+            done
+            payload="${payload%}}"
+            payload+=",\"document_ids\":[$ids_json]}"
+        fi
+
+        if [[ ${#recipient_ids[@]} -gt 0 ]]; then
+            local recipient_ids_json=""
+            local recipient_id
+            for recipient_id in "${recipient_ids[@]}"; do
+                if [[ -n "$recipient_ids_json" ]]; then
+                    recipient_ids_json+=","
+                fi
+                recipient_ids_json+="\"$recipient_id\""
+            done
+            payload="${payload%}}"
+            payload+=",\"recipient_ids\":[$recipient_ids_json]}"
+        fi
+
+        if [[ ${#recipient_emails[@]} -gt 0 ]]; then
+            local recipient_emails_json=""
+            local recipient_email
+            for recipient_email in "${recipient_emails[@]}"; do
+                if [[ -n "$recipient_emails_json" ]]; then
+                    recipient_emails_json+=","
+                fi
+                recipient_emails_json+="\"$(json_escape "$recipient_email")\""
+            done
+            payload="${payload%}}"
+            payload+=",\"recipient_emails\":[$recipient_emails_json]}"
+        fi
+
+        if [[ -n "$limit" ]]; then
+            payload="${payload%}}"
+            payload+=",\"limit\":$limit}"
+        fi
+
+        printf '%s' "$payload"
+    }
+
+    request_send() {
+        local payload="$1"
+        curl -sf \
+            -H "Content-Type: application/json" \
+            -H "x-internal-service-secret: $INTERNAL_SERVICE_SECRET" \
+            -d "$payload" \
+            "$api_url/internal/legal-notices/send"
+    }
+
+    print_response() {
+        local response="$1"
+        if command -v jq >/dev/null 2>&1; then
+            echo "$response" | jq .
+        else
+            echo "$response"
+        fi
+    }
+
+    if [[ "$send_requested" != "true" ]]; then
         echo "Dry-running legal notice email delivery..."
-    else
-        echo "Sending legal notice emails..."
+        print_response "$(request_send "$(build_payload "true")")"
+        return
     fi
 
-    local response
-    response="$(curl -sf \
-        -H "Content-Type: application/json" \
-        -H "x-internal-service-secret: $INTERNAL_SERVICE_SECRET" \
-        -d "$payload" \
-        "$api_url/internal/legal-notices/send")"
+    echo "Preparing legal notice send with a dry-run preview..."
+    local dry_run_response
+    dry_run_response="$(request_send "$(build_payload "true")")"
+    print_response "$dry_run_response"
 
     if command -v jq >/dev/null 2>&1; then
-        echo "$response" | jq .
-    else
-        echo "$response"
+        local selected_count pending_count
+        selected_count="$(echo "$dry_run_response" | jq -r '.selected_recipient_count // 0')"
+        pending_count="$(echo "$dry_run_response" | jq -r '.pending_recipient_count // 0')"
+
+        if [[ "$selected_count" == "0" || "$pending_count" == "0" ]]; then
+            echo "No pending recipients selected for this run. Nothing will be sent."
+            return
+        fi
     fi
+
+    if [[ "$confirm_send" != "true" ]]; then
+        if [[ ! -t 0 ]]; then
+            echo "Error: Refusing to send without --confirm in a non-interactive shell"
+            exit 1
+        fi
+
+        echo ""
+        echo "Type SEND to confirm legal notice email delivery:"
+        local confirmation=""
+        read -r confirmation
+        if [[ "$confirmation" != "SEND" ]]; then
+            echo "Send cancelled."
+            exit 1
+        fi
+    fi
+
+    echo "Sending legal notice emails..."
+    print_response "$(request_send "$(build_payload "false")")"
 }
 
 main() {
