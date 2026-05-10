@@ -362,6 +362,7 @@ run-frontend: network
 		--network $(NETWORK) \
 		-p 3000:3000 \
 		-e VITE_PROXY_TARGET=$(VITE_PROXY_TARGET) \
+		-e VITE_ALLOWED_HOSTS=$(VITE_ALLOWED_HOSTS) \
 		-e VITE_PADDLE_SANDBOX=$(VITE_PADDLE_SANDBOX) \
 		caution-frontend
 	@echo "Frontend started on port 3000"
@@ -561,6 +562,7 @@ run-frontend-test: network
 		--network $(NETWORK) \
 		-p 127.0.0.1:3000:3000 \
 		-e VITE_PROXY_TARGET=$(VITE_PROXY_TARGET) \
+		-e VITE_ALLOWED_HOSTS=$(VITE_ALLOWED_HOSTS) \
 		-e VITE_PADDLE_SANDBOX=$(VITE_PADDLE_SANDBOX) \
 		caution-frontend
 	@echo "Frontend started on 127.0.0.1:3000"
