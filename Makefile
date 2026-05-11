@@ -27,6 +27,94 @@ endif
 
 DEV_BUILD_ARGS := --build-arg CARGO_BUILD_FLAGS="" --build-arg CARGO_PROFILE_DIR="debug" --build-arg EXTRA_RUSTFLAGS=""
 
+env_pass = $(if $(strip $($(1))),-e $(1))
+
+API_ENV_VARS = \
+	$(call env_pass,AWS_ACCESS_KEY_ID) \
+	$(call env_pass,AWS_ACCOUNT_ID) \
+	$(call env_pass,AWS_CONFIG_FILE) \
+	$(call env_pass,AWS_DEFAULT_REGION) \
+	$(call env_pass,AWS_REGION) \
+	$(call env_pass,AWS_PROFILE) \
+	$(call env_pass,AWS_SECRET_ACCESS_KEY) \
+	$(call env_pass,AWS_SHARED_CREDENTIALS_FILE) \
+	$(call env_pass,AWS_SESSION_TOKEN) \
+	$(call env_pass,BOOTPROOF_COMMIT) \
+	$(call env_pass,BUILDER_AMI_ID) \
+	$(call env_pass,BUILDER_INSTANCE_PROFILE) \
+	$(call env_pass,BUILDER_SECURITY_GROUP_ID) \
+	$(call env_pass,BUILDER_SUBNET_ID) \
+	$(call env_pass,BUILDER_TIMEOUT_SECS) \
+	$(call env_pass,CAUTION_ENCRYPTION_KEY) \
+	$(call env_pass,CAUTION_GPG_KEY_PATH) \
+	$(call env_pass,CAUTION_GPG_PRIVATE_KEY) \
+	$(call env_pass,EIF_S3_BUCKET) \
+	$(call env_pass,EMAIL_SERVICE_URL) \
+	$(call env_pass,FRONTEND_URL) \
+	$(call env_pass,GIT_HOSTNAME) \
+	$(call env_pass,INTERNAL_SERVICE_SECRET) \
+	$(call env_pass,LOCKSMITH_COMMIT) \
+	$(call env_pass,METERING_SERVICE_URL) \
+	$(call env_pass,PADDLE_API_KEY) \
+	$(call env_pass,PADDLE_API_URL) \
+	$(call env_pass,PADDLE_CLIENT_TOKEN) \
+	$(call env_pass,PADDLE_CREDITS_PRICE_ID_1000) \
+	$(call env_pass,PADDLE_CREDITS_PRICE_ID_10000) \
+	$(call env_pass,PADDLE_CREDITS_PRICE_ID_5000) \
+	$(call env_pass,PADDLE_SETUP_PRICE_ID) \
+	$(call env_pass,REMOTE_BUILDER_HELPER_PATH) \
+	$(call env_pass,RUST_LOG) \
+	$(call env_pass,SSH_KEY_NAME) \
+	$(call env_pass,SSH_PORT) \
+	$(call env_pass,STEVE_COMMIT) \
+	$(call env_pass,TERRAFORM_STATE_BUCKET)
+
+GATEWAY_ENV_VARS = \
+	$(call env_pass,API_SERVICE_URL) \
+	$(call env_pass,CSRF_SECRET) \
+	$(call env_pass,DB_MAX_CONNECTIONS) \
+	$(call env_pass,ENVIRONMENT) \
+	$(call env_pass,FRONTEND_DIR) \
+	$(call env_pass,INTERNAL_SERVICE_SECRET) \
+	$(call env_pass,METERING_SERVICE_URL) \
+	$(call env_pass,PORT) \
+	$(call env_pass,RP_DISPLAY_NAME) \
+	$(call env_pass,RP_ID) \
+	$(call env_pass,RP_ORIGINS) \
+	$(call env_pass,RUST_LOG) \
+	$(call env_pass,SESSION_TIMEOUT_HOURS)
+
+EMAIL_ENV_VARS = \
+	$(call env_pass,EMAIL_TEST_MODE) \
+	$(call env_pass,ENVIRONMENT) \
+	$(call env_pass,FROM_EMAIL) \
+	$(call env_pass,FROM_NAME) \
+	$(call env_pass,FRONTEND_URL) \
+	$(call env_pass,SMTP_HOST) \
+	$(call env_pass,SMTP_PASSWORD) \
+	$(call env_pass,SMTP_PORT) \
+	$(call env_pass,SMTP_USERNAME)
+
+METERING_ENV_VARS = \
+	$(call env_pass,API_URL) \
+	$(call env_pass,AWS_ACCESS_KEY_ID) \
+	$(call env_pass,AWS_CONFIG_FILE) \
+	$(call env_pass,AWS_DEFAULT_REGION) \
+	$(call env_pass,AWS_REGION) \
+	$(call env_pass,AWS_PROFILE) \
+	$(call env_pass,AWS_SECRET_ACCESS_KEY) \
+	$(call env_pass,AWS_SHARED_CREDENTIALS_FILE) \
+	$(call env_pass,AWS_SESSION_TOKEN) \
+	$(call env_pass,EMAIL_SERVICE_URL) \
+	$(call env_pass,ENABLE_TEST_ENDPOINTS) \
+	$(call env_pass,ENVIRONMENT) \
+	$(call env_pass,INTERNAL_SERVICE_SECRET) \
+	$(call env_pass,METERING_INTERVAL_SECS) \
+	$(call env_pass,PADDLE_API_KEY) \
+	$(call env_pass,PADDLE_API_URL) \
+	$(call env_pass,PADDLE_WEBHOOK_SECRET) \
+	$(call env_pass,RUST_LOG)
+
 build-gateway:
 	@echo "Building Gateway binary..."
 	@mkdir -p $(OUT_DIR)
@@ -302,11 +390,10 @@ run-api: network postgres
 		--dns 8.8.8.8 \
 		--dns 8.8.4.4 \
 		--group-add $$(stat -c '%g' /var/run/docker.sock) \
-		-e AWS_REGION=us-west-2 \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
 		-e DATABASE_URL=$(DATABASE_URL) \
-		--env-file .env \
+		$(API_ENV_VARS) \
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
@@ -323,11 +410,11 @@ run-gateway: network
 		--network $(NETWORK) \
 		-p 8000:8080 \
 		-p $(SSH_PORT):$(SSH_PORT) \
-		--env-file .env \
 		-e DATABASE_URL=$(DATABASE_URL) \
 		-e SSH_PORT=$(SSH_PORT) \
 		-e SSH_HOST_KEY_PATH=$(CONTAINER_DATA_DIR)/ssh_host_ed25519_key \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
+		$(GATEWAY_ENV_VARS) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		caution-gateway
 	@echo "Gateway started on port 8000 (HTTP) and $(SSH_PORT) (SSH)"
@@ -337,8 +424,8 @@ run-email: network
 	@docker run -d \
 		--name email \
 		--network $(NETWORK) \
-		--env-file .env \
 		-e EMAIL_BIND_ADDR=0.0.0.0:8082 \
+		$(EMAIL_ENV_VARS) \
 		-p 127.0.0.1:8082:8082 \
 		caution-email
 	@echo "Email service started on http://localhost:8082"
@@ -348,7 +435,7 @@ run-metering: network postgres
 	@docker run -d \
 		--name metering \
 		--network $(NETWORK) \
-		--env-file .env \
+		$(METERING_ENV_VARS) \
 		-e DATABASE_URL=$(DATABASE_URL) \
 		-e METERING_INTERVAL_SECS=60 \
 		$(if $(wildcard $(PWD)/prices.json),-v $(PWD)/prices.json:/app/prices.json:ro) \
@@ -511,8 +598,7 @@ run-api-test: network
 		--dns 8.8.4.4 \
 		-p 127.0.0.1:8080:8080 \
 		--group-add $$(stat -c '%g' /var/run/docker.sock) \
-		--env-file .env \
-		-e AWS_REGION=us-west-2 \
+		$(API_ENV_VARS) \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
@@ -533,11 +619,11 @@ run-gateway-test: network
 		--network $(NETWORK) \
 		-p 127.0.0.1:8000:8080 \
 		-p 127.0.0.1:$(SSH_PORT):$(SSH_PORT) \
-		--env-file .env \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
 		-e SSH_PORT=$(SSH_PORT) \
 		-e SSH_HOST_KEY_PATH=$(CONTAINER_DATA_DIR)/ssh_host_ed25519_key \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
+		$(GATEWAY_ENV_VARS) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		caution-gateway
 	@echo "Gateway started on 127.0.0.1:8000 (HTTP) and 127.0.0.1:$(SSH_PORT) (SSH)"
@@ -547,7 +633,7 @@ run-email-test: network
 	@docker run -d \
 		--name email \
 		--network $(NETWORK) \
-		--env-file .env \
+		$(EMAIL_ENV_VARS) \
 		-e FRONTEND_URL=http://localhost:3000 \
 		-e EMAIL_TEST_MODE=true \
 		-e EMAIL_BIND_ADDR=0.0.0.0:8082 \
@@ -573,7 +659,7 @@ run-metering-test: network
 		--name metering \
 		--network $(NETWORK) \
 		-p 127.0.0.1:8083:8083 \
-		--env-file .env \
+		$(METERING_ENV_VARS) \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
 		-e METERING_INTERVAL_SECS=9999 \
 		-e ENABLE_TEST_ENDPOINTS=true \
