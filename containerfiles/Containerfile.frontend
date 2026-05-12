@@ -4,7 +4,7 @@ FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769f
 FROM stagex/core-curl@sha256:bc8bab43d96a9167fbb85022ea773644a45ef335e7a9b747f203078973fa988e AS curl
 FROM stagex/core-busybox@sha256:637b1e0d9866807fac94c22d6dc4b2e1f45c8a5ca1113c88172e0324a30c7283 AS busybox
 
-FROM pallet-nodejs AS builder
+FROM pallet-nodejs AS frontend-deps
 
 COPY --from=npm . /
 COPY --from=git . /
@@ -16,6 +16,12 @@ WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json* ./
 
 RUN npm ci
+
+FROM frontend-deps AS npm-audit
+
+RUN npm audit --audit-level=high
+
+FROM frontend-deps AS builder
 
 COPY frontend/ ./
 

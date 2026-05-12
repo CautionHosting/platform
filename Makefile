@@ -75,7 +75,7 @@ build-metering:
 
 audit-frontend:
 	@echo "Auditing Frontend npm dependencies..."
-	@cd frontend && npm audit --audit-level=high
+	@docker build -f ./containerfiles/Containerfile.frontend --target npm-audit .
 
 build-frontend: audit-frontend
 	@echo "Building Frontend..."
