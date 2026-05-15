@@ -2387,6 +2387,38 @@ pub async fn redeem_credit_code(
         new_balance
     );
 
+    if new_balance > 0 {
+        let suspended: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT credit_suspended_at FROM organizations WHERE id = $1")
+                .bind(org_id)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten()
+                .flatten();
+
+        if suspended.is_some() {
+            tracing::info!(
+                "Clearing credit suspension for org {} after credit code redemption",
+                org_id
+            );
+            if let Err(e) =
+                sqlx::query("UPDATE organizations SET credit_suspended_at = NULL WHERE id = $1")
+                    .bind(org_id)
+                    .execute(&state.db)
+                    .await
+            {
+                tracing::error!(
+                    "Failed to clear credit suspension for org {} after credit code redemption: {}",
+                    org_id,
+                    e
+                );
+            }
+
+            let _ = call_internal_unsuspend(&state, org_id).await;
+        }
+    }
+
     Ok(Json(serde_json::json!({
         "success": true,
         "amount_cents": amount_cents,
