@@ -29,3 +29,16 @@ EXPOSE 3000
 
 ENTRYPOINT []
 CMD ["/usr/bin/npm", "run", "dev"]
+
+FROM builder AS static-builder
+
+ARG VITE_PADDLE_SANDBOX
+
+ENV ENVIRONMENT=production
+ENV NODE_ENV=production
+
+RUN VITE_PADDLE_SANDBOX="${VITE_PADDLE_SANDBOX}" /usr/bin/npm run build
+
+FROM scratch AS static
+
+COPY --from=static-builder /app/dist /

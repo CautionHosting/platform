@@ -10,6 +10,18 @@ export default defineConfig(({ mode }) => {
   const allowedHosts = env.VITE_ALLOWED_HOSTS
     ? env.VITE_ALLOWED_HOSTS.split(',').map((host) => host.trim()).filter(Boolean)
     : []
+  const proxyOptions = {
+    target: proxyTarget,
+    changeOrigin: true,
+    secure: false,
+    cookieDomainRewrite: ''
+  }
+  const proxy = Object.fromEntries(
+    ['/api', '/auth', '/ssh-keys', '/passkeys', '/health'].map((path) => [
+      path,
+      { ...proxyOptions },
+    ]),
+  )
 
   return {
     plugins: [vue()],
@@ -20,38 +32,7 @@ export default defineConfig(({ mode }) => {
       hmr: {
         overlay: false,
       },
-      proxy: {
-        '/api': {
-          target: proxyTarget,
-          changeOrigin: true,
-          secure: false,
-          cookieDomainRewrite: ''
-        },
-        '/auth': {
-          target: proxyTarget,
-          changeOrigin: true,
-          secure: false,
-          cookieDomainRewrite: ''
-        },
-        '/ssh-keys': {
-          target: proxyTarget,
-          changeOrigin: true,
-          secure: false,
-          cookieDomainRewrite: ''
-        },
-        '/passkeys': {
-          target: proxyTarget,
-          changeOrigin: true,
-          secure: false,
-          cookieDomainRewrite: ''
-        },
-        '/health': {
-          target: proxyTarget,
-          changeOrigin: true,
-          secure: false,
-          cookieDomainRewrite: ''
-        }
-      }
+      proxy,
     },
     build: {
       outDir: 'dist',

@@ -6,7 +6,7 @@ export
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-macos-untrusted install-cli install-cli-macos-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner audit-frontend
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-macos-untrusted install-cli install-cli-macos-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -20,6 +20,14 @@ DB_VOLUME := caution-postgres-data
 SSH_PORT ?= 2222
 CAUTION_DATA_DIR ?= $(PWD)/caution-cache
 CONTAINER_DATA_DIR := /var/cache/caution
+
+ifeq ($(ENVIRONMENT),production)
+FRONTEND_BUILD_TARGET := build-frontend-dist
+FRONTEND_STATUS := Frontend: served by gateway from $(OUT_DIR)/frontend
+else
+FRONTEND_BUILD_TARGET := build-frontend
+FRONTEND_STATUS := Frontend: http://localhost:3000 (dev server with hot reload)
+endif
 
 ifdef NOCACHE
 	NO_CACHE := --no-cache
@@ -79,8 +87,19 @@ audit-frontend:
 
 build-frontend: audit-frontend
 	@echo "Building Frontend..."
-	@docker build -t caution-frontend -f ./containerfiles/Containerfile.frontend .
+	@docker build -t caution-frontend -f ./containerfiles/Containerfile.frontend --target builder .
 	@echo "Frontend image built: caution-frontend"
+
+build-frontend-dist:
+	@echo "Building Frontend static assets..."
+	@rm -rf $(OUT_DIR)/frontend
+	@docker build \
+		-f ./containerfiles/Containerfile.frontend \
+		--target static \
+		$(if $(VITE_PADDLE_SANDBOX),--build-arg VITE_PADDLE_SANDBOX=$(VITE_PADDLE_SANDBOX)) \
+		--output type=local,dest=$(OUT_DIR)/frontend \
+		.
+	@echo "Frontend static assets built in $(OUT_DIR)/frontend"
 
 # CLI release variables
 CLI_VERSION := $(shell grep '^version' src/cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
@@ -245,7 +264,7 @@ install-cli-macos-untrusted: build-cli-macos-untrusted
 	install -m 0755 $(CLI_OUT_DIR)/$(CLI_MACOS_UNTRUSTED_BINARY) "$$DEST_DIR/caution"; \
 	echo "Installed untrusted macOS caution to $$DEST_DIR/caution"
 
-build-all: build-gateway build-api build-email build-metering build-frontend build-cli
+build-all: build-gateway build-api build-email build-metering $(FRONTEND_BUILD_TARGET) build-cli
 
 network:
 	@docker network inspect $(NETWORK) >/dev/null 2>&1 || \
@@ -333,6 +352,7 @@ run-gateway: network
 		-e SSH_HOST_KEY_PATH=$(CONTAINER_DATA_DIR)/ssh_host_ed25519_key \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
+		$(if $(wildcard $(OUT_DIR)/frontend/index.html),-v $(PWD)/$(OUT_DIR)/frontend:/app/frontend:ro) \
 		caution-gateway
 	@echo "Gateway started on port 8000 (HTTP) and $(SSH_PORT) (SSH)"
 
@@ -360,16 +380,22 @@ run-metering: network postgres
 	@echo "Metering service started (internal port 8083)"
 
 run-frontend: network
+ifeq ($(ENVIRONMENT),production)
+	@docker rm -f frontend 2>/dev/null || true
+	@echo "ENVIRONMENT=production: frontend is static and served by gateway from $(OUT_DIR)/frontend."
+else
 	@docker rm -f frontend 2>/dev/null || true
 	@docker run -d \
 		--name frontend \
 		--network $(NETWORK) \
 		-p 3000:3000 \
+		-e ENVIRONMENT=$(ENVIRONMENT) \
 		-e VITE_PROXY_TARGET=$(VITE_PROXY_TARGET) \
 		-e VITE_ALLOWED_HOSTS=$(VITE_ALLOWED_HOSTS) \
 		-e VITE_PADDLE_SANDBOX=$(VITE_PADDLE_SANDBOX) \
 		caution-frontend
 	@echo "Frontend started on port 3000"
+endif
 
 # =============================================================================
 # =============================================================================
@@ -378,13 +404,13 @@ run-frontend: network
 
 up: migrate
 	@echo "Building all images in parallel..."
-	@$(MAKE) build-api build-gateway build-email build-metering build-frontend
+	@$(MAKE) build-api build-gateway build-email build-metering $(FRONTEND_BUILD_TARGET)
 	@$(MAKE) run-email run-metering run-api run-frontend
 	@echo "Waiting for API to be ready..."
 	@sleep 2
 	@$(MAKE) run-gateway
 	@echo "  All services running"
-	@echo "  Frontend: http://localhost:3000 (dev server with hot reload)"
+	@echo "  $(FRONTEND_STATUS)"
 	@echo "  Gateway: http://localhost:8000"
 	@echo "  SSH: localhost:2222"
 	@echo "  API: internal only (http://api:8080)"
@@ -565,6 +591,7 @@ run-frontend-test: network
 		--name frontend \
 		--network $(NETWORK) \
 		-p 127.0.0.1:3000:3000 \
+		-e ENVIRONMENT=$(ENVIRONMENT) \
 		-e VITE_PROXY_TARGET=$(VITE_PROXY_TARGET) \
 		-e VITE_ALLOWED_HOSTS=$(VITE_ALLOWED_HOSTS) \
 		-e VITE_PADDLE_SANDBOX=$(VITE_PADDLE_SANDBOX) \

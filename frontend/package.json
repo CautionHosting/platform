@@ -5,8 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "build": "vite build"
   },
   "dependencies": {
     "attestation-widget": "git+https://git.distrust.co/public/attestation-widget.git#2a9111cdc9b1bfa855fc48032b4ffd013162fb42",
