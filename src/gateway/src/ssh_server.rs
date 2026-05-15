@@ -601,12 +601,20 @@ async fn handle_git_push(
             domain: Option<String>,
         }
 
+        #[derive(serde::Deserialize)]
+        struct DeployErrorResponse {
+            error: String,
+            #[serde(default)]
+            status: Option<u16>,
+        }
+
         // Stream the response to the SSH client with spinner animation for milestones
         let mut stream = response.bytes_stream();
         let mut last_line = String::new();
         let mut buffer = String::new();
         let mut current_milestone: Option<String> = None;
         let mut spinner_stop_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
+        let mut stream_reported_error = false;
 
         let spinner_frames = ["⣼", "⣹", "⢻", "⠿", "⡟", "⣏", "⣧", "⣶"];
 
@@ -693,6 +701,9 @@ async fn handle_git_push(
                                     .extended_data(channel, 1, done_msg.into_bytes().into())
                                     .await;
                             }
+                            if line.starts_with("error:") {
+                                stream_reported_error = true;
+                            }
                             let msg = format!("remote: {}\n", line);
                             let _ = session_handle
                                 .extended_data(channel, 1, msg.into_bytes().into())
@@ -733,6 +744,23 @@ async fn handle_git_push(
         let deploy_result: DeployResponse = match serde_json::from_str(&last_line) {
             Ok(result) => result,
             Err(e) => {
+                if let Ok(api_error) = serde_json::from_str::<DeployErrorResponse>(&last_line) {
+                    tracing::error!(
+                        "Deployment failed with API error: status={:?}, error={}",
+                        api_error.status,
+                        api_error.error
+                    );
+                    if !stream_reported_error {
+                        let error_msg = format!("remote: error: {}\n", api_error.error);
+                        let _ = session_handle
+                            .extended_data(channel, 1, error_msg.into_bytes().into())
+                            .await;
+                    }
+                    let _ = session_handle.exit_status_request(channel, 1).await;
+                    let _ = session_handle.close(channel).await;
+                    return;
+                }
+
                 tracing::error!(
                     "Failed to parse deployment response: {} (line: {})",
                     e,
