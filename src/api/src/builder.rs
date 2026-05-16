@@ -928,7 +928,8 @@ fail() {{
     exit 1
 }}
 
-trap 'fail "Builder script crashed at line $LINENO: $(tail -1 /var/log/cloud-init-output.log 2>/dev/null || echo unknown)"' ERR
+trap 'fail "Builder script crashed at line $LINENO:
+$(tail -80 /build/remote-helper-work/eif-stage/build.log 2>/dev/null || tail -80 /var/log/cloud-init-output.log 2>/dev/null || echo unknown)"' ERR
 
 # Install dependencies
 echo "Installing Docker..."
