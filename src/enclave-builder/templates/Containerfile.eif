@@ -1,4 +1,3 @@
-
 FROM stagex/pallet-rust@sha256:9c38bf1066dd9ad1b6a6b584974dd798c2bf798985bf82e58024fbe0515592ca AS pallet-rust
 FROM stagex/core-busybox@sha256:637b1e0d9866807fac94c22d6dc4b2e1f45c8a5ca1113c88172e0324a30c7283 AS busybox
 FROM stagex/core-musl@sha256:d9af23284cca2e1002cd53159ada469dfe6d6791814e72d6163c7de18d4ae701 AS musl
@@ -32,14 +31,9 @@ WORKDIR /build-steve
 RUN git clone https://git.distrust.co/public/steve.git . && \
     git checkout {{STEVE_COMMIT}}
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    cargo fetch --locked --target $TARGET_ARCH
+RUN cargo fetch --locked --target $TARGET_ARCH
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build-steve/target \
-    cargo build --release --locked --target ${TARGET_ARCH} -p steve \
+RUN cargo build --release --locked --target ${TARGET_ARCH} -p steve \
       && install -D -m 0755 /build-steve/target/${TARGET_ARCH}/release/steve /binaries/steve
 
 # }STEVE
@@ -60,14 +54,9 @@ WORKDIR /build-locksmith
 RUN git clone https://codeberg.org/caution/locksmith.git . && \
     git checkout {{LOCKSMITH_COMMIT}}
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    cargo fetch --locked --target $TARGET_ARCH
+RUN cargo fetch --locked --target $TARGET_ARCH
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build-locksmith/target \
-    cargo build --release --locked --target ${TARGET_ARCH} -p locksmith \
+RUN cargo build --release --locked --target ${TARGET_ARCH} -p locksmith \
       && install -D -m 0755 /build-locksmith/target/${TARGET_ARCH}/release/locksmithd /binaries/locksmithd \
       && install -D -m 0755 /build-locksmith/target/${TARGET_ARCH}/release/locksmith-oneshot /binaries/locksmith-oneshot
 # }LOCKSMITH
@@ -87,14 +76,9 @@ WORKDIR /build-bootproof
 RUN git clone https://git.distrust.co/public/bootproof.git . && \
     git checkout {{BOOTPROOF_COMMIT}}
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    cargo fetch --locked --target $TARGET_ARCH
+RUN cargo fetch --locked --target $TARGET_ARCH
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build-bootproof/target \
-    cargo build --release --locked --target ${TARGET_ARCH} -p bootproofd \
+RUN cargo build --release --locked --target ${TARGET_ARCH} -p bootproofd \
       && install -D -m 0755 /build-bootproof/target/${TARGET_ARCH}/release/bootproofd /binaries/bootproofd
 
 FROM pallet-rust AS enclave-builder
@@ -108,14 +92,9 @@ WORKDIR /build-enclave
 
 COPY enclave/ /build-enclave/
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    cargo fetch --locked --target $TARGET_ARCH
+RUN cargo fetch --locked --target $TARGET_ARCH
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build-enclave/target \
-    cargo build --release --locked --target ${TARGET_ARCH} -p init \
+RUN cargo build --release --locked --target ${TARGET_ARCH} -p init \
       && install -D -m 0755 /build-enclave/target/${TARGET_ARCH}/release/init /binaries/init
 
 FROM busybox AS eif-builder
