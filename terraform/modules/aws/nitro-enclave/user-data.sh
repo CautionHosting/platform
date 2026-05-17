@@ -212,7 +212,7 @@ chown caddy:caddy /var/lib/caddy /var/log/caddy
 %{ if http_port != 0 ~}
 CADDY_DEFAULT_UPSTREAM="reverse_proxy localhost:${http_port}"
 %{ else ~}
-CADDY_DEFAULT_UPSTREAM="respond 404"
+CADDY_DEFAULT_UPSTREAM='respond "No HTTP Gateway Configured" 502'
 %{ endif ~}
 
 %{ if domain != "" ~}
