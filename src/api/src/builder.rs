@@ -481,9 +481,13 @@ pub async fn execute_remote_build(
         Err(sqlx::Error::Database(db_err))
             if db_err.constraint() == Some("idx_eif_builds_active_app") =>
         {
+            tracing::warn!(?db_err, "Reached bad constraint");
             bail!(ACTIVE_BUILD_CONFLICT_MSG);
         }
-        Err(e) => return Err(e).context("Failed to insert eif_builds row"),
+        Err(e) => {
+            tracing::warn!(?e, "Error inserting eif_builds");
+            return Err(e).context("Failed to insert eif_builds row")
+        },
     }
 
     // 2. Generate user-data and launch EC2 instance
