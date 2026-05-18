@@ -460,8 +460,21 @@ pub async fn execute_remote_build(
     let eif_s3_key = format!("eifs/{}/{}.eif", request.org_id, cache_key);
     let procfile_hash = format!("{:x}", Sha256::digest(request.procfile_content.as_bytes()));
 
-    // 1. Insert pending build row
-    let insert_result = sqlx::query(
+    // 1. Check no active build exists for this app
+    let existing = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM eif_builds WHERE app_id = $1 AND status IN ('pending', 'building')"
+    )
+    .bind(request.app_id)
+    .fetch_one(db)
+    .await
+    .context("Failed to check for existing builds")?;
+
+    if existing > 0 {
+        bail!(ACTIVE_BUILD_CONFLICT_MSG);
+    }
+
+    // 2. Insert pending build row
+    sqlx::query(
         "INSERT INTO eif_builds (id, organization_id, app_id, user_id, commit_sha, procfile_hash, cache_key, builder_instance_type, status, started_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', NOW())"
     )
@@ -474,21 +487,8 @@ pub async fn execute_remote_build(
     .bind(cache_key)
     .bind(instance_type)
     .execute(db)
-    .await;
-
-    match insert_result {
-        Ok(_) => {}
-        Err(sqlx::Error::Database(db_err))
-            if db_err.constraint() == Some("idx_eif_builds_active_app") =>
-        {
-            tracing::warn!(?db_err, "Reached bad constraint");
-            bail!(ACTIVE_BUILD_CONFLICT_MSG);
-        }
-        Err(e) => {
-            tracing::warn!(?e, "Error inserting eif_builds");
-            return Err(e).context("Failed to insert eif_builds row")
-        },
-    }
+    .await
+    .context("Failed to insert eif_builds row")?;
 
     // 2. Generate user-data and launch EC2 instance
     let helper_artifact =
