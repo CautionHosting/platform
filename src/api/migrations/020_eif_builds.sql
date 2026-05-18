@@ -30,9 +30,11 @@ CREATE TABLE eif_builds (
 );
 
 -- Only one completed build per org+cache_key (failed/timed out builds don't block retries)
-CREATE UNIQUE INDEX idx_eif_builds_cache_lookup
-    ON eif_builds(organization_id, cache_key)
-    WHERE status = 'completed';
+--CREATE UNIQUE INDEX idx_eif_builds_cache_lookup
+--    ON eif_builds(organization_id, cache_key)
+--    WHERE status = 'completed';
+
+DROP INDEX IF EXISTS idx_eif_builds_cache_lookup;
 
 CREATE INDEX idx_eif_builds_stale
     ON eif_builds(created_at)
