@@ -227,8 +227,8 @@ https://${domain} {
         respond "OK" 200
     }
 
-    handle /steve* {
-        reverse_proxy localhost:8081
+    handle /e2p/* {
+        reverse_proxy localhost:8080
     }
     handle /attestation {
         reverse_proxy localhost:8082
@@ -245,8 +245,8 @@ https://${domain} {
         respond "OK" 200
     }
 
-    handle /steve* {
-        reverse_proxy localhost:8081
+    handle /e2p/* {
+        reverse_proxy localhost:8080
     }
     handle /attestation {
         reverse_proxy localhost:8082
@@ -280,8 +280,8 @@ cat > /etc/caddy/Caddyfile <<EOF
         respond "OK" 200
     }
 
-    handle /steve* {
-        reverse_proxy localhost:8081
+    handle /e2p/* {
+        reverse_proxy localhost:8080
     }
     handle /attestation {
         reverse_proxy localhost:8082
@@ -298,8 +298,8 @@ cat > /etc/caddy/Caddyfile <<EOF
         respond "OK" 200
     }
 
-    handle /steve* {
-        reverse_proxy localhost:8081
+    handle /e2p/* {
+        reverse_proxy localhost:8080
     }
     handle /attestation {
         reverse_proxy localhost:8082
