@@ -80,6 +80,8 @@ pub struct NitroDeploymentRequest {
     pub debug_mode: bool,
     pub ports: Vec<u16>,
     pub http_port: Option<u16>,
+    #[serde(default)]
+    pub locksmith: bool,
     pub ssh_keys: Vec<String>,
     pub domain: Option<String>,
     #[serde(skip)]
@@ -307,6 +309,7 @@ mod tests {
             debug_mode: false,
             ports: vec![],
             http_port: None,
+            locksmith: false,
             ssh_keys: vec![],
             domain: None,
             credentials: None,
@@ -1494,6 +1497,8 @@ resource "aws_security_group" "enclave" {{
     description = "Allow HTTPS"
   }}
 
+  {locksmith_ingress}
+
   # Dynamic user ports
   dynamic "ingress" {{
     for_each = var.ports
@@ -1553,6 +1558,7 @@ resource "aws_instance" "enclave" {{
     debug_mode  = "{debug_mode}"
     ports       = var.ports
     http_port   = var.http_port
+    locksmith   = "{locksmith}"
     ssh_keys    = {ssh_keys_json}
     domain      = "{domain}"
   }}))
@@ -1613,6 +1619,12 @@ output "instance_type" {{
         } else {
             "# SSH enabled (ssh_keys configured in Procfile)\n  ingress {\n    from_port   = 22\n    to_port     = 22\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow SSH\"\n  }".to_string()
         },
+        locksmith_ingress = if request.locksmith {
+            "# Locksmith shard receiver ingress enabled\n  ingress {\n    from_port   = 8084\n    to_port     = 8084\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow Locksmith shard receiver\"\n  }".to_string()
+        } else {
+            "# Locksmith ingress disabled".to_string()
+        },
+        locksmith = if request.locksmith { "true" } else { "false" },
         domain = request.domain.as_deref().unwrap_or(""),
         url_output = if let Some(ref domain) = request.domain {
             format!("https://{}", domain)
@@ -1752,6 +1764,8 @@ resource "aws_security_group" "enclave" {{
     description = "Allow HTTPS"
   }}
 
+  {locksmith_ingress}
+
   dynamic "ingress" {{
     for_each = var.ports
     content {{
@@ -1815,6 +1829,7 @@ resource "aws_launch_template" "enclave" {{
     debug_mode  = "{debug_mode}"
     ports       = var.ports
     http_port   = var.http_port
+    locksmith   = "{locksmith}"
     ssh_keys    = {ssh_keys_json}
     domain      = "{domain}"
   }}))
@@ -1901,6 +1916,12 @@ output "instance_type" {{
         } else {
             "# SSH enabled (ssh_keys configured in Procfile)\n  ingress {\n    from_port   = 22\n    to_port     = 22\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow SSH\"\n  }".to_string()
         },
+        locksmith_ingress = if request.locksmith {
+            "# Locksmith shard receiver ingress enabled\n  ingress {\n    from_port   = 8084\n    to_port     = 8084\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow Locksmith shard receiver\"\n  }".to_string()
+        } else {
+            "# Locksmith ingress disabled".to_string()
+        },
+        locksmith = if request.locksmith { "true" } else { "false" },
         domain = request.domain.as_deref().unwrap_or(""),
         url_output = if let Some(ref domain) = request.domain {
             format!("https://{}", domain)

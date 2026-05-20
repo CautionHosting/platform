@@ -139,7 +139,11 @@ WantedBy=multi-user.target
 EOF
 
 # Create vsock proxy services for standard ports
-for port in 8080 8081 8082; do
+standard_ports="8080 8081 8082"
+%{ if locksmith == "true" ~}
+standard_ports="$standard_ports 8084"
+%{ endif ~}
+for port in $standard_ports; do
 cat > /etc/systemd/system/vsock-proxy-$port.service <<EOF
 [Unit]
 Description=VSock Proxy for Port $port
@@ -178,9 +182,9 @@ EOF
 
 systemctl daemon-reload
 systemctl enable nitro-enclave.service
-systemctl enable vsock-proxy-8080.service
-systemctl enable vsock-proxy-8081.service
-systemctl enable vsock-proxy-8082.service
+for port in $standard_ports; do
+systemctl enable vsock-proxy-$port.service
+done
 %{ for port in ports ~}
 systemctl enable vsock-proxy-${port}.service
 %{ endfor ~}
@@ -190,9 +194,9 @@ systemctl start nitro-enclave.service
 echo "Waiting for enclave to boot before starting host-side proxies..."
 sleep 15
 
-systemctl start vsock-proxy-8080.service
-systemctl start vsock-proxy-8081.service
-systemctl start vsock-proxy-8082.service
+for port in $standard_ports; do
+systemctl start vsock-proxy-$port.service
+done
 %{ for port in ports ~}
 systemctl start vsock-proxy-${port}.service
 %{ endfor ~}
