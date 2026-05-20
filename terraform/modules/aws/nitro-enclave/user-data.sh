@@ -138,10 +138,10 @@ TimeoutStartSec=300
 WantedBy=multi-user.target
 EOF
 
-# Create vsock proxy services for standard ports
-standard_ports="8080 8081 8082"
+# Create vsock proxy services for internal platform ports
+standard_ports="49500 49501 49502"
 %{ if locksmith == "true" ~}
-standard_ports="$standard_ports 8084"
+standard_ports="$standard_ports 49504"
 %{ endif ~}
 for port in $standard_ports; do
 cat > /etc/systemd/system/vsock-proxy-$port.service <<EOF
@@ -232,10 +232,10 @@ https://${domain} {
     }
 
     handle /e2p/* {
-        reverse_proxy localhost:8080
+        reverse_proxy localhost:49500
     }
     handle /attestation {
-        reverse_proxy localhost:8082
+        reverse_proxy localhost:49502
     }
 
     handle {
@@ -250,10 +250,10 @@ https://${domain} {
     }
 
     handle /e2p/* {
-        reverse_proxy localhost:8080
+        reverse_proxy localhost:49500
     }
     handle /attestation {
-        reverse_proxy localhost:8082
+        reverse_proxy localhost:49502
     }
 
     handle {
@@ -285,10 +285,10 @@ cat > /etc/caddy/Caddyfile <<EOF
     }
 
     handle /e2p/* {
-        reverse_proxy localhost:8080
+        reverse_proxy localhost:49500
     }
     handle /attestation {
-        reverse_proxy localhost:8082
+        reverse_proxy localhost:49502
     }
 
     handle {
@@ -303,10 +303,10 @@ cat > /etc/caddy/Caddyfile <<EOF
     }
 
     handle /e2p/* {
-        reverse_proxy localhost:8080
+        reverse_proxy localhost:49500
     }
     handle /attestation {
-        reverse_proxy localhost:8082
+        reverse_proxy localhost:49502
     }
 
     handle {

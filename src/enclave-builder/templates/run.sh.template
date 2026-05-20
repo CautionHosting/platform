@@ -46,21 +46,26 @@ fi
 
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
-echo "Starting bootproofd on port 8082..."
-/bootproofd &
+INTERNAL_E2P_PORT=49500
+INTERNAL_AUX_PORT=49501
+INTERNAL_BOOTPROOFD_PORT=49502
+INTERNAL_LOCKSMITH_PORT=49504
+
+echo "Starting bootproofd on internal port ${INTERNAL_BOOTPROOFD_PORT}..."
+BOOTPROOFD_LISTEN_ADDR="0.0.0.0:${INTERNAL_BOOTPROOFD_PORT}" /bootproofd &
 
 # {STEVE
 echo "Starting STEVE (Secure Transport Encryption Via Enclave)..."
-/steve &
+STEVE_LISTEN_ADDR="0.0.0.0:${INTERNAL_E2P_PORT}" /steve &
 # }STEVE
 
 echo "Starting VSOCK-to-TCP proxies..."
-# Hardcoded proxies for ports 8080, 8081, 8082
-/bin/socat VSOCK-LISTEN:8080,reuseaddr,fork TCP:localhost:8080 &
-/bin/socat VSOCK-LISTEN:8081,reuseaddr,fork TCP:localhost:8081 &
-/bin/socat VSOCK-LISTEN:8082,reuseaddr,fork TCP:localhost:8082 &
+# Internal service proxies use high ports so application ports like 8080 are available.
+/bin/socat VSOCK-LISTEN:${INTERNAL_E2P_PORT},reuseaddr,fork TCP:localhost:${INTERNAL_E2P_PORT} &
+/bin/socat VSOCK-LISTEN:${INTERNAL_AUX_PORT},reuseaddr,fork TCP:localhost:${INTERNAL_AUX_PORT} &
+/bin/socat VSOCK-LISTEN:${INTERNAL_BOOTPROOFD_PORT},reuseaddr,fork TCP:localhost:${INTERNAL_BOOTPROOFD_PORT} &
 # {LOCKSMITH
-/bin/socat VSOCK-LISTEN:8084,reuseaddr,fork TCP:localhost:8084 &
+/bin/socat VSOCK-LISTEN:${INTERNAL_LOCKSMITH_PORT},reuseaddr,fork TCP:localhost:${INTERNAL_LOCKSMITH_PORT} &
 # }LOCKSMITH
 {{CUSTOM_PORT_SECTION}}
 /bin/busybox sleep 2

@@ -14,6 +14,12 @@ const DEFAULT_ENCLAVEOS_COMMIT: &str = "9582e25239430070667fdd0a6b64d887f1c308df
 const DEFAULT_BOOTPROOF_COMMIT: &str = "64dae0628e58b9f898b89f9b7a404b37e2f0ca9f";
 const DEFAULT_STEVE_COMMIT: &str = "ed38a190cd5d7a8f452c854e41d00ec748e172bf";
 const DEFAULT_LOCKSMITH_COMMIT: &str = "d16b74c6b3fd1d1006a5b00e4d9e21a4613947a9";
+const RESERVED_INTERNAL_PORT_START: u16 = 49_500;
+const RESERVED_INTERNAL_PORT_END: u16 = 49_600;
+
+fn is_reserved_internal_port(port: u16) -> bool {
+    (RESERVED_INTERNAL_PORT_START..=RESERVED_INTERNAL_PORT_END).contains(&port)
+}
 
 pub fn resolve_enclaveos_commit() -> String {
     std::env::var("ENCLAVEOS_COMMIT").unwrap_or_else(|_| DEFAULT_ENCLAVEOS_COMMIT.to_string())
@@ -233,21 +239,22 @@ async fn render_run_sh_template(
         "echo \"ERROR: No run command specified in Procfile\"\nexit 1".to_string()
     };
 
-    let reserved: &[(u16, &str)] = &[
-        (8080, "internal enclave services"),
-        (8081, "internal enclave services"),
-        (8082, "bootproofd"),
-        (8084, "locksmith"),
-    ];
-    for &(port, service) in reserved {
-        if ports.contains(&port) {
-            anyhow::bail!("Port {} is reserved for {}", port, service);
-        }
+    if let Some(port) = ports
+        .iter()
+        .copied()
+        .find(|port| is_reserved_internal_port(*port))
+    {
+        anyhow::bail!(
+            "Port {} is reserved for internal enclave services (reserved range: {}-{})",
+            port,
+            RESERVED_INTERNAL_PORT_START,
+            RESERVED_INTERNAL_PORT_END
+        );
     }
 
     let custom_port_proxies: String = ports
         .iter()
-        .filter(|&&port| port != 8080 && port != 8081 && port != 8082 && port != 8084)
+        .filter(|&&port| !is_reserved_internal_port(port))
         .map(|port| {
             format!(
                 "/bin/socat VSOCK-LISTEN:{},reuseaddr,fork TCP:localhost:{} &",

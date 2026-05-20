@@ -1115,8 +1115,8 @@ build: docker build -t app .
 
 # Features
 # domain: app.example.com
-# ports: 8083
-# http_port: 8083
+# ports: 8080
+# http_port: 8080
 # e2e: false
 # locksmith: false
 # debug: false
@@ -5805,7 +5805,7 @@ build: docker build -t app .
         let bundle: keymaker_models::generate_quorum::GenerateQuorumResponse =
             serde_json::from_str(&bundle_text).context("Failed to parse bundle JSON")?;
 
-        let address_str = format!("{}:8084", public_ip);
+        let address_str = format!("{}:49504", public_ip);
         eprintln!("Sending shard to enclave at {}...", address_str);
         let address: std::net::SocketAddr = address_str.parse().context("Invalid address")?;
 

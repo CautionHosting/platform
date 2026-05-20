@@ -4,6 +4,13 @@
 use serde::{Deserialize, Serialize};
 use sqlx::Type;
 
+const RESERVED_INTERNAL_PORT_START: u16 = 49_500;
+const RESERVED_INTERNAL_PORT_END: u16 = 49_600;
+
+fn is_reserved_internal_port(port: u16) -> bool {
+    (RESERVED_INTERNAL_PORT_START..=RESERVED_INTERNAL_PORT_END).contains(&port)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[sqlx(type_name = "user_role", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
@@ -513,29 +520,16 @@ impl BuildConfig {
             }
         }
 
-        // Ports 8080, 8081, 8082, 8084 are reserved for internal enclave services
-        if ports.contains(&8080) {
+        // Keep platform internals out of the app-facing port range.
+        if let Some(port) = ports
+            .iter()
+            .copied()
+            .find(|port| is_reserved_internal_port(*port))
+        {
             return Err(format!(
-                "Port 8080 is reserved for internal enclave services. \
-                Your application should listen on port 8083."
-            ));
-        }
-        if ports.contains(&8081) {
-            return Err(format!(
-                "Port 8081 is reserved for internal enclave services. \
-                Your application should listen on port 8083."
-            ));
-        }
-        if ports.contains(&8082) {
-            return Err(format!(
-                "Port 8082 is reserved for bootproofd. \
-                Your application should listen on a different port."
-            ));
-        }
-        if ports.contains(&8084) {
-            return Err(format!(
-                "Port 8084 is reserved for locksmith (shard receiver). \
-                Your application should listen on a different port."
+                "Port {} is reserved for internal enclave services. \
+                Ports {}-{} are reserved; choose a different application port.",
+                port, RESERVED_INTERNAL_PORT_START, RESERVED_INTERNAL_PORT_END
             ));
         }
 
@@ -665,35 +659,35 @@ mod tests {
     }
 
     #[test]
-    fn test_rejects_reserved_port_8080() {
+    fn test_allows_application_port_8080() {
         let procfile = "run: /app/server\nports: 8080\n";
-        let result = BuildConfig::from_procfile(procfile);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("8080"));
+        let config = BuildConfig::from_procfile(procfile).unwrap();
+        assert_eq!(config.ports, vec![8080]);
+        assert_eq!(config.http_port, Some(8080));
     }
 
     #[test]
-    fn test_rejects_reserved_port_8081() {
-        let procfile = "run: /app/server\nports: 8081\n";
+    fn test_rejects_reserved_internal_port_start() {
+        let procfile = "run: /app/server\nports: 49500\n";
         let result = BuildConfig::from_procfile(procfile);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("8081"));
+        assert!(result.unwrap_err().contains("49500"));
     }
 
     #[test]
-    fn test_rejects_reserved_port_8082() {
-        let procfile = "run: /app/server\nports: 8082\n";
+    fn test_rejects_reserved_internal_port_middle() {
+        let procfile = "run: /app/server\nports: 49550\n";
         let result = BuildConfig::from_procfile(procfile);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("8082"));
+        assert!(result.unwrap_err().contains("49550"));
     }
 
     #[test]
-    fn test_rejects_reserved_port_8084() {
-        let procfile = "run: /app/server\nports: 8084\n";
+    fn test_rejects_reserved_internal_port_end() {
+        let procfile = "run: /app/server\nports: 49600\n";
         let result = BuildConfig::from_procfile(procfile);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("8084"));
+        assert!(result.unwrap_err().contains("49600"));
     }
 
     #[test]
@@ -705,7 +699,7 @@ mod tests {
 
     #[test]
     fn test_rejects_domain_with_invalid_characters() {
-        let procfile = "run: /app/server\ndomain: evil\"${x}\n";
+        let procfile = "run: /app/server\ndomain: evil\".example.com\n";
         let result = BuildConfig::from_procfile(procfile);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid characters"));

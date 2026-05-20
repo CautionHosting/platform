@@ -64,7 +64,9 @@ ENV LIBPCSCLITE_STATIC=1
 
 WORKDIR /build-locksmith
 RUN git clone https://codeberg.org/caution/locksmith.git . && \
-    git checkout {{LOCKSMITH_COMMIT}}
+    git checkout {{LOCKSMITH_COMMIT}} && \
+    sed -i 's/"0\.0\.0\.0:8084"/"0.0.0.0:49504"/' crates/locksmith/src/bin/locksmithd.rs && \
+    grep -q '"0.0.0.0:49504"' crates/locksmith/src/bin/locksmithd.rs
 
 RUN cargo fetch --locked --target $TARGET_ARCH
 

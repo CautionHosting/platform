@@ -1620,7 +1620,7 @@ output "instance_type" {{
             "# SSH enabled (ssh_keys configured in Procfile)\n  ingress {\n    from_port   = 22\n    to_port     = 22\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow SSH\"\n  }".to_string()
         },
         locksmith_ingress = if request.locksmith {
-            "# Locksmith shard receiver ingress enabled\n  ingress {\n    from_port   = 8084\n    to_port     = 8084\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow Locksmith shard receiver\"\n  }".to_string()
+            "# Locksmith shard receiver ingress enabled\n  ingress {\n    from_port   = 49504\n    to_port     = 49504\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow Locksmith shard receiver\"\n  }".to_string()
         } else {
             "# Locksmith ingress disabled".to_string()
         },
@@ -1917,7 +1917,7 @@ output "instance_type" {{
             "# SSH enabled (ssh_keys configured in Procfile)\n  ingress {\n    from_port   = 22\n    to_port     = 22\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow SSH\"\n  }".to_string()
         },
         locksmith_ingress = if request.locksmith {
-            "# Locksmith shard receiver ingress enabled\n  ingress {\n    from_port   = 8084\n    to_port     = 8084\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow Locksmith shard receiver\"\n  }".to_string()
+            "# Locksmith shard receiver ingress enabled\n  ingress {\n    from_port   = 49504\n    to_port     = 49504\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow Locksmith shard receiver\"\n  }".to_string()
         } else {
             "# Locksmith ingress disabled".to_string()
         },
