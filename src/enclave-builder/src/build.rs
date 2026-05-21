@@ -121,6 +121,7 @@ pub async fn stage_eif_components(
             manifest.steve_commit.get_or_insert(steve_commit.clone());
         }
         if locksmith {
+            manifest.locksmith = true;
             manifest
                 .locksmith_commit
                 .get_or_insert(locksmith_commit.clone());

@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tokio::fs;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnclaveManifest {
     pub version: String,
@@ -26,6 +30,8 @@ pub struct EnclaveManifest {
     pub bootproof_commit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub steve_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub locksmith: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locksmith_commit: Option<String>,
 }
@@ -86,6 +92,7 @@ impl EnclaveManifest {
             enclaveos_commit: None,
             bootproof_commit: None,
             steve_commit: None,
+            locksmith: false,
             locksmith_commit: None,
         }
     }
@@ -321,6 +328,7 @@ mod tests {
     #[test]
     fn test_manifest_locksmith_commit_none_by_default() {
         let manifest = make_manifest(None, None, None, None);
+        assert!(!manifest.locksmith);
         assert!(manifest.locksmith_commit.is_none());
         assert!(manifest.steve_commit.is_none());
     }
@@ -329,14 +337,17 @@ mod tests {
     fn test_manifest_locksmith_commit_omitted_when_none() {
         let manifest = make_manifest(None, None, None, None);
         let json = serde_json::to_string(&manifest).unwrap();
+        assert!(!json.contains("locksmith"));
         assert!(!json.contains("locksmith_commit"));
     }
 
     #[test]
     fn test_manifest_locksmith_commit_present_when_set() {
         let mut manifest = make_manifest(None, None, None, None);
+        manifest.locksmith = true;
         manifest.locksmith_commit = Some("abc123".to_string());
         let json = serde_json::to_string(&manifest).unwrap();
+        assert!(json.contains("\"locksmith\":true"));
         assert!(json.contains("locksmith_commit"));
         assert!(json.contains("abc123"));
     }
@@ -344,12 +355,14 @@ mod tests {
     #[test]
     fn test_manifest_locksmith_commit_round_trip() {
         let mut manifest = make_manifest(None, None, None, None);
+        manifest.locksmith = true;
         manifest.locksmith_commit = Some("d16b74c6b3fd".to_string());
         manifest.steve_commit = Some("ed38a190cd5d".to_string());
 
         let json = serde_json::to_string_pretty(&manifest).unwrap();
         let loaded: EnclaveManifest = serde_json::from_str(&json).unwrap();
 
+        assert!(loaded.locksmith);
         assert_eq!(loaded.locksmith_commit, Some("d16b74c6b3fd".to_string()));
         assert_eq!(loaded.steve_commit, Some("ed38a190cd5d".to_string()));
     }
@@ -364,6 +377,7 @@ mod tests {
             "framework_source": {"type": "git_archive", "url": "https://example.com/f.tar.gz"}
         }"#;
         let manifest: EnclaveManifest = serde_json::from_str(json).unwrap();
+        assert!(!manifest.locksmith);
         assert!(manifest.locksmith_commit.is_none());
         assert!(manifest.steve_commit.is_none());
     }

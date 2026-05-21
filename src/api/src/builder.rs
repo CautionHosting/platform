@@ -860,6 +860,7 @@ fn generate_builder_userdata(
         manifest.steve_commit = Some(steve_commit);
     }
     if request.locksmith {
+        manifest.locksmith = true;
         manifest.locksmith_commit = Some(locksmith_commit);
     }
     let manifest_json =

@@ -3938,10 +3938,13 @@ build: docker build -t app .
             .unwrap_or(false);
         log_verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
-        let locksmith = self
-            .read_procfile_field("locksmith")
-            .map(|v| v.to_lowercase() == "true")
-            .unwrap_or(false);
+        let locksmith = if let Some(ref manifest) = external_manifest {
+            manifest.locksmith || manifest.locksmith_commit.is_some()
+        } else {
+            self.read_procfile_field("locksmith")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(false)
+        };
         log_verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
 
         let deployment = if let Some(ref bin_path) = binary_path {
