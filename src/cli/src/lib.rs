@@ -1007,11 +1007,6 @@ impl ApiClient {
         }
     }
 
-    fn read_procfile_http_port(&self) -> Option<u16> {
-        self.read_procfile_field("http_port")
-            .and_then(|s| s.trim().parse::<u16>().ok())
-    }
-
     fn read_procfile_sources(&self) -> Vec<String> {
         self.read_procfile_field("app_sources")
             .or_else(|| self.read_procfile_field("app_source"))
@@ -3712,6 +3707,7 @@ build: docker build -t app .
         &self,
         external_manifest: Option<enclave_builder::EnclaveManifest>,
         no_cache: bool,
+        use_local_app: bool,
     ) -> Result<enclave_builder::PcrValues> {
         let (enclave_source, enclave_version) = if let Some(ref manifest) = external_manifest {
             match &manifest.enclave_source {
@@ -3765,7 +3761,20 @@ build: docker build -t app .
             enclave_builder::FRAMEWORK_SOURCE.to_string()
         };
 
-        let cache_key = if let Some(ref manifest) = external_manifest {
+        let cache_key = if use_local_app {
+            Command::new("git")
+                .args(&["rev-parse", "HEAD"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+        } else if let Some(ref manifest) = external_manifest {
             if let Some(ref app_src) = manifest.app_source {
                 app_src.commit.clone()
             } else {
@@ -3805,7 +3814,9 @@ build: docker build -t app .
         log_verbose(self.verbose, "Building Docker image locally...");
 
         let mut loader = Loader::new("Reproducing enclave image", LoaderStyle::Processing);
-        let image_ref = if let Some(ref manifest) = external_manifest {
+        let image_ref = if use_local_app {
+            self.build_local_docker_image(no_cache).await?
+        } else if let Some(ref manifest) = external_manifest {
             let app_source = manifest.app_source.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
                     "Manifest does not contain app_source - cannot reproduce without source URL"
@@ -4212,7 +4223,7 @@ build: docker build -t app .
             self.read_pcrs_from_file(&pcrs_path)?
         } else if from_local {
             println!("\nBuilding from local directory...");
-            self.build_and_get_pcrs(None, no_cache).await?
+            self.build_and_get_pcrs(manifest.clone(), no_cache, true).await?
         } else if let Some(ref source_url) = app_source_url {
             println!("\nBuilding from provided source URL: {}", source_url);
             if let Some(ref m) = manifest {
@@ -4227,7 +4238,7 @@ build: docker build -t app .
                     commit,
                     branch: None,
                 });
-                self.build_and_get_pcrs(Some(modified_manifest), no_cache)
+                self.build_and_get_pcrs(Some(modified_manifest), no_cache, false)
                     .await?
             } else {
                 println!("\n⚠️  Remote attestation does not include a manifest");
@@ -4257,7 +4268,7 @@ build: docker build -t app .
                     bail!("Cannot reproduce private code deployment");
                 }
                 println!("\nReproducing build from remote manifest...");
-                self.build_and_get_pcrs(manifest.clone(), no_cache).await?
+                self.build_and_get_pcrs(manifest.clone(), no_cache, false).await?
             } else {
                 println!("\n⚠️  Remote attestation does not include a manifest");
                 println!();
