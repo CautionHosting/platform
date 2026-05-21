@@ -43,6 +43,8 @@ mod users;
 mod validated_types;
 mod validation;
 
+const DEFAULT_DEPLOYMENT_HEALTH_TIMEOUT_SECS: u64 = 600;
+
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct PricingConfig {
     pub(crate) compute_margin_percent: f64,
@@ -301,6 +303,14 @@ pub(crate) async fn get_or_create_resource_type(db: &PgPool) -> Result<Uuid, Sta
 
 async fn health_check() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
+}
+
+fn deployment_health_timeout_secs() -> u64 {
+    std::env::var("DEPLOYMENT_HEALTH_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|timeout| *timeout > 0)
+        .unwrap_or(DEFAULT_DEPLOYMENT_HEALTH_TIMEOUT_SECS)
 }
 
 async fn wait_for_health(public_ip: &str, timeout_secs: u64) -> Result<(), String> {
@@ -2290,8 +2300,10 @@ async fn deploy_logic(
 
     let _ = tx.send(Ok(milestone("Waiting for health check..."))).await;
 
+    let health_timeout_secs = deployment_health_timeout_secs();
+
     tracing::info!("Waiting for health endpoint to become healthy...");
-    if let Err(e) = wait_for_health(&deployment_result.public_ip, 120).await {
+    if let Err(e) = wait_for_health(&deployment_result.public_ip, health_timeout_secs).await {
         tracing::error!("Attestation health check failed: {}", e);
         recover_deploy_failure(
             &state,
@@ -2311,7 +2323,7 @@ async fn deploy_logic(
     }
 
     tracing::info!("Waiting for attestation endpoint to become healthy...");
-    if let Err(e) = wait_for_attestation_health(&deployment_result.public_ip, 120).await {
+    if let Err(e) = wait_for_attestation_health(&deployment_result.public_ip, health_timeout_secs).await {
         tracing::error!("Attestation health check failed: {}", e);
         recover_deploy_failure(
             &state,
