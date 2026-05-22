@@ -151,6 +151,7 @@ pub struct BuildRequest {
     pub ports: Vec<u16>,
     pub e2e: bool,
     pub locksmith: bool,
+    pub no_cache: bool,
     pub enclaveos_commit: String,
     pub builder_size: String,
     pub builder_instance_type: String,
@@ -826,6 +827,7 @@ fn generate_builder_userdata(
 
     let e2e_flag = if request.e2e { "true" } else { "false" };
     let locksmith_flag = if request.locksmith { "true" } else { "false" };
+    let no_cache_flag = if request.no_cache { "true" } else { "false" };
 
     // Build manifest using the same EnclaveManifest struct as the inline build path
     let app_source = if request.app_sources.is_empty() {
@@ -885,6 +887,7 @@ BUILD_CMD='{build_cmd}'
 PORTS="{ports_csv}"
 E2E="{e2e_flag}"
 LOCKSMITH="{locksmith_flag}"
+NO_CACHE="{no_cache_flag}"
 
 # Install script dependencies
 # We won't have status tracking for these, but we also can't build status without these.
@@ -980,6 +983,7 @@ CAUTION_OUTPUT_PCRS="/build/output/enclave.pcrs" \
 CAUTION_PORTS="$PORTS" \
 CAUTION_E2E="$E2E" \
 CAUTION_LOCKSMITH="$LOCKSMITH" \
+CAUTION_NO_CACHE="$NO_CACHE" \
 /usr/local/bin/remote-build-helper 2>&1
 
 EIF_PATH="/build/output/enclave.eif"
@@ -1030,6 +1034,7 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
         ports_csv = ports_csv,
         e2e_flag = e2e_flag,
         locksmith_flag = locksmith_flag,
+        no_cache_flag = no_cache_flag,
         manifest_json = manifest_json,
     ))
 }
@@ -1398,6 +1403,7 @@ mod tests {
             ports: vec![],
             e2e: false,
             locksmith: false,
+            no_cache: true,
             enclaveos_commit: "enclave-abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
@@ -1467,6 +1473,11 @@ mod tests {
             userdata.contains("CAUTION_MANIFEST_PATH"),
             "should pass manifest to helper"
         );
+        assert!(
+            userdata.contains("NO_CACHE=\"true\"")
+                && userdata.contains("CAUTION_NO_CACHE=\"$NO_CACHE\""),
+            "should pass no_cache to helper"
+        );
 
         // Should upload EIF to S3
         assert!(
@@ -1521,6 +1532,7 @@ mod tests {
             ports: vec![],
             e2e: false,
             locksmith: false,
+            no_cache: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
@@ -1574,6 +1586,7 @@ mod tests {
             ports: vec![],
             e2e: false,
             locksmith: false,
+            no_cache: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
@@ -1627,6 +1640,7 @@ mod tests {
             ports: vec![],
             e2e: false,
             locksmith: false,
+            no_cache: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),

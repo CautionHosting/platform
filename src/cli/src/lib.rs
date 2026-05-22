@@ -1003,7 +1003,7 @@ impl ApiClient {
                 .split(',')
                 .filter_map(|s| s.trim().parse::<u16>().ok())
                 .collect(),
-            None => vec![8080], // Default port
+            None => Vec::new(),
         }
     }
 
@@ -3709,6 +3709,16 @@ build: docker build -t app .
         no_cache: bool,
         use_local_app: bool,
     ) -> Result<enclave_builder::PcrValues> {
+        let no_cache = if use_local_app {
+            no_cache
+                || self
+                    .read_procfile_field("no_cache")
+                    .map(|v| v.to_lowercase() == "true")
+                    .unwrap_or(false)
+        } else {
+            no_cache
+        };
+
         let (enclave_source, enclave_version) = if let Some(ref manifest) = external_manifest {
             match &manifest.enclave_source {
                 enclave_builder::EnclaveSource::GitArchive { urls, commit } => {
@@ -3762,7 +3772,7 @@ build: docker build -t app .
         };
 
         let cache_key = if use_local_app {
-            Command::new("git")
+            let app_commit = Command::new("git")
                 .args(&["rev-parse", "HEAD"])
                 .output()
                 .ok()
@@ -3773,7 +3783,16 @@ build: docker build -t app .
                         None
                     }
                 })
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+            if let Some(ref manifest) = external_manifest {
+                let manifest_json = serde_json::to_vec(manifest)
+                    .context("Failed to serialize manifest for cache key")?;
+                let manifest_hash = hex::encode(Sha256::digest(&manifest_json));
+                format!("{}-{}", app_commit, &manifest_hash[..16])
+            } else {
+                app_commit
+            }
         } else if let Some(ref manifest) = external_manifest {
             if let Some(ref app_src) = manifest.app_source {
                 app_src.commit.clone()

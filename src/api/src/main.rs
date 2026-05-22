@@ -2109,6 +2109,7 @@ async fn deploy_logic(
                 ports: enclave_config.ports.clone(),
                 e2e: build_config.e2e,
                 locksmith: build_config.locksmith,
+                no_cache: build_config.no_cache,
                 enclaveos_commit,
                 builder_size: resolved_size.id.clone(),
                 builder_instance_type: resolved_size.instance_type.clone(),

@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::path::Path;
 use tokio::fs;
 
@@ -34,6 +35,8 @@ pub struct EnclaveManifest {
     pub locksmith: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locksmith_commit: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +97,7 @@ impl EnclaveManifest {
             steve_commit: None,
             locksmith: false,
             locksmith_commit: None,
+            extra: Map::new(),
         }
     }
 
