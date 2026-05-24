@@ -12,6 +12,7 @@ use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tower_http::services::ServeFile;
 use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, services::ServeDir};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use webauthn_rs::prelude::*;
@@ -287,6 +288,13 @@ async fn main() -> Result<()> {
         std::env::var("FRONTEND_DIR").unwrap_or_else(|_| "/app/frontend".to_string());
 
     let frontend_service = ServeDir::new(&frontend_dir).append_index_html_on_directories(true);
+    let frontend_index = std::path::Path::new(&frontend_dir).join("index.html");
+    let frontend_routes = Router::new()
+        .route_service("/login", ServeFile::new(frontend_index.clone()))
+        .route_service("/onboarding", ServeFile::new(frontend_index.clone()))
+        .route_service("/dashboard", ServeFile::new(frontend_index.clone()))
+        .route_service("/qr-login", ServeFile::new(frontend_index.clone()))
+        .route_service("/qr-sign", ServeFile::new(frontend_index));
 
     // Webhook proxy to metering service (no auth required — Paddle verifies via signature)
     let webhook_proxy = Router::new()
@@ -299,6 +307,7 @@ async fn main() -> Result<()> {
         .merge(protected)
         .merge(webhook_proxy)
         .nest("/api", public_api_proxy.merge(api_proxy))
+        .merge(frontend_routes)
         .fallback_service(frontend_service)
         .layer(cors)
         .layer(middleware::from_fn(request_id::request_id_middleware))
