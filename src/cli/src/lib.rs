@@ -3594,7 +3594,7 @@ build: docker build -t app .
             Some(ref ip) if !ip.is_empty() => Ok(format!("http://{}/attestation", ip)),
             _ => {
                 bail!(
-                    "No public IP available. Run 'caution describe' to check deployment status, or provide --url explicitly."
+                    "No public IP available. Run 'caution app get <id/null>' to check deployment status, or provide --url explicitly."
                 )
             }
         }
