@@ -31,6 +31,7 @@ tracing-subscriber = { workspace = true }
 url = { workspace = true }
 regex = { workspace = true }
 async-trait = { workspace = true }
+tempfile = { workspace = true }
 
 # Gateway-specific dependencies
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }

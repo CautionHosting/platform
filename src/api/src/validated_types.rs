@@ -180,6 +180,8 @@ pub struct DeployRequest {
     pub app_id: Uuid,
     #[serde(default = "default_branch")]
     pub branch: String,
+    #[serde(default)]
+    pub commit_sha: Option<String>,
     /// Builder instance size: "small" (default), "medium", or "large"
     #[serde(default)]
     pub builder_size: Option<String>,
@@ -193,6 +195,11 @@ impl Validate for DeployRequest {
     fn validate(&self) -> Result<(), String> {
         validation::validate_branch_name(&self.branch)
             .map_err(|e| format!("Invalid branch name: {}", e))?;
+        if let Some(commit_sha) = &self.commit_sha {
+            if commit_sha.len() != 40 || !commit_sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err("Invalid commit_sha: must be 40 hex characters".to_string());
+            }
+        }
         Ok(())
     }
 }
@@ -244,5 +251,37 @@ impl Validate for UpdateOrgSettingsRequest {
             return Err("At least one setting must be provided".to_string());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeployRequest, Validate};
+    use uuid::Uuid;
+
+    fn deploy_request(commit_sha: Option<&str>) -> DeployRequest {
+        DeployRequest {
+            org_id: Uuid::nil(),
+            app_id: Uuid::nil(),
+            branch: "main".to_string(),
+            commit_sha: commit_sha.map(str::to_string),
+            builder_size: None,
+        }
+    }
+
+    #[test]
+    fn deploy_request_accepts_valid_commit_sha() {
+        let req = deploy_request(Some("abcdef123456abcdef123456abcdef123456abcd"));
+
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn deploy_request_rejects_invalid_commit_sha() {
+        let req = deploy_request(Some("not-a-sha"));
+
+        let err = req.validate().unwrap_err();
+
+        assert!(err.contains("Invalid commit_sha"));
     }
 }

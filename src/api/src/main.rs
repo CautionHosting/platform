@@ -440,6 +440,25 @@ async fn get_commit_sha(
     Ok(commit_sha)
 }
 
+fn select_deploy_commit_sha(
+    branch: &str,
+    resolved_commit_sha: &str,
+    requested_commit_sha: Option<&str>,
+) -> Result<String, String> {
+    let resolved_commit_sha = resolved_commit_sha.to_ascii_lowercase();
+
+    if let Some(requested_commit_sha) = requested_commit_sha {
+        if !requested_commit_sha.eq_ignore_ascii_case(&resolved_commit_sha) {
+            return Err(format!(
+                "commit_sha does not match refs/heads/{} (expected {}, got {})",
+                branch, resolved_commit_sha, requested_commit_sha
+            ));
+        }
+    }
+
+    Ok(resolved_commit_sha)
+}
+
 async fn list_cloud_credentials(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1563,6 +1582,40 @@ mod deploy_build_command_tests {
     }
 }
 
+#[cfg(test)]
+mod deploy_commit_tests {
+    use super::select_deploy_commit_sha;
+
+    const COMMIT_SHA: &str = "abcdef123456abcdef123456abcdef123456abcd";
+
+    #[test]
+    fn uses_resolved_commit_when_request_does_not_pin_sha() {
+        let selected = select_deploy_commit_sha("main", COMMIT_SHA, None).unwrap();
+
+        assert_eq!(selected, COMMIT_SHA);
+    }
+
+    #[test]
+    fn accepts_matching_requested_commit_sha() {
+        let uppercase = COMMIT_SHA.to_uppercase();
+        let selected = select_deploy_commit_sha("feature", COMMIT_SHA, Some(&uppercase)).unwrap();
+
+        assert_eq!(selected, COMMIT_SHA);
+    }
+
+    #[test]
+    fn rejects_mismatched_requested_commit_sha() {
+        let err = select_deploy_commit_sha(
+            "feature",
+            COMMIT_SHA,
+            Some("1111111111111111111111111111111111111111"),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("commit_sha does not match refs/heads/feature"));
+    }
+}
+
 async fn deploy_logic(
     state: Arc<AppState>,
     auth: AuthContext,
@@ -1893,7 +1946,8 @@ async fn deploy_logic(
 
     tracing::info!("Deploying branch: {}", req.branch);
 
-    let commit_sha = match get_commit_sha(&app_id_str, &req.branch, &state.data_dir).await {
+    let resolved_commit_sha = match get_commit_sha(&app_id_str, &req.branch, &state.data_dir).await
+    {
         Ok(sha) => {
             tracing::info!("Latest commit on branch '{}': {}", req.branch, sha);
             sha
@@ -1913,6 +1967,17 @@ async fn deploy_logic(
             ));
         }
     };
+
+    let commit_sha =
+        select_deploy_commit_sha(&req.branch, &resolved_commit_sha, req.commit_sha.as_deref())
+            .map_err(|e| {
+                tracing::error!(
+                    "Invalid deployment commit for branch '{}': {}",
+                    req.branch,
+                    e
+                );
+                (StatusCode::BAD_REQUEST, e)
+            })?;
 
     let git_dir = format!("{}/git-repos/{}.git", state.data_dir, app_id_str);
     let (procfile_content, build_config) =

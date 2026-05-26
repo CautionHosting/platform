@@ -9,11 +9,40 @@ use russh_keys::key::{KeyPair, PublicKey};
 use russh_keys::PublicKeyBase64;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Child;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+const POST_RECEIVE_HOOK: &str = r#"#!/bin/sh
+set -eu
+: "${CAUTION_PUSH_REF_LOG:?}"
+
+while read old new ref; do
+    case "$ref" in
+        refs/heads/*)
+            printf '%s %s %s\n' "$old" "$new" "$ref" >> "$CAUTION_PUSH_REF_LOG"
+            ;;
+    esac
+done
+"#;
+
+const ZERO_SHA1: &str = "0000000000000000000000000000000000000000";
+
+#[derive(Debug)]
+struct PushedBranchRef {
+    branch: String,
+    commit_sha: String,
+}
+
+#[derive(Debug)]
+enum PushedBranchSelection {
+    None,
+    One(PushedBranchRef),
+    Multiple,
+}
 
 #[derive(Clone)]
 pub struct SshServer {
@@ -311,36 +340,108 @@ fn ensure_git_repo_exists(repo_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn update_repo_head(repo_path: &str) -> Result<String> {
+fn prepare_push_ref_hook() -> Result<(tempfile::TempDir, std::path::PathBuf)> {
+    use std::fs;
+
+    let hook_dir = tempfile::Builder::new()
+        .prefix("caution-push-hooks-")
+        .tempdir()
+        .context("Failed to create temporary git hook directory")?;
+    let hook_path = hook_dir.path().join("post-receive");
+    let log_path = hook_dir.path().join("pushed-refs.log");
+
+    fs::write(&hook_path, POST_RECEIVE_HOOK).context("Failed to write post-receive hook")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(&hook_path)
+            .context("Failed to stat post-receive hook")?
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&hook_path, permissions)
+            .context("Failed to make post-receive hook executable")?;
+    }
+
+    Ok((hook_dir, log_path))
+}
+
+fn is_sha1_hex(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn parse_pushed_branch_ref(log_content: &str) -> Result<PushedBranchSelection> {
+    let mut pushed_ref = None;
+
+    for (line_index, line) in log_content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let mut parts = line.split_whitespace();
+        let _old = parts
+            .next()
+            .with_context(|| format!("Malformed pushed ref log line {}", line_index + 1))?;
+        let new = parts
+            .next()
+            .with_context(|| format!("Malformed pushed ref log line {}", line_index + 1))?;
+        let ref_name = parts
+            .next()
+            .with_context(|| format!("Malformed pushed ref log line {}", line_index + 1))?;
+
+        if parts.next().is_some() {
+            bail!("Malformed pushed ref log line {}", line_index + 1);
+        }
+
+        let Some(branch) = ref_name.strip_prefix("refs/heads/") else {
+            continue;
+        };
+
+        if new == ZERO_SHA1 {
+            continue;
+        }
+
+        if branch.is_empty() {
+            bail!("Malformed pushed ref log line {}", line_index + 1);
+        }
+
+        if !is_sha1_hex(new) {
+            bail!(
+                "Invalid commit SHA in pushed ref log line {}",
+                line_index + 1
+            );
+        }
+
+        let next_ref = PushedBranchRef {
+            branch: branch.to_string(),
+            commit_sha: new.to_ascii_lowercase(),
+        };
+        if pushed_ref.replace(next_ref).is_some() {
+            return Ok(PushedBranchSelection::Multiple);
+        }
+    }
+
+    Ok(match pushed_ref {
+        Some(pushed_ref) => PushedBranchSelection::One(pushed_ref),
+        None => PushedBranchSelection::None,
+    })
+}
+
+fn read_pushed_branch_ref(log_path: &Path) -> Result<PushedBranchSelection> {
+    match std::fs::read_to_string(log_path) {
+        Ok(content) => parse_pushed_branch_ref(&content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(PushedBranchSelection::None)
+        }
+        Err(error) => Err(error).context("Failed to read pushed ref log"),
+    }
+}
+
+fn set_repo_head(repo_path: &str, branch: &str) -> Result<()> {
     use std::process::Command;
 
-    let output = Command::new("git")
-        .args(&[
-            "--git-dir",
-            repo_path,
-            "for-each-ref",
-            "--sort=-committerdate",
-            "--format=%(refname:short)",
-            "refs/heads/",
-            "--count=1",
-        ])
-        .output()
-        .context("Failed to list branches")?;
-
-    if !output.status.success() {
-        tracing::debug!("No branches found yet in {}", repo_path);
-        return Ok("main".to_string());
-    }
-
-    let target_branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    if target_branch.is_empty() {
-        tracing::debug!("No branches found in {}", repo_path);
-        return Ok("main".to_string());
-    }
-
-    tracing::info!("Most recently updated branch: {}", target_branch);
-    tracing::info!("Setting HEAD to refs/heads/{}", target_branch);
+    tracing::info!("Setting HEAD to refs/heads/{}", branch);
 
     let output = Command::new("git")
         .args(&[
@@ -349,7 +450,7 @@ fn update_repo_head(repo_path: &str) -> Result<String> {
             "symbolic-ref",
             "--",
             "HEAD",
-            &format!("refs/heads/{}", target_branch),
+            &format!("refs/heads/{}", branch),
         ])
         .output()
         .context("Failed to update HEAD")?;
@@ -358,10 +459,48 @@ fn update_repo_head(repo_path: &str) -> Result<String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::warn!("Failed to update HEAD: {}", stderr);
     } else {
-        tracing::info!("Successfully set HEAD to refs/heads/{}", target_branch);
+        tracing::info!("Successfully set HEAD to refs/heads/{}", branch);
     }
 
-    Ok(target_branch)
+    Ok(())
+}
+
+fn get_repo_head_branch(repo_path: &str) -> Result<Option<PushedBranchRef>> {
+    use std::process::Command;
+
+    let output = Command::new("git")
+        .args(&["--git-dir", repo_path, "symbolic-ref", "--short", "HEAD"])
+        .output()
+        .context("Failed to read repo HEAD")?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        return Ok(None);
+    }
+
+    let ref_name = format!("refs/heads/{}", branch);
+    let output = Command::new("git")
+        .args(&["--git-dir", repo_path, "rev-parse", &ref_name])
+        .output()
+        .context("Failed to resolve repo HEAD branch")?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let commit_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !is_sha1_hex(&commit_sha) {
+        bail!("Repo HEAD resolved to invalid commit SHA");
+    }
+
+    Ok(Some(PushedBranchRef {
+        branch,
+        commit_sha: commit_sha.to_ascii_lowercase(),
+    }))
 }
 
 async fn handle_git_push(
@@ -406,12 +545,17 @@ async fn handle_git_push(
 
     let repo_path = format!("{}/git-repos/{}.git", data_dir, app_id);
     ensure_git_repo_exists(&repo_path)?;
+    let (push_hook_dir, push_ref_log_path) = prepare_push_ref_hook()?;
+    let hooks_path = push_hook_dir.path().to_path_buf();
 
     tracing::info!("Spawning git receive-pack for {}", repo_path);
 
     let mut child = tokio::process::Command::new("git")
+        .arg("-c")
+        .arg(format!("core.hooksPath={}", hooks_path.display()))
         .arg("receive-pack")
         .arg(&repo_path)
+        .env("CAUTION_PUSH_REF_LOG", &push_ref_log_path)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -433,6 +577,8 @@ async fn handle_git_push(
     let channel_id = channel;
 
     tokio::spawn(async move {
+        let push_hook_dir = push_hook_dir;
+
         let stdout_task = {
             let handle = session_handle.clone();
             tokio::spawn(async move {
@@ -519,13 +665,72 @@ async fn handle_git_push(
 
         tracing::info!("Git receive-pack completed successfully");
 
-        let branch = match update_repo_head(&repo_path) {
-            Ok(b) => b,
+        let pushed_ref = match read_pushed_branch_ref(&push_ref_log_path) {
+            Ok(PushedBranchSelection::One(pushed_ref)) => pushed_ref,
+            Ok(PushedBranchSelection::None) => match get_repo_head_branch(&repo_path) {
+                Ok(Some(head_ref)) => {
+                    tracing::info!(
+                        "No branch refs updated; redeploying HEAD branch '{}' at {}",
+                        head_ref.branch,
+                        head_ref.commit_sha
+                    );
+                    head_ref
+                }
+                Ok(None) => {
+                    tracing::info!(
+                        "No branch refs updated and no deployable HEAD; skipping deployment"
+                    );
+                    let msg = "\nremote: No branch updates; skipping deployment.\n".to_string();
+                    let _ = session_handle
+                        .extended_data(channel, 1, msg.into_bytes().into())
+                        .await;
+                    let _ = session_handle.exit_status_request(channel, 0).await;
+                    let _ = session_handle.close(channel).await;
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to resolve repo HEAD for no-op push: {}", e);
+                    let msg = "remote: error: Failed to resolve deploy branch\n".to_string();
+                    let _ = session_handle
+                        .extended_data(channel, 1, msg.into_bytes().into())
+                        .await;
+                    let _ = session_handle.exit_status_request(channel, 1).await;
+                    let _ = session_handle.close(channel).await;
+                    return;
+                }
+            },
+            Ok(PushedBranchSelection::Multiple) => {
+                tracing::warn!("Multiple branch refs updated; skipping deployment");
+                let msg =
+                    "\nremote: warning: Multiple branches updated; push one branch to deploy.\n"
+                        .to_string();
+                let _ = session_handle
+                    .extended_data(channel, 1, msg.into_bytes().into())
+                    .await;
+                let _ = session_handle.exit_status_request(channel, 0).await;
+                let _ = session_handle.close(channel).await;
+                return;
+            }
             Err(e) => {
-                tracing::warn!("Failed to update repo HEAD: {}", e);
-                "main".to_string()
+                tracing::error!("Failed to read pushed branch refs: {}", e);
+                let msg = "remote: error: Failed to read pushed refs\n".to_string();
+                let _ = session_handle
+                    .extended_data(channel, 1, msg.into_bytes().into())
+                    .await;
+                let _ = session_handle.exit_status_request(channel, 1).await;
+                let _ = session_handle.close(channel).await;
+                return;
             }
         };
+
+        drop(push_hook_dir);
+
+        if let Err(e) = set_repo_head(&repo_path, &pushed_ref.branch) {
+            tracing::warn!("Failed to update repo HEAD: {}", e);
+        }
+
+        let branch = pushed_ref.branch;
+        let commit_sha = pushed_ref.commit_sha;
 
         let _ = session_handle
             .extended_data(channel, 1, b"\n".to_vec().into())
@@ -536,10 +741,16 @@ async fn handle_git_push(
             org_id: Uuid,
             app_id: Uuid,
             branch: String,
+            commit_sha: String,
         }
 
         let app_uuid = Uuid::parse_str(&app_id).expect("Already validated app_id");
-        tracing::info!("Triggering deployment for {} (branch: {})", app_id, branch);
+        tracing::info!(
+            "Triggering deployment for {} (branch: {}, commit: {})",
+            app_id,
+            branch,
+            commit_sha
+        );
 
         let client = reqwest::Client::new();
         let deploy_url = format!("{}/deploy", api_service_url);
@@ -557,6 +768,7 @@ async fn handle_git_push(
                 org_id,
                 app_id: app_uuid,
                 branch: branch.clone(),
+                commit_sha: commit_sha.clone(),
             })
             .timeout(std::time::Duration::from_secs(7200))
             .send()
@@ -807,6 +1019,122 @@ async fn handle_git_push(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_pushed_branch_ref, PushedBranchSelection, ZERO_SHA1};
+
+    const OLD_SHA: &str = "1111111111111111111111111111111111111111";
+    const MAIN_SHA: &str = "2222222222222222222222222222222222222222";
+    const FEATURE_SHA: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    #[test]
+    fn pushed_ref_parser_keeps_branch_updates() {
+        let log = format!("{OLD_SHA} {FEATURE_SHA} refs/heads/qwen2.5-model-swap\n");
+
+        let pushed_ref = parse_pushed_branch_ref(&log).unwrap();
+
+        let PushedBranchSelection::One(pushed_ref) = pushed_ref else {
+            panic!("expected one pushed branch ref");
+        };
+        assert_eq!(pushed_ref.branch, "qwen2.5-model-swap");
+        assert_eq!(
+            pushed_ref.commit_sha,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn pushed_ref_parser_ignores_deleted_branches_and_tags() {
+        let log = format!(
+            "{OLD_SHA} {ZERO_SHA1} refs/heads/old-branch\n{OLD_SHA} {MAIN_SHA} refs/tags/v1\n"
+        );
+
+        let pushed_ref = parse_pushed_branch_ref(&log).unwrap();
+
+        assert!(matches!(pushed_ref, PushedBranchSelection::None));
+    }
+
+    #[test]
+    fn pushed_ref_selector_refuses_to_guess_multiple_branches() {
+        let log = format!(
+            "{OLD_SHA} {MAIN_SHA} refs/heads/main\n{OLD_SHA} {FEATURE_SHA} refs/heads/feature\n"
+        );
+        let pushed_ref = parse_pushed_branch_ref(&log).unwrap();
+
+        assert!(matches!(pushed_ref, PushedBranchSelection::Multiple));
+    }
+
+    #[test]
+    fn repo_head_branch_resolves_current_deploy_target() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo_path = repo_dir.path().to_str().unwrap();
+        let work_dir = tempfile::tempdir().unwrap();
+        let work_path = work_dir.path().to_str().unwrap();
+
+        run_git(&["init", "--bare", repo_path]);
+        run_git(&["-C", work_path, "init"]);
+        std::fs::write(work_dir.path().join("README.md"), "test\n").unwrap();
+        run_git(&["-C", work_path, "add", "."]);
+        run_git(&[
+            "-C",
+            work_path,
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "initial commit",
+        ]);
+        let commit_sha = run_git_stdout(&["-C", work_path, "rev-parse", "HEAD"]);
+        run_git(&["-C", work_path, "push", repo_path, "HEAD:refs/heads/main"]);
+        run_git(&[
+            "--git-dir",
+            repo_path,
+            "symbolic-ref",
+            "--",
+            "HEAD",
+            "refs/heads/main",
+        ]);
+
+        let pushed_ref = super::get_repo_head_branch(repo_path).unwrap().unwrap();
+
+        assert_eq!(pushed_ref.branch, "main");
+        assert_eq!(pushed_ref.commit_sha, commit_sha);
+    }
+
+    fn run_git(args: &[&str]) {
+        let output = run_git_output(args);
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn run_git_stdout(args: &[&str]) -> String {
+        let output = run_git_output(args);
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn run_git_output(args: &[&str]) -> std::process::Output {
+        std::process::Command::new("git")
+            .args(args)
+            .output()
+            .unwrap()
+    }
 }
 
 pub async fn run_ssh_server(
