@@ -344,6 +344,36 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_caddy_routes_encrypted_e2p_requests_before_default_upstream() {
+        let user_data = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("terraform/modules/aws/nitro-enclave/user-data.sh"),
+        )
+        .unwrap();
+        let e2p_header_matcher = r#"@e2p_encrypted {
+        method POST
+        header X-E2P-Key *
+        header X-E2P-Original-Method *
+        header Content-Type application/octet-stream
+    }
+    handle @e2p_encrypted {
+        reverse_proxy localhost:49500
+    }"#;
+
+        assert_eq!(user_data.matches(e2p_header_matcher).count(), 4);
+
+        for block in user_data.split("handle /e2p/* {").skip(1).take(4) {
+            let encrypted_route = block.find("handle @e2p_encrypted").unwrap();
+            let default_upstream = block.find("$CADDY_DEFAULT_UPSTREAM").unwrap();
+            assert!(
+                encrypted_route < default_upstream,
+                "encrypted E2P requests must be routed before the app catch-all"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_fully_managed_tf_opens_steve_port_when_e2e_enabled() {
         let mut request = deployment_request("/tmp/enclave.eif", None);
@@ -359,6 +389,7 @@ mod tests {
         assert!(main_tf.contains("from_port   = 49500"));
         assert!(main_tf.contains("to_port     = 49500"));
         assert!(main_tf.contains("Allow STEVE encrypted transport"));
+        assert!(main_tf.contains(r#"e2e         = "true""#));
         assert!(!main_tf.contains("from_port   = 49501"));
         assert!(!main_tf.contains("from_port   = 49502"));
         assert!(main_tf.contains("Locksmith ingress disabled"));
@@ -377,6 +408,7 @@ mod tests {
 
         let main_tf = std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap();
         assert!(main_tf.contains("STEVE ingress disabled"));
+        assert!(main_tf.contains(r#"e2e         = "false""#));
         assert!(!main_tf.contains("from_port   = 49500"));
         assert!(!main_tf.contains("from_port   = 49501"));
         assert!(!main_tf.contains("from_port   = 49502"));
@@ -404,8 +436,23 @@ mod tests {
         let main_tf = std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap();
         assert!(main_tf.contains("from_port   = 49500"));
         assert!(main_tf.contains("to_port     = 49500"));
+        assert!(main_tf.contains(r#"e2e         = "true""#));
         assert!(main_tf.contains("from_port   = 49504"));
         assert!(main_tf.contains("Allow Locksmith shard receiver"));
+    }
+
+    #[test]
+    fn test_user_data_routes_e2e_default_traffic_through_steve() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let user_data = std::fs::read_to_string(
+            manifest_dir.join("../../terraform/modules/aws/nitro-enclave/user-data.sh"),
+        )
+        .unwrap();
+
+        assert!(user_data.contains(r#"%{ if e2e == "true" ~}"#));
+        assert!(
+            user_data.contains(r#"CADDY_DEFAULT_UPSTREAM="reverse_proxy localhost:49500""#)
+        );
     }
 }
 
@@ -1666,6 +1713,7 @@ resource "aws_instance" "enclave" {{
     debug_mode  = "{debug_mode}"
     ports       = var.ports
     http_port   = var.http_port
+    e2e         = "{e2e}"
     locksmith   = "{locksmith}"
     ssh_keys    = {ssh_keys_json}
     domain      = "{domain}"
@@ -1728,6 +1776,7 @@ output "instance_type" {{
             "# SSH enabled (ssh_keys configured in Procfile)\n  ingress {\n    from_port   = 22\n    to_port     = 22\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow SSH\"\n  }".to_string()
         },
         platform_internal_ingress = platform_internal_ingress(request.e2e, request.locksmith),
+        e2e = if request.e2e { "true" } else { "false" },
         locksmith = if request.locksmith { "true" } else { "false" },
         domain = request.domain.as_deref().unwrap_or(""),
         url_output = if let Some(ref domain) = request.domain {
@@ -1933,6 +1982,7 @@ resource "aws_launch_template" "enclave" {{
     debug_mode  = "{debug_mode}"
     ports       = var.ports
     http_port   = var.http_port
+    e2e         = "{e2e}"
     locksmith   = "{locksmith}"
     ssh_keys    = {ssh_keys_json}
     domain      = "{domain}"
@@ -2021,6 +2071,7 @@ output "instance_type" {{
             "# SSH enabled (ssh_keys configured in Procfile)\n  ingress {\n    from_port   = 22\n    to_port     = 22\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow SSH\"\n  }".to_string()
         },
         platform_internal_ingress = platform_internal_ingress(request.e2e, request.locksmith),
+        e2e = if request.e2e { "true" } else { "false" },
         locksmith = if request.locksmith { "true" } else { "false" },
         domain = request.domain.as_deref().unwrap_or(""),
         url_output = if let Some(ref domain) = request.domain {

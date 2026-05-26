@@ -13,6 +13,7 @@
 #   5. Deploy app
 #   6. Assert AWS security group exposes only the expected platform port
 #   7. Assert STEVE is reachable on 49500
+#   8. Assert Caddy routes encrypted E2P requests to STEVE
 
 set -euo pipefail
 
@@ -376,3 +377,68 @@ if ! $STEVE_READY; then
 fi
 
 step_pass "STEVE endpoint reachable on 49500"
+
+# ── Step 8: Assert Caddy E2P Routing ─────────────────────────────────
+
+STEP_NUM=8
+log "Checking Caddy routes encrypted E2P requests to STEVE..."
+
+APP_ROOT_STATUS=$(curl -sS --connect-timeout 5 --max-time 10 \
+    -o /dev/null -w "%{http_code}" \
+    "http://$APP_IP/" || true)
+
+if [ "$APP_ROOT_STATUS" != "200" ]; then
+    step_fail "App root remains routed to app upstream (HTTP $APP_ROOT_STATUS)"
+fi
+
+INVALID_E2P_BODY="$WORK_DIR/invalid-e2p-body.bin"
+printf "not-a-valid-e2p-envelope" > "$INVALID_E2P_BODY"
+
+DIRECT_STEVE_RESPONSE="$WORK_DIR/direct-steve-invalid.txt"
+CADDY_E2P_RESPONSE="$WORK_DIR/caddy-e2p-invalid.txt"
+
+DIRECT_STEVE_STATUS=$(curl -sS --connect-timeout 5 --max-time 10 \
+    -o "$DIRECT_STEVE_RESPONSE" -w "%{http_code}" \
+    -H "Content-Type: application/octet-stream" \
+    -H "X-E2P-Key: test" \
+    -H "X-E2P-Original-Method: POST" \
+    --data-binary "@$INVALID_E2P_BODY" \
+    "http://$APP_IP:49500/__caution_e2p_probe" || true)
+
+if [ -z "$DIRECT_STEVE_STATUS" ] || [ "$DIRECT_STEVE_STATUS" = "000" ]; then
+    step_fail "Direct STEVE invalid encrypted request"
+fi
+
+CADDY_E2P_READY=false
+for i in $(seq 1 30); do
+    CADDY_E2P_STATUS=$(curl -sS --connect-timeout 5 --max-time 10 \
+        -o "$CADDY_E2P_RESPONSE" -w "%{http_code}" \
+        -H "Content-Type: application/octet-stream" \
+        -H "X-E2P-Key: test" \
+        -H "X-E2P-Original-Method: POST" \
+        --data-binary "@$INVALID_E2P_BODY" \
+        "http://$APP_IP/__caution_e2p_probe" || true)
+
+    if [ "$CADDY_E2P_STATUS" = "$DIRECT_STEVE_STATUS" ] &&
+        cmp -s "$DIRECT_STEVE_RESPONSE" "$CADDY_E2P_RESPONSE"; then
+        CADDY_E2P_READY=true
+        break
+    fi
+
+    log "Caddy E2P route not ready yet... ($i/30)"
+    sleep 5
+done
+
+if ! $CADDY_E2P_READY; then
+    echo "--- Direct STEVE status/body ---"
+    echo "$DIRECT_STEVE_STATUS"
+    cat "$DIRECT_STEVE_RESPONSE" 2>/dev/null || true
+    echo ""
+    echo "--- Caddy E2P status/body ---"
+    echo "${CADDY_E2P_STATUS:-}"
+    cat "$CADDY_E2P_RESPONSE" 2>/dev/null || true
+    echo ""
+    step_fail "Caddy encrypted E2P route"
+fi
+
+step_pass "Caddy encrypted E2P route"

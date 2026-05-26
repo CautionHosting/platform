@@ -213,10 +213,14 @@ useradd --system --home /var/lib/caddy --shell /usr/sbin/nologin caddy || true
 mkdir -p /etc/caddy /var/lib/caddy /var/log/caddy
 chown caddy:caddy /var/lib/caddy /var/log/caddy
 
+%{ if e2e == "true" ~}
+CADDY_DEFAULT_UPSTREAM="reverse_proxy localhost:49500"
+%{ else ~}
 %{ if http_port != 0 ~}
 CADDY_DEFAULT_UPSTREAM="reverse_proxy localhost:${http_port}"
 %{ else ~}
 CADDY_DEFAULT_UPSTREAM='respond "No HTTP Gateway Configured" 502'
+%{ endif ~}
 %{ endif ~}
 
 %{ if domain != "" ~}
@@ -232,6 +236,15 @@ https://${domain} {
     }
 
     handle /e2p/* {
+        reverse_proxy localhost:49500
+    }
+    @e2p_encrypted {
+        method POST
+        header X-E2P-Key *
+        header X-E2P-Original-Method *
+        header Content-Type application/octet-stream
+    }
+    handle @e2p_encrypted {
         reverse_proxy localhost:49500
     }
     handle /attestation {
@@ -250,6 +263,15 @@ https://${domain} {
     }
 
     handle /e2p/* {
+        reverse_proxy localhost:49500
+    }
+    @e2p_encrypted {
+        method POST
+        header X-E2P-Key *
+        header X-E2P-Original-Method *
+        header Content-Type application/octet-stream
+    }
+    handle @e2p_encrypted {
         reverse_proxy localhost:49500
     }
     handle /attestation {
@@ -287,6 +309,15 @@ cat > /etc/caddy/Caddyfile <<EOF
     handle /e2p/* {
         reverse_proxy localhost:49500
     }
+    @e2p_encrypted {
+        method POST
+        header X-E2P-Key *
+        header X-E2P-Original-Method *
+        header Content-Type application/octet-stream
+    }
+    handle @e2p_encrypted {
+        reverse_proxy localhost:49500
+    }
     handle /attestation {
         reverse_proxy localhost:49502
     }
@@ -303,6 +334,15 @@ cat > /etc/caddy/Caddyfile <<EOF
     }
 
     handle /e2p/* {
+        reverse_proxy localhost:49500
+    }
+    @e2p_encrypted {
+        method POST
+        header X-E2P-Key *
+        header X-E2P-Original-Method *
+        header Content-Type application/octet-stream
+    }
+    handle @e2p_encrypted {
         reverse_proxy localhost:49500
     }
     handle /attestation {
