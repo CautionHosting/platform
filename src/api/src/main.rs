@@ -2247,6 +2247,7 @@ async fn deploy_logic(
         debug_mode: enclave_config.debug,
         ports: enclave_config.ports.clone(),
         http_port: enclave_config.http_port,
+        e2e: build_config.e2e,
         locksmith: build_config.locksmith,
         ssh_keys: build_config.ssh_keys.clone(),
         domain: build_config.domain.clone(),

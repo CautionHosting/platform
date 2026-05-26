@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -80,6 +80,8 @@ pub struct NitroDeploymentRequest {
     pub debug_mode: bool,
     pub ports: Vec<u16>,
     pub http_port: Option<u16>,
+    #[serde(default)]
+    pub e2e: bool,
     #[serde(default)]
     pub locksmith: bool,
     pub ssh_keys: Vec<String>,
@@ -309,6 +311,7 @@ mod tests {
             debug_mode: false,
             ports: vec![],
             http_port: None,
+            e2e: false,
             locksmith: false,
             ssh_keys: vec![],
             domain: None,
@@ -339,6 +342,70 @@ mod tests {
             &request,
             request.managed_onprem.as_ref().unwrap()
         ));
+    }
+
+    #[tokio::test]
+    async fn test_fully_managed_tf_opens_steve_port_when_e2e_enabled() {
+        let mut request = deployment_request("/tmp/enclave.eif", None);
+        request.managed_onprem = None;
+        request.e2e = true;
+
+        let work_dir = TempDir::new().unwrap();
+        generate_nitro_deployment_main_tf(work_dir.path(), &request, "s3://bucket/enclave.eif")
+            .await
+            .unwrap();
+
+        let main_tf = std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap();
+        assert!(main_tf.contains("from_port   = 49500"));
+        assert!(main_tf.contains("to_port     = 49500"));
+        assert!(main_tf.contains("Allow STEVE encrypted transport"));
+        assert!(!main_tf.contains("from_port   = 49501"));
+        assert!(!main_tf.contains("from_port   = 49502"));
+        assert!(main_tf.contains("Locksmith ingress disabled"));
+        assert!(!main_tf.contains("from_port   = 49504"));
+    }
+
+    #[tokio::test]
+    async fn test_fully_managed_tf_keeps_steve_port_closed_when_e2e_disabled() {
+        let mut request = deployment_request("/tmp/enclave.eif", None);
+        request.managed_onprem = None;
+
+        let work_dir = TempDir::new().unwrap();
+        generate_nitro_deployment_main_tf(work_dir.path(), &request, "s3://bucket/enclave.eif")
+            .await
+            .unwrap();
+
+        let main_tf = std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap();
+        assert!(main_tf.contains("STEVE ingress disabled"));
+        assert!(!main_tf.contains("from_port   = 49500"));
+        assert!(!main_tf.contains("from_port   = 49501"));
+        assert!(!main_tf.contains("from_port   = 49502"));
+        assert!(!main_tf.contains("from_port   = 49504"));
+    }
+
+    #[tokio::test]
+    async fn test_managed_onprem_tf_opens_locksmith_port_when_enabled() {
+        let mut request = deployment_request(
+            "s3://customer-bucket/eifs/org/key.eif",
+            Some("eifs/org/key.eif"),
+        );
+        request.e2e = true;
+        request.locksmith = true;
+
+        let work_dir = TempDir::new().unwrap();
+        generate_managed_onprem_deployment_tf(
+            work_dir.path(),
+            &request,
+            "s3://customer-bucket/enclave.eif",
+        )
+        .await
+        .unwrap();
+
+        let main_tf = std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap();
+        assert!(main_tf.contains("from_port   = 49500"));
+        assert!(main_tf.contains("to_port     = 49500"));
+        assert!(main_tf.contains("from_port   = 49504"));
+        assert!(main_tf.contains("Allow Locksmith shard receiver"));
     }
 }
 
@@ -1055,7 +1122,9 @@ async fn provision_nitro_enclave(
     );
 
     if request.credentials.is_some() {
-        tracing::info!("Using user-provided AWS credentials for provider (Caution credentials for state backend)");
+        tracing::info!(
+            "Using user-provided AWS credentials for provider (Caution credentials for state backend)"
+        );
     }
 
     let temp_dir = TempDir::new().context("Failed to create temporary directory")?;
@@ -1239,6 +1308,45 @@ fn compute_enclave_sizing(request: &NitroDeploymentRequest) -> (u32, &'static st
     );
 
     (cpu_count_rounded, instance_type)
+}
+
+fn platform_internal_ingress(e2e: bool, locksmith: bool) -> String {
+    let mut ingress = if e2e {
+        r#"# STEVE encrypted transport ingress enabled
+  ingress {
+    from_port   = 49500
+    to_port     = 49500
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow STEVE encrypted transport"
+  }"#
+        .to_string()
+    } else {
+        "# STEVE ingress disabled".to_string()
+    };
+
+    if locksmith {
+        ingress.push_str(
+            r#"
+
+  # Locksmith shard receiver ingress enabled
+  ingress {
+    from_port   = 49504
+    to_port     = 49504
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow Locksmith shard receiver"
+  }"#,
+        );
+    } else {
+        ingress.push_str(
+            r#"
+
+  # Locksmith ingress disabled"#,
+        );
+    }
+
+    ingress
 }
 
 async fn generate_nitro_deployment_main_tf(
@@ -1497,7 +1605,7 @@ resource "aws_security_group" "enclave" {{
     description = "Allow HTTPS"
   }}
 
-  {locksmith_ingress}
+  {platform_internal_ingress}
 
   # Dynamic user ports
   dynamic "ingress" {{
@@ -1619,11 +1727,7 @@ output "instance_type" {{
         } else {
             "# SSH enabled (ssh_keys configured in Procfile)\n  ingress {\n    from_port   = 22\n    to_port     = 22\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow SSH\"\n  }".to_string()
         },
-        locksmith_ingress = if request.locksmith {
-            "# Locksmith shard receiver ingress enabled\n  ingress {\n    from_port   = 49504\n    to_port     = 49504\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow Locksmith shard receiver\"\n  }".to_string()
-        } else {
-            "# Locksmith ingress disabled".to_string()
-        },
+        platform_internal_ingress = platform_internal_ingress(request.e2e, request.locksmith),
         locksmith = if request.locksmith { "true" } else { "false" },
         domain = request.domain.as_deref().unwrap_or(""),
         url_output = if let Some(ref domain) = request.domain {
@@ -1764,7 +1868,7 @@ resource "aws_security_group" "enclave" {{
     description = "Allow HTTPS"
   }}
 
-  {locksmith_ingress}
+  {platform_internal_ingress}
 
   dynamic "ingress" {{
     for_each = var.ports
@@ -1916,11 +2020,7 @@ output "instance_type" {{
         } else {
             "# SSH enabled (ssh_keys configured in Procfile)\n  ingress {\n    from_port   = 22\n    to_port     = 22\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow SSH\"\n  }".to_string()
         },
-        locksmith_ingress = if request.locksmith {
-            "# Locksmith shard receiver ingress enabled\n  ingress {\n    from_port   = 49504\n    to_port     = 49504\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow Locksmith shard receiver\"\n  }".to_string()
-        } else {
-            "# Locksmith ingress disabled".to_string()
-        },
+        platform_internal_ingress = platform_internal_ingress(request.e2e, request.locksmith),
         locksmith = if request.locksmith { "true" } else { "false" },
         domain = request.domain.as_deref().unwrap_or(""),
         url_output = if let Some(ref domain) = request.domain {
