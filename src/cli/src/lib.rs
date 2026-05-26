@@ -4242,7 +4242,8 @@ build: docker build -t app .
             self.read_pcrs_from_file(&pcrs_path)?
         } else if from_local {
             println!("\nBuilding from local directory...");
-            self.build_and_get_pcrs(manifest.clone(), no_cache, true).await?
+            self.build_and_get_pcrs(manifest.clone(), no_cache, true)
+                .await?
         } else if let Some(ref source_url) = app_source_url {
             println!("\nBuilding from provided source URL: {}", source_url);
             if let Some(ref m) = manifest {
@@ -4287,7 +4288,8 @@ build: docker build -t app .
                     bail!("Cannot reproduce private code deployment");
                 }
                 println!("\nReproducing build from remote manifest...");
-                self.build_and_get_pcrs(manifest.clone(), no_cache, false).await?
+                self.build_and_get_pcrs(manifest.clone(), no_cache, false)
+                    .await?
             } else {
                 println!("\n⚠️  Remote attestation does not include a manifest");
                 println!();
@@ -4778,7 +4780,77 @@ build: docker build -t app .
                 }
             }
 
-            // Fallback: try direct fetch by commit (works with GitHub)
+            // Fallback: fetch the full advertised branch ref into a fresh repo.
+            // Some forges reject raw SHA fetches unless the object is reachable
+            // from a requested ref, and reusing a failed shallow clone can leave
+            // the object database incomplete.
+            let mut branch_fetch_error = None;
+            if let Some(branch_name) = branch {
+                if clone_path.exists() {
+                    std::fs::remove_dir_all(&clone_path).with_context(|| {
+                        format!("Failed to reset git checkout: {}", clone_path.display())
+                    })?;
+                }
+
+                std::fs::create_dir_all(&clone_path)?;
+
+                let init_output = Command::new("git")
+                    .args(&["init"])
+                    .current_dir(&clone_path)
+                    .output()
+                    .context("Failed to run git init")?;
+
+                if !init_output.status.success() {
+                    let stderr = String::from_utf8_lossy(&init_output.stderr);
+                    bail!("Git init failed: {}", stderr);
+                }
+
+                let branch_ref = format!("refs/heads/{}", branch_name);
+                let fetch_branch_output = Command::new("git")
+                    .arg("fetch")
+                    .arg(git_url)
+                    .arg(&branch_ref)
+                    .current_dir(&clone_path)
+                    .output()
+                    .context("Failed to fetch branch")?;
+
+                if fetch_branch_output.status.success() {
+                    let checkout_output = Command::new("git")
+                        .args(&["checkout", commit])
+                        .current_dir(&clone_path)
+                        .output()
+                        .context("Failed to checkout commit")?;
+
+                    if checkout_output.status.success() {
+                        let extract_dir = temp_dir.keep().join("repo");
+                        log_verbose(
+                            self.verbose,
+                            &format!("Git fetch successful: {}", extract_dir.display()),
+                        );
+                        return Ok(extract_dir);
+                    }
+
+                    let stderr = String::from_utf8_lossy(&checkout_output.stderr);
+                    branch_fetch_error = Some(format!(
+                        "Fetched branch '{}' but could not checkout commit '{}': {}",
+                        branch_name, commit, stderr
+                    ));
+                } else {
+                    let stderr = String::from_utf8_lossy(&fetch_branch_output.stderr);
+                    branch_fetch_error = Some(format!(
+                        "Git branch fetch failed for '{}': {}",
+                        branch_name, stderr
+                    ));
+                }
+            }
+
+            // Last resort: direct fetch by commit. This works on hosts that allow
+            // fetching reachable objects by SHA, but not all forges permit it.
+            if clone_path.exists() {
+                std::fs::remove_dir_all(&clone_path).with_context(|| {
+                    format!("Failed to reset git checkout: {}", clone_path.display())
+                })?;
+            }
             std::fs::create_dir_all(&clone_path)?;
 
             let init_output = Command::new("git")
@@ -4792,25 +4864,17 @@ build: docker build -t app .
                 bail!("Git init failed: {}", stderr);
             }
 
-            let remote_output = Command::new("git")
-                .args(&["remote", "add", "origin", git_url])
-                .current_dir(&clone_path)
-                .output()
-                .context("Failed to add git remote")?;
-
-            if !remote_output.status.success() {
-                let stderr = String::from_utf8_lossy(&remote_output.stderr);
-                bail!("Git remote add failed: {}", stderr);
-            }
-
             let fetch_output = Command::new("git")
-                .args(&["fetch", "--depth", "1", "origin", commit])
+                .args(&["fetch", "--depth", "1", git_url, commit])
                 .current_dir(&clone_path)
                 .output()
                 .context("Failed to fetch commit")?;
 
             if !fetch_output.status.success() {
                 let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+                if let Some(branch_error) = branch_fetch_error {
+                    bail!("Git fetch failed: {}\n{}", stderr, branch_error);
+                }
                 bail!("Git fetch failed: {}", stderr);
             }
 
