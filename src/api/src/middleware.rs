@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
+    Json,
     extract::{Extension, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Serialize;
 use sqlx::PgPool;
@@ -274,4 +274,126 @@ pub async fn ensure_user_has_org(db: &PgPool, user_id: Uuid) -> Result<(), Statu
 
     tracing::info!("Successfully initialized account for user {}", user_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Router, body::Body, extract::Extension, routing::get};
+    use sqlx::postgres::PgPoolOptions;
+    use std::collections::HashMap;
+    use tower::ServiceExt;
+
+    fn test_state(internal_service_secret: Option<String>) -> Arc<AppState> {
+        Arc::new(AppState {
+            db: PgPoolOptions::new()
+                .max_connections(1)
+                .connect_lazy("postgresql://api:***@127.0.0.1:1/api_test")
+                .unwrap(),
+            git_hostname: "git.test".to_string(),
+            git_ssh_port: Some(2222),
+            data_dir: "/tmp/caution-api-test".to_string(),
+            encryptor: None,
+            internal_service_secret,
+            paddle_client_token: None,
+            paddle_setup_price_id: None,
+            paddle_credits_price_ids: [None, None, None],
+            paddle_api_url: String::new(),
+            paddle_api_key: None,
+            pricing: crate::PricingConfig {
+                compute_margin_percent: 0.0,
+                subscription_tiers: HashMap::new(),
+                credit_packages: HashMap::new(),
+            },
+            builder_config: crate::builder::BuilderConfig {
+                ami_id: "ami-test".to_string(),
+                security_group_id: "sg-test".to_string(),
+                subnet_id: "subnet-test".to_string(),
+                instance_profile: "profile-test".to_string(),
+                region: "us-west-2".to_string(),
+                timeout_secs: 60,
+                eif_s3_bucket: "bucket-test".to_string(),
+                git_hostname: "git.test".to_string(),
+                additional_instance_tags: Vec::new(),
+            },
+            builder_sizes: crate::builder::BuilderSizesConfig {
+                builder_sizes: vec![crate::builder::BuilderSizeSpec {
+                    id: "small".to_string(),
+                    label: "Small".to_string(),
+                    instance_type: "c6i.large".to_string(),
+                    vcpus: 2,
+                    ram_gb: 4,
+                }],
+                max_resources_per_org: 10,
+            },
+        })
+    }
+
+    async fn current_user_handler(Extension(auth): Extension<AuthContext>) -> String {
+        auth.user_id.to_string()
+    }
+
+    fn auth_test_router(state: Arc<AppState>) -> Router {
+        Router::new()
+            .route("/protected", get(current_user_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn auth_middleware_rejects_missing_auth_without_touching_database() {
+        let response = auth_test_router(test_state(Some("secret".to_string())))
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_middleware_rejects_invalid_internal_secret_without_touching_database() {
+        let response = auth_test_router(test_state(Some("secret".to_string())))
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("x-internal-service-secret", "wrong")
+                    .header("x-authenticated-user-id", Uuid::new_v4().to_string())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_middleware_accepts_valid_internal_secret_and_sets_auth_context() {
+        let user_id = Uuid::new_v4();
+        let response = auth_test_router(test_state(Some("secret".to_string())))
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("x-internal-service-secret", "secret")
+                    .header("x-authenticated-user-id", user_id.to_string())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), user_id.to_string().as_bytes());
+    }
 }

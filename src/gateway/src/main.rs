@@ -136,6 +136,116 @@ async fn main() -> Result<()> {
         csrf_secret: config.csrf_secret.clone(),
     };
 
+    let frontend_dir =
+        std::env::var("FRONTEND_DIR").unwrap_or_else(|_| "/app/frontend".to_string());
+    let app = build_router(state.clone(), &config, &frontend_dir);
+
+    let cleanup_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            db::run_cleanups(&cleanup_pool).await;
+        }
+    });
+
+    // Cleanup expired in-memory challenge states (registration, authentication, sign challenges)
+    let cleanup_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let now = time::OffsetDateTime::now_utc();
+
+            // Clean up expired registration states
+            {
+                let mut reg_states = cleanup_state.reg_states.write().await;
+                let before_count = reg_states.len();
+                reg_states.retain(|_, pending| pending.expires_at > now);
+                let removed = before_count - reg_states.len();
+                if removed > 0 {
+                    tracing::debug!("Cleaned up {} expired registration challenges", removed);
+                }
+            }
+
+            // Clean up expired passkey registration states
+            {
+                let mut reg_states = cleanup_state.passkey_reg_states.write().await;
+                let before_count = reg_states.len();
+                reg_states.retain(|_, pending| pending.expires_at > now);
+                let removed = before_count - reg_states.len();
+                if removed > 0 {
+                    tracing::debug!(
+                        "Cleaned up {} expired passkey registration challenges",
+                        removed
+                    );
+                }
+            }
+
+            // Clean up expired authentication states
+            {
+                let mut auth_states = cleanup_state.auth_states.write().await;
+                let before_count = auth_states.len();
+                auth_states.retain(|_, pending| pending.expires_at > now);
+                let removed = before_count - auth_states.len();
+                if removed > 0 {
+                    tracing::debug!("Cleaned up {} expired authentication challenges", removed);
+                }
+            }
+
+            // Clean up expired sign challenges
+            {
+                let mut sign_challenges = cleanup_state.sign_challenges.write().await;
+                let before_count = sign_challenges.len();
+                sign_challenges.retain(|_, pending| pending.expires_at > now);
+                let removed = before_count - sign_challenges.len();
+                if removed > 0 {
+                    tracing::debug!("Cleaned up {} expired sign challenges", removed);
+                }
+            }
+        }
+    });
+
+    let ssh_pool = pool.clone();
+    let ssh_api_url = config.api_service_url.clone();
+    let ssh_data_dir = config.data_dir.clone();
+    let ssh_bind_addr = format!("0.0.0.0:{}", config.ssh_port);
+    let ssh_internal_service_secret = internal_service_secret.clone();
+    tokio::spawn(async move {
+        if let Err(e) = ssh_server::run_ssh_server(
+            ssh_pool,
+            ssh_api_url,
+            ssh_data_dir,
+            ssh_internal_service_secret,
+            host_key,
+            &ssh_bind_addr,
+        )
+        .await
+        {
+            tracing::error!("SSH server error: {:?}", e);
+        }
+    });
+
+    let addr = format!("0.0.0.0:{}", config.port);
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .context("Failed to bind to address")?;
+
+    tracing::info!("Gateway listening on {}", addr);
+    tracing::info!("SSH server listening on port {}", config.ssh_port);
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("Server error")?;
+
+    Ok(())
+}
+
+fn build_router(state: AppState, config: &Config, frontend_dir: &str) -> Router {
     let rate_limiter = rate_limit::RateLimiter::new(100, 60);
 
     let rate_limiter_cleanup = rate_limiter.clone();
@@ -169,6 +279,7 @@ async fn main() -> Result<()> {
             "X-Fido2-Response".parse().unwrap(),
         ]);
 
+    #[allow(unused_mut)]
     let mut auth_routes = Router::new()
         .route(
             "/auth/register/begin",
@@ -284,11 +395,8 @@ async fn main() -> Result<()> {
         .with_state(state.clone())
         .layer(cors.clone());
 
-    let frontend_dir =
-        std::env::var("FRONTEND_DIR").unwrap_or_else(|_| "/app/frontend".to_string());
-
-    let frontend_service = ServeDir::new(&frontend_dir).append_index_html_on_directories(true);
-    let frontend_index = std::path::Path::new(&frontend_dir).join("index.html");
+    let frontend_service = ServeDir::new(frontend_dir).append_index_html_on_directories(true);
+    let frontend_index = std::path::Path::new(frontend_dir).join("index.html");
     let frontend_routes = Router::new()
         .route_service("/login", ServeFile::new(frontend_index.clone()))
         .route_service("/onboarding", ServeFile::new(frontend_index.clone()))
@@ -303,8 +411,7 @@ async fn main() -> Result<()> {
         .with_state(state.clone())
         .layer(cors.clone());
 
-    let app = app
-        .merge(protected)
+    app.merge(protected)
         .merge(webhook_proxy)
         .nest("/api", public_api_proxy.merge(api_proxy))
         .merge(frontend_routes)
@@ -313,111 +420,7 @@ async fn main() -> Result<()> {
         .layer(middleware::from_fn(request_id::request_id_middleware))
         .layer(middleware::from_fn(
             security_headers::security_headers_middleware,
-        ));
-
-    let cleanup_pool = pool.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
-        loop {
-            interval.tick().await;
-            db::run_cleanups(&cleanup_pool).await;
-        }
-    });
-
-    // Cleanup expired in-memory challenge states (registration, authentication, sign challenges)
-    let cleanup_state = state.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            let now = time::OffsetDateTime::now_utc();
-
-            // Clean up expired registration states
-            {
-                let mut reg_states = cleanup_state.reg_states.write().await;
-                let before_count = reg_states.len();
-                reg_states.retain(|_, pending| pending.expires_at > now);
-                let removed = before_count - reg_states.len();
-                if removed > 0 {
-                    tracing::debug!("Cleaned up {} expired registration challenges", removed);
-                }
-            }
-
-            // Clean up expired passkey registration states
-            {
-                let mut reg_states = cleanup_state.passkey_reg_states.write().await;
-                let before_count = reg_states.len();
-                reg_states.retain(|_, pending| pending.expires_at > now);
-                let removed = before_count - reg_states.len();
-                if removed > 0 {
-                    tracing::debug!(
-                        "Cleaned up {} expired passkey registration challenges",
-                        removed
-                    );
-                }
-            }
-
-            // Clean up expired authentication states
-            {
-                let mut auth_states = cleanup_state.auth_states.write().await;
-                let before_count = auth_states.len();
-                auth_states.retain(|_, pending| pending.expires_at > now);
-                let removed = before_count - auth_states.len();
-                if removed > 0 {
-                    tracing::debug!("Cleaned up {} expired authentication challenges", removed);
-                }
-            }
-
-            // Clean up expired sign challenges
-            {
-                let mut sign_challenges = cleanup_state.sign_challenges.write().await;
-                let before_count = sign_challenges.len();
-                sign_challenges.retain(|_, pending| pending.expires_at > now);
-                let removed = before_count - sign_challenges.len();
-                if removed > 0 {
-                    tracing::debug!("Cleaned up {} expired sign challenges", removed);
-                }
-            }
-        }
-    });
-
-    let ssh_pool = pool.clone();
-    let ssh_api_url = config.api_service_url.clone();
-    let ssh_data_dir = config.data_dir.clone();
-    let ssh_bind_addr = format!("0.0.0.0:{}", config.ssh_port);
-    let ssh_internal_service_secret = internal_service_secret.clone();
-    tokio::spawn(async move {
-        if let Err(e) = ssh_server::run_ssh_server(
-            ssh_pool,
-            ssh_api_url,
-            ssh_data_dir,
-            ssh_internal_service_secret,
-            host_key,
-            &ssh_bind_addr,
-        )
-        .await
-        {
-            tracing::error!("SSH server error: {:?}", e);
-        }
-    });
-
-    let addr = format!("0.0.0.0:{}", config.port);
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .context("Failed to bind to address")?;
-
-    tracing::info!("Gateway listening on {}", addr);
-    tracing::info!("SSH server listening on port {}", config.ssh_port);
-
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .context("Server error")?;
-
-    Ok(())
+        ))
 }
 
 async fn shutdown_signal() {
@@ -471,5 +474,112 @@ fn load_or_generate_host_key(path: &str) -> Result<KeyPair> {
 
         tracing::info!("SSH host key generated");
         Ok(key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use sqlx::postgres::PgPoolOptions;
+    use tower::ServiceExt;
+
+    fn test_config() -> Config {
+        Config {
+            database_url: "postgresql://gateway:***@127.0.0.1:1/gateway_test".to_string(),
+            api_service_url: "http://api.test".to_string(),
+            metering_service_url: "http://metering.test".to_string(),
+            rp_id: "localhost".to_string(),
+            rp_display_name: "Caution Test".to_string(),
+            rp_origins: vec!["http://localhost:3000".to_string()],
+            port: 8080,
+            ssh_port: 2222,
+            ssh_host_key_path: "/tmp/caution-test-ssh-key".to_string(),
+            session_timeout_hours: 24,
+            data_dir: "/tmp/caution-test-data".to_string(),
+            csrf_secret: "test-csrf-secret".to_string(),
+        }
+    }
+
+    fn test_state(config: &Config) -> AppState {
+        let origin = Url::parse(&config.rp_origins[0]).unwrap();
+        let webauthn = WebauthnBuilder::new(&config.rp_id, &origin)
+            .unwrap()
+            .rp_name(&config.rp_display_name)
+            .build()
+            .unwrap();
+
+        AppState {
+            db: PgPoolOptions::new()
+                .max_connections(1)
+                .connect_lazy(&config.database_url)
+                .unwrap(),
+            webauthn,
+            api_service_url: config.api_service_url.clone(),
+            metering_service_url: config.metering_service_url.clone(),
+            reg_states: Arc::new(RwLock::new(HashMap::new())),
+            passkey_reg_states: Arc::new(RwLock::new(HashMap::new())),
+            auth_states: Arc::new(RwLock::new(HashMap::new())),
+            sign_challenges: Arc::new(RwLock::new(HashMap::new())),
+            session_timeout_hours: config.session_timeout_hours,
+            internal_service_secret: None,
+            csrf_secret: config.csrf_secret.clone(),
+        }
+    }
+
+    fn test_router() -> Router {
+        let config = test_config();
+        let state = test_state(&config);
+        let frontend_dir = tempfile::tempdir().unwrap();
+        build_router(state, &config, frontend_dir.path().to_str().unwrap())
+    }
+
+    #[tokio::test]
+    async fn health_route_is_public() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn protected_route_rejects_missing_session_before_touching_database() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/ssh-keys")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn protected_route_does_not_trust_spoofed_authenticated_user_header() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/ssh-keys")
+                    .header("X-Authenticated-User-ID", Uuid::new_v4().to_string())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

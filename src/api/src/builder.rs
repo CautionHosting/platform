@@ -7,17 +7,17 @@
 //! ephemeral EC2 instances that perform the build, upload the EIF to S3,
 //! and signal completion via an S3 status file.
 
-use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Utc, TimeDelta};
+use anyhow::{Context, Result, bail};
+use chrono::{DateTime, TimeDelta, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::{
+    AppliedPricing,
     deployment::{AwsCredentials, ManagedOnPremConfig},
     ec2::{Ec2Client, RunInstancesParams},
-    AppliedPricing,
 };
 
 const REMOTE_BUILDER_HELPER: &str = "remote-build-helper";
@@ -463,7 +463,7 @@ pub async fn execute_remote_build(
 
     // 1. Check no active build exists for this app
     let existing = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM eif_builds WHERE app_id = $1 AND status IN ('pending', 'building')"
+        "SELECT COUNT(*) FROM eif_builds WHERE app_id = $1 AND status IN ('pending', 'building')",
     )
     .bind(request.app_id)
     .fetch_one(db)
@@ -602,7 +602,12 @@ pub async fn execute_remote_build(
             Ok(_) => break,
             Err(e) => {
                 if terminate_attempts >= 3 {
-                    tracing::error!("Failed to terminate builder {} after {} attempts: {}. INSTANCE MAY BE LEAKED.", instance_id, terminate_attempts, e);
+                    tracing::error!(
+                        "Failed to terminate builder {} after {} attempts: {}. INSTANCE MAY BE LEAKED.",
+                        instance_id,
+                        terminate_attempts,
+                        e
+                    );
                     break;
                 }
                 tracing::warn!(
@@ -723,7 +728,7 @@ async fn poll_build_status(
                     Ok(o) => {
                         tracing::info!("Received status: {o:?} ({:?})", String::from_utf8(body));
                         o
-                    },
+                    }
                     Err(e) => {
                         tracing::error!("Could not parse status.json: {e}");
                         tracing::error!("Received body: {:?}", String::from_utf8(body));
@@ -1441,11 +1446,15 @@ mod tests {
             "should reference source archive"
         );
         assert!(
-            userdata.contains("SOURCE_SHA256=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""),
+            userdata.contains(
+                "SOURCE_SHA256=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+            ),
             "should include source archive digest"
         );
         assert!(
-            userdata.contains("HELPER_SHA256=\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\""),
+            userdata.contains(
+                "HELPER_SHA256=\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\""
+            ),
             "should include helper digest"
         );
         assert!(
@@ -1485,14 +1494,18 @@ mod tests {
             "should upload to correct S3 key"
         );
 
-        // Should write status updates
+        // Should write status updates through the heartbeat/status phase helpers
         assert!(
-            userdata.contains("write_status"),
-            "should write status to S3"
+            userdata.contains("heartbeat()"),
+            "should define status heartbeat writer"
         );
         assert!(
-            userdata.contains("\"completed\""),
+            userdata.contains("set_phase \"completed\""),
             "should write completed status"
+        );
+        assert!(
+            userdata.contains("aws s3 cp - \"$s3_url\" --content-type application/json"),
+            "should upload status JSON to S3"
         );
 
         // Should download the helper from S3

@@ -6,7 +6,7 @@ export
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-macos-untrusted install-cli install-cli-macos-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-platform-ports test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-macos-untrusted install-cli install-cli-macos-untrusted release-cli sign-cli verify-cli reproduce-cli test test-fast test-unit test-e2e test-e2e-platform-ports test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -659,6 +659,9 @@ prepare-byoc-provisioner:
 	else \
 		echo "Local BYOC provisioner repo not found at $(ONPREM_PROVISIONER_DIR); using published image."; \
 	fi
+
+test-fast:
+	cargo test --workspace
 
 test-unit:
 	cargo test --workspace
