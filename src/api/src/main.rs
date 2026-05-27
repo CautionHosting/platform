@@ -1332,18 +1332,13 @@ async fn repo_has_file_at_commit(
 async fn validate_explicit_containerfile_for_deploy(
     git_dir: &str,
     commit_sha: &str,
-    build_command: Option<&str>,
     containerfile: Option<&str>,
 ) -> Result<Option<String>, (StatusCode, String)> {
-    if enclave_builder::has_explicit_build_command(build_command) {
-        return Ok(None);
-    }
-
     let Some(containerfile) = containerfile else {
         return Ok(None);
     };
 
-    let containerfile = enclave_builder::validate_explicit_containerfile_path(containerfile)
+    let containerfile = builder::validate_remote_containerfile_path(containerfile)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     if !repo_has_file_at_commit(git_dir, commit_sha, &containerfile).await? {
@@ -1386,7 +1381,7 @@ async fn load_build_config_for_deploy(
         tracing::error!("Procfile not found in repository at commit {}", commit_sha);
         return Err((
             StatusCode::BAD_REQUEST,
-            "No Procfile found in repository root. Please add a Procfile with a required `run:` field and either `build:` or `containerfile:`. If both are absent, Caution auto-detects a repo-root `Containerfile` before `Dockerfile`.".to_string(),
+            "No Procfile found in repository root. Please add a Procfile with a required `run:` field. Use `containerfile:` for an explicit Dockerfile/Containerfile path, or let Caution auto-detect a repo-root `Containerfile` before `Dockerfile`.".to_string(),
         ));
     }
 
@@ -1407,20 +1402,25 @@ async fn load_build_config_for_deploy(
     Ok((procfile_content, build_config))
 }
 
-async fn resolve_build_command_for_deploy(
+async fn resolve_containerfile_for_deploy(
     git_dir: &str,
     commit_sha: &str,
     build_config: &types::BuildConfig,
 ) -> Result<String, (StatusCode, String)> {
+    if enclave_builder::has_explicit_build_command(build_config.build.as_deref()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Procfile field `build:` is not supported for remote deploys. Put build steps in your Dockerfile/Containerfile and use `containerfile:` when needed.".to_string(),
+        ));
+    }
+
     let containerfile = validate_explicit_containerfile_for_deploy(
         git_dir,
         commit_sha,
-        build_config.build.as_deref(),
         build_config.containerfile.as_deref(),
     )
     .await?;
     let containerfile = if containerfile.is_none()
-        && !enclave_builder::has_explicit_build_command(build_config.build.as_deref())
         && repo_has_file_at_commit(git_dir, commit_sha, "Containerfile").await?
     {
         Some("Containerfile".to_string())
@@ -1428,16 +1428,12 @@ async fn resolve_build_command_for_deploy(
         containerfile
     };
 
-    Ok(enclave_builder::resolve_build_command(
-        build_config.build.as_deref(),
-        containerfile.as_deref(),
-    ))
+    Ok(containerfile.unwrap_or_else(|| "Dockerfile".to_string()))
 }
 
 #[cfg(test)]
-mod deploy_build_command_tests {
-    use super::{load_build_config_for_deploy, resolve_build_command_for_deploy};
-    use enclave_builder::resolve_build_command;
+mod deploy_containerfile_tests {
+    use super::{load_build_config_for_deploy, resolve_containerfile_for_deploy};
     use std::{path::Path, process::Command};
     use tempfile::TempDir;
 
@@ -1490,41 +1486,6 @@ mod deploy_build_command_tests {
         (repo_dir, commit_sha)
     }
 
-    #[test]
-    fn explicit_build_wins() {
-        assert_eq!(
-            resolve_build_command(
-                Some("docker build -f Custom.Containerfile ."),
-                Some("Ignored.Containerfile"),
-            ),
-            "docker build -f Custom.Containerfile ."
-        );
-    }
-
-    #[test]
-    fn explicit_containerfile_wins() {
-        assert_eq!(
-            resolve_build_command(None, Some("Custom.Containerfile")),
-            "docker build -f Custom.Containerfile ."
-        );
-    }
-
-    #[test]
-    fn selected_containerfile_builds_with_containerfile_flag() {
-        assert_eq!(
-            resolve_build_command(None, Some("Containerfile")),
-            "docker build -f Containerfile ."
-        );
-    }
-
-    #[test]
-    fn dockerfile_is_final_fallback() {
-        assert_eq!(
-            resolve_build_command(None, None),
-            "docker build -f Dockerfile ."
-        );
-    }
-
     #[tokio::test]
     async fn deploy_path_auto_detects_committed_containerfile() {
         let (repo_dir, commit_sha) = commit_test_repo(&[
@@ -1540,12 +1501,12 @@ mod deploy_build_command_tests {
         assert!(build_config.build.is_none());
         assert!(build_config.containerfile.is_none());
 
-        let build_command =
-            resolve_build_command_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &build_config)
+        let containerfile =
+            resolve_containerfile_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &build_config)
                 .await
                 .unwrap();
 
-        assert_eq!(build_command, "docker build -f Containerfile .");
+        assert_eq!(containerfile, "Containerfile");
     }
 
     #[tokio::test]
@@ -1573,12 +1534,56 @@ mod deploy_build_command_tests {
             Some("Custom.Containerfile")
         );
 
-        let build_command =
-            resolve_build_command_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &build_config)
+        let containerfile =
+            resolve_containerfile_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &build_config)
                 .await
                 .unwrap();
 
-        assert_eq!(build_command, "docker build -f Custom.Containerfile .");
+        assert_eq!(containerfile, "Custom.Containerfile");
+    }
+
+    #[tokio::test]
+    async fn deploy_path_falls_back_to_dockerfile() {
+        let (repo_dir, commit_sha) = commit_test_repo(&[
+            ("Procfile", "run: /app\n"),
+            ("Dockerfile", "FROM alpine:3.20\n"),
+        ]);
+        let git_dir = repo_dir.path().join(".git");
+        let (_, build_config) =
+            load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
+                .await
+                .unwrap();
+
+        let containerfile =
+            resolve_containerfile_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &build_config)
+                .await
+                .unwrap();
+
+        assert_eq!(containerfile, "Dockerfile");
+    }
+
+    #[tokio::test]
+    async fn deploy_path_rejects_procfile_build_command() {
+        let (repo_dir, commit_sha) = commit_test_repo(&[
+            (
+                "Procfile",
+                "build: docker build -f Dockerfile .\nrun: /app\n",
+            ),
+            ("Dockerfile", "FROM alpine:3.20\n"),
+        ]);
+        let git_dir = repo_dir.path().join(".git");
+        let (_, build_config) =
+            load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
+                .await
+                .unwrap();
+
+        let err =
+            resolve_containerfile_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &build_config)
+                .await
+                .unwrap_err();
+
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("`build:` is not supported"));
     }
 }
 
@@ -1983,16 +1988,16 @@ async fn deploy_logic(
     let (procfile_content, build_config) =
         load_build_config_for_deploy(&git_dir, &commit_sha).await?;
 
-    let build_command =
-        resolve_build_command_for_deploy(&git_dir, &commit_sha, &build_config).await?;
+    let containerfile =
+        resolve_containerfile_for_deploy(&git_dir, &commit_sha, &build_config).await?;
     tracing::info!(
-        "Resolved build command for resource {} at commit {}: {}",
+        "Resolved containerfile for resource {} at commit {}: {}",
         resource_id,
         commit_sha,
-        build_command
+        containerfile
     );
 
-    tracing::info!("Build command for {}: {}", app_name, build_command);
+    tracing::info!("Docker build file for {}: {}", app_name, containerfile);
 
     let enclave_config = types::EnclaveConfig {
         binary_path: build_config
@@ -2169,7 +2174,7 @@ async fn deploy_logic(
                 source_sha256: source_artifact.sha256,
                 procfile_content,
                 run_command: build_config.run.clone(),
-                build_command: Some(build_command.clone()),
+                containerfile: containerfile.clone(),
                 binary_path: build_config.binary.clone(),
                 ports: enclave_config.ports.clone(),
                 e2e: build_config.e2e,

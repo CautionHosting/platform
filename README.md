@@ -73,7 +73,10 @@ make up
    caution init
    ```
 
-   You may need to adjust the Procfile.
+   You may need to adjust the Procfile. Caution remote builds run Docker from
+   the repository root; your app should build with `docker build -f <file> .`.
+   Put setup, compilation, and asset build steps in the Dockerfile or
+   Containerfile.
 
    The <a href="https://codeberg.org/Caution/hello-world-enclave" target="_blank">hello-world-enclave</a> repo is a good test app to deploy.
 

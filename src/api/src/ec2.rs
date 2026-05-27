@@ -4,7 +4,7 @@
 //! Minimal AWS clients using direct HTTP calls with SigV4 signing.
 //! Replaces aws-sdk-ec2 and aws-sdk-autoscaling to avoid compiling massive generated SDKs.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
@@ -43,6 +43,10 @@ pub struct Image {
     pub creation_date: String,
 }
 
+// Allow the EC2 host to use IMDSv2 while blocking metadata responses from
+// traversing into Docker build containers.
+const INSTANCE_METADATA_RESPONSE_HOP_LIMIT: &str = "1";
+
 impl Filter {
     pub fn new(name: &str, values: &[&str]) -> Self {
         Self {
@@ -50,6 +54,70 @@ impl Filter {
             values: values.iter().map(|v| v.to_string()).collect(),
         }
     }
+}
+
+fn run_instances_request_params(params: &RunInstancesParams) -> Vec<(String, String)> {
+    let user_data_b64 = base64::engine::general_purpose::STANDARD.encode(&params.user_data);
+
+    let mut req_params = vec![
+        ("Action".to_string(), "RunInstances".to_string()),
+        ("Version".to_string(), "2016-11-15".to_string()),
+        ("ImageId".to_string(), params.image_id.clone()),
+        ("InstanceType".to_string(), params.instance_type.clone()),
+        ("MinCount".to_string(), "1".to_string()),
+        ("MaxCount".to_string(), "1".to_string()),
+        ("UserData".to_string(), user_data_b64),
+        ("SubnetId".to_string(), params.subnet_id.clone()),
+        (
+            "IamInstanceProfile.Name".to_string(),
+            params.iam_instance_profile.clone(),
+        ),
+        (
+            "MetadataOptions.HttpTokens".to_string(),
+            "required".to_string(),
+        ),
+        (
+            "MetadataOptions.HttpPutResponseHopLimit".to_string(),
+            INSTANCE_METADATA_RESPONSE_HOP_LIMIT.to_string(),
+        ),
+        (
+            "BlockDeviceMapping.1.DeviceName".to_string(),
+            "/dev/xvda".to_string(),
+        ),
+        (
+            "BlockDeviceMapping.1.Ebs.VolumeSize".to_string(),
+            "50".to_string(),
+        ),
+        (
+            "BlockDeviceMapping.1.Ebs.VolumeType".to_string(),
+            "gp3".to_string(),
+        ),
+        (
+            "BlockDeviceMapping.1.Ebs.Encrypted".to_string(),
+            "true".to_string(),
+        ),
+    ];
+
+    for (i, sg_id) in params.security_group_ids.iter().enumerate() {
+        req_params.push((format!("SecurityGroupId.{}", i + 1), sg_id.clone()));
+    }
+
+    if !params.tags.is_empty() {
+        req_params.push((
+            "TagSpecification.1.ResourceType".to_string(),
+            "instance".to_string(),
+        ));
+        for (i, (key, value)) in params.tags.iter().enumerate() {
+            let idx = i + 1;
+            req_params.push((format!("TagSpecification.1.Tag.{}.Key", idx), key.clone()));
+            req_params.push((
+                format!("TagSpecification.1.Tag.{}.Value", idx),
+                value.clone(),
+            ));
+        }
+    }
+
+    req_params
 }
 
 impl Ec2Client {
@@ -105,67 +173,7 @@ impl Ec2Client {
     }
 
     pub async fn run_instances(&self, params: &RunInstancesParams) -> Result<String> {
-        let user_data_b64 = base64::engine::general_purpose::STANDARD.encode(&params.user_data);
-
-        let mut req_params = vec![
-            ("Action".to_string(), "RunInstances".to_string()),
-            ("Version".to_string(), "2016-11-15".to_string()),
-            ("ImageId".to_string(), params.image_id.clone()),
-            ("InstanceType".to_string(), params.instance_type.clone()),
-            ("MinCount".to_string(), "1".to_string()),
-            ("MaxCount".to_string(), "1".to_string()),
-            ("UserData".to_string(), user_data_b64),
-            ("SubnetId".to_string(), params.subnet_id.clone()),
-            (
-                "IamInstanceProfile.Name".to_string(),
-                params.iam_instance_profile.clone(),
-            ),
-            // IMDSv2 required
-            (
-                "MetadataOptions.HttpTokens".to_string(),
-                "required".to_string(),
-            ),
-            (
-                "MetadataOptions.HttpPutResponseHopLimit".to_string(),
-                "2".to_string(),
-            ),
-            // Encrypted root volume
-            (
-                "BlockDeviceMapping.1.DeviceName".to_string(),
-                "/dev/xvda".to_string(),
-            ),
-            (
-                "BlockDeviceMapping.1.Ebs.VolumeSize".to_string(),
-                "50".to_string(),
-            ),
-            (
-                "BlockDeviceMapping.1.Ebs.VolumeType".to_string(),
-                "gp3".to_string(),
-            ),
-            (
-                "BlockDeviceMapping.1.Ebs.Encrypted".to_string(),
-                "true".to_string(),
-            ),
-        ];
-
-        for (i, sg_id) in params.security_group_ids.iter().enumerate() {
-            req_params.push((format!("SecurityGroupId.{}", i + 1), sg_id.clone()));
-        }
-
-        if !params.tags.is_empty() {
-            req_params.push((
-                "TagSpecification.1.ResourceType".to_string(),
-                "instance".to_string(),
-            ));
-            for (i, (key, value)) in params.tags.iter().enumerate() {
-                let idx = i + 1;
-                req_params.push((format!("TagSpecification.1.Tag.{}.Key", idx), key.clone()));
-                req_params.push((
-                    format!("TagSpecification.1.Tag.{}.Value", idx),
-                    value.clone(),
-                ));
-            }
-        }
+        let req_params = run_instances_request_params(params);
 
         let body = self.signed_request(&req_params).await?;
 
@@ -530,6 +538,13 @@ fn parse_images(xml: &str) -> Vec<Image> {
 mod tests {
     use super::*;
 
+    fn param_value<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        params
+            .iter()
+            .find(|(param_key, _)| param_key == key)
+            .map(|(_, value)| value.as_str())
+    }
+
     #[test]
     fn test_parse_instance_ids() {
         let xml = r#"
@@ -631,6 +646,38 @@ mod tests {
     }
 
     #[test]
+    fn test_run_instances_requires_imdsv2_with_one_hop_limit() {
+        let params = RunInstancesParams {
+            image_id: "ami-123".to_string(),
+            instance_type: "c5.xlarge".to_string(),
+            user_data: "#!/bin/sh\n".to_string(),
+            iam_instance_profile: "builder-profile".to_string(),
+            security_group_ids: vec!["sg-123".to_string()],
+            subnet_id: "subnet-123".to_string(),
+            tags: vec![("ManagedBy".to_string(), "caution-builder".to_string())],
+        };
+
+        let req_params = run_instances_request_params(&params);
+
+        assert_eq!(
+            param_value(&req_params, "MetadataOptions.HttpTokens"),
+            Some("required")
+        );
+        assert_eq!(
+            param_value(&req_params, "MetadataOptions.HttpPutResponseHopLimit"),
+            Some("1")
+        );
+        assert_eq!(
+            param_value(&req_params, "SecurityGroupId.1"),
+            Some("sg-123")
+        );
+        assert_eq!(
+            param_value(&req_params, "TagSpecification.1.Tag.1.Key"),
+            Some("ManagedBy")
+        );
+    }
+
+    #[test]
     fn test_create_security_group_uses_group_description_param() {
         let params = vec![
             ("Action".to_string(), "CreateSecurityGroup".to_string()),
@@ -651,9 +698,11 @@ mod tests {
         assert!(encoded.contains(
             "GroupDescription=Security%20group%20for%20Caution%20builder%20deployment%20dep-123"
         ));
-        assert!(encoded
-            .split('&')
-            .all(|param| !param.starts_with("Description=")));
+        assert!(
+            encoded
+                .split('&')
+                .all(|param| !param.starts_with("Description="))
+        );
     }
 
     // Verify stop/start param construction by testing the pattern they use

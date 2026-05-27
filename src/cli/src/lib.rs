@@ -951,15 +951,17 @@ impl ApiClient {
 
         if !work_dir.join("Procfile").exists() {
             println!("Procfile not found in current directory");
-            println!("Add a Procfile with a run command and one of these build options:");
+            println!("Add a Procfile with a run command and optional containerfile:");
             println!();
             println!("run: /app/myapp");
-            println!("build: docker build -t myapp .");
-            println!("# or");
             println!("# containerfile: Containerfile");
             println!();
             println!(
-                "If both 'build:' and 'containerfile:' are absent, Caution auto-detects a repo-root Containerfile before Dockerfile."
+                "Remote builds run Docker from the repo root; put app build steps in your Dockerfile/Containerfile."
+            );
+            println!();
+            println!(
+                "If 'containerfile:' is absent, Caution auto-detects a repo-root Containerfile before Dockerfile."
             );
             println!();
             println!("To learn more visit https://docs.caution.co/quickstart");
@@ -1092,9 +1094,10 @@ aws_region: us-east-1
 
 # Build configuration
 run: /app/myapp
-# Use `build:` for a custom command, `containerfile:` for an explicit file,
-# or rely on automatic repo-root `Containerfile` detection before `Dockerfile`.
-build: docker build -t app .
+# Remote builds run Docker from the repo root. Put app build steps in your
+# Dockerfile/Containerfile so this succeeds: docker build -f <file> .
+# Use `containerfile:` for an explicit Dockerfile/Containerfile path, or rely
+# on automatic repo-root `Containerfile` detection before `Dockerfile`.
 # containerfile: Containerfile
 # oci_tarball: image.tar
 # binary: /app/myapp  # extracts only this binary, not the full container filesystem
@@ -1124,9 +1127,7 @@ build: docker build -t app .
 
         println!("\nCreated Procfile in current directory");
         println!("Edit the required 'run' field to match your application");
-        println!(
-            "Build precedence: build: -> containerfile: -> repo-root Containerfile -> Dockerfile"
-        );
+        println!("Build file precedence: containerfile: -> repo-root Containerfile -> Dockerfile");
         if byoc {
             println!("Configure AWS deployment settings in the BYOC section");
         }
@@ -3381,9 +3382,9 @@ build: docker build -t app .
         println!("Git URL: {}", git_url);
         println!("\nState saved to: {}", caution_dir.display());
         println!("\nNext steps:");
-        println!("  1. Create your Procfile with 'run:' plus either 'build:' or 'containerfile:'");
+        println!("  1. Create your Procfile with 'run:' and optional 'containerfile:'");
         println!(
-            "     If both are absent, Caution auto-detects a repo-root Containerfile before Dockerfile"
+            "     If containerfile is absent, Caution auto-detects a repo-root Containerfile before Dockerfile"
         );
         println!("  2. Push to deploy: git push caution main");
         println!("\nTo tear down this deployment:");

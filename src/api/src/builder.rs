@@ -146,7 +146,7 @@ pub struct BuildRequest {
     pub source_sha256: String,
     pub procfile_content: String,
     pub run_command: Option<String>,
-    pub build_command: Option<String>,
+    pub containerfile: String,
     pub binary_path: Option<String>,
     pub ports: Vec<u16>,
     pub e2e: bool,
@@ -160,6 +160,21 @@ pub struct BuildRequest {
 
 pub const ACTIVE_BUILD_CONFLICT_MSG: &str =
     "A build is already in progress for this app. Please wait for it to complete.";
+
+pub fn validate_remote_containerfile_path(containerfile: &str) -> Result<String> {
+    let containerfile = enclave_builder::validate_explicit_containerfile_path(containerfile)?;
+    if let Some(ch) = containerfile
+        .chars()
+        .find(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/')))
+    {
+        bail!(
+            "Remote builder containerfile path contains unsupported character {:?}",
+            ch
+        );
+    }
+
+    Ok(containerfile)
+}
 
 pub fn should_use_customer_builder_path(managed_onprem: Option<&ManagedOnPremConfig>) -> bool {
     managed_onprem
@@ -812,11 +827,7 @@ fn generate_builder_userdata(
         .collect::<Vec<_>>()
         .join(",");
 
-    let build_cmd_raw = request
-        .build_command
-        .as_deref()
-        .unwrap_or("docker build -t app-image .");
-    let build_cmd = build_cmd_raw.replace('\'', "'\\''");
+    let containerfile = validate_remote_containerfile_path(&request.containerfile)?;
 
     let bootproof_commit = std::env::var("BOOTPROOF_COMMIT")
         .unwrap_or_else(|_| "64dae0628e58b9f898b89f9b7a404b37e2f0ca9f".to_string());
@@ -883,7 +894,7 @@ HELPER_S3_KEY="{helper_s3_key}"
 HELPER_SHA256="{helper_sha256}"
 COMMIT_SHA="{commit_sha}"
 ENCLAVEOS_COMMIT="{enclaveos_commit}"
-BUILD_CMD='{build_cmd}'
+CONTAINERFILE="{containerfile}"
 PORTS="{ports_csv}"
 E2E="{e2e_flag}"
 LOCKSMITH="{locksmith_flag}"
@@ -962,10 +973,7 @@ chmod +x /usr/local/bin/remote-build-helper
 # Build Docker image
 echo "Building Docker image..."
 cd /build/repo
-eval "$BUILD_CMD"
-# Re-tag to a known name so we can reference it consistently
-BUILT_IMAGE=$(docker images -q --no-trunc | head -1)
-docker tag "$BUILT_IMAGE" app-image 2>/dev/null || true
+docker build -f "$CONTAINERFILE" -t app-image .
 set_phase "docker_built"
 
 # Write manifest for remote-build-helper
@@ -1030,7 +1038,7 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
         helper_sha256 = helper_sha256,
         commit_sha = request.commit_sha,
         enclaveos_commit = request.enclaveos_commit,
-        build_cmd = build_cmd,
+        containerfile = containerfile,
         ports_csv = ports_csv,
         e2e_flag = e2e_flag,
         locksmith_flag = locksmith_flag,
@@ -1322,6 +1330,41 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_remote_containerfile_path_accepts_relative_paths() {
+        assert_eq!(
+            validate_remote_containerfile_path("docker/Prod.Containerfile").unwrap(),
+            "docker/Prod.Containerfile"
+        );
+    }
+
+    #[test]
+    fn test_validate_remote_containerfile_path_rejects_absolute_paths() {
+        let err = validate_remote_containerfile_path("/etc/passwd").unwrap_err();
+        assert!(
+            err.to_string().contains("relative path"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_remote_containerfile_path_rejects_parent_dirs() {
+        let err = validate_remote_containerfile_path("../Dockerfile").unwrap_err();
+        assert!(
+            err.to_string().contains("within the repository"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_remote_containerfile_path_rejects_shell_chars() {
+        let err = validate_remote_containerfile_path("Dockerfile$(aws)").unwrap_err();
+        assert!(
+            err.to_string().contains("unsupported character"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn test_build_managed_onprem_builder_config_uses_customer_settings() {
         let default_config = BuilderConfig {
             ami_id: "ami-platform".to_string(),
@@ -1398,7 +1441,7 @@ mod tests {
                 .to_string(),
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
-            build_command: Some("docker build -t app-image .".to_string()),
+            containerfile: "Dockerfile".to_string(),
             binary_path: None,
             ports: vec![],
             e2e: false,
@@ -1458,10 +1501,17 @@ mod tests {
             "should not git clone user repo"
         );
 
-        // Should contain docker build
         assert!(
-            userdata.contains("docker build -t app-image"),
-            "should build docker image"
+            userdata.contains("CONTAINERFILE=\"Dockerfile\""),
+            "should include the selected Dockerfile path"
+        );
+        assert!(
+            userdata.contains("docker build -f \"$CONTAINERFILE\" -t app-image ."),
+            "should build app-image with the platform-owned Docker command"
+        );
+        assert!(
+            !userdata.contains("BUILD_CMD") && !userdata.contains("eval "),
+            "should not embed or evaluate user-controlled build commands"
         );
 
         // Should invoke the shared remote-build-helper path
@@ -1503,7 +1553,7 @@ mod tests {
     }
 
     #[test]
-    fn test_userdata_preserves_resolved_containerfile_build_command() {
+    fn test_userdata_uses_resolved_containerfile() {
         let config = BuilderConfig {
             ami_id: "ami-test".to_string(),
             security_group_id: "sg-test".to_string(),
@@ -1527,7 +1577,7 @@ mod tests {
                 .to_string(),
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
-            build_command: Some("docker build -f Containerfile .".to_string()),
+            containerfile: "Containerfile".to_string(),
             binary_path: None,
             ports: vec![],
             e2e: false,
@@ -1550,14 +1600,11 @@ mod tests {
         )
         .unwrap();
 
-        assert!(
-            userdata.contains("BUILD_CMD='docker build -f Containerfile .'"),
-            "should preserve the resolved Containerfile build command verbatim"
-        );
+        assert!(userdata.contains("CONTAINERFILE=\"Containerfile\""));
     }
 
     #[test]
-    fn test_userdata_preserves_explicit_custom_containerfile_build_command() {
+    fn test_userdata_uses_explicit_custom_containerfile() {
         let config = BuilderConfig {
             ami_id: "ami-test".to_string(),
             security_group_id: "sg-test".to_string(),
@@ -1581,7 +1628,57 @@ mod tests {
                 .to_string(),
             procfile_content: "containerfile: Custom.Containerfile\nrun: /app\n".to_string(),
             run_command: Some("/app".to_string()),
-            build_command: Some("docker build -f Custom.Containerfile .".to_string()),
+            containerfile: "Custom.Containerfile".to_string(),
+            binary_path: None,
+            ports: vec![],
+            e2e: false,
+            locksmith: false,
+            no_cache: false,
+            enclaveos_commit: "abc".to_string(),
+            builder_size: "small".to_string(),
+            builder_instance_type: "c5.xlarge".to_string(),
+            app_sources: vec![],
+        };
+
+        let userdata = generate_builder_userdata(
+            Uuid::new_v4(),
+            &config,
+            &request,
+            "eifs/test.eif",
+            "builds/test/remote-build-helper",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            None,
+        )
+        .unwrap();
+
+        assert!(userdata.contains("CONTAINERFILE=\"Custom.Containerfile\""));
+    }
+
+    #[test]
+    fn test_userdata_has_no_user_build_command() {
+        let config = BuilderConfig {
+            ami_id: "ami-test".to_string(),
+            security_group_id: "sg-test".to_string(),
+            subnet_id: "subnet-test".to_string(),
+            instance_profile: "profile-test".to_string(),
+            region: "us-west-2".to_string(),
+            timeout_secs: 1200,
+            eif_s3_bucket: "test-bucket".to_string(),
+            git_hostname: "git.example.com".to_string(),
+            additional_instance_tags: Vec::new(),
+        };
+        let request = BuildRequest {
+            org_id: Uuid::new_v4(),
+            app_id: Uuid::new_v4(),
+            app_name: "test-app".to_string(),
+            commit_sha: "abc123".to_string(),
+            branch: "main".to_string(),
+            source_s3_key: "builds/test/source.tar.gz".to_string(),
+            source_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            procfile_content: "run: /app\n".to_string(),
+            run_command: Some("/app".to_string()),
+            containerfile: "Dockerfile".to_string(),
             binary_path: None,
             ports: vec![],
             e2e: false,
@@ -1605,8 +1702,66 @@ mod tests {
         .unwrap();
 
         assert!(
-            userdata.contains("BUILD_CMD='docker build -f Custom.Containerfile .'"),
-            "should preserve the explicit custom containerfile build command verbatim"
+            !userdata.contains("eval \"$BUILD_CMD\""),
+            "build command should not be evaluated through eval"
+        );
+        assert!(
+            !userdata.contains("BUILD_CMD"),
+            "userdata should not include a user-supplied build command"
+        );
+    }
+
+    #[test]
+    fn test_userdata_rejects_unsafe_containerfile_path() {
+        let config = BuilderConfig {
+            ami_id: "ami-test".to_string(),
+            security_group_id: "sg-test".to_string(),
+            subnet_id: "subnet-test".to_string(),
+            instance_profile: "profile-test".to_string(),
+            region: "us-west-2".to_string(),
+            timeout_secs: 1200,
+            eif_s3_bucket: "test-bucket".to_string(),
+            git_hostname: "git.example.com".to_string(),
+            additional_instance_tags: Vec::new(),
+        };
+
+        let request = BuildRequest {
+            org_id: Uuid::new_v4(),
+            app_id: Uuid::new_v4(),
+            app_name: "test-app".to_string(),
+            commit_sha: "abc123".to_string(),
+            branch: "main".to_string(),
+            source_s3_key: "builds/test/source.tar.gz".to_string(),
+            source_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            procfile_content: "run: /app\n".to_string(),
+            run_command: Some("/app".to_string()),
+            containerfile: "Dockerfile$(aws)".to_string(),
+            binary_path: None,
+            ports: vec![],
+            e2e: false,
+            locksmith: false,
+            no_cache: false,
+            enclaveos_commit: "abc".to_string(),
+            builder_size: "small".to_string(),
+            builder_instance_type: "c5.xlarge".to_string(),
+            app_sources: vec![],
+        };
+
+        let err = generate_builder_userdata(
+            Uuid::new_v4(),
+            &config,
+            &request,
+            "eifs/test.eif",
+            "builds/test/remote-build-helper",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            None,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("unsupported character"),
+            "unexpected error: {err}"
         );
     }
 
@@ -1635,7 +1790,7 @@ mod tests {
                 .to_string(),
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
-            build_command: None,
+            containerfile: "Dockerfile".to_string(),
             binary_path: None,
             ports: vec![],
             e2e: false,
