@@ -1,6 +1,43 @@
 #!/bin/sh
 set -e
 
+log() {
+    echo "[caution-run] $*"
+}
+
+log_exit() {
+    status=$?
+    log "=== Caution Enclave Exit: status ${status} ==="
+}
+trap log_exit EXIT
+
+show_processes() {
+    log "Process snapshot:"
+    /bin/busybox ps 2>/dev/null || true
+}
+
+wait_for_socket() {
+    socket_path="$1"
+    timeout_secs="$2"
+    elapsed=0
+
+    while [ "${elapsed}" -lt "${timeout_secs}" ]; do
+        if [ -S "${socket_path}" ]; then
+            log "Socket is ready: ${socket_path}"
+            return 0
+        fi
+
+        /bin/busybox sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    log "ERROR: Socket did not appear within ${timeout_secs}s: ${socket_path}"
+    show_processes
+    log "Root directory snapshot:"
+    /bin/busybox ls -la / 2>/dev/null || true
+    return 1
+}
+
 echo "=== Caution Enclave Startup ==="
 
 echo "Setting up network loopback..."
@@ -46,6 +83,7 @@ fi
 
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 export KEYFORKD_SOCKET_PATH=/keyforkd.sock
+export RUST_BACKTRACE=1
 
 INTERNAL_E2P_PORT=49500
 INTERNAL_AUX_PORT=49501
@@ -74,10 +112,31 @@ echo "Starting VSOCK-to-TCP proxies..."
 # {LOCKSMITH
 echo "Starting locksmithd (shard receiver + keyforkd)..."
 /bin/busybox rm -f "${KEYFORKD_SOCKET_PATH}"
-/usr/bin/locksmithd
+/usr/bin/locksmithd || {
+    status=$?
+    echo "ERROR: locksmithd failed with status ${status}"
+    exit "${status}"
+}
+log "locksmithd returned; keyforkd should now be daemonized"
+wait_for_socket "${KEYFORKD_SOCKET_PATH}" 30
 
 echo "Decrypting secrets via locksmith-oneshot..."
-eval "$(/usr/bin/locksmith-oneshot)"
+LOCKSMITH_EXPORTS="$(/usr/bin/locksmith-oneshot)" || {
+    status=$?
+    echo "ERROR: locksmith-oneshot failed with status ${status}"
+    exit "${status}"
+}
+eval "${LOCKSMITH_EXPORTS}" || {
+    status=$?
+    echo "ERROR: failed to evaluate locksmith exports with status ${status}"
+    exit "${status}"
+}
+if [ -n "${LOCKSMITH_EXPORTS}" ]; then
+    export_count="$(/bin/busybox printf '%s\n' "${LOCKSMITH_EXPORTS}" | /bin/busybox grep -c '^export ' || true)"
+    log "locksmith-oneshot produced ${export_count} export statement(s)"
+else
+    log "WARNING: locksmith-oneshot produced no export statements"
+fi
 # }LOCKSMITH
 
 echo "Starting user application..."

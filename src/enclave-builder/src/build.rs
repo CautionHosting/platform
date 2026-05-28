@@ -235,7 +235,10 @@ async fn render_run_sh_template(
 
     let user_cmd = if let Some(cmd) = run_command {
         let escaped_cmd = cmd.replace("'", "'\\''");
-        format!("exec sh -c '{}'", escaped_cmd)
+        format!(
+            "sh -c '{}'\nAPP_STATUS=$?\necho \"ERROR: user application exited with status ${{APP_STATUS}}\"\nexit \"${{APP_STATUS}}\"",
+            escaped_cmd
+        )
     } else {
         "echo \"ERROR: No run command specified in Procfile\"\nexit 1".to_string()
     };
