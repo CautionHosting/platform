@@ -45,6 +45,7 @@ else
 fi
 
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+export KEYFORKD_SOCKET_PATH=/keyforkd.sock
 
 INTERNAL_E2P_PORT=49500
 INTERNAL_AUX_PORT=49501
@@ -72,6 +73,7 @@ echo "Starting VSOCK-to-TCP proxies..."
 
 # {LOCKSMITH
 echo "Starting locksmithd (shard receiver + keyforkd)..."
+/bin/busybox rm -f "${KEYFORKD_SOCKET_PATH}"
 /usr/bin/locksmithd
 
 echo "Decrypting secrets via locksmith-oneshot..."
