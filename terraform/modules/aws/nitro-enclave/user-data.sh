@@ -119,6 +119,35 @@ systemctl start vsock-network.service
 
 sleep 3
 
+cat > /usr/local/bin/capture-enclave-console.sh <<'CONSOLE_CAPTURE'
+#!/bin/bash
+set -o pipefail
+
+LOG_FILE=/var/log/nitro_enclaves/enclave-console.log
+mkdir -p /var/log/nitro_enclaves
+
+echo "=== Enclave console capture starting at $(date -Is) ===" >> "$LOG_FILE"
+
+for i in {1..60}; do
+  ENCLAVE_ID=$(nitro-cli describe-enclaves 2>/dev/null | grep -o '"EnclaveID": "[^"]*"' | cut -d'"' -f4 | head -1)
+  if [ -n "$ENCLAVE_ID" ]; then
+    echo "Found enclave ID on attempt $i: $ENCLAVE_ID" >> "$LOG_FILE"
+    nitro-cli console --enclave-id "$ENCLAVE_ID" 2>&1 | tee -a "$LOG_FILE"
+    status=$?
+    echo "=== Enclave console capture ended with status ${status} at $(date -Is) ===" >> "$LOG_FILE"
+    exit "$status"
+  fi
+
+  echo "Attempt $i: no enclave ID yet, retrying..." >> "$LOG_FILE"
+  sleep 1
+done
+
+echo "ERROR: no enclave ID found for console capture" >> "$LOG_FILE"
+exit 1
+CONSOLE_CAPTURE
+
+chmod +x /usr/local/bin/capture-enclave-console.sh
+
 cat > /etc/systemd/system/nitro-enclave.service <<EOF
 [Unit]
 Description=Nitro Enclave Application
@@ -133,6 +162,21 @@ ExecStop=/usr/bin/nitro-cli terminate-enclave --all
 Restart=on-failure
 RestartSec=10s
 TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/nitro-enclave-console.service <<'EOF'
+[Unit]
+Description=Nitro Enclave Console Capture
+After=nitro-enclave.service
+Requires=nitro-enclave.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/capture-enclave-console.sh
+Restart=no
 
 [Install]
 WantedBy=multi-user.target
@@ -182,6 +226,7 @@ EOF
 
 systemctl daemon-reload
 systemctl enable nitro-enclave.service
+systemctl enable nitro-enclave-console.service
 for port in $standard_ports; do
 systemctl enable vsock-proxy-$port.service
 done
@@ -190,6 +235,7 @@ systemctl enable vsock-proxy-${port}.service
 %{ endfor ~}
 
 systemctl start nitro-enclave.service
+systemctl start nitro-enclave-console.service
 
 echo "Waiting for enclave to boot before starting host-side proxies..."
 sleep 15
@@ -388,30 +434,11 @@ echo "Caddy started with self-signed TLS on port 443"
 echo "=== Nitro Enclave Setup Complete ==="
 echo "Finished at $(date)"
 
-echo "=== Attempting to read enclave console (early capture) ==="
-echo "Waiting 5 seconds for enclave to boot..."
-sleep 5
-
-for i in {1..3}; do
-  ENCLAVE_ID=$(nitro-cli describe-enclaves 2>/dev/null | grep -o '"EnclaveID": "[^"]*"' | cut -d'"' -f4 | head -1)
-  if [ -n "$ENCLAVE_ID" ]; then
-    echo "Found enclave ID on attempt $i: $ENCLAVE_ID"
-    break
-  fi
-  echo "Attempt $i: No enclave ID yet, retrying..."
-  sleep 1
-done
-
-if [ -n "$ENCLAVE_ID" ]; then
-  echo "Enclave is running, capturing console output:"
-  echo "=========================================="
-  timeout 10 nitro-cli console --enclave-id "$ENCLAVE_ID" 2>&1 || echo "Console read failed or timed out"
-  echo "=========================================="
-else
-  echo "ERROR: No enclave ID found after 3 attempts - enclave likely crashed immediately"
-  echo "Checking for any error messages in nitro-cli logs..."
-  journalctl -u nitro-enclave.service --no-pager || true
-fi
+echo "=== Enclave Console Capture Status ==="
+systemctl status nitro-enclave-console.service --no-pager || true
+echo "Recent captured enclave console output:"
+tail -n 120 /var/log/nitro_enclaves/enclave-console.log || true
+echo "=== End Enclave Console Capture Status ==="
 
 sleep 7
 echo "=== Checking Service Status ==="
@@ -421,9 +448,15 @@ echo ""
 echo "Enclave service:"
 systemctl status nitro-enclave.service --no-pager || true
 echo ""
+echo "Enclave console capture service:"
+systemctl status nitro-enclave-console.service --no-pager || true
+echo ""
 echo "Running enclaves:"
 nitro-cli describe-enclaves || echo "No enclaves running or command failed"
 echo ""
 echo "Recent enclave service logs:"
 journalctl -u nitro-enclave.service -n 50 --no-pager || true
+echo ""
+echo "Recent enclave console capture logs:"
+journalctl -u nitro-enclave-console.service -n 50 --no-pager || true
 echo "=== End Status Check ==="
