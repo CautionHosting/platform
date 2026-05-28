@@ -134,7 +134,7 @@ for i in {1..60}; do
     echo "Found enclave ID on attempt $i: $ENCLAVE_ID" >> "$LOG_FILE"
     nitro-cli console --enclave-id "$ENCLAVE_ID" 2>&1 | tee -a "$LOG_FILE"
     status=$?
-    echo "=== Enclave console capture ended with status ${status} at $(date -Is) ===" >> "$LOG_FILE"
+    echo "=== Enclave console capture ended with status $${status} at $(date -Is) ===" >> "$LOG_FILE"
     exit "$status"
   fi
 
