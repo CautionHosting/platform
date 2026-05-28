@@ -75,7 +75,7 @@ echo "Starting locksmithd (shard receiver + keyforkd)..."
 /usr/bin/locksmithd
 
 echo "Decrypting secrets via locksmith-oneshot..."
-source <(/usr/bin/locksmith-oneshot)
+eval "$(/usr/bin/locksmith-oneshot)"
 # }LOCKSMITH
 
 echo "Starting user application..."
