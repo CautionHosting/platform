@@ -34,6 +34,7 @@ ENV RUSTFLAGS="${RUSTFLAGS} -C target-feature=+crt-static"
 ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=-Wl,--build-id=none"
 ENV TARGET_ARCH="x86_64-unknown-linux-musl"
 ENV NETTLE_STATIC=1
+ENV LIBPCSCLITE_STATIC=1
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -47,7 +48,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --frozen \
       -p cli \
       --target ${TARGET_ARCH} \
-      && install -D -m 0755 /build/target/${TARGET_ARCH}/release/caution /usr/local/bin/caution
+      && install -D -m 0755 /build/target/${TARGET_ARCH}/release/caution /usr/local/bin/caution \
+      && touch -t 197001010000.01 /usr/local/bin/caution
 
 FROM scratch AS export
 
