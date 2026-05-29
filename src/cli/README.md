@@ -52,12 +52,6 @@ system. CDN accounts, git forges, and package repository accounts get
 compromised all the time.`curl ... | sh` style installers are a widely spread
 anti-pattern when it comes to good security practices.
 
-#### Download
-
-| Version | OS    | Architecture | Download |
-| ------- | ----- | ------------ | -------- |
-| v0.1.0-alpha | Linux | x86_64 | [caution-linux-x86_64](https://codeberg.org/caution/platform/raw/branch/main/dist/cli/caution-linux-x86_64) |
-
 #### From Source
 
 ```sh
@@ -71,12 +65,11 @@ If you need to send locksmith shards, use `make install-cli-untrusted` instead.
 ### Moderate Trust
 
 These steps allow proving that at least two Caution engineers
-signed off on the produced binaries, signaling that they were reproduced from
-source code and got identical results, in addition to the usual two-party code
-review processes.
+signed off on the release manifest, signaling that they reproduced the binary
+from source code and got identical results, in addition to the usual two-party
+code review processes.
 
-This minimizes single points of trust (and failure) in the binary release
-process.
+This minimizes single points of trust (and failure) in the release process.
 
 See the [Reproducible Builds](https://reproducible-builds.org/) project for
 more information on these practices.
@@ -103,20 +96,22 @@ more information on these practices.
    gpg --keyserver hkps://keys.openpgp.org --recv-keys C92FE5A3FBD58DD3EC5AA26BB10116B8193F2DBD
    ```
 
-3. Verify release artifacts
+3. Verify release metadata
 
    > [!NOTE]
-   > Maintainers create and sign release artifacts with `make release-cli` and
+   > Maintainers create and sign release metadata with `make release-cli` and
    > `make sign-cli` before publishing them. If `dist/cli` is absent in this
    > checkout, no CLI release has been published for this state yet.
 
-   Published release assets live in `dist/cli`: the Caution executable binary,
-   `release.env`, which holds information about the commit, author, and public
-   key of the Caution software being built, `manifest.txt`, which lists the
-   hashsums of the assets, and detached signatures over that manifest.
+   Published release metadata lives in `dist/cli`: `release.env`, which holds
+   information about the commit, author, and public key of the Caution software
+   being built, `manifest.txt`, which lists the hashsums of the expected binary
+   and metadata, and detached signatures over that manifest. The executable
+   binary is not committed to this repository.
 
-   Cryptographically verify that the manifest is signed and that the hashsums
-   match the release assets:
+   Cryptographically verify that the manifest is signed and that the committed
+   metadata matches the manifest. If you separately place the release binary at
+   `dist/cli/caution-linux-x86_64`, this target will also verify its hash.
    ```sh
    make verify-cli
    ```
@@ -125,9 +120,14 @@ more information on these practices.
 
 4. Install binary
 
+   If you separately downloaded and verified the release binary:
+
    ```sh
    install -D -m 0755 dist/cli/caution-linux-x86_64 "$HOME/.local/bin/caution"
    ```
+
+   Otherwise, use the Zero Trust flow below to reproduce and install the binary
+   from `out/cli`.
 
 ### Zero Trust
 
@@ -151,9 +151,9 @@ to attempt to force one or more of us to tamper with the software.
    - Ideal: Review the entire supply chain for high risk uses
    - Minimal: Review the build targets in the Makefile and [Containerfile](https://codeberg.org/caution/platform/src/branch/main/containerfiles/Containerfile.cli)
 
-3. Reproduce binaries
+3. Reproduce binary
 
-   This requires published release artifacts in `dist/cli`, including
+   This requires published release metadata in `dist/cli`, including
    `release.env` and `manifest.txt`.
 
    ```sh
@@ -162,7 +162,7 @@ to attempt to force one or more of us to tamper with the software.
 
    Note: See Trust section below for expected keys/signers
 
-4. Install binaries
+4. Install reproduced binary
 
    ```sh
    install -D -m 0755 out/cli/caution-linux-x86_64 "$HOME/.local/bin/caution"
@@ -171,7 +171,7 @@ to attempt to force one or more of us to tamper with the software.
 5. Upload signature (optional)
 
    While this step is totally optional, if you took the time to verify our
-   binaries we would welcome you signing them and submitting your signature so
+   binary we would welcome you signing it and submitting your signature so
    we have public evidence third parties are checking our work.
 
    ```sh
@@ -203,8 +203,9 @@ To address both problems we take the following steps:
 
 1. All commits are signed with keys that only exist on hardware security
    modules held by each engineer
-2. All binaries are signed by the engineer that compiled them
-3. Attesting engineers compile and sign binaries if they get the same hashes
+2. All release manifests are signed by the engineer that compiled the binary
+3. Attesting engineers compile the binary and sign the manifest if they get the
+   same hashes
 
 ### Signature Verification
 
@@ -217,8 +218,8 @@ make verify-cli
 Commits will be signed by at least one of the keys under the signers section
 below.
 
-Released binaries should be signed by at least two of them signifying
-successful reproducible builds.
+Release manifests should be signed by at least two of them signifying successful
+reproducible builds.
 
 We encourage you to review the below keyoxide links and any available
 web-of-trust for each key to ensure it is really owned by the person it claims

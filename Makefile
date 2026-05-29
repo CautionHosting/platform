@@ -126,6 +126,7 @@ build-cli:
 	@mkdir -p $(CLI_OUT_DIR)
 	@docker build \
 		--progress=plain \
+		--provenance=false \
 		--build-arg SOURCE_DATE_EPOCH=1 \
 		$(NO_CACHE) \
 		-t caution-cli \
@@ -317,15 +318,18 @@ release-cli:
 	> $(CLI_OUT_DIR)/manifest.txt
 	@rm -rf dist/cli/*
 	@mkdir -p dist/cli
-	@cp $(CLI_OUT_DIR)/$(CLI_BINARY) $(CLI_OUT_DIR)/release.env $(CLI_OUT_DIR)/manifest.txt dist/cli/
+	@cp $(CLI_OUT_DIR)/release.env $(CLI_OUT_DIR)/manifest.txt dist/cli/
 	@echo ""
-	@echo "Release assets in dist/cli/:"
+	@echo "Release metadata in dist/cli/:"
 	@ls -lh dist/cli/
+	@echo ""
+	@echo "Release binary remains in $(CLI_OUT_DIR)/$(CLI_BINARY)"
 	@echo ""
 	@echo "Next steps:"
 	@echo "  1. make sign-cli"
-	@echo "  2. git add dist/cli/ && git commit -m 'Release CLI $(CLI_VERSION)'"
-	@echo "  3. git push"
+	@echo "  2. git add dist/cli/release.env dist/cli/manifest.txt dist/cli/manifest.*.asc"
+	@echo "  3. git commit -m 'Release CLI $(CLI_VERSION)'"
+	@echo "  4. git push"
 
 sign-cli:
 	@set -e; \
@@ -343,16 +347,57 @@ sign-cli:
 	cp dist/cli/manifest.$${fingerprint}.asc $(CLI_OUT_DIR)/; \
 	echo "Signed: dist/cli/manifest.$${fingerprint}.asc"
 
-verify-cli: | dist/cli/manifest.txt
+verify-cli:
 	@set -e; \
+	if [ ! -f dist/cli/release.env ] || [ ! -f dist/cli/manifest.txt ]; then \
+		echo "Missing release metadata in dist/cli/. Maintainers must run make release-cli and make sign-cli first."; \
+		exit 1; \
+	fi; \
+	expected_release_env=$$(openssl sha256 -r dist/cli/release.env | sed -e 's| \*dist/cli/| |g' -e 's| dist/cli/| |g' -e 's| \./| |g'); \
+	if ! grep -Fx "$$expected_release_env" dist/cli/manifest.txt >/dev/null; then \
+		echo "Release manifest does not match dist/cli/release.env"; \
+		echo "Expected line: $$expected_release_env"; \
+		exit 1; \
+	fi; \
+	if ! grep -Eq '^[0-9a-f]{64} $(CLI_BINARY)$$' dist/cli/manifest.txt; then \
+		echo "Release manifest is missing the $(CLI_BINARY) hash"; \
+		exit 1; \
+	fi; \
+	if [ -f dist/cli/$(CLI_BINARY) ]; then \
+		expected_binary=$$(openssl sha256 -r dist/cli/$(CLI_BINARY) | sed -e 's| \*dist/cli/| |g' -e 's| dist/cli/| |g' -e 's| \./| |g'); \
+		if ! grep -Fx "$$expected_binary" dist/cli/manifest.txt >/dev/null; then \
+			echo "Release manifest does not match dist/cli/$(CLI_BINARY)"; \
+			echo "Expected line: $$expected_binary"; \
+			exit 1; \
+		fi; \
+	else \
+		echo "No dist/cli/$(CLI_BINARY) present; verified signed release metadata only."; \
+	fi; \
+	found_signature=0; \
 	for file in dist/cli/manifest.*.asc; do \
+		[ -e "$$file" ] || continue; \
+		found_signature=1; \
 		echo "\nVerifying: $${file}\n"; \
 		$(GPG) --verify $${file} dist/cli/manifest.txt; \
-	done
+	done; \
+	if [ "$$found_signature" -eq 0 ]; then \
+		echo "No release signatures found in dist/cli/."; \
+		exit 1; \
+	fi
 
 reproduce-cli:
+	@if [ ! -f dist/cli/release.env ] || [ ! -f dist/cli/manifest.txt ]; then \
+		echo "Missing release metadata in dist/cli/. Maintainers must publish release.env and manifest.txt first."; \
+		exit 1; \
+	fi
 	@rm -rf $(CLI_OUT_DIR)
 	@$(MAKE) build-cli REPRODUCE=true NOCACHE=1
+	@cp dist/cli/release.env $(CLI_OUT_DIR)/release.env
+	@openssl sha256 -r \
+		$(CLI_OUT_DIR)/$(CLI_BINARY) \
+		$(CLI_OUT_DIR)/release.env \
+	| sed -e 's| \*$(CLI_OUT_DIR)/| |g' -e 's| \./| |g' \
+	> $(CLI_OUT_DIR)/manifest.txt
 	@diff -q $(CLI_OUT_DIR)/manifest.txt dist/cli/manifest.txt
 	@echo "Reproduction successful - manifests match"
 
