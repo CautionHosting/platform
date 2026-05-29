@@ -20,6 +20,25 @@ The Makefile assumes the presence of a few basic tools:
 - `bash`
 - `Docker`
 
+### Build Compatibility
+
+The default `make build-cli` and `make install-cli` path uses the StageX-based
+reproducible build. That binary works for CLI workflows that do not send
+locksmith shards.
+
+The locksmith shard-sending flow, `caution secret send-shard`, currently only
+works with the host-toolchain untrusted build:
+
+```sh
+make install-cli-untrusted
+```
+
+The current StageX build is statically linked with musl, and this path can fail
+when `pcscdaemon` or the PC/SC stack tries to load
+`libpcsclite_real.so.1`, with an error like `Dynamic loading not supported`.
+The untrusted build links against the host's native C library (glibc on most
+Linux distributions) and PC/SC stack, which avoids this issue.
+
 ### Blind Trust
 
 > :warning: Before you copy/paste, note that these are *low* security options
@@ -46,6 +65,8 @@ git clone https://codeberg.org/caution/platform
 cd platform
 make install-cli
 ```
+
+If you need to send locksmith shards, use `make install-cli-untrusted` instead.
 
 ### Moderate Trust
 
@@ -82,21 +103,20 @@ more information on these practices.
    gpg --keyserver hkps://keys.openpgp.org --recv-keys C92FE5A3FBD58DD3EC5AA26BB10116B8193F2DBD
    ```
 
-3. Verify signatures
+3. Verify release artifacts
 
-> [!NOTE]
-> The `release-cli` step is meant to be completed by maintainers.
+   > [!NOTE]
+   > Maintainers create and sign release artifacts with `make release-cli` and
+   > `make sign-cli` before publishing them. If `dist/cli` is absent in this
+   > checkout, no CLI release has been published for this state yet.
 
-   Create release assets in `dist/cli`: The Caution executable binary,
+   Published release assets live in `dist/cli`: the Caution executable binary,
    `release.env`, which holds information about the commit, author, and public
-   key of the Caution software being built, and `manifest.txt` which lists the
-   hashsums of the assets.
-   ```sh
-   make release-cli
-   ```
+   key of the Caution software being built, `manifest.txt`, which lists the
+   hashsums of the assets, and detached signatures over that manifest.
 
-   Cryptographically verify the hashsums correctly match the release
-   assets:
+   Cryptographically verify that the manifest is signed and that the hashsums
+   match the release assets:
    ```sh
    make verify-cli
    ```
@@ -106,7 +126,7 @@ more information on these practices.
 4. Install binary
 
    ```sh
-   make install-cli
+   install -D -m 0755 dist/cli/caution-linux-x86_64 "$HOME/.local/bin/caution"
    ```
 
 ### Zero Trust
@@ -133,6 +153,9 @@ to attempt to force one or more of us to tamper with the software.
 
 3. Reproduce binaries
 
+   This requires published release artifacts in `dist/cli`, including
+   `release.env` and `manifest.txt`.
+
    ```sh
    make reproduce-cli
    ```
@@ -142,7 +165,7 @@ to attempt to force one or more of us to tamper with the software.
 4. Install binaries
 
    ```sh
-   make install-cli
+   install -D -m 0755 out/cli/caution-linux-x86_64 "$HOME/.local/bin/caution"
    ```
 
 5. Upload signature (optional)
