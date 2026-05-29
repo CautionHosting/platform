@@ -110,24 +110,24 @@ more information on these practices.
    binary is not committed to this repository.
 
    Cryptographically verify that the manifest is signed and that the committed
-   metadata matches the manifest. If you separately place the release binary at
-   `dist/cli/caution-linux-x86_64`, this target will also verify its hash.
+   metadata matches the manifest.
    ```sh
    make verify-cli
    ```
 
    Note: See Trust section below for expected keys/signers
 
-4. Install binary
-
-   If you separately downloaded and verified the release binary:
+4. Reproduce binary
 
    ```sh
-   install -D -m 0755 dist/cli/caution-linux-x86_64 "$HOME/.local/bin/caution"
+   make reproduce-cli
    ```
 
-   Otherwise, use the Zero Trust flow below to reproduce and install the binary
-   from `out/cli`.
+5. Install reproduced binary
+
+   ```sh
+   install -D -m 0755 out/cli/caution-linux-x86_64 "$HOME/.local/bin/caution"
+   ```
 
 ### Zero Trust
 
