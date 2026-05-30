@@ -4176,16 +4176,22 @@ enclave "default" {{
             .map(|http| http.port);
         log_verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
 
-        let e2e = default_enclave
+        let e2e_config = default_enclave
             .and_then(|e| e.network.as_ref())
             .and_then(|n| n.http.as_ref())
-            .and_then(|h| h.e2e_encryption.as_ref())
+            .and_then(|h| h.e2e_encryption.as_ref());
+
+        let e2e = e2e_config
             .and_then(|ee| ee.enabled)
             .unwrap_or(false);
         log_verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = cfg.has_vault_env();
         log_verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
+
+        let e2e_cors_origins = e2e_config
+            .and_then(|e2e| e2e.cors_origins.as_ref())
+            .map(|origins| origins.join(","));
 
         let mut loader = Loader::new("Building enclave image", LoaderStyle::Processing);
         let deployment = if let Some(ref bin_path) = binary_path {
@@ -4207,6 +4213,7 @@ enclave "default" {{
                     http_port,
                     e2e,
                     locksmith,
+                    e2e_cors_origins,
                 )
                 .await
         } else {
@@ -4225,6 +4232,7 @@ enclave "default" {{
                     http_port,
                     e2e,
                     locksmith,
+                    e2e_cors_origins,
                 )
                 .await
         }
@@ -4555,7 +4563,7 @@ enclave "default" {{
         };
         log_verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
 
-        let e2e = {
+        let e2e_config = {
             let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
             self.read_config_from_dir(config_dir)
                 .ok()
@@ -4566,6 +4574,11 @@ enclave "default" {{
                 .and_then(|config| config.network)
                 .and_then(|network| network.http)
                 .and_then(|http| http.e2e_encryption)
+        };
+
+        let e2e = {
+            e2e_config
+                .as_ref()
                 .and_then(|e2e| e2e.enabled)
                 .unwrap_or_else(|| {
                     external_manifest
@@ -4596,6 +4609,15 @@ enclave "default" {{
         };
         log_verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
 
+        let e2e_cors_origins = if e2e {
+            e2e_config
+                .as_ref()
+                .and_then(|e2e| e2e.cors_origins.as_ref())
+                .map(|origins| origins.join(","))
+        } else {
+            None
+        };
+
         let deployment = if let Some(ref bin_path) = binary_path {
             log_verbose(
                 self.verbose,
@@ -4615,6 +4637,7 @@ enclave "default" {{
                     http_port,
                     e2e,
                     locksmith,
+                    e2e_cors_origins,
                 )
                 .await
         } else {
@@ -4633,6 +4656,7 @@ enclave "default" {{
                     http_port,
                     e2e,
                     locksmith,
+                    e2e_cors_origins,
                 )
                 .await
         }

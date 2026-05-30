@@ -62,6 +62,7 @@ pub async fn stage_eif_components(
     http_port: Option<u16>,
     e2e: bool,
     locksmith: bool,
+    e2e_cors_origins: Option<String>,
     templates_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     let stage_dir = work_dir.join("eif-stage");
@@ -162,6 +163,7 @@ pub async fn stage_eif_components(
         http_port,
         e2e,
         locksmith,
+        e2e_cors_origins.as_deref()
     )
     .await?;
     let containerfile_content = render_containerfile_template(
@@ -228,6 +230,7 @@ async fn render_run_sh_template(
     http_port: Option<u16>,
     e2e: bool,
     locksmith: bool,
+    e2e_cors_origins: Option<&str>,
 ) -> Result<String> {
     let template = fs::read_to_string(template_path)
         .await
@@ -304,10 +307,19 @@ async fn render_run_sh_template(
         )
     };
 
+    let cors_env = match e2e_cors_origins {
+        Some(origins) => format!(
+            "STEVE_CORS_ORIGINS='{}'",
+            origins.replace('\'', "'\\''")
+        ),
+        None => String::new(),
+    };
+
     let result = processed
         .replace("{{USER_CMD}}", &user_cmd)
         .replace("{{STEVE_APP_PORT}}", &steve_app_port)
-        .replace("{{CUSTOM_PORT_SECTION}}", &custom_port_section);
+        .replace("{{CUSTOM_PORT_SECTION}}", &custom_port_section)
+        .replace("{{STEVE_CORS_ORIGINS_ENV}}", &cors_env);
 
     Ok(result)
 }
@@ -353,6 +365,7 @@ pub async fn build_eif_from_filesystems(
     no_cache: bool,
     e2e: bool,
     locksmith: bool,
+    e2e_cors_origins: Option<String>,
     templates_dir: Option<&Path>,
 ) -> Result<EifFile> {
     tracing::info!("Building EIF using transparent Containerfile approach");
@@ -371,6 +384,7 @@ pub async fn build_eif_from_filesystems(
         http_port,
         e2e,
         locksmith,
+        e2e_cors_origins,
         templates_dir,
     )
     .await?;

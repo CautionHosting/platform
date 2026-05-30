@@ -232,6 +232,10 @@ pub struct BuildConfig {
     /// Enable locksmith secret management (default: false)
     #[serde(default)]
     pub locksmith: bool,
+
+    /// Allowed CORS origins for STEVE E2E endpoints (e.g. "*" or "https://app.example.com").
+    /// Only meaningful when e2e is true.
+    pub e2e_cors_origins: Option<String>,
 }
 
 impl Default for BuildConfig {
@@ -257,6 +261,7 @@ impl Default for BuildConfig {
             managed_on_prem: None,
             e2e: false,
             locksmith: false,
+            e2e_cors_origins: None,
         }
     }
 }
@@ -305,6 +310,7 @@ impl BuildConfig {
         let mut no_cache = None;
         let mut e2e = None;
         let mut locksmith = None;
+        let mut e2e_cors_origins: Option<String> = None;
         let mut ports: Vec<u16> = Vec::new();
         let mut http_port: Option<u16> = None;
         let mut ssh_keys: Vec<String> = Vec::new();
@@ -420,6 +426,9 @@ impl BuildConfig {
                     }
                     "locksmith" => {
                         locksmith = Some(value.to_lowercase() == "true");
+                    }
+                    "e2e_cors_origins" => {
+                        e2e_cors_origins = Some(value);
                     }
                     "ports" => {
                         let mut parsed_ports: Vec<u16> = Vec::new();
@@ -595,6 +604,12 @@ impl BuildConfig {
             managed_on_prem: managed_on_prem_config,
             e2e: e2e.unwrap_or(false),
             locksmith: locksmith.unwrap_or(false),
+            e2e_cors_origins: {
+                if e2e_cors_origins.is_some() && !e2e.unwrap_or(false) {
+                    return Err("e2e_cors_origins requires e2e: true".into());
+                }
+                e2e_cors_origins
+            },
         })
     }
 }
