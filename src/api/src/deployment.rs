@@ -282,6 +282,46 @@ async fn scale_down_asg(asg_name: &str, credentials: &AwsCredentials) -> Result<
 mod tests {
     use super::*;
 
+    fn assert_template_references_guarded_by_debug(user_data: &str, needle: &str) {
+        const DEBUG_IF: &str = r#"%{ if debug_mode == "true" ~}"#;
+        const ENDIF: &str = "%{ endif ~}";
+
+        let mut debug_ranges = Vec::new();
+        let mut search_start = 0;
+        while let Some(offset) = user_data[search_start..].find(DEBUG_IF) {
+            let start = search_start + offset;
+            let body_start = start + DEBUG_IF.len();
+            let end_offset = user_data[body_start..]
+                .find(ENDIF)
+                .unwrap_or_else(|| panic!("debug template block at byte {start} is not closed"));
+            let end = body_start + end_offset + ENDIF.len();
+            debug_ranges.push(start..end);
+            search_start = end;
+        }
+
+        assert!(
+            !debug_ranges.is_empty(),
+            "expected at least one debug_mode template block"
+        );
+
+        let mut found = false;
+        let mut needle_search_start = 0;
+        while let Some(offset) = user_data[needle_search_start..].find(needle) {
+            found = true;
+            let position = needle_search_start + offset;
+            assert!(
+                debug_ranges.iter().any(|range| range.contains(&position)),
+                "{needle} reference at byte {position} must be guarded by debug_mode"
+            );
+            needle_search_start = position + needle.len();
+        }
+
+        assert!(
+            found,
+            "expected user-data template to contain {needle} reference"
+        );
+    }
+
     fn managed_onprem_config() -> ManagedOnPremConfig {
         ManagedOnPremConfig {
             deployment_id: "dep-123".to_string(),
@@ -374,6 +414,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_enclave_console_capture_is_debug_only() {
+        let user_data = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("terraform/modules/aws/nitro-enclave/user-data.sh"),
+        )
+        .unwrap();
+
+        for needle in [
+            "/usr/local/bin/capture-enclave-console.sh",
+            "nitro-enclave-console.service",
+            "/var/log/nitro_enclaves/enclave-console.log",
+            "nitro-cli console",
+        ] {
+            assert_template_references_guarded_by_debug(&user_data, needle);
+        }
+    }
+
     #[tokio::test]
     async fn test_fully_managed_tf_opens_steve_port_when_e2e_enabled() {
         let mut request = deployment_request("/tmp/enclave.eif", None);
@@ -450,9 +509,7 @@ mod tests {
         .unwrap();
 
         assert!(user_data.contains(r#"%{ if e2e == "true" ~}"#));
-        assert!(
-            user_data.contains(r#"CADDY_DEFAULT_UPSTREAM="reverse_proxy localhost:49500""#)
-        );
+        assert!(user_data.contains(r#"CADDY_DEFAULT_UPSTREAM="reverse_proxy localhost:49500""#));
     }
 }
 

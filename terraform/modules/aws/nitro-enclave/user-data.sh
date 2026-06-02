@@ -119,6 +119,7 @@ systemctl start vsock-network.service
 
 sleep 3
 
+%{ if debug_mode == "true" ~}
 cat > /usr/local/bin/capture-enclave-console.sh <<'CONSOLE_CAPTURE'
 #!/bin/bash
 set -o pipefail
@@ -147,6 +148,7 @@ exit 1
 CONSOLE_CAPTURE
 
 chmod +x /usr/local/bin/capture-enclave-console.sh
+%{ endif ~}
 
 cat > /etc/systemd/system/nitro-enclave.service <<EOF
 [Unit]
@@ -167,6 +169,7 @@ TimeoutStartSec=300
 WantedBy=multi-user.target
 EOF
 
+%{ if debug_mode == "true" ~}
 cat > /etc/systemd/system/nitro-enclave-console.service <<'EOF'
 [Unit]
 Description=Nitro Enclave Console Capture
@@ -181,6 +184,7 @@ Restart=no
 [Install]
 WantedBy=multi-user.target
 EOF
+%{ endif ~}
 
 # Create vsock proxy services for internal platform ports
 standard_ports="49500 49501 49502"
@@ -226,7 +230,9 @@ EOF
 
 systemctl daemon-reload
 systemctl enable nitro-enclave.service
+%{ if debug_mode == "true" ~}
 systemctl enable nitro-enclave-console.service
+%{ endif ~}
 for port in $standard_ports; do
 systemctl enable vsock-proxy-$port.service
 done
@@ -235,7 +241,9 @@ systemctl enable vsock-proxy-${port}.service
 %{ endfor ~}
 
 systemctl start nitro-enclave.service
+%{ if debug_mode == "true" ~}
 systemctl start nitro-enclave-console.service
+%{ endif ~}
 
 echo "Waiting for enclave to boot before starting host-side proxies..."
 sleep 15
@@ -434,11 +442,13 @@ echo "Caddy started with self-signed TLS on port 443"
 echo "=== Nitro Enclave Setup Complete ==="
 echo "Finished at $(date)"
 
+%{ if debug_mode == "true" ~}
 echo "=== Enclave Console Capture Status ==="
 systemctl status nitro-enclave-console.service --no-pager || true
 echo "Recent captured enclave console output:"
 tail -n 120 /var/log/nitro_enclaves/enclave-console.log || true
 echo "=== End Enclave Console Capture Status ==="
+%{ endif ~}
 
 sleep 7
 echo "=== Checking Service Status ==="
@@ -448,15 +458,19 @@ echo ""
 echo "Enclave service:"
 systemctl status nitro-enclave.service --no-pager || true
 echo ""
+%{ if debug_mode == "true" ~}
 echo "Enclave console capture service:"
 systemctl status nitro-enclave-console.service --no-pager || true
 echo ""
+%{ endif ~}
 echo "Running enclaves:"
 nitro-cli describe-enclaves || echo "No enclaves running or command failed"
 echo ""
 echo "Recent enclave service logs:"
 journalctl -u nitro-enclave.service -n 50 --no-pager || true
+%{ if debug_mode == "true" ~}
 echo ""
 echo "Recent enclave console capture logs:"
 journalctl -u nitro-enclave-console.service -n 50 --no-pager || true
+%{ endif ~}
 echo "=== End Status Check ==="
