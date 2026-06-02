@@ -179,9 +179,10 @@ build-cli-untrusted:
 				echo "  xcode-select --install"; \
 				exit 1; \
 			fi; \
-			if command -v brew >/dev/null 2>&1 && brew list --versions nettle gmp openssl@3 pkgconf >/dev/null 2>&1; then \
+			if command -v brew >/dev/null 2>&1 && brew list --versions gmp openssl@3 pkgconf >/dev/null 2>&1 && { brew list --versions nettle@3 >/dev/null 2>&1 || brew list --versions nettle >/dev/null 2>&1; }; then \
 				dep_source="brew"; \
-				brew_pkg_config_path="$$(brew --prefix gmp)/lib/pkgconfig:$$(brew --prefix nettle)/lib/pkgconfig:$$(brew --prefix openssl@3)/lib/pkgconfig"; \
+				nettle_prefix=$$(brew list --versions nettle@3 >/dev/null 2>&1 && brew --prefix nettle@3 || brew --prefix nettle); \
+				brew_pkg_config_path="$$(brew --prefix gmp)/lib/pkgconfig:$$nettle_prefix/lib/pkgconfig:$$(brew --prefix openssl@3)/lib/pkgconfig"; \
 				if [ -n "$$pkg_config_path" ]; then \
 					pkg_config_path="$$brew_pkg_config_path:$$pkg_config_path"; \
 				else \
