@@ -3644,9 +3644,7 @@ run: /app/myapp
             reference: image_ref.clone(),
         };
 
-        let binary_path = self
-            .read_procfile_field("binary")
-            .context("Procfile must specify 'binary' field")?;
+        let binary_path = self.read_procfile_field("binary");
 
         let run_command = self.read_procfile_field("run");
         let app_source_urls = self.read_procfile_sources();
@@ -3658,22 +3656,45 @@ run: /app/myapp
         let ports = self.read_procfile_ports();
 
         let mut loader = Loader::new("Building enclave image", LoaderStyle::Processing);
-        let deployment = builder
-            .build_enclave_auto(
-                &user_image,
-                &binary_path,
-                run_command,
-                app_source_urls_opt,
-                None,
-                None,
-                None,
-                None,
-                &ports,
-                false,
-                false,
-            )
-            .await
-            .context("Failed to build enclave")?;
+        let deployment = if let Some(ref bin_path) = binary_path {
+            log_verbose(
+                self.verbose,
+                &format!("Using build_enclave_auto with binary: {}", bin_path),
+            );
+            builder
+                .build_enclave_auto(
+                    &user_image,
+                    bin_path,
+                    run_command,
+                    app_source_urls_opt,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &ports,
+                    false,
+                    false,
+                )
+                .await
+        } else {
+            log_verbose(self.verbose, "Using build_enclave (no binary specified)");
+            builder
+                .build_enclave(
+                    &user_image,
+                    None,
+                    run_command,
+                    app_source_urls_opt,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &ports,
+                    false,
+                    false,
+                )
+                .await
+        }
+        .context("Failed to build enclave")?;
         loader.stop();
 
         println!("✓ Enclave built successfully!\n");
