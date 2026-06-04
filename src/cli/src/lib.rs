@@ -26,6 +26,7 @@ use enclave_builder::{
 use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_cbor;
+use sequoia_openpgp as openpgp;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Write};
@@ -33,6 +34,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::channel;
 use std::time::Duration;
+
+use openpgp::{cert::CertParser, parse::Parse};
 
 mod loader;
 use loader::{Loader, LoaderStyle};
@@ -464,7 +467,7 @@ enum SecretCommands {
         #[arg(
             long,
             requires = "threshold",
-            help = "Total number of shares to generate"
+            help = "Total shares to generate (defaults to the eligible cert count)"
         )]
         max: Option<u8>,
         #[arg(long, help = "Skip uploading bundle to Caution")]
@@ -732,6 +735,69 @@ struct LegalAcceptanceRequiredError {
     message: Option<String>,
 }
 
+fn keymaker_eligible_cert_count(armored_keyring: &str) -> Result<usize> {
+    let cert_parser = CertParser::from_bytes(armored_keyring)
+        .context("Failed to parse keyring as OpenPGP public certificates")?;
+    let policy = openpgp::policy::StandardPolicy::new();
+    let mut count = 0;
+
+    for parseable_cert in cert_parser {
+        let cert = parseable_cert.context("Failed to parse OpenPGP public certificate")?;
+        let valid_cert = cert
+            .with_policy(&policy, None)
+            .context("OpenPGP public certificate is not valid under the standard policy")?;
+        let has_auth = valid_cert.keys().for_authentication().next().is_some();
+        let has_enc = valid_cert.keys().for_storage_encryption().next().is_some();
+
+        if has_auth && has_enc {
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
+fn resolve_quorum_parameters(
+    threshold: Option<u8>,
+    max: Option<u8>,
+    eligible_certs: usize,
+) -> Result<(u8, u8)> {
+    if eligible_certs == 0 {
+        bail!(
+            "keyring contains no Keymaker-eligible public certificates \
+             (each certificate needs authentication and storage-encryption keys)"
+        );
+    }
+
+    let inferred_max = u8::try_from(eligible_certs)
+        .context("keyring contains more than 255 Keymaker-eligible public certificates")?;
+    let threshold = threshold.unwrap_or(1);
+    let max = max.unwrap_or(inferred_max);
+
+    if max as usize != eligible_certs {
+        bail!(
+            "--max ({}) must match the number of Keymaker-eligible public certificates \
+             in the keyring ({}); use --max {}, or pass a keyring with exactly {} \
+             eligible certificate(s)",
+            max,
+            eligible_certs,
+            eligible_certs,
+            max
+        );
+    }
+
+    if threshold == 0 || threshold > max {
+        bail!(
+            "--threshold must be between 1 and --max \
+             (got threshold={}, max={})",
+            threshold,
+            max
+        );
+    }
+
+    Ok((threshold, max))
+}
+
 struct ApiClient {
     base_url: String,
     client: reqwest::Client,
@@ -972,7 +1038,11 @@ impl ApiClient {
     }
 
     fn read_procfile_field(&self, field: &str) -> Option<String> {
-        let procfile_path = PathBuf::from("Procfile");
+        self.read_procfile_field_from_dir(Path::new("."), field)
+    }
+
+    fn read_procfile_field_from_dir(&self, dir: &Path, field: &str) -> Option<String> {
+        let procfile_path = dir.join("Procfile");
         if !procfile_path.exists() {
             return None;
         }
@@ -1000,7 +1070,11 @@ impl ApiClient {
     }
 
     fn read_procfile_ports(&self) -> Vec<u16> {
-        match self.read_procfile_field("ports") {
+        self.read_procfile_ports_from_dir(Path::new("."))
+    }
+
+    fn read_procfile_ports_from_dir(&self, dir: &Path) -> Vec<u16> {
+        match self.read_procfile_field_from_dir(dir, "ports") {
             Some(ports_str) => ports_str
                 .split(',')
                 .filter_map(|s| s.trim().parse::<u16>().ok())
@@ -3816,10 +3890,13 @@ run: /app/myapp
                 app_commit
             }
         } else if let Some(ref manifest) = external_manifest {
+            let manifest_json = serde_json::to_vec(manifest)
+                .context("Failed to serialize manifest for cache key")?;
+            let manifest_hash = hex::encode(Sha256::digest(&manifest_json));
             if let Some(ref app_src) = manifest.app_source {
-                app_src.commit.clone()
+                format!("{}-{}", app_src.commit, &manifest_hash[..16])
             } else {
-                uuid::Uuid::new_v4().to_string()
+                format!("manifest-{}", &manifest_hash[..16])
             }
         } else {
             Command::new("git")
@@ -3855,6 +3932,7 @@ run: /app/myapp
         log_verbose(self.verbose, "Building Docker image locally...");
 
         let mut loader = Loader::new("Reproducing enclave image", LoaderStyle::Processing);
+        let mut app_source_dir: Option<PathBuf> = None;
         let image_ref = if use_local_app {
             self.build_local_docker_image(no_cache).await?
         } else if let Some(ref manifest) = external_manifest {
@@ -3887,7 +3965,9 @@ run: /app/myapp
                         .map(|(u, c, b)| (u.as_str(), c.as_str(), b.as_deref())),
                 )
                 .await?;
-            self.build_docker_image_from_dir(&app_dir, no_cache).await?
+            let image_ref = self.build_docker_image_from_dir(&app_dir, no_cache).await?;
+            app_source_dir = Some(app_dir);
+            image_ref
         } else {
             self.build_local_docker_image(no_cache).await?
         };
@@ -3981,16 +4061,39 @@ run: /app/myapp
                 (binary, run_cmd, source_urls_opt, branch, commit, metadata)
             };
 
-        let ports = self.read_procfile_ports();
+        let ports = if let Some(ref app_dir) = app_source_dir {
+            self.read_procfile_ports_from_dir(app_dir)
+        } else {
+            self.read_procfile_ports()
+        };
         log_verbose(self.verbose, &format!("Ports: {:?}", ports));
 
-        let e2e = self
-            .read_procfile_field("e2e")
-            .map(|v| v.to_lowercase() == "true")
-            .unwrap_or(false);
+        let e2e = if let Some(ref app_dir) = app_source_dir {
+            self.read_procfile_field_from_dir(app_dir, "e2e")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or_else(|| {
+                    external_manifest
+                        .as_ref()
+                        .and_then(|manifest| manifest.steve_commit.as_ref())
+                        .is_some()
+                })
+        } else {
+            self.read_procfile_field("e2e")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(false)
+        };
         log_verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
-        let locksmith = if let Some(ref manifest) = external_manifest {
+        let locksmith = if let Some(ref app_dir) = app_source_dir {
+            self.read_procfile_field_from_dir(app_dir, "locksmith")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or_else(|| {
+                    external_manifest
+                        .as_ref()
+                        .map(|manifest| manifest.locksmith || manifest.locksmith_commit.is_some())
+                        .unwrap_or(false)
+                })
+        } else if let Some(ref manifest) = external_manifest {
             manifest.locksmith || manifest.locksmith_commit.is_some()
         } else {
             self.read_procfile_field("locksmith")
@@ -5573,8 +5676,9 @@ run: /app/myapp
         let keyring_data = fs::read_to_string(&keyring)
             .with_context(|| format!("Failed to read keyring file: {}", keyring.display()))?;
 
-        let threshold = threshold.unwrap_or(1);
-        let max = max.unwrap_or(1);
+        let eligible_certs = keymaker_eligible_cert_count(&keyring_data)
+            .with_context(|| format!("Failed to inspect keyring file: {}", keyring.display()))?;
+        let (threshold, max) = resolve_quorum_parameters(threshold, max, eligible_certs)?;
 
         let request_body = serde_json::json!({
             "threshold": threshold,
@@ -6242,8 +6346,36 @@ pub async fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_local_build_command_from_dir, resolve_procfile_build_command};
+    use super::{
+        resolve_local_build_command_from_dir, resolve_procfile_build_command,
+        resolve_quorum_parameters,
+    };
     use tempfile::tempdir;
+
+    #[test]
+    fn resolve_quorum_parameters_infers_max_from_keyring() {
+        assert_eq!(resolve_quorum_parameters(None, None, 10).unwrap(), (1, 10));
+    }
+
+    #[test]
+    fn resolve_quorum_parameters_rejects_mismatched_max() {
+        let err = resolve_quorum_parameters(Some(2), Some(4), 10).unwrap_err();
+
+        assert!(
+            err.to_string().contains("--max (4) must match"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_quorum_parameters_rejects_threshold_above_max() {
+        let err = resolve_quorum_parameters(Some(11), Some(10), 10).unwrap_err();
+
+        assert!(
+            err.to_string().contains("--threshold must be between 1 and --max"),
+            "unexpected error: {err}"
+        );
+    }
 
     #[test]
     fn resolve_procfile_build_command_prefers_explicit_build_over_containerfile() {

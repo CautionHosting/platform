@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use futures::StreamExt;
 use russh::server::{Auth, Msg, Server, Session};
 use russh::{Channel, ChannelId};
-use russh_keys::key::{KeyPair, PublicKey};
 use russh_keys::PublicKeyBase64;
+use russh_keys::key::{KeyPair, PublicKey};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::path::Path;
@@ -465,6 +465,48 @@ fn set_repo_head(repo_path: &str, branch: &str) -> Result<()> {
     Ok(())
 }
 
+fn get_repo_head_branch(repo_path: &str) -> Result<Option<PushedBranchRef>> {
+    use std::process::Command;
+
+    let output = Command::new("git")
+        .args(&["--git-dir", repo_path, "symbolic-ref", "--short", "HEAD"])
+        .output()
+        .context("Failed to read repo HEAD")?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        return Ok(None);
+    }
+
+    let ref_name = format!("refs/heads/{}", branch);
+    let output = Command::new("git")
+        .args(&["--git-dir", repo_path, "rev-parse", &ref_name])
+        .output()
+        .context("Failed to resolve repo HEAD branch")?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let commit_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !is_sha1_hex(&commit_sha) {
+        bail!("Repo HEAD resolved to invalid commit SHA");
+    }
+
+    Ok(Some(PushedBranchRef {
+        branch,
+        commit_sha: commit_sha.to_ascii_lowercase(),
+    }))
+}
+
+fn resource_state_allows_noop_redeploy(state: &str) -> bool {
+    matches!(state, "initialized" | "terminated" | "failed")
+}
+
 async fn handle_git_push(
     pool: &PgPool,
     api_service_url: &str,
@@ -489,21 +531,28 @@ async fn handle_git_push(
     .await
     .context("Failed to check existing resource")?;
 
-    match existing {
+    let resource_state = match existing {
         Some((state,)) => {
             if state == "running" || state == "stopped" {
-                bail!("App '{}' already exists in state '{}'. Use 'caution apps destroy {}' to destroy it first.", app_id, state, app_id);
+                bail!(
+                    "App '{}' already exists in state '{}'. Use 'caution apps destroy {}' to destroy it first.",
+                    app_id,
+                    state,
+                    app_id
+                );
             }
             tracing::info!(
                 "App '{}' exists in state '{}', allowing push",
                 app_id,
                 state
             );
+            state
         }
         None => {
             bail!("App '{}' not found. Run 'caution init' first.", app_id);
         }
-    }
+    };
+    let allow_noop_redeploy = resource_state_allows_noop_redeploy(&resource_state);
 
     let repo_path = format!("{}/git-repos/{}.git", data_dir, app_id);
     ensure_git_repo_exists(&repo_path)?;
@@ -629,6 +678,47 @@ async fn handle_git_push(
 
         let pushed_ref = match read_pushed_branch_ref(&push_ref_log_path) {
             Ok(PushedBranchSelection::One(pushed_ref)) => pushed_ref,
+            Ok(PushedBranchSelection::None) if allow_noop_redeploy => {
+                match get_repo_head_branch(&repo_path) {
+                    Ok(Some(head_ref)) => {
+                        tracing::info!(
+                            "No branch refs updated; redeploying HEAD branch '{}' at {}",
+                            head_ref.branch,
+                            head_ref.commit_sha
+                        );
+                        let msg = format!(
+                            "\nremote: No branch updates received; redeploying existing remote HEAD '{}' at {}.\nremote: To deploy the current checkout, push with: git push caution HEAD:{}\n",
+                            head_ref.branch, head_ref.commit_sha, head_ref.branch
+                        );
+                        let _ = session_handle
+                            .extended_data(channel, 1, msg.into_bytes().into())
+                            .await;
+                        head_ref
+                    }
+                    Ok(None) => {
+                        tracing::info!(
+                            "No branch refs updated and no deployable HEAD; skipping deployment"
+                        );
+                        let msg = "\nremote: No branch updates; skipping deployment.\n".to_string();
+                        let _ = session_handle
+                            .extended_data(channel, 1, msg.into_bytes().into())
+                            .await;
+                        let _ = session_handle.exit_status_request(channel, 0).await;
+                        let _ = session_handle.close(channel).await;
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to resolve repo HEAD for no-op push: {}", e);
+                        let msg = "remote: error: Failed to resolve deploy branch\n".to_string();
+                        let _ = session_handle
+                            .extended_data(channel, 1, msg.into_bytes().into())
+                            .await;
+                        let _ = session_handle.exit_status_request(channel, 1).await;
+                        let _ = session_handle.close(channel).await;
+                        return;
+                    }
+                }
+            }
             Ok(PushedBranchSelection::None) => {
                 tracing::info!("No branch refs updated; skipping deployment");
                 let msg = "\nremote: No branch updates; skipping deployment.\n".to_string();
@@ -672,8 +762,12 @@ async fn handle_git_push(
         let branch = pushed_ref.branch;
         let commit_sha = pushed_ref.commit_sha;
 
+        let deploy_ref_msg = format!(
+            "\nremote: Deploying branch '{}' at {}\n",
+            branch, commit_sha
+        );
         let _ = session_handle
-            .extended_data(channel, 1, b"\n".to_vec().into())
+            .extended_data(channel, 1, deploy_ref_msg.into_bytes().into())
             .await;
 
         #[derive(serde::Serialize)]
@@ -947,9 +1041,7 @@ async fn handle_git_push(
 
         let success_msg = format!(
             "\nApplication: {}\nAttestation: {}{}\n\nRun 'caution verify' to verify the application attestation.\n\n",
-            deploy_result.url,
-            attestation_url,
-            dns_note
+            deploy_result.url, attestation_url, dns_note
         );
         let _ = session_handle
             .extended_data(channel, 1, success_msg.into_bytes().into())
@@ -963,7 +1055,10 @@ async fn handle_git_push(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_pushed_branch_ref, PushedBranchSelection, ZERO_SHA1};
+    use super::{
+        PushedBranchSelection, ZERO_SHA1, parse_pushed_branch_ref,
+        resource_state_allows_noop_redeploy,
+    };
 
     const OLD_SHA: &str = "1111111111111111111111111111111111111111";
     const MAIN_SHA: &str = "2222222222222222222222222222222222222222";
@@ -1006,6 +1101,86 @@ mod tests {
         assert!(matches!(pushed_ref, PushedBranchSelection::Multiple));
     }
 
+    #[test]
+    fn noop_redeploy_is_only_allowed_for_deployable_inactive_states() {
+        assert!(resource_state_allows_noop_redeploy("initialized"));
+        assert!(resource_state_allows_noop_redeploy("terminated"));
+        assert!(resource_state_allows_noop_redeploy("failed"));
+
+        assert!(!resource_state_allows_noop_redeploy("pending"));
+        assert!(!resource_state_allows_noop_redeploy("running"));
+        assert!(!resource_state_allows_noop_redeploy("stopped"));
+    }
+
+    #[test]
+    fn repo_head_branch_resolves_current_deploy_target() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo_path = repo_dir.path().to_str().unwrap();
+        let work_dir = tempfile::tempdir().unwrap();
+        let work_path = work_dir.path().to_str().unwrap();
+
+        run_git(&["init", "--bare", repo_path]);
+        run_git(&["-C", work_path, "init"]);
+        std::fs::write(work_dir.path().join("README.md"), "test\n").unwrap();
+        run_git(&["-C", work_path, "add", "."]);
+        run_git(&[
+            "-C",
+            work_path,
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "initial commit",
+        ]);
+        let commit_sha = run_git_stdout(&["-C", work_path, "rev-parse", "HEAD"]);
+        run_git(&["-C", work_path, "push", repo_path, "HEAD:refs/heads/main"]);
+        run_git(&[
+            "--git-dir",
+            repo_path,
+            "symbolic-ref",
+            "--",
+            "HEAD",
+            "refs/heads/main",
+        ]);
+
+        let pushed_ref = super::get_repo_head_branch(repo_path).unwrap().unwrap();
+
+        assert_eq!(pushed_ref.branch, "main");
+        assert_eq!(pushed_ref.commit_sha, commit_sha);
+    }
+
+    fn run_git(args: &[&str]) {
+        let output = run_git_output(args);
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn run_git_stdout(args: &[&str]) -> String {
+        let output = run_git_output(args);
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn run_git_output(args: &[&str]) -> std::process::Output {
+        std::process::Command::new("git")
+            .args(args)
+            .output()
+            .unwrap()
+    }
 }
 
 pub async fn run_ssh_server(

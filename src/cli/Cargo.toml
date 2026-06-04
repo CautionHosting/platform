@@ -45,6 +45,7 @@ coset = "0.3"
 # Locksmith (shard sending)
 locksmith = { git = "https://codeberg.org/caution/locksmith.git" }
 keymaker-models = { git = "https://codeberg.org/caution/locksmith.git" }
+sequoia-openpgp = { workspace = true }
 
 # Archive handling
 flate2 = "1.0"
