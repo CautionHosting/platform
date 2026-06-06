@@ -2394,24 +2394,28 @@ async fn deploy_logic(
         ));
     }
 
-    tracing::info!("Waiting for attestation endpoint to become healthy...");
-    if let Err(e) = wait_for_attestation_health(&deployment_result.public_ip, health_timeout_secs).await {
-        tracing::error!("Attestation health check failed: {}", e);
-        recover_deploy_failure(
-            &state,
-            req.org_id,
-            resource_id,
-            &app_name,
-            previous_state,
-            should_cleanup_on_failure,
-            cleanup_credentials,
-            cleanup_managed_onprem,
-        )
-        .await;
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Enclave failed to become healthy: {}", e),
-        ));
+    if enclave_config.debug {
+        tracing::info!("Skipping attestation check: enclave is in debug mode");
+    } else {
+        tracing::info!("Waiting for attestation endpoint to become healthy...");
+        if let Err(e) = wait_for_attestation_health(&deployment_result.public_ip, health_timeout_secs).await {
+            tracing::error!("Attestation health check failed: {}", e);
+            recover_deploy_failure(
+                &state,
+                req.org_id,
+                resource_id,
+                &app_name,
+                previous_state,
+                should_cleanup_on_failure,
+                cleanup_credentials,
+                cleanup_managed_onprem,
+            )
+            .await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Enclave failed to become healthy: {}", e),
+            ));
+        }
     }
 
     if let Err(e) = sqlx::query(
