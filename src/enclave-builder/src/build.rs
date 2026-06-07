@@ -629,4 +629,18 @@ mod tests {
         let result = process_template_blocks(content, &[]);
         assert_eq!(result, "start\nmid\nend\n");
     }
+
+    #[tokio::test]
+    async fn test_render_run_sh_uses_reserved_locksmith_port() {
+        let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
+        let rendered =
+            render_run_sh_template(&template, Some("/app".to_string()), &[], false, true)
+                .await
+                .unwrap();
+
+        assert!(rendered.contains("INTERNAL_LOCKSMITH_PORT=49504"));
+        assert!(rendered.contains(
+            "VSOCK-LISTEN:${INTERNAL_LOCKSMITH_PORT},reuseaddr,fork TCP:localhost:${INTERNAL_LOCKSMITH_PORT}"
+        ));
+    }
 }
