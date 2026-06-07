@@ -325,6 +325,11 @@ enum Commands {
             help = "Save verified PCR hashes to .caution/trusted_hashes.json for use by send-shard"
         )]
         save_pcrs: bool,
+        #[arg(
+            long,
+            help = "Dev mode: skip full attestation verification (unsafe)"
+        )]
+        debug: bool,
     },
     #[command(about = "Manage deployed applications")]
     Apps {
@@ -502,6 +507,11 @@ enum SecretCommands {
         app: Option<String>,
         #[arg(long, help = "Path to quorum bundle JSON file")]
         bundle: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Dev mode: skip PCR trust check (unsafe)"
+        )]
+        debug: bool,
     },
 }
 
@@ -4210,7 +4220,14 @@ run: /app/myapp
         pcrs_file: Option<String>,
         no_cache: bool,
         save_pcrs: bool,
+        debug: bool,
     ) -> Result<()> {
+        if debug {
+            eprintln!("\n⚠️  DEBUG MODE ENABLED - Skip full attestation verification");
+            eprintln!("   PCRs will be displayed but NOT verified.");
+            eprintln!("   This mode is UNSAFE and should only be used for development.\n");
+        }
+
         println!("Verifying enclave attestation...");
         println!("Learn more: https://docs.caution.co/concepts/attestation/");
 
@@ -4360,6 +4377,18 @@ run: /app/myapp
             if let Some(ref metadata) = m.metadata {
                 println!("  Metadata: {}", metadata);
             }
+        }
+
+        if debug {
+            if manifest.is_some() {
+                println!("\n✓ Attestation endpoint reachable, manifest exists (debug mode)");
+                println!("   PCRs displayed above were NOT verified against expected values.\n");
+            } else {
+                bail!(
+                    "No manifest found at attestation endpoint. The enclave may not be fully started."
+                );
+            }
+            return Ok(());
         }
 
         let expected_pcrs = if let Some(pcrs_path) = pcrs_file {
@@ -5919,7 +5948,14 @@ run: /app/myapp
         &self,
         app: Option<String>,
         bundle_path: Option<PathBuf>,
+        debug: bool,
     ) -> Result<()> {
+        if debug {
+            eprintln!("\n⚠️  DEBUG MODE ENABLED - Skip PCR trust check");
+            eprintln!("   Shard will be sent WITHOUT verifying PCRs against trusted hashes.");
+            eprintln!("   This mode is UNSAFE and should only be used for development.\n");
+        }
+
         // Resolve the app to get the enclave's public IP
         let app_info = match app {
             Some(id) => self.fetch_app(&id).await?,
@@ -5994,33 +6030,80 @@ run: /app/myapp
 
         // Load trusted hashes from a prior `caution verify --save-pcrs`
         let hashes_path = PathBuf::from(".caution/trusted_hashes.json");
-        let hashes_text = fs::read_to_string(&hashes_path).context(
-            "No trusted hashes found. Run `caution verify --save-pcrs` first to establish trusted PCR values."
-        )?;
-        let hashes: serde_json::Value = serde_json::from_str(&hashes_text)
-            .context("Failed to parse .caution/trusted_hashes.json")?;
+        let pcrs = match fs::read_to_string(&hashes_path) {
+            Ok(hashes_text) => {
+                let hashes: serde_json::Value = serde_json::from_str(&hashes_text)
+                    .context("Failed to parse .caution/trusted_hashes.json")?;
 
-        let pcrs = std::collections::HashMap::from([
-            (
-                0u8,
-                hex::decode(hashes["pcr0"].as_str().context("missing pcr0")?)
-                    .context("invalid pcr0 hex")?,
-            ),
-            (
-                1u8,
-                hex::decode(hashes["pcr1"].as_str().context("missing pcr1")?)
-                    .context("invalid pcr1 hex")?,
-            ),
-            (
-                2u8,
-                hex::decode(hashes["pcr2"].as_str().context("missing pcr2")?)
-                    .context("invalid pcr2 hex")?,
-            ),
-        ]);
+                if let Some(verified_at) = hashes["verified_at"].as_str() {
+                    eprintln!("Using trusted hashes from {}", verified_at);
+                }
 
-        if let Some(verified_at) = hashes["verified_at"].as_str() {
-            eprintln!("Using trusted hashes from {}", verified_at);
-        }
+                std::collections::HashMap::from([
+                    (
+                        0u8,
+                        hex::decode(hashes["pcr0"].as_str().context("missing pcr0")?)
+                            .context("invalid pcr0 hex")?,
+                    ),
+                    (
+                        1u8,
+                        hex::decode(hashes["pcr1"].as_str().context("missing pcr1")?)
+                            .context("invalid pcr1 hex")?,
+                    ),
+                    (
+                        2u8,
+                        hex::decode(hashes["pcr2"].as_str().context("missing pcr2")?)
+                            .context("invalid pcr2 hex")?,
+                    ),
+                ])
+            }
+            Err(_) if debug => {
+                eprintln!("No trusted hashes found, fetching live PCRs from enclave (debug mode)...");
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()?;
+                let nonce = {
+                    use rand::RngCore;
+                    let mut nonce = vec![0u8; 32];
+                    rand::thread_rng().fill_bytes(&mut nonce);
+                    nonce
+                };
+                let response = client
+                    .post(format!("http://{}/attestation", public_ip))
+                    .json(&serde_json::json!({"nonce": general_purpose::STANDARD.encode(&nonce)}))
+                    .send()
+                    .await
+                    .context("Failed to fetch live attestation from enclave")?;
+                if !response.status().is_success() {
+                    bail!("Failed to fetch attestation: {}", response.status());
+                }
+                let attest_resp: serde_json::Value = response
+                    .json()
+                    .await
+                    .context("Failed to parse attestation response")?;
+                let attestation_b64 = attest_resp
+                    .get("attestation_document")
+                    .or_else(|| attest_resp.get("document"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("No attestation document in response"))?;
+                let attestation_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(attestation_b64)
+                    .context("Failed to decode attestation document")?;
+                let remote_pcrs = attestation::extract_pcrs(&attestation_bytes)
+                    .context("Failed to extract PCRs from attestation document")?;
+                eprintln!("Using live PCRs: PCR0={}, PCR1={}, PCR2={}",
+                    remote_pcrs.pcr0, remote_pcrs.pcr1, remote_pcrs.pcr2);
+
+                std::collections::HashMap::from([
+                    (0u8, hex::decode(&remote_pcrs.pcr0).context("invalid pcr0 hex")?),
+                    (1u8, hex::decode(&remote_pcrs.pcr1).context("invalid pcr1 hex")?),
+                    (2u8, hex::decode(&remote_pcrs.pcr2).context("invalid pcr2 hex")?),
+                ])
+            }
+            Err(e) => {
+                bail!("No trusted hashes found: {}. Run `caution verify --save-pcrs` first to establish trusted PCR values, or use --debug to skip this check.", e);
+            }
+        };
 
         // Parse the quorum bundle
         let bundle_text = fs::read_to_string(&bundle_file)
@@ -6224,6 +6307,7 @@ pub async fn run() -> Result<()> {
             pcrs,
             no_cache,
             save_pcrs,
+            debug,
         } => {
             client
                 .verify(
@@ -6233,6 +6317,7 @@ pub async fn run() -> Result<()> {
                     pcrs,
                     no_cache,
                     save_pcrs,
+                    debug,
                 )
                 .await?;
         }
@@ -6335,8 +6420,8 @@ pub async fn run() -> Result<()> {
                     client.secret_label_remove(id, keys).await?;
                 }
             },
-            SecretCommands::SendShard { app, bundle } => {
-                client.secret_send_shard(app, bundle).await?;
+            SecretCommands::SendShard { app, bundle, debug } => {
+                client.secret_send_shard(app, bundle, debug).await?;
             }
         },
     }
