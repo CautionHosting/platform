@@ -109,7 +109,29 @@ CLI_UNTRUSTED_ARCH := $(shell uname -m | sed -e 's/^aarch64$$/arm64/' -e 's/^amd
 CLI_UNTRUSTED_EXE_SUFFIX := $(shell uname -s | sed -n -e 's/^MINGW.*/.exe/p' -e 's/^MSYS.*/.exe/p' -e 's/^CYGWIN.*/.exe/p')
 CLI_UNTRUSTED_BINARY := caution-$(CLI_UNTRUSTED_OS)-$(CLI_UNTRUSTED_ARCH)-untrusted$(CLI_UNTRUSTED_EXE_SUFFIX)
 CLI_OUT_DIR := $(OUT_DIR)/cli
-CLI_UNTRUSTED_INSTALL_DIR ?= $(if $(filter macos,$(CLI_UNTRUSTED_OS)),/usr/local/bin,$(HOME)/.local/bin)
+CLI_UNTRUSTED_INSTALL_DIR ?= $(shell \
+	if [ "$(CLI_UNTRUSTED_OS)" = "macos" ]; then \
+		caution_path=$$(command -v caution 2>/dev/null || true); \
+		if [ -n "$$caution_path" ] && [ -f "$$caution_path" ]; then \
+			caution_dir=$$(dirname "$$caution_path"); \
+			if [ -d "$$caution_dir" ] && [ -w "$$caution_dir" ]; then \
+				printf '%s\n' "$$caution_dir"; \
+				exit 0; \
+			fi; \
+		fi; \
+		for dir in "$$HOME/.local/bin" "/opt/homebrew/bin" "/usr/local/bin"; do \
+			parent_dir=$$(dirname "$$dir"); \
+			if [ -d "$$dir" ] && [ -w "$$dir" ]; then \
+				printf '%s\n' "$$dir"; \
+				exit 0; \
+			fi; \
+			if [ ! -e "$$dir" ] && [ -d "$$parent_dir" ] && [ -w "$$parent_dir" ]; then \
+				printf '%s\n' "$$dir"; \
+				exit 0; \
+			fi; \
+		done; \
+	fi; \
+	printf '%s\n' "$$HOME/.local/bin")
 GIT_REF := $(shell git log -1 --format=%H)
 GIT_AUTHOR := $(shell git log -1 --format=%an)
 GIT_PUBKEY := $(shell git log -1 --format=%GK)
@@ -418,7 +440,21 @@ install-cli-untrusted: build-cli-untrusted
 		exit 1; \
 	fi; \
 	install -m 0755 $(CLI_OUT_DIR)/$(CLI_UNTRUSTED_BINARY) "$$DEST_DIR/caution"; \
-	echo "Installed untrusted caution to $$DEST_DIR/caution"
+	echo "Installed untrusted caution to $$DEST_DIR/caution"; \
+	if [ "$(CLI_UNTRUSTED_OS)" = "macos" ]; then \
+		resolved_caution=$$(command -v caution 2>/dev/null || true); \
+		if [ "$$resolved_caution" != "$$DEST_DIR/caution" ]; then \
+			echo ""; \
+			if [ -n "$$resolved_caution" ]; then \
+				echo "caution resolves to $$resolved_caution, not $$DEST_DIR/caution."; \
+			else \
+				echo "$$DEST_DIR is not on your PATH."; \
+			fi; \
+			echo "Use it in the current shell with:"; \
+			echo "  export PATH=\"$$DEST_DIR:\$$PATH\""; \
+			echo "To persist it, add that line to ~/.zshrc or your shell config and reload your shell."; \
+		fi; \
+	fi
 
 build-all: build-gateway build-api build-email build-metering $(FRONTEND_BUILD_TARGET) build-cli
 
