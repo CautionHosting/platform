@@ -2278,6 +2278,9 @@ async fn deploy_logic(
                 containerfile: containerfile.clone(),
                 binary_path,
                 ports: ingress_ports.clone(),
+                http_port: ec_network
+                    .and_then(|n| n.http.as_ref())
+                    .map(|h| h.port),
                 e2e,
                 locksmith: config_file.has_vault_env(),
                 no_cache,

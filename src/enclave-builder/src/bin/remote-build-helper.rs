@@ -35,6 +35,17 @@ fn ports_from_env() -> Vec<u16> {
         .unwrap_or_default()
 }
 
+fn http_port_from_env() -> Option<u16> {
+    std::env::var("CAUTION_HTTP_PORT").ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            trimmed.parse::<u16>().ok()
+        }
+    })
+}
+
 fn enclave_source_from_manifest(manifest: &EnclaveManifest) -> Result<(String, String)> {
     match &manifest.enclave_source {
         EnclaveSource::GitArchive { urls, commit } => {
@@ -81,6 +92,7 @@ async fn main() -> Result<()> {
     let locksmith = env_flag("CAUTION_LOCKSMITH");
     let no_cache = env_flag("CAUTION_NO_CACHE");
     let ports = ports_from_env();
+    let http_port = http_port_from_env();
 
     tokio::fs::create_dir_all(&work_dir)
         .await
@@ -131,6 +143,7 @@ async fn main() -> Result<()> {
                 metadata,
                 Some(manifest),
                 &ports,
+                http_port,
                 e2e,
                 locksmith,
             )
@@ -147,6 +160,7 @@ async fn main() -> Result<()> {
                 metadata,
                 Some(manifest),
                 &ports,
+                http_port,
                 e2e,
                 locksmith,
             )

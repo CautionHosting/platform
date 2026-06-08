@@ -95,7 +95,7 @@ BOOTPROOFD_LISTEN_ADDR="0.0.0.0:${INTERNAL_BOOTPROOFD_PORT}" /bootproofd &
 
 # {STEVE
 echo "Starting STEVE (Secure Transport Encryption Via Enclave)..."
-STEVE_LISTEN_ADDR="0.0.0.0:${INTERNAL_E2P_PORT}" /steve &
+STEVE_LISTEN_ADDR="0.0.0.0:${INTERNAL_E2P_PORT}" STEVE_APP_UPSTREAM="http://127.0.0.1:{{STEVE_APP_PORT}}" /steve &
 # }STEVE
 
 echo "Starting VSOCK-to-TCP proxies..."

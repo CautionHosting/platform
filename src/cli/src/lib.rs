@@ -4170,6 +4170,12 @@ enclave "default" {{
             })
             .unwrap_or_default();
 
+        let http_port = default_enclave
+            .and_then(|config| config.network.as_ref())
+            .and_then(|network| network.http.as_ref())
+            .map(|http| http.port);
+        log_verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
+
         let e2e = default_enclave
             .and_then(|e| e.network.as_ref())
             .and_then(|n| n.http.as_ref())
@@ -4198,6 +4204,7 @@ enclave "default" {{
                     None,
                     None,
                     &ports,
+                    http_port,
                     e2e,
                     locksmith,
                 )
@@ -4215,6 +4222,7 @@ enclave "default" {{
                     None,
                     None,
                     &ports,
+                    http_port,
                     e2e,
                     locksmith,
                 )
@@ -4533,6 +4541,20 @@ enclave "default" {{
         };
         log_verbose(self.verbose, &format!("Ports: {:?}", ports));
 
+        let http_port = {
+            let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
+            self.read_config_from_dir(config_dir)
+                .ok()
+                .and_then(|cfg| {
+                    cfg.enclave
+                        .and_then(|e| e.into_iter().next().map(|(_, v)| v))
+                })
+                .and_then(|config| config.network)
+                .and_then(|network| network.http)
+                .map(|http| http.port)
+        };
+        log_verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
+
         let e2e = {
             let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
             self.read_config_from_dir(config_dir)
@@ -4541,10 +4563,10 @@ enclave "default" {{
                     cfg.enclave
                         .and_then(|e| e.into_iter().next().map(|(_, v)| v))
                 })
-                .and_then(|e| e.network)
-                .and_then(|n| n.http)
-                .and_then(|h| h.e2e_encryption)
-                .and_then(|ee| ee.enabled)
+                .and_then(|config| config.network)
+                .and_then(|network| network.http)
+                .and_then(|http| http.e2e_encryption)
+                .and_then(|e2e| e2e.enabled)
                 .unwrap_or_else(|| {
                     external_manifest
                         .as_ref()
@@ -4590,6 +4612,7 @@ enclave "default" {{
                     metadata,
                     external_manifest,
                     &ports,
+                    http_port,
                     e2e,
                     locksmith,
                 )
@@ -4607,6 +4630,7 @@ enclave "default" {{
                     metadata,
                     external_manifest,
                     &ports,
+                    http_port,
                     e2e,
                     locksmith,
                 )

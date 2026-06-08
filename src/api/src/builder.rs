@@ -149,6 +149,7 @@ pub struct BuildRequest {
     pub containerfile: String,
     pub binary_path: Option<String>,
     pub ports: Vec<u16>,
+    pub http_port: Option<u16>,
     pub e2e: bool,
     pub locksmith: bool,
     pub no_cache: bool,
@@ -826,6 +827,10 @@ fn generate_builder_userdata(
         .map(u16::to_string)
         .collect::<Vec<_>>()
         .join(",");
+    let http_port = request
+        .http_port
+        .map(|port| port.to_string())
+        .unwrap_or_default();
 
     let containerfile = validate_remote_containerfile_path(&request.containerfile)?;
 
@@ -896,6 +901,7 @@ COMMIT_SHA="{commit_sha}"
 ENCLAVEOS_COMMIT="{enclaveos_commit}"
 CONTAINERFILE="{containerfile}"
 PORTS="{ports_csv}"
+HTTP_PORT="{http_port}"
 E2E="{e2e_flag}"
 LOCKSMITH="{locksmith_flag}"
 NO_CACHE="{no_cache_flag}"
@@ -989,6 +995,7 @@ CAUTION_WORK_DIR="/build/remote-helper-work" \
 CAUTION_OUTPUT_EIF="/build/output/enclave.eif" \
 CAUTION_OUTPUT_PCRS="/build/output/enclave.pcrs" \
 CAUTION_PORTS="$PORTS" \
+CAUTION_HTTP_PORT="$HTTP_PORT" \
 CAUTION_E2E="$E2E" \
 CAUTION_LOCKSMITH="$LOCKSMITH" \
 CAUTION_NO_CACHE="$NO_CACHE" \
@@ -1040,6 +1047,7 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
         enclaveos_commit = request.enclaveos_commit,
         containerfile = containerfile,
         ports_csv = ports_csv,
+        http_port = http_port,
         e2e_flag = e2e_flag,
         locksmith_flag = locksmith_flag,
         no_cache_flag = no_cache_flag,
@@ -1444,6 +1452,7 @@ mod tests {
             containerfile: "Dockerfile".to_string(),
             binary_path: None,
             ports: vec![],
+            http_port: None,
             e2e: false,
             locksmith: false,
             no_cache: true,
@@ -1580,6 +1589,7 @@ mod tests {
             containerfile: "Containerfile".to_string(),
             binary_path: None,
             ports: vec![],
+            http_port: None,
             e2e: false,
             locksmith: false,
             no_cache: false,
@@ -1631,6 +1641,7 @@ mod tests {
             containerfile: "Custom.Containerfile".to_string(),
             binary_path: None,
             ports: vec![],
+            http_port: None,
             e2e: false,
             locksmith: false,
             no_cache: false,
@@ -1681,6 +1692,7 @@ mod tests {
             containerfile: "Dockerfile".to_string(),
             binary_path: None,
             ports: vec![],
+            http_port: None,
             e2e: false,
             locksmith: false,
             no_cache: false,
@@ -1739,6 +1751,7 @@ mod tests {
             containerfile: "Dockerfile$(aws)".to_string(),
             binary_path: None,
             ports: vec![],
+            http_port: None,
             e2e: false,
             locksmith: false,
             no_cache: false,
@@ -1793,6 +1806,7 @@ mod tests {
             containerfile: "Dockerfile".to_string(),
             binary_path: None,
             ports: vec![],
+            http_port: None,
             e2e: false,
             locksmith: false,
             no_cache: false,
