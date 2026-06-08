@@ -1216,7 +1216,7 @@ dependencies = [
 [[package]]
 name = "bootproof"
 version = "0.1.0"
-source = "git+https://git.distrust.co/public/bootproof.git#53a93872c17c22a253e4ecb8ade00c5964762e45"
+source = "git+https://git.distrust.co/public/bootproof.git#78f531a2c245404a9d8879fb71cc397096ae0077"
 dependencies = [
  "aws-nitro-enclaves-nsm-api",
  "serde_bytes",
@@ -1227,7 +1227,7 @@ dependencies = [
 [[package]]
 name = "bootproof-sdk"
 version = "0.1.0"
-source = "git+https://git.distrust.co/public/bootproof.git#53a93872c17c22a253e4ecb8ade00c5964762e45"
+source = "git+https://git.distrust.co/public/bootproof.git#78f531a2c245404a9d8879fb71cc397096ae0077"
 dependencies = [
  "coset 0.4.2",
  "ring",
@@ -2385,7 +2385,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3132,7 +3132,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "system-configuration 0.7.0",
  "tokio",
  "tower-service",
@@ -3620,7 +3620,7 @@ dependencies = [
 [[package]]
 name = "keymaker-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git#a14d81936cff710540be83d72ffd9c922a9e18d1"
+source = "git+https://codeberg.org/caution/locksmith.git#6cab189c6c87aefe6fd8e652ea1901abb7f2b9dd"
 dependencies = [
  "serde",
  "sha2",
@@ -3797,7 +3797,7 @@ dependencies = [
 [[package]]
 name = "locksmith"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git#a14d81936cff710540be83d72ffd9c922a9e18d1"
+source = "git+https://codeberg.org/caution/locksmith.git#6cab189c6c87aefe6fd8e652ea1901abb7f2b9dd"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4110,7 +4110,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4560,7 +4560,7 @@ dependencies = [
  "aes-gcm",
  "aes-kw",
  "argon2",
- "base64 0.22.1",
+ "base64 0.21.7",
  "bitfields",
  "block-padding",
  "blowfish",
@@ -5367,7 +5367,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5613,7 +5613,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e858e4e9e48ff079cede92e1b45c942a5466ce9a4e3cc0c2a7e66586a718ef59"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.21.7",
  "buffered-reader",
  "bzip2 0.5.2",
  "chrono",
@@ -6419,7 +6419,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7256,7 +7256,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

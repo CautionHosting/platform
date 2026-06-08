@@ -502,6 +502,8 @@ enum SecretCommands {
         app: Option<String>,
         #[arg(long, help = "Path to quorum bundle JSON file")]
         bundle: Option<PathBuf>,
+        #[arg(long, help = "Path for private OpenPGP Keyring (if not using smartcards)")]
+        keyring: Option<PathBuf>,
     },
 }
 
@@ -5919,6 +5921,7 @@ run: /app/myapp
         &self,
         app: Option<String>,
         bundle_path: Option<PathBuf>,
+        private_keyring: Option<PathBuf>,
     ) -> Result<()> {
         // Resolve the app to get the enclave's public IP
         let app_info = match app {
@@ -6032,7 +6035,7 @@ run: /app/myapp
         eprintln!("Sending shard to enclave at {}...", address_str);
         let address: std::net::SocketAddr = address_str.parse().context("Invalid address")?;
 
-        let status = locksmith::client::send_shard(address, pcrs, &bundle)
+        let status = locksmith::client::send_shard(address, pcrs, &bundle, private_keyring)
             .await
             .context("Failed to send shard to enclave")?;
 
@@ -6335,8 +6338,8 @@ pub async fn run() -> Result<()> {
                     client.secret_label_remove(id, keys).await?;
                 }
             },
-            SecretCommands::SendShard { app, bundle } => {
-                client.secret_send_shard(app, bundle).await?;
+            SecretCommands::SendShard { app, bundle, keyring } => {
+                client.secret_send_shard(app, bundle, keyring).await?;
             }
         },
     }
