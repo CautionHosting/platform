@@ -4385,8 +4385,17 @@ run: /app/myapp
             println!("\nReading expected PCRs from file: {}", pcrs_path);
             self.read_pcrs_from_file(&pcrs_path)?
         } else if from_local {
-            println!("\nBuilding from local Git HEAD archive...");
-            let source = self.stage_git_head_source().await?;
+            let manifest_app_commit = manifest
+                .as_ref()
+                .and_then(|manifest| manifest.app_source.as_ref())
+                .map(|app_source| app_source.commit.as_str());
+            match manifest_app_commit {
+                Some(commit) => {
+                    println!("\nBuilding from local Git commit from manifest: {commit}")
+                }
+                None => println!("\nBuilding from local Git HEAD archive..."),
+            }
+            let source = self.stage_git_source(manifest_app_commit).await?;
             self.build_and_get_pcrs(manifest.clone(), no_cache, Some(&source))
                 .await?
         } else if let Some(ref tarball_path) = from_tarball {
@@ -4574,7 +4583,7 @@ run: /app/myapp
         self.build_docker_image_from_dir(&work_dir, no_cache).await
     }
 
-    async fn stage_git_head_source(&self) -> Result<StagedSource> {
+    async fn stage_git_source(&self, requested_commit: Option<&str>) -> Result<StagedSource> {
         let root_output = tokio::process::Command::new("git")
             .args(["rev-parse", "--show-toplevel"])
             .output()
@@ -4587,17 +4596,34 @@ run: /app/myapp
         }
 
         let repo_root = PathBuf::from(String::from_utf8_lossy(&root_output.stdout).trim());
+        let requested_commit = requested_commit
+            .map(str::trim)
+            .filter(|commit| !commit.is_empty());
+        let commit_ish = requested_commit.unwrap_or("HEAD");
+        let commit_rev = format!("{commit_ish}^{{commit}}");
 
         let commit_output = tokio::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
+            .args(["rev-parse", "--verify", &commit_rev])
             .current_dir(&repo_root)
             .output()
             .await
-            .context("Failed to resolve local Git HEAD")?;
+            .with_context(|| format!("Failed to resolve local Git commit {commit_ish}"))?;
 
         if !commit_output.status.success() {
             let stderr = String::from_utf8_lossy(&commit_output.stderr);
-            bail!("Failed to resolve local Git HEAD: {}", stderr.trim());
+            if requested_commit.is_some() {
+                bail!(
+                    "Failed to resolve manifest app commit {} in local repository. Fetch it locally or use --from-tarball. Git error: {}",
+                    commit_ish,
+                    stderr.trim()
+                );
+            } else {
+                bail!(
+                    "Failed to resolve local Git commit {}: {}",
+                    commit_ish,
+                    stderr.trim()
+                );
+            }
         }
 
         let commit = String::from_utf8_lossy(&commit_output.stdout)
@@ -4605,15 +4631,15 @@ run: /app/myapp
             .to_string();
 
         let archive_output = tokio::process::Command::new("git")
-            .args(["archive", "--format=tar.gz", "HEAD"])
+            .args(["archive", "--format=tar.gz", &commit])
             .current_dir(&repo_root)
             .output()
             .await
-            .context("Failed to archive local Git HEAD")?;
+            .with_context(|| format!("Failed to archive local Git commit {commit}"))?;
 
         if !archive_output.status.success() {
             let stderr = String::from_utf8_lossy(&archive_output.stderr);
-            bail!("git archive failed: {}", stderr.trim());
+            bail!("git archive failed for {}: {}", commit, stderr.trim());
         }
 
         let temp_dir = tempfile::TempDir::new().context("Failed to create temp source dir")?;
@@ -4622,7 +4648,7 @@ run: /app/myapp
         log_verbose(
             self.verbose,
             &format!(
-                "Staged local Git HEAD {} from {} into {}",
+                "Staged local Git commit {} from {} into {}",
                 commit,
                 repo_root.display(),
                 temp_dir.path().display()
