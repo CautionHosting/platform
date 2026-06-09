@@ -314,6 +314,12 @@ enum Commands {
         attestation_url: Option<String>,
         #[arg(long, help = "Build from current directory instead of remote manifest")]
         from_local: bool,
+        #[arg(
+            long,
+            conflicts_with_all = ["from_local", "app_source_url", "pcrs"],
+            help = "Build from a local source tarball laid out like git archive"
+        )]
+        from_tarball: Option<PathBuf>,
         #[arg(long, help = "Git URL to fetch application source")]
         app_source_url: Option<String>,
         #[arg(long, help = "Compare against PCRs from file instead of building")]
@@ -737,6 +743,13 @@ struct LegalAcceptanceRequiredError {
     message: Option<String>,
 }
 
+struct StagedSource {
+    path: PathBuf,
+    cache_key: String,
+    app_commit: Option<String>,
+    _temp_dir: tempfile::TempDir,
+}
+
 fn keymaker_eligible_cert_count(armored_keyring: &str) -> Result<usize> {
     let cert_parser = CertParser::from_bytes(armored_keyring)
         .context("Failed to parse keyring as OpenPGP public certificates")?;
@@ -1086,8 +1099,12 @@ impl ApiClient {
     }
 
     fn read_procfile_sources(&self) -> Vec<String> {
-        self.read_procfile_field("app_sources")
-            .or_else(|| self.read_procfile_field("app_source"))
+        self.read_procfile_sources_from_dir(Path::new("."))
+    }
+
+    fn read_procfile_sources_from_dir(&self, dir: &Path) -> Vec<String> {
+        self.read_procfile_field_from_dir(dir, "app_sources")
+            .or_else(|| self.read_procfile_field_from_dir(dir, "app_source"))
             .map(|s| {
                 s.split(',')
                     .map(|url| url.trim().to_string())
@@ -1098,8 +1115,12 @@ impl ApiClient {
     }
 
     fn read_procfile_enclave_sources(&self) -> Vec<String> {
-        self.read_procfile_field("enclave_sources")
-            .or_else(|| self.read_procfile_field("enclave_source"))
+        self.read_procfile_enclave_sources_from_dir(Path::new("."))
+    }
+
+    fn read_procfile_enclave_sources_from_dir(&self, dir: &Path) -> Vec<String> {
+        self.read_procfile_field_from_dir(dir, "enclave_sources")
+            .or_else(|| self.read_procfile_field_from_dir(dir, "enclave_source"))
             .map(|s| {
                 s.split(',')
                     .map(|url| url.trim().to_string())
@@ -3805,12 +3826,12 @@ run: /app/myapp
         &self,
         external_manifest: Option<enclave_builder::EnclaveManifest>,
         no_cache: bool,
-        use_local_app: bool,
+        local_source: Option<&StagedSource>,
     ) -> Result<enclave_builder::PcrValues> {
-        let no_cache = if use_local_app {
+        let no_cache = if let Some(source) = local_source {
             no_cache
                 || self
-                    .read_procfile_field("no_cache")
+                    .read_procfile_field_from_dir(&source.path, "no_cache")
                     .map(|v| v.to_lowercase() == "true")
                     .unwrap_or(false)
         } else {
@@ -3836,7 +3857,10 @@ run: /app/myapp
                 }
             }
         } else {
-            let enclave_sources = self.read_procfile_enclave_sources();
+            let procfile_dir = local_source
+                .map(|source| source.path.as_path())
+                .unwrap_or_else(|| Path::new("."));
+            let enclave_sources = self.read_procfile_enclave_sources_from_dir(procfile_dir);
             if !enclave_sources.is_empty() {
                 log_verbose(
                     self.verbose,
@@ -3869,27 +3893,14 @@ run: /app/myapp
             enclave_builder::FRAMEWORK_SOURCE.to_string()
         };
 
-        let cache_key = if use_local_app {
-            let app_commit = Command::new("git")
-                .args(&["rev-parse", "HEAD"])
-                .output()
-                .ok()
-                .and_then(|o| {
-                    if o.status.success() {
-                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
+        let cache_key = if let Some(source) = local_source {
             if let Some(ref manifest) = external_manifest {
                 let manifest_json = serde_json::to_vec(manifest)
                     .context("Failed to serialize manifest for cache key")?;
                 let manifest_hash = hex::encode(Sha256::digest(&manifest_json));
-                format!("{}-{}", app_commit, &manifest_hash[..16])
+                format!("{}-{}", source.cache_key, &manifest_hash[..16])
             } else {
-                app_commit
+                source.cache_key.clone()
             }
         } else if let Some(ref manifest) = external_manifest {
             let manifest_json = serde_json::to_vec(manifest)
@@ -3935,8 +3946,10 @@ run: /app/myapp
 
         let mut loader = Loader::new("Reproducing enclave image", LoaderStyle::Processing);
         let mut app_source_dir: Option<PathBuf> = None;
-        let image_ref = if use_local_app {
-            self.build_local_docker_image(no_cache).await?
+        let image_ref = if let Some(source) = local_source {
+            let image_ref = self.build_docker_image_from_dir(&source.path, no_cache).await?;
+            app_source_dir = Some(source.path.clone());
+            image_ref
         } else if let Some(ref manifest) = external_manifest {
             let app_source = manifest.app_source.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -4013,30 +4026,37 @@ run: /app/myapp
                     manifest.metadata.clone(),
                 )
             } else {
-                let binary = self.read_procfile_field("binary");
-                let run_cmd = self.read_procfile_field("run");
-                let source_urls = self.read_procfile_sources();
+                let procfile_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
+                let binary = self.read_procfile_field_from_dir(procfile_dir, "binary");
+                let run_cmd = self.read_procfile_field_from_dir(procfile_dir, "run");
+                let source_urls = self.read_procfile_sources_from_dir(procfile_dir);
                 let source_urls_opt = if source_urls.is_empty() {
                     None
                 } else {
                     Some(source_urls)
                 };
-                let metadata = self.read_procfile_field("metadata");
+                let metadata = self.read_procfile_field_from_dir(procfile_dir, "metadata");
 
-                let commit = Command::new("git")
-                    .args(&["rev-parse", "HEAD"])
-                    .output()
-                    .ok()
-                    .and_then(|o| {
-                        if o.status.success() {
-                            Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                        } else {
-                            None
-                        }
+                let commit = local_source
+                    .and_then(|source| source.app_commit.clone())
+                    .or_else(|| {
+                        Command::new("git")
+                            .args(&["rev-parse", "HEAD"])
+                            .current_dir(procfile_dir)
+                            .output()
+                            .ok()
+                            .and_then(|o| {
+                                if o.status.success() {
+                                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                                } else {
+                                    None
+                                }
+                            })
                     });
 
                 let branch = Command::new("git")
                     .args(&["rev-parse", "--abbrev-ref", "HEAD"])
+                    .current_dir(procfile_dir)
                     .output()
                     .ok()
                     .and_then(|o| {
@@ -4208,6 +4228,7 @@ run: /app/myapp
         &self,
         attestation_url_opt: Option<String>,
         from_local: bool,
+        from_tarball: Option<PathBuf>,
         app_source_url: Option<String>,
         pcrs_file: Option<String>,
         no_cache: bool,
@@ -4368,8 +4389,14 @@ run: /app/myapp
             println!("\nReading expected PCRs from file: {}", pcrs_path);
             self.read_pcrs_from_file(&pcrs_path)?
         } else if from_local {
-            println!("\nBuilding from local directory...");
-            self.build_and_get_pcrs(manifest.clone(), no_cache, true)
+            println!("\nBuilding from local Git HEAD archive...");
+            let source = self.stage_git_head_source().await?;
+            self.build_and_get_pcrs(manifest.clone(), no_cache, Some(&source))
+                .await?
+        } else if let Some(ref tarball_path) = from_tarball {
+            println!("\nBuilding from source tarball: {}", tarball_path.display());
+            let source = self.stage_tarball_source(tarball_path)?;
+            self.build_and_get_pcrs(manifest.clone(), no_cache, Some(&source))
                 .await?
         } else if let Some(ref source_url) = app_source_url {
             println!("\nBuilding from provided source URL: {}", source_url);
@@ -4385,7 +4412,7 @@ run: /app/myapp
                     commit,
                     branch: None,
                 });
-                self.build_and_get_pcrs(Some(modified_manifest), no_cache, false)
+                self.build_and_get_pcrs(Some(modified_manifest), no_cache, None)
                     .await?
             } else {
                 println!("\n⚠️  Remote attestation does not include a manifest");
@@ -4415,7 +4442,7 @@ run: /app/myapp
                     bail!("Cannot reproduce private code deployment");
                 }
                 println!("\nReproducing build from remote manifest...");
-                self.build_and_get_pcrs(manifest.clone(), no_cache, false)
+                self.build_and_get_pcrs(manifest.clone(), no_cache, None)
                     .await?
             } else {
                 println!("\n⚠️  Remote attestation does not include a manifest");
@@ -4551,6 +4578,170 @@ run: /app/myapp
         self.build_docker_image_from_dir(&work_dir, no_cache).await
     }
 
+    async fn stage_git_head_source(&self) -> Result<StagedSource> {
+        let root_output = tokio::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .await
+            .context("Failed to locate Git repository")?;
+
+        if !root_output.status.success() {
+            let stderr = String::from_utf8_lossy(&root_output.stderr);
+            bail!("--from-local must be run inside a Git repository: {}", stderr.trim());
+        }
+
+        let repo_root = PathBuf::from(String::from_utf8_lossy(&root_output.stdout).trim());
+
+        let commit_output = tokio::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo_root)
+            .output()
+            .await
+            .context("Failed to resolve local Git HEAD")?;
+
+        if !commit_output.status.success() {
+            let stderr = String::from_utf8_lossy(&commit_output.stderr);
+            bail!("Failed to resolve local Git HEAD: {}", stderr.trim());
+        }
+
+        let commit = String::from_utf8_lossy(&commit_output.stdout)
+            .trim()
+            .to_string();
+
+        let archive_output = tokio::process::Command::new("git")
+            .args(["archive", "--format=tar.gz", "HEAD"])
+            .current_dir(&repo_root)
+            .output()
+            .await
+            .context("Failed to archive local Git HEAD")?;
+
+        if !archive_output.status.success() {
+            let stderr = String::from_utf8_lossy(&archive_output.stderr);
+            bail!("git archive failed: {}", stderr.trim());
+        }
+
+        let temp_dir = tempfile::TempDir::new().context("Failed to create temp source dir")?;
+        Self::extract_tarball_bytes_to_dir(&archive_output.stdout, temp_dir.path(), 0)?;
+
+        log_verbose(
+            self.verbose,
+            &format!(
+                "Staged local Git HEAD {} from {} into {}",
+                commit,
+                repo_root.display(),
+                temp_dir.path().display()
+            ),
+        );
+
+        Ok(StagedSource {
+            path: temp_dir.path().to_path_buf(),
+            cache_key: commit.clone(),
+            app_commit: Some(commit),
+            _temp_dir: temp_dir,
+        })
+    }
+
+    fn stage_tarball_source(&self, tarball_path: &Path) -> Result<StagedSource> {
+        let archive_bytes = fs::read(tarball_path)
+            .with_context(|| format!("Failed to read tarball: {}", tarball_path.display()))?;
+        let archive_hash = hex::encode(Sha256::digest(&archive_bytes));
+        let temp_dir = tempfile::TempDir::new().context("Failed to create temp source dir")?;
+
+        Self::extract_tarball_bytes_to_dir(&archive_bytes, temp_dir.path(), 0)?;
+
+        log_verbose(
+            self.verbose,
+            &format!(
+                "Staged source tarball {} into {}",
+                tarball_path.display(),
+                temp_dir.path().display()
+            ),
+        );
+
+        Ok(StagedSource {
+            path: temp_dir.path().to_path_buf(),
+            cache_key: format!("tarball-{}", &archive_hash[..16]),
+            app_commit: None,
+            _temp_dir: temp_dir,
+        })
+    }
+
+    fn extract_tarball_bytes_to_dir(
+        archive_bytes: &[u8],
+        extract_dir: &Path,
+        strip_components: usize,
+    ) -> Result<()> {
+        if archive_bytes.starts_with(&[0x1f, 0x8b]) {
+            let decoder = flate2::read::GzDecoder::new(archive_bytes);
+            Self::extract_tar_archive_to_dir(tar::Archive::new(decoder), extract_dir, strip_components)
+        } else {
+            Self::extract_tar_archive_to_dir(
+                tar::Archive::new(archive_bytes),
+                extract_dir,
+                strip_components,
+            )
+        }
+    }
+
+    fn extract_tar_archive_to_dir<R: std::io::Read>(
+        mut archive: tar::Archive<R>,
+        extract_dir: &Path,
+        strip_components: usize,
+    ) -> Result<()> {
+        std::fs::create_dir_all(extract_dir).with_context(|| {
+            format!("Failed to create extract dir: {}", extract_dir.display())
+        })?;
+        let canonical_extract = extract_dir.canonicalize().with_context(|| {
+            format!(
+                "Failed to canonicalize extract dir: {}",
+                extract_dir.display()
+            )
+        })?;
+
+        for entry in archive
+            .entries()
+            .context("Failed to read archive entries")?
+        {
+            let mut entry = entry.context("Failed to read archive entry")?;
+            let path = entry.path().context("Failed to get entry path")?;
+            if path.is_absolute() {
+                bail!("Archive path traversal detected: {}", path.display());
+            }
+
+            let components: Vec<_> = path.components().collect();
+            if components.len() <= strip_components {
+                continue;
+            }
+
+            let stripped_path: PathBuf = components[strip_components..].iter().collect();
+            if stripped_path.as_os_str().is_empty() {
+                continue;
+            }
+            let dest_path = canonical_extract.join(&stripped_path);
+
+            if let Some(parent) = dest_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+
+                let canonical_parent = parent
+                    .canonicalize()
+                    .with_context(|| format!("Failed to canonicalize: {}", parent.display()))?;
+                if !canonical_parent.starts_with(&canonical_extract) {
+                    bail!(
+                        "Archive path traversal detected: {}",
+                        stripped_path.display()
+                    );
+                }
+            }
+
+            entry
+                .unpack(&dest_path)
+                .with_context(|| format!("Failed to extract: {}", stripped_path.display()))?;
+        }
+
+        Ok(())
+    }
+
     async fn build_docker_image_from_dir(
         &self,
         work_dir: &std::path::Path,
@@ -4654,9 +4845,6 @@ run: /app/myapp
     }
 
     async fn download_and_extract_app_source(&self, url: &str) -> Result<PathBuf> {
-        use flate2::read::GzDecoder;
-        use tar::Archive;
-
         let cache_dir = dirs::home_dir()
             .context("Failed to determine home directory")?
             .join(".cache/caution/downloads");
@@ -4715,55 +4903,7 @@ run: /app/myapp
             &format!("Downloaded {} bytes, extracting...", archive_bytes.len()),
         );
 
-        // Extract tar.gz archive with strip_components=1
-        let decoder = GzDecoder::new(&archive_bytes[..]);
-        let mut archive = Archive::new(decoder);
-
-        std::fs::create_dir_all(&extract_dir)
-            .with_context(|| format!("Failed to create extract dir: {}", extract_dir.display()))?;
-        let canonical_extract = extract_dir.canonicalize().with_context(|| {
-            format!(
-                "Failed to canonicalize extract dir: {}",
-                extract_dir.display()
-            )
-        })?;
-
-        for entry in archive
-            .entries()
-            .context("Failed to read archive entries")?
-        {
-            let mut entry = entry.context("Failed to read archive entry")?;
-            let path = entry.path().context("Failed to get entry path")?;
-
-            // Skip the first path component (equivalent to --strip-components=1)
-            let components: Vec<_> = path.components().collect();
-            if components.len() <= 1 {
-                continue;
-            }
-
-            let stripped_path: PathBuf = components[1..].iter().collect();
-            let dest_path = canonical_extract.join(&stripped_path);
-
-            if let Some(parent) = dest_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-
-                // Security: verify the resolved path stays within the extract directory
-                let canonical_parent = parent
-                    .canonicalize()
-                    .with_context(|| format!("Failed to canonicalize: {}", parent.display()))?;
-                if !canonical_parent.starts_with(&canonical_extract) {
-                    bail!(
-                        "Archive path traversal detected: {}",
-                        stripped_path.display()
-                    );
-                }
-            }
-
-            entry
-                .unpack(&dest_path)
-                .with_context(|| format!("Failed to extract: {}", stripped_path.display()))?;
-        }
+        Self::extract_tarball_bytes_to_dir(&archive_bytes, &extract_dir, 1)?;
 
         log_verbose(
             self.verbose,
@@ -6223,6 +6363,7 @@ pub async fn run() -> Result<()> {
         Commands::Verify {
             attestation_url,
             from_local,
+            from_tarball,
             app_source_url,
             pcrs,
             no_cache,
@@ -6232,6 +6373,7 @@ pub async fn run() -> Result<()> {
                 .verify(
                     attestation_url,
                     from_local,
+                    from_tarball,
                     app_source_url,
                     pcrs,
                     no_cache,
