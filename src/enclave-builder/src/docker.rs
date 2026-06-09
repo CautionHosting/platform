@@ -106,6 +106,36 @@ pub fn resolve_build_command_in_dir(
     resolve_build_command_with_selected_containerfile(build_command, containerfile.as_deref())
 }
 
+fn augment_docker_build_command(build_command: &str, image_tag: &str, no_cache: bool) -> String {
+    let mut cmd = build_command.to_string();
+
+    if !cmd.starts_with("docker build") {
+        return cmd;
+    }
+
+    // Enclave/user image builds target Linux/x86_64. Without an explicit
+    // platform, Docker on Apple Silicon can select arm64 and fail to resolve
+    // the pinned StageX base images needed for reproducible builds.
+    if !cmd.contains("--platform") {
+        cmd = cmd.replacen("docker build", "docker build --platform linux/amd64", 1);
+    }
+
+    if no_cache && !cmd.contains("--no-cache") {
+        cmd = cmd.replacen("docker build", "docker build --no-cache --pull", 1);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        cmd = format!("{} --build-arg CACHEBUST={}", cmd, timestamp);
+    }
+
+    if cmd.ends_with(" .") {
+        cmd.replace(" .", &format!(" -t {} .", image_tag))
+    } else {
+        format!("{} -t {}", cmd, image_tag)
+    }
+}
+
 /// Build a Docker image from a Procfile configuration.
 ///
 /// This function handles the full build workflow:
@@ -146,33 +176,8 @@ pub async fn build_user_image(
         work_dir,
     );
 
-    // Add -t <tag> and optionally --no-cache if it's a docker build command
-    let build_command_with_tag = if build_command.starts_with("docker build") {
-        let mut cmd = build_command.clone();
-
-        // Add --no-cache --pull and CACHEBUST if no_cache is enabled
-        if config.no_cache {
-            if !cmd.contains("--no-cache") {
-                cmd = cmd.replacen("docker build", "docker build --no-cache --pull", 1);
-            }
-            // Add cache-busting build arg with timestamp to invalidate BuildKit layer cache
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            cmd = format!("{} --build-arg CACHEBUST={}", cmd, timestamp);
-        }
-
-        // Add image tag
-        if cmd.ends_with(" .") {
-            cmd.replace(" .", &format!(" -t {} .", image_tag))
-        } else {
-            format!("{} -t {}", cmd, image_tag)
-        }
-    } else {
-        // Non-docker build command, use as-is
-        build_command.clone()
-    };
+    let build_command_with_tag =
+        augment_docker_build_command(&build_command, image_tag, config.no_cache);
 
     tracing::info!("Executing build command: {}", build_command_with_tag);
 
@@ -333,6 +338,28 @@ mod tests {
         assert!(
             err.to_string().contains("missing file"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_augment_docker_build_command_adds_linux_amd64_platform() {
+        let cmd = augment_docker_build_command("docker build -f Dockerfile .", "test-image", false);
+        assert_eq!(
+            cmd,
+            "docker build --platform linux/amd64 -f Dockerfile -t test-image ."
+        );
+    }
+
+    #[test]
+    fn test_augment_docker_build_command_preserves_explicit_platform() {
+        let cmd = augment_docker_build_command(
+            "docker build --platform linux/arm64 -f Dockerfile .",
+            "test-image",
+            false,
+        );
+        assert_eq!(
+            cmd,
+            "docker build --platform linux/arm64 -f Dockerfile -t test-image ."
         );
     }
 }
