@@ -3680,7 +3680,7 @@ run: /app/myapp
     async fn build_local(&self, no_cache: bool) -> Result<()> {
         println!("Building EIF locally for inspection...\n");
 
-        let commit_sha = Command::new("git")
+        let app_commit = Command::new("git")
             .args(&["rev-parse", "HEAD"])
             .output()
             .ok()
@@ -3690,7 +3690,20 @@ run: /app/myapp
                 } else {
                     None
                 }
-            })
+            });
+        let app_branch = Command::new("git")
+            .args(&["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            });
+        let commit_sha = app_commit
+            .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let procfile_no_cache = self
@@ -3731,6 +3744,18 @@ run: /app/myapp
         };
         let ports = self.read_procfile_ports();
 
+        let e2e = self
+            .read_procfile_field("e2e")
+            .map(|v| v.to_lowercase() == "true")
+            .unwrap_or(false);
+        log_verbose(self.verbose, &format!("E2E encryption: {}", e2e));
+
+        let locksmith = self
+            .read_procfile_field("locksmith")
+            .map(|v| v.to_lowercase() == "true")
+            .unwrap_or(false);
+        log_verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
+
         let mut loader = Loader::new("Building enclave image", LoaderStyle::Processing);
         let deployment = if let Some(ref bin_path) = binary_path {
             log_verbose(
@@ -3743,13 +3768,13 @@ run: /app/myapp
                     bin_path,
                     run_command,
                     app_source_urls_opt,
-                    None,
-                    None,
+                    app_branch.clone(),
+                    app_commit.clone(),
                     None,
                     None,
                     &ports,
-                    false,
-                    false,
+                    e2e,
+                    locksmith,
                 )
                 .await
         } else {
@@ -3760,13 +3785,13 @@ run: /app/myapp
                     None,
                     run_command,
                     app_source_urls_opt,
-                    None,
-                    None,
+                    app_branch.clone(),
+                    app_commit.clone(),
                     None,
                     None,
                     &ports,
-                    false,
-                    false,
+                    e2e,
+                    locksmith,
                 )
                 .await
         }
