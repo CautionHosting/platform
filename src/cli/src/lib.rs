@@ -23,6 +23,7 @@ use enclave_builder::{
     BuildConfig, build_user_image, has_explicit_build_command, resolve_build_command_in_dir,
     validate_explicit_containerfile_path,
 };
+use keymaker_models::generate_quorum::GenerateQuorumResponse;
 use reqwest;
 use sequoia_openpgp as openpgp;
 use serde::{Deserialize, Serialize};
@@ -69,15 +70,15 @@ fn is_valid_env_key(key: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-fn strip_matching_quotes(value: &str) -> &str {
-    if value.len() >= 2
-        && ((value.starts_with('"') && value.ends_with('"'))
-            || (value.starts_with('\'') && value.ends_with('\'')))
+fn parse_env_value(value: &str) -> String {
+    if (value.starts_with('"') || value.starts_with('\''))
+        && let Some(words) = shlex::split(value)
+        && words.len() == 1
     {
-        &value[1..value.len() - 1]
-    } else {
-        value
+        return words.into_iter().next().unwrap_or_default();
     }
+
+    value.to_string()
 }
 
 fn parse_env_assignments(content: &str) -> Vec<EnvAssignment> {
@@ -85,7 +86,7 @@ fn parse_env_assignments(content: &str) -> Vec<EnvAssignment> {
 
     for line in content.lines() {
         let line = line.strip_suffix('\r').unwrap_or(line);
-        let trimmed = line.trim_start();
+        let trimmed = line.trim();
 
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
@@ -106,6 +107,8 @@ fn parse_env_assignments(content: &str) -> Vec<EnvAssignment> {
         let Some((key, value)) = assignment.split_once('=') else {
             continue;
         };
+        let key = key.trim();
+        let value = value.trim();
 
         if !is_valid_env_key(key) {
             continue;
@@ -113,31 +116,42 @@ fn parse_env_assignments(content: &str) -> Vec<EnvAssignment> {
 
         assignments.push(EnvAssignment {
             key: key.to_string(),
-            value: strip_matching_quotes(value).to_string(),
+            value: parse_env_value(value),
         });
     }
 
     assignments
 }
 
-fn find_quorum_public_key(bundle: &serde_json::Value) -> Option<&str> {
-    bundle
-        .get("secret_recipient_public_key")
-        .or_else(|| bundle.get("public_key"))
-        .and_then(|value| value.as_str())
-        .or_else(|| bundle.get("data").and_then(find_quorum_public_key))
-}
-
-fn extract_quorum_public_key(bundle: &serde_json::Value) -> Result<&str> {
-    let public_key = find_quorum_public_key(bundle)
-        .context("Quorum bundle does not contain `secret_recipient_public_key` or `public_key`")?;
-
+fn validate_quorum_public_key(public_key: &str) -> Result<&str> {
     anyhow::ensure!(
         public_key.contains("BEGIN PGP PUBLIC KEY BLOCK"),
         "Quorum bundle public key is not an armored PGP public key"
     );
 
     Ok(public_key)
+}
+
+fn find_legacy_quorum_public_key(bundle: &serde_json::Value) -> Option<&str> {
+    bundle
+        .get("secret_recipient_public_key")
+        .or_else(|| bundle.get("public_key"))
+        .and_then(|value| value.as_str())
+        .or_else(|| bundle.get("data").and_then(find_legacy_quorum_public_key))
+}
+
+fn parse_quorum_bundle_public_key(bundle_text: &str) -> Result<String> {
+    if let Ok(bundle) = serde_json::from_str::<GenerateQuorumResponse>(bundle_text) {
+        validate_quorum_public_key(&bundle.public_key)?;
+        return Ok(bundle.public_key);
+    }
+
+    let bundle: serde_json::Value =
+        serde_json::from_str(bundle_text).context("Failed to parse quorum bundle JSON")?;
+    let public_key = find_legacy_quorum_public_key(&bundle)
+        .context("Quorum bundle does not contain `secret_recipient_public_key` or `public_key`")?;
+
+    validate_quorum_public_key(public_key).map(str::to_string)
 }
 
 fn load_recipient_cert(public_key: &str) -> Result<openpgp::Cert> {
@@ -264,10 +278,8 @@ fn encrypt_env_file(
 
     let bundle_text = fs::read_to_string(bundle_file)
         .with_context(|| format!("Failed to read quorum bundle {}", bundle_file.display()))?;
-    let bundle: serde_json::Value =
-        serde_json::from_str(&bundle_text).context("Failed to parse quorum bundle JSON")?;
-    let public_key = extract_quorum_public_key(&bundle)?;
-    let recipient = load_recipient_cert(public_key)?;
+    let public_key = parse_quorum_bundle_public_key(&bundle_text)?;
+    let recipient = load_recipient_cert(&public_key)?;
 
     fs::create_dir_all(secrets_dir)
         .with_context(|| format!("Failed to create {}", secrets_dir.display()))?;
@@ -5984,7 +5996,7 @@ run: /app/myapp
             bail!("Keymaker error ({}): {}", status, error);
         }
 
-        let quorum_response: serde_json::Value = response
+        let quorum_response: GenerateQuorumResponse = response
             .json()
             .await
             .context("Failed to parse Keymaker response")?;
@@ -6650,12 +6662,14 @@ pub async fn run() -> Result<()> {
 mod tests {
     use super::openpgp;
     use super::{
-        encrypt_env_file, encrypt_secret_value, extract_quorum_public_key, load_recipient_cert,
-        parse_env_assignments, resolve_local_build_command_from_dir,
+        encrypt_env_file, encrypt_secret_value, load_recipient_cert, parse_env_assignments,
+        parse_quorum_bundle_public_key, resolve_local_build_command_from_dir,
         resolve_procfile_build_command, resolve_quorum_parameters,
     };
+    use keymaker_models::generate_quorum::GenerateQuorumResponse;
     use openpgp::cert::prelude::*;
     use openpgp::serialize::SerializeInto;
+    use std::collections::HashMap;
     use tempfile::tempdir;
 
     fn test_public_key() -> String {
@@ -6679,6 +6693,9 @@ EMPTY=\n\
 INLINE=value # preserved\n\
 BAD-KEY=no\n\
 SPACED =no\n\
+PADDED = \" spaced \" \n\
+ESCAPED=\"say \\\"hi\\\"\"\n\
+COMMENTED=\"bar\" # trailing comment\n\
 export MISSING_EQUALS\n",
         );
 
@@ -6694,22 +6711,48 @@ export MISSING_EQUALS\n",
                 ("BAR", "baz"),
                 ("EMPTY", ""),
                 ("INLINE", "value # preserved"),
+                ("SPACED", "no"),
+                ("PADDED", " spaced "),
+                ("ESCAPED", "say \"hi\""),
+                ("COMMENTED", "bar"),
             ]
         );
     }
 
     #[test]
-    fn extract_quorum_public_key_accepts_current_legacy_and_wrapped_fields() {
+    fn parse_quorum_bundle_public_key_accepts_typed_legacy_and_wrapped_fields() {
         let public_key = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nabc\n";
 
+        let typed = GenerateQuorumResponse {
+            label: HashMap::new(),
+            keyring: String::new(),
+            keyring_hash: Vec::new(),
+            shardfile: String::new(),
+            public_key: public_key.to_string(),
+            necroproof: Vec::new(),
+        };
+        assert_eq!(
+            parse_quorum_bundle_public_key(&serde_json::to_string(&typed).unwrap()).unwrap(),
+            public_key
+        );
+
         let current = serde_json::json!({ "secret_recipient_public_key": public_key });
-        assert_eq!(extract_quorum_public_key(&current).unwrap(), public_key);
+        assert_eq!(
+            parse_quorum_bundle_public_key(&current.to_string()).unwrap(),
+            public_key
+        );
 
         let legacy = serde_json::json!({ "public_key": public_key });
-        assert_eq!(extract_quorum_public_key(&legacy).unwrap(), public_key);
+        assert_eq!(
+            parse_quorum_bundle_public_key(&legacy.to_string()).unwrap(),
+            public_key
+        );
 
         let wrapped = serde_json::json!({ "data": { "secret_recipient_public_key": public_key } });
-        assert_eq!(extract_quorum_public_key(&wrapped).unwrap(), public_key);
+        assert_eq!(
+            parse_quorum_bundle_public_key(&wrapped.to_string()).unwrap(),
+            public_key
+        );
     }
 
     #[test]
@@ -6741,9 +6784,14 @@ UNREQUESTED=nope\n",
         )
         .unwrap();
 
-        let bundle = serde_json::json!({
-            "secret_recipient_public_key": test_public_key(),
-        });
+        let bundle = GenerateQuorumResponse {
+            label: HashMap::new(),
+            keyring: String::new(),
+            keyring_hash: Vec::new(),
+            shardfile: String::new(),
+            public_key: test_public_key(),
+            necroproof: Vec::new(),
+        };
         std::fs::write(&bundle_file, serde_json::to_string(&bundle).unwrap()).unwrap();
 
         let count = encrypt_env_file(
