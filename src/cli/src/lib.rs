@@ -1114,10 +1114,6 @@ impl ApiClient {
             .unwrap_or_default()
     }
 
-    fn read_procfile_enclave_sources(&self) -> Vec<String> {
-        self.read_procfile_enclave_sources_from_dir(Path::new("."))
-    }
-
     fn read_procfile_enclave_sources_from_dir(&self, dir: &Path) -> Vec<String> {
         self.read_procfile_field_from_dir(dir, "enclave_sources")
             .or_else(|| self.read_procfile_field_from_dir(dir, "enclave_source"))
