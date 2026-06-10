@@ -175,7 +175,7 @@ build-cli-untrusted:
 		case "$$(uname -s)" in \
 			Darwin) \
 				echo "Install dependencies with one of:"; \
-				echo "  brew install pkgconf nettle gmp openssl@3"; \
+				echo "  brew install pkgconf nettle@3 gmp openssl@3"; \
 				echo "  sudo port install pkgconfig nettle gmp openssl"; \
 				;; \
 			Linux) \
@@ -250,7 +250,7 @@ build-cli-untrusted:
 		case "$$(uname -s)" in \
 			Darwin) \
 				echo "Install them with one of:"; \
-				echo "  brew install llvm pkgconf nettle gmp openssl@3"; \
+				echo "  brew install llvm pkgconf nettle@3 gmp openssl@3"; \
 				echo "  sudo port install pkgconfig clang-17 nettle gmp openssl"; \
 				;; \
 			Linux) \
