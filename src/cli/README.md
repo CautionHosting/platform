@@ -62,6 +62,36 @@ make install-cli
 
 If you need to send locksmith shards, use `make install-cli-untrusted` instead.
 
+### Encrypt Env Secrets
+
+After generating a quorum bundle with Keymaker, encrypt local `.env` values into
+the layout consumed by Caution deployments:
+
+```sh
+export KEYMAKER_URL=http://35.163.164.207
+caution secret new keyring.asc --threshold 2 --max 4 --no-upload
+caution secrets encrypt
+```
+
+By default, `caution secrets encrypt` reads `.env`, extracts the recipient
+public key from `.caution/quorum-bundle.json`, and writes one armored OpenPGP
+message per non-empty env value to `.caution/secrets/<KEY>.asc`.
+
+Encrypt only selected keys:
+
+```sh
+caution secrets encrypt PRIVATE_KEY WEB3_RPC_ENDPOINT
+```
+
+Override paths when needed:
+
+```sh
+caution secrets encrypt \
+  --env-file ./prod.env \
+  --bundle ./.caution/quorum-bundle.json \
+  --secrets-dir ./.caution/secrets
+```
+
 ### Moderate Trust
 
 These steps allow proving that at least two Caution engineers

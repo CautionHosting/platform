@@ -23,11 +23,13 @@ use enclave_builder::{
     BuildConfig, build_user_image, has_explicit_build_command, resolve_build_command_in_dir,
     validate_explicit_containerfile_path,
 };
+use keymaker_models::generate_quorum::GenerateQuorumResponse;
 use reqwest;
+use sequoia_openpgp as openpgp;
 use serde::{Deserialize, Serialize};
 use serde_cbor;
-use sequoia_openpgp as openpgp;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -35,6 +37,8 @@ use std::process::Command;
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
+use openpgp::policy::StandardPolicy as OpenPgpPolicy;
+use openpgp::serialize::stream::{Armorer, Encryptor2, LiteralWriter, Message};
 use openpgp::{cert::CertParser, parse::Parse};
 
 mod loader;
@@ -48,6 +52,240 @@ const BYOC_STATE_FILE_NAME: &str = "bring-your-own-cloud.json";
 
 fn byoc_state_path(base_dir: &Path) -> PathBuf {
     base_dir.join(BYOC_STATE_FILE_NAME)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EnvAssignment {
+    key: String,
+    value: String,
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn parse_env_value(value: &str) -> String {
+    // Parse the first shell compatible word
+    // $() and embedded variations will be maintained, but quotes will be stripped.
+    let first_word = if let Some(mut words) = shlex::split(value) && !words.is_empty() {
+        words.swap_remove(0)
+    } else {
+        String::new()
+    };
+
+    shlex::try_quote(&first_word)
+        .expect("only possible error is null byte, impossible with str")
+        .into()
+}
+
+fn parse_env_assignments(content: &str) -> Vec<EnvAssignment> {
+    let mut assignments = Vec::new();
+
+    for line in content.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let assignment = match trimmed.strip_prefix("export") {
+            Some(rest)
+                if rest
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_whitespace()) =>
+            {
+                rest.trim_start()
+            }
+            _ => trimmed,
+        };
+
+        let Some((key, value)) = assignment.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+
+        if !is_valid_env_key(key) {
+            continue;
+        }
+
+        assignments.push(EnvAssignment {
+            key: key.to_string(),
+            value: parse_env_value(value),
+        });
+    }
+
+    assignments
+}
+
+fn parse_quorum_bundle_public_key(bundle_text: &str) -> Result<String> {
+    let bundle: keymaker_models::generate_quorum::GenerateQuorumResponse =
+        serde_json::from_str(bundle_text).context("Failed to parse quorum bundle JSON")?;
+
+    Ok(bundle.public_key)
+}
+
+fn load_recipient_cert(public_key: &str) -> Result<openpgp::Cert> {
+    openpgp::Cert::from_reader(public_key.as_bytes())
+        .context("Failed to parse recipient public key")
+}
+
+fn encrypt_secret_value(recipient: &openpgp::Cert, plaintext: &str) -> Result<String> {
+    let policy = &OpenPgpPolicy::new();
+    let mut recipients: Vec<_> = recipient
+        .keys()
+        .with_policy(policy, None)
+        .supported()
+        .alive()
+        .revoked(false)
+        .for_storage_encryption()
+        .collect();
+
+    if recipients.is_empty() {
+        recipients = recipient
+            .keys()
+            .with_policy(policy, None)
+            .supported()
+            .alive()
+            .revoked(false)
+            .for_transport_encryption()
+            .collect();
+    }
+
+    anyhow::ensure!(
+        !recipients.is_empty(),
+        "Recipient public key has no suitable encryption subkey"
+    );
+
+    let mut ciphertext = Vec::new();
+    let message = Message::new(&mut ciphertext);
+    let message = Armorer::new(message)
+        .build()
+        .context("Failed to armor encrypted secret")?;
+    let message = Encryptor2::for_recipients(message, recipients)
+        .build()
+        .context("Failed to create OpenPGP encryptor")?;
+    let mut message = LiteralWriter::new(message)
+        .build()
+        .context("Failed to create OpenPGP literal writer")?;
+
+    message
+        .write_all(plaintext.as_bytes())
+        .context("Failed to write secret plaintext")?;
+    message
+        .finalize()
+        .context("Failed to finalize encrypted secret")?;
+
+    String::from_utf8(ciphertext).context("Encrypted OpenPGP armor was not valid UTF-8")
+}
+
+fn write_secret_file_atomically(path: &Path, content: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("Output path has no parent: {}", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("Output path has invalid file name: {}", path.display()))?;
+    let tmp_path = parent.join(format!(".{}.tmp.{}", file_name, std::process::id()));
+
+    fs::write(&tmp_path, content)
+        .with_context(|| format!("Failed to write temporary file {}", tmp_path.display()))?;
+
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err)
+            .with_context(|| format!("Failed to move encrypted secret to {}", path.display()));
+    }
+
+    Ok(())
+}
+
+fn encrypt_env_file(
+    env_file: &Path,
+    bundle_file: &Path,
+    secrets_dir: &Path,
+    requested_keys: &[String],
+) -> Result<usize> {
+    for key in requested_keys {
+        anyhow::ensure!(is_valid_env_key(key), "Invalid env key: {}", key);
+    }
+
+    anyhow::ensure!(
+        env_file.is_file(),
+        "Missing env file: {}",
+        env_file.display()
+    );
+    anyhow::ensure!(
+        bundle_file.is_file(),
+        "Missing quorum bundle: {}",
+        bundle_file.display()
+    );
+
+    let env_text = fs::read_to_string(env_file)
+        .with_context(|| format!("Failed to read env file {}", env_file.display()))?;
+    let assignments = parse_env_assignments(&env_text);
+    let requested: HashSet<&str> = requested_keys.iter().map(String::as_str).collect();
+
+    if !requested.is_empty() {
+        let env_keys: HashSet<&str> = assignments
+            .iter()
+            .map(|assignment| assignment.key.as_str())
+            .collect();
+        let mut missing: Vec<&str> = requested
+            .iter()
+            .copied()
+            .filter(|key| !env_keys.contains(key))
+            .collect();
+        missing.sort_unstable();
+
+        anyhow::ensure!(
+            missing.is_empty(),
+            "Env key(s) not found in {}: {}",
+            env_file.display(),
+            missing.join(", ")
+        );
+    }
+
+    let bundle_text = fs::read_to_string(bundle_file)
+        .with_context(|| format!("Failed to read quorum bundle {}", bundle_file.display()))?;
+    let public_key = parse_quorum_bundle_public_key(&bundle_text)?;
+    let recipient = load_recipient_cert(&public_key)?;
+
+    fs::create_dir_all(secrets_dir)
+        .with_context(|| format!("Failed to create {}", secrets_dir.display()))?;
+
+    let mut count = 0usize;
+    for assignment in assignments {
+        if !requested.is_empty() && !requested.contains(assignment.key.as_str()) {
+            continue;
+        }
+
+        if assignment.value.is_empty() {
+            eprintln!("skipping empty value for {}", assignment.key);
+            continue;
+        }
+
+        let encrypted = encrypt_secret_value(&recipient, &assignment.value)
+            .with_context(|| format!("Failed to encrypt {}", assignment.key))?;
+        let output = secrets_dir.join(format!("{}.asc", assignment.key));
+        write_secret_file_atomically(&output, &encrypted)?;
+
+        eprintln!("encrypted {} -> {}", assignment.key, output.display());
+        count += 1;
+    }
+
+    eprintln!("encrypted {} secret(s)", count);
+
+    Ok(count)
 }
 
 fn prompt_for_pin() -> Result<Option<String>> {
@@ -352,7 +590,7 @@ enum Commands {
         #[command(subcommand)]
         command: CredentialCommands,
     },
-    #[command(about = "Manage cryptographic secrets")]
+    #[command(about = "Manage cryptographic secrets", alias = "secrets")]
     Secret {
         #[command(subcommand)]
         command: SecretCommands,
@@ -487,6 +725,32 @@ enum SecretCommands {
         )]
         labels: Vec<String>,
     },
+    #[command(about = "Encrypt env file values into .caution/secrets/*.asc")]
+    Encrypt {
+        #[arg(help = "Env keys to encrypt (defaults to every key in the env file)")]
+        keys: Vec<String>,
+        #[arg(
+            long = "env-file",
+            default_value = ".env",
+            value_name = "PATH",
+            help = "Path to the env file to encrypt"
+        )]
+        env_file: PathBuf,
+        #[arg(
+            long,
+            default_value = ".caution/quorum-bundle.json",
+            value_name = "PATH",
+            help = "Path to the Keymaker quorum bundle JSON"
+        )]
+        bundle: PathBuf,
+        #[arg(
+            long = "secrets-dir",
+            default_value = ".caution/secrets",
+            value_name = "PATH",
+            help = "Directory for encrypted secret files"
+        )]
+        secrets_dir: PathBuf,
+    },
     #[command(about = "Rename a quorum bundle")]
     Rename {
         #[arg(help = "Bundle ID")]
@@ -508,7 +772,10 @@ enum SecretCommands {
         app: Option<String>,
         #[arg(long, help = "Path to quorum bundle JSON file")]
         bundle: Option<PathBuf>,
-        #[arg(long, help = "Path for private OpenPGP Keyring (if not using smartcards)")]
+        #[arg(
+            long,
+            help = "Path for private OpenPGP Keyring (if not using smartcards)"
+        )]
         keyring: Option<PathBuf>,
     },
 }
@@ -5895,7 +6162,7 @@ run: /app/myapp
             bail!("Keymaker error ({}): {}", status, error);
         }
 
-        let quorum_response: serde_json::Value = response
+        let quorum_response: GenerateQuorumResponse = response
             .json()
             .await
             .context("Failed to parse Keymaker response")?;
@@ -5970,6 +6237,17 @@ run: /app/myapp
             }
         }
 
+        Ok(())
+    }
+
+    fn secret_encrypt(
+        &self,
+        keys: Vec<String>,
+        env_file: PathBuf,
+        bundle: PathBuf,
+        secrets_dir: PathBuf,
+    ) -> Result<()> {
+        encrypt_env_file(&env_file, &bundle, &secrets_dir, &keys)?;
         Ok(())
     }
 
@@ -6516,6 +6794,14 @@ pub async fn run() -> Result<()> {
                     .secret_new(keyring, threshold, max, !no_upload, name, labels)
                     .await?;
             }
+            SecretCommands::Encrypt {
+                keys,
+                env_file,
+                bundle,
+                secrets_dir,
+            } => {
+                client.secret_encrypt(keys, env_file, bundle, secrets_dir)?;
+            }
             SecretCommands::Rename { id, name } => {
                 client.secret_rename(id, name).await?;
             }
@@ -6527,7 +6813,11 @@ pub async fn run() -> Result<()> {
                     client.secret_label_remove(id, keys).await?;
                 }
             },
-            SecretCommands::SendShard { app, bundle, keyring } => {
+            SecretCommands::SendShard {
+                app,
+                bundle,
+                keyring,
+            } => {
                 client.secret_send_shard(app, bundle, keyring).await?;
             }
         },
@@ -6538,11 +6828,126 @@ pub async fn run() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::openpgp;
     use super::{
-        resolve_local_build_command_from_dir, resolve_procfile_build_command,
-        resolve_quorum_parameters,
+        encrypt_env_file, encrypt_secret_value, load_recipient_cert, parse_env_assignments,
+        parse_quorum_bundle_public_key, resolve_local_build_command_from_dir,
+        resolve_procfile_build_command, resolve_quorum_parameters,
     };
+    use keymaker_models::generate_quorum::GenerateQuorumResponse;
+    use openpgp::cert::prelude::*;
+    use openpgp::serialize::SerializeInto;
+    use std::collections::HashMap;
     use tempfile::tempdir;
+
+    fn test_public_key() -> String {
+        let (cert, _revocation) = CertBuilder::new()
+            .add_userid("test@example.org")
+            .add_storage_encryption_subkey()
+            .generate()
+            .unwrap();
+
+        String::from_utf8(cert.armored().to_vec().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn parse_env_assignments_supports_export_and_matching_quotes() {
+        let assignments = parse_env_assignments(
+            "\
+# comment\n\
+export FOO=\"bar\"\n\
+BAR='baz'\n\
+EMPTY=\n\
+INLINE=\"value # preserved\"\n\
+BAD-KEY=no\n\
+SPACED =no\n\
+PADDED = \" spaced \" \n\
+ESCAPED=\"say \\\"hi\\\"\"\n\
+COMMENTED=\"bar\" # trailing comment\n\
+export MISSING_EQUALS\n",
+        );
+
+        let pairs: Vec<_> = assignments
+            .iter()
+            .map(|assignment| (assignment.key.as_str(), assignment.value.as_str()))
+            .collect();
+
+        assert_eq!(
+            pairs,
+            vec![
+                ("FOO", "bar"),
+                ("BAR", "baz"),
+                ("EMPTY", "''"),
+                ("INLINE", "'value # preserved'"),
+                ("SPACED", "no"),
+                ("PADDED", "' spaced '"),
+                ("ESCAPED", "'say \"hi\"'"),
+                ("COMMENTED", "bar"),
+            ]
+        );
+    }
+
+    #[test]
+    fn encrypt_secret_value_outputs_armored_pgp_message() {
+        let public_key = test_public_key();
+        let recipient = load_recipient_cert(&public_key).unwrap();
+        let encrypted = encrypt_secret_value(&recipient, "super-secret").unwrap();
+
+        assert!(encrypted.starts_with("-----BEGIN PGP MESSAGE-----"));
+        assert!(encrypted.contains("-----END PGP MESSAGE-----"));
+    }
+
+    #[test]
+    fn encrypt_env_file_writes_requested_secret_files() {
+        let work_dir = tempdir().unwrap();
+        let caution_dir = work_dir.path().join(".caution");
+        let env_file = work_dir.path().join(".env");
+        let bundle_file = caution_dir.join("quorum-bundle.json");
+        let secrets_dir = caution_dir.join("secrets");
+
+        std::fs::create_dir_all(&caution_dir).unwrap();
+        std::fs::write(
+            &env_file,
+            "\
+FOO=bar\n\
+EMPTY=\n\
+export QUOTED=\"baz\"\n\
+UNREQUESTED=nope\n",
+        )
+        .unwrap();
+
+        let bundle = GenerateQuorumResponse {
+            label: HashMap::new(),
+            keyring: String::new(),
+            keyring_hash: Vec::new(),
+            shardfile: String::new(),
+            public_key: test_public_key(),
+            necroproof: Vec::new(),
+        };
+        std::fs::write(&bundle_file, serde_json::to_string(&bundle).unwrap()).unwrap();
+
+        let count = encrypt_env_file(
+            &env_file,
+            &bundle_file,
+            &secrets_dir,
+            &["FOO".to_string(), "QUOTED".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(count, 2);
+        assert!(
+            std::fs::read_to_string(secrets_dir.join("FOO.asc"))
+                .unwrap()
+                .starts_with("-----BEGIN PGP MESSAGE-----")
+        );
+        assert!(
+            std::fs::read_to_string(secrets_dir.join("QUOTED.asc"))
+                .unwrap()
+                .starts_with("-----BEGIN PGP MESSAGE-----")
+        );
+        assert!(!secrets_dir.join("EMPTY.asc").exists());
+        assert!(!secrets_dir.join("UNREQUESTED.asc").exists());
+    }
 
     #[test]
     fn resolve_quorum_parameters_infers_max_from_keyring() {
@@ -6564,7 +6969,8 @@ mod tests {
         let err = resolve_quorum_parameters(Some(11), Some(10), 10).unwrap_err();
 
         assert!(
-            err.to_string().contains("--threshold must be between 1 and --max"),
+            err.to_string()
+                .contains("--threshold must be between 1 and --max"),
             "unexpected error: {err}"
         );
     }
