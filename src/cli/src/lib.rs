@@ -32,6 +32,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::channel;
@@ -39,7 +41,11 @@ use std::time::Duration;
 
 use openpgp::policy::StandardPolicy as OpenPgpPolicy;
 use openpgp::serialize::stream::{Armorer, Encryptor2, LiteralWriter, Message};
-use openpgp::{cert::CertParser, parse::Parse};
+use openpgp::{
+    cert::{CertParser, prelude::CertBuilder},
+    parse::Parse,
+    serialize::Serialize as _,
+};
 
 mod loader;
 use loader::{Loader, LoaderStyle};
@@ -49,6 +55,10 @@ mod attestation;
 const BYOC_PROVISIONER_IMAGE: &str =
     "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest";
 const BYOC_STATE_FILE_NAME: &str = "bring-your-own-cloud.json";
+const PLAINTEXT_KEYGEN_WARNING: &str = "This helper writes private OpenPGP key material to an \
+unencrypted file on disk. That is unsafe for real shard holders: anyone who can read the file can \
+submit that holder's shard. Prefer a smart card containing the OpenPGP key. Keyfork supports \
+offline OpenPGP key derivation and smart-card-oriented workflows: https://git.distrust.co/public/keyfork";
 
 fn byoc_state_path(base_dir: &Path) -> PathBuf {
     base_dir.join(BYOC_STATE_FILE_NAME)
@@ -702,6 +712,27 @@ enum CredentialCommands {
 
 #[derive(Subcommand, Debug)]
 enum SecretCommands {
+    #[command(about = "Generate unsafe plaintext Keymaker-compatible OpenPGP keyrings")]
+    Keygen {
+        #[arg(help = "Path to write the armored public keyring")]
+        output: PathBuf,
+        #[arg(
+            long,
+            help = "Path to write the armored private keyring (default: public path with .private before the extension)"
+        )]
+        private_keyring: Option<PathBuf>,
+        #[arg(long, help = "Shard-holder display name")]
+        name: String,
+        #[arg(long, help = "Shard-holder email address")]
+        email: String,
+        #[arg(long, help = "Overwrite output files if they exist")]
+        force: bool,
+        #[arg(
+            long,
+            help = "Acknowledge unsafe plaintext private keyring generation"
+        )]
+        shoot_self_in_foot: bool,
+    },
     #[command(about = "Generate a new cryptographic quorum")]
     New {
         #[arg(help = "Path to armored PGP keyring file")]
@@ -1078,6 +1109,83 @@ fn resolve_quorum_parameters(
     }
 
     Ok((threshold, max))
+}
+
+fn keymaker_cert(user_id: String) -> Result<openpgp::Cert> {
+    let (cert, _) = CertBuilder::new()
+        .add_userid(user_id)
+        .add_storage_encryption_subkey()
+        .add_authentication_subkey()
+        .generate()
+        .context("Failed to generate OpenPGP key")?;
+
+    Ok(cert)
+}
+
+fn armored_keyrings_for_cert(cert: &openpgp::Cert) -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut public_keyring = Vec::new();
+    cert.armored()
+        .serialize(&mut public_keyring)
+        .context("Failed to serialize public keyring")?;
+
+    let mut private_keyring = Vec::new();
+    cert.as_tsk()
+        .armored()
+        .serialize(&mut private_keyring)
+        .context("Failed to serialize private keyring")?;
+
+    Ok((public_keyring, private_keyring))
+}
+
+fn default_private_keyring_path(public_keyring: &Path) -> PathBuf {
+    let mut private_keyring = public_keyring.to_path_buf();
+    let extension = public_keyring
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| format!("private.{extension}"))
+        .unwrap_or_else(|| "private".to_string());
+    private_keyring.set_extension(extension);
+    private_keyring
+}
+
+fn write_keyring(path: &Path, contents: &[u8], force: bool, sensitive: bool) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true);
+    if force {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    #[cfg(unix)]
+    if sensitive {
+        options.mode(0o600);
+    }
+
+    let mut file = options.open(path).with_context(|| {
+        if force {
+            format!("Failed to open {} for writing", path.display())
+        } else {
+            format!(
+                "{} already exists; pass --force to overwrite it",
+                path.display()
+            )
+        }
+    })?;
+    file.write_all(contents)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+
+    #[cfg(unix)]
+    if sensitive {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to set permissions on {}", path.display()))?;
+    }
+
+    Ok(())
 }
 
 struct ApiClient {
@@ -6240,6 +6348,87 @@ run: /app/myapp
         Ok(())
     }
 
+    fn secret_keygen(
+        &self,
+        output: PathBuf,
+        private_keyring: Option<PathBuf>,
+        name: String,
+        email: String,
+        force: bool,
+        shoot_self_in_foot: bool,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            shoot_self_in_foot,
+            "Refusing to generate an unencrypted private keyring without \
+             --shoot-self-in-foot.\n\n{}",
+            PLAINTEXT_KEYGEN_WARNING
+        );
+
+        let name = name.trim();
+        let email = email.trim();
+
+        anyhow::ensure!(!name.is_empty(), "--name must not be empty");
+        anyhow::ensure!(!email.is_empty(), "--email must not be empty");
+        anyhow::ensure!(
+            !name.chars().any(|ch| matches!(ch, '\n' | '\r' | '<' | '>'))
+                && !email
+                    .chars()
+                    .any(|ch| matches!(ch, '\n' | '\r' | '<' | '>')),
+            "--name and --email must not contain newlines or angle brackets"
+        );
+        anyhow::ensure!(email.contains('@'), "--email must be an email address");
+
+        let private_keyring =
+            private_keyring.unwrap_or_else(|| default_private_keyring_path(&output));
+        anyhow::ensure!(
+            output != private_keyring,
+            "public and private keyring paths must be different"
+        );
+        if !force {
+            anyhow::ensure!(
+                !output.exists(),
+                "{} already exists; pass --force to overwrite it",
+                output.display()
+            );
+            anyhow::ensure!(
+                !private_keyring.exists(),
+                "{} already exists; pass --force to overwrite it",
+                private_keyring.display()
+            );
+        }
+
+        let user_id = format!("{name} <{email}>");
+        eprintln!("Generating OpenPGP key for {user_id}...");
+
+        let cert = keymaker_cert(user_id)?;
+        let fingerprint = cert.fingerprint();
+        let (public_keyring, private_keyring_contents) = armored_keyrings_for_cert(&cert)?;
+
+        let public_keyring_text = std::str::from_utf8(&public_keyring)
+            .context("Generated public keyring is not valid UTF-8")?;
+        let eligible_certs = keymaker_eligible_cert_count(public_keyring_text)
+            .context("Generated keyring is not Keymaker-eligible")?;
+        anyhow::ensure!(
+            eligible_certs == 1,
+            "generated keyring should contain exactly one eligible certificate, found {}",
+            eligible_certs
+        );
+
+        write_keyring(&output, &public_keyring, force, false)?;
+        write_keyring(&private_keyring, &private_keyring_contents, force, true)?;
+
+        eprintln!("Wrote public keyring to {}", output.display());
+        eprintln!("Fingerprint: {}", fingerprint);
+        eprintln!("Wrote private keyring to {}", private_keyring.display());
+        eprintln!("{}", PLAINTEXT_KEYGEN_WARNING);
+        eprintln!(
+            "Use the private keyring with: caution secret send-shard --keyring {}",
+            private_keyring.display()
+        );
+
+        Ok(())
+    }
+
     fn secret_encrypt(
         &self,
         keys: Vec<String>,
@@ -6248,6 +6437,7 @@ run: /app/myapp
         secrets_dir: PathBuf,
     ) -> Result<()> {
         encrypt_env_file(&env_file, &bundle, &secrets_dir, &keys)?;
+
         Ok(())
     }
 
@@ -6782,6 +6972,23 @@ pub async fn run() -> Result<()> {
             }
         },
         Commands::Secret { command } => match command {
+            SecretCommands::Keygen {
+                output,
+                private_keyring,
+                name,
+                email,
+                force,
+                shoot_self_in_foot,
+            } => {
+                client.secret_keygen(
+                    output,
+                    private_keyring,
+                    name,
+                    email,
+                    force,
+                    shoot_self_in_foot,
+                )?;
+            }
             SecretCommands::New {
                 keyring,
                 threshold,
@@ -6831,8 +7038,8 @@ mod tests {
     use super::openpgp;
     use super::{
         encrypt_env_file, encrypt_secret_value, load_recipient_cert, parse_env_assignments,
-        parse_quorum_bundle_public_key, resolve_local_build_command_from_dir,
-        resolve_procfile_build_command, resolve_quorum_parameters,
+        resolve_local_build_command_from_dir, resolve_procfile_build_command,
+        resolve_quorum_parameters,
     };
     use keymaker_models::generate_quorum::GenerateQuorumResponse;
     use openpgp::cert::prelude::*;
