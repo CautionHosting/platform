@@ -3,10 +3,13 @@
 
 fn print_heuristics() {
     let build_heuristics_content = include_str!(concat!(env!("OUT_DIR"), "/heuristics.json"));
-    let build_heuristics: Vec<caution_environment_heuristics::Heuristic> =
+    let mut build_heuristics: Vec<caution_environment_heuristics::Heuristic> =
         serde_json::from_str(build_heuristics_content)
             .expect("should have valid constant build heuristics");
-    let run_heuristics = caution_environment_heuristics::heuristics();
+    let mut run_heuristics = caution_environment_heuristics::heuristics();
+
+    caution_environment_heuristics::collapse_heuristics(&mut build_heuristics);
+    caution_environment_heuristics::collapse_heuristics(&mut run_heuristics);
 
     if !build_heuristics.is_empty() || !run_heuristics.is_empty() {
         eprintln!("Potentially unsafe environment:");
