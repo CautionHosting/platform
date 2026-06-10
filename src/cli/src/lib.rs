@@ -126,35 +126,11 @@ fn parse_env_assignments(content: &str) -> Vec<EnvAssignment> {
     assignments
 }
 
-fn validate_quorum_public_key(public_key: &str) -> Result<&str> {
-    anyhow::ensure!(
-        public_key.contains("BEGIN PGP PUBLIC KEY BLOCK"),
-        "Quorum bundle public key is not an armored PGP public key"
-    );
-
-    Ok(public_key)
-}
-
-fn find_legacy_quorum_public_key(bundle: &serde_json::Value) -> Option<&str> {
-    bundle
-        .get("secret_recipient_public_key")
-        .or_else(|| bundle.get("public_key"))
-        .and_then(|value| value.as_str())
-        .or_else(|| bundle.get("data").and_then(find_legacy_quorum_public_key))
-}
-
 fn parse_quorum_bundle_public_key(bundle_text: &str) -> Result<String> {
-    if let Ok(bundle) = serde_json::from_str::<GenerateQuorumResponse>(bundle_text) {
-        validate_quorum_public_key(&bundle.public_key)?;
-        return Ok(bundle.public_key);
-    }
-
-    let bundle: serde_json::Value =
+    let bundle: keymaker_models::generate_quorum::GenerateQuorumResponse =
         serde_json::from_str(bundle_text).context("Failed to parse quorum bundle JSON")?;
-    let public_key = find_legacy_quorum_public_key(&bundle)
-        .context("Quorum bundle does not contain `secret_recipient_public_key` or `public_key`")?;
 
-    validate_quorum_public_key(public_key).map(str::to_string)
+    Ok(bundle.public_key)
 }
 
 fn load_recipient_cert(public_key: &str) -> Result<openpgp::Cert> {
@@ -6719,42 +6695,6 @@ export MISSING_EQUALS\n",
                 ("ESCAPED", "'say \"hi\"'"),
                 ("COMMENTED", "bar"),
             ]
-        );
-    }
-
-    #[test]
-    fn parse_quorum_bundle_public_key_accepts_typed_legacy_and_wrapped_fields() {
-        let public_key = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nabc\n";
-
-        let typed = GenerateQuorumResponse {
-            label: HashMap::new(),
-            keyring: String::new(),
-            keyring_hash: Vec::new(),
-            shardfile: String::new(),
-            public_key: public_key.to_string(),
-            necroproof: Vec::new(),
-        };
-        assert_eq!(
-            parse_quorum_bundle_public_key(&serde_json::to_string(&typed).unwrap()).unwrap(),
-            public_key
-        );
-
-        let current = serde_json::json!({ "secret_recipient_public_key": public_key });
-        assert_eq!(
-            parse_quorum_bundle_public_key(&current.to_string()).unwrap(),
-            public_key
-        );
-
-        let legacy = serde_json::json!({ "public_key": public_key });
-        assert_eq!(
-            parse_quorum_bundle_public_key(&legacy.to_string()).unwrap(),
-            public_key
-        );
-
-        let wrapped = serde_json::json!({ "data": { "secret_recipient_public_key": public_key } });
-        assert_eq!(
-            parse_quorum_bundle_public_key(&wrapped.to_string()).unwrap(),
-            public_key
         );
     }
 
