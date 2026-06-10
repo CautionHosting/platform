@@ -71,14 +71,17 @@ fn is_valid_env_key(key: &str) -> bool {
 }
 
 fn parse_env_value(value: &str) -> String {
-    if (value.starts_with('"') || value.starts_with('\''))
-        && let Some(words) = shlex::split(value)
-        && words.len() == 1
-    {
-        return words.into_iter().next().unwrap_or_default();
-    }
+    // Parse the first shell compatible word
+    // $() and embedded variations will be maintained, but quotes will be stripped.
+    let first_word = if let Some(mut words) = shlex::split(value) && !words.is_empty() {
+        words.swap_remove(0)
+    } else {
+        String::new()
+    };
 
-    value.to_string()
+    shlex::try_quote(&first_word)
+        .expect("only possible error is null byte, impossible with str")
+        .into()
 }
 
 fn parse_env_assignments(content: &str) -> Vec<EnvAssignment> {
@@ -6690,7 +6693,7 @@ mod tests {
 export FOO=\"bar\"\n\
 BAR='baz'\n\
 EMPTY=\n\
-INLINE=value # preserved\n\
+INLINE=\"value # preserved\"\n\
 BAD-KEY=no\n\
 SPACED =no\n\
 PADDED = \" spaced \" \n\
@@ -6709,11 +6712,11 @@ export MISSING_EQUALS\n",
             vec![
                 ("FOO", "bar"),
                 ("BAR", "baz"),
-                ("EMPTY", ""),
-                ("INLINE", "value # preserved"),
+                ("EMPTY", "''"),
+                ("INLINE", "'value # preserved'"),
                 ("SPACED", "no"),
-                ("PADDED", " spaced "),
-                ("ESCAPED", "say \"hi\""),
+                ("PADDED", "' spaced '"),
+                ("ESCAPED", "'say \"hi\"'"),
                 ("COMMENTED", "bar"),
             ]
         );
