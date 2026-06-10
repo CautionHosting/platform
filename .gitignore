@@ -17,3 +17,6 @@ tests/e2e/logs/
 backend.tf.disabled
 
 target/
+
+AGENTS.md
+patch
