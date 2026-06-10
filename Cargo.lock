@@ -3057,6 +3057,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "ssh-key 0.6.7",
  "subtle",
  "tempfile",
  "thiserror 1.0.69",
@@ -5973,6 +5974,7 @@ dependencies = [
  "pkcs1 0.7.5",
  "pkcs8 0.10.2",
  "rand_core 0.6.4",
+ "sha2 0.10.9",
  "signature 2.2.0",
  "spki 0.7.3",
  "subtle",
@@ -6076,8 +6078,8 @@ dependencies = [
  "sha3 0.11.0",
  "signature 3.0.0",
  "spki 0.8.0",
- "ssh-encoding",
- "ssh-key",
+ "ssh-encoding 0.3.0-rc.9",
+ "ssh-key 0.7.0-rc.10",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
@@ -6094,7 +6096,7 @@ checksum = "443f6bbcfacb34a1aab2b12b99bf08e0c63abdc5a0db261901365df9d57fff51"
 dependencies = [
  "log",
  "nix 0.31.3",
- "ssh-encoding",
+ "ssh-encoding 0.3.0-rc.9",
  "windows-sys 0.61.2",
 ]
 
@@ -7067,6 +7069,16 @@ dependencies = [
 
 [[package]]
 name = "ssh-cipher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caac132742f0d33c3af65bfcde7f6aa8f62f0e991d80db99149eb9d44708784f"
+dependencies = [
+ "cipher 0.4.4",
+ "ssh-encoding 0.2.0",
+]
+
+[[package]]
+name = "ssh-cipher"
 version = "0.3.0-rc.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10db6f219196a8528f9ec904d9d45cdad692d65b0e57e72be4dedd1c5fddce36"
@@ -7081,8 +7093,19 @@ dependencies = [
  "ctutils",
  "des 0.9.0",
  "poly1305",
- "ssh-encoding",
+ "ssh-encoding 0.3.0-rc.9",
  "zeroize",
+]
+
+[[package]]
+name = "ssh-encoding"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb9242b9ef4108a78e8cd1a2c98e193ef372437f8c22be363075233321dd4a15"
+dependencies = [
+ "base64ct",
+ "pem-rfc7468 0.7.0",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -7097,6 +7120,28 @@ dependencies = [
  "ctutils",
  "digest 0.11.3",
  "pem-rfc7468 1.0.0",
+ "zeroize",
+]
+
+[[package]]
+name = "ssh-key"
+version = "0.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b86f5297f0f04d08cabaa0f6bff7cb6aec4d9c3b49d87990d63da9d9156a8c3"
+dependencies = [
+ "ed25519-dalek 2.2.0",
+ "num-bigint-dig",
+ "p256 0.13.2",
+ "p384 0.13.1",
+ "p521 0.13.3",
+ "rand_core 0.6.4",
+ "rsa 0.9.10",
+ "sec1 0.7.3",
+ "sha2 0.10.9",
+ "signature 2.2.0",
+ "ssh-cipher 0.2.0",
+ "ssh-encoding 0.2.0",
+ "subtle",
  "zeroize",
 ]
 
@@ -7121,8 +7166,8 @@ dependencies = [
  "sha1 0.11.0",
  "sha2 0.11.0",
  "signature 3.0.0",
- "ssh-cipher",
- "ssh-encoding",
+ "ssh-cipher 0.3.0-rc.9",
+ "ssh-encoding 0.3.0-rc.9",
  "zeroize",
 ]
 

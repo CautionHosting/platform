@@ -562,6 +562,20 @@ pub async fn update_ssh_key_last_used(pool: &PgPool, fingerprint: &str) -> Resul
     Ok(())
 }
 
+pub async fn get_ssh_public_key_by_fingerprint(
+    pool: &PgPool,
+    fingerprint: &str,
+) -> Result<Option<String>> {
+    let public_key: Option<String> =
+        sqlx::query_scalar("SELECT public_key FROM ssh_keys WHERE fingerprint = $1 LIMIT 1")
+            .bind(fingerprint)
+            .fetch_optional(pool)
+            .await
+            .context("Failed to get SSH public key by fingerprint")?;
+
+    Ok(public_key)
+}
+
 /// Check if an SSH key fingerprint exists for any user
 pub async fn ssh_key_exists(pool: &PgPool, fingerprint: &str) -> Result<bool> {
     let exists: bool =
