@@ -1061,8 +1061,9 @@ fn keymaker_eligible_cert_count(armored_keyring: &str) -> Result<usize> {
             .context("OpenPGP public certificate is not valid under the standard policy")?;
         let has_auth = valid_cert.keys().for_authentication().next().is_some();
         let has_enc = valid_cert.keys().for_storage_encryption().next().is_some();
+        let has_sign = valid_cert.keys().for_signing().next().is_some();
 
-        if has_auth && has_enc {
+        if has_auth && has_enc && has_sign {
             count += 1;
         }
     }
@@ -1078,7 +1079,7 @@ fn resolve_quorum_parameters(
     if eligible_certs == 0 {
         bail!(
             "keyring contains no Keymaker-eligible public certificates \
-             (each certificate needs authentication and storage-encryption keys)"
+             (each certificate needs signing, authentication, and storage-encryption keys)"
         );
     }
 
@@ -1114,6 +1115,7 @@ fn resolve_quorum_parameters(
 fn keymaker_cert(user_id: String) -> Result<openpgp::Cert> {
     let (cert, _) = CertBuilder::new()
         .add_userid(user_id)
+        .add_signing_subkey()
         .add_storage_encryption_subkey()
         .add_authentication_subkey()
         .generate()
