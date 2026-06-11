@@ -30,10 +30,12 @@ use serde::{Deserialize, Serialize};
 use serde_cbor;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::error::Error as StdError;
 use std::fs;
 use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::panic::Location;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::channel;
@@ -65,6 +67,185 @@ unencrypted file on disk. That is unsafe for real shard holders: anyone who can 
 submit that holder's shard. Prefer a smart card containing the OpenPGP key. Keyfork supports \
 offline OpenPGP key derivation and smart-card-oriented workflows: https://git.distrust.co/public/keyfork";
 const SSH_SIGNING_NAMESPACE: &str = "caution-api";
+
+#[derive(Debug)]
+enum SshSignedRequestErrorKind {
+    PublicKeyForIdentity,
+    FingerprintPublicKey,
+    SystemClockBeforeUnixEpoch,
+    SignPayload,
+    SendRequest,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Unable to send SSH-signed request {method} {path} with identity {identity:?}: {kind:?} [{location}]"
+)]
+struct SshSignedRequestError {
+    kind: SshSignedRequestErrorKind,
+    method: reqwest::Method,
+    path: String,
+    identity: PathBuf,
+    location: &'static Location<'static>,
+
+    #[source]
+    source: Box<dyn StdError + Send + Sync + 'static>,
+}
+
+impl SshSignedRequestError {
+    #[track_caller]
+    fn new<E>(
+        kind: SshSignedRequestErrorKind,
+        method: reqwest::Method,
+        path: &str,
+        identity: &Path,
+        source: E,
+    ) -> Self
+    where
+        E: StdError + Send + Sync + 'static,
+    {
+        Self {
+            kind,
+            method,
+            path: path.to_string(),
+            identity: identity.to_path_buf(),
+            location: Location::caller(),
+            source: Box::new(source),
+        }
+    }
+
+    #[track_caller]
+    fn new_boxed(
+        kind: SshSignedRequestErrorKind,
+        method: reqwest::Method,
+        path: &str,
+        identity: &Path,
+        source: Box<dyn StdError + Send + Sync + 'static>,
+    ) -> Self {
+        Self {
+            kind,
+            method,
+            path: path.to_string(),
+            identity: identity.to_path_buf(),
+            location: Location::caller(),
+            source,
+        }
+    }
+}
+
+enum FetchAppViaSshHttpsErrorKind {
+    SendSignedRequest,
+    DecodeResponse,
+    ApiStatus {
+        status: reqwest::StatusCode,
+        message: String,
+    },
+}
+
+impl std::fmt::Debug for FetchAppViaSshHttpsErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SendSignedRequest => f.write_str("SendSignedRequest"),
+            Self::DecodeResponse => f.write_str("DecodeResponse"),
+            Self::ApiStatus { status, message } => f
+                .debug_struct("ApiStatus")
+                .field("status", status)
+                .field("message", message)
+                .finish(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Unable to fetch app {id} via SSH-signed HTTPS at {path}: {kind:?} [{location}]")]
+struct FetchAppViaSshHttpsError {
+    kind: FetchAppViaSshHttpsErrorKind,
+    id: String,
+    path: String,
+    location: &'static Location<'static>,
+
+    #[source]
+    source: Option<Box<dyn StdError + Send + Sync + 'static>>,
+}
+
+impl FetchAppViaSshHttpsError {
+    #[track_caller]
+    fn new(kind: FetchAppViaSshHttpsErrorKind, id: &str, path: &str) -> Self {
+        Self {
+            kind,
+            id: id.to_string(),
+            path: path.to_string(),
+            location: Location::caller(),
+            source: None,
+        }
+    }
+
+    fn with_source<E>(mut self, source: E) -> Self
+    where
+        E: StdError + Send + Sync + 'static,
+    {
+        self.source = Some(Box::new(source));
+        self
+    }
+}
+
+enum DestroyAppViaSshHttpsErrorKind {
+    SendSignedRequest,
+    ApiStatus {
+        status: reqwest::StatusCode,
+        message: String,
+    },
+}
+
+impl std::fmt::Debug for DestroyAppViaSshHttpsErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SendSignedRequest => f.write_str("SendSignedRequest"),
+            Self::ApiStatus { status, message } => f
+                .debug_struct("ApiStatus")
+                .field("status", status)
+                .field("message", message)
+                .finish(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Unable to destroy app {id} via SSH-signed HTTPS at {path} with force_delete={force_delete}: {kind:?} [{location}]"
+)]
+struct DestroyAppViaSshHttpsError {
+    kind: DestroyAppViaSshHttpsErrorKind,
+    id: String,
+    path: String,
+    force_delete: bool,
+    location: &'static Location<'static>,
+
+    #[source]
+    source: Option<Box<dyn StdError + Send + Sync + 'static>>,
+}
+
+impl DestroyAppViaSshHttpsError {
+    #[track_caller]
+    fn new(kind: DestroyAppViaSshHttpsErrorKind, id: &str, path: &str, force_delete: bool) -> Self {
+        Self {
+            kind,
+            id: id.to_string(),
+            path: path.to_string(),
+            force_delete,
+            location: Location::caller(),
+            source: None,
+        }
+    }
+
+    fn with_source<E>(mut self, source: E) -> Self
+    where
+        E: StdError + Send + Sync + 'static,
+    {
+        self.source = Some(Box::new(source));
+        self
+    }
+}
 
 fn byoc_state_path(base_dir: &Path) -> PathBuf {
     base_dir.join(BYOC_STATE_FILE_NAME)
@@ -104,7 +285,9 @@ fn is_valid_env_key(key: &str) -> bool {
 fn parse_env_value(value: &str) -> String {
     // Parse the first shell compatible word
     // $() and embedded variations will be maintained, but quotes will be stripped.
-    let first_word = if let Some(mut words) = shlex::split(value) && !words.is_empty() {
+    let first_word = if let Some(mut words) = shlex::split(value)
+        && !words.is_empty()
+    {
         words.swap_remove(0)
     } else {
         String::new()
@@ -798,10 +981,7 @@ enum SecretCommands {
         email: String,
         #[arg(long, help = "Overwrite output files if they exist")]
         force: bool,
-        #[arg(
-            long,
-            help = "Acknowledge unsafe plaintext private keyring generation"
-        )]
+        #[arg(long, help = "Acknowledge unsafe plaintext private keyring generation")]
         shoot_self_in_foot: bool,
     },
     #[command(about = "Generate a new cryptographic quorum")]
@@ -1309,7 +1489,10 @@ fn default_private_keyring_path(public_keyring: &Path) -> PathBuf {
 }
 
 fn write_keyring(path: &Path, contents: &[u8], force: bool, sensitive: bool) -> Result<()> {
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
@@ -1838,20 +2021,52 @@ impl ApiClient {
         method: reqwest::Method,
         path: &str,
         body: Option<Vec<u8>>,
-    ) -> Result<Option<reqwest::Response>> {
+    ) -> std::result::Result<Option<reqwest::Response>, SshSignedRequestError> {
         let Some(identity) = self.configured_ssh_signing_identity() else {
             return Ok(None);
         };
 
         let body = body.unwrap_or_default();
-        let public_key = Self::public_key_for_identity(&identity)?;
-        let fingerprint = Self::ssh_fingerprint(&public_key)?;
+        let public_key = Self::public_key_for_identity(&identity).map_err(|source| {
+            SshSignedRequestError::new_boxed(
+                SshSignedRequestErrorKind::PublicKeyForIdentity,
+                method.clone(),
+                path,
+                &identity,
+                source.into_boxed_dyn_error(),
+            )
+        })?;
+        let fingerprint = Self::ssh_fingerprint(&public_key).map_err(|source| {
+            SshSignedRequestError::new_boxed(
+                SshSignedRequestErrorKind::FingerprintPublicKey,
+                method.clone(),
+                path,
+                &identity,
+                source.into_boxed_dyn_error(),
+            )
+        })?;
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .context("System clock is before UNIX epoch")?
+            .map_err(|source| {
+                SshSignedRequestError::new(
+                    SshSignedRequestErrorKind::SystemClockBeforeUnixEpoch,
+                    method.clone(),
+                    path,
+                    &identity,
+                    source,
+                )
+            })?
             .as_secs();
         let payload = Self::canonical_ssh_request(method.as_str(), path, timestamp, &body);
-        let signature = Self::sign_ssh_payload(&identity, &payload)?;
+        let signature = Self::sign_ssh_payload(&identity, &payload).map_err(|source| {
+            SshSignedRequestError::new_boxed(
+                SshSignedRequestErrorKind::SignPayload,
+                method.clone(),
+                path,
+                &identity,
+                source.into_boxed_dyn_error(),
+            )
+        })?;
 
         log_verbose(
             self.verbose,
@@ -1860,7 +2075,7 @@ impl ApiClient {
 
         let mut request = self
             .client
-            .request(method, format!("{}{}", self.base_url, path))
+            .request(method.clone(), format!("{}{}", self.base_url, path))
             .header("X-Caution-SSH-Key-Fingerprint", fingerprint)
             .header("X-Caution-SSH-Timestamp", timestamp.to_string())
             .header("X-Caution-SSH-Signature", signature);
@@ -1871,27 +2086,62 @@ impl ApiClient {
                 .body(body);
         }
 
-        Ok(Some(request.send().await?))
+        Ok(Some(request.send().await.map_err(|source| {
+            SshSignedRequestError::new(
+                SshSignedRequestErrorKind::SendRequest,
+                method,
+                path,
+                &identity,
+                source,
+            )
+        })?))
     }
 
-    async fn fetch_app_via_ssh_https(&self, id: &str) -> Result<Option<App>> {
+    async fn fetch_app_via_ssh_https(
+        &self,
+        id: &str,
+    ) -> std::result::Result<Option<App>, FetchAppViaSshHttpsError> {
         let path = format!("/api/resources/{}", id);
         let Some(response) = self
             .ssh_signed_request(reqwest::Method::GET, &path, None)
-            .await?
+            .await
+            .map_err(|source| {
+                FetchAppViaSshHttpsError::new(
+                    FetchAppViaSshHttpsErrorKind::SendSignedRequest,
+                    id,
+                    &path,
+                )
+                .with_source(source)
+            })?
         else {
             return Ok(None);
         };
 
         if response.status().is_success() {
-            Ok(Some(response.json().await?))
+            Ok(Some(response.json().await.map_err(|source| {
+                FetchAppViaSshHttpsError::new(
+                    FetchAppViaSshHttpsErrorKind::DecodeResponse,
+                    id,
+                    &path,
+                )
+                .with_source(source)
+            })?))
         } else {
-            let error = self.api_error_message(response).await;
-            bail!("SSH-signed app get failed: {}", error)
+            let status = response.status();
+            let message = self.api_error_message(response).await;
+            Err(FetchAppViaSshHttpsError::new(
+                FetchAppViaSshHttpsErrorKind::ApiStatus { status, message },
+                id,
+                &path,
+            ))
         }
     }
 
-    async fn destroy_app_via_ssh_https(&self, id: &str, force_delete: bool) -> Result<bool> {
+    async fn destroy_app_via_ssh_https(
+        &self,
+        id: &str,
+        force_delete: bool,
+    ) -> std::result::Result<bool, DestroyAppViaSshHttpsError> {
         let path = if force_delete {
             format!("/api/resources/{}?force=true", id)
         } else {
@@ -1899,7 +2149,16 @@ impl ApiClient {
         };
         let Some(response) = self
             .ssh_signed_request(reqwest::Method::DELETE, &path, None)
-            .await?
+            .await
+            .map_err(|source| {
+                DestroyAppViaSshHttpsError::new(
+                    DestroyAppViaSshHttpsErrorKind::SendSignedRequest,
+                    id,
+                    &path,
+                    force_delete,
+                )
+                .with_source(source)
+            })?
         else {
             return Ok(false);
         };
@@ -1908,12 +2167,13 @@ impl ApiClient {
             Ok(true)
         } else {
             let status = response.status();
-            let error = self.api_error_message(response).await;
-            bail!(
-                "SSH-signed app destroy failed (status {}): {}",
-                status,
-                error
-            )
+            let message = self.api_error_message(response).await;
+            Err(DestroyAppViaSshHttpsError::new(
+                DestroyAppViaSshHttpsErrorKind::ApiStatus { status, message },
+                id,
+                &path,
+                force_delete,
+            ))
         }
     }
 
@@ -3594,9 +3854,10 @@ enclave "default" {{
             LoaderStyle::Processing,
         );
 
-        if allow_ci_ssh && self
-            .destroy_app_via_ssh_https(&app.id, force_delete)
-            .await?
+        if allow_ci_ssh
+            && self
+                .destroy_app_via_ssh_https(&app.id, force_delete)
+                .await?
         {
             loader.stop();
             println!("App {} ({}) destroyed", name, app.id);
@@ -4923,7 +5184,9 @@ enclave "default" {{
         let mut loader = Loader::new("Reproducing enclave image", LoaderStyle::Processing);
         let mut app_source_dir: Option<PathBuf> = None;
         let image_ref = if let Some(source) = local_source {
-            let image_ref = self.build_docker_image_from_dir(&source.path, no_cache).await?;
+            let image_ref = self
+                .build_docker_image_from_dir(&source.path, no_cache)
+                .await?;
             app_source_dir = Some(source.path.clone());
             image_ref
         } else if let Some(ref manifest) = external_manifest {
@@ -5648,7 +5911,10 @@ enclave "default" {{
 
         if !root_output.status.success() {
             let stderr = String::from_utf8_lossy(&root_output.stderr);
-            bail!("--from-local must be run inside a Git repository: {}", stderr.trim());
+            bail!(
+                "--from-local must be run inside a Git repository: {}",
+                stderr.trim()
+            );
         }
 
         let repo_root = PathBuf::from(String::from_utf8_lossy(&root_output.stdout).trim());
@@ -5751,7 +6017,11 @@ enclave "default" {{
     ) -> Result<()> {
         if archive_bytes.starts_with(&[0x1f, 0x8b]) {
             let decoder = flate2::read::GzDecoder::new(archive_bytes);
-            Self::extract_tar_archive_to_dir(tar::Archive::new(decoder), extract_dir, strip_components)
+            Self::extract_tar_archive_to_dir(
+                tar::Archive::new(decoder),
+                extract_dir,
+                strip_components,
+            )
         } else {
             Self::extract_tar_archive_to_dir(
                 tar::Archive::new(archive_bytes),
@@ -5766,9 +6036,8 @@ enclave "default" {{
         extract_dir: &Path,
         strip_components: usize,
     ) -> Result<()> {
-        std::fs::create_dir_all(extract_dir).with_context(|| {
-            format!("Failed to create extract dir: {}", extract_dir.display())
-        })?;
+        std::fs::create_dir_all(extract_dir)
+            .with_context(|| format!("Failed to create extract dir: {}", extract_dir.display()))?;
         let canonical_extract = extract_dir.canonicalize().with_context(|| {
             format!(
                 "Failed to canonicalize extract dir: {}",

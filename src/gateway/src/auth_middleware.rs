@@ -33,61 +33,284 @@ enum SshSignatureHeaderState {
     Complete,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-enum SshSignedRequestErrorKind {
-    #[error("incomplete authentication headers")]
-    IncompleteHeaders,
-    #[error("missing authentication header")]
-    MissingHeader,
-    #[error("invalid authentication header")]
-    InvalidHeader,
-    #[error("unsupported endpoint")]
-    UnsupportedEndpoint,
-    #[error("invalid resource ID")]
-    InvalidResourceId,
-    #[error("invalid timestamp")]
-    InvalidTimestamp,
-    #[error("expired timestamp")]
-    ExpiredTimestamp,
-    #[error("read body")]
-    ReadBody,
-    #[error("load public key")]
-    LoadPublicKey,
-    #[error("unknown key")]
-    UnknownKey,
-    #[error("parse public key")]
-    ParsePublicKey,
-    #[error("decode signature")]
-    DecodeSignature,
-    #[error("parse signature")]
-    ParseSignature,
-    #[error("verify signature")]
-    VerifySignature,
-    #[error("authorize key")]
-    AuthorizeKey,
-    #[error("unauthorized key")]
-    UnauthorizedKey,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HeaderStrErrorKind {
+    MissingHeader { header: &'static str },
+    InvalidHeader { header: &'static str },
+}
+
+impl std::fmt::Debug for HeaderStrErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingHeader { header } => f
+                .debug_struct("MissingHeader")
+                .field("header", header)
+                .finish(),
+            Self::InvalidHeader { header } => f
+                .debug_struct("InvalidHeader")
+                .field("header", header)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("Unable to verify SSH-signed request: {kind} [{location}]")]
-struct SshSignedRequestError {
-    kind: SshSignedRequestErrorKind,
+#[error("Unable to read SSH authentication header: {kind:?} [{location}]")]
+struct HeaderStrError {
+    kind: HeaderStrErrorKind,
     location: &'static Location<'static>,
-    status: StatusCode,
-    user_message: &'static str,
-    header: Option<&'static str>,
-    path: Option<String>,
-    fingerprint: Option<String>,
 
     #[source]
     source: Option<Box<dyn Error + Send + Sync + 'static>>,
 }
 
-impl SshSignedRequestError {
+impl HeaderStrError {
+    #[track_caller]
+    fn missing_header(header: &'static str) -> Self {
+        Self {
+            kind: HeaderStrErrorKind::MissingHeader { header },
+            location: Location::caller(),
+            source: None,
+        }
+    }
+
+    #[track_caller]
+    fn invalid_header<E>(header: &'static str, source: E) -> Self
+    where
+        E: Error + Send + Sync + 'static,
+    {
+        Self {
+            kind: HeaderStrErrorKind::InvalidHeader { header },
+            location: Location::caller(),
+            source: Some(Box::new(source)),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum SshSignedResourceIdErrorKind {
+    UnsupportedMethod { method: Method },
+    MissingResourcePrefix,
+    NestedResourcePath,
+    InvalidResourceId,
+}
+
+impl std::fmt::Debug for SshSignedResourceIdErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedMethod { method } => f
+                .debug_struct("UnsupportedMethod")
+                .field("method", method)
+                .finish(),
+            Self::MissingResourcePrefix => f.write_str("MissingResourcePrefix"),
+            Self::NestedResourcePath => f.write_str("NestedResourcePath"),
+            Self::InvalidResourceId => f.write_str("InvalidResourceId"),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Unable to parse SSH-signed resource ID from {path}: {kind:?} [{location}]")]
+struct SshSignedResourceIdError {
+    kind: SshSignedResourceIdErrorKind,
+    path: String,
+    location: &'static Location<'static>,
+
+    #[source]
+    source: Option<Box<dyn Error + Send + Sync + 'static>>,
+}
+
+impl SshSignedResourceIdError {
+    #[track_caller]
+    fn new(kind: SshSignedResourceIdErrorKind, path: &str) -> Self {
+        Self {
+            kind,
+            path: path.to_string(),
+            location: Location::caller(),
+            source: None,
+        }
+    }
+
+    #[track_caller]
+    fn invalid_resource_id<E>(path: &str, source: E) -> Self
+    where
+        E: Error + Send + Sync + 'static,
+    {
+        Self {
+            kind: SshSignedResourceIdErrorKind::InvalidResourceId,
+            path: path.to_string(),
+            location: Location::caller(),
+            source: Some(Box::new(source)),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ValidateSshTimestampErrorKind {
+    InvalidTimestamp,
+    ExpiredTimestamp { compared_at: i64, window_secs: i64 },
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Unable to validate SSH authentication timestamp {timestamp}: {kind:?} [{location}]")]
+struct ValidateSshTimestampError {
+    kind: ValidateSshTimestampErrorKind,
+    timestamp: String,
+    location: &'static Location<'static>,
+
+    #[source]
+    source: Option<Box<dyn Error + Send + Sync + 'static>>,
+}
+
+impl ValidateSshTimestampError {
+    #[track_caller]
+    fn invalid_timestamp<E>(timestamp: &str, source: E) -> Self
+    where
+        E: Error + Send + Sync + 'static,
+    {
+        Self {
+            kind: ValidateSshTimestampErrorKind::InvalidTimestamp,
+            timestamp: timestamp.to_string(),
+            location: Location::caller(),
+            source: Some(Box::new(source)),
+        }
+    }
+
+    #[track_caller]
+    fn expired_timestamp(timestamp: &str, compared_at: i64) -> Self {
+        Self {
+            kind: ValidateSshTimestampErrorKind::ExpiredTimestamp {
+                compared_at,
+                window_secs: SSH_SIGNATURE_WINDOW_SECS,
+            },
+            timestamp: timestamp.to_string(),
+            location: Location::caller(),
+            source: None,
+        }
+    }
+}
+
+enum VerifySshSignedRequestErrorKind {
+    IncompleteHeaders {
+        method: Method,
+        path: String,
+    },
+    Header {
+        kind: HeaderStrErrorKind,
+    },
+    ResourceId {
+        kind: SshSignedResourceIdErrorKind,
+        path: String,
+    },
+    Timestamp {
+        kind: ValidateSshTimestampErrorKind,
+        timestamp: String,
+    },
+    ReadBody {
+        path: String,
+    },
+    QueryPublicKey {
+        fingerprint: String,
+    },
+    UnknownKey {
+        fingerprint: String,
+    },
+    ParsePublicKey {
+        fingerprint: String,
+    },
+    DecodeSignature {
+        fingerprint: String,
+    },
+    ParseSignature {
+        fingerprint: String,
+    },
+    VerifySignature {
+        fingerprint: String,
+    },
+    QueryAuthorization {
+        fingerprint: String,
+        path: String,
+    },
+    UnauthorizedKey {
+        fingerprint: String,
+        path: String,
+    },
+}
+
+impl std::fmt::Debug for VerifySshSignedRequestErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IncompleteHeaders { method, path } => f
+                .debug_struct("IncompleteHeaders")
+                .field("method", method)
+                .field("path", path)
+                .finish(),
+            Self::Header { kind } => f.debug_struct("Header").field("kind", kind).finish(),
+            Self::ResourceId { kind, path } => f
+                .debug_struct("ResourceId")
+                .field("kind", kind)
+                .field("path", path)
+                .finish(),
+            Self::Timestamp { kind, timestamp } => f
+                .debug_struct("Timestamp")
+                .field("kind", kind)
+                .field("timestamp", timestamp)
+                .finish(),
+            Self::ReadBody { path } => f.debug_struct("ReadBody").field("path", path).finish(),
+            Self::QueryPublicKey { fingerprint } => f
+                .debug_struct("QueryPublicKey")
+                .field("fingerprint", fingerprint)
+                .finish(),
+            Self::UnknownKey { fingerprint } => f
+                .debug_struct("UnknownKey")
+                .field("fingerprint", fingerprint)
+                .finish(),
+            Self::ParsePublicKey { fingerprint } => f
+                .debug_struct("ParsePublicKey")
+                .field("fingerprint", fingerprint)
+                .finish(),
+            Self::DecodeSignature { fingerprint } => f
+                .debug_struct("DecodeSignature")
+                .field("fingerprint", fingerprint)
+                .finish(),
+            Self::ParseSignature { fingerprint } => f
+                .debug_struct("ParseSignature")
+                .field("fingerprint", fingerprint)
+                .finish(),
+            Self::VerifySignature { fingerprint } => f
+                .debug_struct("VerifySignature")
+                .field("fingerprint", fingerprint)
+                .finish(),
+            Self::QueryAuthorization { fingerprint, path } => f
+                .debug_struct("QueryAuthorization")
+                .field("fingerprint", fingerprint)
+                .field("path", path)
+                .finish(),
+            Self::UnauthorizedKey { fingerprint, path } => f
+                .debug_struct("UnauthorizedKey")
+                .field("fingerprint", fingerprint)
+                .field("path", path)
+                .finish(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Unable to verify SSH-signed request: {kind:?} [{location}]")]
+struct VerifySshSignedRequestError {
+    kind: VerifySshSignedRequestErrorKind,
+    location: &'static Location<'static>,
+    status: StatusCode,
+    user_message: &'static str,
+
+    #[source]
+    source: Option<Box<dyn Error + Send + Sync + 'static>>,
+}
+
+impl VerifySshSignedRequestError {
     #[track_caller]
     fn new(
-        kind: SshSignedRequestErrorKind,
+        kind: VerifySshSignedRequestErrorKind,
         status: StatusCode,
         user_message: &'static str,
     ) -> Self {
@@ -96,26 +319,8 @@ impl SshSignedRequestError {
             location: Location::caller(),
             status,
             user_message,
-            header: None,
-            path: None,
-            fingerprint: None,
             source: None,
         }
-    }
-
-    fn with_header(mut self, header: &'static str) -> Self {
-        self.header = Some(header);
-        self
-    }
-
-    fn with_path(mut self, path: impl Into<String>) -> Self {
-        self.path = Some(path.into());
-        self
-    }
-
-    fn with_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
-        self.fingerprint = Some(fingerprint.into());
-        self
     }
 
     fn with_source<E>(mut self, source: E) -> Self
@@ -133,6 +338,75 @@ impl SshSignedRequestError {
 
     fn into_response(self) -> Response {
         (self.status, self.user_message).into_response()
+    }
+}
+
+impl From<HeaderStrError> for VerifySshSignedRequestError {
+    #[track_caller]
+    fn from(source: HeaderStrError) -> Self {
+        let kind = source.kind;
+        let user_message = match kind {
+            HeaderStrErrorKind::MissingHeader { .. } => "Missing SSH authentication header",
+            HeaderStrErrorKind::InvalidHeader { .. } => "Invalid SSH authentication header",
+        };
+
+        Self::new(
+            VerifySshSignedRequestErrorKind::Header { kind },
+            StatusCode::BAD_REQUEST,
+            user_message,
+        )
+        .with_source(source)
+    }
+}
+
+impl From<SshSignedResourceIdError> for VerifySshSignedRequestError {
+    #[track_caller]
+    fn from(source: SshSignedResourceIdError) -> Self {
+        let kind = source.kind.clone();
+        let path = source.path.clone();
+        let (status, user_message) = match kind {
+            SshSignedResourceIdErrorKind::InvalidResourceId => {
+                (StatusCode::BAD_REQUEST, "Invalid resource ID")
+            }
+            SshSignedResourceIdErrorKind::UnsupportedMethod { .. }
+            | SshSignedResourceIdErrorKind::MissingResourcePrefix
+            | SshSignedResourceIdErrorKind::NestedResourcePath => (
+                StatusCode::FORBIDDEN,
+                "SSH authentication is not supported for this endpoint",
+            ),
+        };
+
+        Self::new(
+            VerifySshSignedRequestErrorKind::ResourceId { kind, path },
+            status,
+            user_message,
+        )
+        .with_source(source)
+    }
+}
+
+impl From<ValidateSshTimestampError> for VerifySshSignedRequestError {
+    #[track_caller]
+    fn from(source: ValidateSshTimestampError) -> Self {
+        let kind = source.kind.clone();
+        let timestamp = source.timestamp.clone();
+        let (status, user_message) = match kind {
+            ValidateSshTimestampErrorKind::InvalidTimestamp => (
+                StatusCode::BAD_REQUEST,
+                "Invalid SSH authentication timestamp",
+            ),
+            ValidateSshTimestampErrorKind::ExpiredTimestamp { .. } => (
+                StatusCode::UNAUTHORIZED,
+                "SSH authentication timestamp expired",
+            ),
+        };
+
+        Self::new(
+            VerifySshSignedRequestErrorKind::Timestamp { kind, timestamp },
+            status,
+            user_message,
+        )
+        .with_source(source)
     }
 }
 
@@ -309,93 +583,54 @@ fn is_ssh_signed_resource_request(method: &Method, path: &str) -> bool {
         .is_some_and(|resource_id| !resource_id.is_empty() && !resource_id.contains('/'))
 }
 
-fn header_str<'a>(
-    req: &'a Request,
-    header: &'static str,
-) -> Result<&'a str, SshSignedRequestError> {
-    use SshSignedRequestErrorKind as ErrorKind;
+fn header_str<'a>(req: &'a Request, header: &'static str) -> Result<&'a str, HeaderStrError> {
+    let value = req
+        .headers()
+        .get(header)
+        .ok_or_else(|| HeaderStrError::missing_header(header))?;
 
-    let value = req.headers().get(header).ok_or_else(|| {
-        SshSignedRequestError::new(
-            ErrorKind::MissingHeader,
-            StatusCode::BAD_REQUEST,
-            "Missing SSH authentication header",
-        )
-        .with_header(header)
-    })?;
-
-    value.to_str().map_err(|source| {
-        SshSignedRequestError::new(
-            ErrorKind::InvalidHeader,
-            StatusCode::BAD_REQUEST,
-            "Invalid SSH authentication header",
-        )
-        .with_header(header)
-        .with_source(source)
-    })
+    value
+        .to_str()
+        .map_err(|source| HeaderStrError::invalid_header(header, source))
 }
 
-fn ssh_signed_resource_id(method: &Method, path: &str) -> Result<Uuid, SshSignedRequestError> {
-    use SshSignedRequestErrorKind as ErrorKind;
-
+fn ssh_signed_resource_id(method: &Method, path: &str) -> Result<Uuid, SshSignedResourceIdError> {
     if !matches!(*method, Method::GET | Method::DELETE) {
-        return Err(SshSignedRequestError::new(
-            ErrorKind::UnsupportedEndpoint,
-            StatusCode::FORBIDDEN,
-            "SSH authentication is not supported for this endpoint",
-        )
-        .with_path(format!("{} {}", method, path)));
+        return Err(SshSignedResourceIdError::new(
+            SshSignedResourceIdErrorKind::UnsupportedMethod {
+                method: method.clone(),
+            },
+            path,
+        ));
     }
 
     let Some(resource_id) = path.strip_prefix("/resources/") else {
-        return Err(SshSignedRequestError::new(
-            ErrorKind::UnsupportedEndpoint,
-            StatusCode::FORBIDDEN,
-            "SSH authentication is not supported for this endpoint",
-        )
-        .with_path(format!("{} {}", method, path)));
+        return Err(SshSignedResourceIdError::new(
+            SshSignedResourceIdErrorKind::MissingResourcePrefix,
+            path,
+        ));
     };
 
     if resource_id.contains('/') {
-        return Err(SshSignedRequestError::new(
-            ErrorKind::UnsupportedEndpoint,
-            StatusCode::FORBIDDEN,
-            "SSH authentication is not supported for this endpoint",
-        )
-        .with_path(format!("{} {}", method, path)));
+        return Err(SshSignedResourceIdError::new(
+            SshSignedResourceIdErrorKind::NestedResourcePath,
+            path,
+        ));
     }
 
-    Uuid::parse_str(resource_id).map_err(|source| {
-        SshSignedRequestError::new(
-            ErrorKind::InvalidResourceId,
-            StatusCode::BAD_REQUEST,
-            "Invalid resource ID",
-        )
-        .with_path(path)
-        .with_source(source)
-    })
+    Uuid::parse_str(resource_id)
+        .map_err(|source| SshSignedResourceIdError::invalid_resource_id(path, source))
 }
 
-fn validate_ssh_timestamp(timestamp: &str) -> Result<(), SshSignedRequestError> {
-    use SshSignedRequestErrorKind as ErrorKind;
-
-    let timestamp = timestamp.parse::<i64>().map_err(|source| {
-        SshSignedRequestError::new(
-            ErrorKind::InvalidTimestamp,
-            StatusCode::BAD_REQUEST,
-            "Invalid SSH authentication timestamp",
-        )
-        .with_source(source)
-    })?;
+fn validate_ssh_timestamp(timestamp: &str) -> Result<(), ValidateSshTimestampError> {
+    let parsed_timestamp = timestamp
+        .parse::<i64>()
+        .map_err(|source| ValidateSshTimestampError::invalid_timestamp(timestamp, source))?;
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
-    if timestamp > now + SSH_SIGNATURE_WINDOW_SECS
-        || timestamp < now.saturating_sub(SSH_SIGNATURE_WINDOW_SECS)
+    if parsed_timestamp > now + SSH_SIGNATURE_WINDOW_SECS
+        || parsed_timestamp < now.saturating_sub(SSH_SIGNATURE_WINDOW_SECS)
     {
-        return Err(SshSignedRequestError::new(
-            ErrorKind::ExpiredTimestamp,
-            StatusCode::UNAUTHORIZED,
-            "SSH authentication timestamp expired",
-        ));
+        return Err(ValidateSshTimestampError::expired_timestamp(timestamp, now));
     }
     Ok(())
 }
@@ -416,7 +651,7 @@ fn canonical_ssh_request(
     )
 }
 
-fn ssh_signed_request_error_response(error: SshSignedRequestError) -> Response {
+fn ssh_signed_request_error_response(error: VerifySshSignedRequestError) -> Response {
     if error.status.is_server_error() {
         tracing::error!("{:?}", error);
     } else {
@@ -428,9 +663,7 @@ fn ssh_signed_request_error_response(error: SshSignedRequestError) -> Response {
 async fn verify_ssh_signed_request(
     state: &AppState,
     req: Request,
-) -> Result<Request, SshSignedRequestError> {
-    use SshSignedRequestErrorKind as ErrorKind;
-
+) -> Result<Request, VerifySshSignedRequestError> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let query = req
@@ -439,23 +672,31 @@ async fn verify_ssh_signed_request(
         .map(|query| format!("?{}", query))
         .unwrap_or_default();
     let path_query = format!("{}{}", path, query);
-    let resource_id = ssh_signed_resource_id(&method, &path)?;
+    let resource_id =
+        ssh_signed_resource_id(&method, &path).map_err(VerifySshSignedRequestError::from)?;
 
-    let fingerprint = header_str(&req, SSH_FINGERPRINT_HEADER)?.to_string();
-    let timestamp = header_str(&req, SSH_TIMESTAMP_HEADER)?.to_string();
-    let signature = header_str(&req, SSH_SIGNATURE_HEADER)?.to_string();
-    validate_ssh_timestamp(&timestamp)?;
+    let fingerprint = header_str(&req, SSH_FINGERPRINT_HEADER)
+        .map_err(VerifySshSignedRequestError::from)?
+        .to_string();
+    let timestamp = header_str(&req, SSH_TIMESTAMP_HEADER)
+        .map_err(VerifySshSignedRequestError::from)?
+        .to_string();
+    let signature = header_str(&req, SSH_SIGNATURE_HEADER)
+        .map_err(VerifySshSignedRequestError::from)?
+        .to_string();
+    validate_ssh_timestamp(&timestamp).map_err(VerifySshSignedRequestError::from)?;
 
     let (parts, body) = req.into_parts();
     let body_bytes = axum::body::to_bytes(body, 10 * 1024 * 1024)
         .await
         .map_err(|source| {
-            SshSignedRequestError::new(
-                ErrorKind::ReadBody,
+            VerifySshSignedRequestError::new(
+                VerifySshSignedRequestErrorKind::ReadBody {
+                    path: path_query.clone(),
+                },
                 StatusCode::BAD_REQUEST,
                 "Failed to read body",
             )
-            .with_path(path_query.clone())
             .with_source(source)
         })?;
     let payload = canonical_ssh_request(&method, &path_query, &timestamp, &body_bytes);
@@ -463,59 +704,65 @@ async fn verify_ssh_signed_request(
     let public_key = db::get_ssh_public_key_by_fingerprint(&state.db, &fingerprint)
         .await
         .map_err(|source| {
-            SshSignedRequestError::new(
-                ErrorKind::LoadPublicKey,
+            VerifySshSignedRequestError::new(
+                VerifySshSignedRequestErrorKind::QueryPublicKey {
+                    fingerprint: fingerprint.clone(),
+                },
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to verify SSH signature",
+                "Failed to query SSH public key",
             )
-            .with_fingerprint(fingerprint.clone())
             .with_boxed_source(source.into_boxed_dyn_error())
         })?
         .ok_or_else(|| {
-            SshSignedRequestError::new(
-                ErrorKind::UnknownKey,
+            VerifySshSignedRequestError::new(
+                VerifySshSignedRequestErrorKind::UnknownKey {
+                    fingerprint: fingerprint.clone(),
+                },
                 StatusCode::UNAUTHORIZED,
                 "Unknown SSH key",
             )
-            .with_fingerprint(fingerprint.clone())
         })?;
 
     let public_key = SshPublicKey::from_openssh(&public_key).map_err(|source| {
-        SshSignedRequestError::new(
-            ErrorKind::ParsePublicKey,
+        VerifySshSignedRequestError::new(
+            VerifySshSignedRequestErrorKind::ParsePublicKey {
+                fingerprint: fingerprint.clone(),
+            },
             StatusCode::UNAUTHORIZED,
             "Invalid SSH key",
         )
-        .with_fingerprint(fingerprint.clone())
         .with_source(source)
     })?;
     let signature_bytes = URL_SAFE_NO_PAD.decode(signature).map_err(|source| {
-        SshSignedRequestError::new(
-            ErrorKind::DecodeSignature,
+        VerifySshSignedRequestError::new(
+            VerifySshSignedRequestErrorKind::DecodeSignature {
+                fingerprint: fingerprint.clone(),
+            },
             StatusCode::BAD_REQUEST,
             "Invalid SSH signature encoding",
         )
-        .with_fingerprint(fingerprint.clone())
         .with_source(source)
     })?;
     let signature = SshSig::from_pem(&signature_bytes).map_err(|source| {
-        SshSignedRequestError::new(
-            ErrorKind::ParseSignature,
+        VerifySshSignedRequestError::new(
+            VerifySshSignedRequestErrorKind::ParseSignature {
+                fingerprint: fingerprint.clone(),
+            },
             StatusCode::UNAUTHORIZED,
             "Invalid SSH signature",
         )
-        .with_fingerprint(fingerprint.clone())
         .with_source(source)
     })?;
     public_key
         .verify(SSH_SIGNING_NAMESPACE, payload.as_bytes(), &signature)
         .map_err(|source| {
-            SshSignedRequestError::new(
-                ErrorKind::VerifySignature,
+            VerifySshSignedRequestError::new(
+                VerifySshSignedRequestErrorKind::VerifySignature {
+                    fingerprint: fingerprint.clone(),
+                },
                 StatusCode::UNAUTHORIZED,
                 "Invalid SSH signature",
             )
-            .with_fingerprint(fingerprint.clone())
             .with_source(source)
         })?;
 
@@ -523,23 +770,25 @@ async fn verify_ssh_signed_request(
         db::get_user_for_app_by_ssh_key(&state.db, &fingerprint, &resource_id.to_string())
             .await
             .map_err(|source| {
-                SshSignedRequestError::new(
-                    ErrorKind::AuthorizeKey,
+                VerifySshSignedRequestError::new(
+                    VerifySshSignedRequestErrorKind::QueryAuthorization {
+                        fingerprint: fingerprint.clone(),
+                        path: path_query.clone(),
+                    },
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to authorize SSH key",
+                    "Failed to query SSH key authorization",
                 )
-                .with_fingerprint(fingerprint.clone())
-                .with_path(path_query.clone())
                 .with_boxed_source(source.into_boxed_dyn_error())
             })?
             .ok_or_else(|| {
-                SshSignedRequestError::new(
-                    ErrorKind::UnauthorizedKey,
+                VerifySshSignedRequestError::new(
+                    VerifySshSignedRequestErrorKind::UnauthorizedKey {
+                        fingerprint: fingerprint.clone(),
+                        path: path_query.clone(),
+                    },
                     StatusCode::FORBIDDEN,
                     "SSH key is not authorized for this app",
                 )
-                .with_fingerprint(fingerprint.clone())
-                .with_path(path_query.clone())
             })?;
 
     if let Err(e) = db::update_ssh_key_last_used(&state.db, &fingerprint).await {
@@ -565,13 +814,15 @@ async fn verify_ssh_signed_request(
     Ok(req)
 }
 
-fn incomplete_ssh_headers_error(req: &Request) -> SshSignedRequestError {
-    SshSignedRequestError::new(
-        SshSignedRequestErrorKind::IncompleteHeaders,
+fn incomplete_ssh_headers_error(req: &Request) -> VerifySshSignedRequestError {
+    VerifySshSignedRequestError::new(
+        VerifySshSignedRequestErrorKind::IncompleteHeaders {
+            method: req.method().clone(),
+            path: req.uri().path().to_string(),
+        },
         StatusCode::BAD_REQUEST,
         "Missing SSH authentication header",
     )
-    .with_path(format!("{} {}", req.method(), req.uri().path()))
 }
 
 pub async fn fido2_sign_middleware(
@@ -841,14 +1092,26 @@ mod tests {
     #[test]
     fn validate_ssh_timestamp_rejects_bad_or_expired_values() {
         let error = validate_ssh_timestamp("not-a-timestamp").unwrap_err();
-        assert_eq!(error.kind, SshSignedRequestErrorKind::InvalidTimestamp);
-        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.kind, ValidateSshTimestampErrorKind::InvalidTimestamp);
+        assert_eq!(error.timestamp, "not-a-timestamp");
 
         let expired =
             time::OffsetDateTime::now_utc().unix_timestamp() - SSH_SIGNATURE_WINDOW_SECS - 60;
+        let before_validation = time::OffsetDateTime::now_utc().unix_timestamp();
         let error = validate_ssh_timestamp(&expired.to_string()).unwrap_err();
-        assert_eq!(error.kind, SshSignedRequestErrorKind::ExpiredTimestamp);
-        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        let after_validation = time::OffsetDateTime::now_utc().unix_timestamp();
+        assert_eq!(error.timestamp, expired.to_string());
+        match error.kind {
+            ValidateSshTimestampErrorKind::ExpiredTimestamp {
+                compared_at,
+                window_secs,
+            } => {
+                assert_eq!(window_secs, SSH_SIGNATURE_WINDOW_SECS);
+                assert!(compared_at >= before_validation);
+                assert!(compared_at <= after_validation);
+            }
+            other => panic!("expected expired timestamp error, got {other:?}"),
+        }
     }
 
     #[test]
