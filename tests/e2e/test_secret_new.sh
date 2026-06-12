@@ -13,6 +13,8 @@
 #   5. Generate quorum with --threshold and --max
 #   6. Missing KEYMAKER_URL gives clear error
 #   7. Missing keyring file gives clear error
+#   8. CLI keygen + concatenated keyring is normalized into one armor block
+#   9. Keyring without signing-capable keys is rejected
 
 set -euo pipefail
 
@@ -88,6 +90,7 @@ gpg --batch --passphrase '' --quick-gen-key "Test Quorum <test@example.com>" rsa
 FINGERPRINT=$(gpg --list-keys --with-colons 2>/dev/null | grep '^fpr' | head -1 | cut -d: -f10)
 gpg --batch --passphrase '' --quick-add-key "$FINGERPRINT" rsa2048 encr 0 2>/dev/null
 gpg --batch --passphrase '' --quick-add-key "$FINGERPRINT" rsa2048 auth 0 2>/dev/null
+gpg --batch --passphrase '' --quick-add-key "$FINGERPRINT" rsa2048 sign 0 2>/dev/null
 gpg --armor --export "$FINGERPRINT" > "$WORK_DIR/keyring.asc"
 rm -rf "$GNUPGHOME"
 unset GNUPGHOME
@@ -217,4 +220,60 @@ if [ $EXIT_CODE -ne 0 ] && echo "$OUTPUT" | grep -qi "failed to read\|no such fi
 else
     echo "$OUTPUT"
     step_fail "Missing keyring file (no clear error)"
+fi
+
+# ── Step 8: CLI keygen + concatenated keyring is normalized ──────────
+# `cat a.asc b.asc` produces multiple armor blocks; the rpgp-based
+# Keymaker/Locksmith stack only reads the first block, so secret new must
+# merge them into a single armor block before upload.
+
+STEP_NUM=8
+log "Testing CLI keygen + concatenated keyring normalization..."
+MULTI_DIR="$WORK_DIR/multi-holder-repo"
+mkdir -p "$MULTI_DIR/.caution"
+touch "$MULTI_DIR/Procfile"
+
+(cd "$MULTI_DIR" \
+    && "$CAUTION_BIN" secret keygen --name Alice --email alice@example.com --shoot-self-in-foot alice.asc 2>/dev/null \
+    && "$CAUTION_BIN" secret keygen --name Bob --email bob@example.com --shoot-self-in-foot bob.asc 2>/dev/null \
+    && cat alice.asc bob.asc > keyring.asc)
+
+OUTPUT=$(cd "$MULTI_DIR" && KEYMAKER_URL="$KEYMAKER_URL" "$CAUTION_BIN" secret new keyring.asc --threshold 2 --max 2 --no-upload 2>&1) || true
+
+BUNDLE="$MULTI_DIR/.caution/quorum-bundle.json"
+if [ -f "$BUNDLE" ]; then
+    ARMOR_BLOCKS=$(jq -r '.keyring' "$BUNDLE" | grep -c "BEGIN PGP PUBLIC KEY BLOCK" || true)
+    if [ "$ARMOR_BLOCKS" = "1" ]; then
+        step_pass "Concatenated keyring normalized into a single armor block"
+    else
+        step_fail "Concatenated keyring not normalized (found $ARMOR_BLOCKS armor blocks in bundle keyring)"
+    fi
+else
+    echo "$OUTPUT"
+    step_fail "CLI keygen + concatenated keyring (bundle not created)"
+fi
+
+# ── Step 9: Keyring without signing keys is rejected ──────────────────
+
+STEP_NUM=9
+log "Testing rejection of keyring without signing-capable keys..."
+export GNUPGHOME=$(mktemp -d)
+gpg --batch --passphrase '' --quick-gen-key "No Sign <nosign@example.com>" rsa2048 cert 0 2>/dev/null
+NOSIGN_FPR=$(gpg --list-keys --with-colons 2>/dev/null | grep '^fpr' | head -1 | cut -d: -f10)
+gpg --batch --passphrase '' --quick-add-key "$NOSIGN_FPR" rsa2048 encr 0 2>/dev/null
+gpg --batch --passphrase '' --quick-add-key "$NOSIGN_FPR" rsa2048 auth 0 2>/dev/null
+gpg --armor --export "$NOSIGN_FPR" > "$REPO_DIR/nosign-keyring.asc"
+rm -rf "$GNUPGHOME"
+unset GNUPGHOME
+
+set +e
+OUTPUT=$(cd "$REPO_DIR" && KEYMAKER_URL="$KEYMAKER_URL" "$CAUTION_BIN" secret new nosign-keyring.asc --no-upload 2>&1)
+EXIT_CODE=$?
+set -e
+
+if [ $EXIT_CODE -ne 0 ] && echo "$OUTPUT" | grep -qi "no Keymaker-eligible"; then
+    step_pass "Keyring without signing keys rejected with clear error"
+else
+    echo "$OUTPUT"
+    step_fail "Keyring without signing keys was not rejected"
 fi
