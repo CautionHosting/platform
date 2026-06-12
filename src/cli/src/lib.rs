@@ -1071,6 +1071,36 @@ fn keymaker_eligible_cert_count(armored_keyring: &str) -> Result<usize> {
     Ok(count)
 }
 
+/// Re-serialize all certificates into a single ASCII-armored block.
+///
+/// Keyrings assembled by concatenating armored files (`cat alice.asc bob.asc`)
+/// contain multiple armor blocks. Sequoia and GnuPG read all of them, but the
+/// rpgp-based Locksmith/Keymaker stack only parses the first block and
+/// silently drops the remaining certificates, which later breaks send-shard
+/// for the dropped holders.
+fn normalize_keyring(armored_keyring: &str) -> Result<String> {
+    let cert_parser = CertParser::from_bytes(armored_keyring)
+        .context("Failed to parse keyring as OpenPGP public certificates")?;
+
+    let mut writer = openpgp::armor::Writer::new(Vec::new(), openpgp::armor::Kind::PublicKey)
+        .context("Failed to create armor writer")?;
+    for parseable_cert in cert_parser {
+        let cert = parseable_cert.context("Failed to parse OpenPGP public certificate")?;
+        cert.serialize(&mut writer)
+            .context("Failed to serialize OpenPGP public certificate")?;
+    }
+    let bytes = writer.finalize().context("Failed to finalize armor")?;
+
+    String::from_utf8(bytes)
+        .context("Normalized keyring is not valid UTF-8")
+        .map(|mut keyring| {
+            if !keyring.ends_with('\n') {
+                keyring.push('\n');
+            }
+            keyring
+        })
+}
+
 fn resolve_quorum_parameters(
     threshold: Option<u8>,
     max: Option<u8>,
@@ -6246,6 +6276,9 @@ run: /app/myapp
             .with_context(|| format!("Failed to inspect keyring file: {}", keyring.display()))?;
         let (threshold, max) = resolve_quorum_parameters(threshold, max, eligible_certs)?;
 
+        let keyring_data = normalize_keyring(&keyring_data)
+            .with_context(|| format!("Failed to normalize keyring file: {}", keyring.display()))?;
+
         let request_body = serde_json::json!({
             "threshold": threshold,
             "max": max,
@@ -7039,12 +7072,13 @@ pub async fn run() -> Result<()> {
 mod tests {
     use super::openpgp;
     use super::{
-        encrypt_env_file, encrypt_secret_value, load_recipient_cert, parse_env_assignments,
-        resolve_local_build_command_from_dir, resolve_procfile_build_command,
-        resolve_quorum_parameters,
+        encrypt_env_file, encrypt_secret_value, load_recipient_cert, normalize_keyring,
+        parse_env_assignments, resolve_local_build_command_from_dir,
+        resolve_procfile_build_command, resolve_quorum_parameters,
     };
     use keymaker_models::generate_quorum::GenerateQuorumResponse;
     use openpgp::cert::prelude::*;
+    use openpgp::parse::Parse;
     use openpgp::serialize::SerializeInto;
     use std::collections::HashMap;
     use tempfile::tempdir;
@@ -7057,6 +7091,23 @@ mod tests {
             .unwrap();
 
         String::from_utf8(cert.armored().to_vec().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn normalize_keyring_merges_concatenated_armor_blocks() {
+        // Simulate `cat alice.asc bob.asc > keyring.asc`
+        let concatenated = format!("{}{}", test_public_key(), test_public_key());
+        assert_eq!(concatenated.matches("BEGIN PGP").count(), 2);
+
+        let normalized = normalize_keyring(&concatenated).unwrap();
+        assert_eq!(normalized.matches("BEGIN PGP").count(), 1);
+
+        // Both certificates survive normalization.
+        let certs: Vec<_> = openpgp::cert::CertParser::from_bytes(normalized.as_bytes())
+            .unwrap()
+            .collect::<openpgp::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(certs.len(), 2);
     }
 
     #[test]
