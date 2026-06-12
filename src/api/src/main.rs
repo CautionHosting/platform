@@ -26,6 +26,7 @@ mod cloud_credentials;
 mod cryptographic_bundles;
 mod deployment;
 mod ec2;
+mod eif_download;
 mod encryption;
 mod errors;
 mod gpg;
@@ -138,6 +139,7 @@ pub(crate) struct AppState {
     pub(crate) pricing: PricingConfig,
     pub(crate) builder_config: builder::BuilderConfig,
     pub(crate) builder_sizes: builder::BuilderSizesConfig,
+    pub(crate) eif_download_cache: eif_download::EifDownloadCache,
 }
 
 #[derive(Clone)]
@@ -2578,6 +2580,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let builder_config = builder::BuilderConfig::from_env()?;
     info!("Dedicated builder enabled");
 
+    let eif_cache_size_gb: u64 = std::env::var("EIF_CACHE_SIZE_GB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+    let eif_download_cache = eif_download::EifDownloadCache::new(&data_dir, eif_cache_size_gb);
+
     let state = Arc::new(AppState {
         db: pool,
         git_hostname,
@@ -2593,6 +2601,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pricing,
         builder_config,
         builder_sizes,
+        eif_download_cache,
     });
 
     let onboarding_routes = Router::new()
@@ -2657,6 +2666,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/resources/{id}/builder-config", get(get_builder_config))
         .route("/resources/{id}/builder-config", put(set_builder_config))
+        .route(
+            "/resources/{id}/eif/download",
+            get(eif_download::download_eif),
+        )
         .route(
             "/resources/managed-onprem",
             post(create_managed_onprem_resource),
