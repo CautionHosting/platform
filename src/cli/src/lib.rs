@@ -50,6 +50,7 @@ use openpgp::{
 mod loader;
 use loader::{Loader, LoaderStyle};
 
+mod apps;
 mod attestation;
 
 const BYOC_PROVISIONER_IMAGE: &str =
@@ -642,6 +643,8 @@ enum AppCommands {
         #[arg(help = "App ID (default: from .caution/deployment)")]
         id: Option<String>,
     },
+    #[command(about = "Download the latest completed EIF for an app")]
+    DownloadEif(apps::download_eif::DownloadEif),
 }
 
 #[derive(Subcommand, Debug)]
@@ -1017,6 +1020,12 @@ struct Config {
     server_url: Option<String>,
 }
 
+impl Config {
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+}
+
 #[derive(Deserialize)]
 struct UserStatus {
     email_verified: bool,
@@ -1262,6 +1271,14 @@ impl ApiClient {
             verbose,
             qr,
         })
+    }
+
+    fn http_client(&self) -> &reqwest::Client {
+        &self.client
+    }
+
+    fn api_base_url(&self) -> &str {
+        &self.base_url
     }
 
     /// Get deployment path, creating .caution directory if needed
@@ -6953,6 +6970,9 @@ pub async fn run() -> Result<()> {
             }
             AppCommands::Rename { name, id } => {
                 client.rename_app(id, name).await?;
+            }
+            AppCommands::DownloadEif(args) => {
+                apps::download_eif::download_eif(&client, &args).await?;
             }
         },
         Commands::SshKeys { command } => match command {
