@@ -3324,7 +3324,7 @@ run: /app/myapp
         println!("\nAfter pushing, check your app status:");
         println!("  caution apps list");
         println!("\nVerify attestation:");
-        println!("  caution verify --reproduce");
+        println!("  caution verify");
 
         Ok(())
     }
@@ -4262,7 +4262,7 @@ run: /app/myapp
         println!("  output/ - Final EIF and PCRs files\n");
 
         println!("To verify your deployed enclave matches this build:");
-        println!("  caution verify --reproduce\n");
+        println!("  caution verify\n");
 
         Ok(())
     }
