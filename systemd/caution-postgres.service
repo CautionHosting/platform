@@ -1,4 +1,4 @@
-# user systemd file for managing Caution gateway
+# user systemd file for managing Caution postgres
 
 [Unit]
 Description=Caution postgres instance

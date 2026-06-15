@@ -563,7 +563,7 @@ endif
 
 up: migrate
 	@echo "Building all images in parallel..."
-	@$(MAKE) build-api build-gateway build-email build-metering build-frontend
+	@$(MAKE) build-api build-gateway build-email build-metering $(FRONTEND_BUILD_TARGET)
 	systemctl restart --user caution-email caution-metering caution-api caution-frontend caution-gateway
 	@echo "  All services running"
 	@echo "  $(FRONTEND_STATUS)"
@@ -698,6 +698,7 @@ run-api-test: network
 		-p 127.0.0.1:8080:8080 \
 		--group-add $$(stat -c '%g' /var/run/docker.sock) \
 		--env-file .env \
+		--env-file $(HOME)/.config/caution/.env \
 		-e AWS_REGION=us-west-2 \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
@@ -706,7 +707,6 @@ run-api-test: network
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
-		--env-file $(HOME)/.config/caution/.env \
 		-v $(HOME)/.config/caution/prices.json:/app/prices.json:ro \
 		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		caution-api
