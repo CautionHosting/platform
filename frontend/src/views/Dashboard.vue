@@ -31,7 +31,7 @@
           <div class="app-detail-header-left">
             <h2 class="app-detail-title">{{ selectedApp.resource_name || 'Unnamed App' }}</h2>
             <a
-              v-if="selectedApp.public_ip"
+              v-if="selectedApp.state === 'running' && selectedApp.public_ip"
               :href="getAppUrl(selectedApp)"
               target="_blank"
               class="app-open-icon-btn"
@@ -45,7 +45,7 @@
             </a>
           </div>
           <button
-            v-if="selectedApp.public_ip"
+            v-if="selectedApp.state === 'running' && selectedApp.public_ip"
             @click="attestationApp = selectedApp"
             class="header-attestation-btn"
             title="Verify that this application is running exactly the code you expect inside a secure enclave."
@@ -109,16 +109,18 @@
                 </div>
                 <div class="app-detail-item">
                   <span class="app-detail-label">Region</span>
-                  <span class="app-detail-value">{{ selectedApp.region || 'Not set' }}</span>
+                  <span v-if="selectedApp.state === 'running'" class="app-detail-value">{{ selectedApp.region || 'Not set' }}</span>
+                  <span v-else class="app-detail-value app-detail-muted">-</span>
                 </div>
                 <div class="app-detail-item">
                   <span class="app-detail-label">Instance type</span>
-                  <span class="app-detail-value">{{ selectedApp.configuration?.instance_type || 'Not set' }}</span>
+                  <span v-if="selectedApp.state === 'running'" class="app-detail-value">{{ selectedApp.configuration?.instance_type || 'Not set' }}</span>
+                  <span v-else class="app-detail-value app-detail-muted">-</span>
                 </div>
                 <!-- Row 3: Public IP, Domain -->
                 <div class="app-detail-item">
                   <span class="app-detail-label">Public IP</span>
-                  <div v-if="selectedApp.public_ip" class="app-detail-value-with-copy">
+                  <div v-if="selectedApp.state === 'running' && selectedApp.public_ip" class="app-detail-value-with-copy">
                     <span class="app-detail-value">{{ selectedApp.public_ip }}</span>
                     <button
                       class="copy-inline-btn"
@@ -135,7 +137,7 @@
                       </svg>
                     </button>
                   </div>
-                  <span v-else class="app-detail-value app-detail-muted">Not set</span>
+                  <span v-else class="app-detail-value app-detail-muted">-</span>
                 </div>
                 <div class="app-detail-item app-detail-item--span2">
                   <span class="app-detail-label">Domain</span>
@@ -397,7 +399,7 @@
                 </td>
                 <td class="app-attestation-cell">
                   <button
-                    v-if="app.public_ip"
+                    v-if="app.state === 'running' && app.public_ip"
                     @click.stop="attestationApp = app"
                     class="app-attestation-btn"
                     title="Verify attestation"
