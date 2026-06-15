@@ -97,7 +97,7 @@ pub async fn suspend_managed_resources(
             }
         }
 
-        if let Err(e) = sqlx::query("UPDATE compute_resources SET state = 'stopped' WHERE id = $1")
+        if let Err(e) = sqlx::query("UPDATE compute_resources SET state = 'stopped', public_ip = NULL, region = NULL WHERE id = $1")
             .bind(resource_id)
             .execute(&state.db)
             .await
@@ -194,7 +194,7 @@ pub async fn suspend_org_resources(
         }
 
         // Mark resource as stopped in DB regardless
-        if let Err(e) = sqlx::query("UPDATE compute_resources SET state = 'stopped' WHERE id = $1")
+        if let Err(e) = sqlx::query("UPDATE compute_resources SET state = 'stopped', public_ip = NULL, region = NULL WHERE id = $1")
             .bind(resource_id)
             .execute(&state.db)
             .await
