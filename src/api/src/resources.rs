@@ -612,7 +612,7 @@ pub async fn delete_resource(
 
     sqlx::query(
         "UPDATE compute_resources
-         SET destroyed_at = NOW(), state = $1
+         SET destroyed_at = NOW(), state = $1, public_ip = NULL, region = NULL
          WHERE id = $2 AND organization_id = $3",
     )
     .bind(types::ResourceState::Terminated)
