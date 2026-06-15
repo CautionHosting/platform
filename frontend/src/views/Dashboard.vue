@@ -31,7 +31,7 @@
           <div class="app-detail-header-left">
             <h2 class="app-detail-title">{{ selectedApp.resource_name || 'Unnamed App' }}</h2>
             <a
-              v-if="selectedApp.state === 'running' && selectedApp.public_ip"
+              v-if="selectedApp.state === 'running' && (selectedApp.public_ip || selectedApp.configuration?.domain)"
               :href="getAppUrl(selectedApp)"
               target="_blank"
               class="app-open-icon-btn"
@@ -114,8 +114,7 @@
                 </div>
                 <div class="app-detail-item">
                   <span class="app-detail-label">Instance type</span>
-                  <span v-if="selectedApp.state === 'running'" class="app-detail-value">{{ selectedApp.configuration?.instance_type || 'Not set' }}</span>
-                  <span v-else class="app-detail-value app-detail-muted">-</span>
+                  <span class="app-detail-value">{{ selectedApp.configuration?.instance_type || 'Not set' }}</span>
                 </div>
                 <!-- Row 3: Public IP, Domain -->
                 <div class="app-detail-item">
@@ -224,7 +223,8 @@
             </div>
             <div class="aws-detail-item">
               <span class="aws-detail-label">Region</span>
-              <span class="aws-detail-value">{{ selectedApp.configuration.managed_onprem.aws_region || selectedApp.region || 'Not set' }}</span>
+              <span v-if="selectedApp.state === 'running'" class="aws-detail-value">{{ selectedApp.configuration.managed_onprem.aws_region || selectedApp.region || 'Not set' }}</span>
+              <span v-else class="aws-detail-value app-detail-muted">-</span>
             </div>
             <div class="aws-detail-item">
               <span class="aws-detail-label">VPC ID</span>
@@ -394,8 +394,8 @@
                   </span>
                 </td>
                 <td class="app-region-cell">
-                  <span v-if="app.region" class="region-code">{{ app.region }}</span>
-                  <span v-else class="app-region-empty">Not set</span>
+                  <span v-if="app.state === 'running' && app.region" class="region-code">{{ app.region }}</span>
+                  <span v-else class="app-region-empty">-</span>
                 </td>
                 <td class="app-attestation-cell">
                   <button
