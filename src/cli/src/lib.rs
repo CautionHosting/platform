@@ -1119,27 +1119,73 @@ struct StagedSource {
     _temp_dir: tempfile::TempDir,
 }
 
-fn keymaker_eligible_cert_count(armored_keyring: &str) -> Result<usize> {
+/// Keymaker-eligibility of a single certificate, with per-subkey detail so we can tell the
+/// user exactly which subkey is missing instead of an opaque "no eligible certificates".
+struct CertEligibility {
+    user_id: String,
+    has_sign: bool,
+    has_auth: bool,
+    has_enc: bool,
+}
+
+impl CertEligibility {
+    fn is_eligible(&self) -> bool {
+        self.has_sign && self.has_auth && self.has_enc
+    }
+
+    /// Human-readable list of the missing subkey roles, in keygen order.
+    fn missing(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.has_sign {
+            missing.push("signing");
+        }
+        if !self.has_auth {
+            missing.push("authentication");
+        }
+        if !self.has_enc {
+            missing.push("storage-encryption");
+        }
+        missing
+    }
+}
+
+/// Inspect each certificate in an armored keyring for Keymaker eligibility.
+///
+/// A certificate is eligible only if it carries signing, authentication, and
+/// storage-encryption subkeys valid under the standard policy.
+fn keymaker_cert_eligibility(armored_keyring: &str) -> Result<Vec<CertEligibility>> {
     let cert_parser = CertParser::from_bytes(armored_keyring)
         .context("Failed to parse keyring as OpenPGP public certificates")?;
     let policy = openpgp::policy::StandardPolicy::new();
-    let mut count = 0;
+    let mut certs = Vec::new();
 
     for parseable_cert in cert_parser {
         let cert = parseable_cert.context("Failed to parse OpenPGP public certificate")?;
         let valid_cert = cert
             .with_policy(&policy, None)
             .context("OpenPGP public certificate is not valid under the standard policy")?;
-        let has_auth = valid_cert.keys().for_authentication().next().is_some();
-        let has_enc = valid_cert.keys().for_storage_encryption().next().is_some();
-        let has_sign = valid_cert.keys().for_signing().next().is_some();
+        let user_id = valid_cert
+            .userids()
+            .next()
+            .map(|uid| String::from_utf8_lossy(uid.userid().value()).into_owned())
+            .unwrap_or_else(|| valid_cert.fingerprint().to_string());
 
-        if has_auth && has_enc && has_sign {
-            count += 1;
-        }
+        certs.push(CertEligibility {
+            user_id,
+            has_sign: valid_cert.keys().for_signing().next().is_some(),
+            has_auth: valid_cert.keys().for_authentication().next().is_some(),
+            has_enc: valid_cert.keys().for_storage_encryption().next().is_some(),
+        });
     }
 
-    Ok(count)
+    Ok(certs)
+}
+
+fn keymaker_eligible_cert_count(armored_keyring: &str) -> Result<usize> {
+    Ok(keymaker_cert_eligibility(armored_keyring)?
+        .iter()
+        .filter(|cert| cert.is_eligible())
+        .count())
 }
 
 /// Re-serialize all certificates into a single ASCII-armored block.
@@ -1170,6 +1216,42 @@ fn normalize_keyring(armored_keyring: &str) -> Result<String> {
             }
             keyring
         })
+}
+
+/// Pure validation of Procfile directives (see `validate_procfile_directives` for context).
+fn validate_procfile_directives_fields(
+    binary: Option<&str>,
+    locksmith: bool,
+    http_port: Option<&str>,
+    ports: &[u16],
+) -> Result<()> {
+    if binary.is_some() && locksmith {
+        bail!(
+            "Procfile sets both `binary:` and `locksmith: true`. The `binary:` directive \
+             extracts only the binary's directory, so /etc/caution/ (bundle + secrets) is \
+             dropped and locksmithd panics at boot. Remove one of them."
+        );
+    }
+
+    if let Some(http_port) = http_port {
+        let http_port: u16 = http_port.trim().parse().with_context(|| {
+            format!(
+                "Procfile `http_port` is not a valid port: {}",
+                http_port.trim()
+            )
+        })?;
+        if !ports.is_empty() && !ports.contains(&http_port) {
+            bail!(
+                "Procfile `http_port: {}` is not listed in `ports:` ({:?}). \
+                 Add {} to `ports:` so the enclave actually exposes it.",
+                http_port,
+                ports,
+                http_port
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn resolve_quorum_parameters(
@@ -1569,6 +1651,65 @@ impl ApiClient {
         }
 
         Ok(())
+    }
+
+    fn read_procfile_field_from_dir(&self, dir: &Path, field: &str) -> Option<String> {
+        let procfile_path = dir.join("Procfile");
+        if !procfile_path.exists() {
+            return None;
+        }
+
+        let content = match fs::read_to_string(&procfile_path) {
+            Ok(c) => c,
+            Err(_) => return None,
+        };
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let prefix = format!("{}:", field);
+            if let Some(value) = line.strip_prefix(&prefix) {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    fn read_procfile_ports_from_dir(&self, dir: &Path) -> Vec<u16> {
+        match self.read_procfile_field_from_dir(dir, "ports") {
+            Some(ports_str) => ports_str
+                .split(',')
+                .filter_map(|s| s.trim().parse::<u16>().ok())
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Validate Procfile directives that otherwise fail late (boot-time panic) or silently.
+    ///
+    /// - `binary:` + `locksmith: true` is rejected (A2): `binary:` extracts only the binary's
+    ///   directory, dropping `/etc/caution/`, so `locksmithd` panics at boot.
+    /// - `http_port:` must be present in `ports:` (A5), or the proxy silently misroutes.
+    fn validate_procfile_directives(&self) -> Result<()> {
+        self.validate_procfile_directives_in_dir(Path::new("."))
+    }
+
+    fn validate_procfile_directives_in_dir(&self, dir: &Path) -> Result<()> {
+        let binary = self.read_procfile_field_from_dir(dir, "binary");
+        let locksmith = self
+            .read_procfile_field_from_dir(dir, "locksmith")
+            .map(|v| v.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let http_port = self.read_procfile_field_from_dir(dir, "http_port");
+        let ports = self.read_procfile_ports_from_dir(dir);
+
+        validate_procfile_directives_fields(binary.as_deref(), locksmith, http_port.as_deref(), &ports)
     }
 
     fn set_git_remote(&self, git_url: &str) -> Result<()> {
@@ -2922,6 +3063,8 @@ enclave "default" {{
         println!("Configuration found");
         println!("Build command: {}", cmd);
 
+        self.validate_procfile_directives()?;
+
         let config = self.ensure_authenticated().await?;
 
         log_verbose(self.verbose, "Creating app on server...");
@@ -3309,6 +3452,8 @@ enclave "default" {{
         let cmd = resolve_local_build_command_from_dir(Path::new("."), false)?;
         println!("Configuration found");
         println!("Build command: {}", cmd);
+
+        self.validate_procfile_directives()?;
 
         let config = self.ensure_authenticated().await?;
 
@@ -4224,6 +4369,8 @@ enclave "default" {{
 
     async fn build_local(&self, no_cache: bool) -> Result<()> {
         println!("Building EIF locally for inspection...\n");
+
+        self.validate_procfile_directives()?;
 
         let app_commit = Command::new("git")
             .args(&["rev-parse", "HEAD"])
@@ -6540,8 +6687,53 @@ enclave "default" {{
         let keyring_data = fs::read_to_string(&keyring)
             .with_context(|| format!("Failed to read keyring file: {}", keyring.display()))?;
 
-        let eligible_certs = keymaker_eligible_cert_count(&keyring_data)
+        let eligibility = keymaker_cert_eligibility(&keyring_data)
             .with_context(|| format!("Failed to inspect keyring file: {}", keyring.display()))?;
+        let eligible_certs = eligibility.iter().filter(|cert| cert.is_eligible()).count();
+
+        if eligible_certs == 0 {
+            eprintln!(
+                "Keyring has no Keymaker-eligible certificates (each needs signing + \
+                 authentication + storage-encryption subkeys):"
+            );
+            if eligibility.is_empty() {
+                eprintln!("  (no certificates found in keyring)");
+            }
+            for cert in &eligibility {
+                eprintln!(
+                    "  - {} — missing: {}",
+                    cert.user_id,
+                    cert.missing().join(", ")
+                );
+            }
+            bail!(
+                "No Keymaker-eligible certificates in {}. Fix: generate a compatible key with \
+                 `caution secret keygen` (non-prod), or derive one offline with keyfork: \
+                 https://git.distrust.co/public/keyfork",
+                keyring.display()
+            );
+        }
+
+        // Warn about any certs that lack required subkeys and will be silently excluded.
+        let ineligible: Vec<&CertEligibility> = eligibility
+            .iter()
+            .filter(|cert| !cert.is_eligible())
+            .collect();
+        if !ineligible.is_empty() {
+            eprintln!(
+                "Warning: {} certificate(s) in the keyring lack required subkeys and will be \
+                 excluded from the quorum:",
+                ineligible.len()
+            );
+            for cert in ineligible {
+                eprintln!(
+                    "  - {} — missing: {}",
+                    cert.user_id,
+                    cert.missing().join(", ")
+                );
+            }
+        }
+
         let (threshold, max) = resolve_quorum_parameters(threshold, max, eligible_certs)?;
 
         let keyring_data = normalize_keyring(&keyring_data)
@@ -7376,9 +7568,10 @@ pub async fn run() -> Result<()> {
 mod tests {
     use super::openpgp;
     use super::{
-        encrypt_env_file, encrypt_secret_value, load_recipient_cert, normalize_keyring,
-        parse_env_assignments, resolve_local_build_command_from_dir,
-        resolve_procfile_build_command, resolve_quorum_parameters, ApiClient,
+        encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility, load_recipient_cert,
+        normalize_keyring, parse_env_assignments, resolve_local_build_command_from_dir,
+        resolve_procfile_build_command, resolve_quorum_parameters,
+        validate_procfile_directives_fields, ApiClient,
     };
     use caution_config::ConfigurationFile;
     use keymaker_models::generate_quorum::GenerateQuorumResponse;
@@ -7647,5 +7840,92 @@ containerfile: Missing.Containerfile\n",
         let hcl = ApiClient::generate_config_hcl("git@codeberg.org:user/repo.git", false);
         let config = ConfigurationFile::from_str(&hcl);
         assert!(config.is_ok(), "generated HCL should parse: {:?}", config.err());
+    }
+
+    // A2: binary: + locksmith: true is rejected (would drop /etc/caution/ → boot panic).
+    #[test]
+    fn validate_rejects_binary_with_locksmith() {
+        let err = validate_procfile_directives_fields(Some("/app/x"), true, None, &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("`binary:` and `locksmith: true`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_allows_binary_without_locksmith() {
+        validate_procfile_directives_fields(Some("/app/x"), false, None, &[8080]).unwrap();
+    }
+
+    // A5: http_port must be one of the declared ports.
+    #[test]
+    fn validate_rejects_http_port_not_in_ports() {
+        let err =
+            validate_procfile_directives_fields(None, false, Some("9000"), &[8080]).unwrap_err();
+        assert!(
+            err.to_string().contains("is not listed in `ports:`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_allows_http_port_in_ports() {
+        validate_procfile_directives_fields(None, false, Some("8080"), &[8080, 9000]).unwrap();
+    }
+
+    #[test]
+    fn validate_skips_http_port_check_when_ports_empty() {
+        // No `ports:` declared — nothing to cross-check against.
+        validate_procfile_directives_fields(None, false, Some("8080"), &[]).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_non_numeric_http_port() {
+        let err =
+            validate_procfile_directives_fields(None, false, Some("https"), &[8080]).unwrap_err();
+        assert!(
+            err.to_string().contains("not a valid port"),
+            "unexpected error: {err}"
+        );
+    }
+
+    fn cert_armor(builder: CertBuilder) -> String {
+        let (cert, _revocation) = builder.generate().unwrap();
+        String::from_utf8(cert.armored().to_vec().unwrap()).unwrap()
+    }
+
+    // A3: a cert carrying all three subkeys is Keymaker-eligible.
+    #[test]
+    fn cert_eligibility_accepts_full_cert() {
+        let keyring = cert_armor(
+            CertBuilder::new()
+                .add_userid("alice@example.org")
+                .add_signing_subkey()
+                .add_authentication_subkey()
+                .add_storage_encryption_subkey(),
+        );
+
+        let certs = keymaker_cert_eligibility(&keyring).unwrap();
+        assert_eq!(certs.len(), 1);
+        assert!(certs[0].is_eligible());
+        assert!(certs[0].missing().is_empty());
+        assert_eq!(certs[0].user_id, "alice@example.org");
+    }
+
+    // A3: a default-style cert without an authentication subkey is reported as ineligible,
+    // naming exactly the missing role.
+    #[test]
+    fn cert_eligibility_reports_missing_authentication_subkey() {
+        let keyring = cert_armor(
+            CertBuilder::new()
+                .add_userid("bob@example.org")
+                .add_signing_subkey()
+                .add_storage_encryption_subkey(),
+        );
+
+        let certs = keymaker_cert_eligibility(&keyring).unwrap();
+        assert_eq!(certs.len(), 1);
+        assert!(!certs[0].is_eligible());
+        assert_eq!(certs[0].missing(), vec!["authentication"]);
     }
 }
