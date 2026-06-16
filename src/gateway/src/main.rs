@@ -7,7 +7,8 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
-use russh_keys::key::KeyPair;
+use russh::keys::{Algorithm, PrivateKey};
+use russh::keys::ssh_key::LineEnding;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -430,7 +431,7 @@ async fn shutdown_signal() {
     }
 }
 
-fn load_or_generate_host_key(path: &str) -> Result<KeyPair> {
+fn load_or_generate_host_key(path: &str) -> Result<PrivateKey> {
     use std::fs;
     use std::path::Path;
 
@@ -440,7 +441,7 @@ fn load_or_generate_host_key(path: &str) -> Result<KeyPair> {
         let key_data = fs::read(key_path)
             .with_context(|| format!("Failed to read SSH host key from {}", path))?;
 
-        let key = russh_keys::decode_secret_key(&String::from_utf8_lossy(&key_data), None)
+        let key = PrivateKey::from_openssh(&key_data)
             .context("Failed to decode SSH host key")?;
 
         tracing::debug!("Loaded SSH host key");
@@ -448,17 +449,17 @@ fn load_or_generate_host_key(path: &str) -> Result<KeyPair> {
     } else {
         tracing::info!("Generating new SSH host key");
 
-        let key = KeyPair::generate_ed25519().context("Failed to generate Ed25519 key")?;
+        let key = PrivateKey::random(&mut rand010::rng(), Algorithm::Ed25519)
+            .context("Failed to generate Ed25519 key")?;
 
         if let Some(parent) = key_path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create directory {}", parent.display()))?;
         }
 
-        let mut key_data = Vec::new();
-        russh_keys::encode_pkcs8_pem(&key, &mut key_data)
+        let key_pem = key.to_openssh(LineEnding::LF)
             .context("Failed to encode SSH host key")?;
-        fs::write(key_path, &key_data)
+        fs::write(key_path, key_pem.as_bytes())
             .with_context(|| format!("Failed to write SSH host key to {}", path))?;
 
         #[cfg(unix)]
@@ -471,5 +472,42 @@ fn load_or_generate_host_key(path: &str) -> Result<KeyPair> {
 
         tracing::info!("SSH host key generated");
         Ok(key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_or_generate_host_key;
+    use russh::keys::{Algorithm, HashAlg};
+
+    #[test]
+    fn generates_ed25519_host_key_and_persists_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("nested").join("ssh_host_key");
+        let path = key_path.to_str().unwrap();
+
+        // First call generates and writes the key.
+        let generated = load_or_generate_host_key(path).unwrap();
+        assert_eq!(generated.algorithm(), Algorithm::Ed25519);
+        assert!(key_path.exists(), "host key file should be written");
+
+        // The on-disk key must be valid OpenSSH PEM (re-decodable).
+        let on_disk = std::fs::read_to_string(&key_path).unwrap();
+        assert!(on_disk.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&key_path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "host key must be private (0600)");
+        }
+
+        // Second call loads the existing key unchanged (same fingerprint).
+        let loaded = load_or_generate_host_key(path).unwrap();
+        assert_eq!(
+            generated.fingerprint(HashAlg::Sha256),
+            loaded.fingerprint(HashAlg::Sha256),
+            "loaded key should match the generated key"
+        );
     }
 }

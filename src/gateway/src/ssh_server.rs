@@ -3,10 +3,10 @@
 
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
+use bytes::Bytes;
+use russh::keys::{PrivateKey, PublicKey, PublicKeyBase64};
 use russh::server::{Auth, Msg, Server, Session};
 use russh::{Channel, ChannelId};
-use russh_keys::PublicKeyBase64;
-use russh_keys::key::{KeyPair, PublicKey};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::path::Path;
@@ -93,7 +93,17 @@ impl russh::server::Server for SshServer {
     }
 }
 
-#[async_trait::async_trait]
+/// Render a public key as the OpenSSH `"<type> <base64>"` line used for
+/// fingerprinting during auth. Must match how keys were stored at
+/// registration, otherwise lookups by fingerprint fail.
+fn public_key_line(public_key: &PublicKey) -> String {
+    format!(
+        "{} {}",
+        public_key.algorithm(),
+        public_key.public_key_base64()
+    )
+}
+
 impl russh::server::Handler for SshSession {
     type Error = anyhow::Error;
 
@@ -113,10 +123,8 @@ impl russh::server::Handler for SshSession {
     ) -> Result<Auth, Self::Error> {
         tracing::info!("SSH public key auth attempt for user: {}", user);
 
-        // Convert public key to OpenSSH format
-        let pub_key_str = public_key.public_key_base64();
-        let key_type = public_key.name();
-        let full_key = format!("{} {}", key_type, pub_key_str);
+        // Convert public key to OpenSSH "<type> <base64>" form for fingerprinting.
+        let full_key = public_key_line(public_key);
 
         let fingerprint = match crate::db::generate_ssh_fingerprint(&full_key) {
             Ok(fp) => fp,
@@ -124,6 +132,7 @@ impl russh::server::Handler for SshSession {
                 tracing::warn!("Failed to generate SSH fingerprint: {}", e);
                 return Ok(Auth::Reject {
                     proceed_with_methods: None,
+                    partial_success: false,
                 });
             }
         };
@@ -142,12 +151,14 @@ impl russh::server::Handler for SshSession {
                 tracing::warn!("SSH key not found in database");
                 Ok(Auth::Reject {
                     proceed_with_methods: None,
+                    partial_success: false,
                 })
             }
             Err(e) => {
                 tracing::error!("SSH auth error: {:?}", e);
                 Ok(Auth::Reject {
                     proceed_with_methods: None,
+                    partial_success: false,
                 })
             }
         }
@@ -203,27 +214,26 @@ impl russh::server::Handler for SshSession {
                         fingerprint,
                         app_id
                     );
-                    session.extended_data(
+                    let _ = session.extended_data(
                         channel,
                         1,
-                        format!("remote: error: {}", error_msg).into_bytes().into(),
+                        Bytes::from(format!("remote: error: {}", error_msg).into_bytes()),
                     );
-                    session.exit_status_request(channel, 1);
-                    session.close(channel);
+                    let _ = session.exit_status_request(channel, 1);
+                    let _ = session.close(channel);
                     return Ok(());
                 }
                 Err(e) => {
                     tracing::error!("Failed to resolve user for app: {:?}", e);
-                    session.extended_data(
+                    let _ = session.extended_data(
                         channel,
                         1,
-                        "remote: error: Internal error, please try again later.\n"
-                            .as_bytes()
-                            .to_vec()
-                            .into(),
+                        Bytes::from_static(
+                            b"remote: error: Internal error, please try again later.\n",
+                        ),
                     );
-                    session.exit_status_request(channel, 1);
-                    session.close(channel);
+                    let _ = session.exit_status_request(channel, 1);
+                    let _ = session.close(channel);
                     return Ok(());
                 }
             };
@@ -248,16 +258,16 @@ impl russh::server::Handler for SshSession {
                 Err(e) => {
                     tracing::error!("Git push failed: {:?}", e);
                     let error_msg = format!("remote: error: {}\n", e);
-                    session.extended_data(channel, 1, error_msg.into_bytes().into());
-                    session.exit_status_request(channel, 1);
-                    session.close(channel);
+                    let _ = session.extended_data(channel, 1, Bytes::from(error_msg.into_bytes()));
+                    let _ = session.exit_status_request(channel, 1);
+                    let _ = session.close(channel);
                 }
             }
         } else {
             let error = "remote: Only git-receive-pack commands are supported\n";
-            session.extended_data(channel, 1, error.as_bytes().to_vec().into());
-            session.exit_status_request(channel, 1);
-            session.close(channel);
+            let _ = session.extended_data(channel, 1, Bytes::from(error.as_bytes().to_vec()));
+            let _ = session.exit_status_request(channel, 1);
+            let _ = session.close(channel);
         }
 
         Ok(())
@@ -599,7 +609,7 @@ async fn handle_git_push(
                         Ok(0) => break,
                         Ok(n) => {
                             tracing::debug!("Git stdout: {} bytes", n);
-                            if let Err(e) = handle.data(channel, buf[..n].to_vec().into()).await {
+                            if let Err(e) = handle.data(channel, Bytes::copy_from_slice(&buf[..n])).await {
                                 tracing::error!("Failed to send git stdout to SSH: {:?}", e);
                                 break;
                             }
@@ -623,7 +633,7 @@ async fn handle_git_push(
                         Ok(n) => {
                             tracing::debug!("Git stderr: {} bytes", n);
                             if let Err(e) = handle
-                                .extended_data(channel, 1, buf[..n].to_vec().into())
+                                .extended_data(channel, 1, Bytes::copy_from_slice(&buf[..n]))
                                 .await
                             {
                                 tracing::error!("Failed to send git stderr to SSH: {:?}", e);
@@ -651,7 +661,7 @@ async fn handle_git_push(
                         let error_msg =
                             format!("remote: error: Failed to complete git receive-pack\n");
                         let _ = session_handle
-                            .extended_data(channel, 1, error_msg.into_bytes().into())
+                            .extended_data(channel, 1, Bytes::from(error_msg.into_bytes()))
                             .await;
                         let _ = session_handle.exit_status_request(channel, 1).await;
                         let _ = session_handle.close(channel).await;
@@ -691,7 +701,7 @@ async fn handle_git_push(
                             head_ref.branch, head_ref.commit_sha, head_ref.branch
                         );
                         let _ = session_handle
-                            .extended_data(channel, 1, msg.into_bytes().into())
+                            .extended_data(channel, 1, Bytes::from(msg.into_bytes()))
                             .await;
                         head_ref
                     }
@@ -701,7 +711,7 @@ async fn handle_git_push(
                         );
                         let msg = "\nremote: No branch updates; skipping deployment.\n".to_string();
                         let _ = session_handle
-                            .extended_data(channel, 1, msg.into_bytes().into())
+                            .extended_data(channel, 1, Bytes::from(msg.into_bytes()))
                             .await;
                         let _ = session_handle.exit_status_request(channel, 0).await;
                         let _ = session_handle.close(channel).await;
@@ -711,7 +721,7 @@ async fn handle_git_push(
                         tracing::error!("Failed to resolve repo HEAD for no-op push: {}", e);
                         let msg = "remote: error: Failed to resolve deploy branch\n".to_string();
                         let _ = session_handle
-                            .extended_data(channel, 1, msg.into_bytes().into())
+                            .extended_data(channel, 1, Bytes::from(msg.into_bytes()))
                             .await;
                         let _ = session_handle.exit_status_request(channel, 1).await;
                         let _ = session_handle.close(channel).await;
@@ -723,7 +733,7 @@ async fn handle_git_push(
                 tracing::info!("No branch refs updated; skipping deployment");
                 let msg = "\nremote: No branch updates; skipping deployment.\n".to_string();
                 let _ = session_handle
-                    .extended_data(channel, 1, msg.into_bytes().into())
+                    .extended_data(channel, 1, Bytes::from(msg.into_bytes()))
                     .await;
                 let _ = session_handle.exit_status_request(channel, 0).await;
                 let _ = session_handle.close(channel).await;
@@ -735,7 +745,7 @@ async fn handle_git_push(
                     "\nremote: warning: Multiple branches updated; push one branch to deploy.\n"
                         .to_string();
                 let _ = session_handle
-                    .extended_data(channel, 1, msg.into_bytes().into())
+                    .extended_data(channel, 1, Bytes::from(msg.into_bytes()))
                     .await;
                 let _ = session_handle.exit_status_request(channel, 0).await;
                 let _ = session_handle.close(channel).await;
@@ -745,7 +755,7 @@ async fn handle_git_push(
                 tracing::error!("Failed to read pushed branch refs: {}", e);
                 let msg = "remote: error: Failed to read pushed refs\n".to_string();
                 let _ = session_handle
-                    .extended_data(channel, 1, msg.into_bytes().into())
+                    .extended_data(channel, 1, Bytes::from(msg.into_bytes()))
                     .await;
                 let _ = session_handle.exit_status_request(channel, 1).await;
                 let _ = session_handle.close(channel).await;
@@ -767,7 +777,7 @@ async fn handle_git_push(
             branch, commit_sha
         );
         let _ = session_handle
-            .extended_data(channel, 1, deploy_ref_msg.into_bytes().into())
+            .extended_data(channel, 1, Bytes::from(deploy_ref_msg.into_bytes()))
             .await;
 
         #[derive(serde::Serialize)]
@@ -815,7 +825,7 @@ async fn handle_git_push(
                     "remote: error: Failed to trigger deployment, please try again later.\n"
                         .to_string();
                 let _ = session_handle
-                    .extended_data(channel, 1, error_msg.into_bytes().into())
+                    .extended_data(channel, 1, Bytes::from(error_msg.into_bytes()))
                     .await;
                 let _ = session_handle.exit_status_request(channel, 1).await;
                 let _ = session_handle.close(channel).await;
@@ -832,7 +842,7 @@ async fn handle_git_push(
             let error_msg =
                 "remote: error: Deployment failed, please try again later.\n".to_string();
             let _ = session_handle
-                .extended_data(channel, 1, error_msg.into_bytes().into())
+                .extended_data(channel, 1, Bytes::from(error_msg.into_bytes()))
                 .await;
             let _ = session_handle.exit_status_request(channel, 1).await;
             let _ = session_handle.close(channel).await;
@@ -884,7 +894,7 @@ async fn handle_git_push(
                             if let Some(milestone) = current_milestone.take() {
                                 let done_msg = format!("\rremote: [x] {}\n", milestone);
                                 let _ = session_handle
-                                    .extended_data(channel, 1, done_msg.into_bytes().into())
+                                    .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
                                     .await;
                             }
                             last_line = line;
@@ -896,7 +906,7 @@ async fn handle_git_push(
                             if let Some(prev_milestone) = current_milestone.take() {
                                 let done_msg = format!("\rremote: [x] {}\n", prev_milestone);
                                 let _ = session_handle
-                                    .extended_data(channel, 1, done_msg.into_bytes().into())
+                                    .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
                                     .await;
                             }
 
@@ -923,7 +933,7 @@ async fn handle_git_push(
                                         _ = &mut stop_rx => break,
                                         _ = interval.tick() => {
                                             let frame_msg = format!("\rremote: {} {}", spinner_frames[frame_idx], milestone_for_spinner);
-                                            let _ = session_handle_clone.extended_data(channel, 1, frame_msg.as_bytes().to_vec().into()).await;
+                                            let _ = session_handle_clone.extended_data(channel, 1, Bytes::from(frame_msg.as_bytes().to_vec())).await;
                                             frame_idx = (frame_idx + 1) % spinner_frames.len();
                                         }
                                     }
@@ -934,7 +944,7 @@ async fn handle_git_push(
                             let initial_msg =
                                 format!("remote: {} {}", spinner_frames[0], milestone_text);
                             let _ = session_handle
-                                .extended_data(channel, 1, initial_msg.into_bytes().into())
+                                .extended_data(channel, 1, Bytes::from(initial_msg.into_bytes()))
                                 .await;
                         } else if !line.is_empty() {
                             // Plain message or error - stop spinner and show
@@ -944,7 +954,7 @@ async fn handle_git_push(
                             if let Some(milestone) = current_milestone.take() {
                                 let done_msg = format!("\rremote: [x] {}\n", milestone);
                                 let _ = session_handle
-                                    .extended_data(channel, 1, done_msg.into_bytes().into())
+                                    .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
                                     .await;
                             }
                             if line.starts_with("error:") {
@@ -952,7 +962,7 @@ async fn handle_git_push(
                             }
                             let msg = format!("remote: {}\n", line);
                             let _ = session_handle
-                                .extended_data(channel, 1, msg.into_bytes().into())
+                                .extended_data(channel, 1, Bytes::from(msg.into_bytes()))
                                 .await;
                         }
                     }
@@ -964,7 +974,7 @@ async fn handle_git_push(
                     tracing::error!("Error reading deployment stream: {}", e);
                     let error_msg = format!("remote: error: Stream error: {}\n", e);
                     let _ = session_handle
-                        .extended_data(channel, 1, error_msg.into_bytes().into())
+                        .extended_data(channel, 1, Bytes::from(error_msg.into_bytes()))
                         .await;
                     let _ = session_handle.exit_status_request(channel, 1).await;
                     let _ = session_handle.close(channel).await;
@@ -980,7 +990,7 @@ async fn handle_git_push(
         if let Some(milestone) = current_milestone.take() {
             let done_msg = format!("\rremote: [x] {}\n", milestone);
             let _ = session_handle
-                .extended_data(channel, 1, done_msg.into_bytes().into())
+                .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
                 .await;
         }
         if !buffer.is_empty() && buffer.starts_with('{') {
@@ -999,7 +1009,7 @@ async fn handle_git_push(
                     if !stream_reported_error {
                         let error_msg = format!("remote: error: {}\n", api_error.error);
                         let _ = session_handle
-                            .extended_data(channel, 1, error_msg.into_bytes().into())
+                            .extended_data(channel, 1, Bytes::from(error_msg.into_bytes()))
                             .await;
                     }
                     let _ = session_handle.exit_status_request(channel, 1).await;
@@ -1014,7 +1024,7 @@ async fn handle_git_push(
                 );
                 let error_msg = format!("remote: error: Invalid deployment response\n");
                 let _ = session_handle
-                    .extended_data(channel, 1, error_msg.into_bytes().into())
+                    .extended_data(channel, 1, Bytes::from(error_msg.into_bytes()))
                     .await;
                 let _ = session_handle.exit_status_request(channel, 1).await;
                 let _ = session_handle.close(channel).await;
@@ -1044,7 +1054,7 @@ async fn handle_git_push(
             deploy_result.url, attestation_url, dns_note
         );
         let _ = session_handle
-            .extended_data(channel, 1, success_msg.into_bytes().into())
+            .extended_data(channel, 1, Bytes::from(success_msg.into_bytes()))
             .await;
         let _ = session_handle.exit_status_request(channel, 0).await;
         let _ = session_handle.close(channel).await;
@@ -1063,6 +1073,53 @@ mod tests {
     const OLD_SHA: &str = "1111111111111111111111111111111111111111";
     const MAIN_SHA: &str = "2222222222222222222222222222222222222222";
     const FEATURE_SHA: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    #[test]
+    fn public_key_line_fingerprints_to_openssh_value() {
+        use russh::keys::PublicKey;
+
+        // Same key/fingerprint as the golden vector in db::tests, verified with
+        // `ssh-keygen -lf`. This exercises the real auth extraction path:
+        // parse a key the way russh hands it to us, build the line, fingerprint.
+        let pubkey = "ssh-ed25519 \
+            AAAAC3NzaC1lZDI1NTE5AAAAIMBnPZP2DQ1v1MC9AQKLsNo0M649c6MVmz9O+P9UiBrT \
+            test@example.com";
+        let key = PublicKey::from_openssh(pubkey).unwrap();
+
+        let line = super::public_key_line(&key);
+        assert_eq!(
+            line,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMBnPZP2DQ1v1MC9AQKLsNo0M649c6MVmz9O+P9UiBrT"
+        );
+
+        let fingerprint = crate::db::generate_ssh_fingerprint(&line).unwrap();
+        assert_eq!(fingerprint, "vO7cKxkbEOoI4Qix7nsJMasdWsJHDFVfgXsKQrA0DhM");
+    }
+
+    #[test]
+    fn ssh_config_offers_and_prefers_post_quantum_kex() {
+        use russh::keys::{Algorithm, PrivateKey};
+
+        let host_key = PrivateKey::random(&mut rand010::rng(), Algorithm::Ed25519).unwrap();
+        let config = super::ssh_server_config(host_key);
+
+        // The PQ hybrid kex must be offered...
+        assert!(
+            config
+                .preferred
+                .kex
+                .contains(&russh::kex::MLKEM768X25519_SHA256),
+            "server must offer the post-quantum mlkem768x25519-sha256 key exchange"
+        );
+
+        // ...and preferred over the classical algorithms, so a PQ-capable
+        // client negotiates it instead of falling back to e.g. curve25519.
+        assert_eq!(
+            config.preferred.kex.first(),
+            Some(&russh::kex::MLKEM768X25519_SHA256),
+            "post-quantum kex must be the highest-priority algorithm"
+        );
+    }
 
     #[test]
     fn pushed_ref_parser_keeps_branch_updates() {
@@ -1183,21 +1240,32 @@ mod tests {
     }
 }
 
-pub async fn run_ssh_server(
-    pool: PgPool,
-    api_service_url: String,
-    data_dir: String,
-    internal_service_secret: Option<String>,
-    host_key: KeyPair,
-    bind_addr: &str,
-) -> Result<()> {
-    let config = Arc::new(russh::server::Config {
+/// Build the SSH server config.
+///
+/// The default `Preferred` algorithm set leads with the post-quantum
+/// `mlkem768x25519-sha256` key exchange, so clients (incl. recent OpenSSH)
+/// negotiate a PQ kex and avoid "store now, decrypt later" warnings. We rely
+/// on that default rather than hand-rolling a kex list so we stay current as
+/// russh adds algorithms.
+fn ssh_server_config(host_key: PrivateKey) -> russh::server::Config {
+    russh::server::Config {
         inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
         auth_rejection_time: std::time::Duration::from_secs(3),
         auth_rejection_time_initial: Some(std::time::Duration::from_secs(0)),
         keys: vec![host_key],
         ..Default::default()
-    });
+    }
+}
+
+pub async fn run_ssh_server(
+    pool: PgPool,
+    api_service_url: String,
+    data_dir: String,
+    internal_service_secret: Option<String>,
+    host_key: PrivateKey,
+    bind_addr: &str,
+) -> Result<()> {
+    let config = Arc::new(ssh_server_config(host_key));
 
     let mut server = SshServer::new(pool, api_service_url, data_dir, internal_service_secret);
 
