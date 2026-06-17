@@ -23,6 +23,7 @@ use uuid::Uuid;
 mod billing;
 mod builder;
 mod cloud_credentials;
+mod config;
 mod cryptographic_bundles;
 mod deployment;
 mod ec2;
