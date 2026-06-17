@@ -9,6 +9,8 @@ use crate::dunning::send_dunning_email;
 use crate::paddle;
 use crate::AppState;
 
+const LOW_BALANCE_WARNING_CENTS: i64 = 2_500;
+
 /// After deducting credits, check if the org's balance requires action.
 pub(crate) async fn check_balance_thresholds(state: &AppState, org_id: uuid::Uuid) -> Result<()> {
     let balance_cents = get_ledger_balance_cents(&state.pool, org_id).await?;
@@ -97,8 +99,8 @@ pub(crate) async fn check_balance_thresholds(state: &AppState, org_id: uuid::Uui
         return Ok(());
     }
 
-    // Priority 3: No auto top-up, balance < $5 (500 cents) → warn
-    if balance_cents < 500 {
+    // Priority 3: No auto top-up, balance below deploy minimum → warn
+    if balance_cents < LOW_BALANCE_WARNING_CENTS {
         let cooldown_ok = low_balance_warned_at
             .map(|t| (now - t).num_seconds() > 86400) // >24h
             .unwrap_or(true);
