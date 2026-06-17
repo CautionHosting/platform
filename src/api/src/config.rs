@@ -47,7 +47,7 @@ pub struct DebugConfig {
 }
 
 /// A port specification
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PortSpec {
     FromTo { from_port: u16, to_port: u16 },
@@ -119,6 +119,272 @@ pub struct EnclaveConfig {
 pub struct ConfigurationFile {
     pub caution: Option<CautionConfig>,
     pub enclave: Option<BTreeMap<String, EnclaveConfig>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum FromProcfileError {
+    #[error("Port {0} is reserved for internal enclave services. Ports 49500-49600 are reserved; choose a different application port.")]
+    ReservedPort(u16),
+
+    #[error("http_port {0} must also be listed in ports")]
+    HttpPortNotInPorts(u16),
+}
+
+impl ConfigurationFile {
+    pub fn from_procfile(content: &str) -> Result<Self, FromProcfileError> {
+        const RESERVED_INTERNAL_PORT_START: u16 = 49_500;
+        const RESERVED_INTERNAL_PORT_END: u16 = 49_600;
+
+        let is_reserved =
+            |port: u16| (RESERVED_INTERNAL_PORT_START..=RESERVED_INTERNAL_PORT_END).contains(&port);
+
+        let mut containerfile = None;
+        let mut binary = None;
+        let mut app_sources: Vec<String> = Vec::new();
+        let mut cache: Option<bool> = None;
+        let mut memory_mb = None;
+        let mut cpus = None;
+        let mut debug = None;
+        let mut ssh_keys: Vec<String> = Vec::new();
+        let mut ports: Vec<u16> = Vec::new();
+        let mut http_port: Option<u16> = None;
+        let mut domain: Option<String> = None;
+        let mut run = None;
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once(':') {
+                let key = key.trim();
+                let value = value.trim().to_string();
+                match key {
+                    "run" => {
+                        if !value.is_empty() {
+                            run = Some(value);
+                        }
+                    }
+                    "containerfile" => {
+                        if !value.is_empty() {
+                            containerfile = Some(value);
+                        }
+                    }
+                    "binary" => {
+                        if !value.is_empty() {
+                            binary = Some(value);
+                        }
+                    }
+                    "app_source" | "app_sources" => {
+                        if !value.is_empty() {
+                            app_sources = value
+                                .split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                        }
+                    }
+                    "cache" => {
+                        cache = Some(value.to_lowercase() == "true");
+                    }
+                    "no_cache" | "nocache" => {
+                        cache = Some(value.to_lowercase() != "true");
+                    }
+                    "memory" | "memory_mb" => {
+                        if let Ok(val) = value.parse::<u32>() {
+                            memory_mb = Some(val);
+                        }
+                    }
+                    "cpu" | "cpus" => {
+                        if let Ok(val) = value.parse::<u32>() {
+                            cpus = Some(val);
+                        }
+                    }
+                    "debug" => {
+                        debug = Some(value.to_lowercase() == "true");
+                    }
+                    "ssh_keys" | "ssh_key" => {
+                        if !value.is_empty() {
+                            let unquoted = value.trim_matches('"').trim_matches('\'').trim();
+                            if !unquoted.is_empty()
+                                && (unquoted.starts_with("ssh-")
+                                    || unquoted.starts_with("ecdsa-")
+                                    || unquoted.starts_with("sk-"))
+                            {
+                                ssh_keys.push(unquoted.to_string());
+                            }
+                        }
+                    }
+                    "ports" => {
+                        for s in value.split(',') {
+                            let trimmed = s.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            match trimmed.parse::<u16>() {
+                                Ok(port) if port > 0 => {
+                                    if is_reserved(port) {
+                                        return Err(FromProcfileError::ReservedPort(port));
+                                    }
+                                    ports.push(port);
+                                }
+                                Ok(_) => {}
+                                Err(_) => {}
+                            }
+                        }
+                        ports.sort();
+                        ports.dedup();
+                    }
+                    "http_port" => match value.parse::<u16>() {
+                        Ok(port) if port > 0 => {
+                            http_port = Some(port);
+                        }
+                        _ => {}
+                    },
+                    "domain" => {
+                        if !value.is_empty() {
+                            domain = Some(value);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let Some(hp) = http_port {
+            if !ports.contains(&hp) {
+                return Err(FromProcfileError::HttpPortNotInPorts(hp));
+            }
+        }
+
+        let http_port = match http_port {
+            Some(hp) => Some(hp),
+            None if ports.len() == 1 => {
+                Some(ports[0])
+            }
+            None => None,
+        };
+
+        let build = if containerfile.is_some()
+            || binary.is_some()
+            || !app_sources.is_empty()
+            || cache.is_some()
+        {
+            Some(BuildConfig {
+                containerfile,
+                binary,
+                app_sources,
+                cache,
+            })
+        } else {
+            None
+        };
+
+        let has_debug = debug.is_some() || !ssh_keys.is_empty();
+        let debug_config = if has_debug {
+            Some(DebugConfig {
+                enabled: debug,
+                ssh_keys,
+            })
+        } else {
+            None
+        };
+
+        let resources = match (memory_mb, cpus) {
+            (Some(mem), Some(cpu)) => Some(ResourceConfig {
+                cpu,
+                memory_mb: mem,
+            }),
+            (Some(mem), None) => Some(ResourceConfig {
+                cpu: 2,
+                memory_mb: mem,
+            }),
+            (None, Some(cpu)) => Some(ResourceConfig {
+                cpu,
+                memory_mb: 512,
+            }),
+            (None, None) => None,
+        };
+
+        let http = match (domain, http_port) {
+            (Some(d), Some(p)) => Some(HttpConfig {
+                domain: d,
+                port: p.to_string(),
+                e2e_encryption: None,
+            }),
+            (Some(d), None) => Some(HttpConfig {
+                domain: d,
+                port: "80".to_string(),
+                e2e_encryption: None,
+            }),
+            (None, _) => None,
+        };
+
+        let network = if !ports.is_empty() || http.is_some() {
+            let ingress: Vec<TrafficRule> = ports
+                .iter()
+                .map(|&port| TrafficRule {
+                    cidr_ipv4: "0.0.0.0/0".into(),
+                    port_spec: Some(PortSpec::FromTo {
+                        from_port: port,
+                        to_port: port,
+                    }),
+                    ip_protocol: Some("tcp".into()),
+                })
+                .collect();
+            Some(NetworkConfig {
+                ingress,
+                egress: Vec::new(),
+                http,
+            })
+        } else {
+            None
+        };
+
+        let unit = run.map(|cmd| {
+            let parts = shlex::split(&cmd);
+            let (command, args) = match parts {
+                Some(p) if !p.is_empty() => (p[0].clone(), p[1..].to_vec()),
+                _ => (cmd, Vec::new()),
+            };
+            let mut units = BTreeMap::new();
+            units.insert(
+                "default".to_string(),
+                UnitConfig {
+                    command,
+                    args,
+                    env: None,
+                },
+            );
+            units
+        });
+
+        let has_any_field = build.is_some()
+            || debug_config.is_some()
+            || network.is_some()
+            || resources.is_some()
+            || unit.is_some();
+
+        let enclave = if has_any_field {
+            Some(BTreeMap::from([(
+                "default".to_string(),
+                EnclaveConfig {
+                    build,
+                    debug: debug_config,
+                    network,
+                    resources,
+                    unit,
+                },
+            )]))
+        } else {
+            None
+        };
+
+        Ok(ConfigurationFile {
+            caution: None,
+            enclave,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -386,5 +652,319 @@ enclave "test" {
         let serialized = hcl::to_string(&config).expect("serialize to HCL");
         assert!(serialized.contains("env::vault"), "expression preserved in output");
         let _: ConfigurationFile = hcl::from_str(&serialized).expect("re-deserialize");
+    }
+
+    // ── from_procfile tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_from_procfile_run_command() {
+        let procfile = "run: /app/server\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.as_ref().unwrap();
+        let default = enclave.get("default").unwrap();
+        let unit = default.unit.as_ref().unwrap();
+        let main = unit.get("default").unwrap();
+        assert_eq!(main.command, "/app/server");
+        assert!(main.args.is_empty());
+    }
+
+    #[test]
+    fn test_from_procfile_run_with_args() {
+        let procfile = "run: /app/server --port 8080\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.as_ref().unwrap();
+        let unit = enclave.get("default").unwrap().unit.as_ref().unwrap();
+        let main = unit.get("default").unwrap();
+        assert_eq!(main.command, "/app/server");
+        assert_eq!(main.args, vec!["--port", "8080"]);
+    }
+
+    #[test]
+    fn test_from_procfile_ports_mapped_to_ingress() {
+        let procfile = "run: /app/server\nports: 80, 443\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let network = enclave.get("default").unwrap().network.as_ref().unwrap();
+        assert_eq!(network.ingress.len(), 2);
+        assert_eq!(network.ingress[0].cidr_ipv4, "0.0.0.0/0");
+        assert_eq!(network.ingress[0].port_spec, Some(PortSpec::FromTo { from_port: 80, to_port: 80 }));
+        assert_eq!(network.ingress[0].ip_protocol, Some("tcp".into()));
+        assert_eq!(network.ingress[1].port_spec, Some(PortSpec::FromTo { from_port: 443, to_port: 443 }));
+    }
+
+    #[test]
+    fn test_from_procfile_all_fields() {
+        let procfile = "\
+run: /app/server --port 8080
+containerfile: Containerfile.custom
+binary: myapp
+app_sources: url1, url2
+memory_mb: 2000
+cpus: 4
+debug: true
+ssh_keys: ssh-ed25519 AAAA...
+ports: 8080
+http_port: 8080
+domain: example.com
+cache: false
+";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let e = enclave.get("default").unwrap();
+
+        // build
+        let build = e.build.as_ref().unwrap();
+        assert_eq!(build.containerfile.as_deref(), Some("Containerfile.custom"));
+        assert_eq!(build.binary.as_deref(), Some("myapp"));
+        assert_eq!(build.app_sources, vec!["url1", "url2"]);
+        assert_eq!(build.cache, Some(false));
+
+        // resources
+        let resources = e.resources.as_ref().unwrap();
+        assert_eq!(resources.memory_mb, 2000);
+        assert_eq!(resources.cpu, 4);
+
+        // debug
+        let debug = e.debug.as_ref().unwrap();
+        assert_eq!(debug.enabled, Some(true));
+        assert_eq!(debug.ssh_keys, vec!["ssh-ed25519 AAAA..."]);
+
+        // network
+        let network = e.network.as_ref().unwrap();
+        assert_eq!(network.ingress.len(), 1);
+        assert_eq!(network.ingress[0].port_spec, Some(PortSpec::FromTo { from_port: 8080, to_port: 8080 }));
+        let http = network.http.as_ref().unwrap();
+        assert_eq!(http.domain, "example.com");
+        assert_eq!(http.port, "8080");
+
+        // unit
+        let unit = e.unit.as_ref().unwrap();
+        let main = unit.get("default").unwrap();
+        assert_eq!(main.command, "/app/server");
+        assert_eq!(main.args, vec!["--port", "8080"]);
+        assert!(main.env.is_none());
+    }
+
+    #[test]
+    fn test_from_procfile_empty() {
+        let config = ConfigurationFile::from_procfile("").unwrap();
+        assert!(config.caution.is_none());
+        assert!(config.enclave.is_none());
+    }
+
+    #[test]
+    fn test_from_procfile_only_comments() {
+        let procfile = "# this is a comment\n# another comment\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        assert!(config.caution.is_none());
+        assert!(config.enclave.is_none());
+    }
+
+    #[test]
+    fn test_from_procfile_comments_and_blank_lines() {
+        let procfile = "\n# comment\n\nrun: /app\n# trailing\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let unit = enclave.get("default").unwrap().unit.as_ref().unwrap();
+        assert_eq!(unit.get("default").unwrap().command, "/app");
+    }
+
+    #[test]
+    fn test_from_procfile_unknown_fields_skipped() {
+        let procfile = "run: /app\nunknown_field: value\nanother_unknown: 123\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let unit = enclave.get("default").unwrap().unit.as_ref().unwrap();
+        assert_eq!(unit.get("default").unwrap().command, "/app");
+    }
+
+    #[test]
+    fn test_from_procfile_http_port_and_domain() {
+        let procfile = "run: /app\nports: 8080\nhttp_port: 8080\ndomain: myapp.example.com\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let network = enclave.get("default").unwrap().network.as_ref().unwrap();
+        let http = network.http.as_ref().unwrap();
+        assert_eq!(http.domain, "myapp.example.com");
+        assert_eq!(http.port, "8080");
+    }
+
+    #[test]
+    fn test_from_procfile_nocache_inverted() {
+        let procfile = "run: /app\nnocache: true\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let build = enclave.get("default").unwrap().build.as_ref().unwrap();
+        assert_eq!(build.cache, Some(false));
+    }
+
+    #[test]
+    fn test_from_procfile_no_cache_inverted() {
+        let procfile = "run: /app\nno_cache: true\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let build = enclave.get("default").unwrap().build.as_ref().unwrap();
+        assert_eq!(build.cache, Some(false));
+    }
+
+    #[test]
+    fn test_from_procfile_nocache_false() {
+        let procfile = "run: /app\nnocache: false\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let build = enclave.get("default").unwrap().build.as_ref().unwrap();
+        assert_eq!(build.cache, Some(true));
+    }
+
+    #[test]
+    fn test_from_procfile_cache_last_wins() {
+        let procfile = "run: /app\ncache: true\nnocache: true\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let build = enclave.get("default").unwrap().build.as_ref().unwrap();
+        assert_eq!(build.cache, Some(false));
+    }
+
+    #[test]
+    fn test_from_procfile_reserved_port_rejected() {
+        let procfile = "run: /app\nports: 49500\n";
+        let result = ConfigurationFile::from_procfile(procfile);
+        assert!(matches!(result, Err(FromProcfileError::ReservedPort(49500))));
+    }
+
+    // ── Real-world Procfile tests ─────────────────────────────────────
+
+    const DEMO_HELLO_WORLD_PROCFILE: &str =
+        include_str!("../tests/data/demo-hello-world-enclave/Procfile");
+
+    const DEMO_AI_INFERENCE_PROCFILE: &str =
+        include_str!("../tests/data/demo-ai-inference/Procfile");
+
+    const LOCKSMITH_PROCFILE: &str =
+        include_str!("../tests/data/locksmith/Procfile");
+
+    #[test]
+    fn demo_hello_world_enclave() {
+        let config =
+            ConfigurationFile::from_procfile(DEMO_HELLO_WORLD_PROCFILE).unwrap();
+        let enclave = config.enclave.as_ref().unwrap();
+        let e = enclave.get("default").unwrap();
+
+        // run → unit
+        let unit = e.unit.as_ref().unwrap().get("default").unwrap();
+        assert_eq!(unit.command, "/usr/local/bin/hello");
+        assert!(unit.args.is_empty());
+
+        // binary → build
+        let build = e.build.as_ref().unwrap();
+        assert_eq!(build.binary.as_deref(), Some("/usr/local/bin/hello"));
+
+        // app_sources → build
+        assert_eq!(
+            build.app_sources,
+            vec!["git@codeberg.org:caution/demo-hello-world-enclave.git"]
+        );
+
+        // ports → network ingress (no domain → no http config)
+        let network = e.network.as_ref().unwrap();
+        assert_eq!(network.ingress.len(), 1);
+        assert_eq!(
+            network.ingress[0].port_spec,
+            Some(PortSpec::FromTo {
+                from_port: 8083,
+                to_port: 8083
+            })
+        );
+        assert!(network.http.is_none());
+    }
+
+    #[test]
+    fn demo_ai_inference() {
+        let config =
+            ConfigurationFile::from_procfile(DEMO_AI_INFERENCE_PROCFILE).unwrap();
+        let enclave = config.enclave.as_ref().unwrap();
+        let e = enclave.get("default").unwrap();
+
+        // run with args
+        let unit = e.unit.as_ref().unwrap().get("default").unwrap();
+        assert_eq!(unit.command, "/usr/bin/llama-server");
+        assert_eq!(
+            unit.args,
+            vec![
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8083",
+                "-m",
+                "/workdir/models/model.gguf",
+                "--path",
+                "/workdir/public",
+                "--ctx-size",
+                "2048",
+                "-t",
+                "8",
+            ]
+        );
+
+        // domain → http
+        let network = e.network.as_ref().unwrap();
+        let http = network.http.as_ref().unwrap();
+        assert_eq!(http.domain, "chat.caution.dev");
+        assert_eq!(http.port, "80");
+
+        // app_sources
+        let build = e.build.as_ref().unwrap();
+        assert_eq!(
+            build.app_sources,
+            vec!["https://codeberg.org/caution/demo-ai-inference.git"]
+        );
+
+        // resources
+        let resources = e.resources.as_ref().unwrap();
+        assert_eq!(resources.memory_mb, 55000);
+        assert_eq!(resources.cpu, 14);
+
+        // nocache → cache = false
+        assert_eq!(build.cache, Some(false));
+
+        // no ports → no ingress rules
+        assert!(network.ingress.is_empty());
+    }
+
+    #[test]
+    fn locksmith() {
+        let config = ConfigurationFile::from_procfile(LOCKSMITH_PROCFILE).unwrap();
+        let enclave = config.enclave.as_ref().unwrap();
+        let e = enclave.get("default").unwrap();
+
+        // run
+        let unit = e.unit.as_ref().unwrap().get("default").unwrap();
+        assert_eq!(unit.command, "/keymaker");
+        assert!(unit.args.is_empty());
+
+        // app_sources
+        let build = e.build.as_ref().unwrap();
+        assert_eq!(
+            build.app_sources,
+            vec!["https://codeberg.org/caution/locksmith/archive/${COMMIT}.tar.gz"]
+        );
+
+        // ports + http_port (no domain → no http config)
+        let network = e.network.as_ref().unwrap();
+        assert_eq!(network.ingress.len(), 1);
+        assert_eq!(
+            network.ingress[0].port_spec,
+            Some(PortSpec::FromTo {
+                from_port: 8080,
+                to_port: 8080
+            })
+        );
+        assert!(network.http.is_none());
+
+        // ssh_keys + debug → debug block populated
+        let debug = e.debug.as_ref().unwrap();
+        assert_eq!(debug.enabled, Some(true));
+        assert_eq!(debug.ssh_keys.len(), 1);
+        assert!(debug.ssh_keys[0].starts_with("ssh-rsa"));
     }
 }

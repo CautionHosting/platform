@@ -58,3 +58,4 @@ dirs = { workspace = true }
 # GPG decryption for managed on-prem
 sequoia-openpgp = { workspace = true }
 hcl-rs = { version = "0.19.7", features = ["perf"] }
+shlex = "1.3"
