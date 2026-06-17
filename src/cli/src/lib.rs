@@ -56,6 +56,10 @@ mod attestation;
 const BYOC_PROVISIONER_IMAGE: &str =
     "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest";
 const BYOC_STATE_FILE_NAME: &str = "bring-your-own-compute.json";
+// Legacy state file name, kept for backward compatibility so that deployments
+// created before the bring-your-own-cloud -> bring-your-own-compute rename can
+// still be located (e.g. for teardown).
+const BYOC_STATE_FILE_NAME_LEGACY: &str = "bring-your-own-cloud.json";
 const PLAINTEXT_KEYGEN_WARNING: &str = "This helper writes private OpenPGP key material to an \
 unencrypted file on disk. That is unsafe for real shard holders: anyone who can read the file can \
 submit that holder's shard. Prefer a smart card containing the OpenPGP key. Keyfork supports \
@@ -63,6 +67,21 @@ offline OpenPGP key derivation and smart-card-oriented workflows: https://git.di
 
 fn byoc_state_path(base_dir: &Path) -> PathBuf {
     base_dir.join(BYOC_STATE_FILE_NAME)
+}
+
+/// Resolve the state file to read: prefer the current name, then fall back to
+/// the legacy name for deployments created before the rename. Returns the
+/// current path when neither exists.
+fn byoc_state_read_path(base_dir: &Path) -> PathBuf {
+    let current = base_dir.join(BYOC_STATE_FILE_NAME);
+    if current.exists() {
+        return current;
+    }
+    let legacy = base_dir.join(BYOC_STATE_FILE_NAME_LEGACY);
+    if legacy.exists() {
+        return legacy;
+    }
+    current
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3933,7 +3952,7 @@ run: /app/myapp
             // Look for state file that matches this resource_id
             if let Ok(entries) = fs::read_dir(&caution_dir) {
                 for entry in entries.flatten() {
-                    let state_path = byoc_state_path(&entry.path());
+                    let state_path = byoc_state_read_path(&entry.path());
                     if state_path.exists() {
                         if let Ok(content) = fs::read_to_string(&state_path) {
                             if let Ok(state) = serde_json::from_str::<serde_json::Value>(&content) {
