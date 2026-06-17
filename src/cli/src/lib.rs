@@ -55,7 +55,7 @@ mod attestation;
 
 const BYOC_PROVISIONER_IMAGE: &str =
     "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest";
-const BYOC_STATE_FILE_NAME: &str = "bring-your-own-cloud.json";
+const BYOC_STATE_FILE_NAME: &str = "bring-your-own-compute.json";
 const PLAINTEXT_KEYGEN_WARNING: &str = "This helper writes private OpenPGP key material to an \
 unencrypted file on disk. That is unsafe for real shard holders: anyone who can read the file can \
 submit that holder's shard. Prefer a smart card containing the OpenPGP key. Keyfork supports \
@@ -501,8 +501,8 @@ enum Commands {
     Init {
         #[arg(
             long = "byoc",
-            alias = "bring-your-own-cloud",
-            help = "Set up a bring-your-own-cloud (BYOC) deployment"
+            alias = "bring-your-own-compute",
+            help = "Set up a bring-your-own-compute (BYOC) deployment"
         )]
         bring_your_own_cloud: bool,
         #[arg(
@@ -533,12 +533,12 @@ enum Commands {
         )]
         config: Option<PathBuf>,
     },
-    #[command(about = "Tear down a bring-your-own-cloud (BYOC) deployment")]
+    #[command(about = "Tear down a bring-your-own-compute (BYOC) deployment")]
     Teardown {
         #[arg(
             long = "byoc",
-            alias = "bring-your-own-cloud",
-            help = "Tear down bring-your-own-cloud infrastructure"
+            alias = "bring-your-own-compute",
+            help = "Tear down bring-your-own-compute infrastructure"
         )]
         bring_your_own_cloud: bool,
         #[arg(long, help = "Cloud platform (default: aws)", default_value = "aws")]
@@ -3184,7 +3184,7 @@ run: /app/myapp
         config_path: Option<PathBuf>,
     ) -> Result<()> {
         // If --byoc without --config, use the interactive flow.
-        // Keep the longer bring-your-own-cloud spelling working via a clap alias.
+        // Keep the longer bring-your-own-compute spelling working via a clap alias.
         if bring_your_own_cloud && config_path.is_none() {
             return self.init_byoc_interactive(name, region, local).await;
         }
@@ -3330,7 +3330,7 @@ run: /app/myapp
     }
 
     async fn init_byoc(&self, config_path: &PathBuf) -> Result<()> {
-        println!("Initializing bring-your-own-cloud deployment...");
+        println!("Initializing bring-your-own-compute deployment...");
 
         log_verbose(
             self.verbose,
@@ -3431,9 +3431,9 @@ run: /app/myapp
         let existing_resource_id = self.load_deployment().ok().map(|d| d.resource_id);
         let is_update = existing_resource_id.is_some();
         let loader_msg = if is_update {
-            "Updating bring-your-own-cloud resource"
+            "Updating bring-your-own-compute resource"
         } else {
-            "Creating bring-your-own-cloud resource"
+            "Creating bring-your-own-compute resource"
         };
         let mut loader = Loader::new(loader_msg, LoaderStyle::Processing);
 
@@ -3445,7 +3445,7 @@ run: /app/myapp
             .body(request_body)
             .send()
             .await
-            .context("Failed to send bring-your-own-cloud request")?;
+            .context("Failed to send bring-your-own-compute request")?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -3453,7 +3453,7 @@ run: /app/myapp
             loader.stop();
             let action = if is_update { "update" } else { "create" };
             bail!(
-                "Failed to {} bring-your-own-cloud resource (status {}): {}",
+                "Failed to {} bring-your-own-compute resource (status {}): {}",
                 action,
                 status,
                 error
@@ -3473,9 +3473,9 @@ run: /app/myapp
         let state = create_response["state"].as_str().unwrap_or("unknown");
 
         if is_update {
-            println!("Bring-your-own-cloud resource updated!");
+            println!("Bring-your-own-compute resource updated!");
         } else {
-            println!("Bring-your-own-cloud resource created!");
+            println!("Bring-your-own-compute resource created!");
         }
         println!("ID: {}", id);
         println!("Name: {}", resource_name);
@@ -3606,7 +3606,7 @@ run: /app/myapp
         region
     }
 
-    /// Interactive bring-your-own-cloud initialization
+    /// Interactive bring-your-own-compute initialization
     async fn init_byoc_interactive(
         &self,
         name: Option<String>,
@@ -3616,7 +3616,7 @@ run: /app/myapp
         use std::io::{self, Write};
 
         println!("\n╔══════════════════════════════════════════════════════════════════╗");
-        println!("║          Bring-Your-Own-Cloud Deployment Setup (AWS)             ║");
+        println!("║          Bring-Your-Own-Compute Deployment Setup (AWS)           ║");
         println!("╚══════════════════════════════════════════════════════════════════╝\n");
 
         // Check for Docker
@@ -3831,7 +3831,7 @@ run: /app/myapp
         println!("App created: {}", app_name);
 
         // Now register the BYOC credentials
-        println!("Registering bring-your-own-cloud configuration...");
+        println!("Registering bring-your-own-compute configuration...");
         let mut loader = Loader::new("Registering credentials", LoaderStyle::Processing);
 
         // Add resource_id to credentials
@@ -3910,12 +3910,12 @@ run: /app/myapp
         Ok(())
     }
 
-    /// Tear down bring-your-own-cloud deployment
+    /// Tear down bring-your-own-compute deployment
     async fn teardown_byoc(&self, force: bool, local: bool) -> Result<()> {
         use std::io::{self, Write};
 
         println!("\n╔══════════════════════════════════════════════════════════════════╗");
-        println!("║          Bring-Your-Own-Cloud Teardown (AWS)                     ║");
+        println!("║          Bring-Your-Own-Compute Teardown (AWS)                   ║");
         println!("╚══════════════════════════════════════════════════════════════════╝\n");
 
         // Try to find local state
@@ -3960,13 +3960,13 @@ run: /app/myapp
             }
             None => {
                 bail!(
-                    "No bring-your-own-cloud state found.\n\
-                       Run this command from your app directory or ensure ~/.caution/<app>/bring-your-own-cloud.json exists."
+                    "No bring-your-own-compute state found.\n\
+                       Run this command from your app directory or ensure the BYOC state file exists in ~/.caution/<app>/."
                 );
             }
         };
 
-        println!("Found bring-your-own-cloud deployment:");
+        println!("Found bring-your-own-compute deployment:");
         println!("  App: {}", app_name);
         println!("  Deployment ID: {}", deployment_id);
         println!("  Region: {}", aws_region);
@@ -4097,7 +4097,7 @@ run: /app/myapp
         println!("\n╔══════════════════════════════════════════════════════════════════╗");
         println!("║                    Teardown Complete                             ║");
         println!("╚══════════════════════════════════════════════════════════════════╝");
-        println!("\nAll bring-your-own-cloud resources have been destroyed.");
+        println!("\nAll bring-your-own-compute resources have been destroyed.");
 
         Ok(())
     }
@@ -6903,7 +6903,7 @@ pub async fn run() -> Result<()> {
         } => {
             if bring_your_own_cloud && platform != "aws" {
                 bail!(
-                    "Only --platform aws is currently supported for bring-your-own-cloud deployments"
+                    "Only --platform aws is currently supported for bring-your-own-compute deployments"
                 );
             }
             client
@@ -6919,7 +6919,7 @@ pub async fn run() -> Result<()> {
             if bring_your_own_cloud {
                 if platform != "aws" {
                     bail!(
-                        "Only --platform aws is currently supported for bring-your-own-cloud deployments"
+                        "Only --platform aws is currently supported for bring-your-own-compute deployments"
                     );
                 }
                 client.teardown_byoc(force, local).await?;

@@ -689,7 +689,7 @@ TEST_DB_VOLUME := caution-test-postgres-data
 TEST_DB_HOST := postgres-test
 TEST_DATABASE_URL := postgresql://$(DB_USER):$(DB_PASSWORD)@$(TEST_DB_HOST):5432/$(TEST_DB_NAME)
 E2E_LOCK_FILE ?= /tmp/caution-platform-e2e.lock
-ONPREM_PROVISIONER_DIR ?= ../bring-your-own-cloud-setup
+ONPREM_PROVISIONER_DIR ?= ../bring-your-own-compute-setup
 ONPREM_PROVISIONER_IMAGE ?= codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest
 
 postgres-test: network
