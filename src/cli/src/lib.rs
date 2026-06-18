@@ -5417,6 +5417,40 @@ run: /app/myapp
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("All source URLs failed")))
     }
 
+    /// Build a non-interactive, stall-bounded `git` command that cannot prompt
+    /// for credentials or block on a TTY. During verification the source URL
+    /// comes from the remote attestation manifest and may point at a repo the
+    /// host refuses to serve anonymously — e.g. a non-existent Codeberg/Forgejo
+    /// repo, which returns `401` (rather than `404`, to avoid leaking
+    /// existence). Without these guards, `git` falls back to prompting
+    /// `Username for ...` on the inherited `/dev/tty` and blocks forever,
+    /// leaving the "Reproducing enclave image" spinner spinning. Verification
+    /// sources are public and reproducible, so a credential prompt is always a
+    /// failure, never an interaction.
+    fn git_command(args: &[&str]) -> std::process::Command {
+        let mut cmd = std::process::Command::new("git");
+        cmd.args([
+            // Abort a transfer that drips below 1000 B/s for 300s, so a server
+            // that accepts the connection but never makes progress can't hang
+            // the build. (git has no working connect-timeout config knob; the
+            // connect phase falls back to libcurl's default. A hard wall-clock
+            // bound would need a process-level deadline.) These precede the
+            // subcommand so git applies them; harmless for local ops.
+            "-c", "http.lowSpeedLimit=1000",
+            "-c", "http.lowSpeedTime=300",
+        ])
+        .args(args)
+        // Never prompt on /dev/tty for a username/password.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // Belt-and-suspenders: if a credential helper/askpass is somehow
+        // configured, make it non-interactive. `true` exits 0 with empty
+        // output, so git gets empty credentials and fails fast.
+        .env("GIT_ASKPASS", "true")
+        // Detach stdin so git can't wait on the parent's TTY either.
+        .stdin(std::process::Stdio::null());
+        cmd
+    }
+
     async fn download_and_extract_app_source_with_git_fallback(
         &self,
         archive_urls: &[String],
@@ -5451,19 +5485,18 @@ run: /app/myapp
                     ),
                 );
 
-                let clone_output = Command::new("git")
-                    .args(&[
-                        "clone",
-                        "--depth",
-                        "100",
-                        "--single-branch",
-                        "--branch",
-                        branch_name,
-                        git_url,
-                        clone_path.to_str().unwrap(),
-                    ])
-                    .output()
-                    .context("Failed to clone repository")?;
+                let clone_output = Self::git_command(&[
+                    "clone",
+                    "--depth",
+                    "100",
+                    "--single-branch",
+                    "--branch",
+                    branch_name,
+                    git_url,
+                    clone_path.to_str().unwrap(),
+                ])
+                .output()
+                .context("Failed to clone repository")?;
 
                 if !clone_output.status.success() {
                     let stderr = String::from_utf8_lossy(&clone_output.stderr);
@@ -5471,8 +5504,7 @@ run: /app/myapp
                     // Fall through to try commit-based fetch
                 } else {
                     // Checkout the specific commit
-                    let checkout_output = Command::new("git")
-                        .args(&["checkout", commit])
+                    let checkout_output = Self::git_command(&["checkout", commit])
                         .current_dir(&clone_path)
                         .output()
                         .context("Failed to checkout commit")?;
@@ -5492,13 +5524,11 @@ run: /app/myapp
                         );
 
                         // Try fetching more history to find the commit
-                        let _ = Command::new("git")
-                            .args(&["fetch", "--unshallow"])
+                        let _ = Self::git_command(&["fetch", "--unshallow"])
                             .current_dir(&clone_path)
                             .output();
 
-                        let checkout_retry = Command::new("git")
-                            .args(&["checkout", commit])
+                        let checkout_retry = Self::git_command(&["checkout", commit])
                             .current_dir(&clone_path)
                             .output()
                             .context("Failed to checkout commit after unshallow")?;
@@ -5532,8 +5562,7 @@ run: /app/myapp
 
                 std::fs::create_dir_all(&clone_path)?;
 
-                let init_output = Command::new("git")
-                    .args(&["init"])
+                let init_output = Self::git_command(&["init"])
                     .current_dir(&clone_path)
                     .output()
                     .context("Failed to run git init")?;
@@ -5544,17 +5573,13 @@ run: /app/myapp
                 }
 
                 let branch_ref = format!("refs/heads/{}", branch_name);
-                let fetch_branch_output = Command::new("git")
-                    .arg("fetch")
-                    .arg(git_url)
-                    .arg(&branch_ref)
+                let fetch_branch_output = Self::git_command(&["fetch", git_url, &branch_ref])
                     .current_dir(&clone_path)
                     .output()
                     .context("Failed to fetch branch")?;
 
                 if fetch_branch_output.status.success() {
-                    let checkout_output = Command::new("git")
-                        .args(&["checkout", commit])
+                    let checkout_output = Self::git_command(&["checkout", commit])
                         .current_dir(&clone_path)
                         .output()
                         .context("Failed to checkout commit")?;
@@ -5591,8 +5616,7 @@ run: /app/myapp
             }
             std::fs::create_dir_all(&clone_path)?;
 
-            let init_output = Command::new("git")
-                .args(&["init"])
+            let init_output = Self::git_command(&["init"])
                 .current_dir(&clone_path)
                 .output()
                 .context("Failed to run git init")?;
@@ -5602,8 +5626,7 @@ run: /app/myapp
                 bail!("Git init failed: {}", stderr);
             }
 
-            let fetch_output = Command::new("git")
-                .args(&["fetch", "--depth", "1", git_url, commit])
+            let fetch_output = Self::git_command(&["fetch", "--depth", "1", git_url, commit])
                 .current_dir(&clone_path)
                 .output()
                 .context("Failed to fetch commit")?;
@@ -5616,8 +5639,7 @@ run: /app/myapp
                 bail!("Git fetch failed: {}", stderr);
             }
 
-            let checkout_output = Command::new("git")
-                .args(&["checkout", "FETCH_HEAD"])
+            let checkout_output = Self::git_command(&["checkout", "FETCH_HEAD"])
                 .current_dir(&clone_path)
                 .output()
                 .context("Failed to checkout commit")?;
