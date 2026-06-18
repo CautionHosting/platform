@@ -1,3 +1,8 @@
+use axum::{
+    body::Body,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use hcl::expr::Expression;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -50,7 +55,7 @@ pub struct DebugConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PortSpec {
-    FromTo { from_port: u16, to_port: u16 },
+    FromTo { start_port: u16, end_port: u16 },
     Exact { port: u16 }
 }
 
@@ -128,6 +133,33 @@ pub(crate) enum FromProcfileError {
 
     #[error("http_port {0} must also be listed in ports")]
     HttpPortNotInPorts(u16),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum FromStrError {
+    #[error("Multiple enclaves defined; only one enclave is supported")]
+    MultipleEnclaves,
+
+    #[error("http_port {0} must also be present in ingress rules")]
+    HttpPortNotInPorts(u16),
+
+    #[error("Invalid env expression for key '{0}'; only string literals and function calls are allowed")]
+    InvalidEnvExpression(String),
+
+    #[error("Failed to parse HCL")]
+    HclParse(#[from] hcl::Error),
+}
+
+impl IntoResponse for FromStrError {
+    fn into_response(self) -> Response<Body> {
+        let (status, body) = match &self {
+            FromStrError::MultipleEnclaves => (StatusCode::BAD_REQUEST, self.to_string()),
+            FromStrError::HttpPortNotInPorts(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            FromStrError::InvalidEnvExpression(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            FromStrError::HclParse(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+        };
+        (status, body).into_response()
+    }
 }
 
 impl ConfigurationFile {
@@ -325,9 +357,8 @@ impl ConfigurationFile {
                 .iter()
                 .map(|&port| TrafficRule {
                     cidr_ipv4: "0.0.0.0/0".into(),
-                    port_spec: Some(PortSpec::FromTo {
-                        from_port: port,
-                        to_port: port,
+                    port_spec: Some(PortSpec::Exact {
+                        port
                     }),
                     ip_protocol: Some("tcp".into()),
                 })
@@ -385,6 +416,76 @@ impl ConfigurationFile {
             enclave,
         })
     }
+
+    pub fn from_str(s: &str) -> Result<Self, FromStrError> {
+        let config: ConfigurationFile = hcl::from_str(s)?;
+
+        if let Some(ref enclaves) = config.enclave {
+            if enclaves.len() > 1 {
+                return Err(FromStrError::MultipleEnclaves);
+            }
+
+            if let Some((_name, enclave)) = enclaves.iter().next() {
+                if let Some(ref network) = enclave.network {
+                    if let Some(ref http) = network.http {
+                        if let Ok(http_port) = http.port.parse::<u16>() {
+                            let port_covered = network.ingress.iter().any(|rule| {
+                                match &rule.port_spec {
+                                    Some(PortSpec::Exact { port }) => *port == http_port,
+                                    Some(PortSpec::FromTo { start_port, end_port }) => {
+                                        *start_port <= http_port && http_port <= *end_port
+                                    }
+                                    None => false,
+                                }
+                            });
+                            if !port_covered {
+                                return Err(FromStrError::HttpPortNotInPorts(http_port));
+                            }
+                        }
+                    }
+                }
+
+                if let Some(ref units) = enclave.unit {
+                    for (unit_name, unit) in units {
+                        if let Some(ref env) = unit.env {
+                            for (key, expr) in env {
+                                match expr {
+                                    Expression::String(_) | Expression::FuncCall(_) => continue,
+                                    _ => {
+                                        return Err(FromStrError::InvalidEnvExpression(
+                                            format!("{}.{}", unit_name, key),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(config)
+    }
+
+    /// Returns `true` if any `env` block contains `env::vault(...)` expressions,
+    /// which requires locksmith to be enabled for secret management.
+    pub fn has_vault_env(&self) -> bool {
+        self.enclave.as_ref().is_some_and(|enclaves| {
+            enclaves.values().any(|enclave| {
+                enclave.unit.as_ref().is_some_and(|units| {
+                    units.values().any(|unit| {
+                        unit.env.as_ref().is_some_and(|env| {
+                            env.values().any(|expr| {
+                                matches!(expr, Expression::FuncCall(fc)
+                                    if fc.name.namespace.iter().any(|n| n.as_str() == "env")
+                                    && fc.name.name.as_str() == "vault")
+                            })
+                        })
+                    })
+                })
+            })
+        })
+    }
 }
 
 #[cfg(test)]
@@ -418,8 +519,8 @@ mod tests {
                         ingress: vec![TrafficRule {
                             cidr_ipv4: "0.0.0.0/0".into(),
                             port_spec: Some(PortSpec::FromTo {
-                                from_port: 80,
-                                to_port: 80,
+                                start_port: 40000,
+                                end_port: 40005,
                             }),
                             ip_protocol: Some("tcp".into()),
                         }],
@@ -476,67 +577,7 @@ mod tests {
 
     #[test]
     fn test_deserialize_example_hcl() {
-        let hcl = r#"
-caution {
-  managed_credentials = "credentials.pgp"
-  machine_type = "c5.xlarge"
-  build_machine_type = "c5.xlarge"
-}
-
-enclave "main" {
-  build {
-    containerfile = "Containerfile.example"
-    binary = "static-binary"
-    app_sources = [
-      "git@codeberg.org:caution/demo-hello-world-enclave",
-      "https://codeberg.org/caution/demo-hello-world-enclave",
-    ]
-    cache = false
-  }
-
-  debug {
-    enabled = true
-    ssh_keys = [
-      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGiqWyt0v5RpZqVK9EUeTWdCBGQo6+GN6jbUe0mPSEfV ryan@left"
-    ]
-  }
-
-  network {
-    ingress {
-      cidr_ipv4 = "0.0.0.0/0"
-      from_port = 80
-      to_port = 80
-      ip_protocol = "tcp"
-    }
-    egress {
-      cidr_ipv4 = "0.0.0.0/0"
-    }
-    http {
-      domain = "chat.caution.dev"
-      port = "8000"
-      e2e_encryption {
-        enabled = true
-        cors_origins = ["*"]
-      }
-    }
-  }
-
-  resources {
-    cpu = 2
-    memory_mb = 2000
-  }
-
-  unit "main" {
-    command = "/usr/bin/hello"
-    args = ["hello", "world"]
-    env {
-      FOO = "bar"
-      HELLO = "world"
-    }
-  }
-}
-"#;
-        let config: ConfigurationFile = hcl::from_str(hcl).expect("parse HCL");
+        let config: ConfigurationFile = hcl::from_str(EXAMPLE_HCL).expect("parse HCL");
         let caution = config.caution.expect("caution block");
         assert_eq!(caution.managed_credentials.as_deref(), Some("credentials.pgp"));
         assert_eq!(caution.machine_type.as_deref(), Some("c5.xlarge"));
@@ -572,8 +613,7 @@ enclave "test" {
   network {
     ingress {
       cidr_ipv4 = "10.0.0.0/8"
-      from_port = 443
-      to_port = 443
+      port = 443
       ip_protocol = "tcp"
     }
   }
@@ -596,14 +636,12 @@ enclave "test" {
   network {
     ingress {
       cidr_ipv4 = "10.0.0.0/8"
-      from_port = 443
-      to_port = 443
+      port = 443
       ip_protocol = "tcp"
     }
     ingress {
       cidr_ipv4 = "192.168.0.0/16"
-      from_port = 80
-      to_port = 80
+      port = 80
       ip_protocol = "tcp"
     }
   }
@@ -654,6 +692,283 @@ enclave "test" {
         let _: ConfigurationFile = hcl::from_str(&serialized).expect("re-deserialize");
     }
 
+    // ── from_str tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_from_str_valid_hcl() {
+        let hcl = r#"
+enclave "main" {
+  resources {
+    cpu = 2
+    memory_mb = 2000
+  }
+}
+"#;
+        let config = ConfigurationFile::from_str(hcl).unwrap();
+        let enclave = config.enclave.unwrap();
+        let main = enclave.get("main").unwrap();
+        let resources = main.resources.as_ref().unwrap();
+        assert_eq!(resources.cpu, 2);
+        assert_eq!(resources.memory_mb, 2000);
+    }
+
+    #[test]
+    fn test_from_str_rejects_multiple_enclaves() {
+        let hcl = r#"
+enclave "main" {
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+enclave "worker" {
+  resources {
+    cpu = 1
+    memory_mb = 256
+  }
+}
+"#;
+        let err = ConfigurationFile::from_str(hcl).unwrap_err();
+        assert!(matches!(err, FromStrError::MultipleEnclaves));
+    }
+
+    #[test]
+    fn test_from_str_rejects_missing_http_port_in_ingress() {
+        let hcl = r#"
+enclave "main" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+      ip_protocol = "tcp"
+    }
+    http {
+      domain = "example.com"
+      port = "9090"
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let err = ConfigurationFile::from_str(hcl).unwrap_err();
+        assert!(matches!(err, FromStrError::HttpPortNotInPorts(9090)));
+    }
+
+    #[test]
+    fn test_from_str_rejects_invalid_env_expression() {
+        let hcl = r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    env {
+      BAD_KEY = [1, 2, 3]
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let err = ConfigurationFile::from_str(hcl).unwrap_err();
+        assert!(matches!(err, FromStrError::InvalidEnvExpression(_)));
+    }
+
+    #[test]
+    fn test_from_str_accepts_string_env() {
+        let hcl = r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    env {
+      KEY = "value"
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        ConfigurationFile::from_str(hcl).unwrap();
+    }
+
+    #[test]
+    fn test_from_str_accepts_funccall_env() {
+        let hcl = r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    env {
+      API_KEY = env::vault("API_KEY")
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        ConfigurationFile::from_str(hcl).unwrap();
+    }
+
+    #[test]
+    fn test_from_str_single_enclave_extracted() {
+        let hcl = r#"
+enclave "myapp" {
+  build {
+    containerfile = "Containerfile.custom"
+    binary = "mybinary"
+  }
+  resources {
+    cpu = 4
+    memory_mb = 4000
+  }
+}
+"#;
+        let config = ConfigurationFile::from_str(hcl).unwrap();
+        let enclaves = config.enclave.unwrap();
+        assert_eq!(enclaves.len(), 1);
+        let (_label, e) = enclaves.iter().next().unwrap();
+        assert_eq!(e.resources.as_ref().unwrap().cpu, 4);
+        assert_eq!(e.resources.as_ref().unwrap().memory_mb, 4000);
+        assert_eq!(e.build.as_ref().unwrap().containerfile.as_deref(), Some("Containerfile.custom"));
+    }
+
+    #[test]
+    fn test_from_str_empty_hcl() {
+        let config = ConfigurationFile::from_str("").unwrap();
+        assert!(config.caution.is_none());
+        assert!(config.enclave.is_none());
+    }
+
+    #[test]
+    fn test_from_str_caution_only() {
+        let hcl = r#"
+caution {
+  managed_credentials = "creds.pgp"
+}
+"#;
+        let config = ConfigurationFile::from_str(hcl).unwrap();
+        assert!(config.enclave.is_none());
+        assert_eq!(
+            config.caution.unwrap().managed_credentials.as_deref(),
+            Some("creds.pgp")
+        );
+    }
+
+    // ── has_vault_env tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_has_vault_env_true() {
+        let hcl = r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    env {
+      API_KEY = env::vault("API_KEY")
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let config = ConfigurationFile::from_str(hcl).unwrap();
+        assert!(config.has_vault_env());
+    }
+
+    #[test]
+    fn test_has_vault_env_false_when_no_env() {
+        let hcl = r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let config = ConfigurationFile::from_str(hcl).unwrap();
+        assert!(!config.has_vault_env());
+    }
+
+    #[test]
+    fn test_has_vault_env_false_when_string_env() {
+        let hcl = r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    env {
+      KEY = "plaintext"
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let config = ConfigurationFile::from_str(hcl).unwrap();
+        assert!(!config.has_vault_env());
+    }
+
+    #[test]
+    fn test_has_vault_env_false_when_other_funccall() {
+        let hcl = r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    env {
+      KEY = upper("value")
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let config = ConfigurationFile::from_str(hcl).unwrap();
+        assert!(!config.has_vault_env());
+    }
+
+    #[test]
+    fn test_has_vault_env_false_no_enclave() {
+        let config = ConfigurationFile {
+            caution: None,
+            enclave: None,
+        };
+        assert!(!config.has_vault_env());
+    }
+
+    #[test]
+    fn test_has_vault_env_with_plain_env_and_vault() {
+        let hcl = r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    env {
+      PLAIN = "value"
+      SECRET = env::vault("SECRET")
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let config = ConfigurationFile::from_str(hcl).unwrap();
+        assert!(config.has_vault_env());
+    }
+
     // ── from_procfile tests ──────────────────────────────────────────
 
     #[test]
@@ -687,9 +1002,9 @@ enclave "test" {
         let network = enclave.get("default").unwrap().network.as_ref().unwrap();
         assert_eq!(network.ingress.len(), 2);
         assert_eq!(network.ingress[0].cidr_ipv4, "0.0.0.0/0");
-        assert_eq!(network.ingress[0].port_spec, Some(PortSpec::FromTo { from_port: 80, to_port: 80 }));
+        assert_eq!(network.ingress[0].port_spec, Some(PortSpec::Exact { port: 80 }));
         assert_eq!(network.ingress[0].ip_protocol, Some("tcp".into()));
-        assert_eq!(network.ingress[1].port_spec, Some(PortSpec::FromTo { from_port: 443, to_port: 443 }));
+        assert_eq!(network.ingress[1].port_spec, Some(PortSpec::Exact { port: 443 }));
     }
 
     #[test]
@@ -732,7 +1047,7 @@ cache: false
         // network
         let network = e.network.as_ref().unwrap();
         assert_eq!(network.ingress.len(), 1);
-        assert_eq!(network.ingress[0].port_spec, Some(PortSpec::FromTo { from_port: 8080, to_port: 8080 }));
+        assert_eq!(network.ingress[0].port_spec, Some(PortSpec::Exact { port: 8080 }));
         let http = network.http.as_ref().unwrap();
         assert_eq!(http.domain, "example.com");
         assert_eq!(http.port, "8080");
@@ -843,6 +1158,9 @@ cache: false
     const LOCKSMITH_PROCFILE: &str =
         include_str!("../tests/data/locksmith/Procfile");
 
+    const EXAMPLE_HCL: &str =
+        include_str!("../tests/data/example/caution.hcl");
+
     #[test]
     fn demo_hello_world_enclave() {
         let config =
@@ -870,9 +1188,8 @@ cache: false
         assert_eq!(network.ingress.len(), 1);
         assert_eq!(
             network.ingress[0].port_spec,
-            Some(PortSpec::FromTo {
-                from_port: 8083,
-                to_port: 8083
+            Some(PortSpec::Exact {
+                port: 8083
             })
         );
         assert!(network.http.is_none());
@@ -954,9 +1271,8 @@ cache: false
         assert_eq!(network.ingress.len(), 1);
         assert_eq!(
             network.ingress[0].port_spec,
-            Some(PortSpec::FromTo {
-                from_port: 8080,
-                to_port: 8080
+            Some(PortSpec::Exact {
+                port: 8080
             })
         );
         assert!(network.http.is_none());
