@@ -145,11 +145,11 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
+ "caution-config",
  "chrono",
  "dirs",
  "enclave-builder",
  "futures",
- "hcl-rs",
  "hex",
  "hmac",
  "rand 0.8.5",
@@ -159,7 +159,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "shlex",
  "sqlx",
  "subtle",
  "tempfile",
@@ -1371,6 +1370,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "caution-config"
+version = "0.1.0"
+dependencies = [
+ "hcl-rs",
+ "serde",
+ "serde_json",
+ "shlex",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "caution-environment-heuristics"
 version = "0.1.0"
 dependencies = [
@@ -1544,6 +1554,7 @@ dependencies = [
  "authenticator",
  "base64 0.22.1",
  "bootproof-sdk",
+ "caution-config",
  "caution-environment-heuristics",
  "chrono",
  "clap",

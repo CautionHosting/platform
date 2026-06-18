@@ -10,6 +10,7 @@ members = [
     "src/enclave-builder",
     "src/metering",
     "src/environment-heuristics",
+    "src/caution-config",
 ]
 resolver = "2"
 
