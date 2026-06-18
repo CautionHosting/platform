@@ -91,7 +91,7 @@ pub struct E2eEncryption {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HttpConfig {
     pub domain: String,
-    pub port: String,
+    pub port: u16,
     pub e2e_encryption: Option<E2eEncryption>,
 }
 
@@ -140,7 +140,9 @@ pub struct ConfigurationFile {
 
 #[derive(Debug, thiserror::Error)]
 pub enum FromProcfileError {
-    #[error("Port {0} is reserved for internal enclave services. Ports 49500-49600 are reserved; choose a different application port.")]
+    #[error(
+        "Port {0} is reserved for internal enclave services. Ports 49500-49600 are reserved; choose a different application port."
+    )]
     ReservedPort(u16),
 
     #[error("http_port {0} must also be listed in ports")]
@@ -158,27 +160,33 @@ pub enum FromProcfileError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum FromStrError {
+    #[error("Ports 49500-49600 are reserved; choose a different application port.")]
+    ReservedPort,
+
     #[error("Multiple enclaves defined; only one enclave is supported")]
     MultipleEnclaves,
 
     #[error("http_port {0} must also be present in ingress rules")]
     HttpPortNotInPorts(u16),
 
-    #[error("Invalid env expression for key '{0}'; only string literals and function calls are allowed")]
+    #[error(
+        "Invalid env expression for key '{0}'; only string literals and function calls are allowed"
+    )]
     InvalidEnvExpression(String),
 
     #[error("Failed to parse HCL")]
     HclParse(#[from] hcl::Error),
 }
 
+const RESERVED_INTERNAL_PORT_START: u16 = 49_500;
+const RESERVED_INTERNAL_PORT_END: u16 = 49_600;
+
+fn is_reserved(port: u16) -> bool {
+    (RESERVED_INTERNAL_PORT_START..=RESERVED_INTERNAL_PORT_END).contains(&port)
+}
+
 impl ConfigurationFile {
     pub fn from_procfile(content: &str) -> Result<Self, FromProcfileError> {
-        const RESERVED_INTERNAL_PORT_START: u16 = 49_500;
-        const RESERVED_INTERNAL_PORT_END: u16 = 49_600;
-
-        let is_reserved =
-            |port: u16| (RESERVED_INTERNAL_PORT_START..=RESERVED_INTERNAL_PORT_END).contains(&port);
-
         let mut containerfile = None;
         let mut binary = None;
         let mut app_sources: Vec<String> = Vec::new();
@@ -391,12 +399,12 @@ impl ConfigurationFile {
         let http = match (domain, http_port) {
             (Some(d), Some(p)) => Some(HttpConfig {
                 domain: d,
-                port: p.to_string(),
+                port: p,
                 e2e_encryption: e2e_encryption.clone(),
             }),
             (Some(d), None) => Some(HttpConfig {
                 domain: d,
-                port: "80".to_string(),
+                port: 80,
                 e2e_encryption: e2e_encryption.clone(),
             }),
             (None, _) => None,
@@ -460,12 +468,10 @@ impl ConfigurationFile {
         };
 
         let provider = if managed_on_prem {
-            let platform =
-                platform.ok_or(FromProcfileError::ManagedOnPremMissingPlatform)?;
+            let platform = platform.ok_or(FromProcfileError::ManagedOnPremMissingPlatform)?;
             match platform.as_str() {
                 "aws" => {
-                    let region =
-                        aws_region.ok_or(FromProcfileError::ManagedOnPremMissingRegion)?;
+                    let region = aws_region.ok_or(FromProcfileError::ManagedOnPremMissingRegion)?;
                     Some(Provider::Aws(AwsProviderConfig {
                         region,
                         vpc_id: aws_vpc_id,
@@ -476,7 +482,7 @@ impl ConfigurationFile {
                 other => {
                     return Err(FromProcfileError::ManagedOnPremUnsupportedPlatform(
                         other.to_string(),
-                    ))
+                    ));
                 }
             }
         } else {
@@ -490,14 +496,33 @@ impl ConfigurationFile {
             provider: Some(p),
         });
 
-        Ok(ConfigurationFile {
-            caution,
-            enclave,
-        })
+        Ok(ConfigurationFile { caution, enclave })
     }
 
     pub fn from_str(s: &str) -> Result<Self, FromStrError> {
         let config: ConfigurationFile = hcl::from_str(s)?;
+
+        if let Some((_, enclave)) = &config.enclave.iter().flatten().next()
+            && let Some(network) = &enclave.network
+        {
+            for ingress in &network.ingress {
+                match ingress.port_spec {
+                    // There's no stdlib range intersection, but I think this may be more elegant.
+                    Some(PortSpec::FromTo {
+                        start_port,
+                        end_port,
+                    }) if start_port <= RESERVED_INTERNAL_PORT_END
+                        && end_port >= RESERVED_INTERNAL_PORT_START =>
+                    {
+                        return Err(FromStrError::ReservedPort);
+                    }
+                    Some(PortSpec::Exact { port }) if is_reserved(port) => {
+                        return Err(FromStrError::ReservedPort);
+                    }
+                    _ => (),
+                }
+            }
+        }
 
         if let Some(ref enclaves) = config.enclave {
             if enclaves.len() > 1 {
@@ -505,21 +530,19 @@ impl ConfigurationFile {
             }
 
             if let Some((_name, enclave)) = enclaves.iter().next() {
-                if let Some(ref network) = enclave.network {
-                    if let Some(ref http) = network.http {
-                        if let Ok(http_port) = http.port.parse::<u16>() {
-                            let port_covered = network.ingress.iter().any(|rule| match &rule.port_spec
-                            {
-                                Some(PortSpec::Exact { port }) => *port == http_port,
-                                Some(PortSpec::FromTo { start_port, end_port }) => {
-                                    *start_port <= http_port && http_port <= *end_port
-                                }
-                                None => false,
-                            });
-                            if !port_covered {
-                                return Err(FromStrError::HttpPortNotInPorts(http_port));
-                            }
-                        }
+                if let Some(ref network) = enclave.network
+                    && let Some(ref http) = network.http
+                {
+                    let port_covered = network.ingress.iter().any(|rule| match &rule.port_spec {
+                        Some(PortSpec::Exact { port }) => *port == http.port,
+                        Some(PortSpec::FromTo {
+                            start_port,
+                            end_port,
+                        }) => *start_port <= http.port && http.port <= *end_port,
+                        None => false,
+                    });
+                    if !port_covered {
+                        return Err(FromStrError::HttpPortNotInPorts(http.port));
                     }
                 }
 
@@ -530,9 +553,10 @@ impl ConfigurationFile {
                                 match expr {
                                     Expression::String(_) | Expression::FuncCall(_) => continue,
                                     _ => {
-                                        return Err(FromStrError::InvalidEnvExpression(
-                                            format!("{}.{}", unit_name, key),
-                                        ));
+                                        return Err(FromStrError::InvalidEnvExpression(format!(
+                                            "{}.{}",
+                                            unit_name, key
+                                        )));
                                     }
                                 }
                             }
@@ -610,7 +634,7 @@ mod tests {
                         }],
                         http: Some(HttpConfig {
                             domain: "chat.caution.dev".into(),
-                            port: "8000".into(),
+                            port: 8000,
                             e2e_encryption: Some(E2eEncryption {
                                 enabled: Some(true),
                                 cors_origins: Some(vec!["*".into()]),
@@ -658,12 +682,18 @@ mod tests {
     fn test_deserialize_example_hcl() {
         let config: ConfigurationFile = hcl::from_str(EXAMPLE_HCL).expect("parse HCL");
         let caution = config.caution.expect("caution block");
-        assert_eq!(caution.managed_credentials.as_deref(), Some("credentials.pgp"));
+        assert_eq!(
+            caution.managed_credentials.as_deref(),
+            Some("credentials.pgp")
+        );
         assert_eq!(caution.machine_type.as_deref(), Some("c5.xlarge"));
         let enclave = config.enclave.expect("enclave block");
         let main = enclave.get("main").expect("enclave main");
         let build = main.build.as_ref().expect("build block");
-        assert_eq!(build.containerfile.as_deref(), Some("Containerfile.example"));
+        assert_eq!(
+            build.containerfile.as_deref(),
+            Some("Containerfile.example")
+        );
         assert!(build.app_sources.len() >= 2);
         let resources = main.resources.as_ref().expect("resources block");
         assert_eq!(resources.cpu, 2);
@@ -764,7 +794,10 @@ enclave "test" {
         let env = unit.env.as_ref().expect("env block");
         let _api_key = env.get("API_KEY").expect("API_KEY entry");
         let serialized = hcl::to_string(&config).expect("serialize to HCL");
-        assert!(serialized.contains("env::vault"), "expression preserved in output");
+        assert!(
+            serialized.contains("env::vault"),
+            "expression preserved in output"
+        );
         let _: ConfigurationFile = hcl::from_str(&serialized).expect("re-deserialize");
     }
 
@@ -1227,7 +1260,10 @@ cache: false
     fn test_from_procfile_reserved_port_rejected() {
         let procfile = "run: /app\nports: 49500\n";
         let result = ConfigurationFile::from_procfile(procfile);
-        assert!(matches!(result, Err(FromProcfileError::ReservedPort(49500))));
+        assert!(matches!(
+            result,
+            Err(FromProcfileError::ReservedPort(49500))
+        ));
     }
 
     // ── Real-world Procfile tests ─────────────────────────────────────
@@ -1368,7 +1404,10 @@ caution {
         };
         assert_eq!(aws.region, "us-east-1");
         assert_eq!(aws.vpc_id.as_deref(), Some("vpc-123"));
-        assert_eq!(aws.subnet_ids, Some(vec!["subnet-a".into(), "subnet-b".into()]));
+        assert_eq!(
+            aws.subnet_ids,
+            Some(vec!["subnet-a".into(), "subnet-b".into()])
+        );
         assert_eq!(aws.security_group_id.as_deref(), Some("sg-456"));
     }
 
@@ -1448,7 +1487,7 @@ caution {
             enclave: None,
         };
         let hcl_str = hcl::to_string(&config).expect("serialize");
-        let deserialized: ConfigurationFile = hcl::from_str(&hcl_str).expect("deserialize");
+        let deserialized = ConfigurationFile::from_str(&hcl_str).expect("deserialize");
         let caution = deserialized.caution.expect("caution block");
         let aws = match caution.provider.expect("provider") {
             Provider::Aws(aws) => aws,
@@ -1533,7 +1572,10 @@ managed_on_prem: true
 aws_region: us-east-1
 ";
         let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
-        assert!(matches!(err, FromProcfileError::ManagedOnPremMissingPlatform));
+        assert!(matches!(
+            err,
+            FromProcfileError::ManagedOnPremMissingPlatform
+        ));
     }
 
     #[test]
@@ -1545,7 +1587,10 @@ platform: azure
 aws_region: us-east-1
 ";
         let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
-        assert!(matches!(err, FromProcfileError::ManagedOnPremUnsupportedPlatform(_)));
+        assert!(matches!(
+            err,
+            FromProcfileError::ManagedOnPremUnsupportedPlatform(_)
+        ));
     }
 
     #[test]

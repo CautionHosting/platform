@@ -40,7 +40,7 @@ enclave "main" {
 
     http {
       domain = "chat.caution.dev"
-      port = "8000"
+      port = 8000
       e2e_encryption {
         enabled = true
         cors_origins = ["*"]

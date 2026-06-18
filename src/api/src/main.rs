@@ -1454,14 +1454,6 @@ async fn resolve_containerfile_for_deploy(
     commit_sha: &str,
     config_file: &config::ConfigurationFile,
 ) -> Result<String, (StatusCode, String)> {
-    // No explicit build command equivalent in HCL schema; always None
-    if enclave_builder::has_explicit_build_command(None) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Explicit build command is not supported for remote deploys.".to_string(),
-        ));
-    }
-
     let containerfile = config_file
         .enclave
         .as_ref()
@@ -2101,7 +2093,7 @@ async fn deploy_logic(
                 .flat_map(|rule| match &rule.port_spec {
                     Some(config::PortSpec::Exact { port }) => vec![*port],
                     Some(config::PortSpec::FromTo { start_port, end_port }) => {
-                        (*start_port..*end_port).collect::<Vec<u16>>()
+                        (*start_port..=*end_port).collect::<Vec<u16>>()
                     }
                     _ => Vec::new(),
                 })
