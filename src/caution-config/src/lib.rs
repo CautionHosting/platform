@@ -20,12 +20,29 @@ where
     }
 }
 
+/// Cloud provider configuration (internally-tagged on `type` field).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum Provider {
+    Aws(AwsProviderConfig),
+}
+
+/// Configuration for the `provider { type = "aws" ... }` block.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AwsProviderConfig {
+    pub region: String,
+    pub vpc_id: Option<String>,
+    pub subnet_ids: Option<Vec<String>>,
+    pub security_group_id: Option<String>,
+}
+
 /// Top-level `caution { }` block.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CautionConfig {
     pub managed_credentials: Option<String>,
     pub machine_type: Option<String>,
     pub build_machine_type: Option<String>,
+    pub provider: Option<Provider>,
 }
 
 /// The `build { }` block inside an enclave definition.
@@ -128,6 +145,15 @@ pub enum FromProcfileError {
 
     #[error("http_port {0} must also be listed in ports")]
     HttpPortNotInPorts(u16),
+
+    #[error("managed_on_prem requires 'platform' to be specified")]
+    ManagedOnPremMissingPlatform,
+
+    #[error("Unsupported platform '{0}'. Currently only 'aws' is supported.")]
+    ManagedOnPremUnsupportedPlatform(String),
+
+    #[error("managed_on_prem with platform 'aws' requires 'aws_region'")]
+    ManagedOnPremMissingRegion,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -166,6 +192,12 @@ impl ConfigurationFile {
         let mut domain: Option<String> = None;
         let mut run = None;
         let mut procfile_e2e: Option<bool> = None;
+        let mut managed_on_prem = false;
+        let mut platform: Option<String> = None;
+        let mut aws_region: Option<String> = None;
+        let mut aws_vpc_id: Option<String> = None;
+        let mut aws_subnet_id: Option<String> = None;
+        let mut aws_security_group_id: Option<String> = None;
 
         for line in content.lines() {
             let line = line.trim();
@@ -264,6 +296,34 @@ impl ConfigurationFile {
                     }
                     "e2e" => {
                         procfile_e2e = Some(value.to_lowercase() == "true");
+                    }
+                    "managed_on_prem" => {
+                        managed_on_prem = value.to_lowercase() == "true";
+                    }
+                    "platform" => {
+                        if !value.is_empty() {
+                            platform = Some(value.to_lowercase());
+                        }
+                    }
+                    "aws_region" => {
+                        if !value.is_empty() {
+                            aws_region = Some(value);
+                        }
+                    }
+                    "aws_vpc_id" => {
+                        if !value.is_empty() {
+                            aws_vpc_id = Some(value);
+                        }
+                    }
+                    "aws_subnet_id" => {
+                        if !value.is_empty() {
+                            aws_subnet_id = Some(value);
+                        }
+                    }
+                    "aws_security_group_id" => {
+                        if !value.is_empty() {
+                            aws_security_group_id = Some(value);
+                        }
                     }
                     _ => {}
                 }
@@ -399,8 +459,39 @@ impl ConfigurationFile {
             None
         };
 
+        let provider = if managed_on_prem {
+            let platform =
+                platform.ok_or(FromProcfileError::ManagedOnPremMissingPlatform)?;
+            match platform.as_str() {
+                "aws" => {
+                    let region =
+                        aws_region.ok_or(FromProcfileError::ManagedOnPremMissingRegion)?;
+                    Some(Provider::Aws(AwsProviderConfig {
+                        region,
+                        vpc_id: aws_vpc_id,
+                        subnet_ids: aws_subnet_id.map(|id| vec![id]),
+                        security_group_id: aws_security_group_id,
+                    }))
+                }
+                other => {
+                    return Err(FromProcfileError::ManagedOnPremUnsupportedPlatform(
+                        other.to_string(),
+                    ))
+                }
+            }
+        } else {
+            None
+        };
+
+        let caution = provider.map(|p| CautionConfig {
+            managed_credentials: None,
+            machine_type: None,
+            build_machine_type: None,
+            provider: Some(p),
+        });
+
         Ok(ConfigurationFile {
-            caution: None,
+            caution,
             enclave,
         })
     }
@@ -485,6 +576,7 @@ mod tests {
                 managed_credentials: Some("credentials.pgp".into()),
                 machine_type: Some("c5.xlarge".into()),
                 build_machine_type: Some("c5.xlarge".into()),
+                provider: None,
             }),
             enclave: Some(BTreeMap::from([(
                 "main".into(),
@@ -1251,5 +1343,219 @@ cache: false
         assert_eq!(debug.enabled, Some(true));
         assert_eq!(debug.ssh_keys.len(), 1);
         assert!(debug.ssh_keys[0].starts_with("ssh-rsa"));
+    }
+
+    // ── Provider HCL tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_provider_block_parsed_as_aws() {
+        let hcl = r#"
+caution {
+  provider {
+    type = "aws"
+    region = "us-east-1"
+    vpc_id = "vpc-123"
+    subnet_ids = ["subnet-a", "subnet-b"]
+    security_group_id = "sg-456"
+  }
+}
+"#;
+        let config = ConfigurationFile::from_str(hcl).unwrap();
+        let caution = config.caution.expect("caution block");
+        let provider = caution.provider.expect("provider");
+        let aws = match provider {
+            Provider::Aws(aws) => aws,
+        };
+        assert_eq!(aws.region, "us-east-1");
+        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-123"));
+        assert_eq!(aws.subnet_ids, Some(vec!["subnet-a".into(), "subnet-b".into()]));
+        assert_eq!(aws.security_group_id.as_deref(), Some("sg-456"));
+    }
+
+    #[test]
+    fn test_provider_block_minimal_region_only() {
+        let hcl = r#"
+caution {
+  provider {
+    type = "aws"
+    region = "us-west-2"
+  }
+}
+"#;
+        let config = ConfigurationFile::from_str(hcl).unwrap();
+        let caution = config.caution.expect("caution block");
+        let provider = caution.provider.expect("provider");
+        let aws = match provider {
+            Provider::Aws(aws) => aws,
+        };
+        assert_eq!(aws.region, "us-west-2");
+        assert!(aws.vpc_id.is_none());
+        assert!(aws.subnet_ids.is_none());
+        assert!(aws.security_group_id.is_none());
+    }
+
+    #[test]
+    fn test_provider_block_full_with_all_fields() {
+        let hcl = r#"
+caution {
+  provider {
+    type = "aws"
+    region = "eu-west-1"
+    vpc_id = "vpc-xxx"
+    subnet_ids = ["subnet-1"]
+    security_group_id = "sg-yyy"
+  }
+}
+"#;
+        let config = ConfigurationFile::from_str(hcl).unwrap();
+        let caution = config.caution.expect("caution block");
+        let provider = caution.provider.expect("provider");
+        let aws = match provider {
+            Provider::Aws(aws) => aws,
+        };
+        assert_eq!(aws.region, "eu-west-1");
+        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-xxx"));
+        assert_eq!(aws.subnet_ids, Some(vec!["subnet-1".into()]));
+        assert_eq!(aws.security_group_id.as_deref(), Some("sg-yyy"));
+    }
+
+    #[test]
+    fn test_provider_block_omitted_is_none() {
+        let hcl = r#"
+caution {
+  managed_credentials = "creds.pgp"
+}
+"#;
+        let config = ConfigurationFile::from_str(hcl).unwrap();
+        let caution = config.caution.expect("caution block");
+        assert!(caution.provider.is_none());
+    }
+
+    #[test]
+    fn test_provider_round_trip() {
+        let config = ConfigurationFile {
+            caution: Some(CautionConfig {
+                managed_credentials: None,
+                machine_type: None,
+                build_machine_type: None,
+                provider: Some(Provider::Aws(AwsProviderConfig {
+                    region: "ap-southeast-1".into(),
+                    vpc_id: Some("vpc-roundtrip".into()),
+                    subnet_ids: Some(vec!["subnet-a".into()]),
+                    security_group_id: None,
+                })),
+            }),
+            enclave: None,
+        };
+        let hcl_str = hcl::to_string(&config).expect("serialize");
+        let deserialized: ConfigurationFile = hcl::from_str(&hcl_str).expect("deserialize");
+        let caution = deserialized.caution.expect("caution block");
+        let aws = match caution.provider.expect("provider") {
+            Provider::Aws(aws) => aws,
+        };
+        assert_eq!(aws.region, "ap-southeast-1");
+        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-roundtrip"));
+    }
+
+    #[test]
+    fn test_provider_unknown_type_rejected() {
+        let hcl = r#"
+caution {
+  provider {
+    type = "gcp"
+    region = "us-central1"
+  }
+}
+"#;
+        let result = ConfigurationFile::from_str(hcl);
+        assert!(result.is_err());
+    }
+
+    // ── from_procfile managed_on_prem tests ─────────────────────────
+
+    #[test]
+    fn test_from_procfile_managed_on_prem_all_fields() {
+        let procfile = "\
+run: /app
+managed_on_prem: true
+platform: aws
+aws_region: us-east-1
+aws_vpc_id: vpc-123
+aws_subnet_id: subnet-a
+aws_security_group_id: sg-456
+";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let caution = config.caution.expect("caution block");
+        let aws = match caution.provider.expect("provider") {
+            Provider::Aws(aws) => aws,
+        };
+        assert_eq!(aws.region, "us-east-1");
+        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-123"));
+        assert_eq!(aws.subnet_ids, Some(vec!["subnet-a".into()]));
+        assert_eq!(aws.security_group_id.as_deref(), Some("sg-456"));
+    }
+
+    #[test]
+    fn test_from_procfile_managed_on_prem_minimal() {
+        let procfile = "\
+run: /app
+managed_on_prem: true
+platform: aws
+aws_region: us-west-2
+";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let caution = config.caution.expect("caution block");
+        let aws = match caution.provider.expect("provider") {
+            Provider::Aws(aws) => aws,
+        };
+        assert_eq!(aws.region, "us-west-2");
+        assert!(aws.vpc_id.is_none());
+        assert!(aws.subnet_ids.is_none());
+        assert!(aws.security_group_id.is_none());
+    }
+
+    #[test]
+    fn test_from_procfile_managed_on_prem_without_managed_on_prem() {
+        let procfile = "\
+run: /app
+platform: aws
+aws_region: us-east-1
+";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        assert!(config.caution.is_none() || config.caution.as_ref().unwrap().provider.is_none());
+    }
+
+    #[test]
+    fn test_from_procfile_managed_on_prem_missing_platform() {
+        let procfile = "\
+run: /app
+managed_on_prem: true
+aws_region: us-east-1
+";
+        let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
+        assert!(matches!(err, FromProcfileError::ManagedOnPremMissingPlatform));
+    }
+
+    #[test]
+    fn test_from_procfile_managed_on_prem_unsupported_platform() {
+        let procfile = "\
+run: /app
+managed_on_prem: true
+platform: azure
+aws_region: us-east-1
+";
+        let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
+        assert!(matches!(err, FromProcfileError::ManagedOnPremUnsupportedPlatform(_)));
+    }
+
+    #[test]
+    fn test_from_procfile_managed_on_prem_missing_region() {
+        let procfile = "\
+run: /app
+managed_on_prem: true
+platform: aws
+";
+        let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
+        assert!(matches!(err, FromProcfileError::ManagedOnPremMissingRegion));
     }
 }

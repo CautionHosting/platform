@@ -1546,14 +1546,15 @@ impl ApiClient {
 
         let byoc_section = if byoc {
             r#"
-# BYOC deployment configuration
-managed_on_prem    = true
-platform           = "aws"
-aws_region         = "us-east-1"
-# aws_instance_type    = "m5.xlarge"
-# aws_vpc_id           = "vpc-xxxxxxxxx"
-# aws_subnet_id        = "subnet-xxxxxxxxx"
-# aws_security_group_id = "sg-xxxxxxxxx"
+caution {
+  provider {
+    type         = "aws"
+    region       = "us-east-1"
+    # vpc_id        = "vpc-xxxxxxxxx"
+    # subnet_ids    = ["subnet-xxxxxxxxx"]
+    # security_group_id = "sg-xxxxxxxxx"
+  }
+}
 "#
         } else {
             ""

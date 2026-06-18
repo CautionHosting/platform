@@ -1041,6 +1041,22 @@ fn managed_onprem_config_from_credential(
     }
 }
 
+/// Overlay fields from the HCL `provider {}` block onto a managed on-prem
+/// deployment config. Inline fields take precedence over credential defaults.
+fn merge_provider_into_onprem(
+    provider: &config::Provider,
+    onprem: &mut deployment::ManagedOnPremConfig,
+) {
+    if let config::Provider::Aws(aws) = provider {
+        if let Some(vpc_id) = &aws.vpc_id {
+            onprem.vpc_id = vpc_id.clone();
+        }
+        if let Some(subnet_ids) = &aws.subnet_ids {
+            onprem.subnet_ids = subnet_ids.clone();
+        }
+    }
+}
+
 fn platform_builder_credentials() -> deployment::AwsCredentials {
     deployment::AwsCredentials {
         access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
@@ -2121,9 +2137,18 @@ async fn deploy_logic(
     let deployment_credentials = managed_onprem_credential
         .as_ref()
         .map(aws_credentials_from_managed_onprem);
-    let managed_onprem_config = managed_onprem_credential
+    let mut managed_onprem_config = managed_onprem_credential
         .as_ref()
         .map(managed_onprem_config_from_credential);
+
+    // Overlay inline provider config from caution.hcl onto DB credential defaults.
+    // Fields specified in the provider block take precedence.
+    if let Some(ref provider) = config_file.caution.as_ref().and_then(|c| c.provider.as_ref()) {
+        if let Some(ref mut onprem) = managed_onprem_config {
+            merge_provider_into_onprem(provider, onprem);
+        }
+    }
+
     let should_cleanup_on_failure = was_destroyed
         || !matches!(
             previous_state,
