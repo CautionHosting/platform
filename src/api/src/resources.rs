@@ -290,9 +290,9 @@ pub async fn proxy_attestation(
     Path(resource_id): Path<Uuid>,
     body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Get the resource to verify ownership and get the public IP + domain
-    let resource: (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT cr.public_ip, cr.configuration->>'domain' as domain
+    // Get the resource to verify ownership and get the public IP
+    let public_ip: Option<String> = sqlx::query_scalar(
+        "SELECT cr.public_ip
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
          WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL",
@@ -303,16 +303,14 @@ pub async fn proxy_attestation(
     .await
     .map_err(|_| (StatusCode::NOT_FOUND, "Resource not found".to_string()))?;
 
-    let public_ip = resource.0.ok_or_else(|| {
+    let public_ip = public_ip.ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
             "Resource has no public IP".to_string(),
         )
     })?;
 
-    // Create HTTP client that accepts self-signed certs (for IP fallback)
     let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| {
@@ -322,13 +320,11 @@ pub async fn proxy_attestation(
             )
         })?;
 
-    // Always use HTTPS — domain gets Let's Encrypt, IP gets self-signed cert
-    // (danger_accept_invalid_certs handles the self-signed case)
-    let attestation_url = if let Some(ref domain) = resource.1 {
-        format!("https://{}/attestation", domain)
-    } else {
-        format!("https://{}/attestation", public_ip)
-    };
+    // Fetch over plain HTTP by IP: the attestation document is a COSE_Sign1 verified
+    // client-side (certificate chain + signature + nonce), so transport TLS is not
+    // load-bearing here. Using HTTP avoids the enclave's on-demand Let's Encrypt TLS,
+    // whose inline cert issuance intermittently fails the handshake (502s in the UI).
+    let attestation_url = format!("http://{}/attestation", public_ip);
     tracing::info!("Proxying attestation request to {}", attestation_url);
 
     let response = client
