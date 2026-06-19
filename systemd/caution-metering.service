@@ -1,0 +1,14 @@
+# user systemd file for managing Caution metering
+
+[Unit]
+Description=Caution Metering service
+Requires=caution-network.service
+After=caution-postgres.service caution-network.service
+
+[Service]
+ExecStartPre=-/usr/bin/docker rm -f metering
+ExecStart=/usr/bin/docker run --name metering --network caution-network --env-file %h/.config/caution/.env -v %h/.config/caution/prices.json:/app/prices.json:ro caution-metering
+ExecStop=/usr/bin/docker stop metering
+
+[Install]
+WantedBy=default.target

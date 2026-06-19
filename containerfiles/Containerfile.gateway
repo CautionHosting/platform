@@ -11,6 +11,10 @@ FROM stagex/docker@sha256:d7e7202ce2b10b13571bd339a921030b0c53ecc4bd50ff8869f004
 FROM stagex/user-pcsc-lite@sha256:2e0bb1cbeb9dd97be4e0594bd712dc138ee2710668281d3faa1a18d99a50979d AS pcsc-lite
 FROM stagex/user-nettle@sha256:3b883ec8fb6781acff2517e7485d7e8f79f147f8fa2b3b644cb96da495af52e7 AS nettle
 FROM stagex/core-gmp@sha256:35f1f6f285efd438e7d985dc0538b7a5ca1a228e69f50d39de2bcafe830b4beb AS gmp
+FROM stagex/pallet-nodejs@sha256:1f705b58321b17e87ea68c04431ad83be6e6b64253d0443be4c61501902d57c3 AS pallet-nodejs
+FROM stagex/core-npm@sha256:72fef63138244c9314e6cb4f72d3dcb335a68f255c629b8436bd5089dfeace72 AS npm
+FROM stagex/core-curl@sha256:bc8bab43d96a9167fbb85022ea773644a45ef335e7a9b747f203078973fa988e AS curl
+FROM stagex/core-busybox@sha256:637b1e0d9866807fac94c22d6dc4b2e1f45c8a5ca1113c88172e0324a30c7283 AS busybox
 FROM gcc AS gitconfig-builder
 RUN mkdir -p /root && \
     echo '[safe]' > /root/.gitconfig && \
@@ -55,6 +59,30 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
       ${EXTRA_FEATURES:+--features ${EXTRA_FEATURES}} \
       && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/gateway /usr/local/bin/gateway
 
+FROM pallet-nodejs AS frontend-deps
+
+COPY --from=npm . /
+COPY --from=git . /
+COPY --from=busybox . /
+COPY --from=curl . /
+
+WORKDIR /app
+
+COPY frontend/package.json frontend/package-lock.json* ./
+
+RUN npm ci
+
+FROM frontend-deps AS frontend-builder
+
+ARG VITE_PADDLE_SANDBOX
+
+ENV ENVIRONMENT=production
+ENV NODE_ENV=production
+
+COPY frontend/ ./
+
+RUN VITE_PADDLE_SANDBOX="${VITE_PADDLE_SANDBOX}" /usr/bin/npm run build
+
 FROM scratch AS runtime
 COPY --from=user-runtime . /
 COPY --from=git . /
@@ -67,6 +95,7 @@ COPY --from=builder /usr/local/bin/gateway /usr/local/bin/gateway
 COPY --from=docker-runtime . /
 COPY --from=docker-cli . /
 COPY --from=gitconfig-builder /root/.gitconfig /root/.gitconfig
+COPY --from=frontend-builder /app/dist/ /app/frontend/
 
 WORKDIR /app
 

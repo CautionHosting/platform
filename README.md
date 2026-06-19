@@ -35,7 +35,7 @@ Follow the [bootstrapping guide](infra-bootstrap/README.md) to create the requir
 Set up `.env` file using the credentials from bootstrapping:
 
 ```bash
-cp env.example .env
+cp env.example $HOME/.config/caution/.env
 # Edit .env with your AWS credentials and bucket names from bootstrapping
 ```
 

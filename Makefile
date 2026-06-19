@@ -1,33 +1,18 @@
 # SPDX-FileCopyrightText: 2025 Caution SEZC
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
--include .env
-export
-
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-platform-ports test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-platform-ports test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
 NETWORK := caution-network
-DB_NAME ?= caution
-DB_USER ?= postgres
-DB_PASSWORD ?= postgres
-DB_HOST ?= postgres
-DATABASE_URL ?= postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):5432/$(DB_NAME)
 DB_VOLUME := caution-postgres-data
-SSH_PORT ?= 2222
 CAUTION_DATA_DIR ?= $(PWD)/caution-cache
 CONTAINER_DATA_DIR := /var/cache/caution
 
-ifeq ($(ENVIRONMENT),production)
-FRONTEND_BUILD_TARGET := build-frontend-dist
-FRONTEND_STATUS := Frontend: served by gateway from $(OUT_DIR)/frontend
-else
-FRONTEND_BUILD_TARGET := build-frontend
-FRONTEND_STATUS := Frontend: http://localhost:3000 (dev server with hot reload)
-endif
+
 
 ifdef NOCACHE
 	NO_CACHE := --no-cache
@@ -80,15 +65,6 @@ build-metering:
 	@echo "Building Metering service..."
 	@docker build -t caution-metering -f ./containerfiles/Containerfile.metering .
 	@echo "Metering service image built: caution-metering"
-
-audit-frontend:
-	@echo "Auditing Frontend npm dependencies..."
-	@docker build -f ./containerfiles/Containerfile.frontend --target npm-audit .
-
-build-frontend: audit-frontend
-	@echo "Building Frontend..."
-	@docker build -t caution-frontend -f ./containerfiles/Containerfile.frontend --target builder .
-	@echo "Frontend image built: caution-frontend"
 
 build-frontend-dist:
 	@echo "Building Frontend static assets..."
@@ -456,7 +432,7 @@ install-cli-untrusted: build-cli-untrusted
 		fi; \
 	fi
 
-build-all: build-gateway build-api build-email build-metering $(FRONTEND_BUILD_TARGET) build-cli
+build-all: build-gateway build-api build-email build-metering build-cli
 
 network:
 	@docker network inspect $(NETWORK) >/dev/null 2>&1 || \
@@ -467,33 +443,12 @@ volume:
 		(docker volume create $(DB_VOLUME) && echo "✓ Volume $(DB_VOLUME) created")
 
 postgres: network volume
-	@if docker ps -a --format '{{.Names}}' | grep -q '^postgres$$'; then \
-		if docker ps --format '{{.Names}}' | grep -q '^postgres$$'; then \
-			echo "Postgres already running"; \
-		else \
-			echo "Starting existing postgres container..."; \
-			docker start postgres; \
-			sleep 2; \
-			echo "Postgres started"; \
-		fi \
-	else \
-		docker run -d \
-			--name postgres \
-			--network $(NETWORK) \
-			-v $(DB_VOLUME):/var/lib/postgresql/data \
-			-e POSTGRES_DB=$(DB_NAME) \
-			-e POSTGRES_USER=$(DB_USER) \
-			-e POSTGRES_PASSWORD=$(DB_PASSWORD) \
-			-p 127.0.0.1:5432:5432 \
-			postgres:16-alpine && \
-		echo "Postgres started, waiting for ready..." && \
-		sleep 5 && \
-		until docker exec postgres pg_isready -U $(DB_USER) > /dev/null 2>&1; do \
-			echo "   Waiting for postgres..."; \
-			sleep 1; \
-		done && \
-		echo "Postgres ready"; \
-	fi
+	systemctl restart --user caution-postgres
+	until docker exec postgres pg_isready -U postgres > /dev/null 2>&1; do \
+		echo "   Waiting for postgres..."; \
+		sleep 1; \
+	done && \
+	echo "Postgres ready"
 
 migrate: postgres
 	@echo "Running migrations..."
@@ -502,9 +457,9 @@ migrate: postgres
 		docker run --rm \
 			--network $(NETWORK) \
 			-v $(PWD)/src/api/migrations:/migrations:ro \
-			-e PGPASSWORD=$(DB_PASSWORD) \
+			--env-file $(HOME)/.config/caution/.env \
 			postgres:16-alpine \
-			psql -h $(DB_HOST) -U $(DB_USER) -d $(DB_NAME) -f /migrations/$$(basename $$migration) || true; \
+			psql -h postgres -U postgres -d caution -f /migrations/$$(basename $$migration) || true; \
 	done
 	@echo "Migrations complete"
 
@@ -520,13 +475,12 @@ run-api: network postgres
 		-e AWS_REGION=us-west-2 \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
-		-e DATABASE_URL=$(DATABASE_URL) \
-		--env-file .env \
+		--env-file $(HOME)/.config/caution/.env \
+		-v $(HOME)/.config/caution/prices.json:/app/prices.json:ro \
+		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
-		$(if $(wildcard $(PWD)/prices.json),-v $(PWD)/prices.json:/app/prices.json:ro) \
-		-v $(PWD)/config.json:/app/config.json:ro \
 		caution-api
 	@echo "API service started (internal port 8080)"
 
@@ -537,23 +491,19 @@ run-gateway: network
 		--name gateway \
 		--network $(NETWORK) \
 		-p 8000:8080 \
-		-p $(SSH_PORT):$(SSH_PORT) \
-		--env-file .env \
-		-e DATABASE_URL=$(DATABASE_URL) \
-		-e SSH_PORT=$(SSH_PORT) \
-		-e SSH_HOST_KEY_PATH=$(CONTAINER_DATA_DIR)/ssh_host_ed25519_key \
+		-p 2222:2222 \
+		--env-file $(HOME)/.config/caution/.env \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
-		$(if $(wildcard $(OUT_DIR)/frontend/index.html),-v $(PWD)/$(OUT_DIR)/frontend:/app/frontend:ro) \
 		caution-gateway
-	@echo "Gateway started on port 8000 (HTTP) and $(SSH_PORT) (SSH)"
+	@echo "Gateway started on port 8000 (HTTP) and 2222 (SSH)"
 
 run-email: network
 	@docker rm -f email 2>/dev/null || true
 	@docker run -d \
 		--name email \
 		--network $(NETWORK) \
-		--env-file .env \
+		--env-file $(HOME)/.config/caution/.env \
 		-e EMAIL_BIND_ADDR=0.0.0.0:8082 \
 		-p 127.0.0.1:8082:8082 \
 		caution-email
@@ -564,30 +514,12 @@ run-metering: network postgres
 	@docker run -d \
 		--name metering \
 		--network $(NETWORK) \
-		--env-file .env \
-		-e DATABASE_URL=$(DATABASE_URL) \
+		--env-file $(HOME)/.config/caution/.env \
+		-v $(HOME)/.config/caution/prices.json:/app/prices.json:ro \
+		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		-e METERING_INTERVAL_SECS=60 \
-		$(if $(wildcard $(PWD)/prices.json),-v $(PWD)/prices.json:/app/prices.json:ro) \
 		caution-metering
 	@echo "Metering service started (internal port 8083)"
-
-run-frontend: network
-ifeq ($(ENVIRONMENT),production)
-	@docker rm -f frontend 2>/dev/null || true
-	@echo "ENVIRONMENT=production: frontend is static and served by gateway from $(OUT_DIR)/frontend."
-else
-	@docker rm -f frontend 2>/dev/null || true
-	@docker run -d \
-		--name frontend \
-		--network $(NETWORK) \
-		-p 3000:3000 \
-		-e ENVIRONMENT=$(ENVIRONMENT) \
-		-e VITE_PROXY_TARGET=$(VITE_PROXY_TARGET) \
-		-e VITE_ALLOWED_HOSTS=$(VITE_ALLOWED_HOSTS) \
-		-e VITE_PADDLE_SANDBOX=$(VITE_PADDLE_SANDBOX) \
-		caution-frontend
-	@echo "Frontend started on port 3000"
-endif
 
 # =============================================================================
 # =============================================================================
@@ -596,30 +528,9 @@ endif
 
 up: migrate
 	@echo "Building all images in parallel..."
-	@$(MAKE) build-api build-gateway build-email build-metering $(FRONTEND_BUILD_TARGET)
-	@$(MAKE) run-email run-metering run-api run-frontend
-	@echo "Waiting for API to be ready..."
-	@sleep 2
-	@$(MAKE) run-gateway
+	@$(MAKE) build-api build-gateway build-email build-metering
+	systemctl restart --user caution-email caution-metering caution-api caution-gateway
 	@echo "  All services running"
-	@echo "  $(FRONTEND_STATUS)"
-	@echo "  Gateway: http://localhost:8000"
-	@echo "  SSH: localhost:2222"
-	@echo "  API: internal only (http://api:8080)"
-	@echo "  Metering: internal only (http://metering:8083)"
-	@echo "  Postgres: localhost:5432"
-	@echo ""
-	@echo "Database is persistent - safe to run 'make down' without losing data"
-
-up-dev: migrate
-	@echo "Building all images in parallel (dev)..."
-	@$(MAKE) build-api-dev build-gateway-dev build-email-dev build-metering build-frontend
-	@$(MAKE) run-email run-metering run-api run-frontend
-	@echo "Waiting for API to be ready..."
-	@sleep 2
-	@$(MAKE) run-gateway
-	@echo "  All services running (dev builds)"
-	@echo "  Frontend: http://localhost:3000 (dev server with hot reload)"
 	@echo "  Gateway: http://localhost:8000"
 	@echo "  SSH: localhost:2222"
 	@echo "  API: internal only (http://api:8080)"
@@ -629,14 +540,14 @@ up-dev: migrate
 	@echo "Database is persistent - safe to run 'make down' without losing data"
 
 down:
-	@docker rm -f gateway api email metering frontend 2>/dev/null || true
+	@docker rm -f gateway api email metering 2>/dev/null || true
 	@docker stop postgres 2>/dev/null || true
 	@echo "Services stopped (postgres data preserved)"
 	@echo "Run 'make up' to restart"
 	@echo "Run 'make down-clean' to remove all data"
 
 down-clean:
-	@docker rm -f gateway api email metering frontend postgres 2>/dev/null || true
+	@docker rm -f gateway api email metering postgres 2>/dev/null || true
 	@docker volume rm $(DB_VOLUME) 2>/dev/null || true
 	@docker network rm $(NETWORK) 2>/dev/null || true
 	@echo "All services and data removed"
@@ -650,15 +561,13 @@ logs:
 	@docker logs email 2>&1 | tail -n 20 || true
 	@echo "\n=== Metering Service Logs ==="
 	@docker logs metering 2>&1 | tail -n 20 || true
-	@echo "\n=== Frontend Logs ==="
-	@docker logs frontend 2>&1 | tail -n 20 || true
 	@echo "\n=== Postgres Logs ==="
 	@docker logs postgres 2>&1 | tail -n 20 || true
 
 clean:
 	@echo "Cleaning build artifacts..."
 	@rm -rf $(OUT_DIR)
-	@docker rmi -f caution-cli caution-gateway caution-api caution-email caution-metering caution-frontend 2>/dev/null || true
+	@docker rmi -f caution-cli caution-gateway caution-api caution-email caution-metering 2>/dev/null || true
 	@echo "Clean complete"
 
 clean-enclave:
@@ -667,7 +576,7 @@ clean-enclave:
 	@echo "Enclave artifacts cleaned"
 
 db-shell:
-	@docker exec -it postgres psql -U $(DB_USER) -d $(DB_NAME)
+	@docker exec -it postgres psql -U postgres -d caution
 
 db-reset: down-clean
 	@echo "Resetting database..."
@@ -675,7 +584,7 @@ db-reset: down-clean
 
 status:
 	@echo "=== Container Status ==="
-	@docker ps -a --filter "name=gateway" --filter "name=api" --filter "name=email" --filter "name=metering" --filter "name=frontend" --filter "name=postgres" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+	@docker ps -a --filter "name=gateway" --filter "name=api" --filter "name=email" --filter "name=metering" --filter "name=postgres" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 	@echo "\n=== Volume Status ==="
 	@docker volume ls --filter "name=$(DB_VOLUME)"
 	@echo "\n=== Network Status ==="
@@ -687,7 +596,7 @@ status:
 TEST_DB_NAME := caution_test
 TEST_DB_VOLUME := caution-test-postgres-data
 TEST_DB_HOST := postgres-test
-TEST_DATABASE_URL := postgresql://$(DB_USER):$(DB_PASSWORD)@$(TEST_DB_HOST):5432/$(TEST_DB_NAME)
+TEST_DATABASE_URL := postgresql://postgres:postgres@$(TEST_DB_HOST):5432/$(TEST_DB_NAME)
 E2E_LOCK_FILE ?= /tmp/caution-platform-e2e.lock
 ONPREM_PROVISIONER_DIR ?= ../bring-your-own-cloud-setup
 ONPREM_PROVISIONER_IMAGE ?= codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest
@@ -701,12 +610,12 @@ postgres-test: network
 		--network $(NETWORK) \
 		-v $(TEST_DB_VOLUME):/var/lib/postgresql/data \
 		-e POSTGRES_DB=$(TEST_DB_NAME) \
-		-e POSTGRES_USER=$(DB_USER) \
-		-e POSTGRES_PASSWORD=$(DB_PASSWORD) \
+		-e POSTGRES_USER=postgres \
+		-e POSTGRES_PASSWORD=postgres \
 		postgres:16-alpine >/dev/null && \
 	echo "Test postgres started, waiting for ready..." && \
 	sleep 3 && \
-	until docker exec $(TEST_DB_HOST) pg_isready -U $(DB_USER) > /dev/null 2>&1; do \
+	until docker exec $(TEST_DB_HOST) pg_isready -U postgres > /dev/null 2>&1; do \
 		sleep 1; \
 	done && \
 	echo "Test postgres ready"
@@ -717,9 +626,9 @@ migrate-test: postgres-test
 		docker run --rm \
 			--network $(NETWORK) \
 			-v $(PWD)/src/api/migrations:/migrations:ro \
-			-e PGPASSWORD=$(DB_PASSWORD) \
+			-e PGPASSWORD=postgres \
 			postgres:16-alpine \
-			psql -h $(TEST_DB_HOST) -U $(DB_USER) -d $(TEST_DB_NAME) -f /migrations/$$(basename $$migration) 2>&1 | grep -v "^$$" || true; \
+			psql -h $(TEST_DB_HOST) -U postgres -d $(TEST_DB_NAME) -f /migrations/$$(basename $$migration) 2>&1 | grep -v "^$$" || true; \
 	done
 	@echo "Test migrations complete"
 
@@ -734,6 +643,7 @@ run-api-test: network
 		-p 127.0.0.1:8080:8080 \
 		--group-add $$(stat -c '%g' /var/run/docker.sock) \
 		--env-file .env \
+		--env-file $(HOME)/.config/caution/.env \
 		-e AWS_REGION=us-west-2 \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
@@ -742,8 +652,8 @@ run-api-test: network
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
-		$(if $(wildcard $(PWD)/prices.json),-v $(PWD)/prices.json:/app/prices.json:ro) \
-		-v $(PWD)/config.json:/app/config.json:ro \
+		-v $(HOME)/.config/caution/prices.json:/app/prices.json:ro \
+		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		caution-api
 	@echo "API service started in test mode"
 
@@ -754,41 +664,25 @@ run-gateway-test: network
 		--name gateway \
 		--network $(NETWORK) \
 		-p 127.0.0.1:8000:8080 \
-		-p 127.0.0.1:$(SSH_PORT):$(SSH_PORT) \
-		--env-file .env \
+		-p 127.0.0.1:2222:2222 \
+		--env-file $(HOME)/.config/caution/.env \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
-		-e SSH_PORT=$(SSH_PORT) \
-		-e SSH_HOST_KEY_PATH=$(CONTAINER_DATA_DIR)/ssh_host_ed25519_key \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		caution-gateway
-	@echo "Gateway started on 127.0.0.1:8000 (HTTP) and 127.0.0.1:$(SSH_PORT) (SSH)"
+	@echo "Gateway started on 127.0.0.1:8000 (HTTP) and 127.0.0.1:2222 (SSH)"
 
 run-email-test: network
 	@docker rm -f email 2>/dev/null || true
 	@docker run -d \
 		--name email \
 		--network $(NETWORK) \
-		--env-file .env \
-		-e FRONTEND_URL=http://localhost:3000 \
+		--env-file $(HOME)/.config/caution/.env \
 		-e EMAIL_TEST_MODE=true \
 		-e EMAIL_BIND_ADDR=0.0.0.0:8082 \
 		-p 127.0.0.1:8082:8082 \
 		caution-email
 	@echo "Email service started on 127.0.0.1:8082 (test mode, /sent endpoint enabled)"
-
-run-frontend-test: network
-	@docker rm -f frontend 2>/dev/null || true
-	@docker run -d \
-		--name frontend \
-		--network $(NETWORK) \
-		-p 127.0.0.1:3000:3000 \
-		-e ENVIRONMENT=$(ENVIRONMENT) \
-		-e VITE_PROXY_TARGET=$(VITE_PROXY_TARGET) \
-		-e VITE_ALLOWED_HOSTS=$(VITE_ALLOWED_HOSTS) \
-		-e VITE_PADDLE_SANDBOX=$(VITE_PADDLE_SANDBOX) \
-		caution-frontend
-	@echo "Frontend started on 127.0.0.1:3000"
 
 run-metering-test: network
 	@docker rm -f metering 2>/dev/null || true
@@ -796,7 +690,9 @@ run-metering-test: network
 		--name metering \
 		--network $(NETWORK) \
 		-p 127.0.0.1:8083:8083 \
-		--env-file .env \
+		--env-file $(HOME)/.config/caution/.env \
+		-v $(HOME)/.config/caution/prices.json:/app/prices.json:ro \
+		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
 		-e METERING_INTERVAL_SECS=9999 \
 		-e ENABLE_TEST_ENDPOINTS=true \
@@ -805,9 +701,9 @@ run-metering-test: network
 
 up-test: down migrate-test
 	@echo "Building test images (e2e-testing-unsafe mode)..."
-	@$(MAKE) build-api-dev build-email-dev build-frontend
+	@$(MAKE) build-api-dev build-email-dev
 	@$(MAKE) build-gateway-e2e
-	@$(MAKE) run-email-test run-api-test run-frontend-test
+	@$(MAKE) run-email-test run-api-test
 	@echo "Waiting for API to be ready..."
 	@sleep 2
 	@$(MAKE) run-gateway-test
@@ -815,15 +711,15 @@ up-test: down migrate-test
 	@echo "  All ports bound to 127.0.0.1 only (not externally accessible)"
 	@echo "  Test DB: $(TEST_DB_HOST) (ephemeral)"
 	@echo "  Gateway: http://127.0.0.1:8000"
-	@echo "  SSH: 127.0.0.1:$(SSH_PORT)"
+	@echo "  SSH: 127.0.0.1:2222"
 	@echo ""
 	@echo "  E2E login: POST http://127.0.0.1:8000/auth/e2e-login"
 
 up-test-billing: down-test-billing migrate-test
 	@echo "Building test images for billing e2e..."
-	@$(MAKE) build-api-dev build-email-dev build-metering build-frontend
+	@$(MAKE) build-api-dev build-email-dev build-metering
 	@$(MAKE) build-gateway-e2e
-	@$(MAKE) run-email-test run-metering-test run-api-test run-frontend-test
+	@$(MAKE) run-email-test run-metering-test run-api-test
 	@echo "Waiting for API to be ready..."
 	@sleep 2
 	@$(MAKE) run-gateway-test
@@ -833,12 +729,12 @@ up-test-billing: down-test-billing migrate-test
 	@echo "  Test DB:  $(TEST_DB_HOST) (ephemeral)"
 
 down-test-billing:
-	@docker rm -f gateway api email metering frontend $(TEST_DB_HOST) 2>/dev/null || true
+	@docker rm -f gateway api email metering $(TEST_DB_HOST) 2>/dev/null || true
 	@docker volume rm $(TEST_DB_VOLUME) 2>/dev/null || true
 	@echo "Billing test services and data removed"
 
 down-test:
-	@docker rm -f gateway api email metering frontend $(TEST_DB_HOST) 2>/dev/null || true
+	@docker rm -f gateway api email metering $(TEST_DB_HOST) 2>/dev/null || true
 	@docker volume rm $(TEST_DB_VOLUME) 2>/dev/null || true
 	@echo "Test services and data removed"
 
@@ -883,8 +779,8 @@ test-e2e-legal:
 	DB_NAME=$(TEST_DB_NAME) \
 	DB_HOST=$(TEST_DB_HOST) \
 	DB_PORT=5432 \
-	DB_USER=$(DB_USER) \
-	DB_PASSWORD=$(DB_PASSWORD) \
+	DB_USER=postgres \
+	DB_PASSWORD=postgres \
 	DATABASE_URL=$(TEST_DATABASE_URL) \
 	bash tests/e2e/test_legal_tracking.sh; \
 	status=$$?; \
@@ -959,11 +855,11 @@ setup-builder:
 	SUBNET=$$(terraform output -raw builder_subnet_id) && \
 	PROFILE=$$(terraform output -raw builder_instance_profile) && \
 	cd .. && \
-	grep -q "^BUILDER_AMI_ID" .env 2>/dev/null && sed -i "s/^BUILDER_AMI_ID=.*/BUILDER_AMI_ID=$$AMI/" .env || echo "BUILDER_AMI_ID=$$AMI" >> .env && \
-	grep -q "^BUILDER_SECURITY_GROUP_ID" .env 2>/dev/null && sed -i "s/^BUILDER_SECURITY_GROUP_ID=.*/BUILDER_SECURITY_GROUP_ID=$$SG/" .env || echo "BUILDER_SECURITY_GROUP_ID=$$SG" >> .env && \
-	grep -q "^BUILDER_SUBNET_ID" .env 2>/dev/null && sed -i "s/^BUILDER_SUBNET_ID=.*/BUILDER_SUBNET_ID=$$SUBNET/" .env || echo "BUILDER_SUBNET_ID=$$SUBNET" >> .env && \
-	grep -q "^BUILDER_INSTANCE_PROFILE" .env 2>/dev/null && sed -i "s/^BUILDER_INSTANCE_PROFILE=.*/BUILDER_INSTANCE_PROFILE=$$PROFILE/" .env || echo "BUILDER_INSTANCE_PROFILE=$$PROFILE" >> .env
-	@echo "Builder env vars written to .env"
+	grep -q "^BUILDER_AMI_ID" $(HOME)/.config/caution/.env 2>/dev/null && sed -i "s/^BUILDER_AMI_ID=.*/BUILDER_AMI_ID=$$AMI/" $(HOME)/.config/caution/.env || echo "BUILDER_AMI_ID=$$AMI" >> $(HOME)/.config/caution/.env && \
+	grep -q "^BUILDER_SECURITY_GROUP_ID" $(HOME)/.config/caution/.env 2>/dev/null && sed -i "s/^BUILDER_SECURITY_GROUP_ID=.*/BUILDER_SECURITY_GROUP_ID=$$SG/" $(HOME)/.config/caution/.env || echo "BUILDER_SECURITY_GROUP_ID=$$SG" >> $(HOME)/.config/caution/.env && \
+	grep -q "^BUILDER_SUBNET_ID" $(HOME)/.config/caution/.env 2>/dev/null && sed -i "s/^BUILDER_SUBNET_ID=.*/BUILDER_SUBNET_ID=$$SUBNET/" $(HOME)/.config/caution/.env || echo "BUILDER_SUBNET_ID=$$SUBNET" >> $(HOME)/.config/caution/.env && \
+	grep -q "^BUILDER_INSTANCE_PROFILE" $(HOME)/.config/caution/.env 2>/dev/null && sed -i "s/^BUILDER_INSTANCE_PROFILE=.*/BUILDER_INSTANCE_PROFILE=$$PROFILE/" $(HOME)/.config/caution/.env || echo "BUILDER_INSTANCE_PROFILE=$$PROFILE" >> $(HOME)/.config/caution/.env
+	@echo "Builder env vars written to $(HOME)/.config/caution/.env"
 
 test-e2e-builder:
 	@echo "Reading builder config from infra-bootstrap state..."

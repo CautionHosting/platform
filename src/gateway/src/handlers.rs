@@ -1296,10 +1296,10 @@ async fn authenticate_session(
 
 fn get_rp_origin() -> String {
     std::env::var("RP_ORIGINS")
-        .unwrap_or_else(|_| "http://localhost:3000".to_string())
+        .unwrap_or_else(|_| "http://localhost:8000".to_string())
         .split(',')
         .next()
-        .unwrap_or("http://localhost:3000")
+        .unwrap_or("http://localhost:8000")
         .trim()
         .to_string()
 }

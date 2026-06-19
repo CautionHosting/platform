@@ -45,7 +45,7 @@ impl Config {
 
         let rp_origins: Vec<String> = env::var("RP_ORIGINS")
             .unwrap_or_else(|_| {
-                "http://localhost:8080,http://localhost:8000,http://localhost:3000".to_string()
+                "http://localhost:8080,http://localhost:8000".to_string()
             })
             .split(',')
             .map(|s| s.trim().to_string())
@@ -69,7 +69,7 @@ impl Config {
             .context("Invalid SSH_PORT")?;
 
         let ssh_host_key_path = env::var("SSH_HOST_KEY_PATH")
-            .unwrap_or_else(|_| "/etc/caution/ssh_host_ed25519_key".to_string());
+            .unwrap_or_else(|_| "/var/cache/caution/ssh_host_ed25519_key".to_string());
 
         let session_timeout_hours: i64 = env::var("SESSION_TIMEOUT_HOURS")
             .unwrap_or_else(|_| "24".to_string())

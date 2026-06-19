@@ -1,0 +1,14 @@
+# user systemd file for managing Caution postgres
+
+[Unit]
+Description=Caution postgres instance
+Requires=caution-network.service
+After=caution-network.service
+
+[Service]
+ExecStartPre=-/usr/bin/docker rm -f postgres
+ExecStart=/usr/bin/docker run --name postgres --network caution-network -v caution-postgres-data:/var/lib/postgresql/data --env-file %h/.config/caution/.env -p 127.0.0.1:5432:5432 postgres:16-alpine
+ExecStop=/usr/bin/docker stop postgres
+
+[Install]
+WantedBy=default.target

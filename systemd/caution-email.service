@@ -1,0 +1,14 @@
+# user systemd file for managing Caution email
+
+[Unit]
+Description=Caution Email service
+Requires=caution-network.service
+After=caution-postgres.service caution-network.service
+
+[Service]
+ExecStartPre=-/usr/bin/docker rm -f email
+ExecStart=/usr/bin/docker run --name email --network caution-network -p 127.0.0.1:8082:8082 --env-file %h/.config/caution/.env -e EMAIL_BIND_ADDR=0.0.0.0:8082 caution-email
+ExecStop=/usr/bin/docker stop email
+
+[Install]
+WantedBy=default.target
