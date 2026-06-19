@@ -457,7 +457,7 @@ migrate: postgres
 		docker run --rm \
 			--network $(NETWORK) \
 			-v $(PWD)/src/api/migrations:/migrations:ro \
-			-e PGPASSWORD=password \
+			--env-file $(HOME)/.config/caution/.env \
 			postgres:16-alpine \
 			psql -h postgres -U postgres -d caution -f /migrations/$$(basename $$migration) || true; \
 	done
