@@ -36,11 +36,17 @@ pub struct Filter {
 
 pub struct Instance {
     pub instance_id: String,
+    pub instance_type: Option<String>,
 }
 
 pub struct Image {
     pub image_id: String,
     pub creation_date: String,
+}
+
+pub struct Region {
+    pub name: String,
+    pub opt_in_status: Option<String>,
 }
 
 // Allow the EC2 host to use IMDSv2 while blocking metadata responses from
@@ -146,6 +152,67 @@ impl Ec2Client {
 
         let body = self.signed_request(&params).await?;
         Ok(parse_instance_ids(&body))
+    }
+
+    pub async fn count_vpcs(&self) -> Result<u32> {
+        let params = vec![
+            ("Action".to_string(), "DescribeVpcs".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+        ];
+
+        let body = self.signed_request(&params).await?;
+        Ok(parse_tag_values(&body, "vpcId").len() as u32)
+    }
+
+    pub async fn count_elastic_ips(&self) -> Result<u32> {
+        let params = vec![
+            ("Action".to_string(), "DescribeAddresses".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+        ];
+
+        let body = self.signed_request(&params).await?;
+        Ok(parse_tag_values(&body, "publicIp").len() as u32)
+    }
+
+    pub async fn active_instance_types(&self) -> Result<Vec<String>> {
+        let instances = self
+            .describe_instances(&[Filter::new("instance-state-name", &["pending", "running"])])
+            .await?;
+
+        Ok(instances
+            .into_iter()
+            .filter_map(|instance| instance.instance_type)
+            .collect())
+    }
+
+    pub async fn describe_regions(&self, all_regions: bool) -> Result<Vec<Region>> {
+        let mut params = vec![
+            ("Action".to_string(), "DescribeRegions".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+        ];
+
+        if all_regions {
+            params.push(("AllRegions".to_string(), "true".to_string()));
+        }
+
+        let body = self.signed_request(&params).await?;
+        Ok(parse_regions(&body))
+    }
+
+    pub async fn instance_type_offered(&self, instance_type: &str) -> Result<bool> {
+        let params = vec![
+            (
+                "Action".to_string(),
+                "DescribeInstanceTypeOfferings".to_string(),
+            ),
+            ("Version".to_string(), "2016-11-15".to_string()),
+            ("LocationType".to_string(), "region".to_string()),
+            ("Filter.1.Name".to_string(), "instance-type".to_string()),
+            ("Filter.1.Value.1".to_string(), instance_type.to_string()),
+        ];
+
+        let body = self.signed_request(&params).await?;
+        Ok(!parse_tag_values(&body, "instanceType").is_empty())
     }
 
     pub async fn stop_instances(&self, instance_ids: &[String]) -> Result<()> {
@@ -305,6 +372,52 @@ impl Ec2Client {
     }
 }
 
+pub struct ServiceQuotasClient {
+    access_key_id: String,
+    secret_access_key: String,
+    region: String,
+    http: reqwest::Client,
+}
+
+impl ServiceQuotasClient {
+    pub fn new(credentials: &AwsCredentials) -> Self {
+        Self {
+            access_key_id: credentials.access_key_id.clone(),
+            secret_access_key: credentials.secret_access_key.clone(),
+            region: credentials.region.clone(),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    pub async fn get_service_quota_value(
+        &self,
+        service_code: &str,
+        quota_code: &str,
+    ) -> Result<f64> {
+        let body = serde_json::json!({
+            "ServiceCode": service_code,
+            "QuotaCode": quota_code,
+        });
+
+        let response = signed_json_request(
+            &self.http,
+            &self.access_key_id,
+            &self.secret_access_key,
+            &self.region,
+            "servicequotas",
+            "ServiceQuotasV20190624.GetServiceQuota",
+            &body,
+        )
+        .await?;
+
+        response
+            .get("Quota")
+            .and_then(|quota| quota.get("Value"))
+            .and_then(|value| value.as_f64())
+            .ok_or_else(|| anyhow::anyhow!("Service quota response did not include Quota.Value"))
+    }
+}
+
 pub struct AsgClient {
     access_key_id: String,
     secret_access_key: String,
@@ -440,6 +553,75 @@ async fn signed_request(
     Ok(text)
 }
 
+async fn signed_json_request(
+    http: &reqwest::Client,
+    access_key_id: &str,
+    secret_access_key: &str,
+    region: &str,
+    service: &str,
+    target: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let host = format!("{}.{}.amazonaws.com", service, region);
+    let url = format!("https://{}/", host);
+    let body = serde_json::to_string(body).context("Failed to serialize AWS JSON body")?;
+
+    let now = chrono::Utc::now();
+    let date_stamp = now.format("%Y%m%d").to_string();
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+
+    let content_type = "application/x-amz-json-1.1";
+    let payload_hash = hex::encode(Sha256::digest(body.as_bytes()));
+    let canonical_headers = format!(
+        "content-type:{}\nhost:{}\nx-amz-date:{}\nx-amz-target:{}\n",
+        content_type, host, amz_date, target
+    );
+    let signed_headers = "content-type;host;x-amz-date;x-amz-target";
+    let canonical_request = format!(
+        "POST\n/\n\n{}\n{}\n{}",
+        canonical_headers, signed_headers, payload_hash
+    );
+
+    let scope = format!("{}/{}/{}/aws4_request", date_stamp, region, service);
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
+        amz_date,
+        scope,
+        hex::encode(Sha256::digest(canonical_request.as_bytes()))
+    );
+
+    let signing_key = derive_signing_key(secret_access_key, &date_stamp, region, service);
+    let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
+        access_key_id, scope, signed_headers, signature
+    );
+
+    let response = http
+        .post(&url)
+        .header("Content-Type", content_type)
+        .header("Host", &host)
+        .header("X-Amz-Date", &amz_date)
+        .header("X-Amz-Target", target)
+        .header("Authorization", &authorization)
+        .body(body)
+        .send()
+        .await
+        .context(format!("{} API request failed", service))?;
+
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .context(format!("Failed to read {} response", service))?;
+
+    if !status.is_success() {
+        bail!("{} API returned {}: {}", service, status, text);
+    }
+
+    serde_json::from_str(&text).context(format!("Failed to parse {} response JSON", service))
+}
+
 fn encode_form(params: &[(String, String)]) -> String {
     params
         .iter()
@@ -478,23 +660,17 @@ fn derive_signing_key(secret: &str, date_stamp: &str, region: &str, service: &st
 
 /// Extract instance IDs from EC2 DescribeInstances XML response.
 fn parse_instance_ids(xml: &str) -> Vec<Instance> {
-    let mut instances = Vec::new();
-    let tag = "<instanceId>";
-    let end_tag = "</instanceId>";
-    let mut pos = 0;
-    while let Some(start) = xml[pos..].find(tag) {
-        let start = pos + start + tag.len();
-        if let Some(end) = xml[start..].find(end_tag) {
-            let id = &xml[start..start + end];
-            instances.push(Instance {
-                instance_id: id.to_string(),
-            });
-            pos = start + end + end_tag.len();
-        } else {
-            break;
-        }
-    }
-    instances
+    let instance_ids = parse_tag_values(xml, "instanceId");
+    let instance_types = parse_tag_values(xml, "instanceType");
+
+    instance_ids
+        .into_iter()
+        .enumerate()
+        .map(|(index, instance_id)| Instance {
+            instance_id,
+            instance_type: instance_types.get(index).cloned(),
+        })
+        .collect()
 }
 
 fn parse_first_tag_value(xml: &str, tag_name: &str) -> Option<String> {
@@ -532,6 +708,30 @@ fn parse_images(xml: &str) -> Vec<Image> {
             creation_date,
         })
         .collect()
+}
+
+fn parse_regions(xml: &str) -> Vec<Region> {
+    let mut regions = Vec::new();
+    let mut pos = 0;
+
+    while let Some(item_start) = xml[pos..].find("<item>") {
+        let item_start = pos + item_start + "<item>".len();
+        let Some(item_end) = xml[item_start..].find("</item>") else {
+            break;
+        };
+        let item = &xml[item_start..item_start + item_end];
+
+        if let Some(name) = parse_first_tag_value(item, "regionName") {
+            regions.push(Region {
+                name,
+                opt_in_status: parse_first_tag_value(item, "optInStatus"),
+            });
+        }
+
+        pos = item_start + item_end + "</item>".len();
+    }
+
+    regions
 }
 
 #[cfg(test)]
@@ -622,6 +822,41 @@ mod tests {
         assert_eq!(images.len(), 2);
         assert_eq!(images[0].image_id, "ami-old");
         assert_eq!(images[1].creation_date, "2025-02-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn test_parse_regions() {
+        let xml = r#"
+        <DescribeRegionsResponse>
+          <regionInfo>
+            <item>
+              <regionName>us-east-1</regionName>
+              <regionEndpoint>ec2.us-east-1.amazonaws.com</regionEndpoint>
+              <optInStatus>opt-in-not-required</optInStatus>
+            </item>
+            <item>
+              <regionName>ap-south-2</regionName>
+              <regionEndpoint>ec2.ap-south-2.amazonaws.com</regionEndpoint>
+              <optInStatus>not-opted-in</optInStatus>
+            </item>
+            <item>
+              <regionName>us-west-2</regionName>
+              <regionEndpoint>ec2.us-west-2.amazonaws.com</regionEndpoint>
+            </item>
+          </regionInfo>
+        </DescribeRegionsResponse>"#;
+
+        let regions = parse_regions(xml);
+        assert_eq!(regions.len(), 3);
+        assert_eq!(regions[0].name, "us-east-1");
+        assert_eq!(
+            regions[0].opt_in_status.as_deref(),
+            Some("opt-in-not-required")
+        );
+        assert_eq!(regions[1].name, "ap-south-2");
+        assert_eq!(regions[1].opt_in_status.as_deref(), Some("not-opted-in"));
+        assert_eq!(regions[2].name, "us-west-2");
+        assert_eq!(regions[2].opt_in_status, None);
     }
 
     #[test]

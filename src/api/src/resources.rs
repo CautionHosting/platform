@@ -510,8 +510,8 @@ pub async fn delete_resource(
         auth.user_id,
         resource_id
     );
-    let resource: Option<(Uuid, Uuid, String, Option<String>, String)> = sqlx::query_as(
-        "SELECT cr.id, cr.organization_id, cr.resource_name, pa.role_arn, cr.provider_resource_id
+    let resource: Option<(Uuid, Uuid, String, Option<String>, String, Option<String>)> = sqlx::query_as(
+        "SELECT cr.id, cr.organization_id, cr.resource_name, pa.role_arn, cr.provider_resource_id, cr.region
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
          INNER JOIN provider_accounts pa ON cr.provider_account_id = pa.id
@@ -526,7 +526,9 @@ pub async fn delete_resource(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let Some((_, org_id, resource_name, _role_arn_opt, tracked_resource_id)) = resource else {
+    let Some((_, org_id, resource_name, _role_arn_opt, tracked_resource_id, resource_region)) =
+        resource
+    else {
         tracing::warn!(
             "Resource {} not found or user {} has no access",
             resource_id,
@@ -540,6 +542,10 @@ pub async fn delete_resource(
         resource_name,
         resource_id
     );
+
+    let resource_region = resource_region
+        .or_else(|| std::env::var("AWS_REGION").ok())
+        .unwrap_or_else(|| "us-west-2".to_string());
 
     let (aws_credentials, asg_name) = if let Some(encryptor) = state.encryptor.as_ref() {
         if let Ok(Some(credential)) =
@@ -580,13 +586,30 @@ pub async fn delete_resource(
                     (None, None)
                 }
             } else {
-                (None, None)
+                (
+                    Some(
+                        crate::fully_managed_capacity::platform_credentials_for_region(
+                            &resource_region,
+                        ),
+                    ),
+                    None,
+                )
             }
         } else {
-            (None, None)
+            (
+                Some(
+                    crate::fully_managed_capacity::platform_credentials_for_region(
+                        &resource_region,
+                    ),
+                ),
+                None,
+            )
         }
     } else {
-        (None, None)
+        (
+            Some(crate::fully_managed_capacity::platform_credentials_for_region(&resource_region)),
+            None,
+        )
     };
 
     let terraform_result = deployment::destroy_app_with_credentials(

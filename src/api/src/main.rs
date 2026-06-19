@@ -29,6 +29,7 @@ mod ec2;
 mod eif_download;
 mod encryption;
 mod errors;
+mod fully_managed_capacity;
 mod gpg;
 mod legal;
 mod metering;
@@ -1003,6 +1004,46 @@ async fn recover_deploy_failure(
             "Failed to restore resource {} state after deploy error: {}",
             resource_id,
             e
+        );
+    }
+}
+
+async fn restore_pending_deploy_rejection(
+    state: &Arc<AppState>,
+    org_id: Uuid,
+    resource_id: Uuid,
+    previous_state: types::ResourceState,
+    was_destroyed: bool,
+) {
+    let result = if was_destroyed {
+        sqlx::query(
+            "UPDATE compute_resources
+             SET state = $1, destroyed_at = COALESCE(destroyed_at, NOW())
+             WHERE id = $2 AND organization_id = $3",
+        )
+        .bind(previous_state)
+        .bind(resource_id)
+        .bind(org_id)
+        .execute(&state.db)
+        .await
+    } else {
+        sqlx::query(
+            "UPDATE compute_resources
+             SET state = $1
+             WHERE id = $2 AND organization_id = $3",
+        )
+        .bind(previous_state)
+        .bind(resource_id)
+        .bind(org_id)
+        .execute(&state.db)
+        .await
+    };
+
+    if let Err(error) = result {
+        tracing::error!(
+            "Failed to restore resource {} after deploy rejection: {}",
+            resource_id,
+            error
         );
     }
 }
@@ -2014,6 +2055,18 @@ async fn deploy_logic(
         http_port: build_config.http_port,
     };
 
+    if !is_managed_onprem
+        && enclave_config.cpus > fully_managed_capacity::MAX_FULLY_MANAGED_ENCLAVE_VCPUS
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Fully managed deployments support up to {} enclave vCPUs. Contact support for larger requests.",
+                fully_managed_capacity::MAX_FULLY_MANAGED_ENCLAVE_VCPUS
+            ),
+        ));
+    }
+
     let managed_onprem_credential = if let Some(credential) = cred
         .as_ref()
         .filter(|credential| credential.managed_on_prem)
@@ -2275,6 +2328,43 @@ async fn deploy_logic(
         );
     }
 
+    let capacity_reservation = if managed_onprem_config.is_none() {
+        let requirements = fully_managed_capacity::DeploymentRequirements::for_enclave(
+            enclave_config.cpus,
+            enclave_config.memory_mb,
+        );
+        let _ = tx
+            .send(Ok(milestone("Checking fully managed capacity...")))
+            .await;
+        match fully_managed_capacity::reserve_capacity(
+            &state.db,
+            req.org_id,
+            auth.user_id,
+            resource_id,
+            &requirements,
+        )
+        .await
+        {
+            Ok(reservation) => Some(reservation),
+            Err(error) => {
+                restore_pending_deploy_rejection(
+                    &state,
+                    req.org_id,
+                    resource_id,
+                    previous_state,
+                    was_destroyed,
+                )
+                .await;
+                return Err((error.status_code(), error.to_string()));
+            }
+        }
+    } else {
+        None
+    };
+    let fully_managed_region = capacity_reservation
+        .as_ref()
+        .map(|reservation| reservation.region.clone());
+
     tracing::info!(
         "Deploying Nitro Enclave for resource {} with memory_mb={}, cpu_count={}, debug={}",
         resource_id,
@@ -2299,11 +2389,16 @@ async fn deploy_logic(
         );
     }
 
-    // Extract region from credentials before moving into nitro_request
     let deployed_region = deployment_credentials
         .as_ref()
         .map(|c| c.region.clone())
-        .unwrap_or_else(|| "us-west-2".to_string());
+        .or_else(|| fully_managed_region.clone())
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "No deployment region resolved".to_string(),
+            )
+        })?;
 
     let nitro_request = deployment::NitroDeploymentRequest {
         org_id: req.org_id,
@@ -2323,10 +2418,19 @@ async fn deploy_logic(
         locksmith: build_config.locksmith,
         ssh_keys: build_config.ssh_keys.clone(),
         domain: build_config.domain.clone(),
+        region: fully_managed_region.clone(),
         credentials: deployment_credentials,
         managed_onprem: managed_onprem_config,
     };
-    let cleanup_credentials = nitro_request.credentials.clone();
+    let cleanup_credentials = nitro_request.credentials.clone().or_else(|| {
+        if nitro_request.managed_onprem.is_none() {
+            Some(fully_managed_capacity::platform_credentials_for_region(
+                &deployed_region,
+            ))
+        } else {
+            None
+        }
+    });
     let cleanup_managed_onprem = nitro_request.managed_onprem.clone();
 
     let _ = tx.send(Ok(milestone("Uploading and launching..."))).await;
@@ -2342,6 +2446,9 @@ async fn deploy_logic(
         }
         Err(e) => {
             tracing::error!("Failed to deploy Nitro Enclave: {:?}", e);
+            if let Some(reservation) = capacity_reservation.as_ref() {
+                fully_managed_capacity::release_reservation(&state.db, reservation).await;
+            }
             recover_deploy_failure(
                 &state,
                 req.org_id,
@@ -2364,6 +2471,7 @@ async fn deploy_logic(
     if let Some(instance_type) = &deployment_result.instance_type {
         final_config["instance_type"] = serde_json::json!(instance_type);
     }
+    final_config["region"] = serde_json::json!(deployed_region.clone());
 
     let app_url = if let Some(ref domain) = build_config.domain {
         format!("https://{}", domain)
@@ -2379,6 +2487,9 @@ async fn deploy_logic(
     tracing::info!("Waiting for health endpoint to become healthy...");
     if let Err(e) = wait_for_health(&deployment_result.public_ip, health_timeout_secs).await {
         tracing::error!("Attestation health check failed: {}", e);
+        if let Some(reservation) = capacity_reservation.as_ref() {
+            fully_managed_capacity::release_reservation(&state.db, reservation).await;
+        }
         recover_deploy_failure(
             &state,
             req.org_id,
@@ -2402,6 +2513,9 @@ async fn deploy_logic(
         tracing::info!("Waiting for attestation endpoint to become healthy...");
         if let Err(e) = wait_for_attestation_health(&deployment_result.public_ip, health_timeout_secs).await {
             tracing::error!("Attestation health check failed: {}", e);
+            if let Some(reservation) = capacity_reservation.as_ref() {
+                fully_managed_capacity::release_reservation(&state.db, reservation).await;
+            }
             recover_deploy_failure(
                 &state,
                 req.org_id,
@@ -2435,6 +2549,9 @@ async fn deploy_logic(
     .execute(&state.db)
     .await
     {
+        if let Some(reservation) = capacity_reservation.as_ref() {
+            fully_managed_capacity::release_reservation(&state.db, reservation).await;
+        }
         recover_deploy_failure(
             &state,
             req.org_id,
@@ -2452,7 +2569,7 @@ async fn deploy_logic(
         ));
     }
 
-    crate::metering::upsert_tracked_resource(
+    if let Err(e) = crate::metering::upsert_tracked_resource(
         &state,
         &deployment_result.instance_id,
         req.org_id,
@@ -2469,15 +2586,22 @@ async fn deploy_logic(
         }),
     )
     .await
-    .map_err(|e| {
-        (
+    {
+        if let Some(reservation) = capacity_reservation.as_ref() {
+            fully_managed_capacity::release_reservation(&state.db, reservation).await;
+        }
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             format!(
                 "Deployment succeeded but metering registration failed: {:#}",
                 e
             ),
-        )
-    })?;
+        ));
+    }
+
+    if let Some(reservation) = capacity_reservation.as_ref() {
+        fully_managed_capacity::release_reservation(&state.db, reservation).await;
+    }
 
     tracing::info!(
         "EIF deployment complete: resource_id={}, instance_id={}, public_ip={}, instance_type={:?}",
@@ -2654,6 +2778,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/organizations/{id}/members/{user_id}",
             delete(organizations::remove_member),
+        )
+        .route(
+            "/organizations/{id}/fully-managed/waitlist",
+            post(fully_managed_capacity::join_waitlist),
         )
         .route("/resources", post(resources::create_resource))
         .route("/resources", get(resources::list_resources))
