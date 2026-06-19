@@ -238,7 +238,7 @@ pub async fn verify_email(
     }
 
     let frontend_url =
-        std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
+        std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:8000".to_string());
 
     let html = format!(
         r#"<!DOCTYPE html>

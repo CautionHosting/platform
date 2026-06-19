@@ -45,7 +45,7 @@ impl Config {
 
         let rp_origins: Vec<String> = env::var("RP_ORIGINS")
             .unwrap_or_else(|_| {
-                "http://localhost:8080,http://localhost:8000,http://localhost:3000".to_string()
+                "http://localhost:8080,http://localhost:8000".to_string()
             })
             .split(',')
             .map(|s| s.trim().to_string())

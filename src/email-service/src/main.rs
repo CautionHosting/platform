@@ -1007,7 +1007,7 @@ async fn main() -> anyhow::Result<()> {
         value
     };
     let base_url =
-        std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
+        std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:8000".to_string());
 
     let smtp_transport = if test_mode {
         info!("EMAIL TEST MODE ENABLED - Emails will be logged instead of sent");

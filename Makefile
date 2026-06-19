@@ -3,7 +3,7 @@
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test run-frontend run-frontend-test up up-dev up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-platform-ports test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-platform-ports test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -12,13 +12,7 @@ DB_VOLUME := caution-postgres-data
 CAUTION_DATA_DIR ?= $(PWD)/caution-cache
 CONTAINER_DATA_DIR := /var/cache/caution
 
-ifeq ($(ENVIRONMENT),production)
-FRONTEND_BUILD_TARGET := build-frontend-dist
-FRONTEND_STATUS := Frontend: served by gateway from $(OUT_DIR)/frontend
-else
-FRONTEND_BUILD_TARGET := build-frontend
-FRONTEND_STATUS := Frontend: http://localhost:3000 (dev server with hot reload)
-endif
+
 
 ifdef NOCACHE
 	NO_CACHE := --no-cache
@@ -71,15 +65,6 @@ build-metering:
 	@echo "Building Metering service..."
 	@docker build -t caution-metering -f ./containerfiles/Containerfile.metering .
 	@echo "Metering service image built: caution-metering"
-
-audit-frontend:
-	@echo "Auditing Frontend npm dependencies..."
-	@docker build -f ./containerfiles/Containerfile.frontend --target npm-audit .
-
-build-frontend: audit-frontend
-	@echo "Building Frontend..."
-	@docker build -t caution-frontend -f ./containerfiles/Containerfile.frontend --target builder .
-	@echo "Frontend image built: caution-frontend"
 
 build-frontend-dist:
 	@echo "Building Frontend static assets..."
@@ -447,7 +432,7 @@ install-cli-untrusted: build-cli-untrusted
 		fi; \
 	fi
 
-build-all: build-gateway build-api build-email build-metering $(FRONTEND_BUILD_TARGET) build-cli
+build-all: build-gateway build-api build-email build-metering build-cli
 
 network:
 	@docker network inspect $(NETWORK) >/dev/null 2>&1 || \
@@ -510,7 +495,6 @@ run-gateway: network
 		--env-file $(HOME)/.config/caution/.env \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
-		$(if $(wildcard $(OUT_DIR)/frontend/index.html),-v $(PWD)/$(OUT_DIR)/frontend:/app/frontend:ro) \
 		caution-gateway
 	@echo "Gateway started on port 8000 (HTTP) and 2222 (SSH)"
 
@@ -537,25 +521,6 @@ run-metering: network postgres
 		caution-metering
 	@echo "Metering service started (internal port 8083)"
 
-run-frontend: network
-ifeq ($(ENVIRONMENT),production)
-	@docker rm -f frontend 2>/dev/null || true
-	@echo "ENVIRONMENT=production: frontend is static and served by gateway from $(OUT_DIR)/frontend."
-else
-	@docker rm -f frontend 2>/dev/null || true
-	@docker run -d \
-		--name frontend \
-		--network $(NETWORK) \
-		-p 3000:3000 \
-		-e ENVIRONMENT=$(ENVIRONMENT) \
-		-e VITE_PROXY_TARGET=$(VITE_PROXY_TARGET) \
-		-e VITE_ALLOWED_HOSTS=$(VITE_ALLOWED_HOSTS) \
-		-e VITE_PADDLE_SANDBOX=$(VITE_PADDLE_SANDBOX) \
-		--env-file $(HOME)/.config/caution/.env \
-		caution-frontend
-	@echo "Frontend started on port 3000"
-endif
-
 # =============================================================================
 # =============================================================================
 # Main targets
@@ -563,27 +528,9 @@ endif
 
 up: migrate
 	@echo "Building all images in parallel..."
-	@$(MAKE) build-api build-gateway build-email build-metering $(FRONTEND_BUILD_TARGET)
-	systemctl restart --user caution-email caution-metering caution-api caution-frontend caution-gateway
+	@$(MAKE) build-api build-gateway build-email build-metering
+	systemctl restart --user caution-email caution-metering caution-api caution-gateway
 	@echo "  All services running"
-	@echo "  $(FRONTEND_STATUS)"
-	@echo "  Gateway: http://localhost:8000"
-	@echo "  SSH: localhost:2222"
-	@echo "  API: internal only (http://api:8080)"
-	@echo "  Metering: internal only (http://metering:8083)"
-	@echo "  Postgres: localhost:5432"
-	@echo ""
-	@echo "Database is persistent - safe to run 'make down' without losing data"
-
-up-dev: migrate
-	@echo "Building all images in parallel (dev)..."
-	@$(MAKE) build-api-dev build-gateway-dev build-email-dev build-metering build-frontend
-	@$(MAKE) run-email run-metering run-api run-frontend
-	@echo "Waiting for API to be ready..."
-	@sleep 2
-	@$(MAKE) run-gateway
-	@echo "  All services running (dev builds)"
-	@echo "  Frontend: http://localhost:3000 (dev server with hot reload)"
 	@echo "  Gateway: http://localhost:8000"
 	@echo "  SSH: localhost:2222"
 	@echo "  API: internal only (http://api:8080)"
@@ -593,14 +540,14 @@ up-dev: migrate
 	@echo "Database is persistent - safe to run 'make down' without losing data"
 
 down:
-	@docker rm -f gateway api email metering frontend 2>/dev/null || true
+	@docker rm -f gateway api email metering 2>/dev/null || true
 	@docker stop postgres 2>/dev/null || true
 	@echo "Services stopped (postgres data preserved)"
 	@echo "Run 'make up' to restart"
 	@echo "Run 'make down-clean' to remove all data"
 
 down-clean:
-	@docker rm -f gateway api email metering frontend postgres 2>/dev/null || true
+	@docker rm -f gateway api email metering postgres 2>/dev/null || true
 	@docker volume rm $(DB_VOLUME) 2>/dev/null || true
 	@docker network rm $(NETWORK) 2>/dev/null || true
 	@echo "All services and data removed"
@@ -614,15 +561,13 @@ logs:
 	@docker logs email 2>&1 | tail -n 20 || true
 	@echo "\n=== Metering Service Logs ==="
 	@docker logs metering 2>&1 | tail -n 20 || true
-	@echo "\n=== Frontend Logs ==="
-	@docker logs frontend 2>&1 | tail -n 20 || true
 	@echo "\n=== Postgres Logs ==="
 	@docker logs postgres 2>&1 | tail -n 20 || true
 
 clean:
 	@echo "Cleaning build artifacts..."
 	@rm -rf $(OUT_DIR)
-	@docker rmi -f caution-cli caution-gateway caution-api caution-email caution-metering caution-frontend 2>/dev/null || true
+	@docker rmi -f caution-cli caution-gateway caution-api caution-email caution-metering 2>/dev/null || true
 	@echo "Clean complete"
 
 clean-enclave:
@@ -639,7 +584,7 @@ db-reset: down-clean
 
 status:
 	@echo "=== Container Status ==="
-	@docker ps -a --filter "name=gateway" --filter "name=api" --filter "name=email" --filter "name=metering" --filter "name=frontend" --filter "name=postgres" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+	@docker ps -a --filter "name=gateway" --filter "name=api" --filter "name=email" --filter "name=metering" --filter "name=postgres" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 	@echo "\n=== Volume Status ==="
 	@docker volume ls --filter "name=$(DB_VOLUME)"
 	@echo "\n=== Network Status ==="
@@ -733,26 +678,11 @@ run-email-test: network
 		--name email \
 		--network $(NETWORK) \
 		--env-file $(HOME)/.config/caution/.env \
-		-e FRONTEND_URL=http://localhost:3000 \
 		-e EMAIL_TEST_MODE=true \
 		-e EMAIL_BIND_ADDR=0.0.0.0:8082 \
 		-p 127.0.0.1:8082:8082 \
 		caution-email
 	@echo "Email service started on 127.0.0.1:8082 (test mode, /sent endpoint enabled)"
-
-run-frontend-test: network
-	@docker rm -f frontend 2>/dev/null || true
-	@docker run -d \
-		--name frontend \
-		--network $(NETWORK) \
-		-p 127.0.0.1:3000:3000 \
-		-e ENVIRONMENT=$(ENVIRONMENT) \
-		-e VITE_PROXY_TARGET=$(VITE_PROXY_TARGET) \
-		-e VITE_ALLOWED_HOSTS=$(VITE_ALLOWED_HOSTS) \
-		-e VITE_PADDLE_SANDBOX=$(VITE_PADDLE_SANDBOX) \
-		--env-file $(HOME)/.config/caution/.env \
-		caution-frontend
-	@echo "Frontend started on 127.0.0.1:3000"
 
 run-metering-test: network
 	@docker rm -f metering 2>/dev/null || true
@@ -771,9 +701,9 @@ run-metering-test: network
 
 up-test: down migrate-test
 	@echo "Building test images (e2e-testing-unsafe mode)..."
-	@$(MAKE) build-api-dev build-email-dev build-frontend
+	@$(MAKE) build-api-dev build-email-dev
 	@$(MAKE) build-gateway-e2e
-	@$(MAKE) run-email-test run-api-test run-frontend-test
+	@$(MAKE) run-email-test run-api-test
 	@echo "Waiting for API to be ready..."
 	@sleep 2
 	@$(MAKE) run-gateway-test
@@ -787,9 +717,9 @@ up-test: down migrate-test
 
 up-test-billing: down-test-billing migrate-test
 	@echo "Building test images for billing e2e..."
-	@$(MAKE) build-api-dev build-email-dev build-metering build-frontend
+	@$(MAKE) build-api-dev build-email-dev build-metering
 	@$(MAKE) build-gateway-e2e
-	@$(MAKE) run-email-test run-metering-test run-api-test run-frontend-test
+	@$(MAKE) run-email-test run-metering-test run-api-test
 	@echo "Waiting for API to be ready..."
 	@sleep 2
 	@$(MAKE) run-gateway-test
@@ -799,12 +729,12 @@ up-test-billing: down-test-billing migrate-test
 	@echo "  Test DB:  $(TEST_DB_HOST) (ephemeral)"
 
 down-test-billing:
-	@docker rm -f gateway api email metering frontend $(TEST_DB_HOST) 2>/dev/null || true
+	@docker rm -f gateway api email metering $(TEST_DB_HOST) 2>/dev/null || true
 	@docker volume rm $(TEST_DB_VOLUME) 2>/dev/null || true
 	@echo "Billing test services and data removed"
 
 down-test:
-	@docker rm -f gateway api email metering frontend $(TEST_DB_HOST) 2>/dev/null || true
+	@docker rm -f gateway api email metering $(TEST_DB_HOST) 2>/dev/null || true
 	@docker volume rm $(TEST_DB_VOLUME) 2>/dev/null || true
 	@echo "Test services and data removed"
 
