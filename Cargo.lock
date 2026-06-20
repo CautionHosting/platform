@@ -1562,6 +1562,7 @@ dependencies = [
  "dirs",
  "enclave-builder",
  "flate2",
+ "hcl-rs",
  "hex",
  "indicatif",
  "keymaker-models",

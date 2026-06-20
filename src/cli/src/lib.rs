@@ -645,6 +645,9 @@ enum AppCommands {
     },
     #[command(about = "Download the latest completed EIF for an app")]
     DownloadEif(apps::download_eif::DownloadEif),
+
+    #[command(name = "migrate-procfile", about = "Convert a Procfile to caution.hcl")]
+    MigrateProcfile(apps::migrate_procfile::MigrateProcfileArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -6991,6 +6994,9 @@ pub async fn run() -> Result<()> {
             }
             AppCommands::DownloadEif(args) => {
                 apps::download_eif::download_eif(&client, &args).await?;
+            }
+            AppCommands::MigrateProcfile(args) => {
+                apps::migrate_procfile::migrate_procfile(&client, &args).await?;
             }
         },
         Commands::SshKeys { command } => match command {
