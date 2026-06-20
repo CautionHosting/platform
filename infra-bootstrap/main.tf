@@ -146,6 +146,18 @@ resource "aws_iam_policy" "platform_deploy" {
         Resource = "*"
       },
       {
+        Sid    = "ServiceQuotasRead"
+        Effect = "Allow"
+        Action = [
+          "servicequotas:GetServiceQuota",
+        ]
+        Resource = [
+          "arn:aws:servicequotas:*:${data.aws_caller_identity.current.account_id}:ec2/L-1216C47A",
+          "arn:aws:servicequotas:*:${data.aws_caller_identity.current.account_id}:ec2/L-0263D0A3",
+          "arn:aws:servicequotas:*:${data.aws_caller_identity.current.account_id}:vpc/L-F678F1CE",
+        ]
+      },
+      {
         Sid    = "EC2Manage"
         Effect = "Allow"
         Action = [

@@ -601,6 +601,11 @@ enum Commands {
         #[command(subcommand)]
         command: CredentialCommands,
     },
+    #[command(about = "Manage fully managed capacity requests")]
+    Capacity {
+        #[command(subcommand)]
+        command: CapacityCommands,
+    },
     #[command(about = "Manage cryptographic secrets", alias = "secrets")]
     Secret {
         #[command(subcommand)]
@@ -710,6 +715,17 @@ enum CredentialCommands {
     SetDefault {
         #[arg(help = "Credential ID or name")]
         id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CapacityCommands {
+    #[command(about = "Join the fully managed capacity notification waitlist")]
+    Waitlist {
+        #[arg(long, help = "Email address to notify when capacity is available")]
+        email: String,
+        #[arg(long, help = "Requested enclave vCPUs, up to 16")]
+        vcpus: Option<u32>,
     },
 }
 
@@ -1041,6 +1057,11 @@ struct OrgSettings {
 #[derive(Deserialize)]
 struct Organization {
     id: String,
+}
+
+#[derive(Deserialize)]
+struct CapacityWaitlistResponse {
+    status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2060,8 +2081,7 @@ run: /app/myapp
         Ok(status)
     }
 
-    async fn check_org_security_settings(&self, session_id: &str) -> Result<OrgSettings> {
-        // Get the user's organizations
+    async fn primary_organization_id(&self, session_id: &str) -> Result<String> {
         let orgs_response = self
             .client
             .get(format!("{}/api/organizations", self.base_url))
@@ -2079,12 +2099,18 @@ run: /app/myapp
             bail!("No organizations found");
         }
 
+        Ok(orgs[0].id.clone())
+    }
+
+    async fn check_org_security_settings(&self, session_id: &str) -> Result<OrgSettings> {
+        let org_id = self.primary_organization_id(session_id).await?;
+
         // Get the first org's settings
         let settings_response = self
             .client
             .get(format!(
                 "{}/api/organizations/{}/settings",
-                self.base_url, orgs[0].id
+                self.base_url, org_id
             ))
             .header("X-Session-ID", session_id)
             .send()
@@ -2989,6 +3015,65 @@ run: /app/myapp
             let error = self.api_error_message(response).await;
             bail!("Failed to list apps: {}", error)
         }
+    }
+
+    async fn join_capacity_waitlist(&self, email: &str, vcpus: Option<u32>) -> Result<()> {
+        let email = email.trim();
+        anyhow::ensure!(!email.is_empty(), "--email must not be empty");
+        anyhow::ensure!(
+            !email.contains('\n') && !email.contains('\r'),
+            "--email is invalid"
+        );
+        anyhow::ensure!(email.contains('@'), "--email must be an email address");
+
+        if let Some(vcpus) = vcpus {
+            anyhow::ensure!(
+                (1..=16).contains(&vcpus),
+                "--vcpus must be between 1 and 16; contact support for larger requests"
+            );
+        }
+
+        let config = self.ensure_authenticated().await?;
+        let org_id = self.primary_organization_id(config.session_id()).await?;
+
+        let response = self
+            .client
+            .post(format!(
+                "{}/api/organizations/{}/fully-managed/waitlist",
+                self.base_url, org_id
+            ))
+            .header("X-Session-ID", config.session_id())
+            .json(&serde_json::json!({
+                "email": email,
+                "requested_enclave_vcpus": vcpus,
+            }))
+            .send()
+            .await
+            .context("Failed to send capacity waitlist request")?;
+
+        if !response.status().is_success() {
+            let error = self.api_error_message(response).await;
+            bail!("Failed to join capacity waitlist: {}", error);
+        }
+
+        let waitlist_response: CapacityWaitlistResponse = response
+            .json()
+            .await
+            .context("Failed to parse capacity waitlist response")?;
+
+        if waitlist_response.status == "already_waiting" {
+            println!(
+                "{} is already on the fully managed capacity waitlist.",
+                email
+            );
+        } else {
+            println!(
+                "{} has been added to the fully managed capacity waitlist.",
+                email
+            );
+        }
+
+        Ok(())
     }
 
     async fn fetch_app(&self, id: &str) -> Result<App> {
@@ -7024,6 +7109,11 @@ pub async fn run() -> Result<()> {
             }
             CredentialCommands::SetDefault { id } => {
                 client.set_default_credential(&id).await?;
+            }
+        },
+        Commands::Capacity { command } => match command {
+            CapacityCommands::Waitlist { email, vcpus } => {
+                client.join_capacity_waitlist(&email, vcpus).await?;
             }
         },
         Commands::Secret { command } => match command {

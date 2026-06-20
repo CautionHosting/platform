@@ -393,10 +393,22 @@ pub async fn get_aws_credentials_for_resource(
         }
     }
 
-    // Fall back to platform credentials from env
+    // Fall back to platform credentials for fully managed resources.
     let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").ok()?;
     let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").ok()?;
-    let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string());
+    let region: Option<String> = sqlx::query_scalar(
+        "SELECT region FROM compute_resources WHERE id = $1 AND organization_id = $2",
+    )
+    .bind(resource_id)
+    .bind(org_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .flatten();
+    let region = region
+        .or_else(|| std::env::var("AWS_REGION").ok())
+        .unwrap_or_else(|| "us-west-2".to_string());
     Some(deployment::AwsCredentials {
         access_key_id,
         secret_access_key,
