@@ -2065,7 +2065,7 @@ async fn deploy_logic(
     let ssh_keys = ec_debug.map(|d| d.ssh_keys.clone()).unwrap_or_default();
     let http_port = ec_network
         .and_then(|n| n.http.as_ref())
-        .and_then(|h| h.port.parse::<u16>().ok());
+        .map(|h| h.port);
     let domain = ec_network
         .and_then(|n| n.http.as_ref())
         .map(|h| h.domain.clone());
