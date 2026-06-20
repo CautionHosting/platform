@@ -4134,7 +4134,7 @@ enclave "default" {{
             &commit_sha,
             enclave_builder::CacheType::Build,
             no_cache,
-            self.workdir.clone(),
+            &self.get_cache_dir()?,
         )?;
 
         let work_dir = builder.work_dir.clone();
@@ -4358,7 +4358,7 @@ enclave "default" {{
             &cache_key,
             enclave_builder::CacheType::Reproduction,
             no_cache,
-            self.workdir.clone(),
+            &self.get_cache_dir()?,
         )?;
 
         if let Some(cached) = builder.get_cached_eif() {

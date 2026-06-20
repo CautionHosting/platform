@@ -25,7 +25,7 @@ pub mod pcrs;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use compile::{resolve_ref_to_commit, EnclaveSourceResult};
 pub use docker::{
@@ -102,16 +102,9 @@ impl EnclaveBuilder {
         cache_key: &str,
         cache_type: CacheType,
         no_cache: bool,
-        base_dir: Option<PathBuf>,
+        base_dir: &Path,
     ) -> Result<Self> {
-        let base_cache_dir = if let Some(dir) = base_dir {
-            dir.join(cache_type.dir_name())
-        } else {
-            dirs::home_dir()
-                .context("Failed to determine home directory")?
-                .join(".cache/caution")
-                .join(cache_type.dir_name())
-        };
+        let base_cache_dir = base_dir.join(cache_type.dir_name());
 
         let safe_org_id = org_id
             .chars()
@@ -160,18 +153,13 @@ impl EnclaveBuilder {
         })
     }
 
-    #[allow(deprecated)]
     pub fn new(
         enclave_source: impl Into<String>,
         enclave_version: impl Into<String>,
         framework_source: impl Into<String>,
+        base_dir: impl AsRef<Path>,
     ) -> Result<Self> {
-        let cache_dir = dirs::home_dir()
-            .context("Failed to determine home directory")?
-            .join(".cache/caution/build");
-        std::fs::create_dir_all(&cache_dir).context("Failed to create cache directory")?;
-
-        let work_dir = tempfile::tempdir_in(&cache_dir)?.into_path();
+        let work_dir = tempfile::tempdir_in(base_dir.as_ref())?.keep();
 
         Ok(Self {
             enclave_source: enclave_source.into(),
@@ -180,11 +168,6 @@ impl EnclaveBuilder {
             work_dir,
             no_cache: false,
         })
-    }
-
-    pub fn with_work_dir(mut self, work_dir: PathBuf) -> Self {
-        self.work_dir = work_dir;
-        self
     }
 
     pub fn with_no_cache(mut self, no_cache: bool) -> Self {
@@ -798,7 +781,8 @@ mod tests {
             ..pcrs1.clone()
         };
 
-        let builder = EnclaveBuilder::new("./enclave", "local", "http://test").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let builder = EnclaveBuilder::new("./enclave", "local", "http://test", tmp.path()).unwrap();
         assert!(builder.compare_pcrs(&pcrs1, &pcrs2));
         assert!(!builder.compare_pcrs(&pcrs1, &pcrs3));
     }

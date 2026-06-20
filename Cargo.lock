@@ -2377,7 +2377,6 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bollard",
- "dirs",
  "flate2",
  "futures-util",
  "hex",
