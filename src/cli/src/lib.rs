@@ -469,7 +469,7 @@ struct Cli {
     )]
     url: String,
 
-    #[arg(short, long, help = "Enable verbose output")]
+    #[arg(short, long, global = true, help = "Enable verbose output")]
     verbose: bool,
 
     #[arg(
@@ -478,6 +478,14 @@ struct Cli {
         help = "Use QR code for cross-device FIDO2 signing (no local security key needed)"
     )]
     qr: bool,
+
+    #[arg(
+        long,
+        global = true,
+        env = "CAUTION_WORKDIR",
+        help = "Working directory for cache (default: ~/.cache/caution)"
+    )]
+    workdir: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1239,10 +1247,11 @@ struct ApiClient {
     deployment_path: Option<PathBuf>,
     verbose: bool,
     qr: bool,
+    workdir: Option<PathBuf>,
 }
 
 impl ApiClient {
-    fn new(base_url: &str, verbose: bool, qr: bool) -> Result<Self> {
+    fn new(base_url: &str, verbose: bool, qr: bool, workdir: Option<PathBuf>) -> Result<Self> {
         log_verbose(verbose, "Initializing API client...");
 
         let config_dir = dirs::config_dir()
@@ -1264,6 +1273,9 @@ impl ApiClient {
 
         log_verbose(verbose, &format!("Config file: {:?}", config_path));
         log_verbose(verbose, &format!("Deployment file: {:?}", deployment_path));
+        if let Some(ref wd) = workdir {
+            log_verbose(verbose, &format!("Working directory: {:?}", wd));
+        }
         log_verbose(verbose, "API client initialized");
 
         Ok(Self {
@@ -1273,6 +1285,7 @@ impl ApiClient {
             deployment_path,
             verbose,
             qr,
+            workdir,
         })
     }
 
@@ -4121,6 +4134,7 @@ enclave "default" {{
             &commit_sha,
             enclave_builder::CacheType::Build,
             no_cache,
+            self.workdir.clone(),
         )?;
 
         let work_dir = builder.work_dir.clone();
@@ -4344,6 +4358,7 @@ enclave "default" {{
             &cache_key,
             enclave_builder::CacheType::Reproduction,
             no_cache,
+            self.workdir.clone(),
         )?;
 
         if let Some(cached) = builder.get_cached_eif() {
@@ -5312,9 +5327,13 @@ enclave "default" {{
     }
 
     async fn download_and_extract_app_source(&self, url: &str) -> Result<PathBuf> {
-        let cache_dir = dirs::home_dir()
-            .context("Failed to determine home directory")?
-            .join(".cache/caution/downloads");
+        let cache_dir = if let Some(ref workdir) = self.workdir {
+            workdir.join("downloads")
+        } else {
+            dirs::home_dir()
+                .context("Failed to determine home directory")?
+                .join(".cache/caution/downloads")
+        };
         std::fs::create_dir_all(&cache_dir)
             .context("Failed to create downloads cache directory")?;
 
@@ -5809,6 +5828,9 @@ enclave "default" {{
     }
 
     fn get_cache_dir(&self) -> Result<PathBuf> {
+        if let Some(ref workdir) = self.workdir {
+            return Ok(workdir.clone());
+        }
         let cache_dir = dirs::home_dir()
             .context("Failed to determine home directory")?
             .join(".cache/caution");
@@ -6896,8 +6918,8 @@ pub async fn run() -> Result<()> {
     }
 
     log_verbose(cli.verbose, "Initializing API client...");
-    let client =
-        ApiClient::new(&cli.url, cli.verbose, cli.qr).context("Failed to initialize API client")?;
+    let client = ApiClient::new(&cli.url, cli.verbose, cli.qr, cli.workdir.clone())
+        .context("Failed to initialize API client")?;
     log_verbose(cli.verbose, "API client ready");
 
     match cli.command {

@@ -102,11 +102,16 @@ impl EnclaveBuilder {
         cache_key: &str,
         cache_type: CacheType,
         no_cache: bool,
+        base_dir: Option<PathBuf>,
     ) -> Result<Self> {
-        let base_cache_dir = dirs::home_dir()
-            .context("Failed to determine home directory")?
-            .join(".cache/caution")
-            .join(cache_type.dir_name());
+        let base_cache_dir = if let Some(dir) = base_dir {
+            dir.join(cache_type.dir_name())
+        } else {
+            dirs::home_dir()
+                .context("Failed to determine home directory")?
+                .join(".cache/caution")
+                .join(cache_type.dir_name())
+        };
 
         let safe_org_id = org_id
             .chars()
