@@ -1564,7 +1564,7 @@ mod tests {
 
         // Should write status updates
         assert!(
-            userdata.contains("write_status"),
+            userdata.contains("set_phase"),
             "should write status to S3"
         );
         assert!(
