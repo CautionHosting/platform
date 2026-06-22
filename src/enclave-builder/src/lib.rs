@@ -272,6 +272,7 @@ impl EnclaveBuilder {
         run_command: Option<String>,
         manifest: Option<EnclaveManifest>,
         ports: &[u16],
+        http_port: Option<u16>,
         e2e: bool,
         locksmith: bool,
         templates_dir: Option<&std::path::Path>,
@@ -286,6 +287,7 @@ impl EnclaveBuilder {
             run_command,
             manifest,
             ports,
+            http_port,
             self.no_cache,
             e2e,
             locksmith,
@@ -359,6 +361,7 @@ impl EnclaveBuilder {
         metadata: Option<String>,
         external_manifest: Option<EnclaveManifest>,
         ports: &[u16],
+        http_port: Option<u16>,
         e2e: bool,
         locksmith: bool,
     ) -> Result<Deployment> {
@@ -498,6 +501,7 @@ impl EnclaveBuilder {
                 run_command,
                 Some(manifest),
                 ports,
+                http_port,
                 e2e,
                 locksmith,
                 templates_dir.as_deref(),
@@ -531,6 +535,7 @@ impl EnclaveBuilder {
         metadata: Option<String>,
         external_manifest: Option<EnclaveManifest>,
         ports: &[u16],
+        http_port: Option<u16>,
         e2e: bool,
         locksmith: bool,
     ) -> Result<Deployment> {
@@ -654,6 +659,7 @@ impl EnclaveBuilder {
                 run_command,
                 Some(manifest),
                 ports,
+                http_port,
                 e2e,
                 locksmith,
                 templates_dir.as_deref(),
@@ -688,6 +694,7 @@ impl EnclaveBuilder {
         metadata: Option<String>,
         external_manifest: Option<EnclaveManifest>,
         ports: &[u16],
+        http_port: Option<u16>,
         e2e: bool,
         locksmith: bool,
     ) -> Result<Deployment> {
@@ -737,6 +744,7 @@ impl EnclaveBuilder {
                 metadata,
                 external_manifest,
                 ports,
+                http_port,
                 e2e,
                 locksmith,
             )
@@ -753,6 +761,7 @@ impl EnclaveBuilder {
                 metadata,
                 external_manifest,
                 ports,
+                http_port,
                 e2e,
                 locksmith,
             )
