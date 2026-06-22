@@ -2069,9 +2069,10 @@ async fn deploy_logic(
     let domain = ec_network
         .and_then(|n| n.http.as_ref())
         .map(|h| h.domain.clone());
-    let e2e = ec_network
+    let e2e_config = ec_network
         .and_then(|n| n.http.as_ref())
-        .and_then(|h| h.e2e_encryption.as_ref())
+        .and_then(|h| h.e2e_encryption.as_ref());
+    let e2e = e2e_config
         .and_then(|e| e.enabled)
         .unwrap_or(false);
 
@@ -2165,6 +2166,7 @@ async fn deploy_logic(
             &config_content,
             e2e,
             config_file.has_vault_env(), // auto-enable locksmith when env::vault is used
+            e2e_config.as_ref().and_then(|e2e| e2e.cors_origins.as_ref()).unwrap_or(&vec![]),
         );
         let s3_client = s3_client_for_credentials(&builder_target.aws_credentials).await;
 
@@ -2283,6 +2285,10 @@ async fn deploy_logic(
                     .map(|h| h.port),
                 e2e,
                 locksmith: config_file.has_vault_env(),
+                e2e_cors_origins: e2e_config
+                    .as_ref()
+                    .and_then(|e2e| e2e.cors_origins.as_ref())
+                    .map(|origins| origins.join(",")),
                 no_cache,
                 enclaveos_commit,
                 builder_size: resolved_size.id.clone(),

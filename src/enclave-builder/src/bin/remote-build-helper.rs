@@ -90,6 +90,7 @@ async fn main() -> Result<()> {
     let output_pcrs = PathBuf::from(env_required("CAUTION_OUTPUT_PCRS")?);
     let e2e = env_flag("CAUTION_E2E");
     let locksmith = env_flag("CAUTION_LOCKSMITH");
+    let e2e_cors_origins = std::env::var("CAUTION_CORS_ORIGINS").ok().filter(|s| !s.is_empty());
     let no_cache = env_flag("CAUTION_NO_CACHE");
     let ports = ports_from_env();
     let http_port = http_port_from_env();
@@ -146,6 +147,7 @@ async fn main() -> Result<()> {
                 http_port,
                 e2e,
                 locksmith,
+                e2e_cors_origins,
             )
             .await?
     } else {
@@ -163,6 +165,7 @@ async fn main() -> Result<()> {
                 http_port,
                 e2e,
                 locksmith,
+                e2e_cors_origins,
             )
             .await?
     };

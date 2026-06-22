@@ -152,6 +152,7 @@ pub struct BuildRequest {
     pub http_port: Option<u16>,
     pub e2e: bool,
     pub locksmith: bool,
+    pub e2e_cors_origins: Option<String>,
     pub no_cache: bool,
     pub enclaveos_commit: String,
     pub builder_size: String,
@@ -257,6 +258,7 @@ pub fn compute_cache_key(
     procfile_content: &str,
     e2e: bool,
     locksmith: bool,
+    e2e_cors_origins: &[String],
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(commit_sha.as_bytes());
@@ -275,6 +277,10 @@ pub fn compute_cache_key(
         }
         .as_bytes(),
     );
+    hasher.update(b"|");
+    for origin in e2e_cors_origins {
+        hasher.update(origin.as_bytes());
+    }
     format!("{:x}", hasher.finalize())
 }
 
@@ -843,6 +849,8 @@ fn generate_builder_userdata(
 
     let e2e_flag = if request.e2e { "true" } else { "false" };
     let locksmith_flag = if request.locksmith { "true" } else { "false" };
+    let cors_origins_value = request.e2e_cors_origins.as_deref().unwrap_or("");
+    let cors_origins_escaped = cors_origins_value.replace('\'', "'\\''");
     let no_cache_flag = if request.no_cache { "true" } else { "false" };
 
     // Build manifest using the same EnclaveManifest struct as the inline build path
@@ -904,6 +912,7 @@ PORTS="{ports_csv}"
 HTTP_PORT="{http_port}"
 E2E="{e2e_flag}"
 LOCKSMITH="{locksmith_flag}"
+CORS_ORIGINS='{cors_origins_escaped}'
 NO_CACHE="{no_cache_flag}"
 
 # Install script dependencies
@@ -998,6 +1007,7 @@ CAUTION_PORTS="$PORTS" \
 CAUTION_HTTP_PORT="$HTTP_PORT" \
 CAUTION_E2E="$E2E" \
 CAUTION_LOCKSMITH="$LOCKSMITH" \
+CAUTION_CORS_ORIGINS="$CORS_ORIGINS" \
 CAUTION_NO_CACHE="$NO_CACHE" \
 /usr/local/bin/remote-build-helper 2>&1
 
@@ -1050,6 +1060,7 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
         http_port = http_port,
         e2e_flag = e2e_flag,
         locksmith_flag = locksmith_flag,
+        cors_origins_escaped = cors_origins_escaped,
         no_cache_flag = no_cache_flag,
         manifest_json = manifest_json,
     ))
@@ -1206,44 +1217,44 @@ mod tests {
 
     #[test]
     fn test_cache_key_deterministic() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false);
-        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
+        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 64); // SHA256 hex
     }
 
     #[test]
     fn test_cache_key_changes_with_commit() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false);
-        let key2 = compute_cache_key("def456", "enclave-v1", "run: /app", false, false);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
+        let key2 = compute_cache_key("def456", "enclave-v1", "run: /app", false, false, None);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_enclaveos() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false);
-        let key2 = compute_cache_key("abc123", "enclave-v2", "run: /app", false, false);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
+        let key2 = compute_cache_key("abc123", "enclave-v2", "run: /app", false, false, None);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_procfile() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false);
-        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /other", false, false);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
+        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /other", false, false, None);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_e2e() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false);
-        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", true, false);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
+        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", true, false, None);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_locksmith() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false);
-        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, true);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
+        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, true, None);
         assert_ne!(key1, key2);
     }
 

@@ -275,6 +275,7 @@ impl EnclaveBuilder {
         http_port: Option<u16>,
         e2e: bool,
         locksmith: bool,
+        e2e_cors_origins: Option<String>,
         templates_dir: Option<&std::path::Path>,
     ) -> Result<EifFile> {
         build::build_eif_from_filesystems(
@@ -291,6 +292,7 @@ impl EnclaveBuilder {
             self.no_cache,
             e2e,
             locksmith,
+            e2e_cors_origins,
             templates_dir,
         )
         .await
@@ -364,6 +366,7 @@ impl EnclaveBuilder {
         http_port: Option<u16>,
         e2e: bool,
         locksmith: bool,
+        e2e_cors_origins: Option<String>,
     ) -> Result<Deployment> {
         if let Some(cached) = self.get_cached_eif() {
             tracing::info!("Using cached EIF from: {}", cached.eif.path.display());
@@ -504,6 +507,7 @@ impl EnclaveBuilder {
                 http_port,
                 e2e,
                 locksmith,
+                e2e_cors_origins,
                 templates_dir.as_deref(),
             )
             .await?;
@@ -538,6 +542,7 @@ impl EnclaveBuilder {
         http_port: Option<u16>,
         e2e: bool,
         locksmith: bool,
+        e2e_cors_origins: Option<String>,
     ) -> Result<Deployment> {
         if let Some(cached) = self.get_cached_eif() {
             tracing::info!("Using cached EIF from: {}", cached.eif.path.display());
@@ -662,6 +667,7 @@ impl EnclaveBuilder {
                 http_port,
                 e2e,
                 locksmith,
+                e2e_cors_origins,
                 templates_dir.as_deref(),
             )
             .await?;
@@ -697,6 +703,7 @@ impl EnclaveBuilder {
         http_port: Option<u16>,
         e2e: bool,
         locksmith: bool,
+        e2e_cors_origins: Option<String>,
     ) -> Result<Deployment> {
         let binary_basename = std::path::Path::new(binary_path)
             .file_name()
@@ -747,6 +754,7 @@ impl EnclaveBuilder {
                 http_port,
                 e2e,
                 locksmith,
+                e2e_cors_origins.clone(),
             )
             .await
         } else {
@@ -764,6 +772,7 @@ impl EnclaveBuilder {
                 http_port,
                 e2e,
                 locksmith,
+                e2e_cors_origins,
             )
             .await
         }
