@@ -52,6 +52,7 @@ mkdir -p /opt/nitro
 echo "Downloading EIF from ${eif_s3_path}..."
 aws s3 cp "${eif_s3_path}" /opt/nitro/enclave.eif
 
+%{ if egress == "true" ~}
 echo "Setting up vsock network proxy for enclave..."
 cat > /usr/local/bin/vsock-network-proxy.sh <<'PROXY_SCRIPT'
 #!/bin/bash
@@ -118,6 +119,9 @@ systemctl enable vsock-network.service
 systemctl start vsock-network.service
 
 sleep 3
+%{ else ~}
+echo "Enclave outbound egress disabled; skipping vsock network proxy"
+%{ endif ~}
 
 %{ if debug_mode == "true" ~}
 cat > /usr/local/bin/capture-enclave-console.sh <<'CONSOLE_CAPTURE'

@@ -519,6 +519,24 @@ mod tests {
     }
 
     #[test]
+    fn test_user_data_proxy_guarded_by_egress() {
+        let user_data = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("terraform/modules/aws/nitro-enclave/user-data.sh"),
+        )
+        .unwrap();
+        let needle = "Setting up vsock network proxy for enclave";
+        let egress_if = r#"%{ if egress == "true" ~}"#;
+        let if_pos = user_data.find(egress_if).expect("egress guard present");
+        let needle_pos = user_data.find(needle).expect("proxy setup present");
+        assert!(
+            if_pos < needle_pos,
+            "proxy setup must be guarded by egress conditional"
+        );
+    }
+
+    #[test]
     fn test_user_data_routes_e2e_default_traffic_through_steve() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let user_data = std::fs::read_to_string(
