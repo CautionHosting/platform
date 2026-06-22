@@ -4208,6 +4208,12 @@ enclave "default" {{
         let locksmith = cfg.has_vault_env();
         log_verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
 
+        let egress = default_enclave
+            .and_then(|e| e.network.as_ref())
+            .map(|n| n.egress_enabled())
+            .unwrap_or(false);
+        log_verbose(self.verbose, &format!("Egress: {}", egress));
+
         let e2e_cors_origins = e2e_config
             .and_then(|e2e| e2e.cors_origins.as_ref())
             .map(|origins| origins.join(","));
@@ -4233,6 +4239,7 @@ enclave "default" {{
                     e2e,
                     locksmith,
                     e2e_cors_origins,
+                    egress,
                 )
                 .await
         } else {
@@ -4252,6 +4259,7 @@ enclave "default" {{
                     e2e,
                     locksmith,
                     e2e_cors_origins,
+                    egress,
                 )
                 .await
         }
@@ -4628,6 +4636,23 @@ enclave "default" {{
         };
         log_verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
 
+        let egress = if let Some(ref app_dir) = app_source_dir {
+            self.read_config_from_dir(app_dir)
+                .ok()
+                .and_then(|cfg| cfg.enclave.and_then(|e| e.into_iter().next().map(|(_, v)| v)))
+                .and_then(|enc| enc.network)
+                .map(|n| n.egress_enabled())
+                .unwrap_or(false)
+        } else {
+            self.read_config()
+                .ok()
+                .and_then(|cfg| cfg.enclave.and_then(|e| e.into_iter().next().map(|(_, v)| v)))
+                .and_then(|enc| enc.network)
+                .map(|n| n.egress_enabled())
+                .unwrap_or(false)
+        };
+        log_verbose(self.verbose, &format!("Egress: {}", egress));
+
         let e2e_cors_origins = if e2e {
             e2e_config
                 .as_ref()
@@ -4657,6 +4682,7 @@ enclave "default" {{
                     e2e,
                     locksmith,
                     e2e_cors_origins,
+                    egress,
                 )
                 .await
         } else {
@@ -4676,6 +4702,7 @@ enclave "default" {{
                     e2e,
                     locksmith,
                     e2e_cors_origins,
+                    egress,
                 )
                 .await
         }
