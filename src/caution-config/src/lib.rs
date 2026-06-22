@@ -121,6 +121,13 @@ pub struct NetworkConfig {
     pub http: Option<HttpConfig>,
 }
 
+impl NetworkConfig {
+    /// Outbound internet access is enabled iff at least one egress rule is declared.
+    pub fn egress_enabled(&self) -> bool {
+        !self.egress.is_empty()
+    }
+}
+
 /// An enclave definition (`enclave "label" { }`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EnclaveConfig {
@@ -1602,5 +1609,34 @@ platform: aws
 ";
         let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
         assert!(matches!(err, FromProcfileError::ManagedOnPremMissingRegion));
+    }
+
+    #[test]
+    fn test_egress_enabled_reflects_rule_presence() {
+        let hcl = r#"
+enclave "main" {
+  network {
+    egress { cidr_ipv4 = "0.0.0.0/0" }
+  }
+}
+"#;
+        let cfg: ConfigurationFile = hcl::from_str(hcl).expect("parse HCL");
+        let net = cfg.enclave.unwrap().get("main").unwrap().network.clone().unwrap();
+        assert!(net.egress_enabled());
+
+        let hcl_empty = r#"
+enclave "main" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+      ip_protocol = "tcp"
+    }
+  }
+}
+"#;
+        let cfg2: ConfigurationFile = hcl::from_str(hcl_empty).expect("parse HCL");
+        let net2 = cfg2.enclave.unwrap().get("main").unwrap().network.clone().unwrap();
+        assert!(!net2.egress_enabled());
     }
 }
