@@ -2432,6 +2432,7 @@ async fn deploy_logic(
         http_port,
         e2e,
         locksmith: config_file.has_vault_env(),
+        egress,
         ssh_keys,
         domain: domain.clone(),
         credentials: deployment_credentials,
