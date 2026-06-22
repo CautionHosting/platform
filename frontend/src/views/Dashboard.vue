@@ -1529,10 +1529,10 @@ make build-cli
           <p class="cloud-credentials-description">
             Manage encrypted AWS credentials for
             <a
-              href="https://docs.caution.co/reference/bring-your-own-cloud/"
+              href="https://docs.caution.co/reference/byoc"
               target="_blank"
               rel="noopener noreferrer"
-            >bring your own cloud</a>
+            >bring your own compute</a>
             deployments.
           </p>
         </div>

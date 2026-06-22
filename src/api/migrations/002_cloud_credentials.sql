@@ -1,7 +1,7 @@
 -- SPDX-FileCopyrightText: 2025 Caution SEZC
 -- SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
--- Cloud Credentials for BYOC (Bring Your Own Cloud)
+-- Cloud Credentials for BYOC (Bring Your Own Compute)
 -- Flexible schema to support any cloud/hosting platform
 
 -- Extend the cloud_provider enum with additional platforms
