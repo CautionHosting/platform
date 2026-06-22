@@ -1,0 +1,11 @@
+[package]
+name = "caution-config"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hcl-rs = { version = "0.19.7", features = ["perf"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+shlex = "1.3"
+thiserror.workspace = true

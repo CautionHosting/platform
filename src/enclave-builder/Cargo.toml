@@ -27,7 +27,6 @@ bollard = "0.17"
 tempfile = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
-dirs = "5.0"
 
 # Logging
 tracing = { workspace = true }

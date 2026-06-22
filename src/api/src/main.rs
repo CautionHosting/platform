@@ -23,6 +23,7 @@ use uuid::Uuid;
 mod billing;
 mod builder;
 mod cloud_credentials;
+mod config;
 mod cryptographic_bundles;
 mod deployment;
 mod ec2;
@@ -1040,6 +1041,22 @@ fn managed_onprem_config_from_credential(
     }
 }
 
+/// Overlay fields from the HCL `provider {}` block onto a managed on-prem
+/// deployment config. Inline fields take precedence over credential defaults.
+fn merge_provider_into_onprem(
+    provider: &config::Provider,
+    onprem: &mut deployment::ManagedOnPremConfig,
+) {
+    if let config::Provider::Aws(aws) = provider {
+        if let Some(vpc_id) = &aws.vpc_id {
+            onprem.vpc_id = vpc_id.clone();
+        }
+        if let Some(subnet_ids) = &aws.subnet_ids {
+            onprem.subnet_ids = subnet_ids.clone();
+        }
+    }
+}
+
 fn platform_builder_credentials() -> deployment::AwsCredentials {
     deployment::AwsCredentials {
         access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
@@ -1359,9 +1376,40 @@ async fn validate_explicit_containerfile_for_deploy(
 async fn load_build_config_for_deploy(
     git_dir: &str,
     commit_sha: &str,
-) -> Result<(String, types::BuildConfig), (StatusCode, String)> {
+) -> Result<(String, config::ConfigurationFile), (StatusCode, String)> {
     use tokio::process::Command;
 
+    // Try caution.hcl first
+    let hcl_output = Command::new("git")
+        .args(&[
+            "--git-dir",
+            git_dir,
+            "show",
+            &format!("{}:caution.hcl", commit_sha),
+        ])
+        .output()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to run git show for caution.hcl: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Git command failed: {}", e),
+            )
+        })?;
+
+    if hcl_output.status.success() {
+        let raw_content = String::from_utf8_lossy(&hcl_output.stdout).to_string();
+        let config_file =
+            config::ConfigurationFile::from_str(&raw_content).map_err(|e| {
+                tracing::error!("Failed to parse caution.hcl: {}", e);
+                (StatusCode::BAD_REQUEST, format!("Invalid caution.hcl: {}", e))
+            })?;
+
+        tracing::info!("Loaded build config from caution.hcl");
+        return Ok((raw_content, config_file));
+    }
+
+    // Fall back to Procfile
     let procfile_output = Command::new("git")
         .args(&[
             "--git-dir",
@@ -1380,46 +1428,43 @@ async fn load_build_config_for_deploy(
         })?;
 
     if !procfile_output.status.success() {
-        tracing::error!("Procfile not found in repository at commit {}", commit_sha);
+        tracing::error!(
+            "Neither caution.hcl nor Procfile found in repository at commit {}",
+            commit_sha
+        );
         return Err((
             StatusCode::BAD_REQUEST,
-            "No Procfile found in repository root. Please add a Procfile with a required `run:` field. Use `containerfile:` for an explicit Dockerfile/Containerfile path, or let Caution auto-detect a repo-root `Containerfile` before `Dockerfile`.".to_string(),
+            "No configuration file found in repository root. Add a `caution.hcl` file or a `Procfile` with a required `run:` field.".to_string(),
         ));
     }
 
     let procfile_content = String::from_utf8_lossy(&procfile_output.stdout).to_string();
-    let build_config = types::BuildConfig::from_procfile(&procfile_content).map_err(|e| {
-        tracing::error!("Failed to parse Procfile: {}", e);
-        (StatusCode::BAD_REQUEST, format!("Invalid Procfile: {}", e))
-    })?;
+    let config_file =
+        config::ConfigurationFile::from_procfile(&procfile_content).map_err(|e| {
+            tracing::error!("Failed to parse Procfile: {}", e);
+            (StatusCode::BAD_REQUEST, format!("Invalid Procfile: {}", e))
+        })?;
 
-    tracing::info!(
-        "Loaded build config from Procfile: containerfile={:?}, binary={:?}, build={:?}, oci_tarball={:?}",
-        build_config.containerfile,
-        build_config.binary,
-        build_config.build,
-        build_config.oci_tarball
-    );
-
-    Ok((procfile_content, build_config))
+    tracing::info!("Loaded build config from Procfile (fallback)");
+    Ok((procfile_content, config_file))
 }
 
 async fn resolve_containerfile_for_deploy(
     git_dir: &str,
     commit_sha: &str,
-    build_config: &types::BuildConfig,
+    config_file: &config::ConfigurationFile,
 ) -> Result<String, (StatusCode, String)> {
-    if enclave_builder::has_explicit_build_command(build_config.build.as_deref()) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Procfile field `build:` is not supported for remote deploys. Put build steps in your Dockerfile/Containerfile and use `containerfile:` when needed.".to_string(),
-        ));
-    }
+    let containerfile = config_file
+        .enclave
+        .as_ref()
+        .and_then(|e| e.iter().next())
+        .and_then(|(_name, ec)| ec.build.as_ref())
+        .and_then(|b| b.containerfile.as_deref());
 
     let containerfile = validate_explicit_containerfile_for_deploy(
         git_dir,
         commit_sha,
-        build_config.containerfile.as_deref(),
+        containerfile,
     )
     .await?;
     let containerfile = if containerfile.is_none()
@@ -1436,6 +1481,7 @@ async fn resolve_containerfile_for_deploy(
 #[cfg(test)]
 mod deploy_containerfile_tests {
     use super::{load_build_config_for_deploy, resolve_containerfile_for_deploy};
+    use crate::config;
     use std::{path::Path, process::Command};
     use tempfile::TempDir;
 
@@ -1495,16 +1541,15 @@ mod deploy_containerfile_tests {
             ("Containerfile", "FROM alpine:3.20\n"),
         ]);
         let git_dir = repo_dir.path().join(".git");
-        let (procfile_content, build_config) =
+        let (procfile_content, config_file) =
             load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
                 .await
                 .unwrap();
         assert_eq!(procfile_content, "run: /app\n");
-        assert!(build_config.build.is_none());
-        assert!(build_config.containerfile.is_none());
+        assert!(config_file.enclave.as_ref().unwrap().get("default").unwrap().build.is_none());
 
         let containerfile =
-            resolve_containerfile_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &build_config)
+            resolve_containerfile_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &config_file)
                 .await
                 .unwrap();
 
@@ -1522,7 +1567,7 @@ mod deploy_containerfile_tests {
             ("Custom.Containerfile", "FROM debian:bookworm-slim\n"),
         ]);
         let git_dir = repo_dir.path().join(".git");
-        let (procfile_content, build_config) =
+        let (procfile_content, config_file) =
             load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
                 .await
                 .unwrap();
@@ -1530,14 +1575,14 @@ mod deploy_containerfile_tests {
             procfile_content,
             "containerfile: Custom.Containerfile\nrun: /app\n"
         );
-        assert!(build_config.build.is_none());
+        let enclave = config_file.enclave.as_ref().unwrap().get("default").unwrap();
         assert_eq!(
-            build_config.containerfile.as_deref(),
+            enclave.build.as_ref().unwrap().containerfile.as_deref(),
             Some("Custom.Containerfile")
         );
 
         let containerfile =
-            resolve_containerfile_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &build_config)
+            resolve_containerfile_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &config_file)
                 .await
                 .unwrap();
 
@@ -1551,13 +1596,13 @@ mod deploy_containerfile_tests {
             ("Dockerfile", "FROM alpine:3.20\n"),
         ]);
         let git_dir = repo_dir.path().join(".git");
-        let (_, build_config) =
+        let (_, config_file) =
             load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
                 .await
                 .unwrap();
 
         let containerfile =
-            resolve_containerfile_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &build_config)
+            resolve_containerfile_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &config_file)
                 .await
                 .unwrap();
 
@@ -1565,7 +1610,7 @@ mod deploy_containerfile_tests {
     }
 
     #[tokio::test]
-    async fn deploy_path_rejects_procfile_build_command() {
+    async fn deploy_path_ignores_procfile_build_command() {
         let (repo_dir, commit_sha) = commit_test_repo(&[
             (
                 "Procfile",
@@ -1574,18 +1619,15 @@ mod deploy_containerfile_tests {
             ("Dockerfile", "FROM alpine:3.20\n"),
         ]);
         let git_dir = repo_dir.path().join(".git");
-        let (_, build_config) =
+        let (_, config_file) =
             load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
                 .await
                 .unwrap();
 
-        let err =
-            resolve_containerfile_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &build_config)
+        let containerfile =
+            resolve_containerfile_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &config_file)
                 .await
-                .unwrap_err();
-
-        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("`build:` is not supported"));
+                .unwrap();
     }
 }
 
@@ -1987,11 +2029,11 @@ async fn deploy_logic(
             })?;
 
     let git_dir = format!("{}/git-repos/{}.git", state.data_dir, app_id_str);
-    let (procfile_content, build_config) =
+    let (config_content, config_file) =
         load_build_config_for_deploy(&git_dir, &commit_sha).await?;
 
     let containerfile =
-        resolve_containerfile_for_deploy(&git_dir, &commit_sha, &build_config).await?;
+        resolve_containerfile_for_deploy(&git_dir, &commit_sha, &config_file).await?;
     tracing::info!(
         "Resolved containerfile for resource {} at commit {}: {}",
         resource_id,
@@ -2001,18 +2043,67 @@ async fn deploy_logic(
 
     tracing::info!("Docker build file for {}: {}", app_name, containerfile);
 
-    let enclave_config = types::EnclaveConfig {
-        binary_path: build_config
-            .binary
-            .clone()
-            .unwrap_or_else(|| "/app".to_string()),
-        args: vec![],
-        memory_mb: build_config.memory_mb,
-        cpus: build_config.cpus,
-        debug: build_config.debug,
-        ports: build_config.ports.clone(),
-        http_port: build_config.http_port,
-    };
+    // Extract single enclave config fields from ConfigurationFile
+    let enclave_opt = config_file
+        .enclave
+        .as_ref()
+        .and_then(|e| e.iter().next())
+        .map(|(_name, ec)| ec);
+
+    let ec_build = enclave_opt.and_then(|e| e.build.as_ref());
+    let ec_debug = enclave_opt.and_then(|e| e.debug.as_ref());
+    let ec_network = enclave_opt.and_then(|e| e.network.as_ref());
+    let ec_resources = enclave_opt.and_then(|e| e.resources.as_ref());
+    let ec_units = enclave_opt.and_then(|e| e.unit.as_ref());
+
+    let run_command = ec_units
+        .and_then(|u| u.get("default"))
+        .map(|u| u.command.clone());
+    let memory_mb = ec_resources.map(|r| r.memory_mb).unwrap_or(512);
+    let cpu_count = ec_resources.map(|r| r.cpu).unwrap_or(2);
+    let debug_enabled = ec_debug.and_then(|d| d.enabled).unwrap_or(false);
+    let ssh_keys = ec_debug.map(|d| d.ssh_keys.clone()).unwrap_or_default();
+    let http_port = ec_network
+        .and_then(|n| n.http.as_ref())
+        .map(|h| h.port);
+    let domain = ec_network
+        .and_then(|n| n.http.as_ref())
+        .map(|h| h.domain.clone());
+    let e2e_config = ec_network
+        .and_then(|n| n.http.as_ref())
+        .and_then(|h| h.e2e_encryption.as_ref());
+    let e2e = e2e_config
+        .and_then(|e| e.enabled)
+        .unwrap_or(false);
+
+    let no_cache = ec_build
+        .and_then(|b| b.cache)
+        .map(|c| !c)
+        .unwrap_or(false);
+    let app_sources = ec_build
+        .map(|b| b.app_sources.clone())
+        .unwrap_or_default();
+    let binary_path = ec_build
+        .and_then(|b| b.binary.clone());
+
+    let ingress_ports: Vec<u16> = ec_network
+        .map(|n| {
+            let mut ports: Vec<u16> = n
+                .ingress
+                .iter()
+                .flat_map(|rule| match &rule.port_spec {
+                    Some(config::PortSpec::Exact { port }) => vec![*port],
+                    Some(config::PortSpec::FromTo { start_port, end_port }) => {
+                        (*start_port..=*end_port).collect::<Vec<u16>>()
+                    }
+                    _ => Vec::new(),
+                })
+                .collect();
+            ports.sort();
+            ports.dedup();
+            ports
+        })
+        .unwrap_or_default();
 
     let managed_onprem_credential = if let Some(credential) = cred
         .as_ref()
@@ -2039,9 +2130,18 @@ async fn deploy_logic(
     let deployment_credentials = managed_onprem_credential
         .as_ref()
         .map(aws_credentials_from_managed_onprem);
-    let managed_onprem_config = managed_onprem_credential
+    let mut managed_onprem_config = managed_onprem_credential
         .as_ref()
         .map(managed_onprem_config_from_credential);
+
+    // Overlay inline provider config from caution.hcl onto DB credential defaults.
+    // Fields specified in the provider block take precedence.
+    if let Some(ref provider) = config_file.caution.as_ref().and_then(|c| c.provider.as_ref()) {
+        if let Some(ref mut onprem) = managed_onprem_config {
+            merge_provider_into_onprem(provider, onprem);
+        }
+    }
+
     let should_cleanup_on_failure = was_destroyed
         || !matches!(
             previous_state,
@@ -2063,14 +2163,15 @@ async fn deploy_logic(
         let cache_key = builder::compute_cache_key(
             &commit_sha,
             &enclaveos_commit,
-            &procfile_content,
-            build_config.e2e,
-            build_config.locksmith,
+            &config_content,
+            e2e,
+            config_file.has_vault_env(), // auto-enable locksmith when env::vault is used
+            e2e_config.as_ref().and_then(|e2e| e2e.cors_origins.as_ref()).unwrap_or(&vec![]),
         );
         let s3_client = s3_client_for_credentials(&builder_target.aws_credentials).await;
 
         // Check cache first
-        let cached_result = if !build_config.no_cache {
+        let cached_result = if !no_cache {
             builder::check_build_cache(
                 &state.db,
                 req.org_id,
@@ -2174,18 +2275,25 @@ async fn deploy_logic(
                 branch: req.branch.clone(),
                 source_s3_key: source_artifact.s3_key,
                 source_sha256: source_artifact.sha256,
-                procfile_content,
-                run_command: build_config.run.clone(),
+                procfile_content: config_content,
+                run_command: run_command.clone(),
                 containerfile: containerfile.clone(),
-                binary_path: build_config.binary.clone(),
-                ports: enclave_config.ports.clone(),
-                e2e: build_config.e2e,
-                locksmith: build_config.locksmith,
-                no_cache: build_config.no_cache,
+                binary_path,
+                ports: ingress_ports.clone(),
+                http_port: ec_network
+                    .and_then(|n| n.http.as_ref())
+                    .map(|h| h.port),
+                e2e,
+                locksmith: config_file.has_vault_env(),
+                e2e_cors_origins: e2e_config
+                    .as_ref()
+                    .and_then(|e2e| e2e.cors_origins.as_ref())
+                    .map(|origins| origins.join(",")),
+                no_cache,
                 enclaveos_commit,
                 builder_size: resolved_size.id.clone(),
                 builder_instance_type: resolved_size.instance_type.clone(),
-                app_sources: build_config.app_sources.clone(),
+                app_sources,
             };
 
             let build_result = builder::execute_remote_build(
@@ -2246,24 +2354,24 @@ async fn deploy_logic(
         "eif_s3_key": builder_eif_s3_key,
         "eif_size_bytes": eif_size_bytes_db,
         "commit_sha": commit_sha,
-        "run_command": build_config.run,
-        "domain": build_config.domain,
-        "memory_mb": enclave_config.memory_mb,
-        "cpus": enclave_config.cpus,
-        "debug": enclave_config.debug,
-        "ports": enclave_config.ports,
-        "http_port": enclave_config.http_port,
+        "run_command": run_command,
+        "domain": domain,
+        "memory_mb": memory_mb,
+        "cpus": cpu_count,
+        "debug": debug_enabled,
+        "ports": ingress_ports,
+        "http_port": http_port,
     });
     let eif_size_bytes = eif_size_bytes_db as u64;
 
-    let memory_bytes = (enclave_config.memory_mb as u64) * 1024 * 1024;
+    let memory_bytes = (memory_mb as u64) * 1024 * 1024;
     if eif_size_bytes > memory_bytes {
         return Err((
             StatusCode::BAD_REQUEST,
             format!(
-                "EIF size ({} MB) exceeds allocated enclave memory ({} MB). Increase memory_mb in Procfile.",
+                "EIF size ({} MB) exceeds allocated enclave memory ({} MB). Increase memory_mb in configuration file.",
                 eif_size_bytes / (1024 * 1024),
-                enclave_config.memory_mb
+                memory_mb
             ),
         ));
     }
@@ -2271,16 +2379,16 @@ async fn deploy_logic(
         tracing::warn!(
             "EIF size ({} MB) is more than 80% of allocated memory ({} MB). Consider increasing memory_mb.",
             eif_size_bytes / (1024 * 1024),
-            enclave_config.memory_mb
+            memory_mb
         );
     }
 
     tracing::info!(
         "Deploying Nitro Enclave for resource {} with memory_mb={}, cpu_count={}, debug={}",
         resource_id,
-        enclave_config.memory_mb,
-        enclave_config.cpus,
-        enclave_config.debug
+        memory_mb,
+        cpu_count,
+        debug_enabled
     );
 
     if let Some(managed_onprem) = managed_onprem_config.as_ref() {
@@ -2313,16 +2421,16 @@ async fn deploy_logic(
         role_arn: role_arn_opt.clone(),
         eif_path: eif_path.clone(),
         eif_s3_key: Some(builder_eif_s3_key.clone()),
-        memory_mb: enclave_config.memory_mb,
-        cpu_count: enclave_config.cpus,
-        disk_gb: build_config.disk_gb,
-        debug_mode: enclave_config.debug,
-        ports: enclave_config.ports.clone(),
-        http_port: enclave_config.http_port,
-        e2e: build_config.e2e,
-        locksmith: build_config.locksmith,
-        ssh_keys: build_config.ssh_keys.clone(),
-        domain: build_config.domain.clone(),
+        memory_mb,
+        cpu_count,
+        disk_gb: 30, // no HCL equivalent
+        debug_mode: debug_enabled,
+        ports: ingress_ports.clone(),
+        http_port,
+        e2e,
+        locksmith: config_file.has_vault_env(),
+        ssh_keys,
+        domain: domain.clone(),
         credentials: deployment_credentials,
         managed_onprem: managed_onprem_config,
     };
@@ -2365,8 +2473,8 @@ async fn deploy_logic(
         final_config["instance_type"] = serde_json::json!(instance_type);
     }
 
-    let app_url = if let Some(ref domain) = build_config.domain {
-        format!("https://{}", domain)
+    let app_url = if let Some(ref d) = domain {
+        format!("https://{}", d)
     } else {
         format!("http://{}", deployment_result.public_ip)
     };
@@ -2396,7 +2504,7 @@ async fn deploy_logic(
         ));
     }
 
-    if enclave_config.debug {
+    if debug_enabled {
         tracing::info!("Skipping attestation check: enclave is in debug mode");
     } else {
         tracing::info!("Waiting for attestation endpoint to become healthy...");
@@ -2500,7 +2608,7 @@ async fn deploy_logic(
         attestation_url,
         resource_id,
         public_ip: deployment_result.public_ip.clone(),
-        domain: build_config.domain.clone(),
+        domain,
     })
 }
 

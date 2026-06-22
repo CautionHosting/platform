@@ -367,12 +367,37 @@ pub(crate) async fn send_dunning_email(
             "data": data,
         });
 
-        let _ = client
+        let response = client
             .post(format!("{}/send", email_service_url))
             .json(&email_request)
             .send()
             .await;
 
-        tracing::info!("Sent {} email to {} for org {}", template, email, org_id);
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!("Sent {} email to {} for org {}", template, email, org_id);
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_else(|_| "".to_string());
+                tracing::error!(
+                    "Failed to send {} email to {} for org {}: email service returned {}: {}",
+                    template,
+                    email,
+                    org_id,
+                    status,
+                    body
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to send {} email to {} for org {}: {}",
+                    template,
+                    email,
+                    org_id,
+                    e
+                );
+            }
+        }
     }
 }

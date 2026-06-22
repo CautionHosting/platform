@@ -59,8 +59,10 @@ pub async fn stage_eif_components(
     run_command: Option<String>,
     manifest: Option<EnclaveManifest>,
     ports: &[u16],
+    http_port: Option<u16>,
     e2e: bool,
     locksmith: bool,
+    e2e_cors_origins: Option<String>,
     templates_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     let stage_dir = work_dir.join("eif-stage");
@@ -154,8 +156,16 @@ pub async fn stage_eif_components(
         containerfile_template.display()
     );
 
-    let run_sh_content =
-        render_run_sh_template(&run_sh_template, run_command, ports, e2e, locksmith).await?;
+    let run_sh_content = render_run_sh_template(
+        &run_sh_template,
+        run_command,
+        ports,
+        http_port,
+        e2e,
+        locksmith,
+        e2e_cors_origins.as_deref()
+    )
+    .await?;
     let containerfile_content = render_containerfile_template(
         &containerfile_template,
         e2e,
@@ -217,8 +227,10 @@ async fn render_run_sh_template(
     template_path: &Path,
     run_command: Option<String>,
     ports: &[u16],
+    http_port: Option<u16>,
     e2e: bool,
     locksmith: bool,
+    e2e_cors_origins: Option<&str>,
 ) -> Result<String> {
     let template = fs::read_to_string(template_path)
         .await
@@ -256,6 +268,24 @@ async fn render_run_sh_template(
         );
     }
 
+    let steve_app_port = if e2e {
+        let port = match http_port {
+            Some(port) => port,
+            None if ports.len() == 1 => ports[0],
+            None => anyhow::bail!(
+                "e2e builds require http_port or exactly one app port so STEVE can reach the app"
+            ),
+        };
+
+        if !ports.contains(&port) {
+            anyhow::bail!("http_port {} must also be listed in ports", port);
+        }
+
+        port.to_string()
+    } else {
+        String::new()
+    };
+
     let custom_port_proxies: String = ports
         .iter()
         .filter(|&&port| !is_reserved_internal_port(port))
@@ -277,9 +307,19 @@ async fn render_run_sh_template(
         )
     };
 
+    let cors_env = match e2e_cors_origins {
+        Some(origins) => format!(
+            "STEVE_CORS_ORIGINS='{}'",
+            origins.replace('\'', "'\\''")
+        ),
+        None => String::new(),
+    };
+
     let result = processed
         .replace("{{USER_CMD}}", &user_cmd)
-        .replace("{{CUSTOM_PORT_SECTION}}", &custom_port_section);
+        .replace("{{STEVE_APP_PORT}}", &steve_app_port)
+        .replace("{{CUSTOM_PORT_SECTION}}", &custom_port_section)
+        .replace("{{STEVE_CORS_ORIGINS_ENV}}", &cors_env);
 
     Ok(result)
 }
@@ -321,9 +361,11 @@ pub async fn build_eif_from_filesystems(
     run_command: Option<String>,
     manifest: Option<EnclaveManifest>,
     ports: &[u16],
+    http_port: Option<u16>,
     no_cache: bool,
     e2e: bool,
     locksmith: bool,
+    e2e_cors_origins: Option<String>,
     templates_dir: Option<&Path>,
 ) -> Result<EifFile> {
     tracing::info!("Building EIF using transparent Containerfile approach");
@@ -339,8 +381,10 @@ pub async fn build_eif_from_filesystems(
         run_command,
         manifest,
         ports,
+        http_port,
         e2e,
         locksmith,
+        e2e_cors_origins,
         templates_dir,
     )
     .await?;
@@ -544,6 +588,17 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    fn run_template_file() -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            file,
+            "#!/bin/sh\n# {{STEVE\necho steve\nSTEVE_APP_UPSTREAM=\"http://127.0.0.1:{{{{STEVE_APP_PORT}}}}\"\n# }}STEVE\n{{{{CUSTOM_PORT_SECTION}}}}\n{{{{USER_CMD}}}}\n"
+        )
+        .unwrap();
+        file
+    }
 
     #[test]
     fn test_process_template_blocks_enabled() {
@@ -634,7 +689,7 @@ mod tests {
     async fn test_render_run_sh_uses_reserved_locksmith_port() {
         let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
         let rendered =
-            render_run_sh_template(&template, Some("/app".to_string()), &[], false, true)
+            render_run_sh_template(&template, Some("/app".to_string()), &[], None, false, true)
                 .await
                 .unwrap();
 
@@ -642,5 +697,58 @@ mod tests {
         assert!(rendered.contains(
             "VSOCK-LISTEN:${INTERNAL_LOCKSMITH_PORT},reuseaddr,fork TCP:localhost:${INTERNAL_LOCKSMITH_PORT}"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_render_run_sh_uses_explicit_http_port_for_steve_upstream() {
+        let template = run_template_file();
+        let result = render_run_sh_template(
+            template.path(),
+            Some("/app/server".to_string()),
+            &[3000, 9000],
+            Some(3000),
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.contains("STEVE_APP_UPSTREAM=\"http://127.0.0.1:3000\""));
+    }
+
+    #[tokio::test]
+    async fn test_render_run_sh_defaults_single_port_for_steve_upstream() {
+        let template = run_template_file();
+        let result = render_run_sh_template(
+            template.path(),
+            Some("/app/server".to_string()),
+            &[8080],
+            None,
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.contains("STEVE_APP_UPSTREAM=\"http://127.0.0.1:8080\""));
+    }
+
+    #[tokio::test]
+    async fn test_render_run_sh_requires_http_port_for_multi_port_e2e() {
+        let template = run_template_file();
+        let err = render_run_sh_template(
+            template.path(),
+            Some("/app/server".to_string()),
+            &[3000, 9000],
+            None,
+            true,
+            false,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("e2e builds require http_port or exactly one app port"));
     }
 }

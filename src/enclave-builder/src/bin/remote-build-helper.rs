@@ -35,6 +35,17 @@ fn ports_from_env() -> Vec<u16> {
         .unwrap_or_default()
 }
 
+fn http_port_from_env() -> Option<u16> {
+    std::env::var("CAUTION_HTTP_PORT").ok().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            trimmed.parse::<u16>().ok()
+        }
+    })
+}
+
 fn enclave_source_from_manifest(manifest: &EnclaveManifest) -> Result<(String, String)> {
     match &manifest.enclave_source {
         EnclaveSource::GitArchive { urls, commit } => {
@@ -79,8 +90,10 @@ async fn main() -> Result<()> {
     let output_pcrs = PathBuf::from(env_required("CAUTION_OUTPUT_PCRS")?);
     let e2e = env_flag("CAUTION_E2E");
     let locksmith = env_flag("CAUTION_LOCKSMITH");
+    let e2e_cors_origins = std::env::var("CAUTION_CORS_ORIGINS").ok().filter(|s| !s.is_empty());
     let no_cache = env_flag("CAUTION_NO_CACHE");
     let ports = ports_from_env();
+    let http_port = http_port_from_env();
 
     tokio::fs::create_dir_all(&work_dir)
         .await
@@ -113,8 +126,7 @@ async fn main() -> Result<()> {
     let run_command = manifest.run_command.clone();
     let metadata = manifest.metadata.clone();
 
-    let builder = EnclaveBuilder::new(enclave_source, enclave_version, framework_source)?
-        .with_work_dir(work_dir.clone())
+    let builder = EnclaveBuilder::new(enclave_source, enclave_version, framework_source, &work_dir)?
         .with_no_cache(no_cache);
 
     let user_image = UserImage {
@@ -132,8 +144,10 @@ async fn main() -> Result<()> {
                 metadata,
                 Some(manifest),
                 &ports,
+                http_port,
                 e2e,
                 locksmith,
+                e2e_cors_origins,
             )
             .await?
     } else {
@@ -148,8 +162,10 @@ async fn main() -> Result<()> {
                 metadata,
                 Some(manifest),
                 &ports,
+                http_port,
                 e2e,
                 locksmith,
+                e2e_cors_origins,
             )
             .await?
     };

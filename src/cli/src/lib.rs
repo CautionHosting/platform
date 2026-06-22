@@ -469,7 +469,7 @@ struct Cli {
     )]
     url: String,
 
-    #[arg(short, long, help = "Enable verbose output")]
+    #[arg(short, long, global = true, help = "Enable verbose output")]
     verbose: bool,
 
     #[arg(
@@ -478,6 +478,14 @@ struct Cli {
         help = "Use QR code for cross-device FIDO2 signing (no local security key needed)"
     )]
     qr: bool,
+
+    #[arg(
+        long,
+        global = true,
+        env = "CAUTION_WORKDIR",
+        help = "Working directory for cache (default: ~/.cache/caution)"
+    )]
+    workdir: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -645,6 +653,9 @@ enum AppCommands {
     },
     #[command(about = "Download the latest completed EIF for an app")]
     DownloadEif(apps::download_eif::DownloadEif),
+
+    #[command(name = "migrate-procfile", about = "Convert a Procfile to caution.hcl")]
+    MigrateProcfile(apps::migrate_procfile::MigrateProcfileArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -1236,10 +1247,11 @@ struct ApiClient {
     deployment_path: Option<PathBuf>,
     verbose: bool,
     qr: bool,
+    workdir: Option<PathBuf>,
 }
 
 impl ApiClient {
-    fn new(base_url: &str, verbose: bool, qr: bool) -> Result<Self> {
+    fn new(base_url: &str, verbose: bool, qr: bool, workdir: Option<PathBuf>) -> Result<Self> {
         log_verbose(verbose, "Initializing API client...");
 
         let config_dir = dirs::config_dir()
@@ -1261,6 +1273,9 @@ impl ApiClient {
 
         log_verbose(verbose, &format!("Config file: {:?}", config_path));
         log_verbose(verbose, &format!("Deployment file: {:?}", deployment_path));
+        if let Some(ref wd) = workdir {
+            log_verbose(verbose, &format!("Working directory: {:?}", wd));
+        }
         log_verbose(verbose, "API client initialized");
 
         Ok(Self {
@@ -1270,6 +1285,7 @@ impl ApiClient {
             deployment_path,
             verbose,
             qr,
+            workdir,
         })
     }
 
@@ -1438,6 +1454,59 @@ impl ApiClient {
         Ok(deployment_info)
     }
 
+    fn read_config(&self) -> Result<caution_config::ConfigurationFile> {
+        use std::path::Path;
+
+        let hcl_path = Path::new("caution.hcl");
+        if hcl_path.exists() {
+            let content = std::fs::read_to_string(hcl_path)
+                .context("Failed to read caution.hcl")?;
+            let config = caution_config::ConfigurationFile::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("Invalid caution.hcl: {}", e))?;
+            return Ok(config);
+        }
+
+        let procfile_path = Path::new("Procfile");
+        if procfile_path.exists() {
+            let content = std::fs::read_to_string(procfile_path)
+                .context("Failed to read Procfile")?;
+            let config = caution_config::ConfigurationFile::from_procfile(&content)
+                .map_err(|e| anyhow::anyhow!("Invalid Procfile: {}", e))?;
+            return Ok(config);
+        }
+
+        eprintln!("No configuration file found.");
+        eprintln!();
+        eprintln!("  Run `caution init` to generate a caution.hcl template.");
+        std::process::exit(1);
+    }
+
+    fn read_config_from_dir(
+        &self,
+        dir: &Path,
+    ) -> Result<caution_config::ConfigurationFile> {
+        let hcl_path = dir.join("caution.hcl");
+        if hcl_path.exists() {
+            let content = std::fs::read_to_string(&hcl_path)
+                .with_context(|| format!("Failed to read {}", hcl_path.display()))?;
+            return caution_config::ConfigurationFile::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("Invalid caution.hcl: {}", e));
+        }
+
+        let procfile_path = dir.join("Procfile");
+        if procfile_path.exists() {
+            let content = std::fs::read_to_string(&procfile_path)
+                .with_context(|| format!("Failed to read {}", procfile_path.display()))?;
+            return caution_config::ConfigurationFile::from_procfile(&content)
+                .map_err(|e| anyhow::anyhow!("Invalid Procfile: {}", e));
+        }
+
+        bail!(
+            "No configuration file found in {}. Create a caution.hcl or Procfile file.",
+            dir.display()
+        )
+    }
+
     fn check_git_repo(&self) -> Result<()> {
         let output = Command::new("git")
             .args(&["rev-parse", "--is-inside-work-tree"])
@@ -1449,105 +1518,6 @@ impl ApiClient {
         }
 
         Ok(())
-    }
-
-    fn read_procfile(&self) -> Result<String> {
-        let work_dir = Path::new(".");
-
-        if !work_dir.join("Procfile").exists() {
-            println!("Procfile not found in current directory");
-            println!("Add a Procfile with a run command and optional containerfile:");
-            println!();
-            println!("run: /app/myapp");
-            println!("# containerfile: Containerfile");
-            println!();
-            println!(
-                "Remote builds run Docker from the repo root; put app build steps in your Dockerfile/Containerfile."
-            );
-            println!();
-            println!(
-                "If 'containerfile:' is absent, Caution auto-detects a repo-root Containerfile before Dockerfile."
-            );
-            println!();
-            println!("To learn more visit https://docs.caution.co/quickstart");
-            std::process::exit(1);
-        }
-
-        resolve_local_build_command_from_dir(work_dir, false)
-    }
-
-    fn read_procfile_field(&self, field: &str) -> Option<String> {
-        self.read_procfile_field_from_dir(Path::new("."), field)
-    }
-
-    fn read_procfile_field_from_dir(&self, dir: &Path, field: &str) -> Option<String> {
-        let procfile_path = dir.join("Procfile");
-        if !procfile_path.exists() {
-            return None;
-        }
-
-        let content = match fs::read_to_string(&procfile_path) {
-            Ok(c) => c,
-            Err(_) => return None,
-        };
-
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            let prefix = format!("{}:", field);
-            if let Some(value) = line.strip_prefix(&prefix) {
-                let value = value.trim();
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
-            }
-        }
-        None
-    }
-
-    fn read_procfile_ports(&self) -> Vec<u16> {
-        self.read_procfile_ports_from_dir(Path::new("."))
-    }
-
-    fn read_procfile_ports_from_dir(&self, dir: &Path) -> Vec<u16> {
-        match self.read_procfile_field_from_dir(dir, "ports") {
-            Some(ports_str) => ports_str
-                .split(',')
-                .filter_map(|s| s.trim().parse::<u16>().ok())
-                .collect(),
-            None => Vec::new(),
-        }
-    }
-
-    fn read_procfile_sources(&self) -> Vec<String> {
-        self.read_procfile_sources_from_dir(Path::new("."))
-    }
-
-    fn read_procfile_sources_from_dir(&self, dir: &Path) -> Vec<String> {
-        self.read_procfile_field_from_dir(dir, "app_sources")
-            .or_else(|| self.read_procfile_field_from_dir(dir, "app_source"))
-            .map(|s| {
-                s.split(',')
-                    .map(|url| url.trim().to_string())
-                    .filter(|url| !url.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn read_procfile_enclave_sources_from_dir(&self, dir: &Path) -> Vec<String> {
-        self.read_procfile_field_from_dir(dir, "enclave_sources")
-            .or_else(|| self.read_procfile_field_from_dir(dir, "enclave_source"))
-            .map(|s| {
-                s.split(',')
-                    .map(|url| url.trim().to_string())
-                    .filter(|url| !url.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     fn set_git_remote(&self, git_url: &str) -> Result<()> {
@@ -1575,80 +1545,72 @@ impl ApiClient {
         Ok(())
     }
 
-    fn create_procfile_if_needed(&self, byoc: bool) -> Result<()> {
+    fn create_config_file_if_needed(&self, byoc: bool) -> Result<()> {
         use std::fs;
         use std::path::Path;
 
-        let procfile_path = Path::new("Procfile");
+        let config_path = Path::new("caution.hcl");
 
-        if procfile_path.exists() {
-            log_verbose(self.verbose, "Procfile already exists, skipping creation");
+        if config_path.exists() {
+            log_verbose(self.verbose, "caution.hcl already exists, skipping creation");
             return Ok(());
         }
 
-        let source_line = self
+        let source_url = self
             .detect_source_url()
-            .map(|url| format!("app_sources: {}", url))
-            .unwrap_or_else(|| "# app_sources: git@codeberg.org:user/repo.git".to_string());
+            .unwrap_or_else(|| "git@codeberg.org:user/repo.git".to_string());
 
         let byoc_section = if byoc {
             r#"
-# BYOC deployment configuration
-managed_on_prem: true
-platform: aws
-aws_region: us-east-1
-# aws_instance_type: m5.xlarge
-# aws_vpc_id: vpc-xxxxxxxxx
-# aws_subnet_id: subnet-xxxxxxxxx
-# aws_security_group_id: sg-xxxxxxxxx
+caution {
+  provider {
+    type         = "aws"
+    region       = "us-east-1"
+    # vpc_id        = "vpc-xxxxxxxxx"
+    # subnet_ids    = ["subnet-xxxxxxxxx"]
+    # security_group_id = "sg-xxxxxxxxx"
+  }
+}
 "#
         } else {
             ""
         };
 
-        let procfile_content = format!(
-            r#"# Caution Procfile - https://docs.caution.co/reference/procfile/
+        let hcl_content = format!(
+            r#"# Caution configuration - https://docs.caution.co/reference/caution-hcl/
 
-# Build configuration
-run: /app/myapp
-# Remote builds run Docker from the repo root. Put app build steps in your
-# Dockerfile/Containerfile so this succeeds: docker build -f <file> .
-# Use `containerfile:` for an explicit Dockerfile/Containerfile path, or rely
-# on automatic repo-root `Containerfile` detection before `Dockerfile`.
-# containerfile: Containerfile
-# oci_tarball: image.tar
-# binary: /app/myapp  # extracts only this binary, not the full container filesystem
+enclave "default" {{
+  build {{
+    run = "/app/myapp"
+    # binary = "/app/myapp"
+  }}
+  # memory = 512
+  # cpus   = 2
+  network {{
+    # ingress = [8080]
+  }}
+  # e2e       = false
+  # locksmith = false
+  # debug     = false
+}}
 
-# Source verification
-{source_line}
-# enclave_sources: https://codeberg.org/caution/enclave
-# metadata:
-
-# Resource allocation
-# memory: 512
-# cpus: 2
-
-# Features
-# domain: app.example.com
-# ports: 8080
-# http_port: 8080
-# e2e: false
-# locksmith: false
-# debug: false
-# no_cache: false
-# ssh_keys: ssh-ed25519 AAAA...
+# containerfile = "Containerfile"
+# domain        = "app.example.com"
+# no_cache      = false
+# app_sources   = "{source_url}"
+# ssh_keys      = ["ssh-ed25519 AAAA..."]
 {byoc_section}"#
         );
 
-        fs::write(procfile_path, procfile_content).context("Failed to create Procfile")?;
+        fs::write(config_path, hcl_content).context("Failed to create caution.hcl")?;
 
-        println!("\nCreated Procfile in current directory");
-        println!("Edit the required 'run' field to match your application");
+        println!("\nCreated caution.hcl in current directory");
+        println!("Edit the 'run' field in the enclave build block to match your application");
         println!("Build file precedence: containerfile: -> repo-root Containerfile -> Dockerfile");
         if byoc {
             println!("Configure AWS deployment settings in the BYOC section");
         }
-        println!("Learn more: https://docs.caution.co/reference/procfile/");
+        println!("Learn more: https://docs.caution.co/reference/caution-hcl/");
 
         Ok(())
     }
@@ -2873,9 +2835,10 @@ run: /app/myapp
         self.check_git_repo()?;
         println!("Git repository found");
 
-        log_verbose(self.verbose, "Reading Procfile...");
-        let cmd = self.read_procfile()?;
-        println!("Procfile found");
+        log_verbose(self.verbose, "Reading configuration...");
+        let _config_file = self.read_config()?;
+        let cmd = resolve_local_build_command_from_dir(Path::new("."), false)?;
+        println!("Configuration found");
         println!("Build command: {}", cmd);
 
         let config = self.ensure_authenticated().await?;
@@ -2937,7 +2900,7 @@ run: /app/myapp
         log_verbose(self.verbose, "Setting git remote...");
         self.set_git_remote(&create_response.git_url)?;
 
-        self.create_procfile_if_needed(false)?;
+        self.create_config_file_if_needed(false)?;
 
         println!("\nYou can now push to 'caution' remote:");
         println!("  git push caution main");
@@ -3199,11 +3162,12 @@ run: /app/myapp
             return self.init_byoc(path).await;
         }
 
-        self.create_procfile_if_needed(bring_your_own_cloud)?;
+        self.create_config_file_if_needed(bring_your_own_cloud)?;
 
-        log_verbose(self.verbose, "Reading Procfile...");
-        let cmd = self.read_procfile()?;
-        println!("Procfile found");
+        log_verbose(self.verbose, "Reading configuration...");
+        let _config = self.read_config()?;
+        let cmd = resolve_local_build_command_from_dir(Path::new("."), false)?;
+        println!("Configuration found");
         println!("Build command: {}", cmd);
 
         let config = self.ensure_authenticated().await?;
@@ -3317,7 +3281,7 @@ run: /app/myapp
         log_verbose(self.verbose, "Setting git remote...");
         self.set_git_remote(&create_response.git_url)?;
 
-        self.create_procfile_if_needed(false)?;
+        self.create_config_file_if_needed(false)?;
 
         println!("\nYou can now push to 'caution' remote:");
         println!("  git push caution main");
@@ -3422,11 +3386,11 @@ run: /app/myapp
 
         let auth_config = self.ensure_authenticated().await?;
 
-        self.create_procfile_if_needed(true)?;
+        self.create_config_file_if_needed(true)?;
 
-        log_verbose(self.verbose, "Reading Procfile...");
-        let _cmd = self.read_procfile()?;
-        println!("Procfile found");
+        log_verbose(self.verbose, "Reading configuration...");
+        let _config = self.read_config()?;
+        println!("Configuration found");
 
         let existing_resource_id = self.load_deployment().ok().map(|d| d.resource_id);
         let is_update = existing_resource_id.is_some();
@@ -4147,11 +4111,15 @@ run: /app/myapp
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        let procfile_no_cache = self
-            .read_procfile_field("no_cache")
-            .map(|v| v.to_lowercase() == "true")
+        let cfg = self.read_config()?;
+        let default_enclave = cfg.enclave.as_ref().and_then(|e| e.get("default"));
+
+        let config_no_cache = default_enclave
+            .and_then(|e| e.build.as_ref())
+            .and_then(|b| b.cache)
+            .map(|c| !c)
             .unwrap_or(false);
-        let no_cache = no_cache || procfile_no_cache;
+        let no_cache = no_cache || config_no_cache;
 
         let mut loader = Loader::new("Building application image", LoaderStyle::Processing);
         let image_ref = self.build_local_docker_image(no_cache).await?;
@@ -4166,6 +4134,7 @@ run: /app/myapp
             &commit_sha,
             enclave_builder::CacheType::Build,
             no_cache,
+            &self.get_cache_dir()?,
         )?;
 
         let work_dir = builder.work_dir.clone();
@@ -4174,28 +4143,55 @@ run: /app/myapp
             reference: image_ref.clone(),
         };
 
-        let binary_path = self.read_procfile_field("binary");
+        let binary_path = default_enclave
+            .and_then(|e| e.build.as_ref())
+            .and_then(|b| b.binary.clone());
 
-        let run_command = self.read_procfile_field("run");
-        let app_source_urls = self.read_procfile_sources();
-        let app_source_urls_opt = if app_source_urls.is_empty() {
-            None
-        } else {
-            Some(app_source_urls.clone())
-        };
-        let ports = self.read_procfile_ports();
+        let run_command = default_enclave
+            .and_then(|e| e.unit.as_ref())
+            .and_then(|u| u.get("default"))
+            .map(|u| u.command.clone());
 
-        let e2e = self
-            .read_procfile_field("e2e")
-            .map(|v| v.to_lowercase() == "true")
+        let app_source_urls_opt = default_enclave
+            .and_then(|e| e.build.as_ref())
+            .map(|b| b.app_sources.clone())
+            .filter(|s| !s.is_empty());
+
+        let ports: Vec<u16> = default_enclave
+            .and_then(|e| e.network.as_ref())
+            .map(|n| {
+                n.ingress
+                    .iter()
+                    .filter_map(|rule| match &rule.port_spec {
+                        Some(caution_config::PortSpec::Exact { port }) => Some(*port),
+                        _ => None,
+                    })
+                    .collect::<Vec<u16>>()
+            })
+            .unwrap_or_default();
+
+        let http_port = default_enclave
+            .and_then(|config| config.network.as_ref())
+            .and_then(|network| network.http.as_ref())
+            .map(|http| http.port);
+        log_verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
+
+        let e2e_config = default_enclave
+            .and_then(|e| e.network.as_ref())
+            .and_then(|n| n.http.as_ref())
+            .and_then(|h| h.e2e_encryption.as_ref());
+
+        let e2e = e2e_config
+            .and_then(|ee| ee.enabled)
             .unwrap_or(false);
         log_verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
-        let locksmith = self
-            .read_procfile_field("locksmith")
-            .map(|v| v.to_lowercase() == "true")
-            .unwrap_or(false);
+        let locksmith = cfg.has_vault_env();
         log_verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
+
+        let e2e_cors_origins = e2e_config
+            .and_then(|e2e| e2e.cors_origins.as_ref())
+            .map(|origins| origins.join(","));
 
         let mut loader = Loader::new("Building enclave image", LoaderStyle::Processing);
         let deployment = if let Some(ref bin_path) = binary_path {
@@ -4214,8 +4210,10 @@ run: /app/myapp
                     None,
                     None,
                     &ports,
+                    http_port,
                     e2e,
                     locksmith,
+                    e2e_cors_origins,
                 )
                 .await
         } else {
@@ -4231,8 +4229,10 @@ run: /app/myapp
                     None,
                     None,
                     &ports,
+                    http_port,
                     e2e,
                     locksmith,
+                    e2e_cors_origins,
                 )
                 .await
         }
@@ -4276,8 +4276,15 @@ run: /app/myapp
         let no_cache = if let Some(source) = local_source {
             no_cache
                 || self
-                    .read_procfile_field_from_dir(&source.path, "no_cache")
-                    .map(|v| v.to_lowercase() == "true")
+                    .read_config_from_dir(&source.path)
+                    .ok()
+                    .and_then(|cfg| {
+                        cfg.enclave
+                            .and_then(|e| e.into_iter().next().map(|(_, v)| v))
+                    })
+                    .and_then(|e| e.build)
+                    .and_then(|b| b.cache)
+                    .map(|c| !c)
                     .unwrap_or(false)
         } else {
             no_cache
@@ -4302,26 +4309,14 @@ run: /app/myapp
                 }
             }
         } else {
-            let procfile_dir = local_source
-                .map(|source| source.path.as_path())
-                .unwrap_or_else(|| Path::new("."));
-            let enclave_sources = self.read_procfile_enclave_sources_from_dir(procfile_dir);
-            if !enclave_sources.is_empty() {
-                log_verbose(
-                    self.verbose,
-                    &format!("Using enclave source from Procfile: {}", enclave_sources[0]),
-                );
-                (enclave_sources[0].clone(), "unused".to_string())
-            } else {
-                let source = enclave_builder::enclave_source_url(
-                    &enclave_builder::build::resolve_enclaveos_commit(),
-                );
-                log_verbose(
-                    self.verbose,
-                    &format!("Using default enclave source: {}", source),
-                );
-                (source, "unused".to_string())
-            }
+            let source = enclave_builder::enclave_source_url(
+                &enclave_builder::build::resolve_enclaveos_commit(),
+            );
+            log_verbose(
+                self.verbose,
+                &format!("Using default enclave source: {}", source),
+            );
+            (source, "unused".to_string())
         };
 
         let framework_source = if let Some(ref manifest) = external_manifest {
@@ -4379,6 +4374,7 @@ run: /app/myapp
             &cache_key,
             enclave_builder::CacheType::Reproduction,
             no_cache,
+            &self.get_cache_dir()?,
         )?;
 
         if let Some(cached) = builder.get_cached_eif() {
@@ -4471,23 +4467,27 @@ run: /app/myapp
                     manifest.metadata.clone(),
                 )
             } else {
-                let procfile_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
-                let binary = self.read_procfile_field_from_dir(procfile_dir, "binary");
-                let run_cmd = self.read_procfile_field_from_dir(procfile_dir, "run");
-                let source_urls = self.read_procfile_sources_from_dir(procfile_dir);
-                let source_urls_opt = if source_urls.is_empty() {
-                    None
-                } else {
-                    Some(source_urls)
-                };
-                let metadata = self.read_procfile_field_from_dir(procfile_dir, "metadata");
+                let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
+                let cfg = self.read_config_from_dir(config_dir)?;
+                let default_enclave = cfg.enclave.as_ref().and_then(|e| e.get("default"));
 
+                let binary = default_enclave
+                    .and_then(|e| e.build.as_ref())
+                    .and_then(|b| b.binary.clone());
+                let run_cmd = default_enclave
+                    .and_then(|e| e.unit.as_ref())
+                    .and_then(|u| u.get("default"))
+                    .map(|u| u.command.clone());
+                let source_urls = default_enclave
+                    .and_then(|e| e.build.as_ref())
+                    .map(|b| b.app_sources.clone())
+                    .filter(|s| !s.is_empty());
                 let commit = local_source
                     .and_then(|source| source.app_commit.clone())
                     .or_else(|| {
                         Command::new("git")
                             .args(&["rev-parse", "HEAD"])
-                            .current_dir(procfile_dir)
+                            .current_dir(config_dir)
                             .output()
                             .ok()
                             .and_then(|o| {
@@ -4501,7 +4501,7 @@ run: /app/myapp
 
                 let branch = Command::new("git")
                     .args(&["rev-parse", "--abbrev-ref", "HEAD"])
-                    .current_dir(procfile_dir)
+                    .current_dir(config_dir)
                     .output()
                     .ok()
                     .and_then(|o| {
@@ -4512,48 +4512,87 @@ run: /app/myapp
                         }
                     });
 
-                log_verbose(self.verbose, &format!("Binary from Procfile: {:?}", binary));
+                log_verbose(self.verbose, &format!("Binary from config: {:?}", binary));
                 log_verbose(
                     self.verbose,
-                    &format!("Run command from Procfile: {:?}", run_cmd),
+                    &format!("Run command from config: {:?}", run_cmd),
                 );
                 log_verbose(
                     self.verbose,
-                    &format!("Source URLs from Procfile: {:?}", source_urls_opt),
+                    &format!("Source URLs from config: {:?}", source_urls),
                 );
                 log_verbose(self.verbose, &format!("Git branch: {:?}", branch));
                 log_verbose(self.verbose, &format!("Git commit: {:?}", commit));
-                log_verbose(self.verbose, &format!("Metadata: {:?}", metadata));
 
-                (binary, run_cmd, source_urls_opt, branch, commit, metadata)
+                (binary, run_cmd, source_urls, branch, commit, None)
             };
 
-        let ports = if let Some(ref app_dir) = app_source_dir {
-            self.read_procfile_ports_from_dir(app_dir)
-        } else {
-            self.read_procfile_ports()
+        let ports: Vec<u16> = {
+            let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
+            self.read_config_from_dir(config_dir)
+                .ok()
+                .and_then(|cfg| {
+                    cfg.enclave
+                        .and_then(|e| e.into_iter().next().map(|(_, v)| v))
+                })
+                .and_then(|e| e.network)
+                .map(|n| {
+                    n.ingress
+                        .iter()
+                        .filter_map(|rule| match &rule.port_spec {
+                            Some(caution_config::PortSpec::Exact { port }) => Some(*port),
+                            _ => None,
+                        })
+                        .collect::<Vec<u16>>()
+                })
+                .unwrap_or_default()
         };
         log_verbose(self.verbose, &format!("Ports: {:?}", ports));
 
-        let e2e = if let Some(ref app_dir) = app_source_dir {
-            self.read_procfile_field_from_dir(app_dir, "e2e")
-                .map(|v| v.to_lowercase() == "true")
+        let http_port = {
+            let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
+            self.read_config_from_dir(config_dir)
+                .ok()
+                .and_then(|cfg| {
+                    cfg.enclave
+                        .and_then(|e| e.into_iter().next().map(|(_, v)| v))
+                })
+                .and_then(|config| config.network)
+                .and_then(|network| network.http)
+                .map(|http| http.port)
+        };
+        log_verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
+
+        let e2e_config = {
+            let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
+            self.read_config_from_dir(config_dir)
+                .ok()
+                .and_then(|cfg| {
+                    cfg.enclave
+                        .and_then(|e| e.into_iter().next().map(|(_, v)| v))
+                })
+                .and_then(|config| config.network)
+                .and_then(|network| network.http)
+                .and_then(|http| http.e2e_encryption)
+        };
+
+        let e2e = {
+            e2e_config
+                .as_ref()
+                .and_then(|e2e| e2e.enabled)
                 .unwrap_or_else(|| {
                     external_manifest
                         .as_ref()
                         .and_then(|manifest| manifest.steve_commit.as_ref())
                         .is_some()
                 })
-        } else {
-            self.read_procfile_field("e2e")
-                .map(|v| v.to_lowercase() == "true")
-                .unwrap_or(false)
         };
         log_verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = if let Some(ref app_dir) = app_source_dir {
-            self.read_procfile_field_from_dir(app_dir, "locksmith")
-                .map(|v| v.to_lowercase() == "true")
+            self.read_config_from_dir(app_dir)
+                .ok()
+                .map(|cfg| cfg.has_vault_env())
                 .unwrap_or_else(|| {
                     external_manifest
                         .as_ref()
@@ -4563,11 +4602,21 @@ run: /app/myapp
         } else if let Some(ref manifest) = external_manifest {
             manifest.locksmith || manifest.locksmith_commit.is_some()
         } else {
-            self.read_procfile_field("locksmith")
-                .map(|v| v.to_lowercase() == "true")
+            self.read_config()
+                .ok()
+                .map(|cfg| cfg.has_vault_env())
                 .unwrap_or(false)
         };
         log_verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
+
+        let e2e_cors_origins = if e2e {
+            e2e_config
+                .as_ref()
+                .and_then(|e2e| e2e.cors_origins.as_ref())
+                .map(|origins| origins.join(","))
+        } else {
+            None
+        };
 
         let deployment = if let Some(ref bin_path) = binary_path {
             log_verbose(
@@ -4585,8 +4634,10 @@ run: /app/myapp
                     metadata,
                     external_manifest,
                     &ports,
+                    http_port,
                     e2e,
                     locksmith,
+                    e2e_cors_origins,
                 )
                 .await
         } else {
@@ -4602,8 +4653,10 @@ run: /app/myapp
                     metadata,
                     external_manifest,
                     &ports,
+                    http_port,
                     e2e,
                     locksmith,
+                    e2e_cors_origins,
                 )
                 .await
         }
@@ -5263,12 +5316,19 @@ run: /app/myapp
             &format!("Building Docker image with tag: {}", tag),
         );
 
+        let containerfile = self
+            .read_config_from_dir(work_dir)
+            .ok()
+            .and_then(|c| c.enclave)
+            .and_then(|e| e.into_iter().next().map(|(_, v)| v))
+            .and_then(|e| e.build)
+            .and_then(|b| b.containerfile);
+
         let procfile_path = work_dir.join("Procfile");
         let config = if procfile_path.exists() {
             let content =
                 std::fs::read_to_string(&procfile_path).context("Failed to read Procfile")?;
             let mut build_command = None;
-            let mut containerfile = None;
             let mut oci_tarball = None;
 
             for line in content.lines() {
@@ -5281,7 +5341,6 @@ run: /app/myapp
                     let value = value.trim().to_string();
                     match key.as_str() {
                         "build" => build_command = Some(value),
-                        "containerfile" => containerfile = Some(value),
                         "oci_tarball" => oci_tarball = Some(value),
                         _ => {}
                     }
@@ -5297,7 +5356,7 @@ run: /app/myapp
         } else {
             BuildConfig {
                 build_command: None,
-                containerfile: None,
+                containerfile,
                 oci_tarball: None,
                 no_cache,
             }
@@ -5316,9 +5375,13 @@ run: /app/myapp
     }
 
     async fn download_and_extract_app_source(&self, url: &str) -> Result<PathBuf> {
-        let cache_dir = dirs::home_dir()
-            .context("Failed to determine home directory")?
-            .join(".cache/caution/downloads");
+        let cache_dir = if let Some(ref workdir) = self.workdir {
+            workdir.join("downloads")
+        } else {
+            dirs::home_dir()
+                .context("Failed to determine home directory")?
+                .join(".cache/caution/downloads")
+        };
         std::fs::create_dir_all(&cache_dir)
             .context("Failed to create downloads cache directory")?;
 
@@ -5417,6 +5480,40 @@ run: /app/myapp
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("All source URLs failed")))
     }
 
+    /// Build a non-interactive, stall-bounded `git` command that cannot prompt
+    /// for credentials or block on a TTY. During verification the source URL
+    /// comes from the remote attestation manifest and may point at a repo the
+    /// host refuses to serve anonymously — e.g. a non-existent Codeberg/Forgejo
+    /// repo, which returns `401` (rather than `404`, to avoid leaking
+    /// existence). Without these guards, `git` falls back to prompting
+    /// `Username for ...` on the inherited `/dev/tty` and blocks forever,
+    /// leaving the "Reproducing enclave image" spinner spinning. Verification
+    /// sources are public and reproducible, so a credential prompt is always a
+    /// failure, never an interaction.
+    fn git_command(args: &[&str]) -> std::process::Command {
+        let mut cmd = std::process::Command::new("git");
+        cmd.args([
+            // Abort a transfer that drips below 1000 B/s for 300s, so a server
+            // that accepts the connection but never makes progress can't hang
+            // the build. (git has no working connect-timeout config knob; the
+            // connect phase falls back to libcurl's default. A hard wall-clock
+            // bound would need a process-level deadline.) These precede the
+            // subcommand so git applies them; harmless for local ops.
+            "-c", "http.lowSpeedLimit=1000",
+            "-c", "http.lowSpeedTime=300",
+        ])
+        .args(args)
+        // Never prompt on /dev/tty for a username/password.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // Belt-and-suspenders: if a credential helper/askpass is somehow
+        // configured, make it non-interactive. `true` exits 0 with empty
+        // output, so git gets empty credentials and fails fast.
+        .env("GIT_ASKPASS", "true")
+        // Detach stdin so git can't wait on the parent's TTY either.
+        .stdin(std::process::Stdio::null());
+        cmd
+    }
+
     async fn download_and_extract_app_source_with_git_fallback(
         &self,
         archive_urls: &[String],
@@ -5451,19 +5548,18 @@ run: /app/myapp
                     ),
                 );
 
-                let clone_output = Command::new("git")
-                    .args(&[
-                        "clone",
-                        "--depth",
-                        "100",
-                        "--single-branch",
-                        "--branch",
-                        branch_name,
-                        git_url,
-                        clone_path.to_str().unwrap(),
-                    ])
-                    .output()
-                    .context("Failed to clone repository")?;
+                let clone_output = Self::git_command(&[
+                    "clone",
+                    "--depth",
+                    "100",
+                    "--single-branch",
+                    "--branch",
+                    branch_name,
+                    git_url,
+                    clone_path.to_str().unwrap(),
+                ])
+                .output()
+                .context("Failed to clone repository")?;
 
                 if !clone_output.status.success() {
                     let stderr = String::from_utf8_lossy(&clone_output.stderr);
@@ -5471,8 +5567,7 @@ run: /app/myapp
                     // Fall through to try commit-based fetch
                 } else {
                     // Checkout the specific commit
-                    let checkout_output = Command::new("git")
-                        .args(&["checkout", commit])
+                    let checkout_output = Self::git_command(&["checkout", commit])
                         .current_dir(&clone_path)
                         .output()
                         .context("Failed to checkout commit")?;
@@ -5492,13 +5587,11 @@ run: /app/myapp
                         );
 
                         // Try fetching more history to find the commit
-                        let _ = Command::new("git")
-                            .args(&["fetch", "--unshallow"])
+                        let _ = Self::git_command(&["fetch", "--unshallow"])
                             .current_dir(&clone_path)
                             .output();
 
-                        let checkout_retry = Command::new("git")
-                            .args(&["checkout", commit])
+                        let checkout_retry = Self::git_command(&["checkout", commit])
                             .current_dir(&clone_path)
                             .output()
                             .context("Failed to checkout commit after unshallow")?;
@@ -5532,8 +5625,7 @@ run: /app/myapp
 
                 std::fs::create_dir_all(&clone_path)?;
 
-                let init_output = Command::new("git")
-                    .args(&["init"])
+                let init_output = Self::git_command(&["init"])
                     .current_dir(&clone_path)
                     .output()
                     .context("Failed to run git init")?;
@@ -5544,17 +5636,13 @@ run: /app/myapp
                 }
 
                 let branch_ref = format!("refs/heads/{}", branch_name);
-                let fetch_branch_output = Command::new("git")
-                    .arg("fetch")
-                    .arg(git_url)
-                    .arg(&branch_ref)
+                let fetch_branch_output = Self::git_command(&["fetch", git_url, &branch_ref])
                     .current_dir(&clone_path)
                     .output()
                     .context("Failed to fetch branch")?;
 
                 if fetch_branch_output.status.success() {
-                    let checkout_output = Command::new("git")
-                        .args(&["checkout", commit])
+                    let checkout_output = Self::git_command(&["checkout", commit])
                         .current_dir(&clone_path)
                         .output()
                         .context("Failed to checkout commit")?;
@@ -5591,8 +5679,7 @@ run: /app/myapp
             }
             std::fs::create_dir_all(&clone_path)?;
 
-            let init_output = Command::new("git")
-                .args(&["init"])
+            let init_output = Self::git_command(&["init"])
                 .current_dir(&clone_path)
                 .output()
                 .context("Failed to run git init")?;
@@ -5602,8 +5689,7 @@ run: /app/myapp
                 bail!("Git init failed: {}", stderr);
             }
 
-            let fetch_output = Command::new("git")
-                .args(&["fetch", "--depth", "1", git_url, commit])
+            let fetch_output = Self::git_command(&["fetch", "--depth", "1", git_url, commit])
                 .current_dir(&clone_path)
                 .output()
                 .context("Failed to fetch commit")?;
@@ -5616,8 +5702,7 @@ run: /app/myapp
                 bail!("Git fetch failed: {}", stderr);
             }
 
-            let checkout_output = Command::new("git")
-                .args(&["checkout", "FETCH_HEAD"])
+            let checkout_output = Self::git_command(&["checkout", "FETCH_HEAD"])
                 .current_dir(&clone_path)
                 .output()
                 .context("Failed to checkout commit")?;
@@ -5813,6 +5898,9 @@ run: /app/myapp
     }
 
     fn get_cache_dir(&self) -> Result<PathBuf> {
+        if let Some(ref workdir) = self.workdir {
+            return Ok(workdir.clone());
+        }
         let cache_dir = dirs::home_dir()
             .context("Failed to determine home directory")?
             .join(".cache/caution");
@@ -6828,9 +6916,34 @@ fn resolve_local_build_command_from_dir(
     work_dir: &Path,
     allow_missing_procfile: bool,
 ) -> Result<String> {
+    let config_path = work_dir.join("caution.hcl");
     let procfile_path = work_dir.join("Procfile");
     let has_containerfile = work_dir.join("Containerfile").is_file();
     let has_dockerfile = work_dir.join("Dockerfile").is_file();
+
+    if config_path.exists() {
+        let content = fs::read_to_string(&config_path).context("Failed to read caution.hcl")?;
+        let config = caution_config::ConfigurationFile::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Invalid caution.hcl: {}", e))?;
+        let containerfile = config
+            .enclave
+            .and_then(|e| e.into_iter().next().map(|(_, v)| v))
+            .and_then(|e| e.build)
+            .and_then(|b| b.containerfile);
+
+        if let Some(ref cf) = containerfile {
+            let cf = validate_explicit_containerfile_path(cf)?;
+            if !work_dir.join(&cf).is_file() {
+                bail!("caution.hcl `containerfile` points to missing file: {}", cf);
+            }
+        }
+
+        return Ok(resolve_build_command_in_dir(
+            None,
+            containerfile.as_deref(),
+            work_dir,
+        ));
+    }
 
     if procfile_path.exists() {
         let content = fs::read_to_string(&procfile_path).context("Failed to read Procfile")?;
@@ -6838,14 +6951,14 @@ fn resolve_local_build_command_from_dir(
     }
 
     if !allow_missing_procfile {
-        bail!("Procfile not found in current directory");
+        bail!("No caution.hcl or Procfile found");
     }
 
     if has_containerfile || has_dockerfile {
         return Ok(resolve_build_command_in_dir(None, None, work_dir));
     }
 
-    Ok("echo 'Please configure your Procfile'".to_string())
+    Ok("echo 'Please configure your configuration file'".to_string())
 }
 
 struct AssertionResult {
@@ -6875,8 +6988,8 @@ pub async fn run() -> Result<()> {
     }
 
     log_verbose(cli.verbose, "Initializing API client...");
-    let client =
-        ApiClient::new(&cli.url, cli.verbose, cli.qr).context("Failed to initialize API client")?;
+    let client = ApiClient::new(&cli.url, cli.verbose, cli.qr, cli.workdir.clone())
+        .context("Failed to initialize API client")?;
     log_verbose(cli.verbose, "API client ready");
 
     match cli.command {
@@ -6973,6 +7086,9 @@ pub async fn run() -> Result<()> {
             }
             AppCommands::DownloadEif(args) => {
                 apps::download_eif::download_eif(&client, &args).await?;
+            }
+            AppCommands::MigrateProcfile(args) => {
+                apps::migrate_procfile::migrate_procfile(&client, &args).await?;
             }
         },
         Commands::SshKeys { command } => match command {
@@ -7354,6 +7470,6 @@ containerfile: Missing.Containerfile\n",
 
         let command = resolve_local_build_command_from_dir(work_dir.path(), true).unwrap();
 
-        assert_eq!(command, "echo 'Please configure your Procfile'");
+        assert_eq!(command, "echo 'Please configure your configuration file'");
     }
 }

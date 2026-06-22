@@ -1019,11 +1019,13 @@ UPDATE billing_config SET auto_topup_enabled = false WHERE organization_id = '$O
 STEP_NUM=24
 log "Testing low balance warning..."
 
-# Set balance below $5 and no auto-topup
-reset_effective_balance 300 "low balance seed"
+# Set balance below the $25 deploy threshold and no auto-topup
+reset_effective_balance 2000 "low balance seed"
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
 UPDATE billing_config SET auto_topup_enabled = false, low_balance_warned_at = NULL WHERE organization_id = '$ORG_ID';
 " >/dev/null 2>&1
+
+INSUFFICIENT_BEFORE=$(curl -sf "$EMAIL_EXTERNAL_URL/sent?template=insufficient_balance" 2>/dev/null | jq ".count // 0" || echo 0)
 
 # Track resource and trigger collection to invoke threshold check
 LB_RESOURCE="low-balance-test-$(cat /proc/sys/kernel/random/uuid)"
@@ -1050,15 +1052,19 @@ curl -sf "${METERING_AUTH[@]}" -X POST "$METERING_EXTERNAL_URL/api/collect" >/de
 sleep 1
 
 WARNED_AT=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT low_balance_warned_at IS NOT NULL FROM billing_config WHERE organization_id = '$ORG_ID';
-" 2>/dev/null | tr -d ' \n')
+SELECT low_balance_warned_at IS NOT NULL FROM billing_config WHERE organization_id = \$\$$ORG_ID\$\$::uuid;
+" 2>/dev/null | tr -d " \n")
+
+INSUFFICIENT_AFTER=$(curl -sf "$EMAIL_EXTERNAL_URL/sent?template=insufficient_balance" 2>/dev/null | jq ".count // 0" || echo 0)
 
 log "  low_balance_warned_at set: $WARNED_AT"
+log "  insufficient_balance emails before: $INSUFFICIENT_BEFORE"
+log "  insufficient_balance emails after: $INSUFFICIENT_AFTER"
 
-if [ "$WARNED_AT" = "t" ]; then
-    step_pass "Low balance warning: warned_at timestamp set"
+if [ "$WARNED_AT" = "t" ] && [ "$INSUFFICIENT_AFTER" -gt "$INSUFFICIENT_BEFORE" ]; then
+    step_pass "Low balance warning: warned_at timestamp set and email recorded"
 else
-    step_fail "Low balance warning: warned_at not set (threshold check may not have triggered)"
+    step_fail "Low balance warning: warned_at=$WARNED_AT insufficient_balance_before=$INSUFFICIENT_BEFORE insufficient_balance_after=$INSUFFICIENT_AFTER"
 fi
 
 curl -sf "${METERING_AUTH[@]}" -X POST "$METERING_EXTERNAL_URL/api/resources/$LB_RESOURCE/untrack" >/dev/null 2>&1 || true
