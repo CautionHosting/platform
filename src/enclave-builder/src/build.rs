@@ -689,7 +689,7 @@ mod tests {
     async fn test_render_run_sh_uses_reserved_locksmith_port() {
         let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
         let rendered =
-            render_run_sh_template(&template, Some("/app".to_string()), &[], None, false, true)
+            render_run_sh_template(&template, Some("/app".to_string()), &[], None, false, true, None)
                 .await
                 .unwrap();
 
@@ -709,6 +709,7 @@ mod tests {
             Some(3000),
             true,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -726,6 +727,7 @@ mod tests {
             None,
             true,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -743,6 +745,7 @@ mod tests {
             None,
             true,
             false,
+            None,
         )
         .await
         .unwrap_err();

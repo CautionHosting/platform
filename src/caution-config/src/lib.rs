@@ -853,7 +853,7 @@ enclave "main" {
     }
     http {
       domain = "example.com"
-      port = "9090"
+      port = 9090
     }
   }
   resources {
@@ -1167,7 +1167,7 @@ cache: false
         );
         let http = network.http.as_ref().unwrap();
         assert_eq!(http.domain, "example.com");
-        assert_eq!(http.port, "8080");
+        assert_eq!(http.port, 8080);
 
         let unit = e.unit.as_ref().unwrap();
         let main = unit.get("default").unwrap();
@@ -1217,7 +1217,7 @@ cache: false
         let network = enclave.get("default").unwrap().network.as_ref().unwrap();
         let http = network.http.as_ref().unwrap();
         assert_eq!(http.domain, "myapp.example.com");
-        assert_eq!(http.port, "8080");
+        assert_eq!(http.port, 8080);
     }
 
     #[test]
@@ -1334,7 +1334,7 @@ cache: false
         let network = e.network.as_ref().unwrap();
         let http = network.http.as_ref().unwrap();
         assert_eq!(http.domain, "chat.caution.dev");
-        assert_eq!(http.port, "80");
+        assert_eq!(http.port, 80);
 
         let build = e.build.as_ref().unwrap();
         assert_eq!(
