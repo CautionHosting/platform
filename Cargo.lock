@@ -1376,7 +1376,6 @@ dependencies = [
  "hcl-rs",
  "serde",
  "serde_json",
- "shlex",
  "thiserror 1.0.69",
 ]
 

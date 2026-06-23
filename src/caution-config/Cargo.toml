@@ -7,5 +7,4 @@ edition = "2024"
 hcl-rs = { version = "0.19.7", features = ["perf"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-shlex = "1.3"
 thiserror.workspace = true

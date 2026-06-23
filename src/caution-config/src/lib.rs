@@ -429,17 +429,15 @@ impl ConfigurationFile {
         };
 
         let unit = run.map(|cmd| {
-            let parts = shlex::split(&cmd);
-            let (command, args) = match parts {
-                Some(p) if !p.is_empty() => (p[0].clone(), p[1..].to_vec()),
-                _ => (cmd, Vec::new()),
-            };
+            // Keep the whole `run:` value in `command`. The deploy path runs it
+            // via `sh -c` and ignores `args`, so splitting here would drop
+            // arguments and break env-prefixed commands (`FOO=1 /app`).
             let mut units = BTreeMap::new();
             units.insert(
                 "default".to_string(),
                 UnitConfig {
-                    command,
-                    args,
+                    command: cmd,
+                    args: Vec::new(),
                     env: None,
                 },
             );
@@ -1102,8 +1100,9 @@ enclave "main" {
         let enclave = config.enclave.as_ref().unwrap();
         let unit = enclave.get("default").unwrap().unit.as_ref().unwrap();
         let main = unit.get("default").unwrap();
-        assert_eq!(main.command, "/app/server");
-        assert_eq!(main.args, vec!["--port", "8080"]);
+        // Whole run: string stays in command; deploy runs it via `sh -c`.
+        assert_eq!(main.command, "/app/server --port 8080");
+        assert!(main.args.is_empty());
     }
 
     #[test]
@@ -1171,8 +1170,8 @@ cache: false
 
         let unit = e.unit.as_ref().unwrap();
         let main = unit.get("default").unwrap();
-        assert_eq!(main.command, "/app/server");
-        assert_eq!(main.args, vec!["--port", "8080"]);
+        assert_eq!(main.command, "/app/server --port 8080");
+        assert!(main.args.is_empty());
         assert!(main.env.is_none());
     }
 
@@ -1312,24 +1311,11 @@ cache: false
         let e = enclave.get("default").unwrap();
 
         let unit = e.unit.as_ref().unwrap().get("default").unwrap();
-        assert_eq!(unit.command, "/usr/bin/llama-server");
         assert_eq!(
-            unit.args,
-            vec![
-                "--host",
-                "0.0.0.0",
-                "--port",
-                "8083",
-                "-m",
-                "/workdir/models/model.gguf",
-                "--path",
-                "/workdir/public",
-                "--ctx-size",
-                "2048",
-                "-t",
-                "8",
-            ]
+            unit.command,
+            "/usr/bin/llama-server --host 0.0.0.0 --port 8083 -m /workdir/models/model.gguf --path /workdir/public --ctx-size 2048 -t 8"
         );
+        assert!(unit.args.is_empty());
 
         let network = e.network.as_ref().unwrap();
         let http = network.http.as_ref().unwrap();
