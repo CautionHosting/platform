@@ -133,27 +133,17 @@ impl SshSignedRequestError {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
 enum FetchAppViaSshHttpsErrorKind {
+    #[error("send signed request")]
     SendSignedRequest,
+    #[error("decode response")]
     DecodeResponse,
+    #[error("api status {status}: {message}")]
     ApiStatus {
         status: reqwest::StatusCode,
         message: String,
     },
-}
-
-impl std::fmt::Debug for FetchAppViaSshHttpsErrorKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SendSignedRequest => f.write_str("SendSignedRequest"),
-            Self::DecodeResponse => f.write_str("DecodeResponse"),
-            Self::ApiStatus { status, message } => f
-                .debug_struct("ApiStatus")
-                .field("status", status)
-                .field("message", message)
-                .finish(),
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -189,25 +179,15 @@ impl FetchAppViaSshHttpsError {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
 enum DestroyAppViaSshHttpsErrorKind {
+    #[error("send signed request")]
     SendSignedRequest,
+    #[error("api status {status}: {message}")]
     ApiStatus {
         status: reqwest::StatusCode,
         message: String,
     },
-}
-
-impl std::fmt::Debug for DestroyAppViaSshHttpsErrorKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SendSignedRequest => f.write_str("SendSignedRequest"),
-            Self::ApiStatus { status, message } => f
-                .debug_struct("ApiStatus")
-                .field("status", status)
-                .field("message", message)
-                .finish(),
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
