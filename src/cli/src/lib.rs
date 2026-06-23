@@ -3165,10 +3165,16 @@ enclave "default" {{
         local: bool,
         config_path: Option<PathBuf>,
     ) -> Result<()> {
-        // If --byoc without --config, use the interactive flow.
-        // Keep the longer bring-your-own-compute spelling working via a clap alias.
-        if bring_your_own_cloud && config_path.is_none() {
-            return self.init_byoc_interactive(name, region, local).await;
+        if bring_your_own_cloud {
+            let auth_config = self.ensure_authenticated().await?;
+            if let Some(ref path) = config_path {
+                return self.init_byoc(path, auth_config).await;
+            }
+
+            // Keep the longer bring-your-own-compute spelling working via a clap alias.
+            return self
+                .init_byoc_interactive(name, region, local, auth_config)
+                .await;
         }
 
         println!("Initializing new deployment...");
@@ -3176,10 +3182,6 @@ enclave "default" {{
         log_verbose(self.verbose, "Checking git repository...");
         self.check_git_repo()?;
         println!("Git repository found");
-
-        if let Some(ref path) = config_path {
-            return self.init_byoc(path).await;
-        }
 
         self.create_config_file_if_needed(bring_your_own_cloud)?;
 
@@ -3312,7 +3314,7 @@ enclave "default" {{
         Ok(())
     }
 
-    async fn init_byoc(&self, config_path: &PathBuf) -> Result<()> {
+    async fn init_byoc(&self, config_path: &PathBuf, auth_config: Config) -> Result<()> {
         println!("Initializing bring-your-own-compute deployment...");
 
         log_verbose(
@@ -3402,8 +3404,6 @@ enclave "default" {{
             log_verbose(self.verbose, "Config file validated");
             serde_json::to_string(&config_json)?
         };
-
-        let auth_config = self.ensure_authenticated().await?;
 
         self.create_config_file_if_needed(true)?;
 
@@ -3595,6 +3595,7 @@ enclave "default" {{
         name: Option<String>,
         region: Option<String>,
         local: bool,
+        auth_config: Config,
     ) -> Result<()> {
         use std::io::{self, Write};
 
@@ -3770,9 +3771,6 @@ enclave "default" {{
         let deployment_id = credentials_json["deployment_id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing deployment_id in provisioner output"))?;
-
-        // Authenticate with Caution
-        let auth_config = self.ensure_authenticated().await?;
 
         let create_cmd = resolve_local_build_command_from_dir(Path::new("."), true)?;
 
