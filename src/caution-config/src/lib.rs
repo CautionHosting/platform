@@ -1890,6 +1890,43 @@ enclave "main" {
     }
 
     #[test]
+    fn run_command_string_quotes_malicious_env_value() {
+        // A shell-metacharacter-laden value must be quoted, not interpreted.
+        let unit = default_unit(
+            r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    env {
+      EVIL = "$(rm -rf /); `id`"
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#,
+        );
+        assert_eq!(
+            unit.run_command_string().unwrap(),
+            "export EVIL='$(rm -rf /); `id`'\n/app"
+        );
+    }
+
+    #[test]
+    fn run_command_string_rejects_nul_byte() {
+        // shlex cannot quote a NUL byte; it must surface as an error, not panic.
+        let unit = UnitConfig {
+            command: "/app\0".to_string(),
+            args: Vec::new(),
+            env: None,
+        };
+        let err = unit.run_command_string().unwrap_err();
+        assert!(matches!(err, FromStrError::UnquotableCommand));
+    }
+
+    #[test]
     fn run_command_string_skips_vault_env() {
         let unit = default_unit(
             r#"
