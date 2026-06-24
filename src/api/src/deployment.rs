@@ -86,6 +86,7 @@ pub struct NitroDeploymentRequest {
     pub locksmith: bool,
     pub ssh_keys: Vec<String>,
     pub domain: Option<String>,
+    pub region: Option<String>,
     #[serde(skip)]
     pub credentials: Option<AwsCredentials>,
     pub managed_onprem: Option<ManagedOnPremConfig>,
@@ -126,7 +127,8 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
         .credentials
         .as_ref()
         .map(|c| c.region.clone())
-        .unwrap_or_else(|| std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()));
+        .or_else(|| request.region.clone())
+        .context("Deployment region is required")?;
 
     let config = TerraformConfig {
         module_path: PathBuf::from("terraform/modules/aws/nitro-enclave"),
@@ -355,6 +357,7 @@ mod tests {
             locksmith: false,
             ssh_keys: vec![],
             domain: None,
+            region: None,
             credentials: None,
             managed_onprem: Some(managed_onprem_config()),
         }
@@ -1386,6 +1389,36 @@ fn select_instance_type(cpu_count: u32, memory_mb: u32) -> &'static str {
     }
 }
 
+pub(crate) fn host_vcpus_for_instance_type(instance_type: &str) -> Option<u32> {
+    let size = instance_type.split('.').next_back()?;
+
+    match size {
+        "nano" | "micro" | "small" | "medium" => Some(2),
+        "large" => Some(2),
+        "xlarge" => Some(4),
+        "metal" => Some(96),
+        size if size.ends_with("xlarge") => {
+            let multiplier = size.trim_end_matches("xlarge").parse::<u32>().ok()?;
+            Some(multiplier * 4)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn host_instance_type_for_enclave(
+    cpu_count: u32,
+    memory_mb: u32,
+) -> (&'static str, u32) {
+    let cpu_count_rounded = if cpu_count % 2 == 0 {
+        cpu_count
+    } else {
+        cpu_count + 1
+    };
+    let instance_type = select_instance_type(cpu_count_rounded, memory_mb);
+    let host_vcpus = host_vcpus_for_instance_type(instance_type).unwrap_or(cpu_count_rounded + 2);
+    (instance_type, host_vcpus)
+}
+
 fn compute_enclave_sizing(request: &NitroDeploymentRequest) -> (u32, &'static str) {
     let cpu_count_rounded = if request.cpu_count % 2 == 0 {
         request.cpu_count
@@ -1401,7 +1434,7 @@ fn compute_enclave_sizing(request: &NitroDeploymentRequest) -> (u32, &'static st
         );
     }
 
-    let instance_type = select_instance_type(cpu_count_rounded, request.memory_mb);
+    let (instance_type, _) = host_instance_type_for_enclave(request.cpu_count, request.memory_mb);
     tracing::info!(
         "Selected instance type {} for {} CPUs and {} MB memory (total needed: {} vCPUs, {} GB)",
         instance_type,
@@ -1462,7 +1495,8 @@ async fn generate_nitro_deployment_main_tf(
         .credentials
         .as_ref()
         .map(|c| c.region.clone())
-        .unwrap_or_else(|| std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()));
+        .or_else(|| request.region.clone())
+        .context("Deployment region is required")?;
     let ssh_key_name = std::env::var("SSH_KEY_NAME").ok();
 
     let (cpu_count_rounded, instance_type) = compute_enclave_sizing(request);
