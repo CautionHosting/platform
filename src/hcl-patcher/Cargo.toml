@@ -1,0 +1,9 @@
+[package]
+name = "hcl-patcher"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+hcl-edit = "0.9.6"
+thiserror = "2"

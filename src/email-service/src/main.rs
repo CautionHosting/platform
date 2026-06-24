@@ -300,6 +300,7 @@ async fn send_email_handler(
         "suspension_warning" => generate_suspension_warning_email(&req.data),
         "suspension_notice" => generate_suspension_notice_email(&req.data),
         "legal_notice" => generate_legal_notice_email(&req.data),
+        "fully_managed_capacity_alert" => generate_fully_managed_capacity_alert_email(&req.data),
         _ => {
             return Ok(Json(SendEmailResponse {
                 success: false,
@@ -850,6 +851,81 @@ fn generate_insufficient_balance_email(data: &serde_json::Value) -> (String, Str
     (subject, html_body, text_body)
 }
 
+fn generate_fully_managed_capacity_alert_email(
+    data: &serde_json::Value,
+) -> (String, String, String) {
+    let organization_id_raw = data["organization_id"].as_str().unwrap_or("unknown");
+    let user_id_raw = data["user_id"].as_str().unwrap_or("unknown");
+    let email_raw = data["email"].as_str().unwrap_or("unknown");
+    let requested_enclave_vcpus_raw = data["requested_enclave_vcpus"]
+        .as_i64()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unspecified".to_string());
+    let required_host_vcpus_raw = data["required_host_vcpus"]
+        .as_i64()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let organization_id = html_escape(organization_id_raw);
+    let user_id = html_escape(user_id_raw);
+    let email = html_escape(email_raw);
+    let requested_enclave_vcpus = html_escape(&requested_enclave_vcpus_raw);
+    let required_host_vcpus = html_escape(&required_host_vcpus_raw);
+
+    let subject = "Fully managed capacity waitlist request".to_string();
+    let html_body = format!(
+        r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Fully Managed Capacity Waitlist Request</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 640px; margin: 0 auto; padding: 20px;">
+    <div style="background-color: #f4f4f4; padding: 20px; border-radius: 10px;">
+        <h1 style="color: #2c3e50; margin-top: 0;">Capacity waitlist request</h1>
+        <p>A user joined the fully managed capacity waitlist.</p>
+        <table style="width: 100%; border-collapse: collapse;">
+            <tr><td style="padding: 6px 0; font-weight: bold;">Organization</td><td>{}</td></tr>
+            <tr><td style="padding: 6px 0; font-weight: bold;">User</td><td>{}</td></tr>
+            <tr><td style="padding: 6px 0; font-weight: bold;">Email</td><td>{}</td></tr>
+            <tr><td style="padding: 6px 0; font-weight: bold;">Requested enclave vCPUs</td><td>{}</td></tr>
+            <tr><td style="padding: 6px 0; font-weight: bold;">Required host vCPUs</td><td>{}</td></tr>
+        </table>
+    </div>
+
+{}
+</body>
+</html>
+        "#,
+        organization_id,
+        user_id,
+        email,
+        requested_enclave_vcpus,
+        required_host_vcpus,
+        html_email_footer()
+    );
+
+    let text_body = format!(
+        "Fully managed capacity waitlist request\n\n\
+         A user joined the fully managed capacity waitlist.\n\n\
+         Organization: {}\n\
+         User: {}\n\
+         Email: {}\n\
+         Requested enclave vCPUs: {}\n\
+         Required host vCPUs: {}\n\n\
+         --\n\
+         Caution Team",
+        organization_id_raw,
+        user_id_raw,
+        email_raw,
+        requested_enclave_vcpus_raw,
+        required_host_vcpus_raw
+    );
+
+    (subject, html_body, text_body)
+}
+
 fn generate_suspension_warning_email(data: &serde_json::Value) -> (String, String, String) {
     let days_remaining = data["days_remaining"].as_i64().unwrap_or(4);
     let amount_raw = data["amount"].as_str().unwrap_or("$0.00");
@@ -1237,6 +1313,7 @@ mod tests {
             "suspension_warning",
             "suspension_notice",
             "legal_notice",
+            "fully_managed_capacity_alert",
         ];
 
         for template in templates {
@@ -1246,6 +1323,11 @@ mod tests {
                 "date": "2025-01-01",
                 "days_remaining": 4,
                 "app_count": 1,
+                "organization_id": Uuid::new_v4(),
+                "user_id": Uuid::new_v4(),
+                "email": "user@example.test",
+                "requested_enclave_vcpus": 4,
+                "required_host_vcpus": 8,
             });
 
             let result = match template {
@@ -1267,6 +1349,9 @@ mod tests {
                     ],
                     "action_required": true,
                 })),
+                "fully_managed_capacity_alert" => {
+                    generate_fully_managed_capacity_alert_email(&data)
+                }
                 _ => panic!("Unknown template: {}", template),
             };
 

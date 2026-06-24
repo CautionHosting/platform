@@ -29,6 +29,7 @@ fi
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
 API_URL="${API_URL:-http://127.0.0.1:8080}"
 CAUTION_BIN="${CAUTION_BIN:-caution}"
+HCL_PATCHER_BIN="${HCL_PATCHER_BIN:-out/cli/hcl-patcher}"
 DEMO_REPO="${DEMO_REPO:-https://codeberg.org/caution/demo-hello-world-enclave.git}"
 WORK_DIR=$(mktemp -d)
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/api-cli"
@@ -103,18 +104,6 @@ require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
         echo "ERROR: $1 is required for this test"
         exit 1
-    fi
-}
-
-set_procfile_value() {
-    local key="$1"
-    local value="$2"
-    local file="${3:-Procfile}"
-
-    if grep -Eq "^${key}:" "$file"; then
-        sed -i "s/^${key}:.*/${key}: ${value}/" "$file"
-    else
-        printf '\n%s: %s\n' "$key" "$value" >> "$file"
     fi
 }
 
@@ -240,8 +229,11 @@ log "Cloning demo app from $DEMO_REPO..."
 git clone "$DEMO_REPO" "$CLONE_DIR"
 cd "$CLONE_DIR"
 
-set_procfile_value "e2e" "true"
-git -c user.name="Caution E2E" -c user.email="e2e@example.com" add Procfile
+# Convert Procfile to caution.hcl, then patch e2e encryption
+"$CAUTION_BIN" apps migrate-procfile
+"$HCL_PATCHER_BIN" caution.hcl /enclave/default/network/http/e2e_encryption/enabled true --type bool
+rm -f Procfile
+git -c user.name="Caution E2E" -c user.email="e2e@example.com" add caution.hcl
 git -c user.name="Caution E2E" -c user.email="e2e@example.com" commit -m "Enable STEVE e2e port test" >/dev/null
 step_pass "Demo app prepared with e2e enabled"
 

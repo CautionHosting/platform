@@ -152,6 +152,7 @@ pub struct BuildRequest {
     pub http_port: Option<u16>,
     pub e2e: bool,
     pub locksmith: bool,
+    pub egress: bool,
     pub e2e_cors_origins: Option<String>,
     pub no_cache: bool,
     pub enclaveos_commit: String,
@@ -849,6 +850,7 @@ fn generate_builder_userdata(
 
     let e2e_flag = if request.e2e { "true" } else { "false" };
     let locksmith_flag = if request.locksmith { "true" } else { "false" };
+    let egress_flag = if request.egress { "true" } else { "false" };
     let cors_origins_value = request.e2e_cors_origins.as_deref().unwrap_or("");
     let cors_origins_escaped = cors_origins_value.replace('\'', "'\\''");
     let no_cache_flag = if request.no_cache { "true" } else { "false" };
@@ -912,6 +914,7 @@ PORTS="{ports_csv}"
 HTTP_PORT="{http_port}"
 E2E="{e2e_flag}"
 LOCKSMITH="{locksmith_flag}"
+EGRESS="{egress_flag}"
 CORS_ORIGINS='{cors_origins_escaped}'
 NO_CACHE="{no_cache_flag}"
 
@@ -1007,6 +1010,7 @@ CAUTION_PORTS="$PORTS" \
 CAUTION_HTTP_PORT="$HTTP_PORT" \
 CAUTION_E2E="$E2E" \
 CAUTION_LOCKSMITH="$LOCKSMITH" \
+CAUTION_EGRESS="$EGRESS" \
 CAUTION_CORS_ORIGINS="$CORS_ORIGINS" \
 CAUTION_NO_CACHE="$NO_CACHE" \
 /usr/local/bin/remote-build-helper 2>&1
@@ -1060,6 +1064,7 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
         http_port = http_port,
         e2e_flag = e2e_flag,
         locksmith_flag = locksmith_flag,
+        egress_flag = egress_flag,
         cors_origins_escaped = cors_origins_escaped,
         no_cache_flag = no_cache_flag,
         manifest_json = manifest_json,
@@ -1217,44 +1222,44 @@ mod tests {
 
     #[test]
     fn test_cache_key_deterministic() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
-        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, &[]);
+        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, &[]);
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 64); // SHA256 hex
     }
 
     #[test]
     fn test_cache_key_changes_with_commit() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
-        let key2 = compute_cache_key("def456", "enclave-v1", "run: /app", false, false, None);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, &[]);
+        let key2 = compute_cache_key("def456", "enclave-v1", "run: /app", false, false, &[]);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_enclaveos() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
-        let key2 = compute_cache_key("abc123", "enclave-v2", "run: /app", false, false, None);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, &[]);
+        let key2 = compute_cache_key("abc123", "enclave-v2", "run: /app", false, false, &[]);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_procfile() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
-        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /other", false, false, None);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, &[]);
+        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /other", false, false, &[]);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_e2e() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
-        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", true, false, None);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, &[]);
+        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", true, false, &[]);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_locksmith() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
-        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, true, None);
+        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, &[]);
+        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, true, &[]);
         assert_ne!(key1, key2);
     }
 
@@ -1466,6 +1471,8 @@ mod tests {
             http_port: None,
             e2e: false,
             locksmith: false,
+            egress: false,
+            e2e_cors_origins: None,
             no_cache: true,
             enclaveos_commit: "enclave-abc".to_string(),
             builder_size: "small".to_string(),
@@ -1557,7 +1564,7 @@ mod tests {
 
         // Should write status updates
         assert!(
-            userdata.contains("write_status"),
+            userdata.contains("set_phase"),
             "should write status to S3"
         );
         assert!(
@@ -1603,6 +1610,8 @@ mod tests {
             http_port: None,
             e2e: false,
             locksmith: false,
+            egress: false,
+            e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
@@ -1655,6 +1664,8 @@ mod tests {
             http_port: None,
             e2e: false,
             locksmith: false,
+            egress: false,
+            e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
@@ -1706,6 +1717,8 @@ mod tests {
             http_port: None,
             e2e: false,
             locksmith: false,
+            egress: false,
+            e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
@@ -1765,6 +1778,8 @@ mod tests {
             http_port: None,
             e2e: false,
             locksmith: false,
+            egress: false,
+            e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
@@ -1820,6 +1835,8 @@ mod tests {
             http_port: None,
             e2e: false,
             locksmith: false,
+            egress: false,
+            e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
@@ -1852,5 +1869,61 @@ mod tests {
             size,
             size as f64 / 16384.0 * 100.0
         );
+    }
+
+    fn make_test_build_request_with_egress(egress: bool) -> BuildRequest {
+        BuildRequest {
+            org_id: Uuid::new_v4(),
+            app_id: Uuid::new_v4(),
+            app_name: "test-app".to_string(),
+            commit_sha: "abc123".to_string(),
+            branch: "main".to_string(),
+            source_s3_key: "builds/test/source.tar.gz".to_string(),
+            source_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            procfile_content: "run: /app\n".to_string(),
+            run_command: Some("/app".to_string()),
+            containerfile: "Dockerfile".to_string(),
+            binary_path: None,
+            ports: vec![],
+            http_port: None,
+            e2e: false,
+            locksmith: false,
+            egress,
+            e2e_cors_origins: None,
+            no_cache: false,
+            enclaveos_commit: "abc".to_string(),
+            builder_size: "small".to_string(),
+            builder_instance_type: "c5.xlarge".to_string(),
+            app_sources: vec![],
+        }
+    }
+
+    #[test]
+    fn test_build_script_sets_caution_egress() {
+        let config = BuilderConfig {
+            ami_id: "ami-test".to_string(),
+            security_group_id: "sg-test".to_string(),
+            subnet_id: "subnet-test".to_string(),
+            instance_profile: "profile-test".to_string(),
+            region: "us-west-2".to_string(),
+            timeout_secs: 1200,
+            eif_s3_bucket: "test-bucket".to_string(),
+            git_hostname: "git.example.com".to_string(),
+            additional_instance_tags: Vec::new(),
+        };
+        let request = make_test_build_request_with_egress(true);
+        let script = generate_builder_userdata(
+            Uuid::new_v4(),
+            &config,
+            &request,
+            "eifs/test.eif",
+            "builds/test/remote-build-helper",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            None,
+        )
+        .unwrap();
+        assert!(script.contains("EGRESS=\"true\""));
+        assert!(script.contains("CAUTION_EGRESS=\"$EGRESS\""));
     }
 }

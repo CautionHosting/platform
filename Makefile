@@ -3,7 +3,7 @@
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-platform-ports test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-platform-ports test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -118,6 +118,13 @@ ifdef REPRODUCE
 	-include dist/cli/release.env
 	export
 endif
+
+build-hcl-patcher:
+	@echo "Building hcl-patcher binary..."
+	@mkdir -p $(CLI_OUT_DIR)
+	@cargo build -p hcl-patcher 2>&1
+	@install -D -m 0755 target/debug/hcl-patcher $(CLI_OUT_DIR)/hcl-patcher
+	@echo "hcl-patcher binary available at $(CLI_OUT_DIR)/hcl-patcher"
 
 build-cli:
 	@echo "Building CLI binary..."
@@ -753,6 +760,7 @@ test-unit:
 
 test-e2e:
 	@$(MAKE) build-cli
+	@$(MAKE) build-hcl-patcher
 	@$(MAKE) up-test
 	@echo "Running e2e tests..."
 	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_happy_path.sh; \
@@ -765,6 +773,7 @@ test-e2e:
 
 test-e2e-platform-ports:
 	@$(MAKE) build-cli
+	@$(MAKE) build-hcl-patcher
 	@$(MAKE) up-test
 	@echo "Running platform ports e2e tests..."
 	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_platform_ports.sh; \
