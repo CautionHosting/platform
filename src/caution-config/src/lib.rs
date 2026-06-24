@@ -125,6 +125,18 @@ fn is_valid_env_key(key: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Returns true if `expr` is an `env::vault(...)` function call.
+///
+/// Vault calls are the only function-call env values the platform supports:
+/// they are resolved inside the enclave by locksmith. Any other function call
+/// (e.g. `upper("x")`) is unsupported and would be silently dropped at deploy,
+/// so it is rejected at validation instead.
+fn is_vault_funccall(expr: &Expression) -> bool {
+    matches!(expr, Expression::FuncCall(fc)
+        if fc.name.namespace.iter().any(|n| n.as_str() == "env")
+        && fc.name.name.as_str() == "vault")
+}
+
 impl UnitConfig {
     /// Build the shell command string the enclave runs for this unit.
     ///
@@ -145,8 +157,9 @@ impl UnitConfig {
             for (key, expr) in env {
                 let value = match expr {
                     Expression::String(s) => s,
-                    // Vault / function-call values are injected at runtime by
-                    // locksmith, not exported here.
+                    // Function-call values (only env::vault(...) survives
+                    // validation) are injected at runtime by locksmith, not
+                    // exported here.
                     _ => continue,
                 };
                 if !is_valid_env_key(key) {
@@ -231,7 +244,7 @@ pub enum FromStrError {
     HttpPortNotInPorts(u16),
 
     #[error(
-        "Invalid env expression for key '{0}'; only string literals and function calls are allowed"
+        "Invalid env expression for key '{0}'; only string literals and env::vault(...) are allowed"
     )]
     InvalidEnvExpression(String),
 
@@ -619,14 +632,13 @@ impl ConfigurationFile {
                     for (unit_name, unit) in units {
                         if let Some(ref env) = unit.env {
                             for (key, expr) in env {
-                                match expr {
-                                    Expression::String(_) | Expression::FuncCall(_) => continue,
-                                    _ => {
-                                        return Err(FromStrError::InvalidEnvExpression(format!(
-                                            "{}.{}",
-                                            unit_name, key
-                                        )));
-                                    }
+                                let allowed = matches!(expr, Expression::String(_))
+                                    || is_vault_funccall(expr);
+                                if !allowed {
+                                    return Err(FromStrError::InvalidEnvExpression(format!(
+                                        "{}.{}",
+                                        unit_name, key
+                                    )));
                                 }
                             }
                         }
@@ -646,11 +658,7 @@ impl ConfigurationFile {
                 enclave.unit.as_ref().is_some_and(|units| {
                     units.values().any(|unit| {
                         unit.env.as_ref().is_some_and(|env| {
-                            env.values().any(|expr| {
-                                matches!(expr, Expression::FuncCall(fc)
-                                    if fc.name.namespace.iter().any(|n| n.as_str() == "env")
-                                    && fc.name.name.as_str() == "vault")
-                            })
+                            env.values().any(is_vault_funccall)
                         })
                     })
                 })
@@ -1101,7 +1109,10 @@ enclave "main" {
     }
 
     #[test]
-    fn test_has_vault_env_false_when_other_funccall() {
+    fn test_from_str_rejects_non_vault_funccall_env() {
+        // Only env::vault(...) is a supported function-call env value; any other
+        // call (e.g. upper(...)) would be silently dropped at deploy, so it must
+        // be rejected at parse time.
         let hcl = r#"
 enclave "main" {
   unit "default" {
@@ -1116,8 +1127,8 @@ enclave "main" {
   }
 }
 "#;
-        let config = ConfigurationFile::from_str(hcl).unwrap();
-        assert!(!config.has_vault_env());
+        let err = ConfigurationFile::from_str(hcl).unwrap_err();
+        assert!(matches!(err, FromStrError::InvalidEnvExpression(_)));
     }
 
     #[test]
