@@ -1285,6 +1285,14 @@ cache: false
 
     const EXAMPLE_HCL: &str = include_str!("../tests/data/example/caution.hcl");
 
+    const DEMO_HELLO_WORLD_HCL: &str =
+        include_str!("../tests/data/demo-hello-world-enclave/caution.hcl");
+
+    const DEMO_AI_INFERENCE_HCL: &str =
+        include_str!("../tests/data/demo-ai-inference/caution.hcl");
+
+    const LOCKSMITH_HCL: &str = include_str!("../tests/data/locksmith/caution.hcl");
+
     #[test]
     fn demo_hello_world_enclave() {
         let config = ConfigurationFile::from_procfile(DEMO_HELLO_WORLD_PROCFILE).unwrap();
@@ -1361,6 +1369,112 @@ cache: false
     #[test]
     fn locksmith() {
         let config = ConfigurationFile::from_procfile(LOCKSMITH_PROCFILE).unwrap();
+        let enclave = config.enclave.as_ref().unwrap();
+        let e = enclave.get("default").unwrap();
+
+        let unit = e.unit.as_ref().unwrap().get("default").unwrap();
+        assert_eq!(unit.command, "/keymaker");
+        assert!(unit.args.is_empty());
+
+        let build = e.build.as_ref().unwrap();
+        assert_eq!(
+            build.app_sources,
+            vec!["https://codeberg.org/caution/locksmith/archive/${COMMIT}.tar.gz"]
+        );
+
+        let network = e.network.as_ref().unwrap();
+        assert_eq!(network.ingress.len(), 1);
+        assert_eq!(
+            network.ingress[0].port_spec,
+            Some(PortSpec::Exact { port: 8080 })
+        );
+        assert!(network.http.is_none());
+
+        let debug = e.debug.as_ref().unwrap();
+        assert_eq!(debug.enabled, Some(true));
+        assert_eq!(debug.ssh_keys.len(), 1);
+        assert!(debug.ssh_keys[0].starts_with("ssh-rsa"));
+    }
+
+    // ── from_str real-world fixture tests ────────────────────────────
+
+    #[test]
+    fn demo_hello_world_enclave_hcl() {
+        let config = ConfigurationFile::from_str(DEMO_HELLO_WORLD_HCL).unwrap();
+        let enclave = config.enclave.as_ref().unwrap();
+        let e = enclave.get("default").unwrap();
+
+        let unit = e.unit.as_ref().unwrap().get("default").unwrap();
+        assert_eq!(unit.command, "/usr/local/bin/hello");
+        assert!(unit.args.is_empty());
+
+        let build = e.build.as_ref().unwrap();
+        assert_eq!(build.binary.as_deref(), Some("/usr/local/bin/hello"));
+
+        assert_eq!(
+            build.app_sources,
+            vec!["git@codeberg.org:caution/demo-hello-world-enclave.git"]
+        );
+
+        let network = e.network.as_ref().unwrap();
+        assert_eq!(network.ingress.len(), 1);
+        assert_eq!(
+            network.ingress[0].port_spec,
+            Some(PortSpec::Exact { port: 8083 })
+        );
+        assert!(network.http.is_none());
+    }
+
+    #[test]
+    fn demo_ai_inference_hcl() {
+        let config = ConfigurationFile::from_str(DEMO_AI_INFERENCE_HCL).unwrap();
+        let enclave = config.enclave.as_ref().unwrap();
+        let e = enclave.get("default").unwrap();
+
+        let unit = e.unit.as_ref().unwrap().get("default").unwrap();
+        assert_eq!(unit.command, "/usr/bin/llama-server");
+        assert_eq!(
+            unit.args,
+            vec![
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8083",
+                "-m",
+                "/workdir/models/model.gguf",
+                "--path",
+                "/workdir/public",
+                "--ctx-size",
+                "2048",
+                "-t",
+                "8",
+            ]
+        );
+
+        let network = e.network.as_ref().unwrap();
+        let http = network.http.as_ref().unwrap();
+        assert_eq!(http.domain, "chat.caution.dev");
+        assert_eq!(http.port, 80);
+
+        let build = e.build.as_ref().unwrap();
+        assert_eq!(
+            build.app_sources,
+            vec!["https://codeberg.org/caution/demo-ai-inference.git"]
+        );
+
+        let resources = e.resources.as_ref().unwrap();
+        assert_eq!(resources.memory_mb, 55000);
+        assert_eq!(resources.cpu, 14);
+
+        assert_eq!(build.cache, Some(false));
+
+        assert_eq!(network.ingress.len(), 1);
+        assert_eq!(network.ingress[0].port_spec, Some(PortSpec::Exact { port: 80 }));
+    }
+
+    #[test]
+    fn locksmith_hcl() {
+        let config = ConfigurationFile::from_str(LOCKSMITH_HCL).unwrap();
         let enclave = config.enclave.as_ref().unwrap();
         let e = enclave.get("default").unwrap();
 

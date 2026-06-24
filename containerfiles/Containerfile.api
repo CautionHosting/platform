@@ -57,9 +57,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build ${CARGO_BUILD_FLAGS} --frozen \
       -p api --bin api \
       -p enclave-builder --bin remote-build-helper \
+      -p hcl-patcher --bin hcl-patcher \
       --target ${TARGET_ARCH} \
       && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/api /usr/local/bin/api \
-      && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/remote-build-helper /usr/local/bin/remote-build-helper
+      && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/remote-build-helper /usr/local/bin/remote-build-helper \
+      && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/hcl-patcher /usr/local/bin/hcl-patcher
 
 FROM scratch AS runtime
 COPY --from=user-runtime . /
@@ -83,6 +85,7 @@ COPY --from=cpio . /
 COPY --from=socat . /
 COPY --from=builder /usr/local/bin/api /usr/local/bin/api
 COPY --from=builder /usr/local/bin/remote-build-helper /usr/local/bin/remote-build-helper
+COPY --from=builder /usr/local/bin/hcl-patcher /usr/local/bin/hcl-patcher
 
 COPY terraform /app/terraform
 COPY src/enclave-builder/templates /app/templates
