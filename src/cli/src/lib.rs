@@ -1564,21 +1564,7 @@ impl ApiClient {
         Ok(())
     }
 
-    fn create_config_file_if_needed(&self, byoc: bool) -> Result<()> {
-        use std::fs;
-        use std::path::Path;
-
-        let config_path = Path::new("caution.hcl");
-
-        if config_path.exists() {
-            log_verbose(self.verbose, "caution.hcl already exists, skipping creation");
-            return Ok(());
-        }
-
-        let source_url = self
-            .detect_source_url()
-            .unwrap_or_else(|| "git@codeberg.org:user/repo.git".to_string());
-
+    fn generate_config_hcl(source_url: &str, byoc: bool) -> String {
         let byoc_section = if byoc {
             r#"
 caution {
@@ -1595,7 +1581,7 @@ caution {
             ""
         };
 
-        let hcl_content = format!(
+        format!(
             r#"# Caution configuration - https://docs.caution.co/reference/caution-hcl/
 
 enclave "default" {{
@@ -1640,7 +1626,25 @@ enclave "default" {{
   }}
 }}
 {byoc_section}"#
-        );
+        )
+    }
+
+    fn create_config_file_if_needed(&self, byoc: bool) -> Result<()> {
+        use std::fs;
+        use std::path::Path;
+
+        let config_path = Path::new("caution.hcl");
+
+        if config_path.exists() {
+            log_verbose(self.verbose, "caution.hcl already exists, skipping creation");
+            return Ok(());
+        }
+
+        let source_url = self
+            .detect_source_url()
+            .unwrap_or_else(|| "git@codeberg.org:user/repo.git".to_string());
+
+        let hcl_content = Self::generate_config_hcl(&source_url, byoc);
 
         fs::write(config_path, hcl_content).context("Failed to create caution.hcl")?;
 
@@ -7250,8 +7254,9 @@ mod tests {
     use super::{
         encrypt_env_file, encrypt_secret_value, load_recipient_cert, normalize_keyring,
         parse_env_assignments, resolve_local_build_command_from_dir,
-        resolve_procfile_build_command, resolve_quorum_parameters,
+        resolve_procfile_build_command, resolve_quorum_parameters, ApiClient,
     };
+    use caution_config::ConfigurationFile;
     use keymaker_models::generate_quorum::GenerateQuorumResponse;
     use openpgp::cert::prelude::*;
     use openpgp::parse::Parse;
@@ -7511,5 +7516,12 @@ containerfile: Missing.Containerfile\n",
         let command = resolve_local_build_command_from_dir(work_dir.path(), true).unwrap();
 
         assert_eq!(command, "echo 'Please configure your configuration file'");
+    }
+
+    #[test]
+    fn generated_config_hcl_parses_as_valid_configuration_file() {
+        let hcl = ApiClient::generate_config_hcl("git@codeberg.org:user/repo.git", false);
+        let config = ConfigurationFile::from_str(&hcl);
+        assert!(config.is_ok(), "generated HCL should parse: {:?}", config.err());
     }
 }
