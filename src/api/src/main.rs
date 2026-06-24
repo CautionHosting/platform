@@ -1565,6 +1565,7 @@ mod deploy_containerfile_tests {
                 "-c",
                 "user.email=test@example.com",
                 "commit",
+                "--no-gpg-sign",
                 "-m",
                 "initial commit",
             ],

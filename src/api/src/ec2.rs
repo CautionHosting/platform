@@ -5,6 +5,7 @@
 //! Replaces aws-sdk-ec2 and aws-sdk-autoscaling to avoid compiling massive generated SDKs.
 
 use anyhow::{Context, Result, bail};
+use thiserror::Error;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
@@ -47,6 +48,44 @@ pub struct Image {
 pub struct Region {
     pub name: String,
     pub opt_in_status: Option<String>,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum CountVpcsError {
+    #[error("failed to count VPCs")]
+    Request(#[source] anyhow::Error),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum CountElasticIpsError {
+    #[error("failed to count elastic IPs")]
+    Request(#[source] anyhow::Error),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum ActiveInstanceTypesError {
+    #[error("failed to get active instance types")]
+    Describe(#[source] anyhow::Error),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum DescribeRegionsError {
+    #[error("failed to describe regions")]
+    Request(#[source] anyhow::Error),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum InstanceTypeOfferedError {
+    #[error("failed to check instance type offering")]
+    Request(#[source] anyhow::Error),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum GetServiceQuotaValueError {
+    #[error("failed to get service quota value")]
+    Request(#[source] SignedJsonRequestError),
+    #[error("Service quota response did not include Quota.Value")]
+    MissingQuotaValue,
 }
 
 // Allow the EC2 host to use IMDSv2 while blocking metadata responses from
@@ -154,30 +193,31 @@ impl Ec2Client {
         Ok(parse_instance_ids(&body))
     }
 
-    pub async fn count_vpcs(&self) -> Result<u32> {
+    pub async fn count_vpcs(&self) -> Result<u32, CountVpcsError> {
         let params = vec![
             ("Action".to_string(), "DescribeVpcs".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
         ];
 
-        let body = self.signed_request(&params).await?;
+        let body = self.signed_request(&params).await.map_err(CountVpcsError::Request)?;
         Ok(parse_tag_values(&body, "vpcId").len() as u32)
     }
 
-    pub async fn count_elastic_ips(&self) -> Result<u32> {
+    pub async fn count_elastic_ips(&self) -> Result<u32, CountElasticIpsError> {
         let params = vec![
             ("Action".to_string(), "DescribeAddresses".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
         ];
 
-        let body = self.signed_request(&params).await?;
+        let body = self.signed_request(&params).await.map_err(CountElasticIpsError::Request)?;
         Ok(parse_tag_values(&body, "publicIp").len() as u32)
     }
 
-    pub async fn active_instance_types(&self) -> Result<Vec<String>> {
+    pub async fn active_instance_types(&self) -> Result<Vec<String>, ActiveInstanceTypesError> {
         let instances = self
             .describe_instances(&[Filter::new("instance-state-name", &["pending", "running"])])
-            .await?;
+            .await
+            .map_err(ActiveInstanceTypesError::Describe)?;
 
         Ok(instances
             .into_iter()
@@ -185,7 +225,7 @@ impl Ec2Client {
             .collect())
     }
 
-    pub async fn describe_regions(&self, all_regions: bool) -> Result<Vec<Region>> {
+    pub async fn describe_regions(&self, all_regions: bool) -> Result<Vec<Region>, DescribeRegionsError> {
         let mut params = vec![
             ("Action".to_string(), "DescribeRegions".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -195,11 +235,11 @@ impl Ec2Client {
             params.push(("AllRegions".to_string(), "true".to_string()));
         }
 
-        let body = self.signed_request(&params).await?;
+        let body = self.signed_request(&params).await.map_err(DescribeRegionsError::Request)?;
         Ok(parse_regions(&body))
     }
 
-    pub async fn instance_type_offered(&self, instance_type: &str) -> Result<bool> {
+    pub async fn instance_type_offered(&self, instance_type: &str) -> Result<bool, InstanceTypeOfferedError> {
         let params = vec![
             (
                 "Action".to_string(),
@@ -211,7 +251,7 @@ impl Ec2Client {
             ("Filter.1.Value.1".to_string(), instance_type.to_string()),
         ];
 
-        let body = self.signed_request(&params).await?;
+        let body = self.signed_request(&params).await.map_err(InstanceTypeOfferedError::Request)?;
         Ok(!parse_tag_values(&body, "instanceType").is_empty())
     }
 
@@ -393,7 +433,7 @@ impl ServiceQuotasClient {
         &self,
         service_code: &str,
         quota_code: &str,
-    ) -> Result<f64> {
+    ) -> Result<f64, GetServiceQuotaValueError> {
         let body = serde_json::json!({
             "ServiceCode": service_code,
             "QuotaCode": quota_code,
@@ -408,13 +448,14 @@ impl ServiceQuotasClient {
             "ServiceQuotasV20190624.GetServiceQuota",
             &body,
         )
-        .await?;
+        .await
+        .map_err(GetServiceQuotaValueError::Request)?;
 
         response
             .get("Quota")
             .and_then(|quota| quota.get("Value"))
             .and_then(|value| value.as_f64())
-            .ok_or_else(|| anyhow::anyhow!("Service quota response did not include Quota.Value"))
+            .ok_or(GetServiceQuotaValueError::MissingQuotaValue)
     }
 }
 
@@ -553,6 +594,20 @@ async fn signed_request(
     Ok(text)
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum SignedJsonRequestError {
+    #[error("Failed to serialize AWS JSON body")]
+    Serialize(#[source] serde_json::Error),
+    #[error("{0} API request failed")]
+    Http(#[source] reqwest::Error, String),
+    #[error("{0} API returned {1}: {2}")]
+    NonSuccess(String, u16, String),
+    #[error("Failed to read {0} response")]
+    ReadResponse(#[source] reqwest::Error, String),
+    #[error("Failed to parse {0} response JSON")]
+    ParseJson(#[source] serde_json::Error, String),
+}
+
 async fn signed_json_request(
     http: &reqwest::Client,
     access_key_id: &str,
@@ -561,10 +616,10 @@ async fn signed_json_request(
     service: &str,
     target: &str,
     body: &serde_json::Value,
-) -> Result<serde_json::Value> {
+) -> Result<serde_json::Value, SignedJsonRequestError> {
     let host = format!("{}.{}.amazonaws.com", service, region);
     let url = format!("https://{}/", host);
-    let body = serde_json::to_string(body).context("Failed to serialize AWS JSON body")?;
+    let body = serde_json::to_string(body).map_err(SignedJsonRequestError::Serialize)?;
 
     let now = chrono::Utc::now();
     let date_stamp = now.format("%Y%m%d").to_string();
@@ -607,19 +662,23 @@ async fn signed_json_request(
         .body(body)
         .send()
         .await
-        .context(format!("{} API request failed", service))?;
+        .map_err(|e| SignedJsonRequestError::Http(e, service.to_string()))?;
 
     let status = response.status();
     let text = response
         .text()
         .await
-        .context(format!("Failed to read {} response", service))?;
+        .map_err(|e| SignedJsonRequestError::ReadResponse(e, service.to_string()))?;
 
     if !status.is_success() {
-        bail!("{} API returned {}: {}", service, status, text);
+        return Err(SignedJsonRequestError::NonSuccess(
+            service.to_string(),
+            status.as_u16(),
+            text,
+        ));
     }
 
-    serde_json::from_str(&text).context(format!("Failed to parse {} response JSON", service))
+    serde_json::from_str(&text).map_err(|e| SignedJsonRequestError::ParseJson(e, service.to_string()))
 }
 
 fn encode_form(params: &[(String, String)]) -> String {

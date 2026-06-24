@@ -1131,6 +1131,7 @@ mod tests {
             "-c",
             "user.email=test@example.com",
             "commit",
+            "--no-gpg-sign",
             "-m",
             "initial commit",
         ]);

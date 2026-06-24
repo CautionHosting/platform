@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::bail;
 use axum::{
     Json,
+    body::Body,
     extract::{Extension, Path, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
 };
+use thiserror::Error;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::sync::Arc;
@@ -47,29 +49,6 @@ impl DeploymentRequirements {
 pub(crate) struct CapacityReservation {
     pub(crate) id: Option<Uuid>,
     pub(crate) region: String,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum CapacityError {
-    #[error("No fully managed deployment regions are available.")]
-    NoRegionsAvailable,
-    #[error("{0}")]
-    NoCapacity(String),
-    #[error("Unable to check fully managed capacity right now. Please try again later.")]
-    CheckFailed,
-    #[error("Database error while reserving fully managed capacity.")]
-    Database(#[from] sqlx::Error),
-}
-
-impl CapacityError {
-    pub(crate) fn status_code(&self) -> StatusCode {
-        match self {
-            CapacityError::NoRegionsAvailable => StatusCode::SERVICE_UNAVAILABLE,
-            CapacityError::NoCapacity(_) => StatusCode::SERVICE_UNAVAILABLE,
-            CapacityError::CheckFailed => StatusCode::SERVICE_UNAVAILABLE,
-            CapacityError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -117,12 +96,19 @@ impl RegionCapacity {
     }
 }
 
-async fn candidate_regions() -> anyhow::Result<Vec<String>> {
+#[derive(Debug, Error)]
+pub(crate) enum CandidateRegionsError {
+    #[error("failed to discover deployment regions")]
+    Describe(#[source] ec2::DescribeRegionsError),
+}
+
+async fn candidate_regions() -> Result<Vec<String>, CandidateRegionsError> {
     let discovery_credentials = platform_credentials_for_region("us-east-1");
     let ec2 = ec2::Ec2Client::new(&discovery_credentials);
     let mut regions: Vec<String> = ec2
         .describe_regions(true)
-        .await?
+        .await
+        .map_err(CandidateRegionsError::Describe)?
         .into_iter()
         .filter(|region| {
             matches!(
@@ -134,6 +120,35 @@ async fn candidate_regions() -> anyhow::Result<Vec<String>> {
         .collect();
     regions.sort();
     Ok(regions)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CapacityError {
+    #[error("No fully managed deployment regions are available.")]
+    NoRegionsAvailable,
+    #[error("{0}")]
+    NoCapacity(String),
+    #[error("Unable to check fully managed capacity right now. Please try again later.")]
+    CheckFailed,
+    #[error("Database error while reserving fully managed capacity.")]
+    Database(#[from] sqlx::Error),
+}
+
+impl CapacityError {
+    pub(crate) fn status_code(&self) -> StatusCode {
+        match self {
+            CapacityError::NoRegionsAvailable => StatusCode::SERVICE_UNAVAILABLE,
+            CapacityError::NoCapacity(_) => StatusCode::SERVICE_UNAVAILABLE,
+            CapacityError::CheckFailed => StatusCode::SERVICE_UNAVAILABLE,
+            CapacityError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+impl IntoResponse for CapacityError {
+    fn into_response(self) -> Response<Body> {
+        (self.status_code(), self.to_string()).into_response()
+    }
 }
 
 pub(crate) async fn reserve_capacity(
@@ -162,7 +177,7 @@ pub(crate) async fn reserve_capacity(
         .await?;
 
     let mut checked_any_region = false;
-    let mut last_error = None;
+    let mut _last_error: Option<String> = None;
     for region in candidates {
         let credentials = platform_credentials_for_region(&region);
         let ec2 = ec2::Ec2Client::new(&credentials);
@@ -183,7 +198,7 @@ pub(crate) async fn reserve_capacity(
                     region,
                     error
                 );
-                last_error = Some(error);
+                _last_error = Some(error.to_string());
                 continue;
             }
         }
@@ -240,7 +255,7 @@ pub(crate) async fn reserve_capacity(
                     region,
                     error
                 );
-                last_error = Some(error);
+                _last_error = Some(error.to_string());
             }
         }
     }
@@ -255,7 +270,6 @@ pub(crate) async fn reserve_capacity(
         };
         Err(CapacityError::NoCapacity(message.to_string()))
     } else {
-        let _ = last_error;
         tx.rollback().await?;
         Err(CapacityError::CheckFailed)
     }
@@ -283,10 +297,26 @@ pub(crate) async fn release_reservation(pool: &PgPool, reservation: &CapacityRes
     }
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum RegionCapacityError {
+    #[error("Database error while checking region capacity")]
+    Database(#[from] sqlx::Error),
+    #[error("Failed to get service quota")]
+    Quota(#[source] ec2::GetServiceQuotaValueError),
+    #[error("Failed to count VPCs")]
+    CountVpcs(#[source] ec2::CountVpcsError),
+    #[error("Failed to count elastic IPs")]
+    CountElasticIps(#[source] ec2::CountElasticIpsError),
+    #[error("Failed to get active instance types")]
+    ActiveInstanceTypes(#[source] ec2::ActiveInstanceTypesError),
+    #[error("Unknown active instance type reported by EC2: {0}")]
+    UnknownInstanceType(String),
+}
+
 async fn region_capacity(
     tx: &mut Transaction<'_, Postgres>,
     region: &str,
-) -> anyhow::Result<RegionCapacity> {
+) -> Result<RegionCapacity, RegionCapacityError> {
     let credentials = platform_credentials_for_region(region);
     let ec2 = ec2::Ec2Client::new(&credentials);
     let quotas = ec2::ServiceQuotasClient::new(&credentials);
@@ -305,26 +335,29 @@ async fn region_capacity(
 
     let vpc_quota = quotas
         .get_service_quota_value("vpc", VPC_QUOTA_CODE)
-        .await?
+        .await
+        .map_err(RegionCapacityError::Quota)?
         .floor() as u32;
     let eip_quota = quotas
         .get_service_quota_value("ec2", ELASTIC_IP_QUOTA_CODE)
-        .await?
+        .await
+        .map_err(RegionCapacityError::Quota)?
         .floor() as u32;
     let host_vcpu_quota = quotas
         .get_service_quota_value("ec2", STANDARD_ON_DEMAND_VCPU_QUOTA_CODE)
-        .await?
+        .await
+        .map_err(RegionCapacityError::Quota)?
         .floor() as u32;
 
-    let vpcs_used = ec2.count_vpcs().await?;
-    let eips_used = ec2.count_elastic_ips().await?;
+    let vpcs_used = ec2.count_vpcs().await.map_err(RegionCapacityError::CountVpcs)?;
+    let eips_used = ec2.count_elastic_ips().await.map_err(RegionCapacityError::CountElasticIps)?;
     let mut host_vcpus_used = 0;
-    for instance_type in ec2.active_instance_types().await? {
+    for instance_type in ec2.active_instance_types().await.map_err(RegionCapacityError::ActiveInstanceTypes)? {
         let Some(vcpus) = deployment::host_vcpus_for_instance_type(&instance_type) else {
-            bail!(
+            return Err(RegionCapacityError::UnknownInstanceType(format!(
                 "Unknown active instance type reported by EC2: {}",
                 instance_type
-            );
+            )));
         };
         host_vcpus_used += vcpus;
     }
@@ -399,24 +432,47 @@ pub(crate) struct WaitlistResponse {
     pub(crate) status: String,
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum JoinWaitlistError {
+    #[error("Organization access denied")]
+    OrganizationAccess,
+    #[error("Invalid email: {0}")]
+    InvalidEmail(String),
+    #[error("{0}")]
+    InvalidVCpus(String),
+    #[error("Failed to join capacity waitlist")]
+    Database(String),
+}
+
+impl IntoResponse for JoinWaitlistError {
+    fn into_response(self) -> Response<Body> {
+        let (status, body) = match &self {
+            JoinWaitlistError::OrganizationAccess => (StatusCode::FORBIDDEN, self.to_string()),
+            JoinWaitlistError::InvalidEmail(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            JoinWaitlistError::InvalidVCpus(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            JoinWaitlistError::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+        };
+        (status, body).into_response()
+    }
+}
+
 pub(crate) async fn join_waitlist(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(org_id): Path<Uuid>,
     Json(payload): Json<WaitlistRequest>,
-) -> Result<Json<WaitlistResponse>, (StatusCode, String)> {
+) -> Result<Json<WaitlistResponse>, JoinWaitlistError> {
     crate::check_org_access(&state.db, auth.user_id, org_id)
         .await
-        .map_err(|status| (status, "Organization access denied".to_string()))?;
+        .map_err(|_| JoinWaitlistError::OrganizationAccess)?;
 
     let email = payload.email.trim().to_lowercase();
     validation::validate_email(&email)
-        .map_err(|error| (StatusCode::BAD_REQUEST, format!("Invalid email: {}", error)))?;
+        .map_err(|error| JoinWaitlistError::InvalidEmail(error.to_string()))?;
 
     if let Some(cpus) = payload.requested_enclave_vcpus {
         if cpus == 0 || cpus > MAX_FULLY_MANAGED_ENCLAVE_VCPUS {
-            return Err((
-                StatusCode::BAD_REQUEST,
+            return Err(JoinWaitlistError::InvalidVCpus(
                 "requested_enclave_vcpus must be between 1 and 16; contact support for larger requests"
                     .to_string(),
             ));
@@ -444,10 +500,7 @@ pub(crate) async fn join_waitlist(
     .await
     .map_err(|error| {
         tracing::error!("Failed to insert fully managed waitlist entry: {}", error);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to join capacity waitlist".to_string(),
-        )
+        JoinWaitlistError::Database("Failed to join capacity waitlist".to_string())
     })?;
 
     let joined = inserted.unwrap_or(false);
@@ -526,11 +579,28 @@ struct CapacityWaitlistAlert {
     required_host_vcpus: Option<i32>,
 }
 
-async fn send_capacity_waitlist_alert_request(alert: CapacityWaitlistAlert) -> Result<(), String> {
+#[derive(Debug, Error)]
+pub(crate) enum SendCapacityWaitlistAlertRequestError {
+    #[error("failed to build email client: {0}")]
+    ClientBuild(String),
+    #[error("{0}")]
+    Send(String),
+    #[error("email service returned {0}")]
+    NonSuccess(u16),
+}
+
+async fn send_capacity_waitlist_alert_request(
+    alert: CapacityWaitlistAlert,
+) -> Result<(), SendCapacityWaitlistAlertRequestError> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .map_err(|error| format!("failed to build email client: {}", error))?;
+        .map_err(|error| {
+            SendCapacityWaitlistAlertRequestError::ClientBuild(format!(
+                "failed to build email client: {}",
+                error
+            ))
+        })?;
 
     let request = serde_json::json!({
         "to": alert.to,
@@ -549,12 +619,16 @@ async fn send_capacity_waitlist_alert_request(alert: CapacityWaitlistAlert) -> R
         .json(&request)
         .send()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            SendCapacityWaitlistAlertRequestError::Send(error.to_string())
+        })?;
 
     if response.status().is_success() {
         Ok(())
     } else {
-        Err(format!("email service returned {}", response.status()))
+        Err(SendCapacityWaitlistAlertRequestError::NonSuccess(
+            response.status().as_u16(),
+        ))
     }
 }
 

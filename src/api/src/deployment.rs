@@ -360,7 +360,7 @@ mod tests {
             egress: false,
             ssh_keys: vec![],
             domain: None,
-            region: None,
+            region: Some("us-west-2".to_string()),
             credentials: None,
             managed_onprem: Some(managed_onprem_config()),
         }
