@@ -1601,7 +1601,6 @@ caution {
 enclave "default" {{
   build {{
     # containerfile = "Containerfile"   # defaults to repo-root Containerfile/Dockerfile
-    # binary        = "/app/myapp"      # only for fully self-contained static binaries
     # app_sources = ["{source_url}"]    # git URLs published in the attestation manifest
     # cache       = true
   }}
