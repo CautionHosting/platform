@@ -1600,31 +1600,53 @@ caution {
 
 enclave "default" {{
   build {{
-    run = "/app/myapp"
-    # binary = "/app/myapp"
+    # containerfile = "Containerfile"   # defaults to repo-root Containerfile/Dockerfile
+    # binary        = "/app/myapp"      # only for fully self-contained static binaries
+    # app_sources = ["{source_url}"]    # git URLs published in the attestation manifest
+    # cache       = true
   }}
-  # memory = 512
-  # cpus   = 2
-  network {{
-    # ingress = [8080]
-  }}
-  # e2e       = false
-  # locksmith = false
-  # debug     = false
-}}
 
-# containerfile = "Containerfile"
-# domain        = "app.example.com"
-# no_cache      = false
-# app_sources   = "{source_url}"
-# ssh_keys      = ["ssh-ed25519 AAAA..."]
+  resources {{
+    cpu       = 2
+    memory_mb = 512
+  }}
+
+  network {{
+    ingress {{
+      cidr_ipv4 = "0.0.0.0/0"
+      port      = 8080
+    }}
+
+    # http {{
+    #   domain = "app.example.com"
+    #   port   = 8080
+    #   e2e_encryption {{
+    #     enabled      = true
+    #     cors_origins = ["*"]
+    #   }}
+    # }}
+  }}
+
+  # debug {{
+  #   enabled  = true
+  #   ssh_keys = ["ssh-ed25519 AAAA..."]
+  # }}
+
+  unit "default" {{
+    command = "/app/myapp"
+    # args = []
+    # env = {{
+    #   API_KEY = env::vault("API_KEY")   # using env::vault enables Locksmith secrets
+    # }}
+  }}
+}}
 {byoc_section}"#
         );
 
         fs::write(config_path, hcl_content).context("Failed to create caution.hcl")?;
 
         println!("\nCreated caution.hcl in current directory");
-        println!("Edit the 'run' field in the enclave build block to match your application");
+        println!("Edit the unit \"default\" command to match your application");
         println!("Build file precedence: containerfile: -> repo-root Containerfile -> Dockerfile");
         if byoc {
             println!("Configure AWS deployment settings in the BYOC section");
