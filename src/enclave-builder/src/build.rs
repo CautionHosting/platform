@@ -63,6 +63,7 @@ pub async fn stage_eif_components(
     e2e: bool,
     locksmith: bool,
     e2e_cors_origins: Option<String>,
+    egress: bool,
     templates_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     let stage_dir = work_dir.join("eif-stage");
@@ -163,7 +164,8 @@ pub async fn stage_eif_components(
         http_port,
         e2e,
         locksmith,
-        e2e_cors_origins.as_deref()
+        e2e_cors_origins.as_deref(),
+        egress,
     )
     .await?;
     let containerfile_content = render_containerfile_template(
@@ -231,6 +233,7 @@ async fn render_run_sh_template(
     e2e: bool,
     locksmith: bool,
     e2e_cors_origins: Option<&str>,
+    egress: bool,
 ) -> Result<String> {
     let template = fs::read_to_string(template_path)
         .await
@@ -242,6 +245,9 @@ async fn render_run_sh_template(
     }
     if locksmith {
         enabled_blocks.push("LOCKSMITH");
+    }
+    if egress {
+        enabled_blocks.push("EGRESS");
     }
     let processed = process_template_blocks(&template, &enabled_blocks);
 
@@ -366,6 +372,7 @@ pub async fn build_eif_from_filesystems(
     e2e: bool,
     locksmith: bool,
     e2e_cors_origins: Option<String>,
+    egress: bool,
     templates_dir: Option<&Path>,
 ) -> Result<EifFile> {
     tracing::info!("Building EIF using transparent Containerfile approach");
@@ -385,6 +392,7 @@ pub async fn build_eif_from_filesystems(
         e2e,
         locksmith,
         e2e_cors_origins,
+        egress,
         templates_dir,
     )
     .await?;
@@ -689,7 +697,7 @@ mod tests {
     async fn test_render_run_sh_uses_reserved_locksmith_port() {
         let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
         let rendered =
-            render_run_sh_template(&template, Some("/app".to_string()), &[], None, false, true)
+            render_run_sh_template(&template, Some("/app".to_string()), &[], None, false, true, None, false)
                 .await
                 .unwrap();
 
@@ -709,6 +717,8 @@ mod tests {
             Some(3000),
             true,
             false,
+            None,
+            true,
         )
         .await
         .unwrap();
@@ -726,6 +736,8 @@ mod tests {
             None,
             true,
             false,
+            None,
+            true,
         )
         .await
         .unwrap();
@@ -743,6 +755,8 @@ mod tests {
             None,
             true,
             false,
+            None,
+            true,
         )
         .await
         .unwrap_err();
@@ -750,5 +764,30 @@ mod tests {
         assert!(err
             .to_string()
             .contains("e2e builds require http_port or exactly one app port"));
+    }
+
+    #[tokio::test]
+    async fn test_render_run_sh_egress_enabled_includes_tunnel() {
+        let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
+        let rendered = render_run_sh_template(
+            &template, Some("/app".to_string()), &[], None, false, false, None, true,
+        )
+        .await
+        .unwrap();
+        assert!(rendered.contains("VSOCK-CONNECT:3:3"));
+        assert!(rendered.contains("nameserver 10.0.100.1"));
+    }
+
+    #[tokio::test]
+    async fn test_render_run_sh_egress_disabled_is_hermetic() {
+        let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
+        let rendered = render_run_sh_template(
+            &template, Some("/app".to_string()), &[], None, false, false, None, false,
+        )
+        .await
+        .unwrap();
+        assert!(!rendered.contains("VSOCK-CONNECT:3:3"));
+        assert!(!rendered.contains("udhcpc"));
+        assert!(rendered.contains("nameserver 127.0.0.1"));
     }
 }

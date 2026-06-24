@@ -356,6 +356,17 @@ fn log_verbose(verbose: bool, msg: &str) {
     }
 }
 
+/// Egress is enabled iff the (single) enclave's network block declares >=1 egress rule.
+/// Derived solely from the parsed HCL config — never from a manifest.
+fn config_egress_enabled(cfg: &caution_config::ConfigurationFile) -> bool {
+    cfg.enclave
+        .as_ref()
+        .and_then(|e| e.values().next())
+        .and_then(|enc| enc.network.as_ref())
+        .map(|n| n.egress_enabled())
+        .unwrap_or(false)
+}
+
 fn ssh_fingerprint(key: &str) -> String {
     let parts: Vec<&str> = key.split_whitespace().collect();
     parts
@@ -4318,6 +4329,9 @@ enclave "default" {{
         let locksmith = cfg.has_vault_env();
         log_verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
 
+        let egress = config_egress_enabled(&cfg);
+        log_verbose(self.verbose, &format!("Egress: {}", egress));
+
         let e2e_cors_origins = e2e_config
             .and_then(|e2e| e2e.cors_origins.as_ref())
             .map(|origins| origins.join(","));
@@ -4343,6 +4357,7 @@ enclave "default" {{
                     e2e,
                     locksmith,
                     e2e_cors_origins,
+                    egress,
                 )
                 .await
         } else {
@@ -4362,6 +4377,7 @@ enclave "default" {{
                     e2e,
                     locksmith,
                     e2e_cors_origins,
+                    egress,
                 )
                 .await
         }
@@ -4738,6 +4754,22 @@ enclave "default" {{
         };
         log_verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
 
+        let egress = if let Some(ref app_dir) = app_source_dir {
+            self.read_config_from_dir(app_dir)
+                .ok()
+                .map(|cfg| config_egress_enabled(&cfg))
+                .unwrap_or(false)
+        } else if external_manifest.is_some() {
+            // Egress is intentionally never read from the manifest; default-deny.
+            false
+        } else {
+            self.read_config()
+                .ok()
+                .map(|cfg| config_egress_enabled(&cfg))
+                .unwrap_or(false)
+        };
+        log_verbose(self.verbose, &format!("Egress: {}", egress));
+
         let e2e_cors_origins = if e2e {
             e2e_config
                 .as_ref()
@@ -4767,6 +4799,7 @@ enclave "default" {{
                     e2e,
                     locksmith,
                     e2e_cors_origins,
+                    egress,
                 )
                 .await
         } else {
@@ -4786,6 +4819,7 @@ enclave "default" {{
                     e2e,
                     locksmith,
                     e2e_cors_origins,
+                    egress,
                 )
                 .await
         }

@@ -2127,6 +2127,8 @@ async fn deploy_logic(
     let binary_path = ec_build
         .and_then(|b| b.binary.clone());
 
+    let egress = ec_network.map(|n| n.egress_enabled()).unwrap_or(false);
+
     let ingress_ports: Vec<u16> = ec_network
         .map(|n| {
             let mut ports: Vec<u16> = n
@@ -2338,6 +2340,7 @@ async fn deploy_logic(
                     .map(|h| h.port),
                 e2e,
                 locksmith: config_file.has_vault_env(),
+                egress,
                 e2e_cors_origins: e2e_config
                     .as_ref()
                     .and_then(|e2e| e2e.cors_origins.as_ref())
@@ -2524,6 +2527,7 @@ async fn deploy_logic(
         http_port,
         e2e,
         locksmith: config_file.has_vault_env(),
+        egress,
         ssh_keys,
         domain: domain.clone(),
         region: fully_managed_region.clone(),

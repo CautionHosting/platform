@@ -84,6 +84,8 @@ pub struct NitroDeploymentRequest {
     pub e2e: bool,
     #[serde(default)]
     pub locksmith: bool,
+    #[serde(default)]
+    pub egress: bool,
     pub ssh_keys: Vec<String>,
     pub domain: Option<String>,
     pub region: Option<String>,
@@ -355,6 +357,7 @@ mod tests {
             http_port: None,
             e2e: false,
             locksmith: false,
+            egress: false,
             ssh_keys: vec![],
             domain: None,
             region: None,
@@ -501,6 +504,39 @@ mod tests {
         assert!(main_tf.contains(r#"e2e         = "true""#));
         assert!(main_tf.contains("from_port   = 49504"));
         assert!(main_tf.contains("Allow Locksmith shard receiver"));
+    }
+
+    #[tokio::test]
+    async fn test_main_tf_passes_egress_var_to_user_data() {
+        let mut request = deployment_request("/tmp/enclave.eif", None);
+        request.managed_onprem = None;
+        request.egress = true;
+
+        let work_dir = TempDir::new().unwrap();
+        generate_nitro_deployment_main_tf(work_dir.path(), &request, "s3://bucket/enclave.eif")
+            .await
+            .unwrap();
+
+        let main_tf = std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap();
+        assert!(main_tf.contains(r#"egress      = "true""#));
+    }
+
+    #[test]
+    fn test_user_data_proxy_guarded_by_egress() {
+        let user_data = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("terraform/modules/aws/nitro-enclave/user-data.sh"),
+        )
+        .unwrap();
+        let needle = "Setting up vsock network proxy for enclave";
+        let egress_if = r#"%{ if egress == "true" ~}"#;
+        let if_pos = user_data.find(egress_if).expect("egress guard present");
+        let needle_pos = user_data.find(needle).expect("proxy setup present");
+        assert!(
+            if_pos < needle_pos,
+            "proxy setup must be guarded by egress conditional"
+        );
     }
 
     #[test]
@@ -1806,6 +1842,7 @@ resource "aws_instance" "enclave" {{
     http_port   = var.http_port
     e2e         = "{e2e}"
     locksmith   = "{locksmith}"
+    egress      = "{egress}"
     ssh_keys    = {ssh_keys_json}
     domain      = "{domain}"
   }}))
@@ -1869,6 +1906,7 @@ output "instance_type" {{
         platform_internal_ingress = platform_internal_ingress(request.e2e, request.locksmith),
         e2e = if request.e2e { "true" } else { "false" },
         locksmith = if request.locksmith { "true" } else { "false" },
+        egress = if request.egress { "true" } else { "false" },
         domain = request.domain.as_deref().unwrap_or(""),
         url_output = if let Some(ref domain) = request.domain {
             format!("https://{}", domain)
@@ -2075,6 +2113,7 @@ resource "aws_launch_template" "enclave" {{
     http_port   = var.http_port
     e2e         = "{e2e}"
     locksmith   = "{locksmith}"
+    egress      = "{egress}"
     ssh_keys    = {ssh_keys_json}
     domain      = "{domain}"
   }}))
@@ -2164,6 +2203,7 @@ output "instance_type" {{
         platform_internal_ingress = platform_internal_ingress(request.e2e, request.locksmith),
         e2e = if request.e2e { "true" } else { "false" },
         locksmith = if request.locksmith { "true" } else { "false" },
+        egress = if request.egress { "true" } else { "false" },
         domain = request.domain.as_deref().unwrap_or(""),
         url_output = if let Some(ref domain) = request.domain {
             format!("https://{}", domain)
