@@ -4519,7 +4519,8 @@ enclave "default" {{
                 let run_cmd = default_enclave
                     .and_then(|e| e.unit.as_ref())
                     .and_then(|u| u.get("default"))
-                    .map(|u| u.command.clone());
+                    .map(|u| u.run_command_string())
+                    .transpose()?;
                 let source_urls = default_enclave
                     .and_then(|e| e.build.as_ref())
                     .map(|b| b.app_sources.clone())
