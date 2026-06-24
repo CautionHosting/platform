@@ -111,6 +111,67 @@ pub struct UnitConfig {
     pub env: Option<BTreeMap<String, Expression>>,
 }
 
+/// Returns true if `key` is a safe POSIX shell environment variable name.
+///
+/// Keys are emitted into the run script unquoted (`export KEY=...`), so an
+/// unvalidated key like `X; rm -rf /` would be a shell-injection vector. Values
+/// are always shlex-quoted, but keys cannot be, so they must be validated.
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+impl UnitConfig {
+    /// Build the shell command string the enclave runs for this unit.
+    ///
+    /// The whole result is executed via `sh -c` by the deploy path, so:
+    /// - `command` + `args` are re-joined with shlex quoting (automatic,
+    ///   injection-safe escaping of every token);
+    /// - literal `env` string values are emitted as `export KEY=<quoted>` lines
+    ///   ahead of the command. Keys are validated (they cannot be quoted);
+    ///   values are shlex-quoted.
+    ///
+    /// `env::vault(...)` (and any other function-call) entries are skipped here:
+    /// they are resolved inside the enclave by locksmith-oneshot, not exported
+    /// from the build host.
+    pub fn run_command_string(&self) -> Result<String, FromStrError> {
+        let mut out = String::new();
+
+        if let Some(env) = &self.env {
+            for (key, expr) in env {
+                let value = match expr {
+                    Expression::String(s) => s,
+                    // Vault / function-call values are injected at runtime by
+                    // locksmith, not exported here.
+                    _ => continue,
+                };
+                if !is_valid_env_key(key) {
+                    return Err(FromStrError::InvalidEnvKey(key.clone()));
+                }
+                let quoted =
+                    shlex::try_quote(value).map_err(|_| FromStrError::UnquotableCommand)?;
+                out.push_str("export ");
+                out.push_str(key);
+                out.push('=');
+                out.push_str(&quoted);
+                out.push('\n');
+            }
+        }
+
+        let argv = std::iter::once(self.command.as_str())
+            .chain(self.args.iter().map(String::as_str));
+        let joined =
+            shlex::try_join(argv).map_err(|_| FromStrError::UnquotableCommand)?;
+        out.push_str(&joined);
+
+        Ok(out)
+    }
+}
+
 /// The `network { }` block inside an enclave definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NetworkConfig {
@@ -173,6 +234,14 @@ pub enum FromStrError {
         "Invalid env expression for key '{0}'; only string literals and function calls are allowed"
     )]
     InvalidEnvExpression(String),
+
+    #[error(
+        "Invalid env key '{0}'; keys must match [A-Za-z_][A-Za-z0-9_]* to be safely exported"
+    )]
+    InvalidEnvKey(String),
+
+    #[error("Command contains characters that cannot be shell-quoted (e.g. NUL byte)")]
+    UnquotableCommand,
 
     #[error("Failed to parse HCL")]
     HclParse(#[from] hcl::Error),
@@ -429,15 +498,17 @@ impl ConfigurationFile {
         };
 
         let unit = run.map(|cmd| {
-            // Keep the whole `run:` value in `command`. The deploy path runs it
-            // via `sh -c` and ignores `args`, so splitting here would drop
-            // arguments and break env-prefixed commands (`FOO=1 /app`).
+            let parts = shlex::split(&cmd);
+            let (command, args) = match parts {
+                Some(p) if !p.is_empty() => (p[0].clone(), p[1..].to_vec()),
+                _ => (cmd, Vec::new()),
+            };
             let mut units = BTreeMap::new();
             units.insert(
                 "default".to_string(),
                 UnitConfig {
-                    command: cmd,
-                    args: Vec::new(),
+                    command,
+                    args,
                     env: None,
                 },
             );
@@ -1100,9 +1171,8 @@ enclave "main" {
         let enclave = config.enclave.as_ref().unwrap();
         let unit = enclave.get("default").unwrap().unit.as_ref().unwrap();
         let main = unit.get("default").unwrap();
-        // Whole run: string stays in command; deploy runs it via `sh -c`.
-        assert_eq!(main.command, "/app/server --port 8080");
-        assert!(main.args.is_empty());
+        assert_eq!(main.command, "/app/server");
+        assert_eq!(main.args, vec!["--port", "8080"]);
     }
 
     #[test]
@@ -1170,8 +1240,8 @@ cache: false
 
         let unit = e.unit.as_ref().unwrap();
         let main = unit.get("default").unwrap();
-        assert_eq!(main.command, "/app/server --port 8080");
-        assert!(main.args.is_empty());
+        assert_eq!(main.command, "/app/server");
+        assert_eq!(main.args, vec!["--port", "8080"]);
         assert!(main.env.is_none());
     }
 
@@ -1311,11 +1381,24 @@ cache: false
         let e = enclave.get("default").unwrap();
 
         let unit = e.unit.as_ref().unwrap().get("default").unwrap();
+        assert_eq!(unit.command, "/usr/bin/llama-server");
         assert_eq!(
-            unit.command,
-            "/usr/bin/llama-server --host 0.0.0.0 --port 8083 -m /workdir/models/model.gguf --path /workdir/public --ctx-size 2048 -t 8"
+            unit.args,
+            vec![
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8083",
+                "-m",
+                "/workdir/models/model.gguf",
+                "--path",
+                "/workdir/public",
+                "--ctx-size",
+                "2048",
+                "-t",
+                "8",
+            ]
         );
-        assert!(unit.args.is_empty());
 
         let network = e.network.as_ref().unwrap();
         let http = network.http.as_ref().unwrap();
@@ -1588,5 +1671,141 @@ platform: aws
 ";
         let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
         assert!(matches!(err, FromProcfileError::ManagedOnPremMissingRegion));
+    }
+
+    fn default_unit(hcl: &str) -> UnitConfig {
+        let config = ConfigurationFile::from_str(hcl).unwrap();
+        config
+            .enclave
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .unit
+            .as_ref()
+            .unwrap()
+            .get("default")
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn run_command_string_joins_command_and_args() {
+        let unit = default_unit(
+            r#"
+enclave "main" {
+  unit "default" {
+    command = "/app/server"
+    args = ["--port", "8080"]
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#,
+        );
+        assert_eq!(unit.run_command_string().unwrap(), "/app/server --port 8080");
+    }
+
+    #[test]
+    fn run_command_string_quotes_args_with_spaces() {
+        let unit = default_unit(
+            r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    args = ["--msg", "hello world", "--inject", "$(rm -rf /)"]
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#,
+        );
+        // Spaces and shell metacharacters are quoted, not interpreted.
+        assert_eq!(
+            unit.run_command_string().unwrap(),
+            "/app --msg 'hello world' --inject '$(rm -rf /)'"
+        );
+    }
+
+    #[test]
+    fn run_command_string_exports_literal_env() {
+        let unit = default_unit(
+            r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    env {
+      FOO = "bar"
+      WITH_SPACE = "a b"
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#,
+        );
+        // BTreeMap orders keys; values are shlex-quoted.
+        assert_eq!(
+            unit.run_command_string().unwrap(),
+            "export FOO=bar\nexport WITH_SPACE='a b'\n/app"
+        );
+    }
+
+    #[test]
+    fn run_command_string_skips_vault_env() {
+        let unit = default_unit(
+            r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    env {
+      API_KEY = env::vault("API_KEY")
+      PLAIN = "x"
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#,
+        );
+        // Vault entry is resolved by locksmith at runtime, not exported here.
+        assert_eq!(
+            unit.run_command_string().unwrap(),
+            "export PLAIN=x\n/app"
+        );
+    }
+
+    #[test]
+    fn run_command_string_rejects_malicious_env_key() {
+        // A key cannot be shell-quoted, so an injection-shaped key must be
+        // rejected rather than emitted into the run script.
+        let unit = UnitConfig {
+            command: "/app".to_string(),
+            args: Vec::new(),
+            env: Some(BTreeMap::from([(
+                "X; rm -rf /".to_string(),
+                Expression::from("1"),
+            )])),
+        };
+        let err = unit.run_command_string().unwrap_err();
+        assert!(matches!(err, FromStrError::InvalidEnvKey(_)));
+    }
+
+    #[test]
+    fn is_valid_env_key_rules() {
+        assert!(is_valid_env_key("FOO"));
+        assert!(is_valid_env_key("_x9"));
+        assert!(!is_valid_env_key(""));
+        assert!(!is_valid_env_key("9FOO"));
+        assert!(!is_valid_env_key("FO O"));
+        assert!(!is_valid_env_key("FOO;BAR"));
     }
 }

@@ -2058,7 +2058,9 @@ async fn deploy_logic(
 
     let run_command = ec_units
         .and_then(|u| u.get("default"))
-        .map(|u| u.command.clone());
+        .map(|u| u.run_command_string())
+        .transpose()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let memory_mb = ec_resources.map(|r| r.memory_mb).unwrap_or(512);
     let cpu_count = ec_resources.map(|r| r.cpu).unwrap_or(2);
     let debug_enabled = ec_debug.and_then(|d| d.enabled).unwrap_or(false);
