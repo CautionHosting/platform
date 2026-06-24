@@ -29,7 +29,7 @@ fi
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
 API_URL="${API_URL:-http://127.0.0.1:8080}"
 CAUTION_BIN="${CAUTION_BIN:-caution}"
-HCL_PATCHER_BIN="${HCL_PATCHER_BIN:-out/cli/hcl-patcher}"
+HCL_PATCHER_BIN="${HCL_PATCHER_BIN:-$REPO_ROOT/out/cli/hcl-patcher}"
 DEMO_REPO="${DEMO_REPO:-https://codeberg.org/caution/demo-hello-world-enclave.git}"
 WORK_DIR=$(mktemp -d)
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/api-cli"
