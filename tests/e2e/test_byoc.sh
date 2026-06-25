@@ -395,7 +395,7 @@ step_pass "Deployment (app running with customer-bucket builder path)"
 STEP_NUM=8
 log "Running caution verify..."
 set +e
-VERIFY_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" verify --no-cache 2>&1)
+VERIFY_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" verify --from-local --no-cache 2>&1)
 VERIFY_STATUS=$?
 set -e
 echo "$VERIFY_OUTPUT"

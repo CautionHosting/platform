@@ -315,7 +315,7 @@ else
 fi
 
 set +e
-VERIFY_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" verify --attestation-url "http://$APP_IP/attestation" --no-cache 2>&1)
+VERIFY_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" verify --attestation-url "http://$APP_IP/attestation" --from-local --no-cache 2>&1)
 VERIFY_STATUS=$?
 set -e
 echo "$VERIFY_OUTPUT"
