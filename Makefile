@@ -3,7 +3,7 @@
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-platform-ports test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-platform-ports test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -48,6 +48,11 @@ build-api-dev:
 	@echo "Building API service (dev)..."
 	@docker build -t caution-api $(DEV_BUILD_ARGS) -f ./containerfiles/Containerfile.api .
 	@echo "API dev service image built: caution-api"
+
+build-api-e2e:
+	@echo "Building API service (e2e test mode)..."
+	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.api .
+	@echo "API e2e image build complete"
 
 build-email-dev:
 	@echo "Building Email service (dev)..."
@@ -607,6 +612,7 @@ TEST_DATABASE_URL := postgresql://postgres:postgres@$(TEST_DB_HOST):5432/$(TEST_
 E2E_LOCK_FILE ?= /tmp/caution-platform-e2e.lock
 ONPREM_PROVISIONER_DIR ?= ../bring-your-own-compute-setup
 ONPREM_PROVISIONER_IMAGE ?= codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest
+DESTROY_ALL_SCRIPT := tests/e2e/destroy-all-apps.sh
 
 postgres-test: network
 	@docker rm -f $(TEST_DB_HOST) 2>/dev/null || true
@@ -708,7 +714,7 @@ run-metering-test: network
 
 up-test: down migrate-test
 	@echo "Building test images (e2e-testing-unsafe mode)..."
-	@$(MAKE) build-api-dev build-email-dev
+	@$(MAKE) build-api-e2e build-email-dev
 	@$(MAKE) build-gateway-e2e
 	@$(MAKE) run-email-test run-api-test
 	@echo "Waiting for API to be ready..."
@@ -724,7 +730,7 @@ up-test: down migrate-test
 
 up-test-billing: down-test-billing migrate-test
 	@echo "Building test images for billing e2e..."
-	@$(MAKE) build-api-dev build-email-dev build-metering
+	@$(MAKE) build-api-e2e build-email-dev build-metering
 	@$(MAKE) build-gateway-e2e
 	@$(MAKE) run-email-test run-metering-test run-api-test
 	@echo "Waiting for API to be ready..."
@@ -875,6 +881,13 @@ test-e2e-builder:
 	@$(MAKE) build-cli
 	@$(MAKE) up-test
 	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_dedicated_builder.sh; \
+	status=$$?; \
+	$(MAKE) down-test; \
+	exit $$status
+
+clean-e2e:
+	@$(MAKE) up-test
+	@bash $(DESTROY_ALL_SCRIPT); \
 	status=$$?; \
 	$(MAKE) down-test; \
 	exit $$status

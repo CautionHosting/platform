@@ -22,6 +22,8 @@ use uuid::Uuid;
 
 mod billing;
 mod builder;
+#[cfg(feature = "e2e-testing-unsafe")]
+mod cleanup;
 mod cloud_credentials;
 mod config;
 mod cryptographic_bundles;
@@ -2744,6 +2746,17 @@ async fn deploy_logic(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
+
+    #[cfg(feature = "e2e-testing-unsafe")]
+    {
+        let env = std::env::var("ENVIRONMENT").unwrap_or_default();
+        if env == "production" {
+            eprintln!("FATAL: e2e-testing-unsafe feature is enabled in a production build. Refusing to start.");
+            std::process::exit(1);
+        }
+        tracing::warn!("e2e-testing-unsafe feature is enabled — /internal/cleanup/destroy-next-app endpoint is active. Do NOT use in production.");
+    }
+
     if let Err(e) = provisioning::validate_setup() {
         tracing::warn!("Provisioning validation failed: {:?}", e);
         tracing::warn!("AWS child account provisioning will not be available");
@@ -2999,7 +3012,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             middleware::auth_middleware,
         ));
 
-    let internal_routes = Router::new()
+    #[cfg_attr(not(feature = "e2e-testing-unsafe"), allow(unused_mut))]
+    let mut internal_routes = Router::new()
         .route(
             "/internal/org/{org_id}/suspend",
             post(suspension::suspend_org_resources),
@@ -3015,8 +3029,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/internal/legal-notices/send",
             post(legal::send_legal_notices),
-        )
-        .layer(axum::middleware::from_fn_with_state(
+        );
+
+    #[cfg(feature = "e2e-testing-unsafe")]
+    {
+        internal_routes = internal_routes.route(
+            "/internal/cleanup/destroy-next-app",
+            post(cleanup::destroy_next_app),
+        );
+    }
+
+    let internal_routes = internal_routes.layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::internal_auth_middleware,
         ));

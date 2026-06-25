@@ -58,3 +58,6 @@ dirs = { workspace = true }
 # GPG decryption for managed on-prem
 sequoia-openpgp = { workspace = true }
 caution-config = { version = "0.1.0", path = "../caution-config" }
+
+[features]
+e2e-testing-unsafe = []
