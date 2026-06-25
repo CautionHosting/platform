@@ -27,7 +27,7 @@ set -euo pipefail
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
 API_URL="${API_URL:-http://127.0.0.1:8080}"
 CAUTION_BIN="${CAUTION_BIN:-caution}"
-DEMO_REPO="${DEMO_REPO:-https://codeberg.org/caution/demo-hello-world-enclave.git}"
+FIXTURES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/fixtures" && pwd)"
 ONPREM_TEST_REGION="${ONPREM_TEST_REGION:-us-east-1}"
 ONPREM_LOCAL_PROVISIONER="${ONPREM_LOCAL_PROVISIONER:-0}"
 WORK_DIR=$(mktemp -d)
@@ -278,10 +278,13 @@ step_pass "Add SSH key (fingerprint: ${FINGERPRINT:0:20}...)"
 
 STEP_NUM=4
 CLONE_DIR="$WORK_DIR/demo-app"
-log "Cloning demo app from $DEMO_REPO..."
-git clone "$DEMO_REPO" "$CLONE_DIR"
+log "Copying demo app fixture..."
+cp -r "$FIXTURES_DIR/demo-app-byoc" "$CLONE_DIR"
 cd "$CLONE_DIR"
-step_pass "Clone demo app"
+git init -b main
+git -c user.email="e2e@caution.dev" -c user.name="Caution E2E" add .
+git -c user.email="e2e@caution.dev" -c user.name="Caution E2E" commit -m "Initial commit" --quiet
+step_pass "Copy and init demo app fixture"
 
 # ── Step 5: caution init --byoc ──────────────────────────────────────
 

@@ -26,7 +26,7 @@ set -euo pipefail
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
 API_URL="${API_URL:-http://localhost:8080}"
 CAUTION_BIN="${CAUTION_BIN:-caution}"
-DEMO_REPO="${DEMO_REPO:-https://codeberg.org/caution/demo-hello-world-enclave.git}"
+FIXTURES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/fixtures" && pwd)"
 WORK_DIR=$(mktemp -d)
 SSH_KEY_PATH="$WORK_DIR/test_key"
 # Hardcoded: test environment always uses postgres-test container and caution_test DB
@@ -197,8 +197,11 @@ fi
 STEP_NUM=4
 echo "── Step $STEP_NUM: Clone demo app, caution init, git push ──"
 
-git clone "$DEMO_REPO" "$WORK_DIR/demo" 2>/dev/null
+cp -r "$FIXTURES_DIR/demo-app-dedicated-builder" "$WORK_DIR/demo"
 cd "$WORK_DIR/demo"
+git init -b main
+git -c user.email="e2e@caution.dev" -c user.name="Caution E2E" add .
+git -c user.email="e2e@caution.dev" -c user.name="Caution E2E" commit -m "Initial commit" --quiet
 
 # caution init creates the app and sets the git remote
 INIT_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" init --name "builder-test-$(date +%s)" 2>&1) || true

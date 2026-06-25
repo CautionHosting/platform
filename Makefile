@@ -760,7 +760,6 @@ test-unit:
 
 test-e2e:
 	@$(MAKE) build-cli
-	@$(MAKE) build-hcl-patcher
 	@$(MAKE) up-test
 	@echo "Running e2e tests..."
 	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_happy_path.sh; \
@@ -773,7 +772,6 @@ test-e2e:
 
 test-e2e-platform-ports:
 	@$(MAKE) build-cli
-	@$(MAKE) build-hcl-patcher
 	@$(MAKE) up-test
 	@echo "Running platform ports e2e tests..."
 	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_platform_ports.sh; \
