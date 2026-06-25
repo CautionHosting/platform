@@ -155,6 +155,13 @@ pub enum FromProcfileError {
     #[error("http_port {0} must also be listed in ports")]
     HttpPortNotInPorts(u16),
 
+    #[error(
+        "`binary:` and `locksmith: true` cannot be used together. The `binary:` directive \
+         extracts only the binary's directory, so /etc/caution/ (bundle + secrets) is \
+         dropped and locksmithd panics at boot. Remove one of them."
+    )]
+    BinaryWithLocksmith,
+
     #[error("managed_on_prem requires 'platform' to be specified")]
     ManagedOnPremMissingPlatform,
 
@@ -206,6 +213,7 @@ impl ConfigurationFile {
         let mut http_port: Option<u16> = None;
         let mut domain: Option<String> = None;
         let mut run = None;
+        let mut locksmith = false;
         let mut procfile_e2e: Option<bool> = None;
         let mut managed_on_prem = false;
         let mut platform: Option<String> = None;
@@ -309,6 +317,9 @@ impl ConfigurationFile {
                             domain = Some(value);
                         }
                     }
+                    "locksmith" => {
+                        locksmith = value.to_lowercase() == "true";
+                    }
                     "e2e" => {
                         procfile_e2e = Some(value.to_lowercase() == "true");
                     }
@@ -343,6 +354,10 @@ impl ConfigurationFile {
                     _ => {}
                 }
             }
+        }
+
+        if binary.is_some() && locksmith {
+            return Err(FromProcfileError::BinaryWithLocksmith);
         }
 
         if let Some(hp) = http_port {
@@ -1683,6 +1698,32 @@ aws_region: us-east-1
 ";
         let config = ConfigurationFile::from_procfile(procfile).unwrap();
         assert!(config.caution.is_none() || config.caution.as_ref().unwrap().provider.is_none());
+    }
+
+    #[test]
+    fn test_from_procfile_rejects_binary_with_locksmith() {
+        let procfile = "run: /app\nbinary: /app/x\nlocksmith: true\n";
+        let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
+        assert!(
+            matches!(err, FromProcfileError::BinaryWithLocksmith),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_from_procfile_allows_binary_without_locksmith() {
+        let procfile = "run: /app\nbinary: /app/x\nports: 8080\n";
+        ConfigurationFile::from_procfile(procfile).unwrap();
+    }
+
+    #[test]
+    fn test_from_procfile_rejects_http_port_not_in_ports() {
+        let procfile = "run: /app\nports: 8080\nhttp_port: 9000\ndomain: x.example.com\n";
+        let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
+        assert!(
+            matches!(err, FromProcfileError::HttpPortNotInPorts(9000)),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

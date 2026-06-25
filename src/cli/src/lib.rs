@@ -1218,42 +1218,6 @@ fn normalize_keyring(armored_keyring: &str) -> Result<String> {
         })
 }
 
-/// Pure validation of Procfile directives (see `validate_procfile_directives` for context).
-fn validate_procfile_directives_fields(
-    binary: Option<&str>,
-    locksmith: bool,
-    http_port: Option<&str>,
-    ports: &[u16],
-) -> Result<()> {
-    if binary.is_some() && locksmith {
-        bail!(
-            "Procfile sets both `binary:` and `locksmith: true`. The `binary:` directive \
-             extracts only the binary's directory, so /etc/caution/ (bundle + secrets) is \
-             dropped and locksmithd panics at boot. Remove one of them."
-        );
-    }
-
-    if let Some(http_port) = http_port {
-        let http_port: u16 = http_port.trim().parse().with_context(|| {
-            format!(
-                "Procfile `http_port` is not a valid port: {}",
-                http_port.trim()
-            )
-        })?;
-        if !ports.is_empty() && !ports.contains(&http_port) {
-            bail!(
-                "Procfile `http_port: {}` is not listed in `ports:` ({:?}). \
-                 Add {} to `ports:` so the enclave actually exposes it.",
-                http_port,
-                ports,
-                http_port
-            );
-        }
-    }
-
-    Ok(())
-}
-
 fn resolve_quorum_parameters(
     threshold: Option<u8>,
     max: Option<u8>,
@@ -1651,65 +1615,6 @@ impl ApiClient {
         }
 
         Ok(())
-    }
-
-    fn read_procfile_field_from_dir(&self, dir: &Path, field: &str) -> Option<String> {
-        let procfile_path = dir.join("Procfile");
-        if !procfile_path.exists() {
-            return None;
-        }
-
-        let content = match fs::read_to_string(&procfile_path) {
-            Ok(c) => c,
-            Err(_) => return None,
-        };
-
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            let prefix = format!("{}:", field);
-            if let Some(value) = line.strip_prefix(&prefix) {
-                let value = value.trim();
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
-            }
-        }
-        None
-    }
-
-    fn read_procfile_ports_from_dir(&self, dir: &Path) -> Vec<u16> {
-        match self.read_procfile_field_from_dir(dir, "ports") {
-            Some(ports_str) => ports_str
-                .split(',')
-                .filter_map(|s| s.trim().parse::<u16>().ok())
-                .collect(),
-            None => Vec::new(),
-        }
-    }
-
-    /// Validate Procfile directives that otherwise fail late (boot-time panic) or silently.
-    ///
-    /// - `binary:` + `locksmith: true` is rejected (A2): `binary:` extracts only the binary's
-    ///   directory, dropping `/etc/caution/`, so `locksmithd` panics at boot.
-    /// - `http_port:` must be present in `ports:` (A5), or the proxy silently misroutes.
-    fn validate_procfile_directives(&self) -> Result<()> {
-        self.validate_procfile_directives_in_dir(Path::new("."))
-    }
-
-    fn validate_procfile_directives_in_dir(&self, dir: &Path) -> Result<()> {
-        let binary = self.read_procfile_field_from_dir(dir, "binary");
-        let locksmith = self
-            .read_procfile_field_from_dir(dir, "locksmith")
-            .map(|v| v.trim().eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        let http_port = self.read_procfile_field_from_dir(dir, "http_port");
-        let ports = self.read_procfile_ports_from_dir(dir);
-
-        validate_procfile_directives_fields(binary.as_deref(), locksmith, http_port.as_deref(), &ports)
     }
 
     fn set_git_remote(&self, git_url: &str) -> Result<()> {
@@ -3063,8 +2968,6 @@ enclave "default" {{
         println!("Configuration found");
         println!("Build command: {}", cmd);
 
-        self.validate_procfile_directives()?;
-
         let config = self.ensure_authenticated().await?;
 
         log_verbose(self.verbose, "Creating app on server...");
@@ -3452,8 +3355,6 @@ enclave "default" {{
         let cmd = resolve_local_build_command_from_dir(Path::new("."), false)?;
         println!("Configuration found");
         println!("Build command: {}", cmd);
-
-        self.validate_procfile_directives()?;
 
         let config = self.ensure_authenticated().await?;
 
@@ -4369,8 +4270,6 @@ enclave "default" {{
 
     async fn build_local(&self, no_cache: bool) -> Result<()> {
         println!("Building EIF locally for inspection...\n");
-
-        self.validate_procfile_directives()?;
 
         let app_commit = Command::new("git")
             .args(&["rev-parse", "HEAD"])
@@ -7570,8 +7469,7 @@ mod tests {
     use super::{
         encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility, load_recipient_cert,
         normalize_keyring, parse_env_assignments, resolve_local_build_command_from_dir,
-        resolve_procfile_build_command, resolve_quorum_parameters,
-        validate_procfile_directives_fields, ApiClient,
+        resolve_procfile_build_command, resolve_quorum_parameters, ApiClient,
     };
     use caution_config::ConfigurationFile;
     use keymaker_models::generate_quorum::GenerateQuorumResponse;
@@ -7840,53 +7738,6 @@ containerfile: Missing.Containerfile\n",
         let hcl = ApiClient::generate_config_hcl("git@codeberg.org:user/repo.git", false);
         let config = ConfigurationFile::from_str(&hcl);
         assert!(config.is_ok(), "generated HCL should parse: {:?}", config.err());
-    }
-
-    // A2: binary: + locksmith: true is rejected (would drop /etc/caution/ → boot panic).
-    #[test]
-    fn validate_rejects_binary_with_locksmith() {
-        let err = validate_procfile_directives_fields(Some("/app/x"), true, None, &[]).unwrap_err();
-        assert!(
-            err.to_string().contains("`binary:` and `locksmith: true`"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_allows_binary_without_locksmith() {
-        validate_procfile_directives_fields(Some("/app/x"), false, None, &[8080]).unwrap();
-    }
-
-    // A5: http_port must be one of the declared ports.
-    #[test]
-    fn validate_rejects_http_port_not_in_ports() {
-        let err =
-            validate_procfile_directives_fields(None, false, Some("9000"), &[8080]).unwrap_err();
-        assert!(
-            err.to_string().contains("is not listed in `ports:`"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_allows_http_port_in_ports() {
-        validate_procfile_directives_fields(None, false, Some("8080"), &[8080, 9000]).unwrap();
-    }
-
-    #[test]
-    fn validate_skips_http_port_check_when_ports_empty() {
-        // No `ports:` declared — nothing to cross-check against.
-        validate_procfile_directives_fields(None, false, Some("8080"), &[]).unwrap();
-    }
-
-    #[test]
-    fn validate_rejects_non_numeric_http_port() {
-        let err =
-            validate_procfile_directives_fields(None, false, Some("https"), &[8080]).unwrap_err();
-        assert!(
-            err.to_string().contains("not a valid port"),
-            "unexpected error: {err}"
-        );
     }
 
     fn cert_armor(builder: CertBuilder) -> String {
