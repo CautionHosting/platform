@@ -143,6 +143,13 @@ impl UnitConfig {
     /// The whole result is executed via `sh -c` by the deploy path, so:
     /// - `command` + `args` are re-joined with shlex quoting (automatic,
     ///   injection-safe escaping of every token);
+    /// - a leading run of `NAME=value` tokens is treated as inline shell
+    ///   environment assignments (e.g. `FOO=1 /app/server`) and emitted as
+    ///   `NAME=<quoted value>` rather than shlex-quoting the whole token.
+    ///   Quoting the whole `FOO=1` token yields `'FOO=1'`, which the shell
+    ///   runs as a command literally named `FOO=1` instead of an assignment;
+    ///   the value is still shlex-quoted and the key validated, so this is
+    ///   injection-safe;
     /// - literal `env` string values are emitted as `export KEY=<quoted>` lines
     ///   ahead of the command. Keys are validated (they cannot be quoted);
     ///   values are shlex-quoted.
@@ -175,11 +182,35 @@ impl UnitConfig {
             }
         }
 
-        let argv = std::iter::once(self.command.as_str())
-            .chain(self.args.iter().map(String::as_str));
-        let joined =
-            shlex::try_join(argv).map_err(|_| FromStrError::UnquotableCommand)?;
-        out.push_str(&joined);
+        let mut argv = std::iter::once(self.command.as_str())
+            .chain(self.args.iter().map(String::as_str))
+            .peekable();
+
+        // Preserve a leading run of `NAME=value` inline env assignments
+        // verbatim (with the value shlex-quoted). Stop at the first token that
+        // is not a valid assignment, matching shell semantics where such
+        // prefixes must precede the command.
+        let mut parts: Vec<String> = Vec::new();
+        while let Some(token) = argv.peek() {
+            let Some((name, value)) = token.split_once('=') else {
+                break;
+            };
+            if !is_valid_env_key(name) {
+                break;
+            }
+            let quoted =
+                shlex::try_quote(value).map_err(|_| FromStrError::UnquotableCommand)?;
+            parts.push(format!("{name}={quoted}"));
+            argv.next();
+        }
+
+        let rest: Vec<&str> = argv.collect();
+        if rest.is_empty() {
+            return Err(FromStrError::NoCommand);
+        }
+        let joined = shlex::try_join(rest).map_err(|_| FromStrError::UnquotableCommand)?;
+        parts.push(joined);
+        out.push_str(&parts.join(" "));
 
         Ok(out)
     }
@@ -262,6 +293,9 @@ pub enum FromStrError {
 
     #[error("Command contains characters that cannot be shell-quoted (e.g. NUL byte)")]
     UnquotableCommand,
+
+    #[error("Unit has no executable command (only inline env assignments found)")]
+    NoCommand,
 
     #[error("Failed to parse HCL")]
     HclParse(#[from] hcl::Error),
@@ -643,6 +677,14 @@ impl ConfigurationFile {
                                     || is_vault_funccall(expr);
                                 if !allowed {
                                     return Err(FromStrError::InvalidEnvExpression(format!(
+                                        "{}.{}",
+                                        unit_name, key
+                                    )));
+                                }
+                                if matches!(expr, Expression::String(_))
+                                    && !is_valid_env_key(key)
+                                {
+                                    return Err(FromStrError::InvalidEnvKey(format!(
                                         "{}.{}",
                                         unit_name, key
                                     )));
@@ -1915,6 +1957,58 @@ enclave "main" {
     }
 
     #[test]
+    fn run_command_string_preserves_inline_env_prefix() {
+        // A Procfile `run:` line like `FOO=1 /app/server` parses into
+        // command = "FOO=1", args = ["/app/server", ...]. The assignment must
+        // be emitted verbatim (not as '\''FOO=1'\''), so the shell treats it as
+        // an env assignment rather than a command literally named "FOO=1".
+        let unit = UnitConfig {
+            command: "PQ_SUBKEYS_AUTH=30".to_string(),
+            args: vec![
+                "/app/pq-ceremony".to_string(),
+                "--bind".to_string(),
+                "0.0.0.0:8080".to_string(),
+            ],
+            env: None,
+        };
+        assert_eq!(
+            unit.run_command_string().unwrap(),
+            "PQ_SUBKEYS_AUTH=30 /app/pq-ceremony --bind 0.0.0.0:8080"
+        );
+    }
+
+    #[test]
+    fn run_command_string_quotes_malicious_inline_env_value() {
+        // The assignment value is still shlex-quoted, so shell metacharacters
+        // in an inline env prefix cannot inject.
+        let unit = UnitConfig {
+            command: "EVIL=$(rm -rf /)".to_string(),
+            args: vec!["/app".to_string()],
+            env: None,
+        };
+        assert_eq!(
+            unit.run_command_string().unwrap(),
+            "EVIL='$(rm -rf /)' /app"
+        );
+    }
+
+    #[test]
+    fn run_command_string_does_not_treat_command_with_equals_as_assignment() {
+        // Once the command is reached, assignment-prefix scanning stops, so an
+        // `=`-bearing argument after it (e.g. `--opt=a b`) is shlex-quoted as a
+        // whole token rather than split into a `NAME=value` assignment.
+        let unit = UnitConfig {
+            command: "/app/server".to_string(),
+            args: vec!["--opt=a b".to_string()],
+            env: None,
+        };
+        assert_eq!(
+            unit.run_command_string().unwrap(),
+            "/app/server '--opt=a b'"
+        );
+    }
+
+    #[test]
     fn run_command_string_rejects_nul_byte() {
         // shlex cannot quote a NUL byte; it must surface as an error, not panic.
         let unit = UnitConfig {
@@ -1965,6 +2059,41 @@ enclave "main" {
             )])),
         };
         let err = unit.run_command_string().unwrap_err();
+        assert!(matches!(err, FromStrError::InvalidEnvKey(_)));
+    }
+
+    #[test]
+    fn run_command_string_errors_when_no_executable() {
+        // If every token is a NAME=value assignment, there is no command to run.
+        let unit = UnitConfig {
+            command: "FOO=1".to_string(),
+            args: Vec::new(),
+            env: None,
+        };
+        let err = unit.run_command_string().unwrap_err();
+        assert!(matches!(err, FromStrError::NoCommand));
+    }
+
+    #[test]
+    fn from_str_rejects_invalid_env_key_at_parse_time() {
+        // Quoted HCL map keys can contain hyphens and other chars that are
+        // invalid POSIX env var names. The validator must reject these at parse
+        // time, not silently accept and fail at deploy.
+        let hcl = r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    env = {
+      "MY-KEY" = "val"
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let err = ConfigurationFile::from_str(hcl).unwrap_err();
         assert!(matches!(err, FromStrError::InvalidEnvKey(_)));
     }
 
