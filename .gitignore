@@ -20,3 +20,4 @@ target/
 
 AGENTS.md
 patch
+.worktrees/

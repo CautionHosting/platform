@@ -53,7 +53,7 @@ enclave "main" {
     memory_mb = 2000
   }
 
-  unit "main" {
+  unit "default" {
     command = "/usr/bin/hello"
     args = ["hello", "world"]
     env {

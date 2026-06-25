@@ -102,7 +102,7 @@ STEP_NUM=1
 log "Testing secret new in a caution repo..."
 REPO_DIR="$WORK_DIR/test-repo"
 mkdir -p "$REPO_DIR/.caution"
-touch "$REPO_DIR/Procfile"
+printf 'enclave "default" {\n  unit "default" {\n    command = "/bin/true"\n  }\n}\n' > "$REPO_DIR/caution.hcl"
 cp "$WORK_DIR/keyring.asc" "$REPO_DIR/"
 
 OUTPUT=$(cd "$REPO_DIR" && KEYMAKER_URL="$KEYMAKER_URL" "$CAUTION_BIN" secret new keyring.asc --no-upload 2>&1) || true
@@ -231,7 +231,7 @@ STEP_NUM=8
 log "Testing CLI keygen + concatenated keyring normalization..."
 MULTI_DIR="$WORK_DIR/multi-holder-repo"
 mkdir -p "$MULTI_DIR/.caution"
-touch "$MULTI_DIR/Procfile"
+printf 'enclave "default" {\n  unit "default" {\n    command = "/bin/true"\n  }\n}\n' > "$MULTI_DIR/caution.hcl"
 
 (cd "$MULTI_DIR" \
     && "$CAUTION_BIN" secret keygen --name Alice --email alice@example.com --shoot-self-in-foot alice.asc 2>/dev/null \

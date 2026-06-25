@@ -356,6 +356,17 @@ fn log_verbose(verbose: bool, msg: &str) {
     }
 }
 
+/// Egress is enabled iff the (single) enclave's network block declares >=1 egress rule.
+/// Derived solely from the parsed HCL config — never from a manifest.
+fn config_egress_enabled(cfg: &caution_config::ConfigurationFile) -> bool {
+    cfg.enclave
+        .as_ref()
+        .and_then(|e| e.values().next())
+        .and_then(|enc| enc.network.as_ref())
+        .map(|n| n.egress_enabled())
+        .unwrap_or(false)
+}
+
 fn ssh_fingerprint(key: &str) -> String {
     let parts: Vec<&str> = key.split_whitespace().collect();
     parts
@@ -628,6 +639,11 @@ enum Commands {
         #[command(subcommand)]
         command: CredentialCommands,
     },
+    #[command(about = "Manage fully managed capacity requests")]
+    Capacity {
+        #[command(subcommand)]
+        command: CapacityCommands,
+    },
     #[command(about = "Manage cryptographic secrets", alias = "secrets")]
     Secret {
         #[command(subcommand)]
@@ -740,6 +756,17 @@ enum CredentialCommands {
     SetDefault {
         #[arg(help = "Credential ID or name")]
         id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CapacityCommands {
+    #[command(about = "Join the fully managed capacity notification waitlist")]
+    Waitlist {
+        #[arg(long, help = "Email address to notify when capacity is available")]
+        email: String,
+        #[arg(long, help = "Requested enclave vCPUs, up to 16")]
+        vcpus: Option<u32>,
     },
 }
 
@@ -1073,6 +1100,11 @@ struct Organization {
     id: String,
 }
 
+#[derive(Deserialize)]
+struct CapacityWaitlistResponse {
+    status: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct LegalAcceptanceRequiredError {
     code: String,
@@ -1087,27 +1119,73 @@ struct StagedSource {
     _temp_dir: tempfile::TempDir,
 }
 
-fn keymaker_eligible_cert_count(armored_keyring: &str) -> Result<usize> {
+/// Keymaker-eligibility of a single certificate, with per-subkey detail so we can tell the
+/// user exactly which subkey is missing instead of an opaque "no eligible certificates".
+struct CertEligibility {
+    user_id: String,
+    has_sign: bool,
+    has_auth: bool,
+    has_enc: bool,
+}
+
+impl CertEligibility {
+    fn is_eligible(&self) -> bool {
+        self.has_sign && self.has_auth && self.has_enc
+    }
+
+    /// Human-readable list of the missing subkey roles, in keygen order.
+    fn missing(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.has_sign {
+            missing.push("signing");
+        }
+        if !self.has_auth {
+            missing.push("authentication");
+        }
+        if !self.has_enc {
+            missing.push("storage-encryption");
+        }
+        missing
+    }
+}
+
+/// Inspect each certificate in an armored keyring for Keymaker eligibility.
+///
+/// A certificate is eligible only if it carries signing, authentication, and
+/// storage-encryption subkeys valid under the standard policy.
+fn keymaker_cert_eligibility(armored_keyring: &str) -> Result<Vec<CertEligibility>> {
     let cert_parser = CertParser::from_bytes(armored_keyring)
         .context("Failed to parse keyring as OpenPGP public certificates")?;
     let policy = openpgp::policy::StandardPolicy::new();
-    let mut count = 0;
+    let mut certs = Vec::new();
 
     for parseable_cert in cert_parser {
         let cert = parseable_cert.context("Failed to parse OpenPGP public certificate")?;
         let valid_cert = cert
             .with_policy(&policy, None)
             .context("OpenPGP public certificate is not valid under the standard policy")?;
-        let has_auth = valid_cert.keys().for_authentication().next().is_some();
-        let has_enc = valid_cert.keys().for_storage_encryption().next().is_some();
-        let has_sign = valid_cert.keys().for_signing().next().is_some();
+        let user_id = valid_cert
+            .userids()
+            .next()
+            .map(|uid| String::from_utf8_lossy(uid.userid().value()).into_owned())
+            .unwrap_or_else(|| valid_cert.fingerprint().to_string());
 
-        if has_auth && has_enc && has_sign {
-            count += 1;
-        }
+        certs.push(CertEligibility {
+            user_id,
+            has_sign: valid_cert.keys().for_signing().next().is_some(),
+            has_auth: valid_cert.keys().for_authentication().next().is_some(),
+            has_enc: valid_cert.keys().for_storage_encryption().next().is_some(),
+        });
     }
 
-    Ok(count)
+    Ok(certs)
+}
+
+fn keymaker_eligible_cert_count(armored_keyring: &str) -> Result<usize> {
+    Ok(keymaker_cert_eligibility(armored_keyring)?
+        .iter()
+        .filter(|cert| cert.is_eligible())
+        .count())
 }
 
 /// Re-serialize all certificates into a single ASCII-armored block.
@@ -1564,21 +1642,7 @@ impl ApiClient {
         Ok(())
     }
 
-    fn create_config_file_if_needed(&self, byoc: bool) -> Result<()> {
-        use std::fs;
-        use std::path::Path;
-
-        let config_path = Path::new("caution.hcl");
-
-        if config_path.exists() {
-            log_verbose(self.verbose, "caution.hcl already exists, skipping creation");
-            return Ok(());
-        }
-
-        let source_url = self
-            .detect_source_url()
-            .unwrap_or_else(|| "git@codeberg.org:user/repo.git".to_string());
-
+    fn generate_config_hcl(source_url: &str, byoc: bool) -> String {
         let byoc_section = if byoc {
             r#"
 caution {
@@ -1595,36 +1659,75 @@ caution {
             ""
         };
 
-        let hcl_content = format!(
+        format!(
             r#"# Caution configuration - https://docs.caution.co/reference/caution-hcl/
 
 enclave "default" {{
   build {{
-    run = "/app/myapp"
-    # binary = "/app/myapp"
+    # containerfile = "Containerfile"   # defaults to repo-root Containerfile/Dockerfile
+    # app_sources = ["{source_url}"]    # git URLs published in the attestation manifest
+    # cache       = true
   }}
-  # memory = 512
-  # cpus   = 2
-  network {{
-    # ingress = [8080]
-  }}
-  # e2e       = false
-  # locksmith = false
-  # debug     = false
-}}
 
-# containerfile = "Containerfile"
-# domain        = "app.example.com"
-# no_cache      = false
-# app_sources   = "{source_url}"
-# ssh_keys      = ["ssh-ed25519 AAAA..."]
+  resources {{
+    cpu       = 2
+    memory_mb = 512
+  }}
+
+  network {{
+    ingress {{
+      cidr_ipv4 = "0.0.0.0/0"
+      port      = 8080
+    }}
+
+    # http {{
+    #   domain = "app.example.com"
+    #   port   = 8080
+    #   e2e_encryption {{
+    #     enabled      = true
+    #     cors_origins = ["*"]
+    #   }}
+    # }}
+  }}
+
+  # debug {{
+  #   enabled  = true
+  #   ssh_keys = ["ssh-ed25519 AAAA..."]
+  # }}
+
+  unit "default" {{
+    command = "/app/myapp"
+    # args = []
+    # env = {{
+    #   API_KEY = env::vault("API_KEY")   # using env::vault enables Locksmith secrets
+    # }}
+  }}
+}}
 {byoc_section}"#
-        );
+        )
+    }
+
+    fn create_config_file_if_needed(&self, byoc: bool) -> Result<()> {
+        use std::fs;
+        use std::path::Path;
+
+        let config_path = Path::new("caution.hcl");
+
+        if config_path.exists() {
+            log_verbose(self.verbose, "caution.hcl already exists, skipping creation");
+            return Ok(());
+        }
+
+        let source_url = self
+            .detect_source_url()
+            .unwrap_or_else(|| "git@codeberg.org:user/repo.git".to_string());
+
+        let hcl_content = Self::generate_config_hcl(&source_url, byoc);
 
         fs::write(config_path, hcl_content).context("Failed to create caution.hcl")?;
 
         println!("\nCreated caution.hcl in current directory");
-        println!("Edit the 'run' field in the enclave build block to match your application");
+        println!("Edit the unit \"default\" command to match your application");
         println!("Build file precedence: containerfile: -> repo-root Containerfile -> Dockerfile");
         if byoc {
             println!("Configure AWS deployment settings in the BYOC section");
@@ -2041,8 +2144,7 @@ enclave "default" {{
         Ok(status)
     }
 
-    async fn check_org_security_settings(&self, session_id: &str) -> Result<OrgSettings> {
-        // Get the user's organizations
+    async fn primary_organization_id(&self, session_id: &str) -> Result<String> {
         let orgs_response = self
             .client
             .get(format!("{}/api/organizations", self.base_url))
@@ -2060,12 +2162,18 @@ enclave "default" {{
             bail!("No organizations found");
         }
 
+        Ok(orgs[0].id.clone())
+    }
+
+    async fn check_org_security_settings(&self, session_id: &str) -> Result<OrgSettings> {
+        let org_id = self.primary_organization_id(session_id).await?;
+
         // Get the first org's settings
         let settings_response = self
             .client
             .get(format!(
                 "{}/api/organizations/{}/settings",
-                self.base_url, orgs[0].id
+                self.base_url, org_id
             ))
             .header("X-Session-ID", session_id)
             .send()
@@ -2971,6 +3079,65 @@ enclave "default" {{
             let error = self.api_error_message(response).await;
             bail!("Failed to list apps: {}", error)
         }
+    }
+
+    async fn join_capacity_waitlist(&self, email: &str, vcpus: Option<u32>) -> Result<()> {
+        let email = email.trim();
+        anyhow::ensure!(!email.is_empty(), "--email must not be empty");
+        anyhow::ensure!(
+            !email.contains('\n') && !email.contains('\r'),
+            "--email is invalid"
+        );
+        anyhow::ensure!(email.contains('@'), "--email must be an email address");
+
+        if let Some(vcpus) = vcpus {
+            anyhow::ensure!(
+                (1..=16).contains(&vcpus),
+                "--vcpus must be between 1 and 16; contact support for larger requests"
+            );
+        }
+
+        let config = self.ensure_authenticated().await?;
+        let org_id = self.primary_organization_id(config.session_id()).await?;
+
+        let response = self
+            .client
+            .post(format!(
+                "{}/api/organizations/{}/fully-managed/waitlist",
+                self.base_url, org_id
+            ))
+            .header("X-Session-ID", config.session_id())
+            .json(&serde_json::json!({
+                "email": email,
+                "requested_enclave_vcpus": vcpus,
+            }))
+            .send()
+            .await
+            .context("Failed to send capacity waitlist request")?;
+
+        if !response.status().is_success() {
+            let error = self.api_error_message(response).await;
+            bail!("Failed to join capacity waitlist: {}", error);
+        }
+
+        let waitlist_response: CapacityWaitlistResponse = response
+            .json()
+            .await
+            .context("Failed to parse capacity waitlist response")?;
+
+        if waitlist_response.status == "already_waiting" {
+            println!(
+                "{} is already on the fully managed capacity waitlist.",
+                email
+            );
+        } else {
+            println!(
+                "{} has been added to the fully managed capacity waitlist.",
+                email
+            );
+        }
+
+        Ok(())
     }
 
     async fn fetch_app(&self, id: &str) -> Result<App> {
@@ -4208,6 +4375,9 @@ enclave "default" {{
         let locksmith = cfg.has_vault_env();
         log_verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
 
+        let egress = config_egress_enabled(&cfg);
+        log_verbose(self.verbose, &format!("Egress: {}", egress));
+
         let e2e_cors_origins = e2e_config
             .and_then(|e2e| e2e.cors_origins.as_ref())
             .map(|origins| origins.join(","));
@@ -4233,6 +4403,7 @@ enclave "default" {{
                     e2e,
                     locksmith,
                     e2e_cors_origins,
+                    egress,
                 )
                 .await
         } else {
@@ -4252,6 +4423,7 @@ enclave "default" {{
                     e2e,
                     locksmith,
                     e2e_cors_origins,
+                    egress,
                 )
                 .await
         }
@@ -4628,6 +4800,22 @@ enclave "default" {{
         };
         log_verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
 
+        let egress = if let Some(ref app_dir) = app_source_dir {
+            self.read_config_from_dir(app_dir)
+                .ok()
+                .map(|cfg| config_egress_enabled(&cfg))
+                .unwrap_or(false)
+        } else if external_manifest.is_some() {
+            // Egress is intentionally never read from the manifest; default-deny.
+            false
+        } else {
+            self.read_config()
+                .ok()
+                .map(|cfg| config_egress_enabled(&cfg))
+                .unwrap_or(false)
+        };
+        log_verbose(self.verbose, &format!("Egress: {}", egress));
+
         let e2e_cors_origins = if e2e {
             e2e_config
                 .as_ref()
@@ -4657,6 +4845,7 @@ enclave "default" {{
                     e2e,
                     locksmith,
                     e2e_cors_origins,
+                    egress,
                 )
                 .await
         } else {
@@ -4676,6 +4865,7 @@ enclave "default" {{
                     e2e,
                     locksmith,
                     e2e_cors_origins,
+                    egress,
                 )
                 .await
         }
@@ -6396,8 +6586,53 @@ enclave "default" {{
         let keyring_data = fs::read_to_string(&keyring)
             .with_context(|| format!("Failed to read keyring file: {}", keyring.display()))?;
 
-        let eligible_certs = keymaker_eligible_cert_count(&keyring_data)
+        let eligibility = keymaker_cert_eligibility(&keyring_data)
             .with_context(|| format!("Failed to inspect keyring file: {}", keyring.display()))?;
+        let eligible_certs = eligibility.iter().filter(|cert| cert.is_eligible()).count();
+
+        if eligible_certs == 0 {
+            eprintln!(
+                "Keyring has no Keymaker-eligible certificates (each needs signing + \
+                 authentication + storage-encryption subkeys):"
+            );
+            if eligibility.is_empty() {
+                eprintln!("  (no certificates found in keyring)");
+            }
+            for cert in &eligibility {
+                eprintln!(
+                    "  - {} — missing: {}",
+                    cert.user_id,
+                    cert.missing().join(", ")
+                );
+            }
+            bail!(
+                "No Keymaker-eligible certificates in {}. Fix: generate a compatible key with \
+                 `caution secret keygen` (non-prod), or derive one offline with keyfork: \
+                 https://git.distrust.co/public/keyfork",
+                keyring.display()
+            );
+        }
+
+        // Warn about any certs that lack required subkeys and will be silently excluded.
+        let ineligible: Vec<&CertEligibility> = eligibility
+            .iter()
+            .filter(|cert| !cert.is_eligible())
+            .collect();
+        if !ineligible.is_empty() {
+            eprintln!(
+                "Warning: {} certificate(s) in the keyring lack required subkeys and will be \
+                 excluded from the quorum:",
+                ineligible.len()
+            );
+            for cert in ineligible {
+                eprintln!(
+                    "  - {} — missing: {}",
+                    cert.user_id,
+                    cert.missing().join(", ")
+                );
+            }
+        }
+
         let (threshold, max) = resolve_quorum_parameters(threshold, max, eligible_certs)?;
 
         let keyring_data = normalize_keyring(&keyring_data)
@@ -7161,6 +7396,11 @@ pub async fn run() -> Result<()> {
                 client.set_default_credential(&id).await?;
             }
         },
+        Commands::Capacity { command } => match command {
+            CapacityCommands::Waitlist { email, vcpus } => {
+                client.join_capacity_waitlist(&email, vcpus).await?;
+            }
+        },
         Commands::Secret { command } => match command {
             SecretCommands::Keygen {
                 output,
@@ -7227,10 +7467,11 @@ pub async fn run() -> Result<()> {
 mod tests {
     use super::openpgp;
     use super::{
-        encrypt_env_file, encrypt_secret_value, load_recipient_cert, normalize_keyring,
-        parse_env_assignments, resolve_local_build_command_from_dir,
-        resolve_procfile_build_command, resolve_quorum_parameters,
+        encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility, load_recipient_cert,
+        normalize_keyring, parse_env_assignments, resolve_local_build_command_from_dir,
+        resolve_procfile_build_command, resolve_quorum_parameters, ApiClient,
     };
+    use caution_config::ConfigurationFile;
     use keymaker_models::generate_quorum::GenerateQuorumResponse;
     use openpgp::cert::prelude::*;
     use openpgp::parse::Parse;
@@ -7490,5 +7731,52 @@ containerfile: Missing.Containerfile\n",
         let command = resolve_local_build_command_from_dir(work_dir.path(), true).unwrap();
 
         assert_eq!(command, "echo 'Please configure your configuration file'");
+    }
+
+    #[test]
+    fn generated_config_hcl_parses_as_valid_configuration_file() {
+        let hcl = ApiClient::generate_config_hcl("git@codeberg.org:user/repo.git", false);
+        let config = ConfigurationFile::from_str(&hcl);
+        assert!(config.is_ok(), "generated HCL should parse: {:?}", config.err());
+    }
+
+    fn cert_armor(builder: CertBuilder) -> String {
+        let (cert, _revocation) = builder.generate().unwrap();
+        String::from_utf8(cert.armored().to_vec().unwrap()).unwrap()
+    }
+
+    // A3: a cert carrying all three subkeys is Keymaker-eligible.
+    #[test]
+    fn cert_eligibility_accepts_full_cert() {
+        let keyring = cert_armor(
+            CertBuilder::new()
+                .add_userid("alice@example.org")
+                .add_signing_subkey()
+                .add_authentication_subkey()
+                .add_storage_encryption_subkey(),
+        );
+
+        let certs = keymaker_cert_eligibility(&keyring).unwrap();
+        assert_eq!(certs.len(), 1);
+        assert!(certs[0].is_eligible());
+        assert!(certs[0].missing().is_empty());
+        assert_eq!(certs[0].user_id, "alice@example.org");
+    }
+
+    // A3: a default-style cert without an authentication subkey is reported as ineligible,
+    // naming exactly the missing role.
+    #[test]
+    fn cert_eligibility_reports_missing_authentication_subkey() {
+        let keyring = cert_armor(
+            CertBuilder::new()
+                .add_userid("bob@example.org")
+                .add_signing_subkey()
+                .add_storage_encryption_subkey(),
+        );
+
+        let certs = keymaker_cert_eligibility(&keyring).unwrap();
+        assert_eq!(certs.len(), 1);
+        assert!(!certs[0].is_eligible());
+        assert_eq!(certs[0].missing(), vec!["authentication"]);
     }
 }

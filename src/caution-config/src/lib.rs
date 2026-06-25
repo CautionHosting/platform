@@ -121,6 +121,13 @@ pub struct NetworkConfig {
     pub http: Option<HttpConfig>,
 }
 
+impl NetworkConfig {
+    /// Outbound internet access is enabled iff at least one egress rule is declared.
+    pub fn egress_enabled(&self) -> bool {
+        !self.egress.is_empty()
+    }
+}
+
 /// An enclave definition (`enclave "label" { }`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EnclaveConfig {
@@ -147,6 +154,13 @@ pub enum FromProcfileError {
 
     #[error("http_port {0} must also be listed in ports")]
     HttpPortNotInPorts(u16),
+
+    #[error(
+        "`binary:` and `locksmith: true` cannot be used together. The `binary:` directive \
+         extracts only the binary's directory, so /etc/caution/ (bundle + secrets) is \
+         dropped and locksmithd panics at boot. Remove one of them."
+    )]
+    BinaryWithLocksmith,
 
     #[error("managed_on_prem requires 'platform' to be specified")]
     ManagedOnPremMissingPlatform,
@@ -199,6 +213,7 @@ impl ConfigurationFile {
         let mut http_port: Option<u16> = None;
         let mut domain: Option<String> = None;
         let mut run = None;
+        let mut locksmith = false;
         let mut procfile_e2e: Option<bool> = None;
         let mut managed_on_prem = false;
         let mut platform: Option<String> = None;
@@ -302,6 +317,9 @@ impl ConfigurationFile {
                             domain = Some(value);
                         }
                     }
+                    "locksmith" => {
+                        locksmith = value.to_lowercase() == "true";
+                    }
                     "e2e" => {
                         procfile_e2e = Some(value.to_lowercase() == "true");
                     }
@@ -336,6 +354,10 @@ impl ConfigurationFile {
                     _ => {}
                 }
             }
+        }
+
+        if binary.is_some() && locksmith {
+            return Err(FromProcfileError::BinaryWithLocksmith);
         }
 
         if let Some(hp) = http_port {
@@ -853,7 +875,7 @@ enclave "main" {
     }
     http {
       domain = "example.com"
-      port = "9090"
+      port = 9090
     }
   }
   resources {
@@ -1167,7 +1189,7 @@ cache: false
         );
         let http = network.http.as_ref().unwrap();
         assert_eq!(http.domain, "example.com");
-        assert_eq!(http.port, "8080");
+        assert_eq!(http.port, 8080);
 
         let unit = e.unit.as_ref().unwrap();
         let main = unit.get("default").unwrap();
@@ -1217,7 +1239,7 @@ cache: false
         let network = enclave.get("default").unwrap().network.as_ref().unwrap();
         let http = network.http.as_ref().unwrap();
         assert_eq!(http.domain, "myapp.example.com");
-        assert_eq!(http.port, "8080");
+        assert_eq!(http.port, 8080);
     }
 
     #[test]
@@ -1278,6 +1300,14 @@ cache: false
 
     const EXAMPLE_HCL: &str = include_str!("../tests/data/example/caution.hcl");
 
+    const DEMO_HELLO_WORLD_HCL: &str =
+        include_str!("../tests/data/demo-hello-world-enclave/caution.hcl");
+
+    const DEMO_AI_INFERENCE_HCL: &str =
+        include_str!("../tests/data/demo-ai-inference/caution.hcl");
+
+    const LOCKSMITH_HCL: &str = include_str!("../tests/data/locksmith/caution.hcl");
+
     #[test]
     fn demo_hello_world_enclave() {
         let config = ConfigurationFile::from_procfile(DEMO_HELLO_WORLD_PROCFILE).unwrap();
@@ -1334,7 +1364,7 @@ cache: false
         let network = e.network.as_ref().unwrap();
         let http = network.http.as_ref().unwrap();
         assert_eq!(http.domain, "chat.caution.dev");
-        assert_eq!(http.port, "80");
+        assert_eq!(http.port, 80);
 
         let build = e.build.as_ref().unwrap();
         assert_eq!(
@@ -1354,6 +1384,112 @@ cache: false
     #[test]
     fn locksmith() {
         let config = ConfigurationFile::from_procfile(LOCKSMITH_PROCFILE).unwrap();
+        let enclave = config.enclave.as_ref().unwrap();
+        let e = enclave.get("default").unwrap();
+
+        let unit = e.unit.as_ref().unwrap().get("default").unwrap();
+        assert_eq!(unit.command, "/keymaker");
+        assert!(unit.args.is_empty());
+
+        let build = e.build.as_ref().unwrap();
+        assert_eq!(
+            build.app_sources,
+            vec!["https://codeberg.org/caution/locksmith/archive/${COMMIT}.tar.gz"]
+        );
+
+        let network = e.network.as_ref().unwrap();
+        assert_eq!(network.ingress.len(), 1);
+        assert_eq!(
+            network.ingress[0].port_spec,
+            Some(PortSpec::Exact { port: 8080 })
+        );
+        assert!(network.http.is_none());
+
+        let debug = e.debug.as_ref().unwrap();
+        assert_eq!(debug.enabled, Some(true));
+        assert_eq!(debug.ssh_keys.len(), 1);
+        assert!(debug.ssh_keys[0].starts_with("ssh-rsa"));
+    }
+
+    // ── from_str real-world fixture tests ────────────────────────────
+
+    #[test]
+    fn demo_hello_world_enclave_hcl() {
+        let config = ConfigurationFile::from_str(DEMO_HELLO_WORLD_HCL).unwrap();
+        let enclave = config.enclave.as_ref().unwrap();
+        let e = enclave.get("default").unwrap();
+
+        let unit = e.unit.as_ref().unwrap().get("default").unwrap();
+        assert_eq!(unit.command, "/usr/local/bin/hello");
+        assert!(unit.args.is_empty());
+
+        let build = e.build.as_ref().unwrap();
+        assert_eq!(build.binary.as_deref(), Some("/usr/local/bin/hello"));
+
+        assert_eq!(
+            build.app_sources,
+            vec!["git@codeberg.org:caution/demo-hello-world-enclave.git"]
+        );
+
+        let network = e.network.as_ref().unwrap();
+        assert_eq!(network.ingress.len(), 1);
+        assert_eq!(
+            network.ingress[0].port_spec,
+            Some(PortSpec::Exact { port: 8083 })
+        );
+        assert!(network.http.is_none());
+    }
+
+    #[test]
+    fn demo_ai_inference_hcl() {
+        let config = ConfigurationFile::from_str(DEMO_AI_INFERENCE_HCL).unwrap();
+        let enclave = config.enclave.as_ref().unwrap();
+        let e = enclave.get("default").unwrap();
+
+        let unit = e.unit.as_ref().unwrap().get("default").unwrap();
+        assert_eq!(unit.command, "/usr/bin/llama-server");
+        assert_eq!(
+            unit.args,
+            vec![
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8083",
+                "-m",
+                "/workdir/models/model.gguf",
+                "--path",
+                "/workdir/public",
+                "--ctx-size",
+                "2048",
+                "-t",
+                "8",
+            ]
+        );
+
+        let network = e.network.as_ref().unwrap();
+        let http = network.http.as_ref().unwrap();
+        assert_eq!(http.domain, "chat.caution.dev");
+        assert_eq!(http.port, 80);
+
+        let build = e.build.as_ref().unwrap();
+        assert_eq!(
+            build.app_sources,
+            vec!["https://codeberg.org/caution/demo-ai-inference.git"]
+        );
+
+        let resources = e.resources.as_ref().unwrap();
+        assert_eq!(resources.memory_mb, 55000);
+        assert_eq!(resources.cpu, 14);
+
+        assert_eq!(build.cache, Some(false));
+
+        assert_eq!(network.ingress.len(), 1);
+        assert_eq!(network.ingress[0].port_spec, Some(PortSpec::Exact { port: 80 }));
+    }
+
+    #[test]
+    fn locksmith_hcl() {
+        let config = ConfigurationFile::from_str(LOCKSMITH_HCL).unwrap();
         let enclave = config.enclave.as_ref().unwrap();
         let e = enclave.get("default").unwrap();
 
@@ -1565,6 +1701,32 @@ aws_region: us-east-1
     }
 
     #[test]
+    fn test_from_procfile_rejects_binary_with_locksmith() {
+        let procfile = "run: /app\nbinary: /app/x\nlocksmith: true\n";
+        let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
+        assert!(
+            matches!(err, FromProcfileError::BinaryWithLocksmith),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_from_procfile_allows_binary_without_locksmith() {
+        let procfile = "run: /app\nbinary: /app/x\nports: 8080\n";
+        ConfigurationFile::from_procfile(procfile).unwrap();
+    }
+
+    #[test]
+    fn test_from_procfile_rejects_http_port_not_in_ports() {
+        let procfile = "run: /app\nports: 8080\nhttp_port: 9000\ndomain: x.example.com\n";
+        let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
+        assert!(
+            matches!(err, FromProcfileError::HttpPortNotInPorts(9000)),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn test_from_procfile_managed_on_prem_missing_platform() {
         let procfile = "\
 run: /app
@@ -1602,5 +1764,34 @@ platform: aws
 ";
         let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
         assert!(matches!(err, FromProcfileError::ManagedOnPremMissingRegion));
+    }
+
+    #[test]
+    fn test_egress_enabled_reflects_rule_presence() {
+        let hcl = r#"
+enclave "main" {
+  network {
+    egress { cidr_ipv4 = "0.0.0.0/0" }
+  }
+}
+"#;
+        let cfg: ConfigurationFile = hcl::from_str(hcl).expect("parse HCL");
+        let net = cfg.enclave.unwrap().get("main").unwrap().network.clone().unwrap();
+        assert!(net.egress_enabled());
+
+        let hcl_empty = r#"
+enclave "main" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+      ip_protocol = "tcp"
+    }
+  }
+}
+"#;
+        let cfg2: ConfigurationFile = hcl::from_str(hcl_empty).expect("parse HCL");
+        let net2 = cfg2.enclave.unwrap().get("main").unwrap().network.clone().unwrap();
+        assert!(!net2.egress_enabled());
     }
 }

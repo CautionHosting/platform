@@ -276,6 +276,7 @@ impl EnclaveBuilder {
         e2e: bool,
         locksmith: bool,
         e2e_cors_origins: Option<String>,
+        egress: bool,
         templates_dir: Option<&std::path::Path>,
     ) -> Result<EifFile> {
         build::build_eif_from_filesystems(
@@ -293,6 +294,7 @@ impl EnclaveBuilder {
             e2e,
             locksmith,
             e2e_cors_origins,
+            egress,
             templates_dir,
         )
         .await
@@ -367,6 +369,7 @@ impl EnclaveBuilder {
         e2e: bool,
         locksmith: bool,
         e2e_cors_origins: Option<String>,
+        egress: bool,
     ) -> Result<Deployment> {
         if let Some(cached) = self.get_cached_eif() {
             tracing::info!("Using cached EIF from: {}", cached.eif.path.display());
@@ -508,6 +511,7 @@ impl EnclaveBuilder {
                 e2e,
                 locksmith,
                 e2e_cors_origins,
+                egress,
                 templates_dir.as_deref(),
             )
             .await?;
@@ -543,6 +547,7 @@ impl EnclaveBuilder {
         e2e: bool,
         locksmith: bool,
         e2e_cors_origins: Option<String>,
+        egress: bool,
     ) -> Result<Deployment> {
         if let Some(cached) = self.get_cached_eif() {
             tracing::info!("Using cached EIF from: {}", cached.eif.path.display());
@@ -668,6 +673,7 @@ impl EnclaveBuilder {
                 e2e,
                 locksmith,
                 e2e_cors_origins,
+                egress,
                 templates_dir.as_deref(),
             )
             .await?;
@@ -704,6 +710,7 @@ impl EnclaveBuilder {
         e2e: bool,
         locksmith: bool,
         e2e_cors_origins: Option<String>,
+        egress: bool,
     ) -> Result<Deployment> {
         let binary_basename = std::path::Path::new(binary_path)
             .file_name()
@@ -755,6 +762,7 @@ impl EnclaveBuilder {
                 e2e,
                 locksmith,
                 e2e_cors_origins.clone(),
+                egress,
             )
             .await
         } else {
@@ -773,6 +781,7 @@ impl EnclaveBuilder {
                 e2e,
                 locksmith,
                 e2e_cors_origins,
+                egress,
             )
             .await
         }

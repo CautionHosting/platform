@@ -46,9 +46,11 @@ echo "Setting up network loopback..."
 /bin/busybox ip link show lo
 
 echo "127.0.0.1   localhost" > /etc/hosts
+echo "nameserver 127.0.0.1" > /etc/resolv.conf
 
 echo "Network loopback configured"
 
+# {EGRESS
 echo "Setting up vsock network tunnel to parent..."
 /bin/socat TUN,tun-type=tap,iff-no-pi,iff-up,tun-name=eth0 VSOCK-CONNECT:3:3 &
 SOCAT_PID=$!
@@ -73,6 +75,7 @@ else
     echo "WARNING: Failed to create eth0 interface, running without internet access"
     echo "nameserver 127.0.0.1" > /etc/resolv.conf
 fi
+# }EGRESS
 
 echo "Loading NSM kernel module..."
 if [ -f /nsm.ko ]; then
