@@ -303,9 +303,17 @@ async fn main() -> Result<()> {
         .with_state(state.clone())
         .layer(cors.clone());
 
+    // Public, unauthenticated, root-level (must NOT be nested under /api): the
+    // platform's current enclave build inputs, proxied to the API's same path.
+    let well_known_proxy = Router::new()
+        .route("/.well-known/caution/build-inputs", get(proxy::proxy_handler))
+        .with_state(state.clone())
+        .layer(cors.clone());
+
     let app = app
         .merge(protected)
         .merge(webhook_proxy)
+        .merge(well_known_proxy)
         .nest("/api", public_api_proxy.merge(api_proxy))
         .merge(frontend_routes)
         .fallback_service(frontend_service)

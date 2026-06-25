@@ -440,20 +440,13 @@ impl EnclaveBuilder {
                     commit: enclave_source_result.commit.clone(),
                 }
             } else {
-                // Local path - resolve commit from git or ENCLAVEOS_COMMIT env var
                 let commit = enclave_source_result
                     .commit
                     .clone()
-                    .or_else(|| std::env::var("ENCLAVEOS_COMMIT").ok());
-                if let Some(commit) = commit {
-                    EnclaveSource::GitArchive {
-                        urls: vec![enclave_source_url(&commit)],
-                        commit: Some(commit),
-                    }
-                } else {
-                    EnclaveSource::Local {
-                        path: self.enclave_source.clone(),
-                    }
+                    .unwrap_or_else(crate::build::resolve_enclaveos_commit);
+                EnclaveSource::GitArchive {
+                    urls: vec![enclave_source_url(&commit)],
+                    commit: Some(commit),
                 }
             };
 
@@ -601,20 +594,13 @@ impl EnclaveBuilder {
                     commit: enclave_source_result.commit.clone(),
                 }
             } else {
-                // Local path - resolve commit from git or ENCLAVEOS_COMMIT env var
                 let commit = enclave_source_result
                     .commit
                     .clone()
-                    .or_else(|| std::env::var("ENCLAVEOS_COMMIT").ok());
-                if let Some(commit) = commit {
-                    EnclaveSource::GitArchive {
-                        urls: vec![enclave_source_url(&commit)],
-                        commit: Some(commit),
-                    }
-                } else {
-                    EnclaveSource::Local {
-                        path: self.enclave_source.clone(),
-                    }
+                    .unwrap_or_else(crate::build::resolve_enclaveos_commit);
+                EnclaveSource::GitArchive {
+                    urls: vec![enclave_source_url(&commit)],
+                    commit: Some(commit),
                 }
             };
 

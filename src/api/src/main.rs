@@ -309,6 +309,23 @@ async fn health_check() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
+// Uses the same resolver as the builder so this response can never drift from what is actually deployed.
+async fn build_inputs() -> impl IntoResponse {
+    let commits = enclave_builder::build::resolve_tool_commits();
+    Json(serde_json::json!({
+        "enclaveos_commit": commits.enclaveos_commit,
+        "bootproof_commit": commits.bootproof_commit,
+        "steve_commit": commits.steve_commit,
+        "locksmith_commit": commits.locksmith_commit,
+        "source_repos": {
+            "enclaveos": enclave_builder::build::ENCLAVEOS_REPO,
+            "bootproof": enclave_builder::build::BOOTPROOF_REPO,
+            "steve": enclave_builder::build::STEVE_REPO,
+            "locksmith": enclave_builder::build::LOCKSMITH_REPO,
+        },
+    }))
+}
+
 fn deployment_health_timeout_secs() -> u64 {
     std::env::var("DEPLOYMENT_HEALTH_TIMEOUT_SECS")
         .ok()
@@ -1517,6 +1534,43 @@ async fn resolve_containerfile_for_deploy(
     };
 
     Ok(containerfile.unwrap_or_else(|| "Dockerfile".to_string()))
+}
+
+#[cfg(test)]
+mod build_inputs_tests {
+    use super::build_inputs;
+    use axum::body::to_bytes;
+    use axum::response::IntoResponse;
+
+    #[tokio::test]
+    async fn build_inputs_returns_commits_and_repos() {
+        let resp = build_inputs().await.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        for key in [
+            "enclaveos_commit",
+            "bootproof_commit",
+            "steve_commit",
+            "locksmith_commit",
+        ] {
+            assert!(
+                json[key].as_str().is_some_and(|s| !s.is_empty()),
+                "missing/empty {key}"
+            );
+        }
+        // Repo links the footer builds its commit URLs from.
+        for tool in ["enclaveos", "bootproof", "steve", "locksmith"] {
+            assert!(
+                json["source_repos"][tool]
+                    .as_str()
+                    .is_some_and(|s| s.contains(tool)),
+                "missing source_repos.{tool}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3023,6 +3077,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let public_routes = Router::new()
         .route("/health", get(health_check))
+        .route("/.well-known/caution/build-inputs", get(build_inputs))
         .route("/onboarding/verify", get(onboarding::verify_email));
 
     // Background task: reap orphaned builder instances

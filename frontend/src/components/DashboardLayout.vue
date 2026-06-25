@@ -296,16 +296,34 @@
           >Contact</a
         >
       </div>
+      <div
+        v-if="buildInputs.length"
+        class="footer-build-inputs"
+        title="Tool commits the platform builds new enclaves with. Build inputs, not attested measurements — verify a running enclave with `caution verify`."
+      >
+        <span class="footer-build-inputs-label">Enclave build inputs:</span>
+        <template v-for="(input, i) in buildInputs" :key="input.name">
+          <a
+            :href="input.url"
+            target="_blank"
+            rel="noopener noreferrer"
+            :title="input.commit"
+            >{{ input.name }}@{{ input.short }}</a
+          ><span v-if="i < buildInputs.length - 1" class="footer-build-inputs-sep">·</span>
+        </template>
+      </div>
     </footer>
   </div>
 </template>
 
 <script>
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import {
   dismissDevelopmentBannerForSession,
   isDevelopmentBannerDismissed,
 } from "../utils/developmentBanner.js";
+
+const TOOL_ORDER = ["enclaveos", "bootproof", "steve", "locksmith"];
 
 export default {
   name: "DashboardLayout",
@@ -351,6 +369,30 @@ export default {
       return `© ${new Date().getFullYear()} Caution SEZC. All rights reserved.`;
     });
 
+    // Tool commits the platform currently builds new enclaves with. Sourced from
+    // the same resolver the builder uses, so the footer can't drift from reality.
+    const buildInputsData = ref(null);
+    const buildInputs = computed(() => {
+      const data = buildInputsData.value;
+      if (!data) return [];
+      return TOOL_ORDER.flatMap((name) => {
+        const commit = data[`${name}_commit`];
+        const repo = data.source_repos?.[name];
+        if (!commit || !repo) return [];
+        const base = repo.replace(/\.git$/, "");
+        return [{ name, commit, short: commit.slice(0, 7), url: `${base}/commit/${commit}` }];
+      });
+    });
+
+    onMounted(async () => {
+      try {
+        const res = await fetch("/.well-known/caution/build-inputs");
+        if (res.ok) buildInputsData.value = await res.json();
+      } catch {
+        // Footer detail is non-critical; stay silent if it can't be fetched.
+      }
+    });
+
     watch(
       () => props.activeTab,
       (activeTab) => {
@@ -359,6 +401,7 @@ export default {
     );
 
     return {
+      buildInputs,
       copyrightLabel,
       dismissDevelopmentBanner,
       isSecurityNavActive,
