@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-API_URL="${API_URL:-http://api:8080}"
+API_URL="${API_URL:-http://127.0.0.1:8080}"
 SUCCESS_COUNT=0
 FAILURE_COUNT=0
 FAILED_IDS=()
