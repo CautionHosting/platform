@@ -2101,7 +2101,7 @@ async fn deploy_logic(
     let ec_units = enclave_opt.and_then(|e| e.unit.as_ref());
 
     let run_command = ec_units
-        .and_then(|u| u.get("default"))
+        .and_then(|u| u.values().next())
         .map(|u| u.run_command_string())
         .transpose()
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;

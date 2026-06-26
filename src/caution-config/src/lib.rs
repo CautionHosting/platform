@@ -285,6 +285,9 @@ pub enum FromStrError {
     #[error("Multiple enclaves defined; only one enclave is supported")]
     MultipleEnclaves,
 
+    #[error("Multiple units defined; only one unit is supported")]
+    MultipleUnits,
+
     #[error("http_port {0} must also be present in ingress rules")]
     HttpPortNotInPorts(u16),
 
@@ -685,6 +688,10 @@ impl ConfigurationFile {
                 }
 
                 if let Some(ref units) = enclave.unit {
+                    if units.len() > 1 {
+                        return Err(FromStrError::MultipleUnits);
+                    }
+
                     for (unit_name, unit) in units {
                         if let Some(ref env) = unit.env {
                             for (key, expr) in env {
@@ -980,6 +987,26 @@ enclave "worker" {
 "#;
         let err = ConfigurationFile::from_str(hcl).unwrap_err();
         assert!(matches!(err, FromStrError::MultipleEnclaves));
+    }
+
+    #[test]
+    fn test_from_str_rejects_multiple_units() {
+        let hcl = r#"
+enclave "main" {
+  unit "web" {
+    command = "/app/web"
+  }
+  unit "worker" {
+    command = "/app/worker"
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let err = ConfigurationFile::from_str(hcl).unwrap_err();
+        assert!(matches!(err, FromStrError::MultipleUnits));
     }
 
     #[test]

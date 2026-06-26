@@ -4335,7 +4335,7 @@ enclave "default" {{
 
         let run_command = default_enclave
             .and_then(|e| e.unit.as_ref())
-            .and_then(|u| u.get("default"))
+            .and_then(|u| u.values().next())
             .map(|u| u.run_command_string())
             .transpose()?;
 
@@ -4668,7 +4668,7 @@ enclave "default" {{
                     .and_then(|b| b.binary.clone());
                 let run_cmd = default_enclave
                     .and_then(|e| e.unit.as_ref())
-                    .and_then(|u| u.get("default"))
+                    .and_then(|u| u.values().next())
                     .map(|u| u.run_command_string())
                     .transpose()?;
                 let source_urls = default_enclave

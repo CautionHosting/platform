@@ -10,8 +10,8 @@
 #
 # Expected env values (must match caution.hcl fixture):
 #   TEST_ENV_FOO  = bar
-#   TEST_ENV_HELLO = world
-#   TEST_ENV_PARITY = check
+#   TEST_ENV_HELLO = $(world)          (literal HCL string, not shell-expanded)
+#   TEST_ENV_PARITY = `"ch\eck"`       (literal HCL string after \"->" and \\->\ escapes)
 
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
 API_URL="${API_URL:-http://127.0.0.1:8080}"
@@ -260,32 +260,38 @@ ENV_RESPONSE=$(curl -sf --max-time 30 "http://${APP_IP}:8080/env" 2>&1) || \
 
 log "  Response: $ENV_RESPONSE"
 
-# Verify expected env values
+# Verify expected env values — these are literal HCL-parsed strings,
+# not shell-expanded. Store in variables to avoid shell reinterpretation
+# of backticks and dollar-paren in the test logic.
 TEST_ENV_FOO=$(echo "$ENV_RESPONSE" | jq -r '.TEST_ENV_FOO // empty')
 TEST_ENV_HELLO=$(echo "$ENV_RESPONSE" | jq -r '.TEST_ENV_HELLO // empty')
 TEST_ENV_PARITY=$(echo "$ENV_RESPONSE" | jq -r '.TEST_ENV_PARITY // empty')
 
+EXPECTED_FOO='bar'
+EXPECTED_HELLO='$(world)'
+EXPECTED_PARITY='`"ch\eck"`'
+
 FAILED_ASSERTS=0
 
-if [ "$TEST_ENV_FOO" != 'bar' ]; then
-    echo "[FAIL] Expected TEST_ENV_FOO=bar, got '$TEST_ENV_FOO'"
+if [ "$TEST_ENV_FOO" != "$EXPECTED_FOO" ]; then
+    echo "[FAIL] Expected TEST_ENV_FOO=$EXPECTED_FOO, got '$TEST_ENV_FOO'"
     FAILED_ASSERTS=$((FAILED_ASSERTS + 1))
 else
-    echo "[PASS] TEST_ENV_FOO=bar"
+    echo "[PASS] TEST_ENV_FOO=$EXPECTED_FOO"
 fi
 
-if [ "$TEST_ENV_HELLO" != 'world' ]; then
-    echo "[FAIL] Expected TEST_ENV_HELLO=world, got '$TEST_ENV_HELLO'"
+if [ "$TEST_ENV_HELLO" != "$EXPECTED_HELLO" ]; then
+    echo "[FAIL] Expected TEST_ENV_HELLO=$EXPECTED_HELLO, got '$TEST_ENV_HELLO'"
     FAILED_ASSERTS=$((FAILED_ASSERTS + 1))
 else
-    echo "[PASS] TEST_ENV_HELLO=world"
+    echo "[PASS] TEST_ENV_HELLO=$EXPECTED_HELLO"
 fi
 
-if [ "$TEST_ENV_PARITY" != 'check' ]; then
-    echo "[FAIL] Expected TEST_ENV_PARITY=check, got '$TEST_ENV_PARITY'"
+if [ "$TEST_ENV_PARITY" != "$EXPECTED_PARITY" ]; then
+    echo "[FAIL] Expected TEST_ENV_PARITY=$EXPECTED_PARITY, got '$TEST_ENV_PARITY'"
     FAILED_ASSERTS=$((FAILED_ASSERTS + 1))
 else
-    echo "[PASS] TEST_ENV_PARITY=check"
+    echo "[PASS] TEST_ENV_PARITY=$EXPECTED_PARITY"
 fi
 
 if [ $FAILED_ASSERTS -gt 0 ]; then
