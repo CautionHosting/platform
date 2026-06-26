@@ -36,10 +36,11 @@ tempfile = { workspace = true }
 # Gateway-specific dependencies
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }
 webauthn-rs-proto = "0.5"
-russh = "0.44"
-russh-keys = "0.44"
+russh = "0.61"
 thiserror = { workspace = true }
 dterror = "0.1.0"
+bytes = "1"
+rand010 = { package = "rand", version = "0.10", features = ["thread_rng"] }
 futures = "0.3"
 cookie = "0.18"
 axum-extra = { version = "0.10", features = ["cookie"] }

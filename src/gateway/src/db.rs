@@ -869,3 +869,44 @@ pub async fn user_requires_pin(pool: &PgPool, user_id: Uuid) -> Result<bool, sql
 
     Ok(requires_pin.unwrap_or(false))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::generate_ssh_fingerprint;
+
+    // Golden vector cross-checked with `ssh-keygen -lf`:
+    //   ssh-keygen -t ed25519 ...  ->  SHA256:vO7cKxkbEOoI4Qix7nsJMasdWsJHDFVfgXsKQrA0DhM
+    // Auth looks keys up by this fingerprint, so the value must stay stable
+    // across SSH-library upgrades or every already-registered key is locked out.
+    const ED25519_PUBKEY: &str = "ssh-ed25519 \
+        AAAAC3NzaC1lZDI1NTE5AAAAIMBnPZP2DQ1v1MC9AQKLsNo0M649c6MVmz9O+P9UiBrT \
+        test@example.com";
+    const EXPECTED_FINGERPRINT: &str = "vO7cKxkbEOoI4Qix7nsJMasdWsJHDFVfgXsKQrA0DhM";
+
+    #[test]
+    fn fingerprint_matches_openssh_for_known_key() {
+        let fp = generate_ssh_fingerprint(ED25519_PUBKEY).unwrap();
+        assert_eq!(fp, EXPECTED_FINGERPRINT);
+    }
+
+    #[test]
+    fn fingerprint_ignores_key_type_and_comment() {
+        // Only the base64 blob is hashed, so a differing type label/comment
+        // must not change the fingerprint.
+        let blob = "AAAAC3NzaC1lZDI1NTE5AAAAIMBnPZP2DQ1v1MC9AQKLsNo0M649c6MVmz9O+P9UiBrT";
+        assert_eq!(
+            generate_ssh_fingerprint(&format!("ssh-ed25519 {blob} alice@host")).unwrap(),
+            generate_ssh_fingerprint(&format!("ssh-ed25519 {blob} bob@other")).unwrap(),
+        );
+        // Bare blob (no type prefix) hashes identically too.
+        assert_eq!(
+            generate_ssh_fingerprint(blob).unwrap(),
+            EXPECTED_FINGERPRINT,
+        );
+    }
+
+    #[test]
+    fn fingerprint_rejects_invalid_base64() {
+        assert!(generate_ssh_fingerprint("ssh-ed25519 not_base64!!!").is_err());
+    }
+}
