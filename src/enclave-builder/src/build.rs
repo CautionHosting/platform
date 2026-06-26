@@ -660,13 +660,11 @@ mod tests {
         file
     }
 
-    // Env-var mutations are process-global; serialize with a mutex so parallel
-    // tests in this binary don't see each other's temporary values.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn test_tool_commit_resolution() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        // Env-var mutations are process-global; serialize on the crate-wide lock
+        // so parallel tests in this binary don't see each other's temp values.
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for var in [
             "ENCLAVEOS_COMMIT",
             "BOOTPROOF_COMMIT",
