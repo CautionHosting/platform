@@ -246,7 +246,7 @@ log "Fetching deployed app URL..."
 
 # Get public IP from the API
 APP_INFO=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps get "$RESOURCE_ID" 2>&1 || true)
-APP_IP=$(echo "$APP_INFO" | grep -oP 'public_ip["\s:]+\K[0-9.]+' || true)
+APP_IP=$(echo "$APP_INFO" | grep -oP 'Public IP:\s*\K[0-9.]+' || true)
 
 if [ -z "$APP_IP" ]; then
     step_fail "Could not determine app IP"
