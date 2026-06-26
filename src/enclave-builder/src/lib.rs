@@ -94,6 +94,40 @@ impl CacheType {
 }
 
 impl EnclaveBuilder {
+    /// Classify `self.enclave_source` (archive URL, git URL, or local path) into
+    /// the matching `EnclaveSource`. `resolved_commit` is the commit already
+    /// resolved from the source (git rev-parse / ref lookup), if any. For a
+    /// local path with no resolved commit, fall back to ENCLAVEOS_COMMIT, and
+    /// with neither build the on-disk files directly.
+    fn classify_enclave_source(&self, resolved_commit: Option<String>) -> EnclaveSource {
+        if self.enclave_source.ends_with(".tar.gz") {
+            EnclaveSource::GitArchive {
+                urls: vec![self.enclave_source.clone()],
+                commit: resolved_commit,
+            }
+        } else if self.enclave_source.starts_with("http")
+            || self.enclave_source.starts_with("git@")
+        {
+            EnclaveSource::GitRepository {
+                url: self.enclave_source.clone(),
+                branch: self.enclave_version.clone(),
+                commit: resolved_commit,
+            }
+        } else {
+            let commit = resolved_commit.or_else(|| std::env::var("ENCLAVEOS_COMMIT").ok());
+            if let Some(commit) = commit {
+                EnclaveSource::GitArchive {
+                    urls: vec![enclave_source_url(&commit)],
+                    commit: Some(commit),
+                }
+            } else {
+                EnclaveSource::Local {
+                    path: self.enclave_source.clone(),
+                }
+            }
+        }
+    }
+
     pub fn new_with_cache(
         enclave_source: impl Into<String>,
         enclave_version: impl Into<String>,
@@ -426,29 +460,8 @@ impl EnclaveBuilder {
             tracing::info!("Using external manifest for reproducible build");
             ext_manifest
         } else {
-            let enclave_src = if self.enclave_source.ends_with(".tar.gz") {
-                EnclaveSource::GitArchive {
-                    urls: vec![self.enclave_source.clone()],
-                    commit: enclave_source_result.commit.clone(),
-                }
-            } else if self.enclave_source.starts_with("http")
-                || self.enclave_source.starts_with("git@")
-            {
-                EnclaveSource::GitRepository {
-                    url: self.enclave_source.clone(),
-                    branch: self.enclave_version.clone(),
-                    commit: enclave_source_result.commit.clone(),
-                }
-            } else {
-                let commit = enclave_source_result
-                    .commit
-                    .clone()
-                    .unwrap_or_else(crate::build::resolve_enclaveos_commit);
-                EnclaveSource::GitArchive {
-                    urls: vec![enclave_source_url(&commit)],
-                    commit: Some(commit),
-                }
-            };
+            let enclave_src =
+                self.classify_enclave_source(enclave_source_result.commit.clone());
 
             let app_src = match (app_source_urls, app_commit.clone()) {
                 (Some(urls), Some(commit)) if !urls.is_empty() => {
@@ -580,29 +593,8 @@ impl EnclaveBuilder {
             tracing::info!("Using external manifest for reproducible build");
             ext_manifest
         } else {
-            let enclave_src = if self.enclave_source.ends_with(".tar.gz") {
-                EnclaveSource::GitArchive {
-                    urls: vec![self.enclave_source.clone()],
-                    commit: enclave_source_result.commit.clone(),
-                }
-            } else if self.enclave_source.starts_with("http")
-                || self.enclave_source.starts_with("git@")
-            {
-                EnclaveSource::GitRepository {
-                    url: self.enclave_source.clone(),
-                    branch: self.enclave_version.clone(),
-                    commit: enclave_source_result.commit.clone(),
-                }
-            } else {
-                let commit = enclave_source_result
-                    .commit
-                    .clone()
-                    .unwrap_or_else(crate::build::resolve_enclaveos_commit);
-                EnclaveSource::GitArchive {
-                    urls: vec![enclave_source_url(&commit)],
-                    commit: Some(commit),
-                }
-            };
+            let enclave_src =
+                self.classify_enclave_source(enclave_source_result.commit.clone());
 
             let app_src = match (app_source_urls, app_commit.clone()) {
                 (Some(urls), Some(commit)) if !urls.is_empty() => {
