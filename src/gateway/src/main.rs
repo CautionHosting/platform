@@ -438,10 +438,10 @@ fn load_or_generate_host_key(path: &str) -> Result<PrivateKey> {
     let key_path = Path::new(path);
 
     if key_path.exists() {
-        let key_data = fs::read(key_path)
+        let key_str = fs::read_to_string(key_path)
             .with_context(|| format!("Failed to read SSH host key from {}", path))?;
 
-        let key = PrivateKey::from_openssh(&key_data)
+        let key = russh::keys::decode_secret_key(&key_str, None)
             .context("Failed to decode SSH host key")?;
 
         tracing::debug!("Loaded SSH host key");
