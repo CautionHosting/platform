@@ -311,19 +311,7 @@ async fn health_check() -> impl IntoResponse {
 
 // Uses the same resolver as the builder so this response can never drift from what is actually deployed.
 async fn build_inputs() -> impl IntoResponse {
-    let commits = enclave_builder::build::resolve_tool_commits();
-    Json(serde_json::json!({
-        "enclaveos_commit": commits.enclaveos_commit,
-        "bootproof_commit": commits.bootproof_commit,
-        "steve_commit": commits.steve_commit,
-        "locksmith_commit": commits.locksmith_commit,
-        "source_repos": {
-            "enclaveos": enclave_builder::build::ENCLAVEOS_REPO,
-            "bootproof": enclave_builder::build::BOOTPROOF_REPO,
-            "steve": enclave_builder::build::STEVE_REPO,
-            "locksmith": enclave_builder::build::LOCKSMITH_REPO,
-        },
-    }))
+    Json(enclave_builder::build::resolve_tool_commits())
 }
 
 fn deployment_health_timeout_secs() -> u64 {
@@ -1550,24 +1538,18 @@ mod build_inputs_tests {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
-        for key in [
-            "enclaveos_commit",
-            "bootproof_commit",
-            "steve_commit",
-            "locksmith_commit",
-        ] {
-            assert!(
-                json[key].as_str().is_some_and(|s| !s.is_empty()),
-                "missing/empty {key}"
-            );
-        }
-        // Repo links the footer builds its commit URLs from.
+        // Each tool carries its commit paired with the repo the footer builds
+        // its commit URLs from.
         for tool in ["enclaveos", "bootproof", "steve", "locksmith"] {
             assert!(
-                json["source_repos"][tool]
+                json[tool]["commit"].as_str().is_some_and(|s| !s.is_empty()),
+                "missing/empty {tool}.commit"
+            );
+            assert!(
+                json[tool]["repo"]
                     .as_str()
                     .is_some_and(|s| s.contains(tool)),
-                "missing source_repos.{tool}"
+                "missing {tool}.repo"
             );
         }
     }

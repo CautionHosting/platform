@@ -48,20 +48,40 @@ pub fn resolve_locksmith_commit() -> String {
     resolve_commit("LOCKSMITH_COMMIT", DEFAULT_LOCKSMITH_COMMIT)
 }
 
+/// A build-input tool paired with the repo it's cloned from, so the commit and
+/// its source URL can never be matched up wrong downstream.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ToolSource {
+    pub commit: String,
+    pub repo: &'static str,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ToolCommits {
-    pub enclaveos_commit: String,
-    pub bootproof_commit: String,
-    pub steve_commit: String,
-    pub locksmith_commit: String,
+    pub enclaveos: ToolSource,
+    pub bootproof: ToolSource,
+    pub steve: ToolSource,
+    pub locksmith: ToolSource,
 }
 
 pub fn resolve_tool_commits() -> ToolCommits {
     ToolCommits {
-        enclaveos_commit: resolve_enclaveos_commit(),
-        bootproof_commit: resolve_bootproof_commit(),
-        steve_commit: resolve_steve_commit(),
-        locksmith_commit: resolve_locksmith_commit(),
+        enclaveos: ToolSource {
+            commit: resolve_enclaveos_commit(),
+            repo: ENCLAVEOS_REPO,
+        },
+        bootproof: ToolSource {
+            commit: resolve_bootproof_commit(),
+            repo: BOOTPROOF_REPO,
+        },
+        steve: ToolSource {
+            commit: resolve_steve_commit(),
+            repo: STEVE_REPO,
+        },
+        locksmith: ToolSource {
+            commit: resolve_locksmith_commit(),
+            repo: LOCKSMITH_REPO,
+        },
     }
 }
 
@@ -658,10 +678,13 @@ mod tests {
 
         // No env override -> pinned defaults, surfaced via the shared bundle.
         let defaults = resolve_tool_commits();
-        assert_eq!(defaults.enclaveos_commit, DEFAULT_ENCLAVEOS_COMMIT);
-        assert_eq!(defaults.bootproof_commit, DEFAULT_BOOTPROOF_COMMIT);
-        assert_eq!(defaults.steve_commit, DEFAULT_STEVE_COMMIT);
-        assert_eq!(defaults.locksmith_commit, DEFAULT_LOCKSMITH_COMMIT);
+        assert_eq!(defaults.enclaveos.commit, DEFAULT_ENCLAVEOS_COMMIT);
+        assert_eq!(defaults.bootproof.commit, DEFAULT_BOOTPROOF_COMMIT);
+        assert_eq!(defaults.steve.commit, DEFAULT_STEVE_COMMIT);
+        assert_eq!(defaults.locksmith.commit, DEFAULT_LOCKSMITH_COMMIT);
+        // Repo URLs are paired with their commit at the source.
+        assert_eq!(defaults.enclaveos.repo, ENCLAVEOS_REPO);
+        assert_eq!(defaults.locksmith.repo, LOCKSMITH_REPO);
 
         // Env override wins (this is how the platform pins prod commits).
         std::env::set_var("BOOTPROOF_COMMIT", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
@@ -670,7 +693,7 @@ mod tests {
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
         );
         assert_eq!(
-            resolve_tool_commits().bootproof_commit,
+            resolve_tool_commits().bootproof.commit,
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
         );
         std::env::remove_var("BOOTPROOF_COMMIT");

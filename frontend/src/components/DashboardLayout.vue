@@ -376,8 +376,8 @@ export default {
       const data = buildInputsData.value;
       if (!data) return [];
       return TOOL_ORDER.flatMap((name) => {
-        const commit = data[`${name}_commit`];
-        const repo = data.source_repos?.[name];
+        const commit = data[name]?.commit;
+        const repo = data[name]?.repo;
         if (!commit || !repo) return [];
         const base = repo.replace(/\.git$/, "");
         return [{ name, commit, short: commit.slice(0, 7), url: `${base}/commit/${commit}` }];
