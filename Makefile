@@ -773,6 +773,9 @@ test-e2e:
 	if [ $$status -eq 0 ]; then \
 		CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_platform_ports.sh || status=$$?; \
 	fi; \
+	if [ $$status -eq 0 ]; then \
+		CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_env_parity.sh || status=$$?; \
+	fi; \
 	$(MAKE) down-test; \
 	exit $$status
 

@@ -1,0 +1,16 @@
+FROM stagex/pallet-rust@sha256:9c38bf1066dd9ad1b6a6b584974dd798c2bf798985bf82e58024fbe0515592ca as builder
+
+WORKDIR /app/env-parity-test
+
+COPY Cargo.toml .
+COPY src/ src/
+
+RUN RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86_64-unknown-linux-musl
+
+FROM scratch
+
+COPY --from=builder /app/env-parity-test/target/x86_64-unknown-linux-musl/release/env-parity-test /usr/local/bin/env-parity-test
+
+EXPOSE 8080
+
+CMD ["env-parity-test"]
