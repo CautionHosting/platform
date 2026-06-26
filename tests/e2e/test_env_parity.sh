@@ -13,8 +13,6 @@
 #   TEST_ENV_HELLO = world
 #   TEST_ENV_PARITY = check
 
-set -euo pipefail
-
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
 API_URL="${API_URL:-http://127.0.0.1:8080}"
 CAUTION_BIN="${CAUTION_BIN:-caution}"
@@ -33,6 +31,16 @@ STEP_RESULTS=()
 mkdir -p "$LOG_DIR"
 
 exec > >(tee -a "$LOG_FILE") 2>&1
+
+# Prerequisite checks
+for cmd in curl jq git ssh-keygen ssh-agent ssh-add; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "[FATAL] Required command not found: $cmd"
+        exit 1
+    fi
+done
+
+set -euo pipefail
 
 cleanup() {
     echo ""
@@ -131,19 +139,22 @@ step_pass "E2E login"
 # ── Step 3: Add SSH Key ──────────────────────────────────────────────
 STEP_NUM=3
 log "Generating SSH key pair..."
-ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "e2e-test-env-parity" >/dev/null 2>&1
+ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "e2e-test-env-parity" >/dev/null 2>&1 || \
+    step_fail "SSH key generation failed"
 
-SSH_PUB_KEY=$(cat "$SSH_KEY_PATH.pub")
+SSH_PUB_KEY=$(cat "$SSH_KEY_PATH.pub") || \
+    step_fail "Failed to read SSH public key"
 
 curl -sf -X POST "$GATEWAY_URL/api/ssh-keys" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $SESSION_ID" \
-    -d "$(jq -n --arg key "$SSH_PUB_KEY" '{key: $key}')" >/dev/null
+    -d "$(jq -n --arg key "$SSH_PUB_KEY" '{key: $key}')" >/dev/null || \
+    step_fail "Failed to register SSH key with gateway"
 step_pass "SSH key added"
 
 # Start ssh-agent and add key
-eval "$(ssh-agent -s)" >/dev/null
-ssh-add "$SSH_KEY_PATH" >/dev/null 2>&1
+eval "$(ssh-agent -s)" >/dev/null || step_fail "Failed to start ssh-agent"
+ssh-add "$SSH_KEY_PATH" >/dev/null 2>&1 || step_warn "ssh-add failed (non-fatal)"
 step_pass "SSH agent started and key loaded"
 
 # ── Step 4: Setup fixture repository ─────────────────────────────────
