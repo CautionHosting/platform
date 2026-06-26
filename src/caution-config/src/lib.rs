@@ -111,6 +111,111 @@ pub struct UnitConfig {
     pub env: Option<BTreeMap<String, Expression>>,
 }
 
+/// Returns true if `key` is a safe POSIX shell environment variable name.
+///
+/// Keys are emitted into the run script unquoted (`export KEY=...`), so an
+/// unvalidated key like `X; rm -rf /` would be a shell-injection vector. Values
+/// are always shlex-quoted, but keys cannot be, so they must be validated.
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Returns true if `expr` is an `env::vault(...)` function call.
+///
+/// Vault calls are the only function-call env values the platform supports:
+/// they are resolved inside the enclave by locksmith. Any other function call
+/// (e.g. `upper("x")`) is unsupported and would be silently dropped at deploy,
+/// so it is rejected at validation instead.
+fn is_vault_funccall(expr: &Expression) -> bool {
+    matches!(expr, Expression::FuncCall(fc)
+        if fc.name.namespace.iter().any(|n| n.as_str() == "env")
+        && fc.name.name.as_str() == "vault")
+}
+
+impl UnitConfig {
+    /// Build the shell command string the enclave runs for this unit.
+    ///
+    /// The whole result is executed via `sh -c` by the deploy path, so:
+    /// - `command` + `args` are re-joined with shlex quoting (automatic,
+    ///   injection-safe escaping of every token);
+    /// - a leading run of `NAME=value` tokens is treated as inline shell
+    ///   environment assignments (e.g. `FOO=1 /app/server`) and emitted as
+    ///   `NAME=<quoted value>` rather than shlex-quoting the whole token.
+    ///   Quoting the whole `FOO=1` token yields `'FOO=1'`, which the shell
+    ///   runs as a command literally named `FOO=1` instead of an assignment;
+    ///   the value is still shlex-quoted and the key validated, so this is
+    ///   injection-safe;
+    /// - literal `env` string values are emitted as `export KEY=<quoted>` lines
+    ///   ahead of the command. Keys are validated (they cannot be quoted);
+    ///   values are shlex-quoted.
+    ///
+    /// `env::vault(...)` (and any other function-call) entries are skipped here:
+    /// they are resolved inside the enclave by locksmith-oneshot, not exported
+    /// from the build host.
+    pub fn run_command_string(&self) -> Result<String, FromStrError> {
+        let mut out = String::new();
+
+        if let Some(env) = &self.env {
+            for (key, expr) in env {
+                let value = match expr {
+                    Expression::String(s) => s,
+                    // Function-call values (only env::vault(...) survives
+                    // validation) are injected at runtime by locksmith, not
+                    // exported here.
+                    _ => continue,
+                };
+                if !is_valid_env_key(key) {
+                    return Err(FromStrError::InvalidEnvKey(key.clone()));
+                }
+                let quoted =
+                    shlex::try_quote(value).map_err(|_| FromStrError::UnquotableCommand)?;
+                out.push_str("export ");
+                out.push_str(key);
+                out.push('=');
+                out.push_str(&quoted);
+                out.push('\n');
+            }
+        }
+
+        let mut argv = std::iter::once(self.command.as_str())
+            .chain(self.args.iter().map(String::as_str))
+            .peekable();
+
+        // Preserve a leading run of `NAME=value` inline env assignments
+        // verbatim (with the value shlex-quoted). Stop at the first token that
+        // is not a valid assignment, matching shell semantics where such
+        // prefixes must precede the command.
+        let mut parts: Vec<String> = Vec::new();
+        while let Some(token) = argv.peek() {
+            let Some((name, value)) = token.split_once('=') else {
+                break;
+            };
+            if !is_valid_env_key(name) {
+                break;
+            }
+            let quoted =
+                shlex::try_quote(value).map_err(|_| FromStrError::UnquotableCommand)?;
+            parts.push(format!("{name}={quoted}"));
+            argv.next();
+        }
+
+        let rest: Vec<&str> = argv.collect();
+        if rest.is_empty() {
+            return Err(FromStrError::NoCommand);
+        }
+        let joined = shlex::try_join(rest).map_err(|_| FromStrError::UnquotableCommand)?;
+        parts.push(joined);
+        out.push_str(&parts.join(" "));
+
+        Ok(out)
+    }
+}
+
 /// The `network { }` block inside an enclave definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NetworkConfig {
@@ -184,9 +289,20 @@ pub enum FromStrError {
     HttpPortNotInPorts(u16),
 
     #[error(
-        "Invalid env expression for key '{0}'; only string literals and function calls are allowed"
+        "Invalid env expression for key '{0}'; only string literals and env::vault(...) are allowed"
     )]
     InvalidEnvExpression(String),
+
+    #[error(
+        "Invalid env key '{0}'; keys must match [A-Za-z_][A-Za-z0-9_]* to be safely exported"
+    )]
+    InvalidEnvKey(String),
+
+    #[error("Command contains characters that cannot be shell-quoted (e.g. NUL byte)")]
+    UnquotableCommand,
+
+    #[error("Unit has no executable command (only inline env assignments found)")]
+    NoCommand,
 
     #[error("Failed to parse HCL")]
     HclParse(#[from] hcl::Error),
@@ -572,14 +688,21 @@ impl ConfigurationFile {
                     for (unit_name, unit) in units {
                         if let Some(ref env) = unit.env {
                             for (key, expr) in env {
-                                match expr {
-                                    Expression::String(_) | Expression::FuncCall(_) => continue,
-                                    _ => {
-                                        return Err(FromStrError::InvalidEnvExpression(format!(
-                                            "{}.{}",
-                                            unit_name, key
-                                        )));
-                                    }
+                                let allowed = matches!(expr, Expression::String(_))
+                                    || is_vault_funccall(expr);
+                                if !allowed {
+                                    return Err(FromStrError::InvalidEnvExpression(format!(
+                                        "{}.{}",
+                                        unit_name, key
+                                    )));
+                                }
+                                if matches!(expr, Expression::String(_))
+                                    && !is_valid_env_key(key)
+                                {
+                                    return Err(FromStrError::InvalidEnvKey(format!(
+                                        "{}.{}",
+                                        unit_name, key
+                                    )));
                                 }
                             }
                         }
@@ -599,11 +722,7 @@ impl ConfigurationFile {
                 enclave.unit.as_ref().is_some_and(|units| {
                     units.values().any(|unit| {
                         unit.env.as_ref().is_some_and(|env| {
-                            env.values().any(|expr| {
-                                matches!(expr, Expression::FuncCall(fc)
-                                    if fc.name.namespace.iter().any(|n| n.as_str() == "env")
-                                    && fc.name.name.as_str() == "vault")
-                            })
+                            env.values().any(is_vault_funccall)
                         })
                     })
                 })
@@ -1054,7 +1173,10 @@ enclave "main" {
     }
 
     #[test]
-    fn test_has_vault_env_false_when_other_funccall() {
+    fn test_from_str_rejects_non_vault_funccall_env() {
+        // Only env::vault(...) is a supported function-call env value; any other
+        // call (e.g. upper(...)) would be silently dropped at deploy, so it must
+        // be rejected at parse time.
         let hcl = r#"
 enclave "main" {
   unit "default" {
@@ -1069,8 +1191,8 @@ enclave "main" {
   }
 }
 "#;
-        let config = ConfigurationFile::from_str(hcl).unwrap();
-        assert!(!config.has_vault_env());
+        let err = ConfigurationFile::from_str(hcl).unwrap_err();
+        assert!(matches!(err, FromStrError::InvalidEnvExpression(_)));
     }
 
     #[test]
@@ -1764,6 +1886,266 @@ platform: aws
 ";
         let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
         assert!(matches!(err, FromProcfileError::ManagedOnPremMissingRegion));
+    }
+
+    fn default_unit(hcl: &str) -> UnitConfig {
+        let config = ConfigurationFile::from_str(hcl).unwrap();
+        config
+            .enclave
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .unit
+            .as_ref()
+            .unwrap()
+            .get("default")
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn run_command_string_joins_command_and_args() {
+        let unit = default_unit(
+            r#"
+enclave "main" {
+  unit "default" {
+    command = "/app/server"
+    args = ["--port", "8080"]
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#,
+        );
+        assert_eq!(unit.run_command_string().unwrap(), "/app/server --port 8080");
+    }
+
+    #[test]
+    fn run_command_string_quotes_args_with_spaces() {
+        let unit = default_unit(
+            r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    args = ["--msg", "hello world", "--inject", "$(rm -rf /)"]
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#,
+        );
+        // Spaces and shell metacharacters are quoted, not interpreted.
+        assert_eq!(
+            unit.run_command_string().unwrap(),
+            "/app --msg 'hello world' --inject '$(rm -rf /)'"
+        );
+    }
+
+    #[test]
+    fn run_command_string_exports_literal_env() {
+        let unit = default_unit(
+            r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    env {
+      FOO = "bar"
+      WITH_SPACE = "a b"
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#,
+        );
+        // BTreeMap orders keys; values are shlex-quoted.
+        assert_eq!(
+            unit.run_command_string().unwrap(),
+            "export FOO=bar\nexport WITH_SPACE='a b'\n/app"
+        );
+    }
+
+    #[test]
+    fn run_command_string_quotes_malicious_env_value() {
+        // A shell-metacharacter-laden value must be quoted, not interpreted.
+        let unit = default_unit(
+            r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    env {
+      EVIL = "$(rm -rf /); `id`"
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#,
+        );
+        assert_eq!(
+            unit.run_command_string().unwrap(),
+            "export EVIL='$(rm -rf /); `id`'\n/app"
+        );
+    }
+
+    #[test]
+    fn run_command_string_preserves_inline_env_prefix() {
+        // A Procfile `run:` line like `FOO=1 /app/server` parses into
+        // command = "FOO=1", args = ["/app/server", ...]. The assignment must
+        // be emitted verbatim (not as '\''FOO=1'\''), so the shell treats it as
+        // an env assignment rather than a command literally named "FOO=1".
+        let unit = UnitConfig {
+            command: "PQ_SUBKEYS_AUTH=30".to_string(),
+            args: vec![
+                "/app/pq-ceremony".to_string(),
+                "--bind".to_string(),
+                "0.0.0.0:8080".to_string(),
+            ],
+            env: None,
+        };
+        assert_eq!(
+            unit.run_command_string().unwrap(),
+            "PQ_SUBKEYS_AUTH=30 /app/pq-ceremony --bind 0.0.0.0:8080"
+        );
+    }
+
+    #[test]
+    fn run_command_string_quotes_malicious_inline_env_value() {
+        // The assignment value is still shlex-quoted, so shell metacharacters
+        // in an inline env prefix cannot inject.
+        let unit = UnitConfig {
+            command: "EVIL=$(rm -rf /)".to_string(),
+            args: vec!["/app".to_string()],
+            env: None,
+        };
+        assert_eq!(
+            unit.run_command_string().unwrap(),
+            "EVIL='$(rm -rf /)' /app"
+        );
+    }
+
+    #[test]
+    fn run_command_string_does_not_treat_command_with_equals_as_assignment() {
+        // Once the command is reached, assignment-prefix scanning stops, so an
+        // `=`-bearing argument after it (e.g. `--opt=a b`) is shlex-quoted as a
+        // whole token rather than split into a `NAME=value` assignment.
+        let unit = UnitConfig {
+            command: "/app/server".to_string(),
+            args: vec!["--opt=a b".to_string()],
+            env: None,
+        };
+        assert_eq!(
+            unit.run_command_string().unwrap(),
+            "/app/server '--opt=a b'"
+        );
+    }
+
+    #[test]
+    fn run_command_string_rejects_nul_byte() {
+        // shlex cannot quote a NUL byte; it must surface as an error, not panic.
+        let unit = UnitConfig {
+            command: "/app\0".to_string(),
+            args: Vec::new(),
+            env: None,
+        };
+        let err = unit.run_command_string().unwrap_err();
+        assert!(matches!(err, FromStrError::UnquotableCommand));
+    }
+
+    #[test]
+    fn run_command_string_skips_vault_env() {
+        let unit = default_unit(
+            r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    env {
+      API_KEY = env::vault("API_KEY")
+      PLAIN = "x"
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#,
+        );
+        // Vault entry is resolved by locksmith at runtime, not exported here.
+        assert_eq!(
+            unit.run_command_string().unwrap(),
+            "export PLAIN=x\n/app"
+        );
+    }
+
+    #[test]
+    fn run_command_string_rejects_malicious_env_key() {
+        // A key cannot be shell-quoted, so an injection-shaped key must be
+        // rejected rather than emitted into the run script.
+        let unit = UnitConfig {
+            command: "/app".to_string(),
+            args: Vec::new(),
+            env: Some(BTreeMap::from([(
+                "X; rm -rf /".to_string(),
+                Expression::from("1"),
+            )])),
+        };
+        let err = unit.run_command_string().unwrap_err();
+        assert!(matches!(err, FromStrError::InvalidEnvKey(_)));
+    }
+
+    #[test]
+    fn run_command_string_errors_when_no_executable() {
+        // If every token is a NAME=value assignment, there is no command to run.
+        let unit = UnitConfig {
+            command: "FOO=1".to_string(),
+            args: Vec::new(),
+            env: None,
+        };
+        let err = unit.run_command_string().unwrap_err();
+        assert!(matches!(err, FromStrError::NoCommand));
+    }
+
+    #[test]
+    fn from_str_rejects_invalid_env_key_at_parse_time() {
+        // Quoted HCL map keys can contain hyphens and other chars that are
+        // invalid POSIX env var names. The validator must reject these at parse
+        // time, not silently accept and fail at deploy.
+        let hcl = r#"
+enclave "main" {
+  unit "default" {
+    command = "/app"
+    env = {
+      "MY-KEY" = "val"
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let err = ConfigurationFile::from_str(hcl).unwrap_err();
+        assert!(matches!(err, FromStrError::InvalidEnvKey(_)));
+    }
+
+    #[test]
+    fn is_valid_env_key_rules() {
+        assert!(is_valid_env_key("FOO"));
+        assert!(is_valid_env_key("_x9"));
+        assert!(!is_valid_env_key(""));
+        assert!(!is_valid_env_key("9FOO"));
+        assert!(!is_valid_env_key("FO O"));
+        assert!(!is_valid_env_key("FOO;BAR"));
     }
 
     #[test]
