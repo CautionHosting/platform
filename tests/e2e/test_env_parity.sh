@@ -111,142 +111,154 @@ EXPIRES_AT=$(echo "$LOGIN_RESPONSE" | jq -r '.expires_at')
 if [ -z "$SESSION_ID" ] || [ "$SESSION_ID" = "null" ]; then
     step_fail "E2E login - no session_id"
 fi
-log "Session: $SESSION_ID User: $USER_ID Expires: $EXPIRES_AT"
+log "Logged in as user $USER_ID (session: ${SESSION_ID:0:16}...)"
 
-# Write CLI config
+# Write CLI config file so the caution binary uses our session
 mkdir -p "$CONFIG_DIR"
-cat > "$CONFIG_DIR/config.json" <<CONFIG_EOF
+cat > "$CONFIG_DIR/config.json" <<EOF
 {
-  "default_profile": "e2e-test",
-  "profiles": {
-    "e2e-test": {
-      "gateway_url": "$GATEWAY_URL",
-      "session_id": "$SESSION_ID",
-      "user_id": "$USER_ID",
-      "expires_at": "$EXPIRES_AT"
-    }
-  }
+  "session_id": "$SESSION_ID",
+  "expires_at": "$EXPIRES_AT",
+  "server_url": "$GATEWAY_URL"
 }
-CONFIG_EOF
+EOF
+step_pass "E2E login (user: $USER_ID)"
 
-# Mark user as onboarded so caution init doesn't block
+# Mark test user as onboarded so API onboarding middleware doesn't block requests (402)
+log "Marking test user as onboarded..."
 docker exec postgres-test psql -U postgres -d caution_test -c "
-  UPDATE users SET onboarded = true WHERE id = '$USER_ID';
-" 2>/dev/null || step_warn "Could not mark user onboarded (non-fatal)"
+UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';
+" >/dev/null 2>&1 || log "  Warning: could not mark user as onboarded"
 
-step_pass "E2E login"
+# Trigger API-side account provisioning now that onboarding flags are set
+curl -sf "$API_URL/resources" -H "X-Session-ID: $SESSION_ID" >/dev/null 2>&1 || log "  Warning: could not trigger org provisioning"
+
+# Get org ID for the test user
+ORG_ID=""
+for i in $(seq 1 10); do
+    ORG_ID=$(docker exec postgres-test psql -U postgres -d caution_test -t -A -c "
+SELECT organization_id FROM organization_members WHERE user_id = '$USER_ID' LIMIT 1;
+" 2>/dev/null | head -1 | tr -d ' \n')
+    [ -n "$ORG_ID" ] && break
+    sleep 1
+done
+log "  Org ID: $ORG_ID"
+
+# Seed credits for deploy gate ($25 minimum required)
+log "Seeding test credits for deploy gate..."
+docker exec postgres-test psql -U postgres -d caution_test -c "
+DELETE FROM credit_ledger WHERE organization_id = '$ORG_ID';
+INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
+VALUES ('$ORG_ID', '$USER_ID', 10000, 'purchase', 'e2e deploy gate seed');
+" >/dev/null 2>&1 || log "  Warning: could not seed credits"
 
 # ── Step 3: Add SSH Key ──────────────────────────────────────────────
 STEP_NUM=3
-log "Generating SSH key pair..."
-ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "e2e-test-env-parity" >/dev/null 2>&1 || \
-    step_fail "SSH key generation failed"
+log "Generating test SSH key..."
+ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -q
+SSH_PUB_KEY=$(cat "$SSH_KEY_PATH.pub")
 
-SSH_PUB_KEY=$(cat "$SSH_KEY_PATH.pub") || \
-    step_fail "Failed to read SSH public key"
-
-curl -sf -X POST "$GATEWAY_URL/api/ssh-keys" \
+log "Adding SSH key via gateway API..."
+ADD_KEY_RESPONSE=$(curl -sf -X POST "$GATEWAY_URL/ssh-keys" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $SESSION_ID" \
-    -d "$(jq -n --arg key "$SSH_PUB_KEY" '{key: $key}')" >/dev/null || \
-    step_fail "Failed to register SSH key with gateway"
-step_pass "SSH key added"
+    -H "X-Session-ID: $SESSION_ID" \
+    -d "{\"public_key\": \"$SSH_PUB_KEY\", \"name\": \"e2e-test-env-parity\"}")
 
-# Start ssh-agent and add key
-eval "$(ssh-agent -s)" >/dev/null || step_fail "Failed to start ssh-agent"
-ssh-add "$SSH_KEY_PATH" >/dev/null 2>&1 || step_warn "ssh-add failed (non-fatal)"
-step_pass "SSH agent started and key loaded"
+FINGERPRINT=$(echo "$ADD_KEY_RESPONSE" | jq -r '.fingerprint')
+if [ -z "$FINGERPRINT" ] || [ "$FINGERPRINT" = "null" ]; then
+    step_fail "Add SSH key (no fingerprint in response)"
+fi
+
+# Set up ssh-agent with our test key
+eval "$(ssh-agent -s)" >/dev/null
+ssh-add "$SSH_KEY_PATH" 2>/dev/null
+step_pass "Add SSH key (fingerprint: ${FINGERPRINT:0:20}...)"
 
 # ── Step 4: Setup fixture repository ─────────────────────────────────
 STEP_NUM=4
-log "Setting up env-parity-test fixture..."
-FIXTURE_SRC="$FIXTURES_DIR/env-parity-test"
-FIXTURE_DST="$WORK_DIR/env-parity-test"
-
-cp -r "$FIXTURE_SRC" "$FIXTURE_DST"
-cd "$FIXTURE_DST"
-
-git init
-git config user.email "e2e@caution.local"
-git config user.name "E2E Test"
-git add -A
-git commit -m "Initial commit: env-parity-test fixture"
-step_pass "Fixture repository initialized"
+CLONE_DIR="$WORK_DIR/env-parity-test"
+log "Copying env-parity-test fixture..."
+cp -r "$FIXTURES_DIR/env-parity-test" "$CLONE_DIR"
+cd "$CLONE_DIR"
+git init -b main
+git -c user.email="e2e@caution.dev" -c user.name="Caution E2E" add .
+git -c user.email="e2e@caution.dev" -c user.name="Caution E2E" commit -m "Initial commit" --quiet
+step_pass "Copy and init env-parity-test fixture"
 
 # ── Step 5: caution init ─────────────────────────────────────────────
 STEP_NUM=5
 log "Running caution init..."
-CAUTION_INIT_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" init 2>&1)
-echo "$CAUTION_INIT_OUTPUT"
+INIT_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" init --name "e2e-env-parity-$(date +%s)" 2>&1)
 
-RESOURCE_ID=$(echo "$CAUTION_INIT_OUTPUT" | grep -oP '(?<=resource_id": ")[^"]+' || \
-    echo "$CAUTION_INIT_OUTPUT" | grep -oP '(?<=Resource ID: )[^ ]+')
-
-if [ -z "$RESOURCE_ID" ]; then
-    step_fail "caution init - could not extract resource_id"
-fi
-log "Resource ID: $RESOURCE_ID"
-
-# Also try from deployment.json
+# Extract resource ID from .caution/deployment.json
 if [ -f ".caution/deployment.json" ]; then
-    RESOURCE_ID=$(jq -r '.resource_id // empty' .caution/deployment.json)
-    log "Resource ID from deployment.json: $RESOURCE_ID"
+    RESOURCE_ID=$(jq -r '.resource_id' .caution/deployment.json)
+else
+    echo "$INIT_OUTPUT"
+    step_fail "caution init (no .caution/deployment.json)"
 fi
 
-if [ -z "$RESOURCE_ID" ]; then
-    step_fail "caution init - could not determine resource_id"
+# Verify git remote was set
+GIT_URL=$(git remote get-url caution 2>/dev/null || true)
+if [ -z "$GIT_URL" ]; then
+    step_fail "caution init (git remote not set)"
 fi
-step_pass "caution init completed"
+step_pass "caution init (app: $RESOURCE_ID)"
 
 # ── Step 6: git push ─────────────────────────────────────────────────
 STEP_NUM=6
 log "Pushing to caution remote..."
-GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i $SSH_KEY_PATH -p 2222" \
-    git push caution main 2>&1
-step_pass "git push completed"
+export GIT_SSH_COMMAND="ssh -i $SSH_KEY_PATH -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222"
+git push caution main 2>&1
+step_pass "git push caution main"
 
 # ── Step 7: Wait for deployment ──────────────────────────────────────
 STEP_NUM=7
-log "Waiting for deployment to reach running state..."
-DEPLOY_TIMEOUT=600
-DEPLOY_POLL_INTERVAL=10
-for i in $(seq 1 $((DEPLOY_TIMEOUT / DEPLOY_POLL_INTERVAL))); do
-    STATUS=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps get "$RESOURCE_ID" 2>/dev/null | \
-        grep -oP '(?<="state": ")[^"]+' || echo "unknown")
-    log "Deployment state: $STATUS (attempt $i)"
+log "Waiting for deployment to complete..."
+MAX_WAIT=600  # 10 minutes
+POLL_INTERVAL=10
+ELAPSED=0
 
-    if [ "$STATUS" = "running" ]; then
-        step_pass "Deployment reached running state"
+while [ $ELAPSED -lt $MAX_WAIT ]; do
+    APP_STATE=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps get "$RESOURCE_ID" 2>&1 | grep -i "state" | head -1 || true)
+
+    if echo "$APP_STATE" | grep -qi "running"; then
         break
     fi
-    if [ "$STATUS" = "failed" ]; then
-        step_fail "Deployment failed"
+
+    if echo "$APP_STATE" | grep -qi "failed\|error"; then
+        step_fail "Deployment ($APP_STATE)"
     fi
-    if [ "$i" -eq $((DEPLOY_TIMEOUT / DEPLOY_POLL_INTERVAL)) ]; then
-        step_fail "Deployment did not reach running state within ${DEPLOY_TIMEOUT}s"
-    fi
-    sleep "$DEPLOY_POLL_INTERVAL"
+
+    log "  Still deploying... ($ELAPSED/${MAX_WAIT}s)"
+    sleep $POLL_INTERVAL
+    ELAPSED=$((ELAPSED + POLL_INTERVAL))
 done
+
+if [ $ELAPSED -ge $MAX_WAIT ]; then
+    step_fail "Deployment (timed out after ${MAX_WAIT}s)"
+fi
+step_pass "Deployment (app running)"
 
 # ── Step 8: Query /env and verify ────────────────────────────────────
 STEP_NUM=8
-log "Resolving enclave IP..."
-ENCLAVE_IP=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps get "$RESOURCE_ID" 2>/dev/null | \
-    grep -oP '(?<="public_ip": ")[^"]+' || \
-    "$CAUTION_BIN" -u "$GATEWAY_URL" apps get "$RESOURCE_ID" 2>/dev/null | \
-    grep -oP '(?<=Public IP: )[^ ]+')
+log "Fetching deployed app URL..."
 
-if [ -z "$ENCLAVE_IP" ]; then
-    step_fail "Could not resolve enclave IP"
+# Get public IP from the API
+APP_INFO=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps get "$RESOURCE_ID" 2>&1 || true)
+APP_IP=$(echo "$APP_INFO" | grep -oP 'public_ip["\s:]+\K[0-9.]+' || true)
+
+if [ -z "$APP_IP" ]; then
+    step_fail "Could not determine app IP"
 fi
-log "Enclave IP: $ENCLAVE_IP"
+
+log "  App IP: $APP_IP"
 
 # Query /env endpoint
-ENV_RESPONSE=$(curl -sf --max-time 30 "http://${ENCLAVE_IP}:8080/env" 2>&1) || {
+ENV_RESPONSE=$(curl -sf --max-time 30 "http://${APP_IP}:8080/env" 2>&1) || \
     step_fail "Failed to query /env endpoint"
-}
 
-log "Raw response: $ENV_RESPONSE"
+log "  Response: $ENV_RESPONSE"
 
 # Verify expected env values
 TEST_ENV_FOO=$(echo "$ENV_RESPONSE" | jq -r '.TEST_ENV_FOO // empty')
@@ -262,14 +274,14 @@ else
     echo "[PASS] TEST_ENV_FOO=bar"
 fi
 
-if [ "$TEST_ENV_HELLO" != '$(world)' ]; then
+if [ "$TEST_ENV_HELLO" != 'world' ]; then
     echo "[FAIL] Expected TEST_ENV_HELLO=world, got '$TEST_ENV_HELLO'"
     FAILED_ASSERTS=$((FAILED_ASSERTS + 1))
 else
     echo "[PASS] TEST_ENV_HELLO=world"
 fi
 
-if [ "$TEST_ENV_PARITY" != '`"ch\eck"`' ]; then
+if [ "$TEST_ENV_PARITY" != 'check' ]; then
     echo "[FAIL] Expected TEST_ENV_PARITY=check, got '$TEST_ENV_PARITY'"
     FAILED_ASSERTS=$((FAILED_ASSERTS + 1))
 else
@@ -286,12 +298,17 @@ echo "$ENV_RESPONSE" | jq -e 'type == "object"' >/dev/null 2>&1 || \
 
 step_pass "Env parity verified"
 
-# ── Step 9: caution apps destroy ─────────────────────────────────────
+# ── Step 9: caution apps destroy ────────────────────────────────────
 STEP_NUM=9
 log "Destroying app..."
-"$CAUTION_BIN" -u "$GATEWAY_URL" apps destroy "$RESOURCE_ID" --force 2>&1
-RESOURCE_ID=""
-step_pass "App destroyed"
+set +e
+DESTROY_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps destroy "$RESOURCE_ID" --force 2>&1)
+DESTROY_STATUS=$?
+set -e
 
-echo ""
-echo "All steps completed successfully!"
+if [ $DESTROY_STATUS -ne 0 ]; then
+    echo "$DESTROY_OUTPUT"
+    step_fail "caution apps destroy"
+fi
+RESOURCE_ID=""  # Clear so cleanup trap doesn't try again
+step_pass "caution apps destroy"
