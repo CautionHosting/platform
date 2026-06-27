@@ -278,6 +278,9 @@ pub enum FromProcfileError {
 
     #[error("invalid domain: {0}")]
     InvalidDomain(String),
+
+    #[error("invalid provider config: {0}")]
+    InvalidProvider(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -315,6 +318,9 @@ pub enum FromStrError {
 
     #[error("invalid domain: {0}")]
     InvalidDomain(String),
+
+    #[error("invalid provider config: {0}")]
+    InvalidProvider(String),
 }
 
 const RESERVED_INTERNAL_PORT_START: u16 = 49_500;
@@ -352,6 +358,43 @@ fn validate_domain(domain: &str) -> Result<(), String> {
         if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             return Err("domain contains invalid characters".to_string());
         }
+    }
+    Ok(())
+}
+
+/// Validate that `value` is a well-formed AWS resource id of the form
+/// `<prefix>-<id>`, where `<id>` is 8 or 17 lowercase hex digits.
+///
+/// These ids flow from the deployer-controlled `provider { }` block into
+/// generated Terraform, so they must contain no characters that could carry
+/// meaning there. Real AWS ids always match this shape, so the check is strict
+/// without rejecting any legitimate value.
+fn validate_aws_id(prefix: &str, value: &str) -> Result<(), String> {
+    let id = value
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .ok_or_else(|| format!("expected an AWS {prefix}-… id, got {value:?}"))?;
+    if !matches!(id.len(), 8 | 17)
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(format!("malformed AWS {prefix} id: {value:?}"));
+    }
+    Ok(())
+}
+
+/// Validate every AWS resource identifier carried by a `provider { }` block.
+fn validate_provider(provider: &Provider) -> Result<(), String> {
+    let Provider::Aws(aws) = provider;
+    if let Some(ref vpc_id) = aws.vpc_id {
+        validate_aws_id("vpc", vpc_id)?;
+    }
+    for subnet_id in aws.subnet_ids.iter().flatten() {
+        validate_aws_id("subnet", subnet_id)?;
+    }
+    if let Some(ref sg_id) = aws.security_group_id {
+        validate_aws_id("sg", sg_id)?;
     }
     Ok(())
 }
@@ -672,6 +715,10 @@ impl ConfigurationFile {
             None
         };
 
+        if let Some(ref p) = provider {
+            validate_provider(p).map_err(FromProcfileError::InvalidProvider)?;
+        }
+
         let caution = provider.map(|p| CautionConfig {
             managed_credentials: None,
             machine_type: None,
@@ -684,6 +731,10 @@ impl ConfigurationFile {
 
     pub fn from_str(s: &str) -> Result<Self, FromStrError> {
         let config: ConfigurationFile = hcl::from_str(s)?;
+
+        if let Some(provider) = config.caution.as_ref().and_then(|c| c.provider.as_ref()) {
+            validate_provider(provider).map_err(FromStrError::InvalidProvider)?;
+        }
 
         if let Some((_, enclave)) = &config.enclave.iter().flatten().next()
             && let Some(network) = &enclave.network
@@ -1764,9 +1815,9 @@ caution {
   provider {
     type = "aws"
     region = "us-east-1"
-    vpc_id = "vpc-123"
-    subnet_ids = ["subnet-a", "subnet-b"]
-    security_group_id = "sg-456"
+    vpc_id = "vpc-0a1b2c3d"
+    subnet_ids = ["subnet-01234567", "subnet-0123456789abcdef0"]
+    security_group_id = "sg-0a1b2c3d"
   }
 }
 "#;
@@ -1777,12 +1828,15 @@ caution {
             Provider::Aws(aws) => aws,
         };
         assert_eq!(aws.region, "us-east-1");
-        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-123"));
+        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-0a1b2c3d"));
         assert_eq!(
             aws.subnet_ids,
-            Some(vec!["subnet-a".into(), "subnet-b".into()])
+            Some(vec![
+                "subnet-01234567".into(),
+                "subnet-0123456789abcdef0".into()
+            ])
         );
-        assert_eq!(aws.security_group_id.as_deref(), Some("sg-456"));
+        assert_eq!(aws.security_group_id.as_deref(), Some("sg-0a1b2c3d"));
     }
 
     #[test]
@@ -1814,9 +1868,9 @@ caution {
   provider {
     type = "aws"
     region = "eu-west-1"
-    vpc_id = "vpc-xxx"
-    subnet_ids = ["subnet-1"]
-    security_group_id = "sg-yyy"
+    vpc_id = "vpc-0123456789abcdef0"
+    subnet_ids = ["subnet-89abcdef"]
+    security_group_id = "sg-89abcdef"
   }
 }
 "#;
@@ -1827,9 +1881,9 @@ caution {
             Provider::Aws(aws) => aws,
         };
         assert_eq!(aws.region, "eu-west-1");
-        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-xxx"));
-        assert_eq!(aws.subnet_ids, Some(vec!["subnet-1".into()]));
-        assert_eq!(aws.security_group_id.as_deref(), Some("sg-yyy"));
+        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-0123456789abcdef0"));
+        assert_eq!(aws.subnet_ids, Some(vec!["subnet-89abcdef".into()]));
+        assert_eq!(aws.security_group_id.as_deref(), Some("sg-89abcdef"));
     }
 
     #[test]
@@ -1853,8 +1907,8 @@ caution {
                 build_machine_type: None,
                 provider: Some(Provider::Aws(AwsProviderConfig {
                     region: "ap-southeast-1".into(),
-                    vpc_id: Some("vpc-roundtrip".into()),
-                    subnet_ids: Some(vec!["subnet-a".into()]),
+                    vpc_id: Some("vpc-0a1b2c3d".into()),
+                    subnet_ids: Some(vec!["subnet-0a1b2c3d".into()]),
                     security_group_id: None,
                 })),
             }),
@@ -1867,7 +1921,7 @@ caution {
             Provider::Aws(aws) => aws,
         };
         assert_eq!(aws.region, "ap-southeast-1");
-        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-roundtrip"));
+        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-0a1b2c3d"));
     }
 
     #[test]
@@ -1884,6 +1938,63 @@ caution {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_from_str_rejects_malformed_provider_ids() {
+        // Values that parse as valid HCL strings but are not well-formed AWS ids
+        // must be rejected by the provider validator. (Embedded quotes/newlines
+        // are separately caught by the HCL parser before this point.)
+        for (field, value) in [
+            ("vpc_id", "vpc-$(id)"),           // shell command substitution
+            ("vpc_id", "vpc-123"),             // too short to be a real id
+            ("vpc_id", "vpc-0A1B2C3D"),        // uppercase is not a valid id
+            ("subnet_ids", "subnet-zzzzzzzz"), // non-hex
+            ("security_group_id", "sg-../etc"), // path traversal characters
+        ] {
+            let line = if field == "subnet_ids" {
+                format!("subnet_ids = [\"{value}\"]")
+            } else {
+                format!("{field} = \"{value}\"")
+            };
+            let hcl = format!(
+                "caution {{\n  provider {{\n    type = \"aws\"\n    region = \"us-east-1\"\n    {line}\n  }}\n}}\n"
+            );
+            assert!(
+                matches!(
+                    ConfigurationFile::from_str(&hcl),
+                    Err(FromStrError::InvalidProvider(_))
+                ),
+                "expected {field}={value:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_procfile_rejects_malformed_provider_ids() {
+        let procfile = "\
+run: /app
+managed_on_prem: true
+platform: aws
+aws_region: us-east-1
+aws_vpc_id: vpc-$(id).example
+";
+        assert!(matches!(
+            ConfigurationFile::from_procfile(procfile),
+            Err(FromProcfileError::InvalidProvider(_))
+        ));
+    }
+
+    #[test]
+    fn test_validate_aws_id_accepts_8_and_17_hex() {
+        assert!(validate_aws_id("vpc", "vpc-0a1b2c3d").is_ok());
+        assert!(validate_aws_id("vpc", "vpc-0123456789abcdef0").is_ok());
+        assert!(validate_aws_id("subnet", "subnet-00000000").is_ok());
+        // Wrong prefix, wrong length, and uppercase are all rejected.
+        assert!(validate_aws_id("vpc", "subnet-0a1b2c3d").is_err());
+        assert!(validate_aws_id("vpc", "vpc-0a1b2c3").is_err());
+        assert!(validate_aws_id("vpc", "vpc-0A1B2C3D").is_err());
+        assert!(validate_aws_id("vpc", "vpc-").is_err());
+    }
+
     // ── from_procfile managed_on_prem tests ─────────────────────────
 
     #[test]
@@ -1893,9 +2004,9 @@ run: /app
 managed_on_prem: true
 platform: aws
 aws_region: us-east-1
-aws_vpc_id: vpc-123
-aws_subnet_id: subnet-a
-aws_security_group_id: sg-456
+aws_vpc_id: vpc-0a1b2c3d
+aws_subnet_id: subnet-0a1b2c3d
+aws_security_group_id: sg-0a1b2c3d
 ";
         let config = ConfigurationFile::from_procfile(procfile).unwrap();
         let caution = config.caution.expect("caution block");
@@ -1903,9 +2014,9 @@ aws_security_group_id: sg-456
             Provider::Aws(aws) => aws,
         };
         assert_eq!(aws.region, "us-east-1");
-        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-123"));
-        assert_eq!(aws.subnet_ids, Some(vec!["subnet-a".into()]));
-        assert_eq!(aws.security_group_id.as_deref(), Some("sg-456"));
+        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-0a1b2c3d"));
+        assert_eq!(aws.subnet_ids, Some(vec!["subnet-0a1b2c3d".into()]));
+        assert_eq!(aws.security_group_id.as_deref(), Some("sg-0a1b2c3d"));
     }
 
     #[test]
