@@ -159,7 +159,7 @@ fi
 EXPIRES_AT=$(echo "$LOGIN_RESPONSE" | jq -r '.expires_at')
 
 # Write CLI config so caution binary uses our session
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/api-cli"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/caution-cli"
 mkdir -p "$CONFIG_DIR"
 cat > "$CONFIG_DIR/config.json" <<EOF
 {

@@ -1351,9 +1351,17 @@ impl ApiClient {
     fn new(base_url: &str, verbose: bool, qr: bool, workdir: Option<PathBuf>) -> Result<Self> {
         log_verbose(verbose, "Initializing API client...");
 
-        let config_dir = dirs::config_dir()
-            .context("Could not find config directory")?
-            .join("api-cli");
+        let base_config = dirs::config_dir().context("Could not find config directory")?;
+        let legacy_dir = base_config.join("api-cli");
+        let config_dir = base_config.join("caution-cli");
+
+        // Migrate from the old api-cli directory name if present
+        if legacy_dir.exists() && !config_dir.exists() {
+            if let Err(e) = fs::rename(&legacy_dir, &config_dir) {
+                eprintln!("Warning: could not migrate config from {} to {}: {e}. You may need to log in again.",
+                    legacy_dir.display(), config_dir.display());
+            }
+        }
 
         log_verbose(verbose, &format!("Config directory: {:?}", config_dir));
 
