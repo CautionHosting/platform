@@ -37,6 +37,7 @@ tempfile = { workspace = true }
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }
 webauthn-rs-proto = "0.5"
 russh = "0.61"
+ssh-key = { version = "0.6.7", features = ["crypto"] }
 thiserror = { workspace = true }
 dterror = "0.1.0"
 bytes = "1"

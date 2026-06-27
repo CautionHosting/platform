@@ -62,6 +62,23 @@ make install-cli
 
 If you need to send locksmith shards, use `make install-cli-untrusted` instead.
 
+### CI SSH App Access
+
+`caution apps get` and `caution apps destroy` normally require a logged-in
+session. CI jobs can use SSH-signed API access for those two commands after the
+public key has been registered with `caution ssh-keys add`.
+
+```sh
+export CAUTION_SSH_SIGNING_KEY=/path/to/id_ed25519
+caution apps get <app-id> --this-is-a-ci-machine
+caution apps destroy <app-id> --force --this-is-a-ci-machine
+```
+
+`--this-is-a-ci-machine` is intentionally explicit. Local development should use
+the normal login flow. If `CAUTION_SSH_SIGNING_KEY` is unset, the CLI checks
+`GIT_SSH_COMMAND`, `git config core.sshCommand`, and then default `~/.ssh/id_*`
+keys when a `caution` git remote exists.
+
 ### Encrypt Env Secrets
 
 After generating a quorum bundle with Keymaker, encrypt local `.env` values into

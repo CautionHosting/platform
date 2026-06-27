@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use futures::StreamExt;
 use bytes::Bytes;
 use russh::keys::{PrivateKey, PublicKey, PublicKeyBase64};
@@ -1066,8 +1066,8 @@ async fn handle_git_push(
 #[cfg(test)]
 mod tests {
     use super::{
-        PushedBranchSelection, ZERO_SHA1, parse_pushed_branch_ref,
-        resource_state_allows_noop_redeploy,
+        parse_pushed_branch_ref, resource_state_allows_noop_redeploy, PushedBranchSelection,
+        ZERO_SHA1,
     };
 
     const OLD_SHA: &str = "1111111111111111111111111111111111111111";
