@@ -27,7 +27,6 @@ rand = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 url = { workspace = true }
-thiserror = { workspace = true }
 
 # Internal dependencies
 enclave-builder = { path = "../enclave-builder" }
