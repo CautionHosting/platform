@@ -805,6 +805,38 @@
   color: var(--color-pink);
 }
 
+.footer-build-inputs {
+  grid-column: 1 / -1;
+  justify-self: center;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  color: #999;
+  font-size: 0.8rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.footer-build-inputs-label {
+  font-family: inherit;
+  color: #888;
+}
+
+.footer-build-inputs a {
+  color: #777;
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.footer-build-inputs a:hover {
+  color: var(--color-pink);
+}
+
+.footer-build-inputs-sep {
+  color: #ccc;
+}
+
 .footer-icon-link {
   display: flex;
   align-items: center;

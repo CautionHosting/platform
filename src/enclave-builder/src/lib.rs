@@ -16,6 +16,42 @@ pub fn pin_archive_url_to_commit(url: &str, commit: &str) -> String {
     }
 }
 
+/// Classify `enclave_source` (archive URL, git URL, or local path) into the
+/// matching `EnclaveSource`. `resolved_commit` is the commit already resolved
+/// from the source (git rev-parse / ref lookup), if any. For a local path with
+/// no resolved commit, fall back to ENCLAVEOS_COMMIT, and with neither build the
+/// on-disk files directly.
+fn classify_enclave_source(
+    enclave_source: &str,
+    enclave_version: &str,
+    resolved_commit: Option<String>,
+) -> EnclaveSource {
+    if enclave_source.ends_with(".tar.gz") {
+        EnclaveSource::GitArchive {
+            urls: vec![enclave_source.to_string()],
+            commit: resolved_commit,
+        }
+    } else if enclave_source.starts_with("http") || enclave_source.starts_with("git@") {
+        EnclaveSource::GitRepository {
+            url: enclave_source.to_string(),
+            branch: enclave_version.to_string(),
+            commit: resolved_commit,
+        }
+    } else {
+        let commit = resolved_commit.or_else(|| std::env::var("ENCLAVEOS_COMMIT").ok());
+        if let Some(commit) = commit {
+            EnclaveSource::GitArchive {
+                urls: vec![enclave_source_url(&commit)],
+                commit: Some(commit),
+            }
+        } else {
+            EnclaveSource::Local {
+                path: enclave_source.to_string(),
+            }
+        }
+    }
+}
+
 pub mod build;
 pub mod compile;
 pub mod docker;
@@ -426,36 +462,12 @@ impl EnclaveBuilder {
             tracing::info!("Using external manifest for reproducible build");
             ext_manifest
         } else {
-            let enclave_src = if self.enclave_source.ends_with(".tar.gz") {
-                EnclaveSource::GitArchive {
-                    urls: vec![self.enclave_source.clone()],
-                    commit: enclave_source_result.commit.clone(),
-                }
-            } else if self.enclave_source.starts_with("http")
-                || self.enclave_source.starts_with("git@")
-            {
-                EnclaveSource::GitRepository {
-                    url: self.enclave_source.clone(),
-                    branch: self.enclave_version.clone(),
-                    commit: enclave_source_result.commit.clone(),
-                }
-            } else {
-                // Local path - resolve commit from git or ENCLAVEOS_COMMIT env var
-                let commit = enclave_source_result
-                    .commit
-                    .clone()
-                    .or_else(|| std::env::var("ENCLAVEOS_COMMIT").ok());
-                if let Some(commit) = commit {
-                    EnclaveSource::GitArchive {
-                        urls: vec![enclave_source_url(&commit)],
-                        commit: Some(commit),
-                    }
-                } else {
-                    EnclaveSource::Local {
-                        path: self.enclave_source.clone(),
-                    }
-                }
-            };
+            let enclave_src =
+                classify_enclave_source(
+                    &self.enclave_source,
+                    &self.enclave_version,
+                    enclave_source_result.commit.clone(),
+                );
 
             let app_src = match (app_source_urls, app_commit.clone()) {
                 (Some(urls), Some(commit)) if !urls.is_empty() => {
@@ -587,36 +599,12 @@ impl EnclaveBuilder {
             tracing::info!("Using external manifest for reproducible build");
             ext_manifest
         } else {
-            let enclave_src = if self.enclave_source.ends_with(".tar.gz") {
-                EnclaveSource::GitArchive {
-                    urls: vec![self.enclave_source.clone()],
-                    commit: enclave_source_result.commit.clone(),
-                }
-            } else if self.enclave_source.starts_with("http")
-                || self.enclave_source.starts_with("git@")
-            {
-                EnclaveSource::GitRepository {
-                    url: self.enclave_source.clone(),
-                    branch: self.enclave_version.clone(),
-                    commit: enclave_source_result.commit.clone(),
-                }
-            } else {
-                // Local path - resolve commit from git or ENCLAVEOS_COMMIT env var
-                let commit = enclave_source_result
-                    .commit
-                    .clone()
-                    .or_else(|| std::env::var("ENCLAVEOS_COMMIT").ok());
-                if let Some(commit) = commit {
-                    EnclaveSource::GitArchive {
-                        urls: vec![enclave_source_url(&commit)],
-                        commit: Some(commit),
-                    }
-                } else {
-                    EnclaveSource::Local {
-                        path: self.enclave_source.clone(),
-                    }
-                }
-            };
+            let enclave_src =
+                classify_enclave_source(
+                    &self.enclave_source,
+                    &self.enclave_version,
+                    enclave_source_result.commit.clone(),
+                );
 
             let app_src = match (app_source_urls, app_commit.clone()) {
                 (Some(urls), Some(commit)) if !urls.is_empty() => {
@@ -788,9 +776,79 @@ impl EnclaveBuilder {
     }
 }
 
+/// Serializes tests that mutate process-global env vars (e.g. ENCLAVEOS_COMMIT).
+/// Shared across this crate's test modules so they don't clobber each other's
+/// temporary values when run in parallel within one test binary.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_enclave_source_dispatches_by_source_kind() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("ENCLAVEOS_COMMIT");
+
+        // 1. Archive URL -> GitArchive carrying the source URL + resolved commit.
+        match classify_enclave_source(
+            "https://example.com/enclaveos/archive/abc.tar.gz",
+            "main",
+            Some("c0ffee".to_string()),
+        ) {
+            EnclaveSource::GitArchive { urls, commit } => {
+                assert_eq!(urls, vec!["https://example.com/enclaveos/archive/abc.tar.gz"]);
+                assert_eq!(commit.as_deref(), Some("c0ffee"));
+            }
+            other => panic!("expected GitArchive, got {other:?}"),
+        }
+
+        // 2. Git URL -> GitRepository with url/branch/commit.
+        match classify_enclave_source(
+            "https://git.distrust.co/public/enclaveos.git",
+            "develop",
+            Some("dead".to_string()),
+        ) {
+            EnclaveSource::GitRepository {
+                url,
+                branch,
+                commit,
+            } => {
+                assert_eq!(url, "https://git.distrust.co/public/enclaveos.git");
+                assert_eq!(branch, "develop");
+                assert_eq!(commit.as_deref(), Some("dead"));
+            }
+            other => panic!("expected GitRepository, got {other:?}"),
+        }
+
+        // 3. Local path WITH a resolved commit -> GitArchive at that commit.
+        match classify_enclave_source("/local/enclaveos", "main", Some("beef".to_string())) {
+            EnclaveSource::GitArchive { urls, commit } => {
+                assert_eq!(urls, vec![enclave_source_url("beef")]);
+                assert_eq!(commit.as_deref(), Some("beef"));
+            }
+            other => panic!("expected GitArchive, got {other:?}"),
+        }
+
+        // 4. Local path, no resolved commit, but ENCLAVEOS_COMMIT set -> GitArchive at env commit.
+        std::env::set_var("ENCLAVEOS_COMMIT", "envc0de");
+        match classify_enclave_source("/local/enclaveos", "main", None) {
+            EnclaveSource::GitArchive { urls, commit } => {
+                assert_eq!(urls, vec![enclave_source_url("envc0de")]);
+                assert_eq!(commit.as_deref(), Some("envc0de"));
+            }
+            other => panic!("expected GitArchive, got {other:?}"),
+        }
+        std::env::remove_var("ENCLAVEOS_COMMIT");
+
+        // 5. Local path, no resolved commit, no env -> build the on-disk files
+        //    directly. This is the fallback whose removal was a regression.
+        match classify_enclave_source("/local/enclaveos", "main", None) {
+            EnclaveSource::Local { path } => assert_eq!(path, "/local/enclaveos"),
+            other => panic!("expected Local, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_pcr_comparison() {

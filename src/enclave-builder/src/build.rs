@@ -14,6 +14,13 @@ const DEFAULT_ENCLAVEOS_COMMIT: &str = "9582e25239430070667fdd0a6b64d887f1c308df
 const DEFAULT_BOOTPROOF_COMMIT: &str = "64dae0628e58b9f898b89f9b7a404b37e2f0ca9f";
 const DEFAULT_STEVE_COMMIT: &str = "ed38a190cd5d7a8f452c854e41d00ec748e172bf";
 const DEFAULT_LOCKSMITH_COMMIT: &str = "d16b74c6b3fd1d1006a5b00e4d9e21a4613947a9";
+
+// Kept in sync with the git clone URLs in templates/Containerfile.eif.
+pub const ENCLAVEOS_REPO: &str = "https://git.distrust.co/public/enclaveos.git";
+pub const BOOTPROOF_REPO: &str = "https://git.distrust.co/public/bootproof.git";
+pub const STEVE_REPO: &str = "https://git.distrust.co/public/steve.git";
+pub const LOCKSMITH_REPO: &str = "https://codeberg.org/caution/locksmith.git";
+
 const RESERVED_INTERNAL_PORT_START: u16 = 49_500;
 const RESERVED_INTERNAL_PORT_END: u16 = 49_600;
 
@@ -21,8 +28,61 @@ fn is_reserved_internal_port(port: u16) -> bool {
     (RESERVED_INTERNAL_PORT_START..=RESERVED_INTERNAL_PORT_END).contains(&port)
 }
 
+fn resolve_commit(var: &str, default: &str) -> String {
+    std::env::var(var).unwrap_or_else(|_| default.to_string())
+}
+
 pub fn resolve_enclaveos_commit() -> String {
-    std::env::var("ENCLAVEOS_COMMIT").unwrap_or_else(|_| DEFAULT_ENCLAVEOS_COMMIT.to_string())
+    resolve_commit("ENCLAVEOS_COMMIT", DEFAULT_ENCLAVEOS_COMMIT)
+}
+
+pub fn resolve_bootproof_commit() -> String {
+    resolve_commit("BOOTPROOF_COMMIT", DEFAULT_BOOTPROOF_COMMIT)
+}
+
+pub fn resolve_steve_commit() -> String {
+    resolve_commit("STEVE_COMMIT", DEFAULT_STEVE_COMMIT)
+}
+
+pub fn resolve_locksmith_commit() -> String {
+    resolve_commit("LOCKSMITH_COMMIT", DEFAULT_LOCKSMITH_COMMIT)
+}
+
+/// A build-input tool paired with the repo it's cloned from, so the commit and
+/// its source URL can never be matched up wrong downstream.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ToolSource {
+    pub commit: String,
+    pub repo: &'static str,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ToolCommits {
+    pub enclaveos: ToolSource,
+    pub bootproof: ToolSource,
+    pub steve: ToolSource,
+    pub locksmith: ToolSource,
+}
+
+pub fn resolve_tool_commits() -> ToolCommits {
+    ToolCommits {
+        enclaveos: ToolSource {
+            commit: resolve_enclaveos_commit(),
+            repo: ENCLAVEOS_REPO,
+        },
+        bootproof: ToolSource {
+            commit: resolve_bootproof_commit(),
+            repo: BOOTPROOF_REPO,
+        },
+        steve: ToolSource {
+            commit: resolve_steve_commit(),
+            repo: STEVE_REPO,
+        },
+        locksmith: ToolSource {
+            commit: resolve_locksmith_commit(),
+            repo: LOCKSMITH_REPO,
+        },
+    }
 }
 
 /// Resolve the templates directory at runtime.
@@ -95,23 +155,15 @@ pub async fn stage_eif_components(
     let bootproof_commit = manifest
         .as_ref()
         .and_then(|m| m.bootproof_commit.clone())
-        .unwrap_or_else(|| {
-            std::env::var("BOOTPROOF_COMMIT")
-                .unwrap_or_else(|_| DEFAULT_BOOTPROOF_COMMIT.to_string())
-        });
+        .unwrap_or_else(resolve_bootproof_commit);
     let steve_commit = manifest
         .as_ref()
         .and_then(|m| m.steve_commit.clone())
-        .unwrap_or_else(|| {
-            std::env::var("STEVE_COMMIT").unwrap_or_else(|_| DEFAULT_STEVE_COMMIT.to_string())
-        });
+        .unwrap_or_else(resolve_steve_commit);
     let locksmith_commit = manifest
         .as_ref()
         .and_then(|m| m.locksmith_commit.clone())
-        .unwrap_or_else(|| {
-            std::env::var("LOCKSMITH_COMMIT")
-                .unwrap_or_else(|_| DEFAULT_LOCKSMITH_COMMIT.to_string())
-        });
+        .unwrap_or_else(resolve_locksmith_commit);
 
     if let Some(mut manifest) = manifest {
         manifest
@@ -606,6 +658,44 @@ mod tests {
         )
         .unwrap();
         file
+    }
+
+    #[test]
+    fn test_tool_commit_resolution() {
+        // Env-var mutations are process-global; serialize on the crate-wide lock
+        // so parallel tests in this binary don't see each other's temp values.
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for var in [
+            "ENCLAVEOS_COMMIT",
+            "BOOTPROOF_COMMIT",
+            "STEVE_COMMIT",
+            "LOCKSMITH_COMMIT",
+        ] {
+            std::env::remove_var(var);
+        }
+
+        // No env override -> pinned defaults, surfaced via the shared bundle.
+        let defaults = resolve_tool_commits();
+        assert_eq!(defaults.enclaveos.commit, DEFAULT_ENCLAVEOS_COMMIT);
+        assert_eq!(defaults.bootproof.commit, DEFAULT_BOOTPROOF_COMMIT);
+        assert_eq!(defaults.steve.commit, DEFAULT_STEVE_COMMIT);
+        assert_eq!(defaults.locksmith.commit, DEFAULT_LOCKSMITH_COMMIT);
+        // Repo URLs are paired with their commit at the source.
+        assert_eq!(defaults.enclaveos.repo, ENCLAVEOS_REPO);
+        assert_eq!(defaults.locksmith.repo, LOCKSMITH_REPO);
+
+        // Env override wins (this is how the platform pins prod commits).
+        std::env::set_var("BOOTPROOF_COMMIT", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+        assert_eq!(
+            resolve_bootproof_commit(),
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        );
+        assert_eq!(
+            resolve_tool_commits().bootproof.commit,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        );
+        std::env::remove_var("BOOTPROOF_COMMIT");
+        assert_eq!(resolve_bootproof_commit(), DEFAULT_BOOTPROOF_COMMIT);
     }
 
     #[test]

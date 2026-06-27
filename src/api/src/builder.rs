@@ -841,12 +841,11 @@ fn generate_builder_userdata(
 
     let containerfile = validate_remote_containerfile_path(&request.containerfile)?;
 
-    let bootproof_commit = std::env::var("BOOTPROOF_COMMIT")
-        .unwrap_or_else(|_| "64dae0628e58b9f898b89f9b7a404b37e2f0ca9f".to_string());
-    let steve_commit = std::env::var("STEVE_COMMIT")
-        .unwrap_or_else(|_| "ed38a190cd5d7a8f452c854e41d00ec748e172bf".to_string());
-    let locksmith_commit = std::env::var("LOCKSMITH_COMMIT")
-        .unwrap_or_else(|_| "d16b74c6b3fd1d1006a5b00e4d9e21a4613947a9".to_string());
+    // Single source of truth shared with the local build path and the public
+    // build-inputs endpoint: env var on the API/builder host, else pinned default.
+    let bootproof_commit = enclave_builder::build::resolve_bootproof_commit();
+    let steve_commit = enclave_builder::build::resolve_steve_commit();
+    let locksmith_commit = enclave_builder::build::resolve_locksmith_commit();
 
     let e2e_flag = if request.e2e { "true" } else { "false" };
     let locksmith_flag = if request.locksmith { "true" } else { "false" };
