@@ -275,6 +275,9 @@ pub enum FromProcfileError {
 
     #[error("managed_on_prem with platform 'aws' requires 'aws_region'")]
     ManagedOnPremMissingRegion,
+
+    #[error("invalid domain: {0}")]
+    InvalidDomain(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -309,6 +312,9 @@ pub enum FromStrError {
 
     #[error("Failed to parse HCL")]
     HclParse(#[from] hcl::Error),
+
+    #[error("invalid domain: {0}")]
+    InvalidDomain(String),
 }
 
 const RESERVED_INTERNAL_PORT_START: u16 = 49_500;
@@ -316,6 +322,38 @@ const RESERVED_INTERNAL_PORT_END: u16 = 49_600;
 
 fn is_reserved(port: u16) -> bool {
     (RESERVED_INTERNAL_PORT_START..=RESERVED_INTERNAL_PORT_END).contains(&port)
+}
+
+/// Validate that `domain` is a well-formed fully-qualified hostname.
+///
+/// The value flows into generated infrastructure (Terraform variables, the
+/// instance bootstrap script, and the Caddy config), so it must be a plain DNS
+/// name with no characters that could carry meaning in those contexts.
+fn validate_domain(domain: &str) -> Result<(), String> {
+    if domain.is_empty() || domain.len() > 253 {
+        return Err("domain must be between 1 and 253 characters".to_string());
+    }
+    if !domain.contains('.') {
+        return Err("domain must be a fully-qualified hostname".to_string());
+    }
+    if domain.starts_with('.') || domain.ends_with('.') {
+        return Err("domain must not start or end with '.'".to_string());
+    }
+    for label in domain.split('.') {
+        if label.is_empty() {
+            return Err("domain must not contain empty labels".to_string());
+        }
+        if label.len() > 63 {
+            return Err("domain labels must be 63 characters or fewer".to_string());
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err("domain labels must not start or end with '-'".to_string());
+        }
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Err("domain contains invalid characters".to_string());
+        }
+    }
+    Ok(())
 }
 
 impl ConfigurationFile {
@@ -537,6 +575,10 @@ impl ConfigurationFile {
             cors_origins: None,
         });
 
+        if let Some(ref d) = domain {
+            validate_domain(d).map_err(FromProcfileError::InvalidDomain)?;
+        }
+
         let http = match (domain, http_port) {
             (Some(d), Some(p)) => Some(HttpConfig {
                 domain: d,
@@ -674,6 +716,8 @@ impl ConfigurationFile {
                 if let Some(ref network) = enclave.network
                     && let Some(ref http) = network.http
                 {
+                    validate_domain(&http.domain).map_err(FromStrError::InvalidDomain)?;
+
                     let port_covered = network.ingress.iter().any(|rule| match &rule.port_spec {
                         Some(PortSpec::Exact { port }) => *port == http.port,
                         Some(PortSpec::FromTo {
@@ -1389,6 +1433,51 @@ cache: false
         let http = network.http.as_ref().unwrap();
         assert_eq!(http.domain, "myapp.example.com");
         assert_eq!(http.port, 8080);
+    }
+
+    #[test]
+    fn test_from_procfile_rejects_malformed_domain() {
+        // Shell/HCL metacharacters must not survive parsing.
+        for bad in [
+            "x.$(id).example.com",
+            "a\"b.example.com",
+            "a b.example.com",
+            "nodot",
+        ] {
+            let procfile = format!("run: /app\nports: 8080\nhttp_port: 8080\ndomain: {bad}\n");
+            assert!(
+                matches!(
+                    ConfigurationFile::from_procfile(&procfile),
+                    Err(FromProcfileError::InvalidDomain(_))
+                ),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_str_rejects_malformed_domain() {
+        let hcl = r#"
+enclave "main" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port      = 8080
+    }
+    http {
+      domain = "x.$(id).example.com"
+      port   = 8080
+    }
+  }
+  unit "default" {
+    command = "/app"
+  }
+}
+"#;
+        assert!(matches!(
+            ConfigurationFile::from_str(hcl),
+            Err(FromStrError::InvalidDomain(_))
+        ));
     }
 
     #[test]
