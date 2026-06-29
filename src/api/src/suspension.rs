@@ -87,7 +87,7 @@ pub async fn suspend_managed_resources(
                     );
                 }
                 Ok(_) => {
-                    tracing::info!("No running instances found for resource {}", resource_name);
+                    tracing::error!("No running instances found for resource {}", resource_name);
                 }
                 Err(e) => {
                     tracing::error!("Failed to describe instances for {}: {}", resource_name, e);
