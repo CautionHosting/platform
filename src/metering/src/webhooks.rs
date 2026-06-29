@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::sync::Arc;
 
-use crate::credits::get_ledger_balance_cents;
+use crate::credits::{credit_ledger_once, CreditOutcome};
 use crate::AppState;
 
 /// Paddle webhook payload
@@ -313,7 +313,7 @@ async fn handle_transaction_completed(
     // row means we cannot trust the amount, so we refuse and leave it for manual
     // reconciliation rather than minting an attacker-declared value.
     let intent = sqlx::query(
-        "SELECT organization_id, credit_cents FROM credit_purchase_intents WHERE paddle_transaction_id = $1",
+        "SELECT organization_id, user_id, credit_cents FROM credit_purchase_intents WHERE paddle_transaction_id = $1",
     )
     .bind(transaction_id)
     .fetch_optional(&state.pool)
@@ -321,6 +321,7 @@ async fn handle_transaction_completed(
 
     if let Some(intent) = intent {
         let intent_org_id: uuid::Uuid = intent.get("organization_id");
+        let intent_user_id: uuid::Uuid = intent.get("user_id");
         let credit_cents: i64 = intent.get("credit_cents");
 
         if intent_org_id != org_id {
@@ -333,45 +334,36 @@ async fn handle_transaction_completed(
             return Ok(());
         }
 
-        let mut tx = state.pool.begin().await?;
-
-        // Unique constraint on paddle_transaction_id makes this the durable
+        // The UNIQUE(paddle_transaction_id) constraint is the durable
         // one-payment-to-one-grant gate; a redundant webhook/callback is a no-op.
-        let inserted = sqlx::query(
-            "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, paddle_transaction_id)
-             VALUES ($1, $2, 'purchase', $3, $4)
-             ON CONFLICT (paddle_transaction_id) DO NOTHING"
-        )
-        .bind(org_id)
-        .bind(credit_cents)
-        .bind(format!("Prepaid credit purchase: ${:.2}", credit_cents as f64 / 100.0))
-        .bind(transaction_id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-
-        if inserted == 0 {
-            tx.rollback().await?;
-            tracing::info!(
-                "Prepaid credit purchase {} already credited, skipping",
-                transaction_id
-            );
-            return Ok(());
-        }
-
-        let new_balance = get_ledger_balance_cents(&mut *tx, org_id).await?;
-
-        tx.commit().await?;
-
-        tracing::info!(
-            "Prepaid credit purchase credited: org={}, txn={}, +{}c, new_balance={}",
+        match credit_ledger_once(
+            &state.pool,
             org_id,
-            transaction_id,
+            Some(intent_user_id),
             credit_cents,
-            new_balance
-        );
-
-        clear_credit_suspension_if_needed(state, org_id, new_balance).await?;
+            "purchase",
+            &format!("Prepaid credit purchase: ${:.2}", credit_cents as f64 / 100.0),
+            transaction_id,
+        )
+        .await?
+        {
+            CreditOutcome::AlreadyCredited => {
+                tracing::info!(
+                    "Prepaid credit purchase {} already credited, skipping",
+                    transaction_id
+                );
+            }
+            CreditOutcome::Credited { new_balance } => {
+                tracing::info!(
+                    "Prepaid credit purchase credited: org={}, txn={}, +{}c, new_balance={}",
+                    org_id,
+                    transaction_id,
+                    credit_cents,
+                    new_balance
+                );
+                clear_credit_suspension_if_needed(state, org_id, new_balance).await?;
+            }
+        }
         return Ok(());
     }
 
@@ -403,50 +395,40 @@ async fn handle_transaction_completed(
             anyhow::bail!("Auto top-up transaction has non-positive amount");
         }
 
+        tracing::info!(
+            "Auto top-up completed: depositing {} cents for org {}",
+            total_cents,
+            org_id
+        );
+
+        // Record the deposited credits in the source-of-truth ledger. The same
+        // UNIQUE(paddle_transaction_id) gate makes a redelivery a no-op.
+        match credit_ledger_once(
+            &state.pool,
+            org_id,
+            None,
+            total_cents,
+            "auto_topup",
+            &format!("Auto top-up: ${:.2}", total_cents as f64 / 100.0),
+            transaction_id,
+        )
+        .await?
         {
-            tracing::info!(
-                "Auto top-up completed: depositing {} cents for org {}",
-                total_cents,
-                org_id
-            );
-
-            // Record the deposited credits in the source-of-truth ledger.
-            let mut tx = state.pool.begin().await?;
-
-            let inserted = sqlx::query(
-                "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, paddle_transaction_id)
-                 VALUES ($1, $2, 'auto_topup', $3, $4)
-                 ON CONFLICT (paddle_transaction_id) DO NOTHING"
-            )
-            .bind(org_id)
-            .bind(total_cents)
-            .bind(format!("Auto top-up: ${:.2}", total_cents as f64 / 100.0))
-            .bind(transaction_id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-
-            if inserted == 0 {
-                tx.rollback().await?;
+            CreditOutcome::AlreadyCredited => {
                 tracing::info!(
                     "Auto top-up transaction {} already credited, skipping",
                     transaction_id
                 );
-                return Ok(());
             }
-
-            let new_balance = get_ledger_balance_cents(&mut *tx, org_id).await?;
-
-            tx.commit().await?;
-
-            tracing::info!(
-                "Auto top-up credited: org={}, +{}c, new_balance={}",
-                org_id,
-                total_cents,
-                new_balance
-            );
-
-            clear_credit_suspension_if_needed(state, org_id, new_balance).await?;
+            CreditOutcome::Credited { new_balance } => {
+                tracing::info!(
+                    "Auto top-up credited: org={}, +{}c, new_balance={}",
+                    org_id,
+                    total_cents,
+                    new_balance
+                );
+                clear_credit_suspension_if_needed(state, org_id, new_balance).await?;
+            }
         }
     }
 

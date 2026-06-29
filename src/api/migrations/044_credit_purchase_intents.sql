@@ -24,6 +24,29 @@ CREATE INDEX IF NOT EXISTS idx_credit_purchase_intents_org
 -- API and webhook paths only did a racy `SELECT EXISTS ... then INSERT`, so the
 -- two could double-credit the same transaction. NULLs remain distinct, so
 -- non-purchase ledger entries (usage debits, credit codes) are unaffected.
-ALTER TABLE credit_ledger
-    ADD CONSTRAINT credit_ledger_paddle_transaction_id_unique
-    UNIQUE (paddle_transaction_id);
+--
+-- Any pre-existing double-credits (the very bug this constraint prevents) must
+-- be collapsed first: ADD CONSTRAINT would otherwise fail, and migrations run
+-- under `psql -f ... || true` with no ON_ERROR_STOP, which would swallow that
+-- failure and silently leave the constraint absent — breaking every later
+-- `ON CONFLICT (paddle_transaction_id)` insert at runtime. Keep the earliest
+-- ledger row per transaction and drop the duplicate grants.
+DELETE FROM credit_ledger a
+USING credit_ledger b
+WHERE a.paddle_transaction_id IS NOT NULL
+  AND a.paddle_transaction_id = b.paddle_transaction_id
+  AND (a.created_at, a.id) > (b.created_at, b.id);
+
+-- Idempotent so re-running the migration is a no-op (ADD CONSTRAINT has no
+-- IF NOT EXISTS form).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'credit_ledger_paddle_transaction_id_unique'
+    ) THEN
+        ALTER TABLE credit_ledger
+            ADD CONSTRAINT credit_ledger_paddle_transaction_id_unique
+            UNIQUE (paddle_transaction_id);
+    END IF;
+END $$;
