@@ -693,6 +693,8 @@ struct TestSimulatePaddleTransactionRequest {
     event_type: Option<String>, // transaction.completed, transaction.billed, transaction.payment_failed
     #[serde(default)]
     transaction_id: Option<String>, // reuse a specific transaction ID (e.g. from a prior billed event)
+    #[serde(default)]
+    custom_data: Option<serde_json::Value>, // optional transaction custom_data (e.g. to exercise credit-purchase paths)
 }
 
 /// Simulate a Paddle transaction webhook for testing email and billing flow
@@ -750,7 +752,8 @@ async fn test_simulate_paddle_transaction(
                     "total": req.amount_cents.to_string(),
                     "tax": "0"
                 }
-            }
+            },
+            "custom_data": req.custom_data.clone().unwrap_or(serde_json::Value::Null)
         }),
     };
 

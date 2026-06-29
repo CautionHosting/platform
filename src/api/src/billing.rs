@@ -1966,6 +1966,36 @@ pub async fn purchase_credits(
             })?
             .to_string();
 
+        // Record the server-authoritative credit amount before handing the
+        // transaction id back to the frontend. Both the completion callback and
+        // the Paddle webhook credit from this row, never from client-supplied
+        // custom_data.
+        if let Err(e) = sqlx::query(
+            "INSERT INTO credit_purchase_intents
+                 (paddle_transaction_id, organization_id, user_id, purchase_cents, credit_cents, paddle_price_id)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (paddle_transaction_id) DO NOTHING",
+        )
+        .bind(&transaction_id)
+        .bind(org_id)
+        .bind(auth.user_id)
+        .bind(purchase.purchase_cents)
+        .bind(purchase.credit_cents)
+        .bind(purchase.price_id.as_deref())
+        .execute(&state.db)
+        .await
+        {
+            tracing::error!(
+                "Failed to record credit purchase intent for transaction {}: {}",
+                transaction_id,
+                e
+            );
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to record credit purchase".to_string(),
+            ));
+        }
+
         tracing::info!(
             "Created Paddle transaction {} for credit purchase checkout ({} cents)",
             transaction_id,
@@ -2180,11 +2210,40 @@ pub async fn purchase_credits(
         })));
     }
 
+    // Credit the server-authoritative amount recorded when this transaction was
+    // created, never the amount derived from the (client-influenced) request or
+    // transaction custom_data. A missing intent row means this is not a
+    // server-created credit purchase and must not be credited.
+    let intent_credit_cents: Option<i64> = sqlx::query_scalar(
+        "SELECT credit_cents FROM credit_purchase_intents WHERE paddle_transaction_id = $1",
+    )
+    .bind(&transaction_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
+
+    let Some(authoritative_credit_cents) = intent_credit_cents else {
+        tracing::error!(
+            "No credit purchase intent for transaction {} (org {}); refusing to credit",
+            transaction_id,
+            org_id
+        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "No matching credit purchase on record".to_string(),
+        ));
+    };
+
     let new_balance = apply_credit(
         &state.db,
         org_id,
         auth.user_id,
-        purchase.credit_cents,
+        authoritative_credit_cents,
         "purchase",
         &purchase.description,
         Some(&transaction_id),
@@ -2444,7 +2503,8 @@ pub async fn apply_credit(
 
     sqlx::query(
         "INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description, paddle_transaction_id, invoice_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)"
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (paddle_transaction_id) DO NOTHING"
     )
     .bind(org_id)
     .bind(user_id)
