@@ -138,8 +138,6 @@ COPY --from=locksmith-builder /binaries/locksmith-oneshot /build/binaries/locksm
 COPY --from=linux-nitro /bzImage /build/kernel/bzImage
 COPY --from=linux-nitro /linux.config /build/kernel/linux.config
 
-COPY app/ /build/app/
-
 COPY run.sh /build/run.sh
 
 COPY enclave/rootfs/udhcpc-script.sh /build/udhcpc-script.sh
@@ -149,6 +147,9 @@ COPY manifest.json /build/manifest.json
 RUN mkdir -p /build/initramfs/bin && \
     mkdir -p /build/initramfs/lib && \
     mkdir -p /build/initramfs/etc/ssl/certs
+
+# Copy user app files first; EnclaveOS components come next so they always win
+COPY app/ /build/initramfs/
 
 RUN cp /bin/init /build/initramfs/init && \
     chmod +x /build/initramfs/init
@@ -209,9 +210,6 @@ RUN if [ -f /lib/ld-musl-x86_64.so.1 ]; then \
 RUN if [ -f /etc/ssl/certs/ca-certificates.crt ]; then \
         cp /etc/ssl/certs/ca-certificates.crt /build/initramfs/etc/ssl/certs/ca-certificates.crt; \
     fi
-
-# Copy user app files to initramfs root to preserve original paths
-RUN cp -r /build/app/* /build/initramfs/ 2>/dev/null || true
 
 RUN find /build/initramfs -exec touch -hcd "@0" {} +
 

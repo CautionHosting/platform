@@ -317,49 +317,20 @@ pub async fn get_or_clone_enclave_source(
         let decoder = GzDecoder::new(&archive_bytes[..]);
         let mut archive = Archive::new(decoder);
 
-        // Extract with strip_components=1 equivalent (skip first path component)
         for entry in archive
             .entries()
             .context("Failed to read archive entries")?
         {
             let mut entry = entry.context("Failed to read archive entry")?;
-            let path = entry.path().context("Failed to get entry path")?;
-
-            // Skip the first path component (equivalent to --strip-components=1)
-            let components: Vec<_> = path.components().collect();
-            if components.len() <= 1 {
-                continue; // Skip the top-level directory itself
-            }
-
-            let stripped_path: PathBuf = components[1..].iter().collect();
-
-            // Reject paths with .. components (zip-slip prevention)
-            if stripped_path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                anyhow::bail!(
-                    "Path traversal detected in archive entry: {}",
-                    path.display()
-                );
-            }
-
-            let dest_path = download_dir.join(&stripped_path);
-
-            // Create parent directories if needed
-            if let Some(parent) = dest_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-            }
-
             entry
-                .unpack(&dest_path)
-                .with_context(|| format!("Failed to extract: {}", stripped_path.display()))?;
+                .unpack_in(&download_dir)
+                .with_context(|| format!("Failed to extract entry"))?;
         }
 
-        tracing::info!("Enclave source extracted to: {}", download_dir.display());
+        let enclave_source_dir = download_dir.join("enclaveos");
+        tracing::info!("Enclave source extracted to: {}", enclave_source_dir.display());
         Ok(EnclaveSourceResult {
-            path: download_dir,
+            path: enclave_source_dir,
             commit,
         })
     } else if enclave_source.starts_with("http://")
@@ -493,36 +464,9 @@ pub async fn get_or_clone_framework_source(
         .context("Failed to read framework archive entries")?
     {
         let mut entry = entry.context("Failed to read framework archive entry")?;
-        let path = entry.path().context("Failed to get entry path")?;
-
-        let components: Vec<_> = path.components().collect();
-        if components.len() <= 1 {
-            continue;
-        }
-
-        let stripped_path: PathBuf = components[1..].iter().collect();
-
-        // Reject paths with .. components (zip-slip prevention)
-        if stripped_path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            anyhow::bail!(
-                "Path traversal detected in archive entry: {}",
-                path.display()
-            );
-        }
-
-        let dest_path = download_dir.join(&stripped_path);
-
-        if let Some(parent) = dest_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-        }
-
         entry
-            .unpack(&dest_path)
-            .with_context(|| format!("Failed to extract: {}", stripped_path.display()))?;
+            .unpack_in(&download_dir)
+            .with_context(|| format!("Failed to extract entry"))?;
     }
 
     tracing::info!("Framework source extracted to: {}", download_dir.display());

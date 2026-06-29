@@ -5945,7 +5945,7 @@ enclave "default" {{
         }
 
         let temp_dir = tempfile::TempDir::new().context("Failed to create temp source dir")?;
-        Self::extract_tarball_bytes_to_dir(&archive_output.stdout, temp_dir.path(), 0)?;
+        Self::extract_tarball_bytes_to_dir(&archive_output.stdout, temp_dir.path())?;
 
         log_verbose(
             self.verbose,
@@ -5971,7 +5971,7 @@ enclave "default" {{
         let archive_hash = hex::encode(Sha256::digest(&archive_bytes));
         let temp_dir = tempfile::TempDir::new().context("Failed to create temp source dir")?;
 
-        Self::extract_tarball_bytes_to_dir(&archive_bytes, temp_dir.path(), 0)?;
+        Self::extract_tarball_bytes_to_dir(&archive_bytes, temp_dir.path())?;
 
         log_verbose(
             self.verbose,
@@ -5993,20 +5993,17 @@ enclave "default" {{
     fn extract_tarball_bytes_to_dir(
         archive_bytes: &[u8],
         extract_dir: &Path,
-        strip_components: usize,
     ) -> Result<()> {
         if archive_bytes.starts_with(&[0x1f, 0x8b]) {
             let decoder = flate2::read::GzDecoder::new(archive_bytes);
             Self::extract_tar_archive_to_dir(
                 tar::Archive::new(decoder),
                 extract_dir,
-                strip_components,
             )
         } else {
             Self::extract_tar_archive_to_dir(
                 tar::Archive::new(archive_bytes),
                 extract_dir,
-                strip_components,
             )
         }
     }
@@ -6014,56 +6011,15 @@ enclave "default" {{
     fn extract_tar_archive_to_dir<R: std::io::Read>(
         mut archive: tar::Archive<R>,
         extract_dir: &Path,
-        strip_components: usize,
     ) -> Result<()> {
-        std::fs::create_dir_all(extract_dir)
-            .with_context(|| format!("Failed to create extract dir: {}", extract_dir.display()))?;
-        let canonical_extract = extract_dir.canonicalize().with_context(|| {
-            format!(
-                "Failed to canonicalize extract dir: {}",
-                extract_dir.display()
-            )
-        })?;
-
         for entry in archive
             .entries()
             .context("Failed to read archive entries")?
         {
             let mut entry = entry.context("Failed to read archive entry")?;
-            let path = entry.path().context("Failed to get entry path")?;
-            if path.is_absolute() {
-                bail!("Archive path traversal detected: {}", path.display());
-            }
-
-            let components: Vec<_> = path.components().collect();
-            if components.len() <= strip_components {
-                continue;
-            }
-
-            let stripped_path: PathBuf = components[strip_components..].iter().collect();
-            if stripped_path.as_os_str().is_empty() {
-                continue;
-            }
-            let dest_path = canonical_extract.join(&stripped_path);
-
-            if let Some(parent) = dest_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-
-                let canonical_parent = parent
-                    .canonicalize()
-                    .with_context(|| format!("Failed to canonicalize: {}", parent.display()))?;
-                if !canonical_parent.starts_with(&canonical_extract) {
-                    bail!(
-                        "Archive path traversal detected: {}",
-                        stripped_path.display()
-                    );
-                }
-            }
-
             entry
-                .unpack(&dest_path)
-                .with_context(|| format!("Failed to extract: {}", stripped_path.display()))?;
+                .unpack_in(extract_dir)
+                .with_context(|| format!("Failed to extract entry"))?;
         }
 
         Ok(())
@@ -6240,7 +6196,7 @@ enclave "default" {{
             &format!("Downloaded {} bytes, extracting...", archive_bytes.len()),
         );
 
-        Self::extract_tarball_bytes_to_dir(&archive_bytes, &extract_dir, 1)?;
+        Self::extract_tarball_bytes_to_dir(&archive_bytes, &extract_dir)?;
 
         log_verbose(
             self.verbose,
