@@ -301,6 +301,7 @@ async fn send_email_handler(
         "suspension_notice" => generate_suspension_notice_email(&req.data),
         "legal_notice" => generate_legal_notice_email(&req.data),
         "fully_managed_capacity_alert" => generate_fully_managed_capacity_alert_email(&req.data),
+        "organization_invite" => generate_organization_invite_email(&req.data),
         _ => {
             return Ok(Json(SendEmailResponse {
                 success: false,
@@ -542,6 +543,75 @@ fn generate_legal_notice_email(data: &serde_json::Value) -> (String, String, Str
          --\n\
          Caution Team",
         text_documents, action_text
+    );
+
+    (subject, html_body, text_body)
+}
+
+fn generate_organization_invite_email(data: &serde_json::Value) -> (String, String, String) {
+    let org_name_raw = data["organization_name"].as_str().unwrap_or("Caution");
+    let invite_url_raw = data["invite_url"]
+        .as_str()
+        .unwrap_or("https://dashboard.caution.co");
+    let inviter_raw = data["inviter_email"].as_str().unwrap_or("a Caution user");
+    let expires_at_raw = data["expires_at"].as_str().unwrap_or("soon");
+
+    let org_name = html_escape(org_name_raw);
+    let invite_url = html_escape(invite_url_raw);
+    let inviter = html_escape(inviter_raw);
+    let expires_at = html_escape(expires_at_raw);
+    let subject = format!("Join {} on Caution.co", org_name_raw);
+
+    let html_body = format!(
+        r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Organization invite</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background-color: #f4f4f4; padding: 20px; border-radius: 10px;">
+        <p>{inviter} invited you to join <strong>{org_name}</strong>.</p>
+
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="{invite_url}"
+               style="background-color: #111; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold; border: 1px solid #fff;">
+                Accept invite
+            </a>
+        </div>
+
+        <p style="color: #7f8c8d; font-size: 14px;">
+            If the button doesn't work, copy and paste this link into your browser:<br>
+            <a href="{invite_url}" style="color: #3498db; word-break: break-all;">{invite_url}</a>
+        </p>
+
+        <p style="color: #7f8c8d; font-size: 14px; margin-top: 30px;">
+            This link expires at {expires_at} and can only be used once.
+        </p>
+    </div>
+
+{footer}
+</body>
+</html>
+        "#,
+        org_name = org_name,
+        inviter = inviter,
+        invite_url = invite_url,
+        expires_at = expires_at,
+        footer = html_email_footer()
+    );
+
+    let text_body = format!(
+        "{inviter} invited you to join {org_name}.\n\n\
+         Accept invite: {invite_url}\n\n\
+         This link expires at {expires_at} and can only be used once.\n\n\
+         --\n\
+         Caution Team",
+        org_name = org_name_raw,
+        inviter = inviter_raw,
+        invite_url = invite_url_raw,
+        expires_at = expires_at_raw
     );
 
     (subject, html_body, text_body)

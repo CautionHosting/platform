@@ -790,6 +790,103 @@ make build-cli
       </template>
     </template>
 
+    <!-- Users Tab -->
+    <div v-if="activeTab === 'users'" class="content-card content-card--dashboard-tab">
+      <div class="content-header">
+        <div class="content-header-text">
+          <h2 class="content-header-title">Users</h2>
+          <p class="content-header-description">
+            Manage organization access.
+          </p>
+        </div>
+      </div>
+
+      <form class="inline-form-panel ssh-key-form-panel" @submit.prevent="inviteUser">
+        <h3 class="inline-form-panel-title">Add user</h3>
+        <div class="form-group">
+          <label class="form-label" for="inviteEmail">Email</label>
+          <input
+            id="inviteEmail"
+            v-model="inviteEmail"
+            type="email"
+            class="form-input"
+            placeholder="user@example.com"
+            :disabled="invitingUser"
+          />
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn-primary" :disabled="invitingUser">
+            <svg v-if="invitingUser" class="spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10" stroke-opacity="0.25"/>
+              <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/>
+            </svg>
+            {{ invitingUser ? "Sending..." : "Send invite" }}
+          </button>
+        </div>
+        <div v-if="inviteMessage" class="message message--success">{{ inviteMessage }}</div>
+        <div v-if="inviteError" class="message message--error">{{ inviteError }}</div>
+      </form>
+
+      <div class="content-subsection">
+        <div class="content-subsection-header">
+          <h3 class="content-subsection-title">Pending invites</h3>
+        </div>
+        <div v-if="loadingInvitations" class="list-item-empty">Loading invites...</div>
+        <div v-else-if="pendingInvitations.length === 0" class="list-item-empty">
+          No pending invites.
+        </div>
+        <div v-else class="passkey-list">
+          <div v-for="invitation in pendingInvitations" :key="invitation.id" class="passkey-item">
+            <div class="passkey-info">
+              <div class="passkey-header">
+                <div>
+                  <div class="passkey-title">{{ invitation.email }}</div>
+                </div>
+                <div class="passkey-badges">
+                  <span class="passkey-badge">{{ invitation.role }}</span>
+                </div>
+              </div>
+              <div class="passkey-meta">
+                <span>Invited {{ formatDate(invitation.created_at) }}</span>
+                <span>Expires {{ formatDate(invitation.expires_at) }}</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              class="btn-danger"
+              :disabled="cancelingInvitation === invitation.id"
+              @click="cancelInvitation(invitation)"
+            >
+              {{ cancelingInvitation === invitation.id ? "Canceling..." : "Cancel invite" }}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="loadingMembers" class="list-item-empty">Loading users...</div>
+      <div v-else-if="organizationMembers.length === 0" class="list-item-empty">
+        No users found for this organization.
+      </div>
+      <div v-else class="passkey-list">
+        <div v-for="member in organizationMembers" :key="member.id" class="passkey-item">
+          <div class="passkey-info">
+            <div class="passkey-header">
+              <div>
+                <div class="passkey-title">{{ member.email || member.username || member.user_id }}</div>
+              </div>
+              <div class="passkey-badges">
+                <span class="passkey-badge">{{ member.role }}</span>
+              </div>
+            </div>
+            <div class="passkey-meta">
+              <span v-if="member.username">{{ member.username }}</span>
+              <span>Joined {{ formatDate(member.joined_at) }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- SSH Keys Tab -->
     <div v-if="activeTab === 'ssh'" class="content-card content-card--dashboard-tab">
       <div class="content-header">
@@ -1167,12 +1264,51 @@ make build-cli
         <div class="content-header-text">
           <h2 class="content-header-title">Account</h2>
           <p class="content-header-description">
-            Manage account-level settings and review legal documents.
+            Manage account and organization settings.
           </p>
         </div>
       </div>
 
       <div class="account-settings-list">
+        <!-- Organization Section -->
+        <section class="account-settings-section">
+          <h3 class="billing-section-title">Organization</h3>
+          <div class="account-settings-row">
+            <div class="account-settings-label">
+              <p class="account-settings-description">
+                Set the organization name shown in the dashboard and invitation emails.
+              </p>
+            </div>
+            <div class="account-settings-content">
+              <div class="email-settings-controls">
+                <label class="sr-only" for="organizationName">Organization name</label>
+                <div class="email-settings-row">
+                  <input
+                    id="organizationName"
+                    v-model="orgNameInput"
+                    type="text"
+                    placeholder="Organization name"
+                    class="email-input"
+                    :disabled="savingOrgName"
+                    @keyup.enter="saveOrganizationName"
+                  />
+                  <button
+                    @click="saveOrganizationName"
+                    :disabled="savingOrgName || !orgNameInput.trim()"
+                    class="btn-primary email-action-button"
+                  >
+                    {{ savingOrgName ? "Saving..." : "Save" }}
+                  </button>
+                </div>
+                <div v-if="orgNameError" class="card-error email-form-message">{{ orgNameError }}</div>
+                <p v-if="orgNameMessage" class="email-settings-helper">
+                  {{ orgNameMessage }}
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <!-- Email Section -->
         <section class="account-settings-section">
           <div class="account-settings-title-row">
@@ -1738,6 +1874,7 @@ export default {
       ssh: "ssh",
       keys: "keys",
       security: "security",
+      users: "users",
       account: "account",
       billing: "billing",
       credentials: "credentials",
@@ -1950,6 +2087,20 @@ export default {
     const updatingOrgSettings = ref(false);
     const orgSettingsError = ref(null);
     const currentOrgId = ref(null);
+    const currentOrganization = ref(null);
+    const orgNameInput = ref("");
+    const savingOrgName = ref(false);
+    const orgNameError = ref("");
+    const orgNameMessage = ref("");
+    const organizationMembers = ref([]);
+    const loadingMembers = ref(false);
+    const inviteEmail = ref("");
+    const invitingUser = ref(false);
+    const inviteMessage = ref("");
+    const inviteError = ref("");
+    const pendingInvitations = ref([]);
+    const loadingInvitations = ref(false);
+    const cancelingInvitation = ref(null);
     const passkeys = ref([]);
     const loadingPasskeys = ref(true);
     const addingPasskey = ref(false);
@@ -1971,6 +2122,42 @@ export default {
       return "";
     });
 
+    const loadCurrentOrganization = async (force = false) => {
+      if (currentOrganization.value && currentOrgId.value && !force) {
+        return currentOrganization.value;
+      }
+      const orgsResponse = await authFetch("/api/organizations", {
+        cache: "no-store",
+      });
+      if (!orgsResponse.ok) {
+        if (orgsResponse.status === 401) {
+          window.location.href = "/login";
+          return null;
+        }
+        throw new Error("Failed to load organizations");
+      }
+
+      const orgs = await orgsResponse.json();
+      currentOrganization.value = orgs[0] || null;
+      currentOrgId.value = currentOrganization.value?.id || null;
+      orgNameInput.value = currentOrganization.value?.name || "";
+      return currentOrganization.value;
+    };
+
+    const ensureCurrentOrgId = async (force = false) => {
+      if (currentOrgId.value && !force) return currentOrgId.value;
+      await loadCurrentOrganization(force);
+      return currentOrgId.value;
+    };
+
+    const refreshCurrentOrganization = async () => {
+      try {
+        await loadCurrentOrganization(true);
+      } catch (err) {
+        orgNameError.value = err.message || "Failed to load organization";
+      }
+    };
+
     const loadOrgSettings = async () => {
       // only display loading text if we have no org settings
       if (Object.keys(orgSettings.value).length == 0) {
@@ -1979,26 +2166,14 @@ export default {
       orgSettingsError.value = null;
 
       try {
-        // First get the user's primary organization
-        const orgsResponse = await authFetch("/api/organizations");
-        if (!orgsResponse.ok) {
-          if (orgsResponse.status === 401) {
-            window.location.href = "/login";
-            return;
-          }
-          throw new Error("Failed to load organizations");
-        }
-
-        const orgs = await orgsResponse.json();
-        if (orgs.length === 0) {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) {
           loadingOrgSettings.value = false;
           return;
         }
 
-        currentOrgId.value = orgs[0].id;
-
         // Then get the org settings
-        const settingsResponse = await authFetch(`/api/organizations/${currentOrgId.value}/settings`);
+        const settingsResponse = await authFetch(`/api/organizations/${orgId}/settings`);
         if (settingsResponse.ok) {
           orgSettings.value = await settingsResponse.json();
         } else {
@@ -2019,6 +2194,163 @@ export default {
         return parsed.error || parsed.message || text;
       } catch {
         return text;
+      }
+    };
+
+    const saveOrganizationName = async () => {
+      const name = orgNameInput.value.trim();
+      orgNameMessage.value = "";
+      orgNameError.value = "";
+
+      if (!name) {
+        orgNameError.value = "Enter an organization name.";
+        return;
+      }
+
+      savingOrgName.value = true;
+
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) {
+          throw new Error("No organization found.");
+        }
+
+        const response = await authFetch(`/api/organizations/${orgId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+        });
+
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to update organization name"));
+        }
+
+        currentOrganization.value = await response.json();
+        orgNameInput.value = currentOrganization.value.name || "";
+        orgNameMessage.value = "Organization name updated.";
+        showToast("Organization name updated");
+      } catch (err) {
+        orgNameError.value = err.message || "Failed to update organization name";
+        showToast(orgNameError.value, "error");
+      } finally {
+        savingOrgName.value = false;
+      }
+    };
+
+    const loadMembers = async () => {
+      loadingMembers.value = true;
+      inviteError.value = "";
+
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) {
+          organizationMembers.value = [];
+          return;
+        }
+
+        const response = await authFetch(`/api/organizations/${orgId}/members`);
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to load users"));
+        }
+        organizationMembers.value = await response.json();
+      } catch (err) {
+        inviteError.value = err.message || "Failed to load users";
+      } finally {
+        loadingMembers.value = false;
+      }
+    };
+
+    const loadInvitations = async () => {
+      loadingInvitations.value = true;
+      inviteError.value = "";
+
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) {
+          pendingInvitations.value = [];
+          return;
+        }
+
+        const response = await authFetch(`/api/organizations/${orgId}/invitations`);
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to load invites"));
+        }
+        pendingInvitations.value = await response.json();
+      } catch (err) {
+        inviteError.value = err.message || "Failed to load invites";
+      } finally {
+        loadingInvitations.value = false;
+      }
+    };
+
+    const inviteUser = async () => {
+      const email = inviteEmail.value.trim();
+      inviteMessage.value = "";
+      inviteError.value = "";
+
+      if (!email) {
+        inviteError.value = "Enter an email address.";
+        return;
+      }
+
+      invitingUser.value = true;
+
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) {
+          throw new Error("No organization found.");
+        }
+
+        const response = await authFetch(`/api/organizations/${orgId}/invitations`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email }),
+        });
+
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to invite user"));
+        }
+
+        const result = await response.json();
+        inviteEmail.value = "";
+        inviteMessage.value = result.email_sent
+          ? `Invitation sent to ${result.invitation.email}.`
+          : `Invitation created for ${result.invitation.email}, but email delivery failed.`;
+        await loadInvitations();
+      } catch (err) {
+        inviteError.value = err.message || "Failed to invite user";
+      } finally {
+        invitingUser.value = false;
+      }
+    };
+
+    const cancelInvitation = async (invitation) => {
+      inviteMessage.value = "";
+      inviteError.value = "";
+      cancelingInvitation.value = invitation.id;
+
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) {
+          throw new Error("No organization found.");
+        }
+
+        const response = await authFetch(`/api/organizations/${orgId}/invitations/${invitation.id}`, {
+          method: "DELETE",
+        });
+
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to cancel invite"));
+        }
+
+        pendingInvitations.value = pendingInvitations.value.filter((item) => item.id !== invitation.id);
+        inviteMessage.value = `Invitation canceled for ${invitation.email}.`;
+        showToast("Invitation canceled");
+      } catch (err) {
+        inviteError.value = err.message || "Failed to cancel invite";
+        showToast(inviteError.value, "error");
+      } finally {
+        cancelingInvitation.value = null;
       }
     };
 
@@ -3821,6 +4153,9 @@ export default {
       } else if (newTab === "security") {
         loadPasskeys();
         loadOrgSettings();
+      } else if (newTab === "users") {
+        loadMembers();
+        loadInvitations();
       } else if (newTab === "credentials") {
         showAddCredentialForm.value = false;
         resetCredentialForm();
@@ -3829,6 +4164,7 @@ export default {
         loadBundles();
       } else if (newTab === "account") {
         loadUserEmail();
+        refreshCurrentOrganization();
       } else if (newTab === "billing") {
         loadBilling();
         loadCreditBalance();
@@ -4143,10 +4479,14 @@ export default {
       } else if (activeTab.value === "security") {
         loadPasskeys();
         loadOrgSettings();
+      } else if (activeTab.value === "users") {
+        loadMembers();
+        loadInvitations();
       } else if (activeTab.value === "keys") {
         loadBundles();
       } else if (activeTab.value === "account") {
         loadUserEmail();
+        refreshCurrentOrganization();
       } else if (activeTab.value === "billing") {
         loadCreditBalance();
         loadBilling();
@@ -4203,6 +4543,12 @@ export default {
 
       if (initialTab === "account") {
         loadUserEmail();
+        refreshCurrentOrganization();
+      }
+
+      if (initialTab === "users") {
+        loadMembers();
+        loadInvitations();
       }
 
       if (initialTab === "billing") {
@@ -4238,10 +4584,14 @@ export default {
           loadKeys();
         } else if (activeTab.value === "credentials") {
           loadCredentials();
+        } else if (activeTab.value === "users") {
+          loadMembers();
+          loadInvitations();
         } else if (activeTab.value === "keys") {
           loadBundles();
         } else if (activeTab.value === "account") {
           loadUserEmail();
+          refreshCurrentOrganization();
         } else if (activeTab.value === "billing") {
           loadBilling();
           loadCreditBalance();
@@ -4360,6 +4710,22 @@ export default {
       updatingOrgSettings,
       orgSettingsError,
       toggleRequirePin,
+      orgNameInput,
+      savingOrgName,
+      orgNameError,
+      orgNameMessage,
+      saveOrganizationName,
+      organizationMembers,
+      loadingMembers,
+      inviteEmail,
+      invitingUser,
+      inviteMessage,
+      inviteError,
+      inviteUser,
+      pendingInvitations,
+      loadingInvitations,
+      cancelingInvitation,
+      cancelInvitation,
       billingData,
       loadingBilling,
       currentBillingPeriod,
@@ -4518,6 +4884,26 @@ export default {
 
 .inline-form-panel .form-input {
   min-height: 45px;
+}
+
+.content-subsection {
+  margin-top: 28px;
+}
+
+.content-subsection-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.content-subsection-title {
+  margin: 0;
+  color: #0f0f0f;
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.3;
 }
 
 .cloud-credentials-header {

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
-    extract::{ConnectInfo, Extension, Path, State},
+    extract::{ConnectInfo, Extension, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -266,6 +266,8 @@ pub async fn health_handler() -> impl IntoResponse {
 pub enum RegisterError {
     #[error("This access code is invalid or has already been used.")]
     InvalidAccessCode,
+    #[error("This invitation link is invalid, expired, or has already been used.")]
+    InvalidInvitation,
     #[error("Registration challenge has expired. Please try again.")]
     ChallengeExpired,
     #[error("No matching registration state found. Please start over.")]
@@ -281,7 +283,9 @@ pub enum RegisterError {
 impl IntoResponse for RegisterError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            Self::InvalidAccessCode => (StatusCode::BAD_REQUEST, self.to_string()),
+            Self::InvalidAccessCode | Self::InvalidInvitation => {
+                (StatusCode::BAD_REQUEST, self.to_string())
+            }
             Self::ChallengeExpired | Self::NoRegistrationState => {
                 (StatusCode::GONE, self.to_string())
             }
@@ -643,6 +647,67 @@ pub async fn begin_register_handler(
 
     tracing::debug!("Alpha code validated: id={}", alpha_code_id);
 
+    begin_registration_challenge(
+        &state,
+        None,
+        PendingRegistrationKind::AlphaCode { alpha_code_id },
+    )
+    .await
+}
+
+pub async fn invite_preview_handler(
+    State(state): State<AppState>,
+    Query(params): Query<InvitePreviewQuery>,
+) -> Result<Json<InvitePreviewResponse>, RegisterError> {
+    let token = params.token.trim();
+    if token.is_empty() {
+        return Err(RegisterError::InvalidInvitation);
+    }
+
+    let token_hash = db::hash_invitation_token(token);
+    let invitation = db::get_valid_invitation(&state.db, &token_hash)
+        .await
+        .map_err(|e| RegisterError::Internal(e))?
+        .ok_or(RegisterError::InvalidInvitation)?;
+
+    Ok(Json(InvitePreviewResponse {
+        email: invitation.email,
+        organization_name: invitation.organization_name,
+        expires_at: invitation.expires_at.to_string(),
+    }))
+}
+
+pub async fn begin_invite_register_handler(
+    State(state): State<AppState>,
+    Json(req): Json<InviteRegisterBeginRequest>,
+) -> Result<Json<RegisterBeginResponse>, RegisterError> {
+    let token = req.token.trim();
+    if token.is_empty() {
+        return Err(RegisterError::InvalidInvitation);
+    }
+
+    let token_hash = db::hash_invitation_token(token);
+    let invitation = db::get_valid_invitation(&state.db, &token_hash)
+        .await
+        .map_err(|e| RegisterError::Internal(e))?
+        .ok_or(RegisterError::InvalidInvitation)?;
+
+    begin_registration_challenge(
+        &state,
+        Some(invitation.email.clone()),
+        PendingRegistrationKind::OrganizationInvite {
+            invitation_id: invitation.id,
+            token_hash,
+        },
+    )
+    .await
+}
+
+async fn begin_registration_challenge(
+    state: &AppState,
+    display_name: Option<String>,
+    kind: PendingRegistrationKind,
+) -> Result<Json<RegisterBeginResponse>, RegisterError> {
     // Fetch ALL existing credential IDs to pass as excludeCredentials
     // This prevents the same authenticator from registering multiple accounts
     let existing_cred_ids = db::get_all_credential_ids(&state.db)
@@ -659,7 +724,7 @@ pub async fn begin_register_handler(
     );
 
     let user_unique_id = Uuid::new_v4();
-    let user_name = format!("user_{}", user_unique_id);
+    let user_name = display_name.unwrap_or_else(|| format!("user_{}", user_unique_id));
 
     let (mut ccr, reg_state) = state
         .webauthn
@@ -697,7 +762,7 @@ pub async fn begin_register_handler(
     let state_key = user_unique_id.to_string();
     let pending = crate::types::PendingRegistration {
         reg_state,
-        alpha_code_id,
+        kind,
         expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(2),
     };
     {
@@ -805,22 +870,51 @@ pub async fn finish_register_handler(
             .map(|s| s.to_string()),
     };
 
-    let user_id = db::create_user(
-        &state.db,
-        &user_unique_id.as_bytes()[..],
-        pending.alpha_code_id,
-        &legal,
-    )
-    .await
-    .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to create user: {}", e)))?;
+    let user_id = match pending.kind {
+        PendingRegistrationKind::AlphaCode { alpha_code_id } => {
+            let user_id = db::create_user(
+                &state.db,
+                &user_unique_id.as_bytes()[..],
+                alpha_code_id,
+                &legal,
+            )
+            .await
+            .map_err(|e| {
+                RegisterError::Internal(anyhow::anyhow!("Failed to create user: {}", e))
+            })?;
 
-    db::redeem_alpha_code(&state.db, pending.alpha_code_id)
-        .await
-        .map_err(|e| {
-            RegisterError::Internal(anyhow::anyhow!("Failed to redeem alpha code: {}", e))
-        })?;
+            db::redeem_alpha_code(&state.db, alpha_code_id)
+                .await
+                .map_err(|e| {
+                    RegisterError::Internal(anyhow::anyhow!("Failed to redeem alpha code: {}", e))
+                })?;
 
-    tracing::debug!("User registered and alpha code redeemed");
+            tracing::debug!("User registered and alpha code redeemed");
+            user_id
+        }
+        PendingRegistrationKind::OrganizationInvite {
+            invitation_id,
+            token_hash,
+        } => {
+            let user_id = db::accept_invitation_and_create_user(
+                &state.db,
+                invitation_id,
+                &token_hash,
+                &user_unique_id.as_bytes()[..],
+                &legal,
+            )
+            .await
+            .map_err(|e| {
+                RegisterError::Internal(anyhow::anyhow!(
+                    "Failed to accept organization invitation: {}",
+                    e
+                ))
+            })?;
+
+            tracing::debug!("User registered from organization invitation");
+            user_id
+        }
+    };
 
     let passkey_json = serde_json::to_vec(&seckey).map_err(|e| {
         RegisterError::Internal(anyhow::anyhow!("Failed to serialize credential: {}", e))

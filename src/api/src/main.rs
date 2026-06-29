@@ -186,7 +186,7 @@ pub(crate) async fn get_user_primary_org(db: &PgPool, user_id: Uuid) -> Result<U
     let org_id: Option<(Uuid,)> = sqlx::query_as(
         "SELECT organization_id FROM organization_members
          WHERE user_id = $1
-         ORDER BY created_at ASC
+         ORDER BY created_at ASC, id ASC
          LIMIT 1",
     )
     .bind(user_id)
@@ -2934,6 +2934,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/organizations/{id}/members",
             post(organizations::add_member),
+        )
+        .route(
+            "/organizations/{id}/invitations",
+            get(organizations::list_active_invitations).post(organizations::invite_member),
+        )
+        .route(
+            "/organizations/{id}/invitations/{invitation_id}",
+            delete(organizations::cancel_invitation),
         )
         .route(
             "/organizations/{id}/members/{user_id}",

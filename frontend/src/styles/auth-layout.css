@@ -907,9 +907,21 @@ p.info a:hover,
 }
 
 .register-submit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-size: 0.975rem;
   gap: 8px;
   padding: 10px 20px;
+}
+
+.register-form > .register-submit {
+  display: flex;
+  margin: 24px auto 0;
+}
+
+.register-field .register-submit {
+  margin: 0;
 }
 
 .btn-icon {
