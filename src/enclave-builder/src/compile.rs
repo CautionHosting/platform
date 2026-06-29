@@ -327,7 +327,9 @@ pub async fn get_or_clone_enclave_source(
                 .with_context(|| format!("Failed to extract entry"))?;
         }
 
-        let enclave_source_dir = download_dir.join("enclaveos");
+        let enclave_source_dir = find_top_level_dir(&download_dir)
+            .await
+            .context("Failed to find top-level directory in extracted enclave source")?;
         tracing::info!("Enclave source extracted to: {}", enclave_source_dir.display());
         Ok(EnclaveSourceResult {
             path: enclave_source_dir,
@@ -469,6 +471,52 @@ pub async fn get_or_clone_framework_source(
             .with_context(|| format!("Failed to extract entry"))?;
     }
 
-    tracing::info!("Framework source extracted to: {}", download_dir.display());
-    Ok(download_dir)
+    let framework_source_dir = find_top_level_dir(&download_dir)
+        .await
+        .context("Failed to find top-level directory in extracted framework source")?;
+    tracing::info!("Framework source extracted to: {}", framework_source_dir.display());
+    Ok(framework_source_dir)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum FindTopLevelDirError {
+    #[error("failed to read directory {0}")]
+    ReadDir(String, #[source] std::io::Error),
+    #[error("failed to read directory entry")]
+    ReadEntry(#[source] std::io::Error),
+    #[error("failed to read entry file type")]
+    FileType(#[source] std::io::Error),
+    #[error("multiple top-level directories found in {0}")]
+    MultipleTopLevelDirs(String),
+    #[error("no top-level directory found in {0}")]
+    NoTopLevelDir(String),
+}
+
+async fn find_top_level_dir(dir: &Path) -> Result<PathBuf, FindTopLevelDirError> {
+    let mut entries = fs::read_dir(dir)
+        .await
+        .map_err(|e| FindTopLevelDirError::ReadDir(dir.display().to_string(), e))?;
+    let mut top_dir = None;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(FindTopLevelDirError::ReadEntry)?
+    {
+        if entry
+            .file_type()
+            .await
+            .map_err(FindTopLevelDirError::FileType)?
+            .is_dir()
+        {
+            if top_dir.is_some() {
+                return Err(FindTopLevelDirError::MultipleTopLevelDirs(
+                    dir.display().to_string(),
+                ));
+            }
+            top_dir = Some(entry.path());
+        }
+    }
+    top_dir.ok_or(FindTopLevelDirError::NoTopLevelDir(
+        dir.display().to_string(),
+    ))
 }
