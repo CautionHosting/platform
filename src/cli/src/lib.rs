@@ -2358,7 +2358,7 @@ enclave "default" {{
                 .split_once(':')
                 .ok_or_else(|| anyhow::anyhow!("Invalid git SSH URL format"))?;
             (host.to_string(), path.trim_end_matches(".git").to_string())
-        } else if git_url.starts_with("https://") || git_url.starts_with("http://") {
+        } else if git_url.starts_with("ssh://") || git_url.starts_with("https://") || git_url.starts_with("http://") {
             let url = url::Url::parse(git_url).context("Failed to parse git URL")?;
             let host = url
                 .host_str()
@@ -6269,7 +6269,15 @@ enclave "default" {{
         // output, so git gets empty credentials and fails fast.
         .env("GIT_ASKPASS", "true")
         // Detach stdin so git can't wait on the parent's TTY either.
-        .stdin(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null())
+        // Prevent SSH from prompting for host-key confirmation or credentials
+        // via /dev/tty, which hangs non-interactive callers. BatchMode=yes
+        // makes SSH fail immediately instead. StrictHostKeyChecking=yes avoids
+        // a TOFU prompt for unknown hosts (fail fast over silently accepting).
+        .env(
+            "GIT_SSH_COMMAND",
+            "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes",
+        );
         cmd
     }
 
