@@ -504,7 +504,7 @@ run: /app
 managed_on_prem: true
 platform: aws
 aws_region: us-east-1
-aws_vpc_id: vpc-123
+aws_vpc_id: vpc-0a1b2c3d
 ";
         let config = caution_config::ConfigurationFile::from_procfile(procfile).unwrap();
         let output = build_body(&config);
@@ -512,6 +512,6 @@ aws_vpc_id: vpc-123
         assert!(output.contains("provider {"), "provider block");
         assert!(output.contains("type = \"aws\""), "aws provider type");
         assert!(output.contains("region = \"us-east-1\""), "aws region");
-        assert!(output.contains("vpc_id = \"vpc-123\""), "vpc id");
+        assert!(output.contains("vpc_id = \"vpc-0a1b2c3d\""), "vpc id");
     }
 }
