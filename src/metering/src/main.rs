@@ -517,16 +517,15 @@ async fn get_user_usage(
 ) -> impl IntoResponse {
     let result = sqlx::query(
         r#"
-        SELECT DISTINCT
+        SELECT
             provider,
             resource_type,
-            quantity,
-            base_unit_cost_usd,
-            margin_percent,
+            quantity::float8           AS quantity,
+            base_unit_cost_usd::float8 AS base_unit_cost_usd,
+            margin_percent::float8     AS margin_percent
         FROM usage_ledger
         WHERE user_id = $1
         AND recorded_at >= NOW() - INTERVAL '30 days'
-	GROUP BY provider, resource_type
         "#,
     )
     .bind(user_id)
