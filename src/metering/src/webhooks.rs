@@ -213,7 +213,12 @@ fn extract_prepaid_credit_purchase_metadata(
 async fn clear_credit_suspension_if_needed(
     state: &AppState,
     org_id: uuid::Uuid,
+    new_balance: i64,
 ) -> anyhow::Result<()> {
+    if new_balance <= 0 {
+        return Ok(());
+    }
+
     let suspended: Option<chrono::DateTime<chrono::Utc>> =
         sqlx::query_scalar("SELECT credit_suspended_at FROM organizations WHERE id = $1")
             .bind(org_id)
@@ -378,7 +383,7 @@ async fn handle_transaction_completed(
             new_balance
         );
 
-        clear_credit_suspension_if_needed(state, org_id).await?;
+        clear_credit_suspension_if_needed(state, org_id, new_balance).await?;
         return Ok(());
     }
 
@@ -442,7 +447,7 @@ async fn handle_transaction_completed(
                 new_balance
             );
 
-            clear_credit_suspension_if_needed(state, org_id).await?;
+            clear_credit_suspension_if_needed(state, org_id, new_balance).await?;
         }
     }
 
