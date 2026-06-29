@@ -6272,11 +6272,17 @@ enclave "default" {{
         .stdin(std::process::Stdio::null())
         // Prevent SSH from prompting for host-key confirmation or credentials
         // via /dev/tty, which hangs non-interactive callers. BatchMode=yes
-        // makes SSH fail immediately instead. StrictHostKeyChecking=yes avoids
-        // a TOFU prompt for unknown hosts (fail fast over silently accepting).
+        // makes SSH fail immediately instead. accept-new accepts unknown hosts
+        // on first contact (no TOFU hang in fresh CI) while still rejecting
+        // changed keys (MITM protection). Preserve any caller-set
+        // GIT_SSH_COMMAND (e.g. a custom -i key) by appending rather than
+        // replacing.
         .env(
             "GIT_SSH_COMMAND",
-            "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes",
+            format!(
+                "{} -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+                std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| "ssh".to_string())
+            ),
         );
         cmd
     }
@@ -8345,7 +8351,7 @@ containerfile: Missing.Containerfile\n",
             .get("GIT_SSH_COMMAND")
             .expect("git SSH fallback must not be able to prompt through /dev/tty");
         assert!(ssh_command.contains("BatchMode=yes"));
-        assert!(ssh_command.contains("StrictHostKeyChecking=yes"));
+        assert!(ssh_command.contains("StrictHostKeyChecking=accept-new"));
     }
 
     #[test]
