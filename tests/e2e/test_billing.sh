@@ -383,7 +383,7 @@ log "  Total cost from DB: \$$TOTAL_DB_COST"
 
 # Also check directly in the database
 DB_RECORD_COUNT=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM usage_records WHERE organization_id = '$ORG_ID';
+SELECT COUNT(*) FROM usage_ledger WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 log "  Raw record count in DB: $DB_RECORD_COUNT"
@@ -1571,7 +1571,7 @@ SELECT COUNT(*) FROM invoices WHERE user_id = '$USER_ID';
 log "  Invoices: $INVOICE_COUNT"
 
 USAGE_COUNT_FINAL=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM usage_records WHERE organization_id = '$ORG_ID';
+SELECT COUNT(*) FROM usage_ledger WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 log "  Usage records: $USAGE_COUNT_FINAL"
 
