@@ -8033,7 +8033,20 @@ mod tests {
     use openpgp::parse::Parse;
     use openpgp::serialize::SerializeInto;
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use tempfile::tempdir;
+
+    fn test_api_client() -> ApiClient {
+        ApiClient {
+            base_url: "http://localhost".to_string(),
+            client: reqwest::Client::new(),
+            config_path: PathBuf::new(),
+            deployment_path: None,
+            verbose: false,
+            qr: false,
+            workdir: None,
+        }
+    }
 
     fn test_public_key() -> String {
         let (cert, _revocation) = CertBuilder::new()
@@ -8287,6 +8300,44 @@ containerfile: Missing.Containerfile\n",
         let command = resolve_local_build_command_from_dir(work_dir.path(), true).unwrap();
 
         assert_eq!(command, "echo 'Please configure your configuration file'");
+    }
+
+    #[test]
+    fn git_url_to_archive_urls_supports_ssh_scheme_urls() {
+        let client = test_api_client();
+        let commit = "50e2608f857ee2c9777b89af0f9af02ffba9999d";
+
+        let urls = client
+            .git_url_to_archive_urls(
+                "ssh://git@codeberg.org/caution/demo-pq-enclave-binding.git",
+                commit,
+            )
+            .unwrap();
+
+        assert!(urls.contains(&format!(
+            "https://codeberg.org/caution/demo-pq-enclave-binding/archive/{commit}.tar.gz"
+        )));
+    }
+
+    #[test]
+    fn git_command_disables_interactive_ssh_prompts() {
+        let cmd = ApiClient::git_command(&[
+            "ls-remote",
+            "ssh://git@codeberg.org/caution/demo-pq-enclave-binding.git",
+        ]);
+        let envs: HashMap<_, _> = cmd
+            .get_envs()
+            .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
+            .collect();
+
+        assert_eq!(envs.get("GIT_TERMINAL_PROMPT"), Some(&"0"));
+        assert_eq!(envs.get("GIT_ASKPASS"), Some(&"true"));
+
+        let ssh_command = envs
+            .get("GIT_SSH_COMMAND")
+            .expect("git SSH fallback must not be able to prompt through /dev/tty");
+        assert!(ssh_command.contains("BatchMode=yes"));
+        assert!(ssh_command.contains("StrictHostKeyChecking=yes"));
     }
 
     #[test]
