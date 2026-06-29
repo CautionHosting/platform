@@ -29,7 +29,7 @@ build-gateway:
 
 build-api:
 	@echo "Building API service..."
-	@docker build -t caution-api -f ./containerfiles/Containerfile.api .
+	@docker build -t caution-api --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) -f ./containerfiles/Containerfile.api .
 	@echo "API service image built: caution-api"
 
 build-email:
@@ -46,12 +46,12 @@ build-gateway-dev:
 
 build-api-dev:
 	@echo "Building API service (dev)..."
-	@docker build -t caution-api $(DEV_BUILD_ARGS) -f ./containerfiles/Containerfile.api .
+	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) -f ./containerfiles/Containerfile.api .
 	@echo "API dev service image built: caution-api"
 
 build-api-e2e:
 	@echo "Building API service (e2e test mode)..."
-	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.api .
+	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.api .
 	@echo "API e2e image build complete"
 
 build-email-dev:

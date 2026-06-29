@@ -311,9 +311,37 @@ async fn health_check() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
-// Uses the same resolver as the builder so this response can never drift from what is actually deployed.
+const PLATFORM_REPO: &str = "https://codeberg.org/caution/platform.git";
+
 async fn build_inputs() -> impl IntoResponse {
-    Json(enclave_builder::build::resolve_tool_commits())
+    #[derive(serde::Serialize)]
+    struct BuildInputs {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        platform: Option<PlatformSource>,
+        enclaveos: enclave_builder::build::ToolSource,
+        bootproof: enclave_builder::build::ToolSource,
+        steve: enclave_builder::build::ToolSource,
+        locksmith: enclave_builder::build::ToolSource,
+    }
+    #[derive(serde::Serialize)]
+    struct PlatformSource {
+        commit: String,
+        repo: &'static str,
+    }
+
+    let tools = enclave_builder::build::resolve_tool_commits();
+    let platform = std::env::var("PLATFORM_GIT_SHA")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|commit| PlatformSource { commit, repo: PLATFORM_REPO });
+
+    Json(BuildInputs {
+        platform,
+        enclaveos: tools.enclaveos,
+        bootproof: tools.bootproof,
+        steve: tools.steve,
+        locksmith: tools.locksmith,
+    })
 }
 
 fn deployment_health_timeout_secs() -> u64 {
@@ -1532,13 +1560,47 @@ mod build_inputs_tests {
     use axum::body::to_bytes;
     use axum::response::IntoResponse;
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: This test owns PLATFORM_GIT_SHA for the duration of the call;
+            // the API test module has no other environment-mutating tests.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: Restores the process environment value captured by this guard.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn build_inputs_returns_commits_and_repos() {
+        let _platform_sha = EnvVarGuard::set("PLATFORM_GIT_SHA", "test-sha");
+
         let resp = build_inputs().await.into_response();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
 
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(json["platform"]["commit"].as_str(), Some("test-sha"));
+        assert_eq!(json["platform"]["repo"].as_str(), Some(PLATFORM_REPO));
 
         // Each tool carries its commit paired with the repo the footer builds
         // its commit URLs from.
