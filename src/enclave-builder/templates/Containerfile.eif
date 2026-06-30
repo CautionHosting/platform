@@ -144,12 +144,13 @@ COPY enclave/rootfs/udhcpc-script.sh /build/udhcpc-script.sh
 
 COPY manifest.json /build/manifest.json
 
-RUN mkdir -p /build/initramfs/bin && \
-    mkdir -p /build/initramfs/lib && \
-    mkdir -p /build/initramfs/etc/ssl/certs
-
 # Copy user app files first; EnclaveOS components come next so they always win
 COPY app/ /build/initramfs/
+
+# Symlinks ruin everything.
+RUN test -e /build/initramfs/bin || mkdir -p /build/initramfs/bin
+RUN test -e /build/initramfs/lib ||  mkdir -p /build/initramfs/lib
+RUN test -e /build/initramfs/etc/ssl/certs ||  mkdir -p /build/initramfs/etc/ssl/certs
 
 RUN cp /bin/init /build/initramfs/init && \
     chmod +x /build/initramfs/init
