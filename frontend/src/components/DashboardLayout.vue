@@ -299,9 +299,9 @@
       <div
         v-if="buildInputs.length"
         class="footer-build-inputs"
-        title="Tool commits the platform builds new enclaves with. Build inputs, not attested measurements — verify a running enclave with `caution verify`."
+        title="Commits the platform builds new enclaves with. Build inputs, not attested measurements — verify a running enclave with `caution verify`."
       >
-        <span class="footer-build-inputs-label">Enclave build inputs:</span>
+        <span class="footer-build-inputs-label">Build inputs:</span>
         <template v-for="(input, i) in buildInputs" :key="input.name">
           <a
             :href="input.url"
@@ -323,7 +323,7 @@ import {
   isDevelopmentBannerDismissed,
 } from "../utils/developmentBanner.js";
 
-const TOOL_ORDER = ["enclaveos", "bootproof", "steve", "locksmith"];
+const TOOL_ORDER = ["platform", "enclaveos", "bootproof", "steve", "locksmith"];
 
 export default {
   name: "DashboardLayout",
