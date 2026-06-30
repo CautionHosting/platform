@@ -1511,6 +1511,45 @@ fn write_keyring(path: &Path, contents: &[u8], force: bool, sensitive: bool) -> 
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum BuildLocalError {
+    #[error("failed to read deployment config")]
+    ReadConfig(#[source] anyhow::Error),
+
+    #[error("failed to build Docker image")]
+    BuildDockerImage(#[source] anyhow::Error),
+
+    #[error("failed to resolve cache directory")]
+    CacheDir(#[source] anyhow::Error),
+
+    #[error("failed to initialize enclave builder")]
+    InitBuilder(#[source] anyhow::Error),
+
+    #[error("failed to parse run command")]
+    ParseRunCommand(#[source] caution_config::FromStrError),
+
+    #[error("failed to build enclave")]
+    BuildEnclave(#[source] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    #[error("dependency check failed")]
+    DependencyCheck(#[source] anyhow::Error),
+
+    #[error("gateway connectivity check failed")]
+    GatewayConnectivity(#[source] anyhow::Error),
+
+    #[error("failed to initialize API client")]
+    ApiClientInit(#[source] anyhow::Error),
+
+    #[error("{0}")]
+    ArgValidation(&'static str),
+
+    #[error("command execution failed")]
+    CommandDispatch(#[source] anyhow::Error),
+}
+
 struct ApiClient {
     base_url: String,
     client: reqwest::Client,
@@ -4852,7 +4891,7 @@ enclave "default" {{
         }
     }
 
-    async fn build_local(&self, no_cache: bool) -> Result<()> {
+    async fn build_local(&self, no_cache: bool) -> Result<(), BuildLocalError> {
         println!("Building EIF locally for inspection...\n");
 
         let app_commit = Command::new("git")
@@ -4881,7 +4920,7 @@ enclave "default" {{
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        let cfg = self.read_config()?;
+        let cfg = self.read_config().map_err(BuildLocalError::ReadConfig)?;
         let default_enclave = cfg.enclave.as_ref().and_then(|e| e.get("default"));
 
         let config_no_cache = default_enclave
@@ -4892,10 +4931,11 @@ enclave "default" {{
         let no_cache = no_cache || config_no_cache;
 
         let mut loader = Loader::new("Building application image", LoaderStyle::Processing);
-        let image_ref = self.build_local_docker_image(no_cache).await?;
+        let image_ref = self.build_local_docker_image(no_cache).await.map_err(BuildLocalError::BuildDockerImage)?;
         loader.stop();
         println!("✓ Application image built: {}\n", image_ref);
 
+        let cache_dir = self.get_cache_dir().map_err(BuildLocalError::CacheDir)?;
         let builder = enclave_builder::EnclaveBuilder::new_with_cache(
             enclave_builder::enclave_source_url(&enclave_builder::build::resolve_enclaveos_commit()),
             "unused",
@@ -4904,8 +4944,9 @@ enclave "default" {{
             &commit_sha,
             enclave_builder::CacheType::Build,
             no_cache,
-            &self.get_cache_dir()?,
-        )?;
+            &cache_dir,
+        )
+        .map_err(BuildLocalError::InitBuilder)?;
 
         let work_dir = builder.work_dir.clone();
 
@@ -4921,7 +4962,8 @@ enclave "default" {{
             .and_then(|e| e.unit.as_ref())
             .and_then(|u| u.values().next())
             .map(|u| u.run_command_string())
-            .transpose()?;
+            .transpose()
+            .map_err(BuildLocalError::ParseRunCommand)?;
 
         let app_source_urls_opt = default_enclave
             .and_then(|e| e.build.as_ref())
@@ -5012,7 +5054,7 @@ enclave "default" {{
                 )
                 .await
         }
-        .context("Failed to build enclave")?;
+        .map_err(BuildLocalError::BuildEnclave)?;
         loader.stop();
 
         println!("✓ Enclave built successfully!\n");
@@ -7769,7 +7811,7 @@ struct AssertionResult {
     response_json: Vec<u8>,
 }
 
-pub async fn run() -> Result<()> {
+pub async fn run() -> Result<(), RunError> {
     let cli = Cli::parse();
 
     log_verbose(cli.verbose, "API CLI v0.1.0");
@@ -7778,14 +7820,14 @@ pub async fn run() -> Result<()> {
 
     if let Err(e) = check_dependencies(cli.verbose) {
         eprintln!("Dependency check failed: {}", e);
-        return Err(e);
+        return Err(RunError::DependencyCheck(e));
     }
 
     match &cli.command {
         Commands::Register { .. } | Commands::Login { .. } => {
             if let Err(e) = check_gateway_connectivity(&cli.url, cli.verbose).await {
                 eprintln!("Pre-flight check failed");
-                return Err(e);
+                return Err(RunError::GatewayConnectivity(e));
             }
         }
         _ => {}
@@ -7793,22 +7835,22 @@ pub async fn run() -> Result<()> {
 
     log_verbose(cli.verbose, "Initializing API client...");
     let client = ApiClient::new(&cli.url, cli.verbose, cli.qr, cli.workdir.clone())
-        .context("Failed to initialize API client")?;
+        .map_err(RunError::ApiClientInit)?;
     log_verbose(cli.verbose, "API client ready");
 
     match cli.command {
         Commands::Register { alpha_code } => {
-            client.register(&alpha_code).await?;
+            client.register(&alpha_code).await.map_err(RunError::CommandDispatch)?;
         }
         Commands::Login { qr } => {
             if qr {
-                client.login_qr().await?;
+                client.login_qr().await.map_err(RunError::CommandDispatch)?;
             } else {
-                client.login().await?;
+                client.login().await.map_err(RunError::CommandDispatch)?;
             }
         }
         Commands::Logout => {
-            client.logout().await?;
+            client.logout().await.map_err(RunError::CommandDispatch)?;
         }
         Commands::Init {
             bring_your_own_cloud,
@@ -7819,13 +7861,14 @@ pub async fn run() -> Result<()> {
             config,
         } => {
             if bring_your_own_cloud && platform != "aws" {
-                bail!(
-                    "Only --platform aws is currently supported for bring-your-own-compute deployments"
-                );
+                return Err(RunError::ArgValidation(
+                    "Only --platform aws is currently supported for bring-your-own-compute deployments",
+                ));
             }
             client
                 .init(bring_your_own_cloud, name, region, local, config)
-                .await?;
+                .await
+                .map_err(RunError::CommandDispatch)?;
         }
         Commands::Teardown {
             bring_your_own_cloud,
@@ -7835,13 +7878,15 @@ pub async fn run() -> Result<()> {
         } => {
             if bring_your_own_cloud {
                 if platform != "aws" {
-                    bail!(
-                        "Only --platform aws is currently supported for bring-your-own-compute deployments"
-                    );
+                    return Err(RunError::ArgValidation(
+                        "Only --platform aws is currently supported for bring-your-own-compute deployments",
+                    ));
                 }
-                client.teardown_byoc(force, local).await?;
+                client.teardown_byoc(force, local).await.map_err(RunError::CommandDispatch)?;
             } else {
-                bail!("Please specify --byoc to tear down BYOC infrastructure");
+                return Err(RunError::ArgValidation(
+                    "Please specify --byoc to tear down BYOC infrastructure",
+                ));
             }
         }
         Commands::Verify {
@@ -7863,20 +7908,21 @@ pub async fn run() -> Result<()> {
                     no_cache,
                     save_pcrs,
                 )
-                .await?;
+                .await
+                .map_err(RunError::CommandDispatch)?;
         }
         Commands::Apps { command } => match command {
             AppCommands::Create => {
-                client.create_app().await?;
+                client.create_app().await.map_err(RunError::CommandDispatch)?;
             }
             AppCommands::List => {
-                client.list_apps().await?;
+                client.list_apps().await.map_err(RunError::CommandDispatch)?;
             }
             AppCommands::Get {
                 id,
                 this_is_a_ci_machine,
             } => {
-                client.get_app(id, this_is_a_ci_machine).await?;
+                client.get_app(id, this_is_a_ci_machine).await.map_err(RunError::CommandDispatch)?;
             }
             AppCommands::Destroy {
                 id,
@@ -7886,19 +7932,23 @@ pub async fn run() -> Result<()> {
             } => {
                 client
                     .destroy_app(id, force, force_delete, this_is_a_ci_machine)
-                    .await?;
+                    .await
+                    .map_err(RunError::CommandDispatch)?;
             }
             AppCommands::Build { no_cache } => {
-                client.build_local(no_cache).await?;
+                client.build_local(no_cache).await
+                    .map_err(|e| RunError::CommandDispatch(anyhow::Error::from(e)))?;
             }
             AppCommands::Rename { name, id } => {
-                client.rename_app(id, name).await?;
+                client.rename_app(id, name).await.map_err(RunError::CommandDispatch)?;
             }
             AppCommands::DownloadEif(args) => {
-                apps::download_eif::download_eif(&client, &args).await?;
+                apps::download_eif::download_eif(&client, &args).await
+                    .map_err(|e| RunError::CommandDispatch(e.into()))?;
             }
             AppCommands::MigrateProcfile(args) => {
-                apps::migrate_procfile::migrate_procfile(&client, &args).await?;
+                apps::migrate_procfile::migrate_procfile(&client, &args).await
+                    .map_err(|e| RunError::CommandDispatch(e.into()))?;
             }
         },
         Commands::SshKeys { command } => match command {
@@ -7908,27 +7958,27 @@ pub async fn run() -> Result<()> {
                 key,
                 name,
             } => {
-                client.add_ssh_key(key_file, from_agent, key, name).await?;
+                client.add_ssh_key(key_file, from_agent, key, name).await.map_err(RunError::CommandDispatch)?;
             }
             SshKeyCommands::List => {
-                client.list_ssh_keys().await?;
+                client.list_ssh_keys().await.map_err(RunError::CommandDispatch)?;
             }
             SshKeyCommands::Remove { fingerprint } => {
-                client.remove_ssh_key(&fingerprint).await?;
+                client.remove_ssh_key(&fingerprint).await.map_err(RunError::CommandDispatch)?;
             }
         },
         Commands::Cache { command } => match command {
             CacheCommands::Path => {
-                client.cache_path()?;
+                client.cache_path().map_err(RunError::CommandDispatch)?;
             }
             CacheCommands::Size => {
-                client.cache_size()?;
+                client.cache_size().map_err(RunError::CommandDispatch)?;
             }
             CacheCommands::List => {
-                client.cache_list()?;
+                client.cache_list().map_err(RunError::CommandDispatch)?;
             }
             CacheCommands::Destroy { force } => {
-                client.cache_destroy(force)?;
+                client.cache_destroy(force).map_err(RunError::CommandDispatch)?;
             }
         },
         Commands::Credentials { command } => match command {
@@ -7940,21 +7990,22 @@ pub async fn run() -> Result<()> {
             } => {
                 client
                     .add_credential(platform, name, default, region)
-                    .await?;
+                    .await
+                    .map_err(RunError::CommandDispatch)?;
             }
             CredentialCommands::List => {
-                client.list_credentials().await?;
+                client.list_credentials().await.map_err(RunError::CommandDispatch)?;
             }
             CredentialCommands::Remove { id, force } => {
-                client.remove_credential(&id, force).await?;
+                client.remove_credential(&id, force).await.map_err(RunError::CommandDispatch)?;
             }
             CredentialCommands::SetDefault { id } => {
-                client.set_default_credential(&id).await?;
+                client.set_default_credential(&id).await.map_err(RunError::CommandDispatch)?;
             }
         },
         Commands::Capacity { command } => match command {
             CapacityCommands::Waitlist { email, vcpus } => {
-                client.join_capacity_waitlist(&email, vcpus).await?;
+                client.join_capacity_waitlist(&email, vcpus).await.map_err(RunError::CommandDispatch)?;
             }
         },
         Commands::Secret { command } => match command {
@@ -7973,7 +8024,8 @@ pub async fn run() -> Result<()> {
                     email,
                     force,
                     shoot_self_in_foot,
-                )?;
+                )
+                .map_err(RunError::CommandDispatch)?;
             }
             SecretCommands::New {
                 keyring,
@@ -7985,7 +8037,8 @@ pub async fn run() -> Result<()> {
             } => {
                 client
                     .secret_new(keyring, threshold, max, !no_upload, name, labels)
-                    .await?;
+                    .await
+                    .map_err(RunError::CommandDispatch)?;
             }
             SecretCommands::Encrypt {
                 keys,
@@ -7993,17 +8046,18 @@ pub async fn run() -> Result<()> {
                 bundle,
                 secrets_dir,
             } => {
-                client.secret_encrypt(keys, env_file, bundle, secrets_dir)?;
+                client.secret_encrypt(keys, env_file, bundle, secrets_dir)
+                    .map_err(RunError::CommandDispatch)?;
             }
             SecretCommands::Rename { id, name } => {
-                client.secret_rename(id, name).await?;
+                client.secret_rename(id, name).await.map_err(RunError::CommandDispatch)?;
             }
             SecretCommands::Label { command } => match command {
                 LabelCommands::Set { id, labels } => {
-                    client.secret_label_set(id, labels).await?;
+                    client.secret_label_set(id, labels).await.map_err(RunError::CommandDispatch)?;
                 }
                 LabelCommands::Remove { id, keys } => {
-                    client.secret_label_remove(id, keys).await?;
+                    client.secret_label_remove(id, keys).await.map_err(RunError::CommandDispatch)?;
                 }
             },
             SecretCommands::SendShard {
@@ -8011,7 +8065,7 @@ pub async fn run() -> Result<()> {
                 bundle,
                 keyring,
             } => {
-                client.secret_send_shard(app, bundle, keyring).await?;
+                client.secret_send_shard(app, bundle, keyring).await.map_err(RunError::CommandDispatch)?;
             }
         },
     }
