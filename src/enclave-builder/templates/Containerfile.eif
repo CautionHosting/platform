@@ -183,17 +183,17 @@ RUN if [ -f /build/manifest.json ]; then \
 RUN if [ -f /bin/busybox ]; then \
         cp /bin/busybox /build/initramfs/bin/busybox && \
         cd /build/initramfs/bin && \
-        ln -s busybox sh && \
-        ln -s busybox sleep && \
-        ln -s busybox find && \
-        ln -s busybox cat && \
-        ln -s busybox ls && \
-        ln -s busybox mkdir && \
-        ln -s busybox mount && \
-        ln -s busybox chmod && \
-        ln -s busybox ip && \
-        ln -s busybox grep && \
-        ln -s busybox udhcpc; \
+        ln -sf busybox sh && \
+        ln -sf busybox sleep && \
+        ln -sf busybox find && \
+        ln -sf busybox cat && \
+        ln -sf busybox ls && \
+        ln -sf busybox mkdir && \
+        ln -sf busybox mount && \
+        ln -sf busybox chmod && \
+        ln -sf busybox ip && \
+        ln -sf busybox grep && \
+        ln -sf busybox udhcpc; \
     fi
 
 RUN if [ -f /usr/bin/socat ]; then \
