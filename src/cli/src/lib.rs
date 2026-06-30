@@ -1550,6 +1550,50 @@ pub enum RunError {
     CommandDispatch(#[source] anyhow::Error),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ReadConfigError {
+    #[error("failed to read caution.hcl")]
+    ReadHcl(#[source] std::io::Error),
+
+    #[error("invalid caution.hcl: {0}")]
+    ParseHcl(#[source] caution_config::FromStrError),
+
+    #[error("failed to read Procfile")]
+    ReadProcfile(#[source] std::io::Error),
+
+    #[error("invalid Procfile: {0}")]
+    ParseProcfile(#[source] caution_config::FromProcfileError),
+
+    #[error("no configuration file found; run `caution init` to generate a caution.hcl template")]
+    ConfigNotFound,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ReadConfigFromDirError {
+    #[error("failed to read {path}")]
+    ReadHcl {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("invalid caution.hcl: {0}")]
+    ParseHcl(#[source] caution_config::FromStrError),
+
+    #[error("failed to read {path}")]
+    ReadProcfile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("invalid Procfile: {0}")]
+    ParseProcfile(#[source] caution_config::FromProcfileError),
+
+    #[error("no configuration file found in {0}; create a caution.hcl or Procfile file")]
+    ConfigNotFound(PathBuf),
+}
+
 struct ApiClient {
     base_url: String,
     client: reqwest::Client,
@@ -1772,57 +1816,59 @@ impl ApiClient {
         Ok(deployment_info)
     }
 
-    fn read_config(&self) -> Result<caution_config::ConfigurationFile> {
+    fn read_config(&self) -> Result<caution_config::ConfigurationFile, ReadConfigError> {
         use std::path::Path;
 
         let hcl_path = Path::new("caution.hcl");
         if hcl_path.exists() {
             let content = std::fs::read_to_string(hcl_path)
-                .context("Failed to read caution.hcl")?;
+                .map_err(ReadConfigError::ReadHcl)?;
             let config = caution_config::ConfigurationFile::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Invalid caution.hcl: {}", e))?;
+                .map_err(ReadConfigError::ParseHcl)?;
             return Ok(config);
         }
 
         let procfile_path = Path::new("Procfile");
         if procfile_path.exists() {
             let content = std::fs::read_to_string(procfile_path)
-                .context("Failed to read Procfile")?;
+                .map_err(ReadConfigError::ReadProcfile)?;
             let config = caution_config::ConfigurationFile::from_procfile(&content)
-                .map_err(|e| anyhow::anyhow!("Invalid Procfile: {}", e))?;
+                .map_err(ReadConfigError::ParseProcfile)?;
             return Ok(config);
         }
 
-        eprintln!("No configuration file found.");
-        eprintln!();
-        eprintln!("  Run `caution init` to generate a caution.hcl template.");
-        std::process::exit(1);
+        Err(ReadConfigError::ConfigNotFound)
     }
 
     fn read_config_from_dir(
         &self,
         dir: &Path,
-    ) -> Result<caution_config::ConfigurationFile> {
+    ) -> Result<caution_config::ConfigurationFile, ReadConfigFromDirError> {
         let hcl_path = dir.join("caution.hcl");
         if hcl_path.exists() {
             let content = std::fs::read_to_string(&hcl_path)
-                .with_context(|| format!("Failed to read {}", hcl_path.display()))?;
-            return caution_config::ConfigurationFile::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Invalid caution.hcl: {}", e));
+                .map_err(|source| ReadConfigFromDirError::ReadHcl {
+                    path: hcl_path.clone(),
+                    source,
+                })?;
+            let config = caution_config::ConfigurationFile::from_str(&content)
+                .map_err(ReadConfigFromDirError::ParseHcl)?;
+            return Ok(config);
         }
 
         let procfile_path = dir.join("Procfile");
         if procfile_path.exists() {
             let content = std::fs::read_to_string(&procfile_path)
-                .with_context(|| format!("Failed to read {}", procfile_path.display()))?;
-            return caution_config::ConfigurationFile::from_procfile(&content)
-                .map_err(|e| anyhow::anyhow!("Invalid Procfile: {}", e));
+                .map_err(|source| ReadConfigFromDirError::ReadProcfile {
+                    path: procfile_path.clone(),
+                    source,
+                })?;
+            let config = caution_config::ConfigurationFile::from_procfile(&content)
+                .map_err(ReadConfigFromDirError::ParseProcfile)?;
+            return Ok(config);
         }
 
-        bail!(
-            "No configuration file found in {}. Create a caution.hcl or Procfile file.",
-            dir.display()
-        )
+        Err(ReadConfigFromDirError::ConfigNotFound(dir.to_path_buf()))
     }
 
     fn read_caution_git_remote(&self) -> Option<String> {
@@ -4920,7 +4966,7 @@ enclave "default" {{
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        let cfg = self.read_config().map_err(BuildLocalError::ReadConfig)?;
+        let cfg = self.read_config().map_err(|e| BuildLocalError::ReadConfig(e.into()))?;
         let default_enclave = cfg.enclave.as_ref().and_then(|e| e.get("default"));
 
         let config_no_cache = default_enclave
