@@ -5279,6 +5279,15 @@ enclave "default" {{
                 )
             });
 
+            // Cheap network preflight before the expensive reproduce. A missing
+            // branch/commit otherwise surfaces only after minutes of archive
+            // downloads and clone/fetch fallbacks (each bounded by a 5-minute
+            // low-speed timeout); `git ls-remote` transfers no objects and fails
+            // in seconds.
+            if let Some((ref url, ref commit, ref branch)) = git_fallback {
+                self.preflight_app_source_ref(url, commit, branch.as_deref())?;
+            }
+
             let app_dir = self
                 .download_and_extract_app_source_with_git_fallback(
                     &archive_urls,
@@ -6359,6 +6368,127 @@ enclave "default" {{
         // Detach stdin so git can't wait on the parent's TTY either.
         .stdin(std::process::Stdio::null());
         cmd
+    }
+
+    /// Cheap network preflight: confirm the app source branch/commit is actually
+    /// reachable on the remote before kicking off an expensive reproduce build.
+    ///
+    /// `git ls-remote` lists refs without transferring any objects, so a branch
+    /// that was never pushed (or a commit that was force-pushed away) fails here
+    /// in seconds instead of after minutes of archive downloads and clone/fetch
+    /// fallbacks. Network/auth failures are treated as inconclusive — we let the
+    /// real download surface the definitive error rather than block a valid build.
+    fn preflight_app_source_ref(
+        &self,
+        git_url: &str,
+        commit: &str,
+        branch: Option<&str>,
+    ) -> Result<()> {
+        // Archive tarball URLs aren't ls-remote-able and 404 quickly on their own.
+        if git_url.contains("/archive/")
+            && (git_url.ends_with(".tar.gz") || git_url.ends_with(".tar"))
+        {
+            return Ok(());
+        }
+
+        println!("\nChecking app source is reachable on remote...");
+        let output = match Self::git_command(&["ls-remote", git_url]).output() {
+            Ok(output) => output,
+            Err(e) => {
+                log_verbose(
+                    self.verbose,
+                    &format!("App source preflight skipped (ls-remote could not run): {}", e),
+                );
+                return Ok(());
+            }
+        };
+
+        if !output.status.success() {
+            // Likely auth/network rather than a missing ref; don't hard-block.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log_verbose(
+                self.verbose,
+                &format!(
+                    "App source preflight inconclusive (ls-remote failed): {}",
+                    stderr.trim()
+                ),
+            );
+            return Ok(());
+        }
+
+        let listing = String::from_utf8_lossy(&output.stdout);
+        match Self::classify_app_source_refs(&listing, commit, branch) {
+            Ok(true) => {
+                println!("  App source reachable ✓");
+            }
+            Ok(false) => {
+                // No branch hint and the commit is not a current ref tip. It may
+                // still live in history; only warn and let the fetch resolve it.
+                log_verbose(
+                    self.verbose,
+                    &format!(
+                        "App source commit {} is not a current ref tip; relying on fetch to resolve",
+                        commit
+                    ),
+                );
+            }
+            Err(missing_branch) => {
+                bail!(
+                    "App source branch '{branch}' is not present on the remote:\n  \
+                     {url}\n\n\
+                     The deployed enclave was built from commit {commit} on branch \
+                     '{branch}', but that branch is not on the remote — it was never \
+                     pushed, or was renamed/deleted. This build cannot be reproduced \
+                     from the remote manifest.\n\n\
+                     Fixes:\n  \
+                     - Push the branch:        git push <remote> {branch}\n  \
+                     - Verify a local checkout: caution verify --from-local\n  \
+                     - Verify a source tarball: caution verify --from-tarball <path>",
+                    branch = missing_branch,
+                    url = git_url,
+                    commit = commit,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Decide whether a `git ls-remote` listing confirms the app source is
+    /// reachable. Pure logic split out from [`Self::preflight_app_source_ref`]
+    /// so it can be unit-tested without the network.
+    ///
+    /// - `Ok(true)`  — reachable confirmed (branch present, or commit is a ref tip)
+    /// - `Ok(false)` — inconclusive (no branch hint and commit isn't a tip; proceed)
+    /// - `Err(branch)` — the named branch is definitively absent from the remote
+    fn classify_app_source_refs(
+        listing: &str,
+        commit: &str,
+        branch: Option<&str>,
+    ) -> std::result::Result<bool, String> {
+        let branch_ref = branch.map(|b| format!("refs/heads/{}", b));
+        let mut branch_present = false;
+        let mut commit_is_ref_tip = false;
+        for line in listing.lines() {
+            let mut parts = line.split('\t');
+            let sha = parts.next().unwrap_or("");
+            let r = parts.next().unwrap_or("");
+            if !commit.is_empty() && (sha.starts_with(commit) || commit.starts_with(sha)) {
+                commit_is_ref_tip = true;
+            }
+            if let Some(ref br) = branch_ref {
+                if r == br {
+                    branch_present = true;
+                }
+            }
+        }
+
+        match branch {
+            Some(branch_name) if !branch_present => Err(branch_name.to_string()),
+            Some(_) => Ok(true),
+            None if commit_is_ref_tip => Ok(true),
+            None => Ok(false),
+        }
     }
 
     async fn download_and_extract_app_source_with_git_fallback(
@@ -8434,5 +8564,67 @@ containerfile: Missing.Containerfile\n",
         assert_eq!(certs.len(), 1);
         assert!(!certs[0].is_eligible());
         assert_eq!(certs[0].missing(), vec!["authentication"]);
+    }
+
+    // Sample `git ls-remote` output: "<sha>\t<ref>" lines.
+    const LS_REMOTE: &str = "\
+1111111111111111111111111111111111111111\tHEAD\n\
+1111111111111111111111111111111111111111\trefs/heads/main\n\
+2222222222222222222222222222222222222222\trefs/heads/deploy-tests\n\
+3333333333333333333333333333333333333333\trefs/tags/v1.0\n";
+
+    #[test]
+    fn preflight_fails_when_branch_absent_from_remote() {
+        // The reported regression: branch was never pushed.
+        let result = ApiClient::classify_app_source_refs(
+            LS_REMOTE,
+            "6d1c5d3550cdaf45411052e7194bdcd34c41dac4",
+            Some("deploy-tests-missing"),
+        );
+        assert_eq!(result, Err("deploy-tests-missing".to_string()));
+    }
+
+    #[test]
+    fn preflight_passes_when_branch_present() {
+        // Branch exists even though the deployed commit is an older,
+        // non-tip commit on that branch — reachable, proceed.
+        let result = ApiClient::classify_app_source_refs(
+            LS_REMOTE,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            Some("deploy-tests"),
+        );
+        assert_eq!(result, Ok(true));
+    }
+
+    #[test]
+    fn preflight_passes_when_commit_is_ref_tip_without_branch_hint() {
+        // No branch in the manifest, but the commit is a current ref tip.
+        let result = ApiClient::classify_app_source_refs(
+            LS_REMOTE,
+            "2222222222222222222222222222222222222222",
+            None,
+        );
+        assert_eq!(result, Ok(true));
+    }
+
+    #[test]
+    fn preflight_inconclusive_when_commit_not_tip_without_branch_hint() {
+        // No branch hint and the commit isn't a ref tip; can't prove it's gone
+        // (may be deep in history), so stay inconclusive and let the fetch decide.
+        let result = ApiClient::classify_app_source_refs(
+            LS_REMOTE,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            None,
+        );
+        assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn preflight_matches_short_commit_against_full_ref_sha() {
+        // Manifests may carry an abbreviated commit; it should still match the
+        // full SHA advertised by ls-remote.
+        let result =
+            ApiClient::classify_app_source_refs(LS_REMOTE, "3333333", None);
+        assert_eq!(result, Ok(true));
     }
 }
