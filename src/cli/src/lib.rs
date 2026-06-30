@@ -1642,7 +1642,14 @@ impl ApiClient {
 
         Ok(Self {
             base_url: base_url.to_string(),
-            client: reqwest::Client::new(),
+            // A connect timeout bounds the TCP+TLS handshake for every request so
+            // an unresponsive host (e.g. an enclave IP that accepts the connection
+            // but never replies) can't hang the CLI forever. It does not cap body
+            // transfer, so large downloads are unaffected.
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             config_path,
             deployment_path,
             verbose,
@@ -5247,6 +5254,18 @@ enclave "default" {{
             return Ok(cached.pcrs);
         }
 
+        // Preflight the enclave/framework source archives before the expensive
+        // build. They are deterministic URLs derived from the manifest; a 404'd
+        // commit otherwise only surfaces after the Docker image build and
+        // user-filesystem extraction (minutes in). Only meaningful when
+        // reproducing from a manifest.
+        if external_manifest.is_some() {
+            self.preflight_archive_url("Enclave source", &enclave_source)
+                .await?;
+            self.preflight_archive_url("Framework source", &framework_source)
+                .await?;
+        }
+
         log_verbose(self.verbose, "Building Docker image locally...");
 
         let mut loader = Loader::new("Reproducing enclave image", LoaderStyle::Processing);
@@ -5650,13 +5669,17 @@ enclave "default" {{
         );
         println!("Requesting attestation...");
 
+        // Bound the challenge/response: a reachable-but-unresponsive enclave must
+        // not hang verify indefinitely. The connect phase is already bounded by
+        // the client's connect_timeout; this caps the whole request.
         let response = self
             .client
             .post(&attestation_url)
+            .timeout(Duration::from_secs(60))
             .json(&serde_json::json!({"nonce": general_purpose::STANDARD.encode(&nonce)}))
             .send()
             .await
-            .context("Failed to fetch attestation document")?;
+            .context("Failed to fetch attestation document (timed out or unreachable)")?;
 
         if !response.status().is_success() {
             bail!("Failed to fetch attestation: {}", response.status());
@@ -6370,14 +6393,76 @@ enclave "default" {{
         cmd
     }
 
-    /// Cheap network preflight: confirm the app source branch/commit is actually
-    /// reachable on the remote before kicking off an expensive reproduce build.
+    /// Cheap reachability check for an enclave/framework source archive. A `HEAD`
+    /// transfers no body, so a commit the remote no longer serves (404/410) fails
+    /// in seconds instead of after the Docker image build and user-filesystem
+    /// extraction. Only a definitive "not found" blocks; any other status, an
+    /// unsupported HEAD (405), or a transport error is treated as inconclusive and
+    /// left for the real download to resolve. Non-HTTP sources (git URLs, local
+    /// paths) are skipped.
+    async fn preflight_archive_url(&self, label: &str, url: &str) -> Result<()> {
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Ok(());
+        }
+
+        println!("\nChecking {} is reachable on remote...", label.to_lowercase());
+        let response = match self
+            .client
+            .head(url)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                log_verbose(
+                    self.verbose,
+                    &format!("{} preflight inconclusive ({})", label, e),
+                );
+                return Ok(());
+            }
+        };
+
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
+            bail!(
+                "{label} archive is not available on the remote (HTTP {code}):\n  \
+                 {url}\n\n\
+                 The deployed enclave references a {lower} commit that the remote no \
+                 longer serves — it may have been garbage-collected, or the manifest \
+                 is stale. This build cannot be reproduced from the remote manifest.",
+                label = label,
+                lower = label.to_lowercase(),
+                code = status.as_u16(),
+                url = url,
+            );
+        }
+
+        log_verbose(
+            self.verbose,
+            &format!("{} reachable (HTTP {})", label, status.as_u16()),
+        );
+        println!("  {} reachable ✓", label);
+        Ok(())
+    }
+
+    /// Cheap network preflight: confirm the app source branch is present on the
+    /// remote before kicking off an expensive reproduce build.
     ///
     /// `git ls-remote` lists refs without transferring any objects, so a branch
-    /// that was never pushed (or a commit that was force-pushed away) fails here
-    /// in seconds instead of after minutes of archive downloads and clone/fetch
-    /// fallbacks. Network/auth failures are treated as inconclusive — we let the
-    /// real download surface the definitive error rather than block a valid build.
+    /// that was never pushed (or was renamed/deleted) fails here in seconds
+    /// instead of after minutes of archive downloads and clone/fetch fallbacks.
+    ///
+    /// Scope and limits (intentionally conservative — never blocks a valid build):
+    /// - We run `ls-remote` with credentials disabled, so a **private** repo
+    ///   auth-fails and is treated as inconclusive: the fast-fail only fires for
+    ///   public (or SSH-agent-reachable) remotes.
+    /// - A missing/unreachable repo (`ls-remote` non-zero) is also inconclusive,
+    ///   not a hard fail — only an *existing, reachable* remote that lacks the
+    ///   branch fast-fails.
+    /// - A commit force-pushed off an existing branch is **not** caught here
+    ///   (we only check branch presence, not commit reachability); the real fetch
+    ///   surfaces that.
     fn preflight_app_source_ref(
         &self,
         git_url: &str,
@@ -6466,6 +6551,13 @@ enclave "default" {{
         commit: &str,
         branch: Option<&str>,
     ) -> std::result::Result<bool, String> {
+        // Require a meaningful abbreviation before prefix-matching a commit against
+        // a ref tip. Without this, a blank ls-remote field (empty `sha`) or a
+        // 1-char `commit` would falsely match an unrelated ref. Git's default
+        // minimum abbreviation is 7; deployed manifests carry full 40-char SHAs.
+        const MIN_SHA_PREFIX: usize = 7;
+        let commit_matchable = commit.len() >= MIN_SHA_PREFIX;
+
         let branch_ref = branch.map(|b| format!("refs/heads/{}", b));
         let mut branch_present = false;
         let mut commit_is_ref_tip = false;
@@ -6473,7 +6565,10 @@ enclave "default" {{
             let mut parts = line.split('\t');
             let sha = parts.next().unwrap_or("");
             let r = parts.next().unwrap_or("");
-            if !commit.is_empty() && (sha.starts_with(commit) || commit.starts_with(sha)) {
+            if commit_matchable
+                && sha.len() >= MIN_SHA_PREFIX
+                && (sha.starts_with(commit) || commit.starts_with(sha))
+            {
                 commit_is_ref_tip = true;
             }
             if let Some(ref br) = branch_ref {
@@ -8626,5 +8721,43 @@ containerfile: Missing.Containerfile\n",
         let result =
             ApiClient::classify_app_source_refs(LS_REMOTE, "3333333", None);
         assert_eq!(result, Ok(true));
+    }
+
+    #[test]
+    fn preflight_dangerously_short_commit_does_not_false_match() {
+        // A 1-char commit prefixes "1111..." but must NOT be treated as a ref
+        // tip — below the 7-char minimum it's not matchable.
+        let result = ApiClient::classify_app_source_refs(LS_REMOTE, "1", None);
+        assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn preflight_empty_commit_is_inconclusive_not_a_match() {
+        // An empty commit must never match a ref tip (would otherwise prefix-match
+        // every line). No branch hint => inconclusive.
+        let result = ApiClient::classify_app_source_refs(LS_REMOTE, "", None);
+        assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn preflight_blank_ls_remote_line_does_not_false_match() {
+        // A malformed/blank line yields an empty sha field; it must not match the
+        // commit and flip an inconclusive result to reachable.
+        let listing = "\n   \n\t\n";
+        let result = ApiClient::classify_app_source_refs(
+            listing,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            None,
+        );
+        assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn preflight_empty_branch_name_absent_bails() {
+        // Defensive: Some("") builds refs/heads/ which won't be present, so it is
+        // reported absent rather than silently passing.
+        let result =
+            ApiClient::classify_app_source_refs(LS_REMOTE, "1111111", Some(""));
+        assert_eq!(result, Err("".to_string()));
     }
 }

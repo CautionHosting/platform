@@ -156,6 +156,31 @@ fn extract_ref_from_archive_url(url: &str) -> Option<String> {
     None
 }
 
+/// A `git` invocation hardened for non-interactive use: never prompts on the
+/// TTY for credentials, detaches stdin, and aborts a transfer that stalls below
+/// 1000 B/s for 300s. Without these guards a private/redirecting remote can hang
+/// `ls-remote` on a credential prompt forever.
+fn guarded_git() -> Command {
+    let mut cmd = Command::new("git");
+    cmd.args(["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=300"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "true")
+        .stdin(std::process::Stdio::null());
+    cmd
+}
+
+/// HTTP client for enclave/framework source archive downloads. A connect timeout
+/// bounds an unresponsive mirror and a total timeout bounds a stalled transfer,
+/// so a missing or hung source fails in minutes at worst instead of hanging
+/// forever — reqwest's default client (`reqwest::get`) has neither bound.
+fn archive_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .context("Failed to build archive HTTP client")
+}
+
 /// Resolve a branch/tag name to a commit SHA using git ls-remote
 pub async fn resolve_ref_to_commit(git_url: &str, ref_name: &str) -> Option<String> {
     tracing::info!(
@@ -173,7 +198,7 @@ pub async fn resolve_ref_to_commit(git_url: &str, ref_name: &str) -> Option<Stri
     // Try as branch first (refs/heads/)
     let branch_ref = format!("refs/heads/{}", ref_name);
     tracing::info!("Trying git ls-remote {} {}", git_url, branch_ref);
-    match Command::new("git")
+    match guarded_git()
         .args(["ls-remote", git_url, &branch_ref])
         .output()
         .await
@@ -205,7 +230,7 @@ pub async fn resolve_ref_to_commit(git_url: &str, ref_name: &str) -> Option<Stri
     // Try as tag (refs/tags/)
     let tag_ref = format!("refs/tags/{}", ref_name);
     tracing::info!("Trying git ls-remote {} {}", git_url, tag_ref);
-    match Command::new("git")
+    match guarded_git()
         .args(["ls-remote", git_url, &tag_ref])
         .output()
         .await
@@ -298,7 +323,9 @@ pub async fn get_or_clone_enclave_source(
 
         // Download archive using reqwest
         tracing::info!("Downloading archive...");
-        let response = reqwest::get(enclave_source)
+        let response = archive_http_client()?
+            .get(enclave_source)
+            .send()
             .await
             .context("Failed to download archive")?;
 
@@ -440,7 +467,9 @@ pub async fn get_or_clone_framework_source(
         "Downloading framework source archive from: {}",
         framework_source_url
     );
-    let response = reqwest::get(framework_source_url)
+    let response = archive_http_client()?
+        .get(framework_source_url)
+        .send()
         .await
         .context("Failed to download framework source archive")?;
 
