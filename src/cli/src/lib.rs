@@ -1604,6 +1604,47 @@ struct ApiClient {
     workdir: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug, thiserror::Error)]
+#[error(
+    "{label} archive is not available on the remote (HTTP {}):\n  \
+     {url}\n\n\
+     The deployed enclave references a commit for {label} that the remote no \
+     longer serves — it may have been garbage-collected, or the manifest \
+     is stale. This build cannot be reproduced from the remote manifest.",
+    code.as_u16()
+)]
+pub(crate) struct PreflightArchiveUrlError {
+    pub label: String,
+    pub url: String,
+    pub code: reqwest::StatusCode,
+}
+
+#[derive(Clone, Debug, thiserror::Error)]
+#[error(
+    "App source branch '{branch}' is not present on the remote:\n  \
+     {url}\n\n\
+     The deployed enclave was built from commit {commit} on branch \
+     '{branch}', but that branch is not on the remote — it was never \
+     pushed, or was renamed/deleted. This build cannot be reproduced \
+     from the remote manifest.\n\n\
+     Fixes:\n  \
+     - Push the branch:        git push <remote> {branch}\n  \
+     - Verify a local checkout: caution verify --from-local\n  \
+     - Verify a source tarball: caution verify --from-tarball <path>"
+)]
+pub(crate) struct AppSourceBranchMissingError {
+    pub url: String,
+    pub commit: String,
+    pub branch: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("app source branch '{branch}' is absent from the remote (deployed commit {commit})")]
+pub(crate) struct ClassifyAppSourceRefsError {
+    pub commit: String,
+    pub branch: String,
+}
+
 impl ApiClient {
     fn new(base_url: &str, verbose: bool, qr: bool, workdir: Option<PathBuf>) -> Result<Self> {
         log_verbose(verbose, "Initializing API client...");
@@ -1644,10 +1685,15 @@ impl ApiClient {
             base_url: base_url.to_string(),
             // A connect timeout bounds the TCP+TLS handshake for every request so
             // an unresponsive host (e.g. an enclave IP that accepts the connection
-            // but never replies) can't hang the CLI forever. It does not cap body
-            // transfer, so large downloads are unaffected.
+            // but never replies) can't hang the CLI forever. A read timeout catches
+            // the case where a host accepts the connection and starts responding but
+            // then stalls mid-transfer; it resets on every successful read, so it
+            // only fires on true inactivity. It must stay above the largest
+            // per-request `.timeout()` override used with this client (currently 60s
+            // for the attestation fetch), or it would silently cut that request short.
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(30))
+                .read_timeout(Duration::from_secs(90))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             config_path,
@@ -5304,7 +5350,8 @@ enclave "default" {{
             // low-speed timeout); `git ls-remote` transfers no objects and fails
             // in seconds.
             if let Some((ref url, ref commit, ref branch)) = git_fallback {
-                self.preflight_app_source_ref(url, commit, branch.as_deref())?;
+                self.preflight_app_source_ref(url, commit, branch.as_deref())
+                    .await?;
             }
 
             let app_dir = self
@@ -6425,17 +6472,12 @@ enclave "default" {{
 
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
-            bail!(
-                "{label} archive is not available on the remote (HTTP {code}):\n  \
-                 {url}\n\n\
-                 The deployed enclave references a {lower} commit that the remote no \
-                 longer serves — it may have been garbage-collected, or the manifest \
-                 is stale. This build cannot be reproduced from the remote manifest.",
-                label = label,
-                lower = label.to_lowercase(),
-                code = status.as_u16(),
-                url = url,
-            );
+            return Err(PreflightArchiveUrlError {
+                label: label.to_string(),
+                url: url.to_string(),
+                code: status,
+            }
+            .into());
         }
 
         log_verbose(
@@ -6463,17 +6505,17 @@ enclave "default" {{
     /// - A commit force-pushed off an existing branch is **not** caught here
     ///   (we only check branch presence, not commit reachability); the real fetch
     ///   surfaces that.
-    fn preflight_app_source_ref(
+    async fn preflight_app_source_ref(
         &self,
         git_url: &str,
         commit: &str,
         branch: Option<&str>,
     ) -> Result<()> {
-        // Archive tarball URLs aren't ls-remote-able and 404 quickly on their own.
+        // Archive tarball URLs aren't ls-remote-able; fall back to a HEAD check.
         if git_url.contains("/archive/")
             && (git_url.ends_with(".tar.gz") || git_url.ends_with(".tar"))
         {
-            return Ok(());
+            return self.preflight_archive_url("App source", git_url).await;
         }
 
         println!("\nChecking app source is reachable on remote...");
@@ -6518,21 +6560,12 @@ enclave "default" {{
                 );
             }
             Err(missing_branch) => {
-                bail!(
-                    "App source branch '{branch}' is not present on the remote:\n  \
-                     {url}\n\n\
-                     The deployed enclave was built from commit {commit} on branch \
-                     '{branch}', but that branch is not on the remote — it was never \
-                     pushed, or was renamed/deleted. This build cannot be reproduced \
-                     from the remote manifest.\n\n\
-                     Fixes:\n  \
-                     - Push the branch:        git push <remote> {branch}\n  \
-                     - Verify a local checkout: caution verify --from-local\n  \
-                     - Verify a source tarball: caution verify --from-tarball <path>",
-                    branch = missing_branch,
-                    url = git_url,
-                    commit = commit,
-                );
+                return Err(AppSourceBranchMissingError {
+                    url: git_url.to_string(),
+                    commit: missing_branch.commit,
+                    branch: missing_branch.branch,
+                }
+                .into());
             }
         }
 
@@ -6545,12 +6578,12 @@ enclave "default" {{
     ///
     /// - `Ok(true)`  — reachable confirmed (branch present, or commit is a ref tip)
     /// - `Ok(false)` — inconclusive (no branch hint and commit isn't a tip; proceed)
-    /// - `Err(branch)` — the named branch is definitively absent from the remote
+    /// - `Err(_)` — the named branch is definitively absent from the remote
     fn classify_app_source_refs(
         listing: &str,
         commit: &str,
         branch: Option<&str>,
-    ) -> std::result::Result<bool, String> {
+    ) -> std::result::Result<bool, ClassifyAppSourceRefsError> {
         // Require a meaningful abbreviation before prefix-matching a commit against
         // a ref tip. Without this, a blank ls-remote field (empty `sha`) or a
         // 1-char `commit` would falsely match an unrelated ref. Git's default
@@ -6579,7 +6612,10 @@ enclave "default" {{
         }
 
         match branch {
-            Some(branch_name) if !branch_present => Err(branch_name.to_string()),
+            Some(branch_name) if !branch_present => Err(ClassifyAppSourceRefsError {
+                commit: commit.to_string(),
+                branch: branch_name.to_string(),
+            }),
             Some(_) => Ok(true),
             None if commit_is_ref_tip => Ok(true),
             None => Ok(false),
@@ -8351,6 +8387,7 @@ mod tests {
         encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility, load_recipient_cert,
         normalize_keyring, parse_env_assignments, resolve_local_build_command_from_dir,
         resolve_procfile_build_command, resolve_quorum_parameters, ApiClient,
+        ClassifyAppSourceRefsError,
     };
     use caution_config::ConfigurationFile;
     use keymaker_models::generate_quorum::GenerateQuorumResponse;
@@ -8676,7 +8713,13 @@ containerfile: Missing.Containerfile\n",
             "6d1c5d3550cdaf45411052e7194bdcd34c41dac4",
             Some("deploy-tests-missing"),
         );
-        assert_eq!(result, Err("deploy-tests-missing".to_string()));
+        assert_eq!(
+            result,
+            Err(ClassifyAppSourceRefsError {
+                commit: "6d1c5d3550cdaf45411052e7194bdcd34c41dac4".to_string(),
+                branch: "deploy-tests-missing".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -8758,6 +8801,12 @@ containerfile: Missing.Containerfile\n",
         // reported absent rather than silently passing.
         let result =
             ApiClient::classify_app_source_refs(LS_REMOTE, "1111111", Some(""));
-        assert_eq!(result, Err("".to_string()));
+        assert_eq!(
+            result,
+            Err(ClassifyAppSourceRefsError {
+                commit: "1111111".to_string(),
+                branch: "".to_string(),
+            })
+        );
     }
 }
