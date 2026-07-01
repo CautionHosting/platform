@@ -2108,13 +2108,21 @@ async fn deploy_logic(
     // Atomically transition to Pending — rejects concurrent deploys via the check above
     if was_destroyed {
         tracing::info!("Reactivating previously destroyed resource {}", resource_id);
-        sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1 WHERE id = $2 AND organization_id = $3")
+        let updated = sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1 WHERE id = $2 AND organization_id = $3 AND state != $1")
             .bind(types::ResourceState::Pending)
             .bind(resource_id)
             .bind(req.org_id)
             .execute(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to reactivate resource: {}", e)))?;
+
+        if updated.rows_affected() == 0 {
+            return Err((
+                StatusCode::CONFLICT,
+                "A deployment is already in progress for this app. Please wait for it to complete."
+                    .to_string(),
+            ));
+        }
     } else {
         // Mark as Pending so concurrent pushes are rejected
         let updated = sqlx::query(
