@@ -281,6 +281,13 @@ impl RateLimiter {
 }
 
 /// Rate-limiting middleware for webhook routes.
+///
+/// `x-forwarded-for` is trustworthy here because metering is not reachable
+/// directly from the internet — the gateway is the only caller and it
+/// overwrites this header with the real peer IP (see
+/// `gateway::proxy::metering_proxy_handler`), discarding whatever the original
+/// client sent. Without that, this header would be client-controlled and every
+/// caller could collapse into the same rate-limit bucket.
 async fn webhook_rate_limit_middleware(
     State(limiter): State<RateLimiter>,
     req: axum::http::Request<axum::body::Body>,
