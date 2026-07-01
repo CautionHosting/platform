@@ -2350,6 +2350,14 @@ enclave "default" {{
             return Ok(vec![git_url.to_string()]);
         }
 
+        // An explicit ssh:// URL signals the caller expects an authenticated
+        // clone. Guessing at anonymous HTTP(S) archive endpoints for it just
+        // wastes round trips on hosts that require auth, so skip straight to
+        // the git-clone fallback instead.
+        if git_url.starts_with("ssh://") {
+            return Ok(vec![]);
+        }
+
         let (host, path) = if git_url.starts_with("git@") {
             let without_prefix = git_url
                 .strip_prefix("git@")
@@ -2358,7 +2366,7 @@ enclave "default" {{
                 .split_once(':')
                 .ok_or_else(|| anyhow::anyhow!("Invalid git SSH URL format"))?;
             (host.to_string(), path.trim_end_matches(".git").to_string())
-        } else if git_url.starts_with("ssh://") || git_url.starts_with("https://") || git_url.starts_with("http://") {
+        } else if git_url.starts_with("https://") || git_url.starts_with("http://") {
             let url = url::Url::parse(git_url).context("Failed to parse git URL")?;
             let host = url
                 .host_str()
@@ -8317,7 +8325,7 @@ containerfile: Missing.Containerfile\n",
     }
 
     #[test]
-    fn git_url_to_archive_urls_supports_ssh_scheme_urls() {
+    fn git_url_to_archive_urls_skips_archive_guessing_for_ssh_scheme_urls() {
         let client = test_api_client();
         let commit = "50e2608f857ee2c9777b89af0f9af02ffba9999d";
 
@@ -8328,9 +8336,7 @@ containerfile: Missing.Containerfile\n",
             )
             .unwrap();
 
-        assert!(urls.contains(&format!(
-            "https://codeberg.org/caution/demo-pq-enclave-binding/archive/{commit}.tar.gz"
-        )));
+        assert!(urls.is_empty());
     }
 
     #[test]
