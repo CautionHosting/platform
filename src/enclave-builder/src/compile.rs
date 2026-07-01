@@ -173,12 +173,14 @@ fn guarded_git() -> Command {
 /// bounds an unresponsive mirror and a total timeout bounds a stalled transfer,
 /// so a missing or hung source fails in minutes at worst instead of hanging
 /// forever — reqwest's default client (`reqwest::get`) has neither bound.
-fn archive_http_client() -> Result<reqwest::Client> {
+fn archive_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(300))
         .build()
-        .context("Failed to build archive HTTP client")
+        // Config is static (constant timeouts only), so build() can't fail on any
+        // input; only a broken TLS/resolver backend could, where panicking is right.
+        .expect("archive HTTP client config is static")
 }
 
 /// Resolve a branch/tag name to a commit SHA using git ls-remote
@@ -323,7 +325,7 @@ pub async fn get_or_clone_enclave_source(
 
         // Download archive using reqwest
         tracing::info!("Downloading archive...");
-        let response = archive_http_client()?
+        let response = archive_http_client()
             .get(enclave_source)
             .send()
             .await
@@ -467,7 +469,7 @@ pub async fn get_or_clone_framework_source(
         "Downloading framework source archive from: {}",
         framework_source_url
     );
-    let response = archive_http_client()?
+    let response = archive_http_client()
         .get(framework_source_url)
         .send()
         .await
