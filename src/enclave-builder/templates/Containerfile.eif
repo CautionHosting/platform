@@ -147,6 +147,22 @@ COPY manifest.json /build/manifest.json
 # Copy user app files first; EnclaveOS components come next so they always win
 COPY app/ /build/initramfs/
 
+# Normalize app file modes so PCR0/PCR1 do not depend on the build host's umask.
+# git records only the exec bit, so a committed non-exec file is checked out
+# 0666 & ~umask (0644 on a macOS umask-022 host, 0664 on a Linux umask-002
+# builder), and `COPY` preserves that host mode verbatim. Before the initramfs
+# assembly was rewritten to a direct `COPY app/ /build/initramfs/`, an
+# in-container `cp -r` re-applied the container umask and hid this; without it,
+# `caution verify` on a different-umask host mismatches the deploy. Force
+# canonical, umask-independent modes here, preserving the exec bit git tracks so
+# app binaries stay runnable. Scoped to the app files only (EnclaveOS components
+# are copied and chmod'd deterministically below).
+# find/chmod here are busybox (this stage is FROM busybox); use octal -perm masks
+# (-0100 = user-exec bit set) which every busybox build parses unambiguously.
+RUN find /build/initramfs -type d -exec chmod 0755 {} + && \
+    find /build/initramfs -type f -perm -0100 -exec chmod 0755 {} + && \
+    find /build/initramfs -type f ! -perm -0100 -exec chmod 0644 {} +
+
 # Symlinks ruin everything.
 RUN test -e /build/initramfs/bin || mkdir -p /build/initramfs/bin
 RUN test -e /build/initramfs/lib ||  mkdir -p /build/initramfs/lib
