@@ -197,6 +197,24 @@ pub(crate) async fn get_user_primary_org(db: &PgPool, user_id: Uuid) -> Result<U
     org_id.map(|o| o.0).ok_or(StatusCode::NOT_FOUND)
 }
 
+pub(crate) async fn get_user_primary_org_and_role(
+    db: &PgPool,
+    user_id: Uuid,
+) -> Result<(Uuid, types::UserRole), StatusCode> {
+    let row: Option<(Uuid, types::UserRole)> = sqlx::query_as(
+        "SELECT organization_id, role FROM organization_members
+         WHERE user_id = $1
+         ORDER BY created_at ASC
+         LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    row.ok_or(StatusCode::NOT_FOUND)
+}
+
 pub(crate) async fn get_or_create_provider_account(
     db: &PgPool,
     org_id: Uuid,
@@ -520,9 +538,13 @@ async fn create_cloud_credential(
         "Cloud credentials feature not configured. Set CAUTION_ENCRYPTION_KEY.".to_string(),
     ))?;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let (org_id, role) = get_user_primary_org_and_role(&state.db, auth.user_id)
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    if !can_manage_org(&role) {
+        return Err((StatusCode::FORBIDDEN, "Insufficient permissions".to_string()));
+    }
 
     let credential =
         cloud_credentials::create_credential(&state.db, encryptor, org_id, auth.user_id, req)
@@ -551,9 +573,13 @@ async fn delete_cloud_credential(
     Extension(auth): Extension<AuthContext>,
     Path(credential_id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let (org_id, role) = get_user_primary_org_and_role(&state.db, auth.user_id)
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    if !can_manage_org(&role) {
+        return Err((StatusCode::FORBIDDEN, "Insufficient permissions".to_string()));
+    }
 
     let deleted = cloud_credentials::delete_credential(&state.db, org_id, credential_id).await?;
 
@@ -569,9 +595,13 @@ async fn set_default_cloud_credential(
     Extension(auth): Extension<AuthContext>,
     Path(credential_id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let (org_id, role) = get_user_primary_org_and_role(&state.db, auth.user_id)
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    if !can_manage_org(&role) {
+        return Err((StatusCode::FORBIDDEN, "Insufficient permissions".to_string()));
+    }
 
     let updated =
         cloud_credentials::set_default_credential(&state.db, org_id, credential_id).await?;
@@ -1556,7 +1586,7 @@ async fn resolve_containerfile_for_deploy(
 
 #[cfg(test)]
 mod build_inputs_tests {
-    use super::build_inputs;
+    use super::{build_inputs, PLATFORM_REPO};
     use axum::body::to_bytes;
     use axum::response::IntoResponse;
 
@@ -1822,11 +1852,9 @@ async fn deploy_logic(
 
     let app_id_str = req.app_id.to_string();
 
-    let user_in_org: Option<bool> = sqlx::query_scalar(
-        "SELECT EXISTS(
-            SELECT 1 FROM organization_members 
-            WHERE user_id = $1 AND organization_id = $2
-        )",
+    let role: Option<(types::UserRole,)> = sqlx::query_as(
+        "SELECT role FROM organization_members
+         WHERE user_id = $1 AND organization_id = $2",
     )
     .bind(auth.user_id)
     .bind(req.org_id)
@@ -1839,10 +1867,17 @@ async fn deploy_logic(
         )
     })?;
 
-    if user_in_org != Some(true) {
+    let Some((role,)) = role else {
         return Err((
             StatusCode::FORBIDDEN,
             "User does not belong to this organization".to_string(),
+        ));
+    };
+
+    if role.is_viewer() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Viewers cannot deploy".to_string(),
         ));
     }
 

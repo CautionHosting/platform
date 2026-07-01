@@ -14,7 +14,10 @@ use std::{
 };
 use uuid::Uuid;
 
-use crate::{get_user_primary_org, AppState, AuthContext, PricingConfig};
+use crate::{
+    can_manage_org, get_user_primary_org, get_user_primary_org_and_role, AppState, AuthContext,
+    PricingConfig,
+};
 
 /// Base AWS on-demand rates by instance type (USD/hr, us-west-2).
 /// Used by both compute metering and builder billing.
@@ -877,9 +880,13 @@ pub async fn delete_payment_method(
     Extension(auth): Extension<AuthContext>,
     Path(method_id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let (org_id, role) = get_user_primary_org_and_role(&state.db, auth.user_id)
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    if !can_manage_org(&role) {
+        return Err((StatusCode::FORBIDDEN, "Insufficient permissions".to_string()));
+    }
 
     // Verify the method belongs to this org and get its primary status
     let method: Option<(bool, Option<String>)> = sqlx::query_as(
@@ -1016,9 +1023,13 @@ pub async fn set_primary_payment_method(
     Extension(auth): Extension<AuthContext>,
     Path(method_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let (org_id, role) = get_user_primary_org_and_role(&state.db, auth.user_id)
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    if !can_manage_org(&role) {
+        return Err((StatusCode::FORBIDDEN, "Insufficient permissions".to_string()));
+    }
 
     // Verify the method belongs to this org
     let exists: Option<(Uuid,)> = sqlx::query_as(
@@ -2526,9 +2537,13 @@ pub async fn put_auto_topup(
         ));
     }
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let (org_id, role) = get_user_primary_org_and_role(&state.db, auth.user_id)
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    if !can_manage_org(&role) {
+        return Err((StatusCode::FORBIDDEN, "Insufficient permissions".to_string()));
+    }
 
     // Verify user has an active payment method (required for auto-topup)
     if req.enabled {

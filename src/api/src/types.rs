@@ -48,6 +48,10 @@ impl UserRole {
     pub fn is_owner(&self) -> bool {
         matches!(self, UserRole::Owner)
     }
+
+    pub fn is_viewer(&self) -> bool {
+        matches!(self, UserRole::Viewer)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]

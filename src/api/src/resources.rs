@@ -15,8 +15,8 @@ use crate::validated_types::{
 };
 use crate::{cloud_credentials, deployment, types, validation};
 use crate::{
-    get_or_create_provider_account, get_or_create_resource_type, get_user_primary_org, AppState,
-    AuthContext,
+    can_manage_org, get_or_create_provider_account, get_or_create_resource_type,
+    get_user_primary_org, AppState, AuthContext,
 };
 
 #[derive(Debug, Serialize, FromRow)]
@@ -506,8 +506,16 @@ pub async fn delete_resource(
         auth.user_id,
         resource_id
     );
-    let resource: Option<(Uuid, Uuid, String, Option<String>, String, Option<String>)> = sqlx::query_as(
-        "SELECT cr.id, cr.organization_id, cr.resource_name, pa.role_arn, cr.provider_resource_id, cr.region
+    let resource: Option<(
+        Uuid,
+        Uuid,
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        types::UserRole,
+    )> = sqlx::query_as(
+        "SELECT cr.id, cr.organization_id, cr.resource_name, pa.role_arn, cr.provider_resource_id, cr.region, om.role
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
          INNER JOIN provider_accounts pa ON cr.provider_account_id = pa.id
@@ -522,7 +530,7 @@ pub async fn delete_resource(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let Some((_, org_id, resource_name, _role_arn_opt, tracked_resource_id, resource_region)) =
+    let Some((_, org_id, resource_name, _role_arn_opt, tracked_resource_id, resource_region, role)) =
         resource
     else {
         tracing::warn!(
@@ -532,6 +540,15 @@ pub async fn delete_resource(
         );
         return Err(StatusCode::NOT_FOUND);
     };
+
+    if !can_manage_org(&role) {
+        tracing::warn!(
+            "User {} lacks permission to delete resource {}",
+            auth.user_id,
+            resource_id
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     tracing::info!(
         "Destroying resource {} (id: {})",
