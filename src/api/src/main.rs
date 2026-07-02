@@ -1556,6 +1556,7 @@ async fn resolve_containerfile_for_deploy(
 
 #[cfg(test)]
 mod build_inputs_tests {
+    use crate::PLATFORM_REPO;
     use super::build_inputs;
     use axum::body::to_bytes;
     use axum::response::IntoResponse;
