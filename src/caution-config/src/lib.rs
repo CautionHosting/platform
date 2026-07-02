@@ -53,6 +53,10 @@ pub struct BuildConfig {
     #[serde(default)]
     pub app_sources: Vec<String>,
     pub cache: Option<bool>,
+    /// Whether the remote builder may use the shared S3 BuildKit layer cache.
+    /// Defaults to enabled; set `layer_cache = false` to force a fully
+    /// self-contained `docker build` (e.g. to bypass a poisoned cache).
+    pub layer_cache: Option<bool>,
 }
 
 /// The `debug { }` block inside an enclave definition.
@@ -405,6 +409,7 @@ impl ConfigurationFile {
         let mut binary = None;
         let mut app_sources: Vec<String> = Vec::new();
         let mut cache: Option<bool> = None;
+        let mut layer_cache: Option<bool> = None;
         let mut memory_mb = None;
         let mut cpus = None;
         let mut debug = None;
@@ -460,6 +465,9 @@ impl ConfigurationFile {
                     }
                     "no_cache" | "nocache" => {
                         cache = Some(value.to_lowercase() != "true");
+                    }
+                    "layer_cache" => {
+                        layer_cache = Some(value.to_lowercase() == "true");
                     }
                     "memory" | "memory_mb" => {
                         if let Ok(val) = value.parse::<u32>() {
@@ -576,12 +584,14 @@ impl ConfigurationFile {
             || binary.is_some()
             || !app_sources.is_empty()
             || cache.is_some()
+            || layer_cache.is_some()
         {
             Some(BuildConfig {
                 containerfile,
                 binary,
                 app_sources,
                 cache,
+                layer_cache,
             })
         } else {
             None
@@ -856,6 +866,7 @@ mod tests {
                             "https://codeberg.org/caution/demo-hello-world-enclave".into(),
                         ],
                         cache: Some(false),
+                        layer_cache: None,
                     }),
                     debug: Some(DebugConfig {
                         enabled: Some(true),

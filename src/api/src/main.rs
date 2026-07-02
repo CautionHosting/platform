@@ -2224,6 +2224,11 @@ async fn deploy_logic(
         .and_then(|b| b.cache)
         .map(|c| !c)
         .unwrap_or(false);
+    // Shared S3 layer cache is on by default; `layer_cache = false` opts out.
+    let disable_build_cache = ec_build
+        .and_then(|b| b.layer_cache)
+        .map(|c| !c)
+        .unwrap_or(false);
     let app_sources = ec_build
         .map(|b| b.app_sources.clone())
         .unwrap_or_default();
@@ -2449,6 +2454,7 @@ async fn deploy_logic(
                     .and_then(|e2e| e2e.cors_origins.as_ref())
                     .map(|origins| origins.join(",")),
                 no_cache,
+                disable_build_cache,
                 enclaveos_commit,
                 builder_size: resolved_size.id.clone(),
                 builder_instance_type: resolved_size.instance_type.clone(),

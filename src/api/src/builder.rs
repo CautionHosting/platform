@@ -155,6 +155,9 @@ pub struct BuildRequest {
     pub egress: bool,
     pub e2e_cors_origins: Option<String>,
     pub no_cache: bool,
+    /// When true, the remote builder skips the shared S3 BuildKit layer cache
+    /// entirely (from HCL `layer_cache = false`).
+    pub disable_build_cache: bool,
     pub enclaveos_commit: String,
     pub builder_size: String,
     pub builder_instance_type: String,
@@ -853,6 +856,11 @@ fn generate_builder_userdata(
     let cors_origins_value = request.e2e_cors_origins.as_deref().unwrap_or("");
     let cors_origins_escaped = cors_origins_value.replace('\'', "'\\''");
     let no_cache_flag = if request.no_cache { "true" } else { "false" };
+    let disable_build_cache_flag = if request.disable_build_cache {
+        "true"
+    } else {
+        "false"
+    };
 
     // Build manifest using the same EnclaveManifest struct as the inline build path
     let app_source = if request.app_sources.is_empty() {
@@ -917,6 +925,7 @@ LOCKSMITH="{locksmith_flag}"
 EGRESS="{egress_flag}"
 CORS_ORIGINS='{cors_origins_escaped}'
 NO_CACHE="{no_cache_flag}"
+DISABLE_BUILD_CACHE="{disable_build_cache_flag}"
 
 # Install script dependencies
 # We won't have status tracking for these, but we also can't build status without these.
@@ -980,16 +989,20 @@ set_phase "starting"
 # NOT `--use`d: the EIF build targets it via `--builder eifcache`, while the
 # customer app `docker build` stays on the default docker driver so it loads
 # into the image store and cannot reach IMDS (host-network is scoped to eifcache).
-echo "Setting up BuildKit S3 layer cache..."
 CACHE_READY="false"
-mkdir -p /usr/local/lib/docker/cli-plugins
-if curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-buildx https://github.com/docker/buildx/releases/download/v0.14.1/buildx-v0.14.1.linux-amd64 \
-    && echo "5688a55c8d4bebafcb595e57718ba0bee2a68b8bab6dac66702ebb2469767b8a  /usr/local/lib/docker/cli-plugins/docker-buildx" | sha256sum -c - \
-    && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx \
-    && docker buildx create --name eifcache --driver docker-container --driver-opt network=host; then
-    CACHE_READY="true"
+if [ "$DISABLE_BUILD_CACHE" = "true" ]; then
+    echo "Build cache disabled via config (layer_cache = false); skipping BuildKit S3 cache setup"
 else
-    echo "BuildKit S3 cache setup failed, continuing without cache" >&2
+    echo "Setting up BuildKit S3 layer cache..."
+    mkdir -p /usr/local/lib/docker/cli-plugins
+    if curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-buildx https://github.com/docker/buildx/releases/download/v0.14.1/buildx-v0.14.1.linux-amd64 \
+        && echo "5688a55c8d4bebafcb595e57718ba0bee2a68b8bab6dac66702ebb2469767b8a  /usr/local/lib/docker/cli-plugins/docker-buildx" | sha256sum -c - \
+        && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx \
+        && docker buildx create --name eifcache --driver docker-container --driver-opt network=host; then
+        CACHE_READY="true"
+    else
+        echo "BuildKit S3 cache setup failed, continuing without cache" >&2
+    fi
 fi
 
 # Download source archive from S3
@@ -1089,6 +1102,7 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
         egress_flag = egress_flag,
         cors_origins_escaped = cors_origins_escaped,
         no_cache_flag = no_cache_flag,
+        disable_build_cache_flag = disable_build_cache_flag,
         manifest_json = manifest_json,
     ))
 }
@@ -1496,6 +1510,7 @@ mod tests {
             egress: false,
             e2e_cors_origins: None,
             no_cache: true,
+            disable_build_cache: false,
             enclaveos_commit: "enclave-abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
@@ -1635,6 +1650,7 @@ mod tests {
             egress: false,
             e2e_cors_origins: None,
             no_cache: false,
+            disable_build_cache: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
@@ -1689,6 +1705,7 @@ mod tests {
             egress: false,
             e2e_cors_origins: None,
             no_cache: false,
+            disable_build_cache: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
@@ -1742,6 +1759,7 @@ mod tests {
             egress: false,
             e2e_cors_origins: None,
             no_cache: false,
+            disable_build_cache: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
@@ -1803,6 +1821,7 @@ mod tests {
             egress: false,
             e2e_cors_origins: None,
             no_cache: false,
+            disable_build_cache: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
@@ -1860,6 +1879,7 @@ mod tests {
             egress: false,
             e2e_cors_origins: None,
             no_cache: false,
+            disable_build_cache: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
@@ -1914,6 +1934,7 @@ mod tests {
             egress,
             e2e_cors_origins: None,
             no_cache: false,
+            disable_build_cache: false,
             enclaveos_commit: "abc".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
