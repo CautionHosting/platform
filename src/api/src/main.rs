@@ -2213,7 +2213,7 @@ async fn deploy_logic(
         .map(|h| h.port);
     let domain = ec_network
         .and_then(|n| n.http.as_ref())
-        .map(|h| h.domain.clone());
+        .and_then(|h| h.domain.clone());
     let e2e_config = ec_network
         .and_then(|n| n.http.as_ref())
         .and_then(|h| h.e2e_encryption.as_ref());

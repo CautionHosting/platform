@@ -101,7 +101,8 @@ pub struct E2eEncryption {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HttpConfig {
-    pub domain: String,
+    #[serde(default)]
+    pub domain: Option<String>,
     pub port: u16,
     pub e2e_encryption: Option<E2eEncryption>,
 }
@@ -351,7 +352,10 @@ fn is_reserved(port: u16) -> bool {
 /// The value flows into generated infrastructure (Terraform variables, the
 /// instance bootstrap script, and the Caddy config), so it must be a plain DNS
 /// name with no characters that could carry meaning in those contexts.
-fn validate_domain(domain: &str) -> Result<(), String> {
+fn validate_domain(domain: Option<&str>) -> Result<(), String> {
+    let Some(domain) = domain else {
+        return Ok(());
+    };
     if domain.is_empty() || domain.len() > 253 {
         return Err("domain must be between 1 and 253 characters".to_string());
     }
@@ -582,11 +586,17 @@ impl ConfigurationFile {
             }
         }
 
+        let explicit_http_port = http_port;
+
         let http_port = match http_port {
             Some(hp) => Some(hp),
             None if ports.len() == 1 => Some(ports[0]),
             None => None,
         };
+
+        // Only construct HttpConfig when http_port was explicitly set in the
+        // Procfile (not auto-derived from a single ports entry).
+        let has_explicit_http_port = explicit_http_port.is_some() || domain.is_some();
 
         let build = if containerfile.is_some()
             || binary.is_some()
@@ -634,22 +644,17 @@ impl ConfigurationFile {
             cors_origins: None,
         });
 
-        if let Some(ref d) = domain {
-            validate_domain(d).map_err(FromProcfileError::InvalidDomain)?;
-        }
+        validate_domain(domain.as_deref()).map_err(FromProcfileError::InvalidDomain)?;
 
-        let http = match (domain, http_port) {
-            (Some(d), Some(p)) => Some(HttpConfig {
-                domain: d,
-                port: p,
+        let http = if has_explicit_http_port {
+            let port = http_port.unwrap_or(80);
+            Some(HttpConfig {
+                domain,
+                port,
                 e2e_encryption: e2e_encryption.clone(),
-            }),
-            (Some(d), None) => Some(HttpConfig {
-                domain: d,
-                port: 80,
-                e2e_encryption: e2e_encryption.clone(),
-            }),
-            (None, _) => None,
+            })
+        } else {
+            None
         };
 
         let network = if !ports.is_empty() || http.is_some() {
@@ -783,7 +788,7 @@ impl ConfigurationFile {
                 if let Some(ref network) = enclave.network
                     && let Some(ref http) = network.http
                 {
-                    validate_domain(&http.domain).map_err(FromStrError::InvalidDomain)?;
+                    validate_domain(http.domain.as_deref()).map_err(FromStrError::InvalidDomain)?;
 
                     let port_covered = network.ingress.iter().any(|rule| match &rule.port_spec {
                         Some(PortSpec::Exact { port }) => *port == http.port,
@@ -892,7 +897,7 @@ mod tests {
                             ip_protocol: None,
                         }],
                         http: Some(HttpConfig {
-                            domain: "chat.caution.dev".into(),
+                            domain: Some("chat.caution.dev".into()),
                             port: 8000,
                             e2e_encryption: Some(E2eEncryption {
                                 enabled: Some(true),
@@ -1448,7 +1453,7 @@ cache: false
             Some(PortSpec::Exact { port: 8080 })
         );
         let http = network.http.as_ref().unwrap();
-        assert_eq!(http.domain, "example.com");
+        assert_eq!(http.domain.as_deref(), Some("example.com"));
         assert_eq!(http.port, 8080);
 
         let unit = e.unit.as_ref().unwrap();
@@ -1498,7 +1503,7 @@ cache: false
         let enclave = config.enclave.unwrap();
         let network = enclave.get("default").unwrap().network.as_ref().unwrap();
         let http = network.http.as_ref().unwrap();
-        assert_eq!(http.domain, "myapp.example.com");
+        assert_eq!(http.domain.as_deref(), Some("myapp.example.com"));
         assert_eq!(http.port, 8080);
     }
 
@@ -1668,7 +1673,7 @@ enclave "main" {
 
         let network = e.network.as_ref().unwrap();
         let http = network.http.as_ref().unwrap();
-        assert_eq!(http.domain, "chat.caution.dev");
+        assert_eq!(http.domain.as_deref(), Some("chat.caution.dev"));
         assert_eq!(http.port, 80);
 
         let build = e.build.as_ref().unwrap();
@@ -1708,7 +1713,9 @@ enclave "main" {
             network.ingress[0].port_spec,
             Some(PortSpec::Exact { port: 8080 })
         );
-        assert!(network.http.is_none());
+        let http = network.http.as_ref().unwrap();
+        assert!(http.domain.is_none());
+        assert_eq!(http.port, 8080);
 
         let debug = e.debug.as_ref().unwrap();
         assert_eq!(debug.enabled, Some(true));
@@ -1773,7 +1780,7 @@ enclave "main" {
 
         let network = e.network.as_ref().unwrap();
         let http = network.http.as_ref().unwrap();
-        assert_eq!(http.domain, "chat.caution.dev");
+        assert_eq!(http.domain.as_deref(), Some("chat.caution.dev"));
         assert_eq!(http.port, 80);
 
         let build = e.build.as_ref().unwrap();
@@ -2573,6 +2580,83 @@ enclave "test" {
         let cfg = ConfigurationFile::from_str(hcl).expect("should accept enclave without unit");
         let enclave = cfg.enclave.unwrap().get("test").unwrap().clone();
         assert!(enclave.unit.is_none());
+    }
+
+    #[test]
+    fn test_from_str_http_without_domain_is_valid() {
+        let hcl = r#"
+enclave "main" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }
+    http {
+      port = 8080
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let cfg = ConfigurationFile::from_str(hcl)
+            .expect("should accept http without domain");
+        let enclave = cfg.enclave.unwrap();
+        let main = enclave.get("main").unwrap();
+        let http = main.network.as_ref().unwrap().http.as_ref().unwrap();
+        assert!(http.domain.is_none());
+        assert_eq!(http.port, 8080);
+    }
+
+    #[test]
+    fn test_from_str_http_with_domain_still_works() {
+        let hcl = r#"
+enclave "main" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }
+    http {
+      domain = "x.com"
+      port = 8080
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let cfg = ConfigurationFile::from_str(hcl)
+            .expect("should accept http with domain");
+        let enclave = cfg.enclave.unwrap();
+        let main = enclave.get("main").unwrap();
+        let http = main.network.as_ref().unwrap().http.as_ref().unwrap();
+        assert_eq!(http.domain.as_deref(), Some("x.com"));
+        assert_eq!(http.port, 8080);
+    }
+
+    #[test]
+    fn test_from_procfile_http_port_only() {
+        let procfile = "run: /app\nports: 8080\nhttp_port: 8080\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let network = enclave.get("default").unwrap().network.as_ref().unwrap();
+        let http = network.http.as_ref().unwrap();
+        assert!(http.domain.is_none());
+        assert_eq!(http.port, 8080);
+    }
+
+    #[test]
+    fn test_from_procfile_no_http_at_all() {
+        let procfile = "run: /app\nports: 8080\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let network = enclave.get("default").unwrap().network.as_ref().unwrap();
+        assert!(network.http.is_none());
     }
 
     #[test]
