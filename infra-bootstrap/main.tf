@@ -407,6 +407,7 @@ resource "aws_iam_role_policy" "builder_s3" {
             "s3:prefix" = [
               "builds/*",
               "eifs/*",
+              "buildcache/*",
             ]
           }
         }
@@ -421,6 +422,18 @@ resource "aws_iam_role_policy" "builder_s3" {
         Resource = [
           "${aws_s3_bucket.eif_storage.arn}/builds/*",
           "${aws_s3_bucket.eif_storage.arn}/eifs/*",
+        ]
+      },
+      {
+        Sid    = "BuilderS3BuildCache"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+        ]
+        Resource = [
+          "${aws_s3_bucket.eif_storage.arn}/buildcache/*",
         ]
       },
     ]

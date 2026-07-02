@@ -24,6 +24,15 @@ pub const LOCKSMITH_REPO: &str = "https://codeberg.org/caution/locksmith.git";
 const RESERVED_INTERNAL_PORT_START: u16 = 49_500;
 const RESERVED_INTERNAL_PORT_END: u16 = 49_600;
 
+/// S3-backed BuildKit cache config for the EIF build. Strictly opt-in: when
+/// absent, the build runs `docker build` with the embedded builder exactly as
+/// before, so `caution verify` and local builds never need buildx or S3.
+#[derive(Debug, Clone)]
+pub struct CacheConfig {
+    pub s3_bucket: String,
+    pub s3_region: String,
+}
+
 fn is_reserved_internal_port(port: u16) -> bool {
     (RESERVED_INTERNAL_PORT_START..=RESERVED_INTERNAL_PORT_END).contains(&port)
 }
@@ -426,6 +435,7 @@ pub async fn build_eif_from_filesystems(
     e2e_cors_origins: Option<String>,
     egress: bool,
     templates_dir: Option<&Path>,
+    cache_config: Option<CacheConfig>,
 ) -> Result<EifFile> {
     tracing::info!("Building EIF using transparent Containerfile approach");
 
@@ -463,24 +473,40 @@ pub async fn build_eif_from_filesystems(
     );
     eprintln!("Output directory: {}", output_dir_absolute.display());
 
-    // Build docker args, conditionally adding --no-cache
-    let mut docker_args = vec![
-        "build".to_string(),
-        "--progress=plain".to_string(),
-        "--target".to_string(),
-        "output".to_string(),
-        "--output".to_string(),
-        format!(
-            "type=local,rewrite-timestamp=true,dest={}",
-            output_dir_absolute.to_str().unwrap()
-        ),
-        "-f".to_string(),
-        "Containerfile.eif".to_string(),
-    ];
+    // Build docker args, conditionally adding --no-cache and S3 BuildKit cache flags
+    let mut docker_args = Vec::new();
+    if cache_config.is_some() {
+        docker_args.push("buildx".to_string());
+    }
+    docker_args.push("build".to_string());
     if no_cache {
-        docker_args.insert(1, "--no-cache".to_string());
+        docker_args.push("--no-cache".to_string());
         tracing::info!("EIF build: no_cache=true, adding --no-cache flag");
     }
+    docker_args.push("--progress=plain".to_string());
+    docker_args.push("--target".to_string());
+    docker_args.push("output".to_string());
+    docker_args.push("--output".to_string());
+    docker_args.push(format!(
+        "type=local,rewrite-timestamp=true,dest={}",
+        output_dir_absolute.to_str().unwrap()
+    ));
+    if let Some(cache) = &cache_config {
+        docker_args.push("--cache-to".to_string());
+        docker_args.push(format!(
+            "type=s3,region={},bucket={},prefix=buildcache/,mode=max,ignore-error=true",
+            cache.s3_region, cache.s3_bucket
+        ));
+        if !no_cache {
+            docker_args.push("--cache-from".to_string());
+            docker_args.push(format!(
+                "type=s3,region={},bucket={},prefix=buildcache/",
+                cache.s3_region, cache.s3_bucket
+            ));
+        }
+    }
+    docker_args.push("-f".to_string());
+    docker_args.push("Containerfile.eif".to_string());
     docker_args.push(".".to_string());
 
     let output = Command::new("docker")

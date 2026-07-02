@@ -4,7 +4,9 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use enclave_builder::{EnclaveBuilder, EnclaveManifest, EnclaveSource, FrameworkSource, UserImage};
+use enclave_builder::{
+    CacheConfig, EnclaveBuilder, EnclaveManifest, EnclaveSource, FrameworkSource, UserImage,
+};
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name)
@@ -33,6 +35,24 @@ fn ports_from_env() -> Vec<u16> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn cache_config_from_env() -> Option<CacheConfig> {
+    let bucket = std::env::var("CAUTION_BUILDKIT_CACHE_S3_BUCKET").ok();
+    let region = std::env::var("CAUTION_BUILDKIT_CACHE_S3_REGION").ok();
+    match (bucket, region) {
+        (Some(s3_bucket), Some(s3_region)) => Some(CacheConfig {
+            s3_bucket,
+            s3_region,
+        }),
+        (None, None) => None,
+        _ => {
+            tracing::warn!(
+                "Only one of CAUTION_BUILDKIT_CACHE_S3_BUCKET / CAUTION_BUILDKIT_CACHE_S3_REGION is set; proceeding without BuildKit S3 cache"
+            );
+            None
+        }
+    }
 }
 
 fn http_port_from_env() -> Option<u16> {
@@ -95,6 +115,7 @@ async fn main() -> Result<()> {
     let no_cache = env_flag("CAUTION_NO_CACHE");
     let ports = ports_from_env();
     let http_port = http_port_from_env();
+    let cache_config = cache_config_from_env();
 
     tokio::fs::create_dir_all(&work_dir)
         .await
@@ -128,7 +149,8 @@ async fn main() -> Result<()> {
     let metadata = manifest.metadata.clone();
 
     let builder = EnclaveBuilder::new(enclave_source, enclave_version, framework_source, &work_dir)?
-        .with_no_cache(no_cache);
+        .with_no_cache(no_cache)
+        .with_cache_config(cache_config);
 
     let user_image = UserImage {
         reference: image_ref,

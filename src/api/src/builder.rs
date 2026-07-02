@@ -900,6 +900,7 @@ set -euo pipefail
 # --- Caution Dedicated Builder ---
 BUILD_ID="{build_id}"
 S3_BUCKET="{bucket}"
+REGION="{region}"
 STATUS_KEY="{status_key}"
 EIF_S3_KEY="{eif_s3_key}"
 SOURCE_S3_KEY="{source_s3_key}"
@@ -975,6 +976,18 @@ systemctl enable docker
 
 set_phase "starting"
 
+echo "Setting up BuildKit S3 layer cache..."
+CACHE_READY="false"
+mkdir -p /usr/local/lib/docker/cli-plugins
+if curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-buildx https://github.com/docker/buildx/releases/download/v0.14.1/buildx-v0.14.1.linux-amd64 \
+    && echo "5688a55c8d4bebafcb595e57718ba0bee2a68b8bab6dac66702ebb2469767b8a  /usr/local/lib/docker/cli-plugins/docker-buildx" | sha256sum -c - \
+    && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx \
+    && docker buildx create --name eifcache --driver docker-container --driver-opt network=host --use; then
+    CACHE_READY="true"
+else
+    echo "BuildKit S3 cache setup failed, continuing without cache" >&2
+fi
+
 # Download source archive from S3
 echo "Downloading source archive..."
 mkdir -p /build/repo
@@ -997,6 +1010,11 @@ set_phase "docker_built"
 cat > /build/manifest.json << 'MANIFEST_EOF'
 {manifest_json}
 MANIFEST_EOF
+
+if [ "$CACHE_READY" = "true" ]; then
+    export CAUTION_BUILDKIT_CACHE_S3_BUCKET="$S3_BUCKET"
+    export CAUTION_BUILDKIT_CACHE_S3_REGION="$REGION"
+fi
 
 echo "Building EIF via remote-build-helper..."
 mkdir -p /build/output
@@ -1050,6 +1068,7 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
 "##,
         build_id = build_id,
         bucket = bucket,
+        region = config.region,
         status_key = status_key,
         eif_s3_key = eif_s3_key,
         source_s3_key = source_s3_key,

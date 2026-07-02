@@ -63,6 +63,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+pub use build::CacheConfig;
 pub use compile::{resolve_ref_to_commit, EnclaveSourceResult};
 pub use docker::{
     build_user_image, has_explicit_build_command, resolve_build_command,
@@ -84,6 +85,9 @@ pub struct EnclaveBuilder {
     pub work_dir: PathBuf,
     /// Whether to skip Docker cache for EIF builds
     pub no_cache: bool,
+    /// Optional S3-backed BuildKit cache for the EIF build. Only set on remote
+    /// builders; local/verify builds leave this `None` and are unaffected.
+    pub cache_config: Option<CacheConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +190,7 @@ impl EnclaveBuilder {
             framework_source: framework_source.into(),
             work_dir,
             no_cache,
+            cache_config: None,
         })
     }
 
@@ -203,11 +208,17 @@ impl EnclaveBuilder {
             framework_source: framework_source.into(),
             work_dir,
             no_cache: false,
+            cache_config: None,
         })
     }
 
     pub fn with_no_cache(mut self, no_cache: bool) -> Self {
         self.no_cache = no_cache;
+        self
+    }
+
+    pub fn with_cache_config(mut self, cache_config: Option<CacheConfig>) -> Self {
+        self.cache_config = cache_config;
         self
     }
 
@@ -332,6 +343,7 @@ impl EnclaveBuilder {
             e2e_cors_origins,
             egress,
             templates_dir,
+            self.cache_config.clone(),
         )
         .await
     }
