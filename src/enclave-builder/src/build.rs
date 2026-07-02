@@ -492,6 +492,13 @@ pub async fn build_eif_from_filesystems(
         output_dir_absolute.to_str().unwrap()
     ));
     if let Some(cache) = &cache_config {
+        // Target the dedicated docker-container builder explicitly rather than
+        // relying on it being the selected default. The remote builder does NOT
+        // `--use` this instance, so the customer app `docker build` stays on the
+        // default docker driver (loaded into the image store, IMDS-isolated).
+        // Name must match `docker buildx create --name` in the builder user-data.
+        docker_args.push("--builder".to_string());
+        docker_args.push("eifcache".to_string());
         docker_args.push("--cache-to".to_string());
         docker_args.push(format!(
             "type=s3,region={},bucket={},prefix=buildcache/,mode=max,ignore-error=true",

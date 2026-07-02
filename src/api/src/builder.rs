@@ -976,13 +976,17 @@ systemctl enable docker
 
 set_phase "starting"
 
+# Set up a dedicated docker-container builder for the EIF cache. Deliberately
+# NOT `--use`d: the EIF build targets it via `--builder eifcache`, while the
+# customer app `docker build` stays on the default docker driver so it loads
+# into the image store and cannot reach IMDS (host-network is scoped to eifcache).
 echo "Setting up BuildKit S3 layer cache..."
 CACHE_READY="false"
 mkdir -p /usr/local/lib/docker/cli-plugins
 if curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-buildx https://github.com/docker/buildx/releases/download/v0.14.1/buildx-v0.14.1.linux-amd64 \
     && echo "5688a55c8d4bebafcb595e57718ba0bee2a68b8bab6dac66702ebb2469767b8a  /usr/local/lib/docker/cli-plugins/docker-buildx" | sha256sum -c - \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx \
-    && docker buildx create --name eifcache --driver docker-container --driver-opt network=host --use; then
+    && docker buildx create --name eifcache --driver docker-container --driver-opt network=host; then
     CACHE_READY="true"
 else
     echo "BuildKit S3 cache setup failed, continuing without cache" >&2
