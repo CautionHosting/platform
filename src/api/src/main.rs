@@ -1309,9 +1309,13 @@ async fn set_builder_config(
     Path(resource_id): Path<Uuid>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let (org_id, role) = get_user_primary_org_and_role(&state.db, auth.user_id)
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    if !can_manage_org(&role) {
+        return Err((StatusCode::FORBIDDEN, "Insufficient permissions".to_string()));
+    }
 
     let builder_size = body
         .get("builder_size")

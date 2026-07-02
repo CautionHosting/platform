@@ -16,7 +16,7 @@ use crate::validated_types::{
 use crate::{cloud_credentials, deployment, types, validation};
 use crate::{
     can_manage_org, get_or_create_provider_account, get_or_create_resource_type,
-    get_user_primary_org, AppState, AuthContext,
+    get_user_primary_org, get_user_primary_org_and_role, AppState, AuthContext,
 };
 
 #[derive(Debug, Serialize, FromRow)]
@@ -45,10 +45,10 @@ pub async fn create_resource(
     tracing::info!("Creating resource for user_id: {}", auth.user_id);
     tracing::debug!("Resource payload: {:?}", payload);
 
-    let org_id = match get_user_primary_org(&state.db, auth.user_id).await {
-        Ok(id) => {
+    let (org_id, role) = match get_user_primary_org_and_role(&state.db, auth.user_id).await {
+        Ok((id, role)) => {
             tracing::debug!("Found primary org: {}", id);
-            id
+            (id, role)
         }
         Err(e) => {
             tracing::error!(
@@ -59,6 +59,14 @@ pub async fn create_resource(
             return Err(e);
         }
     };
+
+    if role.is_viewer() {
+        tracing::warn!(
+            "User {} (viewer) attempted to create a resource",
+            auth.user_id
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     let provider_account_id = match get_or_create_provider_account(&state.db, org_id).await {
         Ok(id) => {

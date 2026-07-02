@@ -9,7 +9,9 @@ use sqlx::Row;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{get_user_primary_org, AppState, AuthContext};
+use crate::{
+    can_manage_org, get_user_primary_org, get_user_primary_org_and_role, AppState, AuthContext,
+};
 
 pub(crate) fn tier_display_name(id: &str) -> String {
     id.split('_')
@@ -165,15 +167,19 @@ pub async fn subscribe(
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<SubscribeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (org_id, role) = get_user_primary_org_and_role(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    if !can_manage_org(&role) {
+        return Err((StatusCode::FORBIDDEN, "Insufficient permissions".to_string()));
+    }
+
     let tier = state
         .pricing
         .subscription_tiers
         .get(&req.tier_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
-
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
-        .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
 
     // Check no existing active subscription
     let existing: Option<(Uuid,)> = sqlx::query_as(
@@ -296,15 +302,19 @@ pub async fn change_subscription_tier(
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<ChangeTierRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (org_id, role) = get_user_primary_org_and_role(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    if !can_manage_org(&role) {
+        return Err((StatusCode::FORBIDDEN, "Insufficient permissions".to_string()));
+    }
+
     let new_tier = state
         .pricing
         .subscription_tiers
         .get(&req.tier_id)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
-
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
-        .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
 
     let sub: Option<(Uuid, String)> = sqlx::query_as(
         "SELECT id, tier
@@ -488,9 +498,13 @@ pub async fn cancel_subscription(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let (org_id, role) = get_user_primary_org_and_role(&state.db, auth.user_id)
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    if !can_manage_org(&role) {
+        return Err((StatusCode::FORBIDDEN, "Insufficient permissions".to_string()));
+    }
 
     let sub: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id

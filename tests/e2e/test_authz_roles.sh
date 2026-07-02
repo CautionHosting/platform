@@ -15,6 +15,11 @@
 #   7. Delete payment method: member/viewer rejected (403), owner allowed
 #   8. Set primary payment method: member/viewer rejected (403), owner allowed
 #   9. Auto top-up: member/viewer rejected (403), owner allowed
+#  10. Create resource: viewer rejected (403), member/owner allowed
+#  11. Set builder config: member/viewer rejected (403), owner allowed
+#  12. Subscribe: member/viewer rejected (403), owner allowed
+#  13. Change subscription tier: member/viewer rejected (403), owner allowed
+#  14. Cancel subscription: member/viewer rejected (403), owner allowed
 
 set -euo pipefail
 
@@ -349,6 +354,97 @@ if [ "$STATUS" = "403" ]; then
 fi
 log "  Owner put_auto_topup: passed role gate (result: $STATUS, expect 200)"
 step_pass "put_auto_topup role gate (member/viewer blocked, owner allowed)"
+
+# ── Step 10: Create resource — viewer rejected, member/owner allowed ──
+
+STEP_NUM=10
+log "Testing create_resource role gate..."
+CREATE_BODY='{"cmd": "echo hi", "name": null}'
+
+# Viewer is read-only: blocked. (Body is valid, so the 403 is the role gate,
+# not a validation rejection.)
+STATUS=$(req_status POST "/api/resources" "$VIEWER_SESSION" "$CREATE_BODY")
+if [ "$STATUS" != "403" ]; then
+  step_fail "Viewer create_resource: expected 403, got $STATUS"
+fi
+
+# Member may provision: must pass the role gate (create_resource is DB-only,
+# so a success is 200 — anything other than 403 means the gate let it through).
+STATUS=$(req_status POST "/api/resources" "$MEMBER_SESSION" "$CREATE_BODY")
+if [ "$STATUS" = "403" ]; then
+  step_fail "Member create_resource: unexpectedly rejected with 403"
+fi
+log "  Member create_resource: passed role gate (result: $STATUS)"
+step_pass "create_resource role gate (viewer blocked, member allowed)"
+
+# ── Step 11: Set builder config — member/viewer rejected, owner allowed ─
+
+STEP_NUM=11
+log "Testing set_builder_config role gate..."
+BUILDER_BODY='{"builder_size": "small"}'
+
+for session in "$MEMBER_SESSION" "$VIEWER_SESSION"; do
+  STATUS=$(req_status PUT "/api/resources/$APP_ID/builder-config" "$session" "$BUILDER_BODY")
+  if [ "$STATUS" != "403" ]; then
+    step_fail "Non-admin set_builder_config: expected 403, got $STATUS"
+  fi
+done
+STATUS=$(req_status PUT "/api/resources/$APP_ID/builder-config" "$OWNER_SESSION" "$BUILDER_BODY")
+if [ "$STATUS" = "403" ]; then
+  step_fail "Owner set_builder_config: unexpectedly rejected with 403"
+fi
+log "  Owner set_builder_config: passed role gate (result: $STATUS)"
+step_pass "set_builder_config role gate (member/viewer blocked, owner allowed)"
+
+# ── Step 12/13/14: Subscription lifecycle ────────────────────────────
+# The role check runs before tier validation, so a dummy tier still yields
+# 403 for non-admins; the owner passes the gate (then 400/404 on the body).
+
+STEP_NUM=12
+log "Testing subscribe role gate..."
+SUB_BODY='{"tier_id": "e2e-nonexistent-tier"}'
+for session in "$MEMBER_SESSION" "$VIEWER_SESSION"; do
+  STATUS=$(req_status POST "/api/billing/subscription/subscribe" "$session" "$SUB_BODY")
+  if [ "$STATUS" != "403" ]; then
+    step_fail "Non-admin subscribe: expected 403, got $STATUS"
+  fi
+done
+STATUS=$(req_status POST "/api/billing/subscription/subscribe" "$OWNER_SESSION" "$SUB_BODY")
+if [ "$STATUS" = "403" ]; then
+  step_fail "Owner subscribe: unexpectedly rejected with 403"
+fi
+log "  Owner subscribe: passed role gate (result: $STATUS)"
+step_pass "subscribe role gate (member/viewer blocked, owner allowed)"
+
+STEP_NUM=13
+log "Testing change_subscription_tier role gate..."
+for session in "$MEMBER_SESSION" "$VIEWER_SESSION"; do
+  STATUS=$(req_status POST "/api/billing/subscription/change-tier" "$session" "$SUB_BODY")
+  if [ "$STATUS" != "403" ]; then
+    step_fail "Non-admin change_subscription_tier: expected 403, got $STATUS"
+  fi
+done
+STATUS=$(req_status POST "/api/billing/subscription/change-tier" "$OWNER_SESSION" "$SUB_BODY")
+if [ "$STATUS" = "403" ]; then
+  step_fail "Owner change_subscription_tier: unexpectedly rejected with 403"
+fi
+log "  Owner change_subscription_tier: passed role gate (result: $STATUS)"
+step_pass "change_subscription_tier role gate (member/viewer blocked, owner allowed)"
+
+STEP_NUM=14
+log "Testing cancel_subscription role gate..."
+for session in "$MEMBER_SESSION" "$VIEWER_SESSION"; do
+  STATUS=$(req_status POST "/api/billing/subscription/cancel" "$session")
+  if [ "$STATUS" != "403" ]; then
+    step_fail "Non-admin cancel_subscription: expected 403, got $STATUS"
+  fi
+done
+STATUS=$(req_status POST "/api/billing/subscription/cancel" "$OWNER_SESSION")
+if [ "$STATUS" = "403" ]; then
+  step_fail "Owner cancel_subscription: unexpectedly rejected with 403"
+fi
+log "  Owner cancel_subscription: passed role gate (result: $STATUS, expect 404 no active sub)"
+step_pass "cancel_subscription role gate (member/viewer blocked, owner allowed)"
 
 # ── Cleanup test data ────────────────────────────────────────────────
 
