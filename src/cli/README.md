@@ -62,6 +62,67 @@ make install-cli
 
 If you need to send locksmith shards, use `make install-cli-untrusted` instead.
 
+### Container (Docker)
+
+If you'd rather not install a native binary at all — e.g. to skip macOS Gatekeeper
+warnings or Apple notarization lead time — the CLI is also available as a
+StageX-built container image, using the same reproducible musl build as the
+native binary.
+
+Build it:
+
+```sh
+docker build -t caution-cli:runtime -f containerfiles/Containerfile.cli --target runtime .
+```
+
+Run it against the current project directory with `scripts/caution-docker.sh`:
+
+```sh
+scripts/caution-docker.sh login --qr
+scripts/caution-docker.sh apps list
+```
+
+The wrapper mounts `$PWD` as the working directory, a host directory
+`~/.config/caution-cli-docker` for your login session, a named Docker volume
+`caution-cli-cache` for the build cache, and the host's `/var/run/docker.sock`
+(needed by `caution verify` and other build-dependent commands, which shell out
+to `git`/`docker` from inside the container to reproduce and compare enclave
+builds).
+
+The build cache is a named Docker volume, not a bind mount: on Docker Desktop,
+bind-mounted build contexts round-trip host->VM->daemon through the
+file-sharing layer and can drop recently-written files, corrupting `caution
+verify` PCRs. A named volume lives in-VM with the daemon, so it stays
+coherent. Inspect with `docker run --rm -v caution-cli-cache:/c alpine ls -R
+/c` if needed.
+
+Known limitations of this install path:
+
+- **No `caution register`.** Registration needs a physical security key over
+  USB, which isn't passed through to the container. Register a native account
+  first (see above), then use `caution login --qr` inside the container for
+  everything after.
+- **Always log in with `--qr` explicitly, first.** Any command run without an
+  existing session falls back to an interactive USB security-key prompt
+  ("Tap your security key to continue") rather than erring — with no USB
+  passthrough, this hangs forever with no feedback. Run
+  `scripts/caution-docker.sh login --qr` before anything else.
+- **No `caution secret send-shard`** (smartcard-based) — same musl/PC-SC
+  limitation as the native trusted build, see above.
+- AWS BYOC flows (`~/.aws/credentials`) and SSH-key-dependent flows (CI SSH
+  signing, baremetal registration) aren't mounted by the wrapper; bind-mount
+  them yourself if you need those commands.
+- amd64 only; runs under emulation on Apple Silicon via Docker Desktop.
+- **Runs as root inside the container.** `/var/run/docker.sock` is root-owned,
+  and matching the container's uid/gid to yours via `--group-add` proved
+  unreliable on Docker Desktop's containerd runtime, so the wrapper runs as
+  root instead — root can always reach the socket regardless of its group.
+  On Docker Desktop (macOS), bind-mounted writes are transparently mapped
+  back to your host user, so files don't end up root-owned in practice. On
+  native Linux this mapping doesn't happen, so files written into
+  bind-mounted project directories (e.g. `.caution/`) will be root-owned on
+  the host.
+
 ### CI SSH App Access
 
 `caution apps get` and `caution apps destroy` normally require a logged-in
