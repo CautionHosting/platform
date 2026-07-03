@@ -2346,13 +2346,21 @@ enclave "default" {{
     }
 
     fn create_config_file_if_needed(&self, byoc: bool) -> Result<()> {
-        use std::fs;
         use std::path::Path;
 
-        let config_path = Path::new("caution.hcl");
+        self.create_config_file_in_dir_if_needed(Path::new("."), byoc)
+    }
+
+    fn create_config_file_in_dir_if_needed(&self, dir: &Path, byoc: bool) -> Result<()> {
+        use std::fs;
+
+        let config_path = dir.join("caution.hcl");
 
         if config_path.exists() {
-            log_verbose(self.verbose, "caution.hcl already exists, skipping creation");
+            log_verbose(
+                self.verbose,
+                "caution.hcl already exists, skipping creation",
+            );
             return Ok(());
         }
 
@@ -2362,7 +2370,7 @@ enclave "default" {{
 
         let hcl_content = Self::generate_config_hcl(&source_url, byoc);
 
-        fs::write(config_path, hcl_content).context("Failed to create caution.hcl")?;
+        fs::write(&config_path, hcl_content).context("Failed to create caution.hcl")?;
 
         println!("\nCreated caution.hcl in current directory");
         println!("Edit the unit \"default\" command to match your application");
@@ -4709,8 +4717,9 @@ enclave "default" {{
             serde_json::to_string_pretty(&byoc_state)?,
         )?;
 
-        // Also save deployment.json in current directory
+        // Also save deployment.json and caution.hcl in current directory
         self.save_deployment(resource_id)?;
+        self.create_config_file_if_needed(true)?;
 
         // Set up git remote
         if !git_url.is_empty() {
@@ -8462,9 +8471,31 @@ containerfile: Missing.Containerfile\n",
 
     #[test]
     fn generated_config_hcl_parses_as_valid_configuration_file() {
-        let hcl = ApiClient::generate_config_hcl("git@codeberg.org:user/repo.git", false);
-        let config = ConfigurationFile::from_str(&hcl);
-        assert!(config.is_ok(), "generated HCL should parse: {:?}", config.err());
+        for byoc in [false, true] {
+            let hcl = ApiClient::generate_config_hcl("git@codeberg.org:user/repo.git", byoc);
+            let config = ConfigurationFile::from_str(&hcl);
+            assert!(
+                config.is_ok(),
+                "generated HCL should parse for byoc={byoc}: {:?}",
+                config.err()
+            );
+        }
+    }
+
+    #[test]
+    fn create_config_file_in_dir_writes_byoc_template() {
+        let work_dir = tempdir().unwrap();
+        let client = test_api_client();
+
+        client
+            .create_config_file_in_dir_if_needed(work_dir.path(), true)
+            .unwrap();
+
+        let hcl = std::fs::read_to_string(work_dir.path().join("caution.hcl")).unwrap();
+        assert!(hcl.contains("caution {"));
+        assert!(hcl.contains("type         = \"aws\""));
+        assert!(hcl.contains("region       = \"us-east-1\""));
+        ConfigurationFile::from_str(&hcl).unwrap();
     }
 
     fn cert_armor(builder: CertBuilder) -> String {
