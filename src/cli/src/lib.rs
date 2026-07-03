@@ -1630,12 +1630,18 @@ pub(crate) struct PreflightArchiveUrlError {
      Fixes:\n  \
      - Push the branch:        git push <remote> {branch}\n  \
      - Verify a local checkout: caution verify --from-local\n  \
-     - Verify a source tarball: caution verify --from-tarball <path>"
+     - Verify a source tarball: caution verify --from-tarball <path>",
+    url = .url,
+    commit = .source.commit,
+    branch = .source.branch,
 )]
 pub(crate) struct AppSourceBranchMissingError {
     pub url: String,
-    pub commit: String,
-    pub branch: String,
+    // The same failure as classification, enriched with the remote URL. Held as
+    // #[source] rather than flattened so any context fields added to the inner
+    // error later are carried through instead of silently dropped.
+    #[source]
+    pub source: ClassifyAppSourceRefsError,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -6610,8 +6616,7 @@ enclave "default" {{
             Err(missing_branch) => {
                 return Err(AppSourceBranchMissingError {
                     url: git_url.to_string(),
-                    commit: missing_branch.commit,
-                    branch: missing_branch.branch,
+                    source: missing_branch,
                 }
                 .into());
             }
