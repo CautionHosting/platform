@@ -1687,13 +1687,19 @@ impl ApiClient {
             // an unresponsive host (e.g. an enclave IP that accepts the connection
             // but never replies) can't hang the CLI forever. A read timeout catches
             // the case where a host accepts the connection and starts responding but
-            // then stalls mid-transfer; it resets on every successful read, so it
-            // only fires on true inactivity. It must stay above the largest
-            // per-request `.timeout()` override used with this client (currently 60s
-            // for the attestation fetch), or it would silently cut that request short.
+            // then stalls mid-transfer; it is an idle timer that resets on every
+            // successful read, so it fires only after true inactivity, not on total
+            // elapsed time. That means it can be shorter than the overall deadline
+            // without cutting a still-live request short: as long as any byte arrives
+            // within the window, the request keeps going. The overall `.timeout()` is
+            // the generic deadline that ultimately bounds every request (time since
+            // first byte), catching a host that stays just active enough to dodge the
+            // idle timer. Individual calls may still raise it via a per-request
+            // `.timeout()` override (e.g. the attestation fetch).
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(30))
-                .read_timeout(Duration::from_secs(90))
+                .read_timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(60))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             config_path,
