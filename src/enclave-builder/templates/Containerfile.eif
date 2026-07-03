@@ -157,11 +157,9 @@ COPY app/ /build/initramfs/
 # canonical, umask-independent modes here, preserving the exec bit git tracks so
 # app binaries stay runnable. Scoped to the app files only (EnclaveOS components
 # are copied and chmod'd deterministically below).
-# find/chmod here are busybox (this stage is FROM busybox); use octal -perm masks
-# (-0100 = user-exec bit set) which every busybox build parses unambiguously.
 RUN find /build/initramfs -type d -exec chmod 0755 {} + && \
-    find /build/initramfs -type f -perm -0100 -exec chmod 0755 {} + && \
-    find /build/initramfs -type f ! -perm -0100 -exec chmod 0644 {} +
+    find /build/initramfs -type f -executable -exec chmod 0755 {} + && \
+    find /build/initramfs -type f ! -executable -exec chmod 0644 {} +
 
 # Symlinks ruin everything.
 RUN test -e /build/initramfs/bin || mkdir -p /build/initramfs/bin
