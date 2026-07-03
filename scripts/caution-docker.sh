@@ -27,6 +27,7 @@ mkdir -p "$CONFIG_DIR"
 
 docker run --rm -it \
   --user root \
+  -e HOME=/home/user \
   -v "$PWD:/workspace" \
   -w /workspace \
   -v "$CONFIG_DIR:/home/user/.config/caution-cli" \
