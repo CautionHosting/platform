@@ -91,6 +91,26 @@ pub async fn update_current_user(
             Some(trimmed.to_string())
         }
     });
+
+    if new_email.is_some() {
+        let last_sent_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT email_verification_sent_at
+             FROM users
+             WHERE id = $1",
+        )
+        .bind(auth.user_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .flatten();
+
+        if let crate::onboarding::EmailVerificationThrottle::Throttled { .. } =
+            crate::onboarding::email_verification_throttle(last_sent_at, Utc::now())
+        {
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
+
     let mut verification_token: Option<String> = None;
 
     if let Some(email_update) = &payload.email {
@@ -102,7 +122,8 @@ pub async fn update_current_user(
                 "email = NULL,
                  email_verified_at = NULL,
                  email_verification_token = NULL,
-                 email_verification_token_expires_at = NULL",
+                 email_verification_token_expires_at = NULL,
+                 email_verification_sent_at = NULL",
             );
         } else {
             query_builder.push("email = ");
@@ -115,6 +136,7 @@ pub async fn update_current_user(
             query_builder.push_bind(token.clone());
             query_builder.push(", email_verification_token_expires_at = ");
             query_builder.push_bind(expires_at);
+            query_builder.push(", email_verification_sent_at = NOW()");
             verification_token = Some(token);
         }
     }

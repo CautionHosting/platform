@@ -86,6 +86,7 @@ CREATE TABLE users (
     email_verified_at TIMESTAMP,
     email_verification_token VARCHAR(255),
     email_verification_token_expires_at TIMESTAMP,
+    email_verification_sent_at TIMESTAMPTZ,
 
     -- Payment tracking
     stripe_customer_id VARCHAR(255) UNIQUE,
@@ -105,6 +106,7 @@ CREATE INDEX idx_users_stripe_customer ON users(stripe_customer_id) WHERE stripe
 COMMENT ON COLUMN users.email_verified_at IS 'Timestamp when user verified their email address';
 COMMENT ON COLUMN users.email_verification_token IS 'Token sent via email for verification';
 COMMENT ON COLUMN users.email_verification_token_expires_at IS 'Expiration time for verification token (24 hours)';
+COMMENT ON COLUMN users.email_verification_sent_at IS 'Timestamp when the latest email verification message was sent';
 COMMENT ON COLUMN users.stripe_customer_id IS 'Stripe customer ID for billing';
 COMMENT ON COLUMN users.payment_method_added_at IS 'Timestamp when user added payment method';
 
