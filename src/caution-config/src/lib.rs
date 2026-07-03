@@ -29,6 +29,7 @@ pub enum Provider {
 
 /// Configuration for the `provider { type = "aws" ... }` block.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AwsProviderConfig {
     pub region: String,
     pub vpc_id: Option<String>,
@@ -38,6 +39,7 @@ pub struct AwsProviderConfig {
 
 /// Top-level `caution { }` block.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CautionConfig {
     pub managed_credentials: Option<String>,
     pub machine_type: Option<String>,
@@ -47,6 +49,7 @@ pub struct CautionConfig {
 
 /// The `build { }` block inside an enclave definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildConfig {
     pub containerfile: Option<String>,
     pub binary: Option<String>,
@@ -57,6 +60,7 @@ pub struct BuildConfig {
 
 /// The `debug { }` block inside an enclave definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DebugConfig {
     pub enabled: Option<bool>,
     #[serde(default)]
@@ -72,6 +76,11 @@ pub enum PortSpec {
 }
 
 /// A single traffic rule.
+///
+/// NOTE: `deny_unknown_fields` is intentionally absent here -- `#[serde(flatten)]`
+/// on `Option<PortSpec>` (untagged) is incompatible with it. Serde can't
+/// distinguish "field consumed by flattened type" from "unknown field" when
+/// the flattened type uses multi-field untagged variants (e.g. `FromTo`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrafficRule {
     pub cidr_ipv4: String,
@@ -82,6 +91,7 @@ pub struct TrafficRule {
 
 /// The `e2e_encryption { }` block inside HTTP config.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct E2eEncryption {
     pub enabled: Option<bool>,
     pub cors_origins: Option<Vec<String>>,
@@ -89,14 +99,17 @@ pub struct E2eEncryption {
 
 /// The `http { }` block inside network config.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpConfig {
-    pub domain: String,
+    #[serde(default)]
+    pub domain: Option<String>,
     pub port: u16,
     pub e2e_encryption: Option<E2eEncryption>,
 }
 
 /// The `resources { }` block inside an enclave definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceConfig {
     pub cpu: u32,
     pub memory_mb: u32,
@@ -104,6 +117,7 @@ pub struct ResourceConfig {
 
 /// A single unit block (`unit "label" { }`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UnitConfig {
     pub command: String,
     #[serde(default)]
@@ -218,6 +232,7 @@ impl UnitConfig {
 
 /// The `network { }` block inside an enclave definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkConfig {
     #[serde(deserialize_with = "single_or_vec", default)]
     pub ingress: Vec<TrafficRule>,
@@ -235,6 +250,7 @@ impl NetworkConfig {
 
 /// An enclave definition (`enclave "label" { }`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnclaveConfig {
     pub build: Option<BuildConfig>,
     pub debug: Option<DebugConfig>,
@@ -245,6 +261,7 @@ pub struct EnclaveConfig {
 
 /// Top-level configuration file matching the `example.hcl` schema.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigurationFile {
     pub caution: Option<CautionConfig>,
     pub enclave: Option<BTreeMap<String, EnclaveConfig>>,
@@ -335,7 +352,10 @@ fn is_reserved(port: u16) -> bool {
 /// The value flows into generated infrastructure (Terraform variables, the
 /// instance bootstrap script, and the Caddy config), so it must be a plain DNS
 /// name with no characters that could carry meaning in those contexts.
-fn validate_domain(domain: &str) -> Result<(), String> {
+fn validate_domain(domain: Option<&str>) -> Result<(), String> {
+    let Some(domain) = domain else {
+        return Ok(());
+    };
     if domain.is_empty() || domain.len() > 253 {
         return Err("domain must be between 1 and 253 characters".to_string());
     }
@@ -566,11 +586,17 @@ impl ConfigurationFile {
             }
         }
 
+        let explicit_http_port = http_port;
+
         let http_port = match http_port {
             Some(hp) => Some(hp),
             None if ports.len() == 1 => Some(ports[0]),
             None => None,
         };
+
+        // Only construct HttpConfig when http_port was explicitly set in the
+        // Procfile (not auto-derived from a single ports entry).
+        let has_explicit_http_port = explicit_http_port.is_some() || domain.is_some();
 
         let build = if containerfile.is_some()
             || binary.is_some()
@@ -618,22 +644,17 @@ impl ConfigurationFile {
             cors_origins: None,
         });
 
-        if let Some(ref d) = domain {
-            validate_domain(d).map_err(FromProcfileError::InvalidDomain)?;
-        }
+        validate_domain(domain.as_deref()).map_err(FromProcfileError::InvalidDomain)?;
 
-        let http = match (domain, http_port) {
-            (Some(d), Some(p)) => Some(HttpConfig {
-                domain: d,
-                port: p,
+        let http = if has_explicit_http_port {
+            let port = http_port.unwrap_or(80);
+            Some(HttpConfig {
+                domain,
+                port,
                 e2e_encryption: e2e_encryption.clone(),
-            }),
-            (Some(d), None) => Some(HttpConfig {
-                domain: d,
-                port: 80,
-                e2e_encryption: e2e_encryption.clone(),
-            }),
-            (None, _) => None,
+            })
+        } else {
+            None
         };
 
         let network = if !ports.is_empty() || http.is_some() {
@@ -767,7 +788,7 @@ impl ConfigurationFile {
                 if let Some(ref network) = enclave.network
                     && let Some(ref http) = network.http
                 {
-                    validate_domain(&http.domain).map_err(FromStrError::InvalidDomain)?;
+                    validate_domain(http.domain.as_deref()).map_err(FromStrError::InvalidDomain)?;
 
                     let port_covered = network.ingress.iter().any(|rule| match &rule.port_spec {
                         Some(PortSpec::Exact { port }) => *port == http.port,
@@ -876,7 +897,7 @@ mod tests {
                             ip_protocol: None,
                         }],
                         http: Some(HttpConfig {
-                            domain: "chat.caution.dev".into(),
+                            domain: Some("chat.caution.dev".into()),
                             port: 8000,
                             e2e_encryption: Some(E2eEncryption {
                                 enabled: Some(true),
@@ -1432,7 +1453,7 @@ cache: false
             Some(PortSpec::Exact { port: 8080 })
         );
         let http = network.http.as_ref().unwrap();
-        assert_eq!(http.domain, "example.com");
+        assert_eq!(http.domain.as_deref(), Some("example.com"));
         assert_eq!(http.port, 8080);
 
         let unit = e.unit.as_ref().unwrap();
@@ -1482,7 +1503,7 @@ cache: false
         let enclave = config.enclave.unwrap();
         let network = enclave.get("default").unwrap().network.as_ref().unwrap();
         let http = network.http.as_ref().unwrap();
-        assert_eq!(http.domain, "myapp.example.com");
+        assert_eq!(http.domain.as_deref(), Some("myapp.example.com"));
         assert_eq!(http.port, 8080);
     }
 
@@ -1652,7 +1673,7 @@ enclave "main" {
 
         let network = e.network.as_ref().unwrap();
         let http = network.http.as_ref().unwrap();
-        assert_eq!(http.domain, "chat.caution.dev");
+        assert_eq!(http.domain.as_deref(), Some("chat.caution.dev"));
         assert_eq!(http.port, 80);
 
         let build = e.build.as_ref().unwrap();
@@ -1692,7 +1713,9 @@ enclave "main" {
             network.ingress[0].port_spec,
             Some(PortSpec::Exact { port: 8080 })
         );
-        assert!(network.http.is_none());
+        let http = network.http.as_ref().unwrap();
+        assert!(http.domain.is_none());
+        assert_eq!(http.port, 8080);
 
         let debug = e.debug.as_ref().unwrap();
         assert_eq!(debug.enabled, Some(true));
@@ -1757,7 +1780,7 @@ enclave "main" {
 
         let network = e.network.as_ref().unwrap();
         let http = network.http.as_ref().unwrap();
-        assert_eq!(http.domain, "chat.caution.dev");
+        assert_eq!(http.domain.as_deref(), Some("chat.caution.dev"));
         assert_eq!(http.port, 80);
 
         let build = e.build.as_ref().unwrap();
@@ -2402,5 +2425,265 @@ enclave "main" {
         let cfg2: ConfigurationFile = hcl::from_str(hcl_empty).expect("parse HCL");
         let net2 = cfg2.enclave.unwrap().get("main").unwrap().network.clone().unwrap();
         assert!(!net2.egress_enabled());
+    }
+
+    #[test]
+    fn test_deny_unknown_caution_config() {
+        let hcl = r#"managed_credentials = "x" unknown = 1"#;
+        let err = hcl::from_str::<CautionConfig>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_aws_provider_config() {
+        let hcl = r#"region = "us-east-1" unknown = "x""#;
+        let err = hcl::from_str::<AwsProviderConfig>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_provider_block() {
+        let hcl = r#"
+caution {
+  provider {
+    type = "aws"
+    region = "us-east-1"
+    unknown = 1
+  }
+}
+"#;
+        let err = ConfigurationFile::from_str(hcl).unwrap_err();
+        assert!(matches!(err, FromStrError::HclParse(_)));
+    }
+
+    #[test]
+    fn test_deny_unknown_build_config() {
+        let hcl = r#"containerfile = "C" unknown = true"#;
+        let err = hcl::from_str::<BuildConfig>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_debug_config() {
+        let hcl = r#"enabled = true unknown = 1"#;
+        let err = hcl::from_str::<DebugConfig>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_e2e_encryption() {
+        let hcl = r#"enabled = true unknown = false"#;
+        let err = hcl::from_str::<E2eEncryption>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_http_config() {
+        let hcl = r#"domain = "x.com" port = 80 unknown = "y""#;
+        let err = hcl::from_str::<HttpConfig>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_resource_config() {
+        let hcl = r#"cpu = 1 memory_mb = 512 unknown = 2"#;
+        let err = hcl::from_str::<ResourceConfig>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_unit_config() {
+        let hcl = r#"command = "/bin/sh" unknown = true"#;
+        let err = hcl::from_str::<UnitConfig>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_network_config() {
+        let hcl = r#"unknown = true"#;
+        let err = hcl::from_str::<NetworkConfig>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_enclave_config() {
+        let hcl = r#"
+enclave "test" {
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+  unknown_block {
+    foo = 1
+  }
+}
+"#;
+        let err = ConfigurationFile::from_str(hcl).unwrap_err();
+        assert!(matches!(err, FromStrError::HclParse(_)));
+    }
+
+    #[test]
+    fn test_deny_unknown_configuration_file() {
+        let hcl = r#"
+unknown_top_block { }
+"#;
+        let err = hcl::from_str::<ConfigurationFile>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown_top_block") || err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_enclave_field() {
+        let hcl = r#"
+enclave "test" {
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+  unknown_field = "x"
+}
+"#;
+        let err = ConfigurationFile::from_str(hcl).unwrap_err();
+        assert!(matches!(err, FromStrError::HclParse(_)));
+    }
+
+    #[test]
+    fn test_network_without_http_is_valid() {
+        let hcl = r#"
+enclave "test" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let cfg = ConfigurationFile::from_str(hcl).expect("should accept network without http");
+        let enclave = cfg.enclave.unwrap().get("test").unwrap().clone();
+        assert!(enclave.network.unwrap().http.is_none());
+    }
+
+    #[test]
+    fn test_enclave_without_unit_is_valid() {
+        let hcl = r#"
+enclave "test" {
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let cfg = ConfigurationFile::from_str(hcl).expect("should accept enclave without unit");
+        let enclave = cfg.enclave.unwrap().get("test").unwrap().clone();
+        assert!(enclave.unit.is_none());
+    }
+
+    #[test]
+    fn test_from_str_http_without_domain_is_valid() {
+        let hcl = r#"
+enclave "main" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }
+    http {
+      port = 8080
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let cfg = ConfigurationFile::from_str(hcl)
+            .expect("should accept http without domain");
+        let enclave = cfg.enclave.unwrap();
+        let main = enclave.get("main").unwrap();
+        let http = main.network.as_ref().unwrap().http.as_ref().unwrap();
+        assert!(http.domain.is_none());
+        assert_eq!(http.port, 8080);
+    }
+
+    #[test]
+    fn test_from_str_http_with_domain_still_works() {
+        let hcl = r#"
+enclave "main" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }
+    http {
+      domain = "x.com"
+      port = 8080
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let cfg = ConfigurationFile::from_str(hcl)
+            .expect("should accept http with domain");
+        let enclave = cfg.enclave.unwrap();
+        let main = enclave.get("main").unwrap();
+        let http = main.network.as_ref().unwrap().http.as_ref().unwrap();
+        assert_eq!(http.domain.as_deref(), Some("x.com"));
+        assert_eq!(http.port, 8080);
+    }
+
+    #[test]
+    fn test_from_procfile_http_port_only() {
+        let procfile = "run: /app\nports: 8080\nhttp_port: 8080\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let network = enclave.get("default").unwrap().network.as_ref().unwrap();
+        let http = network.http.as_ref().unwrap();
+        assert!(http.domain.is_none());
+        assert_eq!(http.port, 8080);
+    }
+
+    #[test]
+    fn test_from_procfile_no_http_at_all() {
+        let procfile = "run: /app\nports: 8080\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let network = enclave.get("default").unwrap().network.as_ref().unwrap();
+        assert!(network.http.is_none());
+    }
+
+    #[test]
+    fn test_network_with_only_http_is_valid() {
+        let hcl = r#"
+enclave "test" {
+  network {
+    http {
+      domain = "x.com"
+      port = 80
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        // Use raw hcl::from_str to test serde deserialization independently
+        // of the extra from_str() validation (which requires the port to be
+        // covered by an ingress rule).
+        let cfg: ConfigurationFile =
+            hcl::from_str(hcl).expect("should accept network with only http");
+        let enclave = cfg.enclave.unwrap().get("test").unwrap().clone();
+        let net = enclave.network.unwrap();
+        assert!(net.ingress.is_empty());
+        assert!(net.egress.is_empty());
+        assert!(net.http.is_some());
     }
 }

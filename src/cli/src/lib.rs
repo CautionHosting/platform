@@ -2435,6 +2435,14 @@ enclave "default" {{
             return Ok(vec![git_url.to_string()]);
         }
 
+        // An explicit ssh:// URL signals the caller expects an authenticated
+        // clone. Guessing at anonymous HTTP(S) archive endpoints for it just
+        // wastes round trips on hosts that require auth, so skip straight to
+        // the git-clone fallback instead.
+        if git_url.starts_with("ssh://") {
+            return Ok(vec![]);
+        }
+
         let (host, path) = if git_url.starts_with("git@") {
             let without_prefix = git_url
                 .strip_prefix("git@")
@@ -6357,7 +6365,21 @@ enclave "default" {{
         // output, so git gets empty credentials and fails fast.
         .env("GIT_ASKPASS", "true")
         // Detach stdin so git can't wait on the parent's TTY either.
-        .stdin(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null())
+        // Prevent SSH from prompting for host-key confirmation or credentials
+        // via /dev/tty, which hangs non-interactive callers. BatchMode=yes
+        // makes SSH fail immediately instead. accept-new accepts unknown hosts
+        // on first contact (no TOFU hang in fresh CI) while still rejecting
+        // changed keys (MITM protection). Preserve any caller-set
+        // GIT_SSH_COMMAND (e.g. a custom -i key) by appending rather than
+        // replacing.
+        .env(
+            "GIT_SSH_COMMAND",
+            format!(
+                "{} -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+                std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| "ssh".to_string())
+            ),
+        );
         cmd
     }
 
@@ -8133,7 +8155,20 @@ mod tests {
     use openpgp::parse::Parse;
     use openpgp::serialize::SerializeInto;
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use tempfile::tempdir;
+
+    fn test_api_client() -> ApiClient {
+        ApiClient {
+            base_url: "http://localhost".to_string(),
+            client: reqwest::Client::new(),
+            config_path: PathBuf::new(),
+            deployment_path: None,
+            verbose: false,
+            qr: false,
+            workdir: None,
+        }
+    }
 
     fn test_public_key() -> String {
         let (cert, _revocation) = CertBuilder::new()
@@ -8387,6 +8422,42 @@ containerfile: Missing.Containerfile\n",
         let command = resolve_local_build_command_from_dir(work_dir.path(), true).unwrap();
 
         assert_eq!(command, "echo 'Please configure your configuration file'");
+    }
+
+    #[test]
+    fn git_url_to_archive_urls_skips_archive_guessing_for_ssh_scheme_urls() {
+        let client = test_api_client();
+        let commit = "50e2608f857ee2c9777b89af0f9af02ffba9999d";
+
+        let urls = client
+            .git_url_to_archive_urls(
+                "ssh://git@codeberg.org/caution/demo-pq-enclave-binding.git",
+                commit,
+            )
+            .unwrap();
+
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn git_command_disables_interactive_ssh_prompts() {
+        let cmd = ApiClient::git_command(&[
+            "ls-remote",
+            "ssh://git@codeberg.org/caution/demo-pq-enclave-binding.git",
+        ]);
+        let envs: HashMap<_, _> = cmd
+            .get_envs()
+            .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
+            .collect();
+
+        assert_eq!(envs.get("GIT_TERMINAL_PROMPT"), Some(&"0"));
+        assert_eq!(envs.get("GIT_ASKPASS"), Some(&"true"));
+
+        let ssh_command = envs
+            .get("GIT_SSH_COMMAND")
+            .expect("git SSH fallback must not be able to prompt through /dev/tty");
+        assert!(ssh_command.contains("BatchMode=yes"));
+        assert!(ssh_command.contains("StrictHostKeyChecking=accept-new"));
     }
 
     #[test]
