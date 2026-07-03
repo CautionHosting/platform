@@ -117,7 +117,13 @@ pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize
     let mut orgs_with_deductions = HashSet::new();
 
     for resource in &resources {
-        match collect_resource_usage(state, &resource.resource_id).await {
+        match collect_resource_usage(
+            state,
+            &resource.resource_id,
+            std::time::Duration::from_secs(60 * 60),
+        )
+        .await
+        {
             Ok(true) => {
                 collected += 1;
                 orgs_with_deductions.insert(resource.organization_id);
@@ -146,9 +152,27 @@ pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize
     Ok(collected)
 }
 
+/// Returns true when enough time has elapsed to collect usage for a resource.
+fn should_collect_usage(
+    last_billed: time::OffsetDateTime,
+    now: time::OffsetDateTime,
+    minimum_interval: std::time::Duration,
+) -> bool {
+    let seconds_elapsed = now.unix_timestamp() - last_billed.unix_timestamp();
+    let Ok(seconds_elapsed) = u64::try_from(seconds_elapsed) else {
+        return false;
+    };
+
+    std::time::Duration::from_secs(seconds_elapsed) >= minimum_interval
+}
+
 /// Collect usage for a resource and record billable debits.
 /// Returns Ok(true) if billable usage was recorded, Ok(false) otherwise.
-pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) -> Result<bool> {
+pub(crate) async fn collect_resource_usage(
+    state: &AppState,
+    resource_id: &str,
+    minimum_interval: std::time::Duration,
+) -> Result<bool> {
     let resource = sqlx::query_as::<_, TrackedResource>(
         r#"
         SELECT resource_id, organization_id, user_id, application_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
@@ -170,8 +194,8 @@ pub(crate) async fn collect_resource_usage(state: &AppState, resource_id: &str) 
     let seconds_elapsed = (now_unix - last_billed_unix) as f64;
     let hours = seconds_elapsed / 3600.0;
 
-    if hours < 1.0 {
-        // Less than 1 hour, skip
+    if !should_collect_usage(last_billed, now, minimum_interval) {
+        // Not enough time has elapsed for this collection mode.
         return Ok(false);
     }
 
@@ -376,4 +400,34 @@ async fn collect_network_egress(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::Duration;
+
+    #[test]
+    fn should_collect_usage_skips_short_regular_intervals() {
+        let last_billed = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let now = last_billed + Duration::minutes(30);
+
+        assert!(!should_collect_usage(
+            last_billed,
+            now,
+            std::time::Duration::from_secs(60 * 60)
+        ));
+    }
+
+    #[test]
+    fn should_collect_usage_allows_short_final_intervals() {
+        let last_billed = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let now = last_billed + Duration::minutes(30);
+
+        assert!(should_collect_usage(
+            last_billed,
+            now,
+            std::time::Duration::ZERO
+        ));
+    }
 }

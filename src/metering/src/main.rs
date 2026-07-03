@@ -454,7 +454,9 @@ async fn untrack_resource(
     Path(resource_id): Path<String>,
 ) -> impl IntoResponse {
     // First collect any remaining usage before stopping tracking
-    if let Err(e) = collection::collect_resource_usage(&state, &resource_id).await {
+    if let Err(e) =
+        collection::collect_resource_usage(&state, &resource_id, std::time::Duration::ZERO).await
+    {
         tracing::warn!("Failed to collect final usage for {}: {}", resource_id, e);
     }
 
