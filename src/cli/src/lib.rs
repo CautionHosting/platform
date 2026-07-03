@@ -1787,6 +1787,17 @@ impl ApiClient {
         }
     }
 
+    fn require_existing_authenticated_config(&self) -> Result<Config> {
+        let config = self.load_config()?;
+        if self.is_session_expired(&config) {
+            bail!("Session expired. Run 'login' command first");
+        }
+        if !self.is_same_server(&config) {
+            bail!("Session is for a different server. Run 'login' command first");
+        }
+        Ok(config)
+    }
+
     fn is_same_server(&self, config: &Config) -> bool {
         config
             .server_url
@@ -4159,6 +4170,8 @@ enclave "default" {{
     async fn init_byoc(&self, config_path: &PathBuf) -> Result<()> {
         println!("Initializing bring-your-own-compute deployment...");
 
+        let auth_config = self.require_existing_authenticated_config()?;
+
         log_verbose(
             self.verbose,
             &format!("Reading config from {:?}", config_path),
@@ -4246,8 +4259,6 @@ enclave "default" {{
             log_verbose(self.verbose, "Config file validated");
             serde_json::to_string(&config_json)?
         };
-
-        let auth_config = self.ensure_authenticated().await?;
 
         self.create_config_file_if_needed(true)?;
 
@@ -8465,6 +8476,24 @@ containerfile: Missing.Containerfile\n",
         let hcl = ApiClient::generate_config_hcl("git@codeberg.org:user/repo.git", false);
         let config = ConfigurationFile::from_str(&hcl);
         assert!(config.is_ok(), "generated HCL should parse: {:?}", config.err());
+    }
+
+    #[tokio::test]
+    async fn init_byoc_requires_login_before_reading_credentials_file() {
+        let work_dir = tempdir().unwrap();
+        let missing_credentials = work_dir.path().join("missing-byoc-credentials.json");
+        let client = ApiClient {
+            config_path: work_dir.path().join("missing-session.json"),
+            ..test_api_client()
+        };
+
+        let err = client.init_byoc(&missing_credentials).await.unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Not logged in. Run 'login' command first"),
+            "BYOC init should check authentication before reading credential material: {err:?}"
+        );
     }
 
     fn cert_armor(builder: CertBuilder) -> String {
