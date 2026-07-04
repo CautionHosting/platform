@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{cloud_credentials, deployment, ec2, metering, AppState};
 
-/// Helper: call the internal unsuspend endpoint (used after credit purchase/auto-topup).
+/// Helper: call the internal unsuspend endpoint after a credit purchase.
 pub async fn call_internal_unsuspend(state: &AppState, org_id: Uuid) -> Result<(), String> {
     let secret = state.internal_service_secret.as_deref().unwrap_or_default();
     let client = reqwest::Client::new();

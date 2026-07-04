@@ -3078,8 +3078,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/billing/credits/purchase", post(billing::purchase_credits))
         .route("/billing/credits/ledger", get(billing::get_credit_ledger))
         .route("/billing/credits/redeem", post(billing::redeem_credit_code))
-        .route("/billing/auto-topup", get(billing::get_auto_topup))
-        .route("/billing/auto-topup", put(billing::put_auto_topup))
         .route(
             "/billing/subscription/tiers",
             get(subscriptions::get_subscription_tiers),
