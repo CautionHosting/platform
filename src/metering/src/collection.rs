@@ -5,11 +5,11 @@ use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 
+use crate::AppState;
 use crate::balance::check_balance_thresholds;
 use crate::types::*;
-use crate::AppState;
 
 // Advisory lock IDs for distributed coordination
 pub(crate) const LOCK_COLLECTION: i64 = 1001;
@@ -158,12 +158,7 @@ fn should_collect_usage(
     now: time::OffsetDateTime,
     minimum_interval: std::time::Duration,
 ) -> bool {
-    let seconds_elapsed = now.unix_timestamp() - last_billed.unix_timestamp();
-    let Ok(seconds_elapsed) = u64::try_from(seconds_elapsed) else {
-        return false;
-    };
-
-    std::time::Duration::from_secs(seconds_elapsed) >= minimum_interval
+    now - last_billed >= minimum_interval
 }
 
 /// Collect usage for a resource and record billable debits.
