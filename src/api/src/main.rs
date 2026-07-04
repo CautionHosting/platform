@@ -20,6 +20,8 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 use uuid::Uuid;
 
+const BILLING_URL: &str = "https://caution.dev/#billing";
+
 mod billing;
 mod builder;
 #[cfg(feature = "e2e-testing-unsafe")]
@@ -1808,6 +1810,16 @@ mod deploy_commit_tests {
     }
 }
 
+#[cfg(test)]
+mod billing_url_tests {
+    use super::BILLING_URL;
+
+    #[test]
+    fn billing_url_points_to_dashboard_billing_hash() {
+        assert_eq!(BILLING_URL, "https://caution.dev/#billing");
+    }
+}
+
 async fn deploy_logic(
     state: Arc<AppState>,
     auth: AuthContext,
@@ -2041,8 +2053,9 @@ async fn deploy_logic(
                 StatusCode::PAYMENT_REQUIRED,
                 format!(
                     "Minimum $25.00 in credits required to deploy (current balance: ${:.2}). \
-                         Purchase credits at https://caution.dev/settings/billing",
-                    balance as f64 / 100.0
+                         Purchase credits at {}",
+                    balance as f64 / 100.0,
+                    BILLING_URL
                 ),
             ));
         }
@@ -2064,9 +2077,11 @@ async fn deploy_logic(
         if credit_suspended.is_some() {
             return Err((
                 StatusCode::PAYMENT_REQUIRED,
-                "Your organization is suspended due to credit exhaustion. \
-                 Add credits at https://caution.dev/settings/billing to resume."
-                    .to_string(),
+                format!(
+                    "Your organization is suspended due to credit exhaustion. \
+                     Add credits at {} to resume.",
+                    BILLING_URL
+                ),
             ));
         }
 
