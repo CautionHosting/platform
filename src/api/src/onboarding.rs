@@ -2,50 +2,49 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
+    Json,
     extract::{Extension, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::validation::validate_email;
 use crate::{AppState, AuthContext};
 
-pub(crate) const EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS: i64 = 5 * 60;
+pub(crate) const EMAIL_VERIFICATION_RESEND_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum EmailVerificationThrottle {
     Allowed,
-    Throttled { retry_after_seconds: i64 },
+    Throttled { retry_after: Duration },
 }
 
-pub(crate) fn email_verification_throttle(
-    last_sent_at: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
-) -> EmailVerificationThrottle {
-    let Some(last_sent_at) = last_sent_at else {
-        return EmailVerificationThrottle::Allowed;
-    };
+impl EmailVerificationThrottle {
+    pub(crate) fn new(last_sent_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Self {
+        let Some(last_sent_at) = last_sent_at else {
+            return Self::Allowed;
+        };
 
-    let elapsed = now.signed_duration_since(last_sent_at);
-    let retry_after_seconds = EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS - elapsed.num_seconds();
+        let elapsed = now
+            .signed_duration_since(last_sent_at)
+            .to_std()
+            .unwrap_or(Duration::ZERO);
 
-    if retry_after_seconds <= 0 {
-        EmailVerificationThrottle::Allowed
-    } else {
-        EmailVerificationThrottle::Throttled {
-            retry_after_seconds,
+        match EMAIL_VERIFICATION_RESEND_COOLDOWN.checked_sub(elapsed) {
+            Some(retry_after) if !retry_after.is_zero() => Self::Throttled { retry_after },
+            _ => Self::Allowed,
         }
     }
 }
 
-pub(crate) fn email_verification_throttled_message(retry_after_seconds: i64) -> String {
-    let retry_after_minutes = (retry_after_seconds + 59) / 60;
+pub(crate) fn email_verification_throttled_message(retry_after: Duration) -> String {
+    let retry_after_minutes = retry_after.as_secs().div_ceil(60);
     format!(
         "Verification email recently sent. Try again in {} minute{}.",
         retry_after_minutes,
@@ -154,7 +153,7 @@ pub async fn send_verification_email(
     }
 
     let token = Uuid::new_v4().to_string();
-    let expires_at = Utc::now() + Duration::hours(24);
+    let expires_at = Utc::now() + ChronoDuration::hours(24);
 
     let update_result = sqlx::query(
         "UPDATE users
@@ -192,13 +191,12 @@ pub async fn send_verification_email(
         })?
         .flatten();
 
-        if let EmailVerificationThrottle::Throttled {
-            retry_after_seconds,
-        } = email_verification_throttle(last_sent_at, Utc::now())
+        if let EmailVerificationThrottle::Throttled { retry_after } =
+            EmailVerificationThrottle::new(last_sent_at, Utc::now())
         {
             return Ok(Json(SendVerificationResponse {
                 success: false,
-                message: email_verification_throttled_message(retry_after_seconds),
+                message: email_verification_throttled_message(retry_after),
             }));
         }
 
@@ -387,15 +385,16 @@ pub async fn check_onboarding_status(db: &PgPool, user_id: uuid::Uuid) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{email_verification_throttle, EmailVerificationThrottle};
-    use chrono::{Duration, TimeZone, Utc};
+    use super::EmailVerificationThrottle;
+    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use std::time::Duration;
 
     #[test]
     fn email_verification_throttle_allows_first_send() {
         let now = Utc.with_ymd_and_hms(2026, 7, 4, 12, 0, 0).unwrap();
 
         assert_eq!(
-            email_verification_throttle(None, now),
+            EmailVerificationThrottle::new(None, now),
             EmailVerificationThrottle::Allowed
         );
     }
@@ -403,12 +402,12 @@ mod tests {
     #[test]
     fn email_verification_throttle_blocks_recent_send() {
         let now = Utc.with_ymd_and_hms(2026, 7, 4, 12, 0, 0).unwrap();
-        let last_sent_at = now - Duration::minutes(2);
+        let last_sent_at = now - ChronoDuration::minutes(2);
 
         assert_eq!(
-            email_verification_throttle(Some(last_sent_at), now),
+            EmailVerificationThrottle::new(Some(last_sent_at), now),
             EmailVerificationThrottle::Throttled {
-                retry_after_seconds: 180,
+                retry_after: Duration::from_secs(180),
             }
         );
     }
@@ -416,10 +415,10 @@ mod tests {
     #[test]
     fn email_verification_throttle_allows_after_cooldown() {
         let now = Utc.with_ymd_and_hms(2026, 7, 4, 12, 0, 0).unwrap();
-        let last_sent_at = now - Duration::minutes(5);
+        let last_sent_at = now - ChronoDuration::minutes(5);
 
         assert_eq!(
-            email_verification_throttle(Some(last_sent_at), now),
+            EmailVerificationThrottle::new(Some(last_sent_at), now),
             EmailVerificationThrottle::Allowed
         );
     }

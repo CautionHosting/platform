@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
+    Json,
     extract::{Extension, State},
     http::StatusCode,
-    Json,
+    response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -66,29 +67,22 @@ pub async fn update_current_user(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     validated_types::Validated(payload): validated_types::Validated<UpdateUserRequest>,
-) -> Result<Json<UpdateUserResponse>, StatusCode> {
+) -> Result<Json<UpdateUserResponse>, Response> {
     if payload.username.is_none() && payload.email.is_none() {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "at least one field is required" })),
+        )
+            .into_response());
     }
 
-    let mut query_builder = sqlx::QueryBuilder::new("UPDATE users SET ");
-    let mut has_updates = false;
-
-    if let Some(username) = &payload.username {
-        if has_updates {
-            query_builder.push(", ");
-        }
-        query_builder.push("username = ");
-        query_builder.push_bind(username);
-        has_updates = true;
-    }
-
-    let new_email = payload.email.clone().and_then(|email| {
+    let username = payload.username.as_deref();
+    let new_email = payload.email.as_deref().and_then(|email| {
         let trimmed = email.trim();
         if trimmed.is_empty() {
             None
         } else {
-            Some(trimmed.to_string())
+            Some(trimmed)
         }
     });
 
@@ -101,63 +95,102 @@ pub async fn update_current_user(
         .bind(auth.user_id)
         .fetch_optional(&state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?
         .flatten();
 
-        if let crate::onboarding::EmailVerificationThrottle::Throttled { .. } =
-            crate::onboarding::email_verification_throttle(last_sent_at, Utc::now())
+        if let crate::onboarding::EmailVerificationThrottle::Throttled { retry_after } =
+            crate::onboarding::EmailVerificationThrottle::new(last_sent_at, Utc::now())
         {
-            return Err(StatusCode::TOO_MANY_REQUESTS);
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": crate::onboarding::email_verification_throttled_message(retry_after),
+                })),
+            )
+                .into_response());
         }
     }
 
     let mut verification_token: Option<String> = None;
 
-    if let Some(email_update) = &payload.email {
-        if has_updates {
-            query_builder.push(", ");
+    let user = match payload.email.as_deref() {
+        None => {
+            let Some(username) = username else {
+                return Err(StatusCode::BAD_REQUEST.into_response());
+            };
+            sqlx::query_as::<_, User>(
+                "UPDATE users
+                 SET username = $1
+                 WHERE id = $2
+                 RETURNING id,
+                           username,
+                           email,
+                           email_verified_at IS NOT NULL AS email_verified,
+                           is_active,
+                           created_at,
+                           updated_at",
+            )
+            .bind(username)
+            .bind(auth.user_id)
+            .fetch_one(&state.db)
+            .await
         }
-        if email_update.trim().is_empty() {
-            query_builder.push(
-                "email = NULL,
+        Some(email_update) if email_update.trim().is_empty() => {
+            sqlx::query_as::<_, User>(
+                "UPDATE users
+             SET username = COALESCE($1, username),
+                 email = NULL,
                  email_verified_at = NULL,
                  email_verification_token = NULL,
                  email_verification_token_expires_at = NULL,
-                 email_verification_sent_at = NULL",
-            );
-        } else {
-            query_builder.push("email = ");
-            query_builder.push_bind(email_update.trim());
-
-            // Generate verification token and reset verified status
+                 email_verification_sent_at = NULL
+             WHERE id = $2
+             RETURNING id,
+                       username,
+                       email,
+                       email_verified_at IS NOT NULL AS email_verified,
+                       is_active,
+                       created_at,
+                       updated_at",
+            )
+            .bind(username)
+            .bind(auth.user_id)
+            .fetch_one(&state.db)
+            .await
+        }
+        Some(email_update) => {
+            let email = email_update.trim();
             let token = Uuid::new_v4().to_string();
             let expires_at = Utc::now() + Duration::hours(24);
-            query_builder.push(", email_verified_at = NULL, email_verification_token = ");
-            query_builder.push_bind(token.clone());
-            query_builder.push(", email_verification_token_expires_at = ");
-            query_builder.push_bind(expires_at);
-            query_builder.push(", email_verification_sent_at = NOW()");
+            let user = sqlx::query_as::<_, User>(
+                "UPDATE users
+                 SET username = COALESCE($1, username),
+                     email = $2,
+                     email_verified_at = NULL,
+                     email_verification_token = $3,
+                     email_verification_token_expires_at = $4,
+                     email_verification_sent_at = NOW()
+                 WHERE id = $5
+                 RETURNING id,
+                           username,
+                           email,
+                           email_verified_at IS NOT NULL AS email_verified,
+                           is_active,
+                           created_at,
+                           updated_at",
+            )
+            .bind(username)
+            .bind(email)
+            .bind(&token)
+            .bind(expires_at)
+            .bind(auth.user_id)
+            .fetch_one(&state.db)
+            .await;
             verification_token = Some(token);
+            user
         }
     }
-
-    query_builder.push(" WHERE id = ");
-    query_builder.push_bind(auth.user_id);
-    query_builder.push(
-        " RETURNING id,
-                    username,
-                    email,
-                    email_verified_at IS NOT NULL AS email_verified,
-                    is_active,
-                    created_at,
-                    updated_at",
-    );
-
-    let user = query_builder
-        .build_query_as::<User>()
-        .fetch_one(&state.db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
 
     let mut verification_email_sent = None;
 
