@@ -204,8 +204,8 @@ export function useWebAuthn() {
     }
   }
 
-  async function handleRegister(alphaCode) {
-    if (!alphaCode || !alphaCode.trim()) {
+  async function handleRegister(alphaCode, username) {
+    if (!alphaCode || !alphaCode.trim() || !username || !username.trim()) {
       return { success: false, validationError: true };
     }
 
@@ -220,7 +220,7 @@ export function useWebAuthn() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ alpha_code: alphaCode.trim() }),
+        body: JSON.stringify({ alpha_code: alphaCode.trim(), username: username.trim() }),
       });
 
       if (!beginResponse.ok) {

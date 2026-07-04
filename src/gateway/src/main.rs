@@ -252,6 +252,11 @@ async fn main() -> Result<()> {
             "/ssh-keys/{fingerprint}",
             delete(handlers::delete_ssh_key_handler),
         )
+        .route(
+            "/user/username",
+            get(handlers::get_username_status_handler),
+        )
+        .route("/user/username", post(handlers::claim_username_handler))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware::fido2_auth_middleware,

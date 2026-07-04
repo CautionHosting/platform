@@ -34,27 +34,98 @@ pub struct SignupLegalContext {
 /// Creates a user and records legal consent events in a single transaction.
 /// If either the user creation or legal event recording fails, the entire
 /// transaction rolls back — no account exists without consent records.
+/// Sentinel error message signalling a unique-constraint violation on
+/// `users.username` (Postgres error code 23505). We can't return a typed
+/// error here without restructuring this fn's `Result<Uuid>` signature (it's
+/// wrapped in a transaction and shares error handling with the legal-event
+/// inserts below), so callers that need to distinguish "username taken" from
+/// other failures should match on this exact anyhow message via
+/// `is_username_taken_error`.
+const USERNAME_TAKEN_ERROR: &str = "USERNAME_TAKEN";
+
+/// Returns true if `err` (as produced by `create_user`) indicates the
+/// username was already taken, so callers can map it to a 409 response.
+pub fn is_username_taken_error(err: &anyhow::Error) -> bool {
+    err.to_string().contains(USERNAME_TAKEN_ERROR)
+}
+
+/// Attempts the one-time username claim for a placeholder account. The
+/// `UPDATE` only matches rows still marked as a placeholder, so a second
+/// concurrent or later claim attempt affects zero rows instead of silently
+/// overwriting an already-chosen username.
+///
+/// Returns `Ok(true)` if the claim succeeded, `Ok(false)` if the user had
+/// already claimed a username (no row matched `username_is_placeholder =
+/// true`). A unique-constraint violation on `users.username` is surfaced as
+/// the same `USERNAME_TAKEN_ERROR` sentinel used by `create_user`, so
+/// callers should check `is_username_taken_error` on the returned error.
+pub async fn claim_username(pool: &PgPool, user_id: Uuid, username: &str) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE users
+         SET username = $1, username_is_placeholder = false
+         WHERE id = $2 AND username_is_placeholder = true",
+    )
+    .bind(username)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        if let sqlx::Error::Database(ref db_err) = e {
+            if db_err.code().as_deref() == Some("23505")
+                && db_err.constraint().is_some_and(|c| c.contains("username"))
+            {
+                tracing::warn!("Username already taken on claim: {}", username);
+                return anyhow::anyhow!(USERNAME_TAKEN_ERROR);
+            }
+        }
+        tracing::error!("Database error claiming username: {:?}", e);
+        anyhow::anyhow!("Failed to claim username: {}", e)
+    })?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Returns `(username, username_is_placeholder)` for the given user.
+pub async fn get_username_status(pool: &PgPool, user_id: Uuid) -> Result<(String, bool)> {
+    let row: (String, bool) = sqlx::query_as(
+        "SELECT username, username_is_placeholder FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to fetch username status")?;
+
+    Ok(row)
+}
+
 pub async fn create_user(
     pool: &PgPool,
     fido2_user_handle: &[u8],
     alpha_code_id: Uuid,
+    username: &str,
     legal: &SignupLegalContext,
 ) -> Result<Uuid> {
-    let username = generate_user_identifier();
-
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
     let user_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (fido2_user_handle, username, email, beta_code_id)
-         VALUES ($1, $2, NULL, $3)
+        "INSERT INTO users (fido2_user_handle, username, email, beta_code_id, username_is_placeholder)
+         VALUES ($1, $2, NULL, $3, false)
          RETURNING id",
     )
     .bind(fido2_user_handle)
-    .bind(&username)
+    .bind(username)
     .bind(alpha_code_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
+        if let sqlx::Error::Database(ref db_err) = e {
+            if db_err.code().as_deref() == Some("23505")
+                && db_err.constraint().is_some_and(|c| c.contains("username"))
+            {
+                tracing::warn!("Username already taken: {}", username);
+                return anyhow::anyhow!(USERNAME_TAKEN_ERROR);
+            }
+        }
         tracing::error!("Database error creating user: {:?}", e);
         tracing::error!("Username attempted: {}", username);
         tracing::error!(

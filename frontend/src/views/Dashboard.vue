@@ -1212,6 +1212,45 @@ make build-cli
           </div>
         </section>
 
+        <!-- Username Section -->
+        <section class="account-settings-section">
+          <h3 class="billing-section-title">Username</h3>
+          <div class="account-settings-row">
+            <div class="account-settings-label">
+              <p class="account-settings-description">
+                {{ usernameIsPlaceholder
+                  ? 'Choose a username. This can only be set once and cannot be changed afterward.'
+                  : 'Your username is permanent and cannot be changed.' }}
+              </p>
+            </div>
+            <div class="account-settings-content">
+              <div v-if="usernameIsPlaceholder" class="form-group">
+                <label class="sr-only" for="accountUsername">Username</label>
+                <div class="email-settings-row">
+                  <input
+                    id="accountUsername"
+                    v-model="usernameInput"
+                    type="text"
+                    placeholder="Enter a username"
+                    class="form-input"
+                    :disabled="savingUsername"
+                    @keyup.enter="saveUsername"
+                  />
+                  <button
+                    @click="saveUsername"
+                    :disabled="savingUsername || !usernameInput.trim()"
+                    class="btn-primary email-action-button"
+                  >
+                    {{ savingUsername ? 'Saving...' : 'Set username' }}
+                  </button>
+                </div>
+                <div v-if="usernameError" class="message message--error">{{ usernameError }}</div>
+              </div>
+              <p v-else class="account-settings-description">{{ username }}</p>
+            </div>
+          </div>
+        </section>
+
         <!-- Legal Section -->
         <section class="account-settings-section">
           <h3 class="billing-section-title">Legal documents</h3>
@@ -2406,6 +2445,13 @@ export default {
     const emailError = ref('');
     const emailVerificationDeliveryStatus = ref(null);
 
+    // Username claim (one-time, immutable once set)
+    const username = ref('');
+    const usernameIsPlaceholder = ref(false);
+    const usernameInput = ref('');
+    const savingUsername = ref(false);
+    const usernameError = ref('');
+
     const emailSettingsStatus = computed(() => {
       if (!userEmail.value) {
         return 'No email added';
@@ -2779,6 +2825,52 @@ export default {
         }
       } catch (err) {
         // ignore
+      }
+      await loadUsername();
+    };
+
+    const loadUsername = async () => {
+      try {
+        const response = await authFetch("/user/username");
+        if (response.ok) {
+          const data = await response.json();
+          username.value = data.username || '';
+          usernameIsPlaceholder.value = Boolean(data.username_is_placeholder);
+          usernameInput.value = '';
+          usernameError.value = '';
+        }
+      } catch (err) {
+        // ignore
+      }
+    };
+
+    const saveUsername = async () => {
+      const value = usernameInput.value.trim().toLowerCase();
+      if (!value) {
+        usernameError.value = 'Enter a username.';
+        return;
+      }
+      savingUsername.value = true;
+      usernameError.value = '';
+      try {
+        const response = await authFetch("/user/username", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: value }),
+        });
+        if (response.ok) {
+          const data = await response.json();
+          username.value = data.username || value;
+          usernameIsPlaceholder.value = Boolean(data.username_is_placeholder);
+          usernameInput.value = '';
+          showToast('Username set');
+        } else {
+          usernameError.value = await readResponseError(response, 'Failed to set username.');
+        }
+      } catch (err) {
+        usernameError.value = "We couldn't connect to the server. Try again.";
+      } finally {
+        savingUsername.value = false;
       }
     };
 
@@ -4416,6 +4508,13 @@ export default {
       startEditEmail,
       handleEmailAction,
       saveEmail,
+      username,
+      usernameIsPlaceholder,
+      usernameInput,
+      savingUsername,
+      usernameError,
+      loadUsername,
+      saveUsername,
       calculateAppMonthlyCost,
       logout,
       handleTabChange,

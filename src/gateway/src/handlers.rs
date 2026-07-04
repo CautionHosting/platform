@@ -274,6 +274,10 @@ pub enum RegisterError {
     CredentialAlreadyRegistered,
     #[error("Too many pending registrations. Please try again later.")]
     TooManyPending,
+    #[error("Invalid username: {0}")]
+    InvalidUsername(String),
+    #[error("This username is already taken.")]
+    UsernameTaken,
     #[error("{0}")]
     Internal(#[source] anyhow::Error),
 }
@@ -287,6 +291,8 @@ impl IntoResponse for RegisterError {
             }
             Self::CredentialAlreadyRegistered => (StatusCode::CONFLICT, self.to_string()),
             Self::TooManyPending => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
+            Self::InvalidUsername(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            Self::UsernameTaken => (StatusCode::CONFLICT, self.to_string()),
             Self::Internal(ref err) => {
                 tracing::error!(?err, "Registration error");
                 (
@@ -630,6 +636,97 @@ pub async fn delete_passkey_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ClaimUsernameRequest {
+    pub username: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UsernameStatusResponse {
+    pub username: String,
+    pub username_is_placeholder: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum UsernameClaimError {
+    #[error("Invalid username: {0}")]
+    InvalidUsername(String),
+    #[error("This username is already taken.")]
+    UsernameTaken,
+    #[error("You have already set your username.")]
+    AlreadyClaimed,
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
+impl IntoResponse for UsernameClaimError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::InvalidUsername(_) => (StatusCode::BAD_REQUEST, self.to_string()).into_response(),
+            Self::UsernameTaken | Self::AlreadyClaimed => {
+                (StatusCode::CONFLICT, self.to_string()).into_response()
+            }
+            Self::Internal(ref err) => {
+                tracing::error!(?err, "Username claim error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "An internal error occurred",
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
+/// Returns the authenticated user's current username and whether it is
+/// still the auto-generated placeholder assigned at signup. Used by the
+/// dashboard to decide whether to show the one-time username claim prompt.
+pub async fn get_username_status_handler(
+    State(state): State<AppState>,
+    Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
+) -> Result<Json<UsernameStatusResponse>, UsernameClaimError> {
+    let (username, username_is_placeholder) =
+        db::get_username_status(&state.db, user_id).await?;
+
+    Ok(Json(UsernameStatusResponse {
+        username,
+        username_is_placeholder,
+    }))
+}
+
+/// One-time username claim: a placeholder account (`u_<base64>`) may set a
+/// real, immutable username exactly once. Subsequent attempts fail with
+/// `AlreadyClaimed` since `db::claim_username` only updates rows that are
+/// still marked as a placeholder.
+pub async fn claim_username_handler(
+    State(state): State<AppState>,
+    Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
+    Json(req): Json<ClaimUsernameRequest>,
+) -> Result<Json<UsernameStatusResponse>, UsernameClaimError> {
+    let username = req.username.trim().to_lowercase();
+    crate::validation::validate_username(&username)
+        .map_err(|e| UsernameClaimError::InvalidUsername(e.to_string()))?;
+
+    let claimed = db::claim_username(&state.db, user_id, &username)
+        .await
+        .map_err(|e| {
+            if db::is_username_taken_error(&e) {
+                UsernameClaimError::UsernameTaken
+            } else {
+                UsernameClaimError::Internal(e)
+            }
+        })?;
+
+    if !claimed {
+        return Err(UsernameClaimError::AlreadyClaimed);
+    }
+
+    Ok(Json(UsernameStatusResponse {
+        username,
+        username_is_placeholder: false,
+    }))
+}
+
 pub async fn begin_register_handler(
     State(state): State<AppState>,
     Json(req): Json<crate::types::RegisterBeginRequest>,
@@ -642,6 +739,10 @@ pub async fn begin_register_handler(
         .ok_or(RegisterError::InvalidAccessCode)?;
 
     tracing::debug!("Alpha code validated: id={}", alpha_code_id);
+
+    let username = req.username.trim().to_lowercase();
+    crate::validation::validate_username(&username)
+        .map_err(|e| RegisterError::InvalidUsername(e.to_string()))?;
 
     // Fetch ALL existing credential IDs to pass as excludeCredentials
     // This prevents the same authenticator from registering multiple accounts
@@ -659,14 +760,13 @@ pub async fn begin_register_handler(
     );
 
     let user_unique_id = Uuid::new_v4();
-    let user_name = format!("user_{}", user_unique_id);
 
     let (mut ccr, reg_state) = state
         .webauthn
         .start_securitykey_registration(
             user_unique_id,
-            &user_name,
-            &user_name,
+            &username,
+            &username,
             Some(exclude_credentials).filter(|v| !v.is_empty()),
             None,
             None,
@@ -698,6 +798,7 @@ pub async fn begin_register_handler(
     let pending = crate::types::PendingRegistration {
         reg_state,
         alpha_code_id,
+        username,
         expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(2),
     };
     {
@@ -809,10 +910,17 @@ pub async fn finish_register_handler(
         &state.db,
         &user_unique_id.as_bytes()[..],
         pending.alpha_code_id,
+        &pending.username,
         &legal,
     )
     .await
-    .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to create user: {}", e)))?;
+    .map_err(|e| {
+        if db::is_username_taken_error(&e) {
+            RegisterError::UsernameTaken
+        } else {
+            RegisterError::Internal(anyhow::anyhow!("Failed to create user: {}", e))
+        }
+    })?;
 
     db::redeem_alpha_code(&state.db, pending.alpha_code_id)
         .await

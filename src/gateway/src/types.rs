@@ -19,6 +19,7 @@ pub struct AuthenticatedUserId(pub Uuid);
 pub struct PendingRegistration {
     pub reg_state: SecurityKeyRegistration,
     pub alpha_code_id: Uuid,
+    pub username: String,
     pub expires_at: time::OffsetDateTime,
 }
 
@@ -143,6 +144,7 @@ pub struct LoginFinishResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterBeginRequest {
     pub alpha_code: String,
+    pub username: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
