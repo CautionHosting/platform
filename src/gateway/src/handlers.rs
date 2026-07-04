@@ -1356,19 +1356,34 @@ pub struct QrLoginStatusQuery {
     pub token: String,
 }
 
+fn qr_login_url_for_origin(origin: &str, requestee_token: &str) -> String {
+    format!("{origin}/qr-login?token={requestee_token}")
+}
+
+fn qr_login_url(requestee_token: &str) -> String {
+    qr_login_url_for_origin(&get_rp_origin(), requestee_token)
+}
+
 pub async fn qr_login_begin_handler(
     State(state): State<AppState>,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> Result<Json<crate::types::QrLoginBeginResponse>, QrLoginError> {
     let token = db::generate_session_id();
+    let requestee_token = db::generate_session_id();
     let expires_at = time::OffsetDateTime::now_utc() + Duration::minutes(3);
     let ip_address = connect_info.0.ip().to_string();
 
-    let url = format!("{}/qr-login?token={}", get_rp_origin(), token);
+    let url = qr_login_url(&requestee_token);
 
-    db::create_qr_login_token(&state.db, &token, Some(&ip_address), expires_at)
-        .await
-        .map_err(|source| QrLoginError::DbCreateToken { source })?;
+    db::create_qr_login_token(
+        &state.db,
+        &token,
+        &requestee_token,
+        Some(&ip_address),
+        expires_at,
+    )
+    .await
+    .map_err(|source| QrLoginError::DbCreateToken { source })?;
 
     Ok(Json(crate::types::QrLoginBeginResponse {
         token,
@@ -1438,8 +1453,8 @@ pub async fn qr_login_authenticate_handler(
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
     Json(req): Json<crate::types::QrLoginAuthenticateRequest>,
 ) -> Result<Json<crate::types::QrLoginAuthenticateResponse>, QrLoginError> {
-    // Verify token exists and is pending
-    let row = db::get_qr_login_token(&state.db, &req.token)
+    // Verify requestee token exists and is pending
+    let row = db::get_qr_login_token_by_requestee_token(&state.db, &req.token)
         .await
         .map_err(|source| QrLoginError::DbGetToken { source })?
         .ok_or(QrLoginError::TokenNotFound)?;
@@ -1513,8 +1528,8 @@ pub async fn qr_login_authenticate_finish_handler(
     let token = req.token;
     let session_key = req.session;
 
-    // Verify token is authenticated and session key matches
-    let row = db::get_qr_login_token(&state.db, &token)
+    // Verify requestee token is authenticated and session key matches
+    let row = db::get_qr_login_token_by_requestee_token(&state.db, &token)
         .await
         .map_err(|e| LoginError::InvalidSession(e.to_string()))?
         .ok_or_else(|| LoginError::InvalidSession("invalid QR login token".into()))?;
@@ -1896,5 +1911,25 @@ pub async fn logout_handler(
             .into_response())
     } else {
         Ok((StatusCode::OK, headers, r#"{"status":"logged_out"}"#).into_response())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::qr_login_url_for_origin;
+
+    #[test]
+    fn qr_login_url_uses_requestee_token_only() {
+        let requester_token = "requester-token";
+        let requestee_token = "requestee-token";
+
+        let url = qr_login_url_for_origin("https://caution.example", requestee_token);
+
+        assert_eq!(
+            url,
+            "https://caution.example/qr-login?token=requestee-token"
+        );
+        assert!(url.contains(requestee_token));
+        assert!(!url.contains(requester_token));
     }
 }
