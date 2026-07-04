@@ -127,7 +127,7 @@ pub(crate) async fn check_balance_thresholds(state: &AppState, org_id: uuid::Uui
                 serde_json::json!({
                     "balance": format!("${:.2}", balance_cents as f64 / 100.0),
                     "amount": format!("${:.2}", balance_cents as f64 / 100.0),
-                    "add_credits_url": "https://caution.dev/settings/billing",
+                    "add_credits_url": "https://caution.dev/#billing",
                 }),
             )
             .await;
