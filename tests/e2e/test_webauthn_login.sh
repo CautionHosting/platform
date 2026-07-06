@@ -18,6 +18,12 @@
 #      only that user's own credential (scoped, not broadcast)
 #   8. with LOGIN_ALLOW_BROADCAST=false, no-username begin -> empty
 #      allowCredentials + conditional mediation (discoverable, not broadcast)
+#   9. QR cross-device login: /auth/qr-login/begin with a KNOWN username,
+#      then /auth/qr-login/authenticate -> allowCredentials scoped to that
+#      user (same non-resident-key support as step 7, over the QR path)
+#  10. QR cross-device login: /auth/qr-login/begin with an UNKNOWN username
+#      -> /auth/qr-login/authenticate returns empty allowCredentials (decoy,
+#      no enumeration oracle on the QR path either)
 #
 # The full assertion round-trip (scoped/broadcast/discoverable finish) needs a
 # WebAuthn authenticator and is covered by the manual Chrome-virtual-authenticator
@@ -147,6 +153,47 @@ N=$(echo "$JSON" | jq '.publicKey.allowCredentials | length')
 MEDIATION=$(echo "$JSON" | jq -r '.mediation')
 [ "$MEDIATION" = conditional ] || step_fail "flag-off no-username begin mediation was '$MEDIATION' (want conditional)"
 step_pass "LOGIN_ALLOW_BROADCAST=false -> no-username begin is discoverable (empty allowCredentials, conditional mediation)"
+
+# ── Step 9: QR login, known username -> scoped allowCredentials ──────
+STEP_NUM=9
+QR_BEGIN=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/begin" \
+    -H 'Content-Type: application/json' \
+    -d "{\"username\":\"$SCOPED_USERNAME\"}")
+CODE=$(echo "$QR_BEGIN" | tail -1)
+JSON=$(echo "$QR_BEGIN" | sed '$d')
+[ "$CODE" = 200 ] || step_fail "qr-login/begin with known username returned HTTP $CODE (want 200)"
+QR_TOKEN=$(echo "$JSON" | jq -r '.token')
+[ -n "$QR_TOKEN" ] && [ "$QR_TOKEN" != null ] || step_fail "qr-login/begin response missing token"
+
+BODY=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/authenticate" \
+    -H 'Content-Type: application/json' \
+    -d "{\"token\":\"$QR_TOKEN\"}")
+CODE=$(echo "$BODY" | tail -1)
+JSON=$(echo "$BODY" | sed '$d')
+[ "$CODE" = 200 ] || step_fail "qr-login/authenticate (known username) returned HTTP $CODE (want 200)"
+N=$(echo "$JSON" | jq '.publicKey.allowCredentials | length')
+[ "$N" = 1 ] || step_fail "qr-login/authenticate (known username) returned $N allowCredentials (want exactly 1)"
+step_pass "QR login with known username -> scoped allowCredentials (non-resident key support over QR)"
+
+# ── Step 10: QR login, unknown username -> decoy (no oracle) ─────────
+STEP_NUM=10
+QR_BEGIN=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/begin" \
+    -H 'Content-Type: application/json' \
+    -d '{"username":"definitely-not-a-real-user-xyz"}')
+CODE=$(echo "$QR_BEGIN" | tail -1)
+JSON=$(echo "$QR_BEGIN" | sed '$d')
+[ "$CODE" = 200 ] || step_fail "qr-login/begin with unknown username returned HTTP $CODE (want 200)"
+QR_TOKEN=$(echo "$JSON" | jq -r '.token')
+
+BODY=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/authenticate" \
+    -H 'Content-Type: application/json' \
+    -d "{\"token\":\"$QR_TOKEN\"}")
+CODE=$(echo "$BODY" | tail -1)
+JSON=$(echo "$BODY" | sed '$d')
+[ "$CODE" = 200 ] || step_fail "qr-login/authenticate (unknown username) returned HTTP $CODE (want 200 — a distinct shape would be an enumeration oracle)"
+N=$(echo "$JSON" | jq '.publicKey.allowCredentials | length')
+[ "$N" = 0 ] || step_fail "qr-login/authenticate (unknown username) leaked $N allowCredentials (want 0)"
+step_pass "QR login with unknown username -> decoy discoverable challenge (no oracle)"
 
 make run-gateway-test >/dev/null
 for i in $(seq 1 30); do

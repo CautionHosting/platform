@@ -1962,7 +1962,7 @@ impl ApiClient {
             }
             _ => {
                 if self.qr {
-                    self.login_qr().await?;
+                    self.login_qr(None).await?;
                 } else {
                     self.login(None).await?;
                 }
@@ -2843,13 +2843,17 @@ enclave "default" {{
         Ok(())
     }
 
-    async fn login_qr(&self) -> Result<()> {
+    async fn login_qr(&self, username: Option<&str>) -> Result<()> {
         log_verbose(self.verbose, "Starting QR code cross-device login...");
 
-        // Step 1: Request a QR login token from the gateway
+        // Step 1: Request a QR login token from the gateway. An optional
+        // username scopes the eventual allowCredentials to that user's own
+        // credentials, needed for non-resident/legacy keys the scanning
+        // device can't otherwise offer via a discoverable challenge.
         let response = self
             .client
             .post(format!("{}/auth/qr-login/begin", self.base_url))
+            .json(&serde_json::json!({ "username": username }))
             .send()
             .await?;
 
@@ -8315,7 +8319,10 @@ pub async fn run() -> Result<(), RunError> {
         }
         Commands::Login { qr, username } => {
             if qr {
-                client.login_qr().await.map_err(RunError::CommandDispatch)?;
+                client
+                    .login_qr(username.as_deref())
+                    .await
+                    .map_err(RunError::CommandDispatch)?;
             } else {
                 client
                     .login(username)

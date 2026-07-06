@@ -221,6 +221,11 @@ pub enum QrLoginError {
         #[source]
         source: WebauthnError,
     },
+    #[error("could not build username-scoped challenge")]
+    ScopedChallenge {
+        #[source]
+        source: anyhow::Error,
+    },
 }
 
 impl IntoResponse for QrLoginError {
@@ -1066,6 +1071,53 @@ fn deserialize_security_keys(public_keys: &[Vec<u8>]) -> Result<Vec<SecurityKey>
         .collect()
 }
 
+/// Build a username-scoped `allowCredentials` challenge for a known username,
+/// or a discoverable decoy challenge for an unknown one — same shape either
+/// way, so the caller can't use this to enumerate usernames. Shared by the
+/// direct login-begin path and the QR cross-device login path.
+async fn scoped_or_decoy_challenge(
+    state: &AppState,
+    username: &str,
+) -> anyhow::Result<(RequestChallengeResponse, AuthState)> {
+    match db::get_user_id_by_username(&state.db, username).await? {
+        Some(user_id) => {
+            let public_keys = db::get_credential_public_keys_by_user_id(&state.db, user_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to fetch credentials for user {}: {:?}", user_id, e);
+                    anyhow::anyhow!("Failed to fetch credentials: {}", e)
+                })?;
+            let allow_credentials = deserialize_security_keys(&public_keys)?;
+
+            tracing::debug!(
+                "Starting username-scoped authentication challenge with {} credentials",
+                allow_credentials.len()
+            );
+
+            let (mut rcr, auth_state) = state
+                .webauthn
+                .start_securitykey_authentication(&allow_credentials)
+                .map_err(|e| {
+                    tracing::error!("Failed to start scoped authentication: {:?}", e);
+                    anyhow::anyhow!("Failed to start authentication: {}", e)
+                })?;
+            rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
+            Ok((rcr, AuthState::SecurityKey(auth_state)))
+        }
+        None => {
+            // Unknown username: no 404, no distinct shape — return an
+            // empty-allowCredentials challenge just like the discoverable
+            // path so an attacker can't distinguish "unknown" from "known".
+            let (rcr, auth_state) =
+                state.webauthn.start_discoverable_authentication().map_err(|e| {
+                    tracing::error!("Failed to start decoy authentication: {:?}", e);
+                    anyhow::anyhow!("Failed to start authentication: {}", e)
+                })?;
+            Ok((rcr, AuthState::Discoverable(auth_state)))
+        }
+    }
+}
+
 /// `POST /auth/login/begin`. Tolerates an absent/empty JSON body (treated as
 /// `{ "username": null }`) since axum's `Json` extractor rejects those.
 ///
@@ -1096,43 +1148,7 @@ pub async fn begin_login_handler(
 
     let (rcr, auth_state) = if let Some(username) = username {
         // Username-scoped fallback path (e.g. CLI / non-resident keys).
-        match db::get_user_id_by_username(&state.db, &username).await? {
-            Some(user_id) => {
-                let public_keys = db::get_credential_public_keys_by_user_id(&state.db, user_id)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!("Failed to fetch credentials for user {}: {:?}", user_id, e);
-                        anyhow::anyhow!("Failed to fetch credentials: {}", e)
-                    })?;
-                let allow_credentials = deserialize_security_keys(&public_keys)?;
-
-                tracing::debug!(
-                    "Starting username-scoped authentication challenge with {} credentials",
-                    allow_credentials.len()
-                );
-
-                let (mut rcr, auth_state) = state
-                    .webauthn
-                    .start_securitykey_authentication(&allow_credentials)
-                    .map_err(|e| {
-                        tracing::error!("Failed to start scoped authentication: {:?}", e);
-                        anyhow::anyhow!("Failed to start authentication: {}", e)
-                    })?;
-                rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
-                (rcr, AuthState::SecurityKey(auth_state))
-            }
-            None => {
-                // Unknown username: no 404, no distinct shape — return an
-                // empty-allowCredentials challenge just like the discoverable
-                // path so an attacker can't distinguish "unknown" from "known".
-                let (rcr, auth_state) =
-                    state.webauthn.start_discoverable_authentication().map_err(|e| {
-                        tracing::error!("Failed to start decoy authentication: {:?}", e);
-                        anyhow::anyhow!("Failed to start authentication: {}", e)
-                    })?;
-                (rcr, AuthState::Discoverable(auth_state))
-            }
-        }
+        scoped_or_decoy_challenge(&state, &username).await?
     } else if state.login_allow_broadcast {
         // Legacy behavior: broadcast every credential in the DB. Kept
         // byte-for-byte unchanged pending the Phase 3 flip.
@@ -1665,7 +1681,16 @@ fn qr_login_url(requestee_token: &str) -> String {
 pub async fn qr_login_begin_handler(
     State(state): State<AppState>,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
+    body: axum::body::Bytes,
 ) -> Result<Json<crate::types::QrLoginBeginResponse>, QrLoginError> {
+    let username: Option<String> = normalize_login_username(if body.is_empty() {
+        None
+    } else {
+        serde_json::from_slice::<crate::types::QrLoginBeginRequest>(&body)
+            .ok()
+            .and_then(|r| r.username)
+    });
+
     let token = db::generate_session_id();
     let requestee_token = db::generate_session_id();
     let expires_at = time::OffsetDateTime::now_utc() + Duration::minutes(3);
@@ -1679,6 +1704,7 @@ pub async fn qr_login_begin_handler(
         &requestee_token,
         Some(&ip_address),
         expires_at,
+        username.as_deref(),
     )
     .await
     .map_err(|source| QrLoginError::DbCreateToken { source })?;
@@ -1793,11 +1819,16 @@ pub async fn qr_login_authenticate_handler(
         _ => return Err(QrLoginError::UnexpectedState(row.status)),
     }
 
-    // QR login has no username field (phone platform authenticators are
-    // resident) — mirror begin_login_handler's flag-driven behavior for the
-    // no-username case: broadcast when the flag is on (unchanged), otherwise
-    // discoverable.
-    let (rcr, auth_state) = if state.login_allow_broadcast {
+    // A username stored on the token (from qr_login_begin_handler) scopes the
+    // challenge to that user's own credentials — needed for non-resident/
+    // legacy keys, which phone platform authenticators normally don't need.
+    // Otherwise mirror begin_login_handler's flag-driven behavior: broadcast
+    // when the flag is on (unchanged), otherwise discoverable.
+    let (rcr, auth_state) = if let Some(username) = row.username.as_deref() {
+        scoped_or_decoy_challenge(&state, username)
+            .await
+            .map_err(|source| QrLoginError::ScopedChallenge { source })?
+    } else if state.login_allow_broadcast {
         let all_public_keys = db::get_all_credential_public_keys(&state.db)
             .await
             .map_err(|source| QrLoginError::DbGetCredentials { source })?;

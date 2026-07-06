@@ -779,15 +779,17 @@ pub async fn create_qr_login_token(
     requestee_token: &str,
     ip_address: Option<&str>,
     expires_at: OffsetDateTime,
+    username: Option<&str>,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO qr_login_tokens (token, requestee_token, status, ip_address, expires_at)
-         VALUES ($1, $2, 'pending', $3, $4)",
+        "INSERT INTO qr_login_tokens (token, requestee_token, status, ip_address, expires_at, username)
+         VALUES ($1, $2, 'pending', $3, $4, $5)",
     )
     .bind(token)
     .bind(requestee_token)
     .bind(ip_address)
     .bind(expires_at)
+    .bind(username)
     .execute(pool)
     .await
     .context("Failed to create QR login token")?;
@@ -800,7 +802,7 @@ pub async fn get_qr_login_token(
     token: &str,
 ) -> Result<Option<crate::types::DbQrLoginToken>> {
     let row: Option<crate::types::DbQrLoginToken> = sqlx::query_as(
-        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at
+        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at, username
          FROM qr_login_tokens
          WHERE token = $1"
     )
