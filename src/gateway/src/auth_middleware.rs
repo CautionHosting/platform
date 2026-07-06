@@ -557,6 +557,55 @@ pub async fn fido2_auth_middleware(
     Ok(next.run(req).await)
 }
 
+/// Paths exempt from the username-claim gate below: claiming/checking your
+/// username obviously has to work before you've claimed one, and logout must
+/// always work so a stuck placeholder account isn't also stuck logged in.
+fn username_gate_exempt_path(path: &str) -> bool {
+    path == "/user/username" || path == "/auth/logout"
+}
+
+/// Enforces the Phase 1 "username claimed" migration gate: once a user is
+/// authenticated (`AuthenticatedUserId` set by `fido2_auth_middleware`, which
+/// must run before this middleware in the layer stack), every protected
+/// endpoint except the username-status/claim and logout routes returns 403
+/// `{"error": "username_required"}` until they claim a real username. This
+/// applies uniformly to web, CLI, and QR clients since it's enforced at the
+/// gateway rather than in UI.
+pub async fn username_claim_gate_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, Response> {
+    if username_gate_exempt_path(req.uri().path()) {
+        return Ok(next.run(req).await);
+    }
+
+    let Some(AuthenticatedUserId(user_id)) = req.extensions().get::<AuthenticatedUserId>().cloned()
+    else {
+        // No authenticated user on this request (e.g. SSH-signed resource
+        // requests, which authenticate via a different mechanism entirely) —
+        // nothing for the username gate to check here.
+        return Ok(next.run(req).await);
+    };
+
+    let (_username, is_placeholder) = db::get_username_status(&state.db, user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to check username placeholder status: {:?}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to check account status").into_response()
+        })?;
+
+    if is_placeholder {
+        return Err((
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({ "error": "username_required" })),
+        )
+            .into_response());
+    }
+
+    Ok(next.run(req).await)
+}
+
 fn ssh_signature_header_state(req: &Request) -> SshSignatureHeaderState {
     let present = [
         req.headers().contains_key(SSH_SIGNATURE_HEADER),
@@ -1022,6 +1071,26 @@ pub async fn fido2_sign_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Full end-to-end coverage of `username_claim_gate_middleware` (protected
+    // route -> 403 username_required while placeholder, -> 200 after claim)
+    // needs a live Postgres + `AuthenticatedUserId` set by a preceding real
+    // `fido2_auth_middleware` pass, which this crate has no DB-backed test
+    // harness for (see the note in `handlers.rs`'s `login_begin_tests`
+    // module). The path-exemption logic below is the pure/testable slice.
+    #[test]
+    fn username_gate_exempt_paths_allow_claim_status_and_logout() {
+        assert!(username_gate_exempt_path("/user/username"));
+        assert!(username_gate_exempt_path("/auth/logout"));
+    }
+
+    #[test]
+    fn username_gate_exempt_paths_reject_everything_else() {
+        assert!(!username_gate_exempt_path("/passkeys"));
+        assert!(!username_gate_exempt_path("/ssh-keys"));
+        assert!(!username_gate_exempt_path("/resources/some-id"));
+        assert!(!username_gate_exempt_path("/user/username/extra"));
+    }
 
     const RESOURCE_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 

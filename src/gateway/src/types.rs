@@ -32,10 +32,25 @@ pub struct PendingPasskeyRegistration {
     pub expires_at: time::OffsetDateTime,
 }
 
+/// Which webauthn-rs authentication ceremony a pending `/auth/login` challenge is
+/// running. `SecurityKey` covers both legacy broadcast and username-scoped login
+/// (both resolve the user from the asserted credential's `rawId`). `Discoverable`
+/// covers the username-less conditional-UI flow (resolves the user from the
+/// assertion's `userHandle` via `identify_discoverable_authentication`).
+///
+/// Sign flows (`PendingSignChallenge`) are already scoped to a single credential
+/// and are intentionally NOT part of this enum — they stay on
+/// `SecurityKeyAuthentication` per the Phase 1 design doc.
+#[derive(Clone)]
+pub enum AuthState {
+    SecurityKey(SecurityKeyAuthentication),
+    Discoverable(DiscoverableAuthentication),
+}
+
 /// Authentication state with expiration
 #[derive(Clone)]
 pub struct PendingAuthentication {
-    pub auth_state: SecurityKeyAuthentication,
+    pub auth_state: AuthState,
     pub expires_at: time::OffsetDateTime,
 }
 
@@ -52,6 +67,14 @@ pub struct AppState {
     pub session_timeout_hours: i64,
     pub internal_service_secret: Option<String>,
     pub csrf_secret: String,
+    /// Kill-switch for the legacy credential-broadcast login behavior
+    /// (`/auth/login/begin` and `/auth/qr-login/authenticate` with no username
+    /// returning every credential in the DB as `allowCredentials`). Defaults to
+    /// `true` so nothing regresses mid-migration; flip to `false` via the
+    /// `LOGIN_ALLOW_BROADCAST` env var once clients no longer depend on it.
+    /// Toggling requires setting the env var and restarting the gateway — it is
+    /// read once at startup, not re-read per request.
+    pub login_allow_broadcast: bool,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -113,6 +136,13 @@ pub struct LoginBeginResponse {
     #[serde(flatten)]
     pub challenge: RequestChallengeResponse,
     pub session: String,
+}
+
+/// Optional body for `POST /auth/login/begin`. An absent/empty body is
+/// tolerated by the handler and treated identically to `{ "username": null }`.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct LoginBeginRequest {
+    pub username: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

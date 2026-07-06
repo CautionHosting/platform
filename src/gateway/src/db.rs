@@ -237,6 +237,7 @@ fn generate_user_identifier() -> String {
     format!("u_{}", encoded)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn save_fido2_credential(
     pool: &PgPool,
     credential_id: &[u8],
@@ -248,6 +249,7 @@ pub async fn save_fido2_credential(
     sign_count: u32,
     transport: Option<serde_json::Value>,
     flags: Option<serde_json::Value>,
+    resident: Option<bool>,
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO fido2_credentials (
@@ -260,9 +262,10 @@ pub async fn save_fido2_credential(
             sign_count,
             transport,
             flags,
+            resident,
             created_at,
             updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())",
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())",
     )
     .bind(credential_id)
     .bind(user_id)
@@ -273,6 +276,7 @@ pub async fn save_fido2_credential(
     .bind(sign_count as i64)
     .bind(transport)
     .bind(flags)
+    .bind(resident)
     .execute(pool)
     .await
     .context("Failed to save credential")?;
@@ -353,6 +357,54 @@ pub async fn get_credential_ids_by_user_id(pool: &PgPool, user_id: Uuid) -> Resu
     .context("Failed to query credentials")?;
 
     Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+/// Look up a user by their (normalized) username. Returns `None` rather than
+/// an error when not found — callers must NOT translate a `None` here into a
+/// distinct HTTP response for unauthenticated login flows, or they'll create a
+/// username-enumeration oracle (see `begin_login_handler`).
+pub async fn get_user_id_by_username(pool: &PgPool, username: &str) -> Result<Option<Uuid>> {
+    let user_id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(username)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to get user ID by username")?;
+
+    Ok(user_id)
+}
+
+/// Fetch the serialized `SecurityKey` public keys for every credential
+/// belonging to a user, for building a username-scoped `allowCredentials` list.
+pub async fn get_credential_public_keys_by_user_id(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Vec<Vec<u8>>> {
+    let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
+        "SELECT public_key FROM fido2_credentials WHERE user_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to query credential public keys by user")?;
+
+    Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+/// Opportunistically mark a credential as resident (discoverable) after it was
+/// successfully used in a discoverable (username-less) login assertion. Only
+/// touches rows where residency is still unknown (`NULL`) — never overwrites
+/// an explicit `false` recorded from a registration-time `credProps` reading.
+pub async fn mark_credential_resident_if_unknown(pool: &PgPool, credential_id: &[u8]) -> Result<()> {
+    sqlx::query(
+        "UPDATE fido2_credentials SET resident = true, updated_at = NOW()
+         WHERE credential_id = $1 AND resident IS NULL",
+    )
+    .bind(credential_id)
+    .execute(pool)
+    .await
+    .context("Failed to backfill credential resident flag")?;
+
+    Ok(())
 }
 
 pub async fn list_user_credentials(
@@ -956,9 +1008,14 @@ pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>)> {
     let credential_id: [u8; 16] = rand::thread_rng().gen();
     let credential_id_vec = credential_id.to_vec();
 
+    // Mark e2e users as non-placeholder so the username-claim gate
+    // (`username_claim_gate_middleware`) doesn't 403 every e2e session on
+    // protected/`/api` routes. Real registrations already set this false;
+    // only the placeholder gate test flips a user back to placeholder on
+    // purpose.
     let user_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (fido2_user_handle, username, email, beta_code_id)
-         VALUES ($1, $2, NULL, NULL)
+        "INSERT INTO users (fido2_user_handle, username, email, beta_code_id, username_is_placeholder)
+         VALUES ($1, $2, NULL, NULL, false)
          RETURNING id",
     )
     .bind(&user_handle[..])

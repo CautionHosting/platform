@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2025 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+#
+# E2E coverage for the Phase 1 WebAuthn login changes. Covers only the pieces
+# that are deterministic without a real authenticator ceremony:
+#
+#   1. Gateway health
+#   2. /auth/login/begin with an UNKNOWN username -> 200 with EMPTY
+#      allowCredentials (no 404 / no distinct shape = no enumeration oracle)
+#   3. /auth/login/begin with no body -> 200 (broadcast default; fresh test DB
+#      has no real credentials, so allowCredentials is empty)
+#   4. username-claim gate: a placeholder-username session gets 403
+#      {"error":"username_required"} on a protected route
+#   5. claiming a username via POST /user/username succeeds (gate-exempt)
+#   6. after claiming, the same protected route is no longer gated (200)
+#
+# The full assertion round-trip (scoped/broadcast/discoverable finish) needs a
+# WebAuthn authenticator and is covered by the manual Chrome-virtual-authenticator
+# runbook, not here.
+#
+# Requires: make up-test (services with the e2e-testing-unsafe feature).
+
+set -euo pipefail
+
+GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
+API_URL="${API_URL:-http://localhost:8080}"
+DB_CONTAINER="${TEST_DB_HOST:-postgres-test}"
+DB_NAME="${TEST_DB_NAME:-caution_test}"
+STEP_NUM=0
+STEPS_PASSED=0
+
+log()  { echo "[webauthn-login] $*"; }
+psql_q() { docker exec "$DB_CONTAINER" psql -U postgres -d "$DB_NAME" -tAc "$1"; }
+
+step_pass() { STEPS_PASSED=$((STEPS_PASSED + 1)); echo "[webauthn-login] ✓ Step $STEP_NUM: $*"; }
+step_fail() { echo "[webauthn-login] ✗ Step $STEP_NUM FAILED: $*" >&2; exit 1; }
+
+# ── Step 1: Gateway health ───────────────────────────────────────────
+STEP_NUM=1
+for i in $(seq 1 30); do
+    if curl -sf -o /dev/null "$GATEWAY_URL/health"; then break; fi
+    [ "$i" = 30 ] && step_fail "gateway never became healthy"
+    sleep 1
+done
+step_pass "Gateway health check"
+
+# ── Step 2: unknown username -> 200 + empty allowCredentials ─────────
+STEP_NUM=2
+BODY=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/login/begin" \
+    -H 'Content-Type: application/json' \
+    -d '{"username":"definitely-not-a-real-user-xyz"}')
+CODE=$(echo "$BODY" | tail -1)
+JSON=$(echo "$BODY" | sed '$d')
+[ "$CODE" = 200 ] || step_fail "unknown username returned HTTP $CODE (want 200 — a 404 would be an enumeration oracle)"
+N=$(echo "$JSON" | jq '.publicKey.allowCredentials | length')
+[ "$N" = 0 ] || step_fail "unknown username leaked $N allowCredentials (want 0)"
+echo "$JSON" | jq -e '.session' >/dev/null || step_fail "unknown username response missing session"
+step_pass "Unknown username -> 200 with empty allowCredentials (no oracle)"
+
+# ── Step 3: no body -> 200 (broadcast default, empty on fresh DB) ────
+STEP_NUM=3
+BODY=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/login/begin")
+CODE=$(echo "$BODY" | tail -1)
+JSON=$(echo "$BODY" | sed '$d')
+[ "$CODE" = 200 ] || step_fail "empty-body begin returned HTTP $CODE (want 200)"
+echo "$JSON" | jq -e '.publicKey.challenge' >/dev/null || step_fail "empty-body begin response missing challenge"
+step_pass "Empty-body begin -> 200 (broadcast default)"
+
+# ── Step 4: placeholder session is gated (403 username_required) ─────
+STEP_NUM=4
+LOGIN=$(curl -sf -X POST "$GATEWAY_URL/auth/e2e-login" -H 'Content-Type: application/json')
+SESSION_ID=$(echo "$LOGIN" | jq -r '.session_id')
+USER_ID=$(echo "$LOGIN" | jq -r '.user_id')
+[ -n "$SESSION_ID" ] && [ "$SESSION_ID" != null ] || step_fail "e2e-login returned no session"
+
+# Force this user into the legacy placeholder state the gate defends.
+psql_q "UPDATE users SET username_is_placeholder = true WHERE id = '$USER_ID';" >/dev/null
+
+GATED=$(curl -s -w '\n%{http_code}' "$GATEWAY_URL/passkeys" -H "X-Session-ID: $SESSION_ID")
+CODE=$(echo "$GATED" | tail -1)
+JSON=$(echo "$GATED" | sed '$d')
+[ "$CODE" = 403 ] || step_fail "placeholder session got HTTP $CODE on /passkeys (want 403)"
+ERR=$(echo "$JSON" | jq -r '.error')
+[ "$ERR" = username_required ] || step_fail "gate body was '$ERR' (want username_required)"
+step_pass "Placeholder session -> 403 username_required on protected route"
+
+# ── Step 5: claiming a username succeeds (gate-exempt route) ─────────
+STEP_NUM=5
+CLAIMED="claimed$(date +%s)$RANDOM"
+CLAIM=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/user/username" \
+    -H "X-Session-ID: $SESSION_ID" -H 'Content-Type: application/json' \
+    -d "{\"username\":\"$CLAIMED\"}")
+CODE=$(echo "$CLAIM" | tail -1)
+[ "$CODE" = 200 ] || step_fail "claim returned HTTP $CODE (want 200); body: $(echo "$CLAIM" | sed '$d')"
+IS_PLACEHOLDER=$(psql_q "SELECT username_is_placeholder FROM users WHERE id = '$USER_ID';")
+[ "$IS_PLACEHOLDER" = f ] || step_fail "user still marked placeholder after claim"
+step_pass "Claim username -> 200 and user no longer placeholder"
+
+# ── Step 6: gate lifts after claim (200) ────────────────────────────
+STEP_NUM=6
+AFTER=$(curl -s -o /dev/null -w '%{http_code}' "$GATEWAY_URL/passkeys" -H "X-Session-ID: $SESSION_ID")
+[ "$AFTER" = 200 ] || step_fail "protected route still HTTP $AFTER after claim (want 200)"
+step_pass "Protected route reachable (200) after claiming username"
+
+echo ""
+log "All $STEPS_PASSED steps passed ✓"

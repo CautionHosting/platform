@@ -29,7 +29,7 @@ export function getCsrfToken() {
 }
 
 // Helper for authenticated API calls with CSRF protection
-export function authFetch(url, options = {}) {
+export async function authFetch(url, options = {}) {
   const headers = options.headers || {};
 
   // Add CSRF token for state-changing requests
@@ -40,11 +40,28 @@ export function authFetch(url, options = {}) {
     }
   }
 
-  return fetch(url, {
+  const response = await fetch(url, {
     ...options,
     headers,
     credentials: 'include',
   });
+
+  // Handle username_required gate: if 403 with username_required error, redirect to dashboard
+  if (response.status === 403) {
+    try {
+      const data = await response.json();
+      if (data.error === 'username_required') {
+        // Redirect to dashboard with account tab active (for username claim)
+        window.location.href = '/#account';
+        // Return a rejected promise to prevent further processing
+        return Promise.reject(new Error('username_required'));
+      }
+    } catch (e) {
+      // If response is not JSON, continue normal error handling
+    }
+  }
+
+  return response;
 }
 
 export function useWebAuthn() {
@@ -85,9 +102,13 @@ export function useWebAuthn() {
     }
   }
 
-  async function handleLogin(e) {
-    if (e && e.preventDefault) {
-      e.preventDefault();
+  async function handleLogin(loginUsername) {
+    // Handle both event and username parameter
+    let username = "";
+    if (typeof loginUsername === "string") {
+      username = loginUsername;
+    } else if (loginUsername && loginUsername.preventDefault) {
+      loginUsername.preventDefault();
     }
 
     // Prevent double invocation
@@ -103,10 +124,19 @@ export function useWebAuthn() {
     try {
       // Step 1: Begin login
       status.value = "Starting login...";
-      const beginResponse = await fetch("/auth/login/begin", {
+
+      const fetchOptions = {
         method: "POST",
         credentials: "include",
-      });
+      };
+
+      // Send username in JSON body if provided and non-empty
+      if (username && username.trim()) {
+        fetchOptions.headers = { "Content-Type": "application/json" };
+        fetchOptions.body = JSON.stringify({ username: username.trim() });
+      }
+
+      const beginResponse = await fetch("/auth/login/begin", fetchOptions);
 
       if (!beginResponse.ok) {
         const errorText = await beginResponse.text();
@@ -132,6 +162,7 @@ export function useWebAuthn() {
       }
 
       delete publicKey.hints;
+      delete publicKey.mediation;
 
       let assertion;
       try {

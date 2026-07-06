@@ -14,6 +14,29 @@ use uuid::Uuid;
 use webauthn_rs::prelude::*;
 use webauthn_rs_proto::{ResidentKeyRequirement, UserVerificationPolicy};
 
+/// Clear the `credProtect` extension (which forces UV=Required and conflicts
+/// with our UV=Preferred authenticator selection, rejecting PIN-less smart
+/// cards and password-manager registrations) while keeping `credProps`
+/// requested, so the browser reports whether it created a resident
+/// (discoverable) credential. Read back at finish time via
+/// `extensions.cred_props.rk` and stored on the credential row.
+fn relax_registration_extensions(
+    extensions: &mut Option<webauthn_rs_proto::RequestRegistrationExtensions>,
+) {
+    if let Some(ext) = extensions.as_mut() {
+        ext.cred_protect = None;
+        ext.cred_props = Some(true);
+    }
+}
+
+/// Read the (unsigned, browser-reported) resident-key hint from a
+/// registration response's client extension outputs, if present. See
+/// `relax_registration_extensions` — `None` here just means the browser
+/// didn't report it; residency capture falls back to backfill-on-login.
+fn read_credprops_rk(reg_response: &RegisterPublicKeyCredential) -> Option<bool> {
+    reg_response.extensions.cred_props.as_ref().and_then(|cp| cp.rk)
+}
+
 /// Maximum number of pending challenges per store to prevent OOM from abuse
 const MAX_PENDING_CHALLENGES: usize = 10_000;
 
@@ -102,6 +125,17 @@ pub enum LoginError {
     },
     #[error("security key authentication could not be finalized for user {user_id}")]
     FinishSecurityKeyAuthentication {
+        user_id: Uuid,
+        #[source]
+        source: WebauthnError,
+    },
+    #[error("could not identify discoverable credential from assertion")]
+    IdentifyDiscoverableCredential {
+        #[source]
+        source: WebauthnError,
+    },
+    #[error("discoverable authentication could not be finalized for user {user_id}")]
+    FinishDiscoverableAuthentication {
         user_id: Uuid,
         #[source]
         source: WebauthnError,
@@ -515,7 +549,7 @@ pub async fn begin_add_passkey_handler(
         auth_sel.user_verification = UserVerificationPolicy::Preferred;
         auth_sel.resident_key = Some(ResidentKeyRequirement::Preferred);
     }
-    ccr.public_key.extensions = None;
+    relax_registration_extensions(&mut ccr.public_key.extensions);
 
     let state_key = Uuid::new_v4().to_string();
     let pending = PendingPasskeyRegistration {
@@ -588,6 +622,7 @@ pub async fn finish_add_passkey_handler(
         .get("transports")
         .cloned()
         .filter(|value| value.is_array());
+    let resident = read_credprops_rk(&reg_response);
 
     db::save_fido2_credential(
         &state.db,
@@ -600,6 +635,7 @@ pub async fn finish_add_passkey_handler(
         0,
         transports,
         None,
+        resident,
     )
     .await?;
 
@@ -787,7 +823,7 @@ pub async fn begin_register_handler(
         auth_sel.user_verification = UserVerificationPolicy::Preferred;
         auth_sel.resident_key = Some(ResidentKeyRequirement::Preferred);
     }
-    ccr.public_key.extensions = None;
+    relax_registration_extensions(&mut ccr.public_key.extensions);
 
     tracing::debug!(
         "Registration challenge created for RP {}",
@@ -933,6 +969,7 @@ pub async fn finish_register_handler(
     let passkey_json = serde_json::to_vec(&seckey).map_err(|e| {
         RegisterError::Internal(anyhow::anyhow!("Failed to serialize credential: {}", e))
     })?;
+    let resident = read_credprops_rk(&reg_response);
 
     db::save_fido2_credential(
         &state.db,
@@ -945,6 +982,7 @@ pub async fn finish_register_handler(
         0,
         None,
         None,
+        resident,
     )
     .await
     .map_err(|e| RegisterError::Internal(e))?;
@@ -1004,51 +1042,144 @@ pub async fn finish_register_handler(
     Ok((StatusCode::OK, headers, body).into_response())
 }
 
+/// Normalize a caller-supplied optional username for login lookup: trim,
+/// lowercase, and treat an all-whitespace/empty value the same as "absent"
+/// so callers don't have to special-case `Some("")`.
+fn normalize_login_username(username: Option<String>) -> Option<String> {
+    username
+        .map(|u| u.trim().to_lowercase())
+        .filter(|u| !u.is_empty())
+}
+
+/// Deserialize a set of stored `public_key` blobs into `SecurityKey`s for use
+/// as an `allowCredentials` list.
+fn deserialize_security_keys(public_keys: &[Vec<u8>]) -> Result<Vec<SecurityKey>, anyhow::Error> {
+    public_keys
+        .iter()
+        .enumerate()
+        .map(|(i, cred_bytes)| {
+            serde_json::from_slice(cred_bytes).map_err(|e| {
+                tracing::error!("Failed to deserialize credential {}", i);
+                anyhow::anyhow!("Failed to deserialize credential: {}", e)
+            })
+        })
+        .collect()
+}
+
+/// `POST /auth/login/begin`. Tolerates an absent/empty JSON body (treated as
+/// `{ "username": null }`) since axum's `Json` extractor rejects those.
+///
+/// - `username` present & non-empty, and matches a user -> username-scoped
+///   `allowCredentials` (that user's credentials only).
+/// - `username` present & non-empty, but no such user -> a normal challenge
+///   with EMPTY `allowCredentials` (discoverable) — never a 404. Returning a
+///   distinct response for unknown usernames would make this endpoint a
+///   username-enumeration oracle.
+/// - `username` absent/empty:
+///   - `login_allow_broadcast == true` (default) -> legacy broadcast:
+///     `allowCredentials` = every credential in the DB, byte-for-byte
+///     unchanged behavior.
+///   - `login_allow_broadcast == false` -> discoverable: empty
+///     `allowCredentials`, `mediation: "conditional"` (set automatically by
+///     `start_discoverable_authentication`).
 pub async fn begin_login_handler(
     State(state): State<AppState>,
+    body: axum::body::Bytes,
 ) -> Result<Json<LoginBeginResponse>, AppError> {
-    let all_public_keys = db::get_all_credential_public_keys(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to fetch credentials from DB: {:?}", e);
-            anyhow::anyhow!("Failed to fetch credentials: {}", e)
-        })?;
+    let username: Option<String> = normalize_login_username(if body.is_empty() {
+        None
+    } else {
+        serde_json::from_slice::<LoginBeginRequest>(&body)
+            .ok()
+            .and_then(|r| r.username)
+    });
 
-    tracing::debug!("Found {} credentials in database", all_public_keys.len());
+    let (rcr, auth_state) = if let Some(username) = username {
+        // Username-scoped fallback path (e.g. CLI / non-resident keys).
+        match db::get_user_id_by_username(&state.db, &username).await? {
+            Some(user_id) => {
+                let public_keys = db::get_credential_public_keys_by_user_id(&state.db, user_id)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Failed to fetch credentials for user {}: {:?}", user_id, e);
+                        anyhow::anyhow!("Failed to fetch credentials: {}", e)
+                    })?;
+                let allow_credentials = deserialize_security_keys(&public_keys)?;
 
-    let mut allow_credentials = Vec::new();
-    for (i, cred_bytes) in all_public_keys.iter().enumerate() {
-        let seckey: SecurityKey = serde_json::from_slice(cred_bytes).map_err(|e| {
-            tracing::error!("Failed to deserialize credential {}", i);
-            anyhow::anyhow!("Failed to deserialize credential: {}", e)
-        })?;
+                tracing::debug!(
+                    "Starting username-scoped authentication challenge with {} credentials",
+                    allow_credentials.len()
+                );
 
-        allow_credentials.push(seckey);
-    }
+                let (mut rcr, auth_state) = state
+                    .webauthn
+                    .start_securitykey_authentication(&allow_credentials)
+                    .map_err(|e| {
+                        tracing::error!("Failed to start scoped authentication: {:?}", e);
+                        anyhow::anyhow!("Failed to start authentication: {}", e)
+                    })?;
+                rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
+                (rcr, AuthState::SecurityKey(auth_state))
+            }
+            None => {
+                // Unknown username: no 404, no distinct shape — return an
+                // empty-allowCredentials challenge just like the discoverable
+                // path so an attacker can't distinguish "unknown" from "known".
+                let (rcr, auth_state) =
+                    state.webauthn.start_discoverable_authentication().map_err(|e| {
+                        tracing::error!("Failed to start decoy authentication: {:?}", e);
+                        anyhow::anyhow!("Failed to start authentication: {}", e)
+                    })?;
+                (rcr, AuthState::Discoverable(auth_state))
+            }
+        }
+    } else if state.login_allow_broadcast {
+        // Legacy behavior: broadcast every credential in the DB. Kept
+        // byte-for-byte unchanged pending the Phase 3 flip.
+        let all_public_keys = db::get_all_credential_public_keys(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to fetch credentials from DB: {:?}", e);
+                anyhow::anyhow!("Failed to fetch credentials: {}", e)
+            })?;
 
-    tracing::debug!(
-        "Starting authentication challenge with {} credentials",
-        allow_credentials.len()
-    );
+        tracing::debug!("Found {} credentials in database", all_public_keys.len());
 
-    // Use securitykey auth which allows flexible UV policy (unlike passkey which requires UV)
-    let (mut rcr, auth_state) = state
-        .webauthn
-        .start_securitykey_authentication(&allow_credentials)
-        .map_err(|e| {
-            tracing::error!("Failed to start authentication: {:?}", e);
+        let allow_credentials = deserialize_security_keys(&all_public_keys)?;
+
+        tracing::debug!(
+            "Starting authentication challenge with {} credentials",
+            allow_credentials.len()
+        );
+
+        // Use securitykey auth which allows flexible UV policy (unlike passkey which requires UV)
+        let (mut rcr, auth_state) = state
+            .webauthn
+            .start_securitykey_authentication(&allow_credentials)
+            .map_err(|e| {
+                tracing::error!("Failed to start authentication: {:?}", e);
+                anyhow::anyhow!("Failed to start authentication: {}", e)
+            })?;
+
+        // Always use Preferred - we enforce PIN requirement in finish_login based on org settings
+        // This allows the authenticator to decide, and we validate server-side
+        rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
+
+        tracing::debug!(
+            "Authentication challenge created for RP {} with {} allowed credentials",
+            rcr.public_key.rp_id,
+            rcr.public_key.allow_credentials.len()
+        );
+
+        (rcr, AuthState::SecurityKey(auth_state))
+    } else {
+        // Primary path: username-less discoverable / conditional UI login.
+        let (rcr, auth_state) = state.webauthn.start_discoverable_authentication().map_err(|e| {
+            tracing::error!("Failed to start discoverable authentication: {:?}", e);
             anyhow::anyhow!("Failed to start authentication: {}", e)
         })?;
-
-    // Always use Preferred - we enforce PIN requirement in finish_login based on org settings
-    // This allows the authenticator to decide, and we validate server-side
-    rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
-
-    tracing::debug!(
-        "Authentication challenge created for RP {} with {} allowed credentials",
-        rcr.public_key.rp_id,
-        rcr.public_key.allow_credentials.len()
-    );
+        (rcr, AuthState::Discoverable(auth_state))
+    };
 
     let session_key = Uuid::new_v4().to_string();
     let pending = PendingAuthentication {
@@ -1079,49 +1210,110 @@ pub async fn finish_login_handler(
         .ok_or_else(|| LoginError::InvalidSession("missing session field".into()))?
         .to_string();
 
-    let pending = state
-        .auth_states
-        .read()
-        .await
-        .get(&session_key)
-        .cloned()
-        .ok_or_else(|| LoginError::InvalidSession(session_key.clone()))?;
+    // Remove (rather than read+clone then remove) so this is the single
+    // source of truth for challenge consumption — a session can only be
+    // finished once, and we don't need `AuthState` to be droppable-and-reused.
+    let pending = {
+        let mut auth_states = state.auth_states.write().await;
+        auth_states.remove(&session_key)
+    }
+    .ok_or_else(|| LoginError::InvalidSession(session_key.clone()))?;
 
     // Check if the authentication challenge has expired.
     if time::OffsetDateTime::now_utc() > pending.expires_at {
-        state.auth_states.write().await.remove(&session_key);
         return Err(LoginError::ChallengeExpired);
     }
-
-    let auth_state = pending.auth_state;
 
     let auth_response: PublicKeyCredential = serde_json::from_value(req.clone())
         .map_err(|source| LoginError::ParsePubkeyCredential { source })?;
 
     tracing::debug!("Received authentication response");
 
-    let credential_id_bytes = auth_response.raw_id.as_ref().to_vec();
-    tracing::debug!("Credential ID: {}", hex::encode(&credential_id_bytes));
+    let (user_id, credential_id_bytes, mut seckey, auth_result) = match pending.auth_state {
+        AuthState::SecurityKey(auth_state) => {
+            // Legacy / username-scoped path: resolve the user from the
+            // asserted credential's rawId, exactly as before.
+            let credential_id_bytes = auth_response.raw_id.as_ref().to_vec();
+            tracing::debug!("Credential ID: {}", hex::encode(&credential_id_bytes));
 
-    let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
-        .await
-        .map_err(|source| LoginError::DbGetUserIdByCredential {
-            provided_bytes: credential_id_bytes.clone(),
-            source,
-        })?;
+            let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
+                .await
+                .map_err(|source| LoginError::DbGetUserIdByCredential {
+                    provided_bytes: credential_id_bytes.clone(),
+                    source,
+                })?;
 
-    let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
-        .await
-        .map_err(|source| LoginError::DbGetPublicKeyForCredential { user_id, source })?;
-    let mut seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
-        .map_err(|source| LoginError::ParseSecurityKey { user_id, source })?;
+            let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
+                .await
+                .map_err(|source| LoginError::DbGetPublicKeyForCredential { user_id, source })?;
+            let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
+                .map_err(|source| LoginError::ParseSecurityKey { user_id, source })?;
 
-    tracing::debug!("Credential fetched, performing securitykey authentication");
+            tracing::debug!("Credential fetched, performing securitykey authentication");
 
-    let auth_result = state
-        .webauthn
-        .finish_securitykey_authentication(&auth_response, &auth_state)
-        .map_err(|source| LoginError::FinishSecurityKeyAuthentication { user_id, source })?;
+            let auth_result = state
+                .webauthn
+                .finish_securitykey_authentication(&auth_response, &auth_state)
+                .map_err(|source| LoginError::FinishSecurityKeyAuthentication { user_id, source })?;
+
+            (user_id, credential_id_bytes, seckey, auth_result)
+        }
+        AuthState::Discoverable(auth_state) => {
+            // Primary path: resolve the user from the assertion's userHandle,
+            // then reload the credential by its rawId to reuse the rest of
+            // the (PIN check / counter update / session creation) pipeline
+            // unchanged.
+            let (_user_handle, cred_id) = state
+                .webauthn
+                .identify_discoverable_authentication(&auth_response)
+                .map_err(|source| LoginError::IdentifyDiscoverableCredential { source })?;
+            let credential_id_bytes = cred_id.to_vec();
+            tracing::debug!(
+                "Discoverable credential ID: {}",
+                hex::encode(&credential_id_bytes)
+            );
+
+            let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
+                .await
+                .map_err(|source| LoginError::DbGetUserIdByCredential {
+                    provided_bytes: credential_id_bytes.clone(),
+                    source,
+                })?;
+
+            let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
+                .await
+                .map_err(|source| LoginError::DbGetPublicKeyForCredential { user_id, source })?;
+            let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
+                .map_err(|source| LoginError::ParseSecurityKey { user_id, source })?;
+
+            // SecurityKey -> Credential -> Passkey -> DiscoverableKey, per
+            // webauthn-rs 0.5's discoverable-auth API (needs the
+            // `danger-credential-internals` feature for the Credential
+            // conversions).
+            let credential: Credential = seckey.clone().into();
+            let passkey: Passkey = credential.into();
+            let discoverable_key: DiscoverableKey = passkey.into();
+
+            tracing::debug!("Credential fetched, performing discoverable authentication");
+
+            let auth_result = state
+                .webauthn
+                .finish_discoverable_authentication(&auth_response, auth_state, &[discoverable_key])
+                .map_err(|source| LoginError::FinishDiscoverableAuthentication { user_id, source })?;
+
+            // Opportunistic residency backfill: a successful discoverable
+            // finish proves the authenticator surfaced this credential via
+            // userHandle, i.e. it's resident. Best-effort — never fail the
+            // login over this.
+            if let Err(e) =
+                db::mark_credential_resident_if_unknown(&state.db, &credential_id_bytes).await
+            {
+                tracing::warn!("Failed to backfill credential resident flag: {:?}", e);
+            }
+
+            (user_id, credential_id_bytes, seckey, auth_result)
+        }
+    };
 
     tracing::debug!(
         user_verified = auth_result.user_verified(),
@@ -1157,8 +1349,6 @@ pub async fn finish_login_handler(
             .map_err(|source| LoginError::DbUpdateFido2Credential { user_id, source })?;
         }
     }
-
-    state.auth_states.write().await.remove(&session_key);
 
     let session_id = db::generate_session_id();
     let csrf_token = crate::csrf::derive_csrf_token(&session_id, &state.csrf_secret);
@@ -1603,24 +1793,36 @@ pub async fn qr_login_authenticate_handler(
         _ => return Err(QrLoginError::UnexpectedState(row.status)),
     }
 
-    // Start WebAuthn challenge (same logic as begin_login_handler)
-    let all_public_keys = db::get_all_credential_public_keys(&state.db)
-        .await
-        .map_err(|source| QrLoginError::DbGetCredentials { source })?;
+    // QR login has no username field (phone platform authenticators are
+    // resident) — mirror begin_login_handler's flag-driven behavior for the
+    // no-username case: broadcast when the flag is on (unchanged), otherwise
+    // discoverable.
+    let (rcr, auth_state) = if state.login_allow_broadcast {
+        let all_public_keys = db::get_all_credential_public_keys(&state.db)
+            .await
+            .map_err(|source| QrLoginError::DbGetCredentials { source })?;
 
-    let mut allow_credentials = Vec::new();
-    for cred_bytes in all_public_keys.iter() {
-        let seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(cred_bytes)
-            .map_err(|source| QrLoginError::DeserializeCredential { source })?;
-        allow_credentials.push(seckey);
-    }
+        let mut allow_credentials = Vec::new();
+        for cred_bytes in all_public_keys.iter() {
+            let seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(cred_bytes)
+                .map_err(|source| QrLoginError::DeserializeCredential { source })?;
+            allow_credentials.push(seckey);
+        }
 
-    let (mut rcr, auth_state) = state
-        .webauthn
-        .start_securitykey_authentication(&allow_credentials)
-        .map_err(|source| QrLoginError::StartAuthentication { source })?;
+        let (mut rcr, auth_state) = state
+            .webauthn
+            .start_securitykey_authentication(&allow_credentials)
+            .map_err(|source| QrLoginError::StartAuthentication { source })?;
 
-    rcr.public_key.user_verification = webauthn_rs_proto::UserVerificationPolicy::Preferred;
+        rcr.public_key.user_verification = webauthn_rs_proto::UserVerificationPolicy::Preferred;
+        (rcr, AuthState::SecurityKey(auth_state))
+    } else {
+        let (rcr, auth_state) = state
+            .webauthn
+            .start_discoverable_authentication()
+            .map_err(|source| QrLoginError::StartAuthentication { source })?;
+        (rcr, AuthState::Discoverable(auth_state))
+    };
 
     let session_key = uuid::Uuid::new_v4().to_string();
     let pending = PendingAuthentication {
@@ -1703,31 +1905,72 @@ pub async fn qr_login_authenticate_finish_handler(
         return Err(LoginError::ChallengeExpired);
     }
 
-    let auth_state = pending.auth_state;
-
     let auth_response: webauthn_rs::prelude::PublicKeyCredential =
         serde_json::from_value(req.credential)
             .map_err(|source| LoginError::ParsePubkeyCredential { source })?;
 
-    let credential_id_bytes = auth_response.raw_id.as_ref().to_vec();
+    let (user_id, credential_id_bytes, mut seckey, auth_result) = match pending.auth_state {
+        AuthState::SecurityKey(auth_state) => {
+            let credential_id_bytes = auth_response.raw_id.as_ref().to_vec();
 
-    let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
-        .await
-        .map_err(|source| LoginError::DbGetUserIdByCredential {
-            provided_bytes: credential_id_bytes.clone(),
-            source,
-        })?;
+            let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
+                .await
+                .map_err(|source| LoginError::DbGetUserIdByCredential {
+                    provided_bytes: credential_id_bytes.clone(),
+                    source,
+                })?;
 
-    let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
-        .await
-        .map_err(|source| LoginError::DbGetPublicKeyForCredential { user_id, source })?;
-    let mut seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(&cred_bytes)
-        .map_err(|source| LoginError::ParseSecurityKey { user_id, source })?;
+            let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
+                .await
+                .map_err(|source| LoginError::DbGetPublicKeyForCredential { user_id, source })?;
+            let seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(&cred_bytes)
+                .map_err(|source| LoginError::ParseSecurityKey { user_id, source })?;
 
-    let auth_result = state
-        .webauthn
-        .finish_securitykey_authentication(&auth_response, &auth_state)
-        .map_err(|source| LoginError::FinishSecurityKeyAuthentication { user_id, source })?;
+            let auth_result = state
+                .webauthn
+                .finish_securitykey_authentication(&auth_response, &auth_state)
+                .map_err(|source| LoginError::FinishSecurityKeyAuthentication { user_id, source })?;
+
+            (user_id, credential_id_bytes, seckey, auth_result)
+        }
+        AuthState::Discoverable(auth_state) => {
+            let (_user_handle, cred_id) = state
+                .webauthn
+                .identify_discoverable_authentication(&auth_response)
+                .map_err(|source| LoginError::IdentifyDiscoverableCredential { source })?;
+            let credential_id_bytes = cred_id.to_vec();
+
+            let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
+                .await
+                .map_err(|source| LoginError::DbGetUserIdByCredential {
+                    provided_bytes: credential_id_bytes.clone(),
+                    source,
+                })?;
+
+            let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
+                .await
+                .map_err(|source| LoginError::DbGetPublicKeyForCredential { user_id, source })?;
+            let seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(&cred_bytes)
+                .map_err(|source| LoginError::ParseSecurityKey { user_id, source })?;
+
+            let credential: Credential = seckey.clone().into();
+            let passkey: Passkey = credential.into();
+            let discoverable_key: DiscoverableKey = passkey.into();
+
+            let auth_result = state
+                .webauthn
+                .finish_discoverable_authentication(&auth_response, auth_state, &[discoverable_key])
+                .map_err(|source| LoginError::FinishDiscoverableAuthentication { user_id, source })?;
+
+            if let Err(e) =
+                db::mark_credential_resident_if_unknown(&state.db, &credential_id_bytes).await
+            {
+                tracing::warn!("Failed to backfill credential resident flag: {:?}", e);
+            }
+
+            (user_id, credential_id_bytes, seckey, auth_result)
+        }
+    };
 
     // Check PIN requirement
     let requires_pin = db::user_requires_pin(&state.db, user_id)
@@ -2063,5 +2306,76 @@ mod tests {
         );
         assert!(url.contains(requestee_token));
         assert!(!url.contains(requester_token));
+    }
+}
+
+#[cfg(test)]
+mod login_begin_tests {
+    use super::*;
+
+    // --- normalize_login_username -------------------------------------
+    //
+    // These are the pure pieces of the `begin_login_handler` username
+    // branching that don't need a DB or a webauthn ceremony, so they're
+    // covered here as plain unit tests. The DB-backed branches (scoped
+    // lookup returns only that user's creds, broadcast-vs-discoverable
+    // selection driven by `login_allow_broadcast`, unknown username ->
+    // empty allowCredentials with 200, discoverable finish round-trip via
+    // `identify_discoverable_authentication` / `finish_discoverable_authentication`,
+    // and the username-claim gate end-to-end) require a live Postgres
+    // instance and a webauthn ceremony (or a stored/replayed one) to
+    // exercise meaningfully. This crate has no `#[sqlx::test]`/ephemeral-DB
+    // harness wired up today (no other test in `gateway` hits a live DB —
+    // see `db.rs`'s and `rate_limit.rs`'s test modules, which are all
+    // pure/in-memory), and no Postgres is available in this sandbox to add
+    // and validate one. Those scenarios are best covered as gateway.rs
+    // integration/e2e coverage (following the shell-script pattern under
+    // `tests/e2e/*.sh`, run via `make up-test` per the caution-local-dev
+    // skill) — flagged here rather than left silently uncovered.
+
+    #[test]
+    fn normalizes_present_username() {
+        assert_eq!(
+            normalize_login_username(Some("  Alice  ".to_string())),
+            Some("alice".to_string())
+        );
+    }
+
+    #[test]
+    fn treats_empty_string_as_absent() {
+        assert_eq!(normalize_login_username(Some("".to_string())), None);
+    }
+
+    #[test]
+    fn treats_whitespace_only_as_absent() {
+        assert_eq!(normalize_login_username(Some("   ".to_string())), None);
+    }
+
+    #[test]
+    fn absent_stays_absent() {
+        assert_eq!(normalize_login_username(None), None);
+    }
+
+    #[test]
+    fn lowercases_mixed_case() {
+        assert_eq!(
+            normalize_login_username(Some("BoB".to_string())),
+            Some("bob".to_string())
+        );
+    }
+
+    // --- deserialize_security_keys -------------------------------------
+
+    #[test]
+    fn deserialize_security_keys_empty_list_is_ok() {
+        let result = deserialize_security_keys(&[]);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn deserialize_security_keys_rejects_garbage() {
+        let garbage = vec![b"not valid json".to_vec()];
+        assert!(deserialize_security_keys(&garbage).is_err());
     }
 }

@@ -114,6 +114,14 @@ async fn main() -> Result<()> {
     let host_key = load_or_generate_host_key(&config.ssh_host_key_path)
         .context("Failed to load SSH host key")?;
 
+    // Kill-switch for legacy credential-broadcast login (see AppState::login_allow_broadcast
+    // doc comment). Read once at startup — toggling requires an env var change + restart.
+    let login_allow_broadcast = std::env::var("LOGIN_ALLOW_BROADCAST")
+        .ok()
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(true);
+    tracing::info!("login_allow_broadcast = {}", login_allow_broadcast);
+
     let internal_service_secret = std::env::var("INTERNAL_SERVICE_SECRET").ok();
     if internal_service_secret.is_some() {
         tracing::info!("Internal service authentication enabled");
@@ -135,6 +143,7 @@ async fn main() -> Result<()> {
         session_timeout_hours: config.session_timeout_hours,
         internal_service_secret: internal_service_secret.clone(),
         csrf_secret: config.csrf_secret.clone(),
+        login_allow_broadcast,
     };
 
     let rate_limiter = rate_limit::RateLimiter::new(100, 60);
@@ -257,6 +266,13 @@ async fn main() -> Result<()> {
             get(handlers::get_username_status_handler),
         )
         .route("/user/username", post(handlers::claim_username_handler))
+        // Added before (so innermost relative to) fido2_auth_middleware, so
+        // it runs AFTER auth has resolved AuthenticatedUserId — order of
+        // execution for an incoming request is sign -> auth -> gate -> handler.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware::username_claim_gate_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware::fido2_auth_middleware,
@@ -278,6 +294,10 @@ async fn main() -> Result<()> {
 
     let api_proxy = Router::new()
         .fallback(proxy::proxy_handler)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware::username_claim_gate_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware::fido2_auth_middleware,

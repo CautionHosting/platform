@@ -494,6 +494,58 @@ fn prompt_for_pin() -> Result<Option<String>> {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum PromptLineError {
+    #[error("failed to read input from stdin: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Prints `prompt`, reads a single non-empty trimmed line from stdin, and
+/// keeps re-prompting with `retry_message` until the user provides one.
+fn prompt_line(prompt: &str, retry_message: &str) -> Result<String, PromptLineError> {
+    prompt_line_from(&mut io::stdin().lock(), prompt, retry_message)
+}
+
+/// Testable core of [`prompt_line`]: reads non-empty trimmed lines from any
+/// `BufRead` instead of always going to real stdin.
+fn prompt_line_from<R: std::io::BufRead>(
+    reader: &mut R,
+    prompt: &str,
+    retry_message: &str,
+) -> Result<String, PromptLineError> {
+    loop {
+        print!("{}", prompt);
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        if reader.read_line(&mut input)? == 0 {
+            // EOF: nothing left to read, stop looping.
+            return Ok(String::new());
+        }
+        let trimmed = input.trim();
+
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+
+        println!("{}", retry_message);
+    }
+}
+
+/// Prompts for the username to log in with when `--username` was not passed.
+fn prompt_for_login_username() -> Result<String, PromptLineError> {
+    prompt_line("Username: ", "Username cannot be empty, please try again.")
+}
+
+/// Prompts for a new username when claiming one is required post-login
+/// (the `username_required` gate).
+fn prompt_for_claimed_username() -> Result<String, PromptLineError> {
+    prompt_line(
+        "Choose a username: ",
+        "Username cannot be empty, please try again.",
+    )
+}
+
 /// Wrapper that zeroizes the PIN string on drop.
 struct ZeroizePin(String);
 
@@ -696,6 +748,11 @@ enum Commands {
             help = "Use QR code for cross-device authentication (no local security key needed)"
         )]
         qr: bool,
+        #[arg(
+            long,
+            help = "Username to log in with (prompted interactively if omitted)"
+        )]
+        username: Option<String>,
     },
     #[command(about = "Logout and clear local session")]
     Logout,
@@ -1118,6 +1175,13 @@ struct LoginBeginResponse {
     session: String,
 }
 
+/// JSON body for `POST /auth/login/begin`. The CLI drives USB security keys
+/// directly (no conditional UI), so it always sends a username and gets a
+/// scoped `allowCredentials` back, per the HTTP contract.
+fn login_begin_request_body(username: &str) -> serde_json::Value {
+    serde_json::json!({ "username": username })
+}
+
 #[derive(Deserialize)]
 struct Fido2SignResponse {
     #[serde(rename = "publicKey")]
@@ -1281,6 +1345,14 @@ struct LegalAcceptanceRequiredError {
     code: String,
     document_type: String,
     message: Option<String>,
+}
+
+/// Body of the username-claim gate: `{"error":"username_required"}`, returned
+/// by any protected endpoint (except username status/claim and logout) while
+/// the authenticated user still has a placeholder username.
+#[derive(Debug, Deserialize)]
+struct UsernameRequiredError {
+    error: String,
 }
 
 struct StagedSource {
@@ -1700,9 +1772,12 @@ impl ApiClient {
     async fn api_error_message(&self, response: reqwest::Response) -> String {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        self.format_api_error(status, &body)
+    }
 
+    fn format_api_error(&self, status: reqwest::StatusCode, body: &str) -> String {
         if status == reqwest::StatusCode::FORBIDDEN {
-            if let Ok(payload) = serde_json::from_str::<LegalAcceptanceRequiredError>(&body) {
+            if let Ok(payload) = serde_json::from_str::<LegalAcceptanceRequiredError>(body) {
                 if payload.code == "legal_acceptance_required" {
                     let mut message = self.legal_acceptance_message(&payload.document_type);
                     if let Some(server_message) = payload.message {
@@ -1719,7 +1794,85 @@ impl ApiClient {
         if body.trim().is_empty() {
             format!("HTTP {}", status)
         } else {
-            body
+            body.to_string()
+        }
+    }
+
+    /// Whether `body` is the username-claim gate response
+    /// (`{"error":"username_required"}`) returned with HTTP 403.
+    fn is_username_required(status: reqwest::StatusCode, body: &str) -> bool {
+        status == reqwest::StatusCode::FORBIDDEN
+            && serde_json::from_str::<UsernameRequiredError>(body)
+                .map(|e| e.error == "username_required")
+                .unwrap_or(false)
+    }
+
+    /// Prompts for a username and claims it via `POST /user/username`
+    /// (a FIDO2-signed protected mutation), reprompting on 409 (taken).
+    async fn claim_username_interactively(&self, session_id: &str) -> Result<()> {
+        loop {
+            let username = prompt_for_claimed_username()?;
+            let body = serde_json::json!({ "username": username });
+
+            let response = self
+                .signed_post(session_id, "/user/username", &body)
+                .await?;
+
+            if response.status().is_success() {
+                println!("Username '{}' claimed.", username);
+                return Ok(());
+            }
+
+            if response.status() == reqwest::StatusCode::CONFLICT {
+                println!(
+                    "Username '{}' is already taken. Please choose another.",
+                    username
+                );
+                continue;
+            }
+
+            let error = self.api_error_message(response).await;
+            bail!("Failed to claim username: {}", error);
+        }
+    }
+
+    /// GETs `path` with the session header, transparently handling the
+    /// username-claim gate: on 403 `username_required`, prompts for and
+    /// claims a username, then retries the request once.
+    async fn get_protected_json<T: serde::de::DeserializeOwned>(
+        &self,
+        session_id: &str,
+        path: &str,
+        failure_context: &str,
+    ) -> Result<T> {
+        let mut gate_claimed = false;
+
+        loop {
+            let response = self
+                .client
+                .get(format!("{}{}", self.base_url, path))
+                .header("X-Session-ID", session_id)
+                .send()
+                .await?;
+
+            let status = response.status();
+            let body = response.text().await?;
+
+            if status.is_success() {
+                return Ok(serde_json::from_str(&body)?);
+            }
+
+            if !gate_claimed && Self::is_username_required(status, &body) {
+                gate_claimed = true;
+                self.claim_username_interactively(session_id).await?;
+                continue;
+            }
+
+            bail!(
+                "{}: {}",
+                failure_context,
+                self.format_api_error(status, &body)
+            );
         }
     }
 
@@ -1787,7 +1940,7 @@ impl ApiClient {
                 if self.qr {
                     self.login_qr().await?;
                 } else {
-                    self.login().await?;
+                    self.login(None).await?;
                 }
                 self.load_config()
             }
@@ -2603,10 +2756,15 @@ enclave "default" {{
         }
     }
 
-    async fn login(&self) -> Result<()> {
+    async fn login(&self, username: Option<String>) -> Result<()> {
         log_verbose(self.verbose, "Starting FIDO2 login...");
 
-        let (session_id, _expires_at) = self.perform_login().await?;
+        let username = match username {
+            Some(username) => username,
+            None => prompt_for_login_username()?,
+        };
+
+        let (session_id, _expires_at) = self.perform_login(&username).await?;
         println!("Login successful");
 
         match self.check_onboarding_status(&session_id).await {
@@ -2800,36 +2958,19 @@ enclave "default" {{
     }
 
     async fn check_onboarding_status(&self, session_id: &str) -> Result<UserStatus> {
-        let response = self
-            .client
-            .get(format!("{}/api/user/status", self.base_url))
-            .header("X-Session-ID", session_id)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error = self.api_error_message(response).await;
-            bail!("Failed to get user status: {}", error);
-        }
-
-        let status: UserStatus = response.json().await?;
-        Ok(status)
+        self.get_protected_json(session_id, "/api/user/status", "Failed to get user status")
+            .await
     }
 
     async fn primary_organization_id(&self, session_id: &str) -> Result<String> {
-        let orgs_response = self
-            .client
-            .get(format!("{}/api/organizations", self.base_url))
-            .header("X-Session-ID", session_id)
-            .send()
+        let orgs: Vec<Organization> = self
+            .get_protected_json(
+                session_id,
+                "/api/organizations",
+                "Failed to get organizations",
+            )
             .await?;
 
-        if !orgs_response.status().is_success() {
-            let error = self.api_error_message(orgs_response).await;
-            bail!("Failed to get organizations: {}", error);
-        }
-
-        let orgs: Vec<Organization> = orgs_response.json().await?;
         if orgs.is_empty() {
             bail!("No organizations found");
         }
@@ -2840,24 +2981,12 @@ enclave "default" {{
     async fn check_org_security_settings(&self, session_id: &str) -> Result<OrgSettings> {
         let org_id = self.primary_organization_id(session_id).await?;
 
-        // Get the first org's settings
-        let settings_response = self
-            .client
-            .get(format!(
-                "{}/api/organizations/{}/settings",
-                self.base_url, org_id
-            ))
-            .header("X-Session-ID", session_id)
-            .send()
-            .await?;
-
-        if !settings_response.status().is_success() {
-            let error = self.api_error_message(settings_response).await;
-            bail!("Failed to get security settings: {}", error);
-        }
-
-        let settings: OrgSettings = settings_response.json().await?;
-        Ok(settings)
+        self.get_protected_json(
+            session_id,
+            &format!("/api/organizations/{}/settings", org_id),
+            "Failed to get security settings",
+        )
+        .await
     }
 
     fn make_credential(
@@ -3129,15 +3258,18 @@ enclave "default" {{
         }
     }
 
-    async fn perform_login(&self) -> Result<(String, String)> {
+    async fn perform_login(&self, username: &str) -> Result<(String, String)> {
         let cookie_store = reqwest::cookie::Jar::default();
         let client = reqwest::Client::builder()
             .cookie_provider(std::sync::Arc::new(cookie_store))
             .build()?;
 
         log_verbose(self.verbose, "Sending login begin request...");
+        // The CLI drives USB security keys directly and has no conditional UI,
+        // so it always sends a username and gets back a scoped allow-list.
         let response = client
             .post(format!("{}/auth/login/begin", self.base_url))
+            .json(&login_begin_request_body(username))
             .send()
             .await?;
 
@@ -8155,11 +8287,14 @@ pub async fn run() -> Result<(), RunError> {
         Commands::Register { alpha_code } => {
             client.register(&alpha_code).await.map_err(RunError::CommandDispatch)?;
         }
-        Commands::Login { qr } => {
+        Commands::Login { qr, username } => {
             if qr {
                 client.login_qr().await.map_err(RunError::CommandDispatch)?;
             } else {
-                client.login().await.map_err(RunError::CommandDispatch)?;
+                client
+                    .login(username)
+                    .await
+                    .map_err(RunError::CommandDispatch)?;
             }
         }
         Commands::Logout => {
@@ -8391,15 +8526,18 @@ mod tests {
     use super::openpgp;
     use super::{
         encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility, load_recipient_cert,
-        normalize_keyring, parse_env_assignments, resolve_local_build_command_from_dir,
-        resolve_procfile_build_command, resolve_quorum_parameters, ApiClient,
+        login_begin_request_body, normalize_keyring, parse_env_assignments, prompt_line_from,
+        resolve_local_build_command_from_dir, resolve_procfile_build_command,
+        resolve_quorum_parameters, ApiClient, Cli, Commands,
     };
     use caution_config::ConfigurationFile;
+    use clap::Parser;
     use keymaker_models::generate_quorum::GenerateQuorumResponse;
     use openpgp::cert::prelude::*;
     use openpgp::parse::Parse;
     use openpgp::serialize::SerializeInto;
     use std::collections::HashMap;
+    use std::io::Cursor;
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -8890,5 +9028,81 @@ containerfile: Missing.Containerfile\n",
         let result =
             ApiClient::classify_app_source_refs(LS_REMOTE, "1111111", Some(""));
         assert_eq!(result, Err("".to_string()));
+    }
+
+    // --- WebAuthn phase 1: `caution login --username` -------------------
+
+    #[test]
+    fn login_parses_username_flag() {
+        let cli = Cli::try_parse_from(["caution", "login", "--username", "alice"]).unwrap();
+        match cli.command {
+            Commands::Login { qr, username } => {
+                assert!(!qr);
+                assert_eq!(username.as_deref(), Some("alice"));
+            }
+            other => panic!("expected Commands::Login, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn login_without_username_flag_leaves_it_unset_for_interactive_prompt() {
+        let cli = Cli::try_parse_from(["caution", "login"]).unwrap();
+        match cli.command {
+            Commands::Login { qr, username } => {
+                assert!(!qr);
+                // `login()` falls back to `prompt_for_login_username()` when this is `None`.
+                assert_eq!(username, None);
+            }
+            other => panic!("expected Commands::Login, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn login_username_flag_combines_with_qr() {
+        let cli = Cli::try_parse_from(["caution", "login", "--qr", "--username", "bob"]).unwrap();
+        match cli.command {
+            Commands::Login { qr, username } => {
+                assert!(qr);
+                assert_eq!(username.as_deref(), Some("bob"));
+            }
+            other => panic!("expected Commands::Login, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn prompt_line_from_returns_typed_line() {
+        let mut input = Cursor::new(b"carol\n".to_vec());
+        let username = prompt_line_from(&mut input, "Username: ", "cannot be empty").unwrap();
+        assert_eq!(username, "carol");
+    }
+
+    #[test]
+    fn prompt_line_from_trims_whitespace() {
+        let mut input = Cursor::new(b"  dave  \n".to_vec());
+        let username = prompt_line_from(&mut input, "Username: ", "cannot be empty").unwrap();
+        assert_eq!(username, "dave");
+    }
+
+    #[test]
+    fn prompt_line_from_reprompts_on_blank_lines() {
+        // Two blank lines, then a real answer: simulates the user hitting
+        // Enter accidentally before typing a username.
+        let mut input = Cursor::new(b"\n\nerin\n".to_vec());
+        let username = prompt_line_from(&mut input, "Username: ", "cannot be empty").unwrap();
+        assert_eq!(username, "erin");
+    }
+
+    #[test]
+    fn login_begin_request_body_carries_username() {
+        let body = login_begin_request_body("frank");
+        assert_eq!(body, serde_json::json!({ "username": "frank" }));
+    }
+
+    #[test]
+    fn login_begin_request_body_does_not_leak_other_fields() {
+        let body = login_begin_request_body("grace");
+        let obj = body.as_object().unwrap();
+        assert_eq!(obj.len(), 1);
+        assert_eq!(obj.get("username").and_then(|v| v.as_str()), Some("grace"));
     }
 }
