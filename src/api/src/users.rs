@@ -104,7 +104,8 @@ pub async fn update_current_user(
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(serde_json::json!({
-                    "error": crate::onboarding::email_verification_throttled_message(retry_after),
+                    "success": false,
+                    "message": crate::onboarding::email_verification_throttled_message(retry_after),
                 })),
             )
                 .into_response());
@@ -142,8 +143,7 @@ pub async fn update_current_user(
                  email = NULL,
                  email_verified_at = NULL,
                  email_verification_token = NULL,
-                 email_verification_token_expires_at = NULL,
-                 email_verification_sent_at = NULL
+                 email_verification_token_expires_at = NULL
              WHERE id = $2
              RETURNING id,
                        username,
