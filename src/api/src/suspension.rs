@@ -1,12 +1,12 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{cloud_credentials, deployment, ec2, metering, AppState};
+use crate::{AppState, cloud_credentials, deployment, ec2, metering};
 
 /// Helper: call the internal unsuspend endpoint (used after credit purchase/auto-topup).
 pub async fn call_internal_unsuspend(state: &AppState, org_id: Uuid) -> Result<(), String> {
@@ -68,10 +68,10 @@ pub async fn suspend_managed_resources(
 
         if let Some(creds) = aws_creds {
             let ec2 = ec2::Ec2Client::new(&creds);
-            let tag_filter = ec2::Filter::new("tag:Name", &[resource_name.as_str()]);
-            let state_filter = ec2::Filter::new("instance-state-name", &["running"]);
+            let resource_id_tag = resource_id.to_string();
+            let filters = instance_lookup_filters(&resource_id_tag, "running");
 
-            match ec2.describe_instances(&[tag_filter, state_filter]).await {
+            match ec2.describe_instances(&filters).await {
                 Ok(instances) if !instances.is_empty() => {
                     let ids: Vec<String> =
                         instances.iter().map(|i| i.instance_id.clone()).collect();
@@ -164,10 +164,10 @@ pub async fn suspend_org_resources(
 
         if let Some(creds) = aws_creds {
             let ec2 = ec2::Ec2Client::new(&creds);
-            let tag_filter = ec2::Filter::new("tag:Name", &[resource_name.as_str()]);
-            let state_filter = ec2::Filter::new("instance-state-name", &["running"]);
+            let resource_id_tag = resource_id.to_string();
+            let filters = instance_lookup_filters(&resource_id_tag, "running");
 
-            match ec2.describe_instances(&[tag_filter, state_filter]).await {
+            match ec2.describe_instances(&filters).await {
                 Ok(instances) if !instances.is_empty() => {
                     let ids: Vec<String> =
                         instances.iter().map(|i| i.instance_id.clone()).collect();
@@ -265,10 +265,10 @@ pub async fn unsuspend_org_resources(
 
         if let Some(creds) = aws_creds {
             let ec2 = ec2::Ec2Client::new(&creds);
-            let tag_filter = ec2::Filter::new("tag:Name", &[resource_name.as_str()]);
-            let state_filter = ec2::Filter::new("instance-state-name", &["stopped"]);
+            let resource_id_tag = resource_id.to_string();
+            let filters = instance_lookup_filters(&resource_id_tag, "stopped");
 
-            match ec2.describe_instances(&[tag_filter, state_filter]).await {
+            match ec2.describe_instances(&filters).await {
                 Ok(instances) if !instances.is_empty() => {
                     let ids: Vec<String> =
                         instances.iter().map(|i| i.instance_id.clone()).collect();
@@ -352,6 +352,13 @@ pub async fn unsuspend_org_resources(
     })))
 }
 
+fn instance_lookup_filters(resource_id: &str, instance_state: &str) -> [ec2::Filter; 2] {
+    [
+        ec2::Filter::new("tag:ResourceId", &[resource_id]),
+        ec2::Filter::new("instance-state-name", &[instance_state]),
+    ]
+}
+
 /// Helper: get AWS credentials for a resource (managed on-prem or platform default).
 pub async fn get_aws_credentials_for_resource(
     state: &AppState,
@@ -414,4 +421,23 @@ pub async fn get_aws_credentials_for_resource(
         secret_access_key,
         region,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_lookup_filters_target_resource_id_tag_not_name_tag() {
+        let filters = instance_lookup_filters("8c93ce84-8e77-47a3-bb0c-7f568ef3aa1a", "running");
+
+        assert_eq!(filters.len(), 2);
+        assert_eq!(filters[0].name, "tag:ResourceId");
+        assert_eq!(
+            filters[0].values,
+            vec!["8c93ce84-8e77-47a3-bb0c-7f568ef3aa1a"]
+        );
+        assert_eq!(filters[1].name, "instance-state-name");
+        assert_eq!(filters[1].values, vec!["running"]);
+    }
 }
