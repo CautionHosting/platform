@@ -4,7 +4,7 @@
 <template>
   <AuthLayout
     :login-loading="loginLoading"
-    @login="handleLogin"
+    @login="onHeaderLogin"
   >
     <template #access-text>
       Email
@@ -184,6 +184,15 @@ export default {
       await handleLogin(loginUsername.value.trim());
     }
 
+    // The header/footer "Log in" link is reachable from the register form.
+    // Switch into login mode first so a failed attempt (e.g. a non-resident
+    // key with no username yet) renders its error in the login view instead
+    // of appearing to come from the register form the user was just on.
+    async function onHeaderLogin() {
+      isLoginMode.value = true;
+      await handleLogin();
+    }
+
     return {
       authenticated,
       loading,
@@ -198,6 +207,7 @@ export default {
       handleLogin,
       onRegister,
       onLogin,
+      onHeaderLogin,
     };
   },
 };
