@@ -15,8 +15,20 @@
       <div v-if="!authenticated" class="login-container">
         <h2 class="login-title">Welcome back</h2>
 
+        <div class="register-field">
+          <input
+            v-model="username"
+            type="text"
+            placeholder="Username (optional)"
+            class="register-input"
+            autocomplete="username webauthn"
+            :disabled="loading"
+            @keyup.enter="() => handleLogin(username)"
+          />
+        </div>
+
         <button
-          @click="handleLogin"
+          @click="() => handleLogin(username)"
           :disabled="loading"
           class="btn-dark btn login-btn"
         >
@@ -46,7 +58,7 @@
 </template>
 
 <script>
-import { onMounted } from "vue";
+import { onMounted, ref } from "vue";
 import AuthLayout from "../components/AuthLayout.vue";
 import { useWebAuthn } from "../composables/useWebAuthn.js";
 
@@ -59,6 +71,7 @@ export default {
     session: String,
   },
   setup(props) {
+    const username = ref("");
     const {
       authenticated,
       loading,
@@ -78,6 +91,7 @@ export default {
     });
 
     return {
+      username,
       authenticated,
       loading,
       loginLoading,
