@@ -533,8 +533,30 @@ fn prompt_line_from<R: std::io::BufRead>(
 }
 
 /// Prompts for the username to log in with when `--username` was not passed.
+/// Unlike [`prompt_for_claimed_username`], an empty line here is valid input
+/// (not just EOF): leaving it blank opts into the discoverable/broadcast
+/// login path for accounts that don't have a username yet.
 fn prompt_for_login_username() -> Result<String, PromptLineError> {
-    prompt_line("Username: ", "Username cannot be empty, please try again.")
+    prompt_optional_line("Username (leave blank if you don't have one): ")
+}
+
+/// Reads a single trimmed line from stdin, returning it as-is (including
+/// empty). No retry loop: an empty line is a valid answer here.
+fn prompt_optional_line(prompt: &str) -> Result<String, PromptLineError> {
+    prompt_optional_line_from(&mut io::stdin().lock(), prompt)
+}
+
+/// Testable core of [`prompt_optional_line`].
+fn prompt_optional_line_from<R: std::io::BufRead>(
+    reader: &mut R,
+    prompt: &str,
+) -> Result<String, PromptLineError> {
+    print!("{}", prompt);
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    reader.read_line(&mut input)?;
+    Ok(input.trim().to_string())
 }
 
 /// Prompts for a new username when claiming one is required post-login
@@ -8527,7 +8549,8 @@ mod tests {
     use super::{
         encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility, load_recipient_cert,
         login_begin_request_body, normalize_keyring, parse_env_assignments, prompt_line_from,
-        resolve_local_build_command_from_dir, resolve_procfile_build_command,
+        prompt_optional_line_from, resolve_local_build_command_from_dir,
+        resolve_procfile_build_command,
         resolve_quorum_parameters, ApiClient, Cli, Commands,
     };
     use caution_config::ConfigurationFile;
@@ -9090,6 +9113,30 @@ containerfile: Missing.Containerfile\n",
         let mut input = Cursor::new(b"\n\nerin\n".to_vec());
         let username = prompt_line_from(&mut input, "Username: ", "cannot be empty").unwrap();
         assert_eq!(username, "erin");
+    }
+
+    #[test]
+    fn prompt_optional_line_from_returns_typed_line() {
+        let mut input = Cursor::new(b"frank\n".to_vec());
+        let username = prompt_optional_line_from(&mut input, "Username: ").unwrap();
+        assert_eq!(username, "frank");
+    }
+
+    #[test]
+    fn prompt_optional_line_from_accepts_blank_line_on_first_try() {
+        // A plain Enter keypress (not just EOF) must resolve to an empty
+        // string immediately — this is the legacy/no-username login path,
+        // and it must not loop asking the user to try again.
+        let mut input = Cursor::new(b"\n".to_vec());
+        let username = prompt_optional_line_from(&mut input, "Username: ").unwrap();
+        assert_eq!(username, "");
+    }
+
+    #[test]
+    fn prompt_optional_line_from_accepts_immediate_eof() {
+        let mut input = Cursor::new(b"".to_vec());
+        let username = prompt_optional_line_from(&mut input, "Username: ").unwrap();
+        assert_eq!(username, "");
     }
 
     #[test]
