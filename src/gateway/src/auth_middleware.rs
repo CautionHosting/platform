@@ -558,10 +558,13 @@ pub async fn fido2_auth_middleware(
 }
 
 /// Paths exempt from the username-claim gate below: claiming/checking your
-/// username obviously has to work before you've claimed one, and logout must
-/// always work so a stuck placeholder account isn't also stuck logged in.
+/// username obviously has to work before you've claimed one, logout must
+/// always work so a stuck placeholder account isn't also stuck logged in,
+/// and `/user/status` must work because the frontend's auth check hits it
+/// before it can even render the account page to prompt for a username —
+/// gating it would make gated users look logged-out forever.
 fn username_gate_exempt_path(path: &str) -> bool {
-    path == "/user/username" || path == "/auth/logout"
+    path == "/user/username" || path == "/auth/logout" || path == "/user/status"
 }
 
 /// Enforces the Phase 1 "username claimed" migration gate: once a user is
@@ -1082,6 +1085,7 @@ mod tests {
     fn username_gate_exempt_paths_allow_claim_status_and_logout() {
         assert!(username_gate_exempt_path("/user/username"));
         assert!(username_gate_exempt_path("/auth/logout"));
+        assert!(username_gate_exempt_path("/user/status"));
     }
 
     #[test]
