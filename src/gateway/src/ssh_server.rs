@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use anyhow::{bail, Context, Result};
-use futures::StreamExt;
 use bytes::Bytes;
+use futures::StreamExt;
 use russh::keys::{PrivateKey, PublicKey, PublicKeyBase64};
 use russh::server::{Auth, Msg, Server, Session};
 use russh::{Channel, ChannelId};
@@ -102,6 +102,19 @@ fn public_key_line(public_key: &PublicKey) -> String {
         public_key.algorithm(),
         public_key.public_key_base64()
     )
+}
+
+fn deploy_progress_started_message(milestone: &str) -> String {
+    format!("remote: [ ] {milestone}\n")
+}
+
+fn deploy_progress_completed_message(milestone: &str) -> String {
+    format!("remote: [x] {milestone}\n")
+}
+
+#[cfg(test)]
+fn contains_non_line_terminal_control(message: &str) -> bool {
+    message.chars().any(|ch| ch.is_control() && ch != '\n')
 }
 
 impl russh::server::Handler for SshSession {
@@ -609,7 +622,10 @@ async fn handle_git_push(
                         Ok(0) => break,
                         Ok(n) => {
                             tracing::debug!("Git stdout: {} bytes", n);
-                            if let Err(e) = handle.data(channel, Bytes::copy_from_slice(&buf[..n])).await {
+                            if let Err(e) = handle
+                                .data(channel, Bytes::copy_from_slice(&buf[..n]))
+                                .await
+                            {
                                 tracing::error!("Failed to send git stdout to SSH: {:?}", e);
                                 break;
                             }
@@ -864,15 +880,14 @@ async fn handle_git_push(
             status: Option<u16>,
         }
 
-        // Stream the response to the SSH client with spinner animation for milestones
+        // Stream line-oriented deployment progress to the SSH client. Keep this
+        // output free of carriage returns and other terminal controls so Git can
+        // pass it through in versions that reject non-color terminal escapes.
         let mut stream = response.bytes_stream();
         let mut last_line = String::new();
         let mut buffer = String::new();
         let mut current_milestone: Option<String> = None;
-        let mut spinner_stop_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
         let mut stream_reported_error = false;
-
-        let spinner_frames = ["⣼", "⣹", "⢻", "⠿", "⡟", "⣏", "⣧", "⣶"];
 
         while let Some(chunk_result) = stream.next().await {
             match chunk_result {
@@ -887,72 +902,30 @@ async fn handle_git_push(
 
                         // Check if this line is JSON (the final result)
                         if line.starts_with('{') {
-                            // Stop any running spinner and mark previous milestone done
-                            if let Some(tx) = spinner_stop_tx.take() {
-                                let _ = tx.send(());
-                            }
                             if let Some(milestone) = current_milestone.take() {
-                                let done_msg = format!("\rremote: [x] {}\n", milestone);
+                                let done_msg = deploy_progress_completed_message(&milestone);
                                 let _ = session_handle
                                     .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
                                     .await;
                             }
                             last_line = line;
                         } else if let Some(step_msg) = line.strip_prefix("STEP:") {
-                            // New milestone starting - complete previous one first
-                            if let Some(tx) = spinner_stop_tx.take() {
-                                let _ = tx.send(());
-                            }
                             if let Some(prev_milestone) = current_milestone.take() {
-                                let done_msg = format!("\rremote: [x] {}\n", prev_milestone);
+                                let done_msg = deploy_progress_completed_message(&prev_milestone);
                                 let _ = session_handle
                                     .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
                                     .await;
                             }
 
-                            // Extract milestone text and start spinner
                             let milestone_text = step_msg.to_string();
-                            current_milestone = Some(milestone_text.clone());
-
-                            // Start spinner for this milestone
-                            let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
-                            spinner_stop_tx = Some(stop_tx);
-
-                            let session_handle_clone = session_handle.clone();
-                            let milestone_for_spinner = milestone_text.clone();
-                            tokio::spawn(async move {
-                                let mut frame_idx = 0;
-                                let mut interval =
-                                    tokio::time::interval(std::time::Duration::from_millis(120));
-                                interval.set_missed_tick_behavior(
-                                    tokio::time::MissedTickBehavior::Skip,
-                                );
-
-                                loop {
-                                    tokio::select! {
-                                        _ = &mut stop_rx => break,
-                                        _ = interval.tick() => {
-                                            let frame_msg = format!("\rremote: {} {}", spinner_frames[frame_idx], milestone_for_spinner);
-                                            let _ = session_handle_clone.extended_data(channel, 1, Bytes::from(frame_msg.as_bytes().to_vec())).await;
-                                            frame_idx = (frame_idx + 1) % spinner_frames.len();
-                                        }
-                                    }
-                                }
-                            });
-
-                            // Show initial state
-                            let initial_msg =
-                                format!("remote: {} {}", spinner_frames[0], milestone_text);
+                            let step_msg = deploy_progress_started_message(&milestone_text);
                             let _ = session_handle
-                                .extended_data(channel, 1, Bytes::from(initial_msg.into_bytes()))
+                                .extended_data(channel, 1, Bytes::from(step_msg.into_bytes()))
                                 .await;
+                            current_milestone = Some(milestone_text);
                         } else if !line.is_empty() {
-                            // Plain message or error - stop spinner and show
-                            if let Some(tx) = spinner_stop_tx.take() {
-                                let _ = tx.send(());
-                            }
                             if let Some(milestone) = current_milestone.take() {
-                                let done_msg = format!("\rremote: [x] {}\n", milestone);
+                                let done_msg = deploy_progress_completed_message(&milestone);
                                 let _ = session_handle
                                     .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
                                     .await;
@@ -968,9 +941,6 @@ async fn handle_git_push(
                     }
                 }
                 Err(e) => {
-                    if let Some(tx) = spinner_stop_tx.take() {
-                        let _ = tx.send(());
-                    }
                     tracing::error!("Error reading deployment stream: {}", e);
                     let error_msg = format!("remote: error: Stream error: {}\n", e);
                     let _ = session_handle
@@ -984,11 +954,8 @@ async fn handle_git_push(
         }
 
         // Handle any remaining content in buffer
-        if let Some(tx) = spinner_stop_tx.take() {
-            let _ = tx.send(());
-        }
         if let Some(milestone) = current_milestone.take() {
-            let done_msg = format!("\rremote: [x] {}\n", milestone);
+            let done_msg = deploy_progress_completed_message(&milestone);
             let _ = session_handle
                 .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
                 .await;
@@ -1066,13 +1033,37 @@ async fn handle_git_push(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_pushed_branch_ref, resource_state_allows_noop_redeploy, PushedBranchSelection,
-        ZERO_SHA1,
+        contains_non_line_terminal_control, deploy_progress_completed_message,
+        deploy_progress_started_message, parse_pushed_branch_ref,
+        resource_state_allows_noop_redeploy, PushedBranchSelection, ZERO_SHA1,
     };
 
     const OLD_SHA: &str = "1111111111111111111111111111111111111111";
     const MAIN_SHA: &str = "2222222222222222222222222222222222222222";
     const FEATURE_SHA: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    #[test]
+    fn deploy_progress_messages_are_git_safe_line_output() {
+        let messages = [
+            deploy_progress_started_message("Building enclave"),
+            deploy_progress_completed_message("Building enclave"),
+        ];
+
+        for message in messages {
+            assert!(
+                message.starts_with("remote: "),
+                "git progress should remain remote-prefixed: {message:?}"
+            );
+            assert!(
+                message.ends_with('\n'),
+                "git progress should be line-oriented: {message:?}"
+            );
+            assert!(
+                !contains_non_line_terminal_control(&message),
+                "git progress must not contain carriage returns or terminal escape controls: {message:?}"
+            );
+        }
+    }
 
     #[test]
     fn public_key_line_fingerprints_to_openssh_value() {
