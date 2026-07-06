@@ -14,6 +14,10 @@
 #      {"error":"username_required"} on a protected route
 #   5. claiming a username via POST /user/username succeeds (gate-exempt)
 #   6. after claiming, the same protected route is no longer gated (200)
+#   7. /auth/login/begin with a KNOWN username -> allowCredentials contains
+#      only that user's own credential (scoped, not broadcast)
+#   8. with LOGIN_ALLOW_BROADCAST=false, no-username begin -> empty
+#      allowCredentials + conditional mediation (discoverable, not broadcast)
 #
 # The full assertion round-trip (scoped/broadcast/discoverable finish) needs a
 # WebAuthn authenticator and is covered by the manual Chrome-virtual-authenticator
@@ -102,6 +106,54 @@ STEP_NUM=6
 AFTER=$(curl -s -o /dev/null -w '%{http_code}' "$GATEWAY_URL/passkeys" -H "X-Session-ID: $SESSION_ID")
 [ "$AFTER" = 200 ] || step_fail "protected route still HTTP $AFTER after claim (want 200)"
 step_pass "Protected route reachable (200) after claiming username"
+
+# ── Step 7: scoped begin with a KNOWN username -> only that user's cred ──
+STEP_NUM=7
+# The e2e user's dummy credential (from create_e2e_user) stores a placeholder
+# public_key that isn't valid SecurityKey JSON — fine for session-join tests,
+# but begin_login_handler's scoped path deserializes it for real to build the
+# challenge, so it 500s. Swap in a real (but unrelated/non-secret) SecurityKey
+# JSON fixture captured from a genuine dev registration; begin only needs a
+# structurally valid public key, never touches the authenticator itself.
+FIXTURE_PUBLIC_KEY='{"cred":{"cred_id":"KuSaAl0uO3_g-D5b5s5PUrHdgck","cred":{"type_":"ES256","key":{"EC_EC2":{"curve":"SECP256R1","x":"VTSRkyIs9sASIgLB2vWSu6xFyAvGf9lQ6GSHgiAmJlQ","y":"UFAsQBox-mvdfu4qaZYEwPKA0bmHWELgEfIUol8H0eQ"}}},"counter":0,"transports":null,"user_verified":true,"backup_eligible":true,"backup_state":true,"registration_policy":"preferred","extensions":{"cred_protect":"Ignored","hmac_create_secret":"NotRequested","appid":"NotRequested","cred_props":"Ignored"},"attestation":{"data":"None","metadata":"None"},"attestation_format":"none"}}'
+psql_q "UPDATE fido2_credentials SET public_key = '$FIXTURE_PUBLIC_KEY'::bytea WHERE user_id = '$USER_ID';" >/dev/null
+SCOPED_USERNAME=$(psql_q "SELECT username FROM users WHERE id = '$USER_ID';")
+BODY=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/login/begin" \
+    -H 'Content-Type: application/json' \
+    -d "{\"username\":\"$SCOPED_USERNAME\"}")
+CODE=$(echo "$BODY" | tail -1)
+JSON=$(echo "$BODY" | sed '$d')
+[ "$CODE" = 200 ] || step_fail "known-username begin returned HTTP $CODE (want 200)"
+N=$(echo "$JSON" | jq '.publicKey.allowCredentials | length')
+[ "$N" = 1 ] || step_fail "known-username begin returned $N allowCredentials (want exactly 1, this user's own credential)"
+step_pass "Known username -> 200 with exactly that user's credential (scoped, not broadcast)"
+
+# ── Step 8: flag off -> no-username begin returns empty allowCredentials ─
+# plus conditional mediation. Restart the test gateway with the flag flipped,
+# then restore the default (true) so the container is left as up-test made it.
+STEP_NUM=8
+GATEWAY_EXTRA_ENV="-e LOGIN_ALLOW_BROADCAST=false" make run-gateway-test >/dev/null
+for i in $(seq 1 30); do
+    if curl -sf -o /dev/null "$GATEWAY_URL/health"; then break; fi
+    [ "$i" = 30 ] && step_fail "gateway never became healthy after LOGIN_ALLOW_BROADCAST=false restart"
+    sleep 1
+done
+BODY=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/login/begin")
+CODE=$(echo "$BODY" | tail -1)
+JSON=$(echo "$BODY" | sed '$d')
+[ "$CODE" = 200 ] || step_fail "flag-off no-username begin returned HTTP $CODE (want 200)"
+N=$(echo "$JSON" | jq '.publicKey.allowCredentials | length')
+[ "$N" = 0 ] || step_fail "flag-off no-username begin leaked $N allowCredentials (want 0 — broadcast must be off)"
+MEDIATION=$(echo "$JSON" | jq -r '.mediation')
+[ "$MEDIATION" = conditional ] || step_fail "flag-off no-username begin mediation was '$MEDIATION' (want conditional)"
+step_pass "LOGIN_ALLOW_BROADCAST=false -> no-username begin is discoverable (empty allowCredentials, conditional mediation)"
+
+make run-gateway-test >/dev/null
+for i in $(seq 1 30); do
+    if curl -sf -o /dev/null "$GATEWAY_URL/health"; then break; fi
+    [ "$i" = 30 ] && step_fail "gateway never became healthy after restoring default flag"
+    sleep 1
+done
 
 echo ""
 log "All $STEPS_PASSED steps passed ✓"

@@ -681,6 +681,7 @@ run-gateway-test: network
 		--env-file $(HOME)/.config/caution/.env \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
+		$(GATEWAY_EXTRA_ENV) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		caution-gateway
 	@echo "Gateway started on 127.0.0.1:8000 (HTTP) and 127.0.0.1:2222 (SSH)"

@@ -1198,8 +1198,10 @@ struct LoginBeginResponse {
 }
 
 /// JSON body for `POST /auth/login/begin`. The CLI drives USB security keys
-/// directly (no conditional UI), so it always sends a username and gets a
-/// scoped `allowCredentials` back, per the HTTP contract.
+/// directly (no conditional UI), so it always sends this field — but `username`
+/// may be an empty string (the user left the login prompt blank), which the
+/// server's `normalize_login_username` treats as absent, falling back to the
+/// broadcast/discoverable no-username path rather than a scoped `allowCredentials`.
 fn login_begin_request_body(username: &str) -> serde_json::Value {
     serde_json::json!({ "username": username })
 }
@@ -3288,7 +3290,9 @@ enclave "default" {{
 
         log_verbose(self.verbose, "Sending login begin request...");
         // The CLI drives USB security keys directly and has no conditional UI,
-        // so it always sends a username and gets back a scoped allow-list.
+        // so it always sends this field — but an empty `username` (blank login
+        // prompt, see prompt_for_login_username) opts into the no-username
+        // broadcast/discoverable path instead of a scoped allow-list.
         let response = client
             .post(format!("{}/auth/login/begin", self.base_url))
             .json(&login_begin_request_body(username))
