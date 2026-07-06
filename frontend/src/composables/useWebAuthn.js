@@ -171,7 +171,9 @@ export function useWebAuthn() {
         console.error("WebAuthn error:", credError);
         if (credError.name === "NotAllowedError") {
           throw new Error(
-            "Login failed. No matching credential was found. Make sure you are using the same authenticator you registered with. If you don't have an account yet, register first."
+            username && username.trim()
+              ? "Login failed. No matching credential was found. Make sure you are using the same authenticator you registered with. If you don't have an account yet, register first."
+              : "Login failed. No matching credential was found. If your passkey isn't a synced/resident credential, enter your username above and try again. If you don't have an account yet, register first."
           );
         }
         throw credError;
