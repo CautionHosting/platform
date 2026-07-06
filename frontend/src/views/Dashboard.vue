@@ -7,8 +7,10 @@
     :active-tab="activeTab"
     :show-title="false"
     :show-development-warning="!orgSettings.require_pin && !loadingOrgSettings"
+    :require-username="usernameIsPlaceholder"
     @tab-change="handleTabChange"
     @logout="logout"
+    @focus-username="focusUsernameInput"
   >
 
     <!-- Applications Tab -->
@@ -1219,7 +1221,7 @@ make build-cli
             <div class="account-settings-label">
               <p class="account-settings-description">
                 {{ usernameIsPlaceholder
-                  ? 'Choose a username. This can only be set once and cannot be changed afterward.'
+                  ? 'Choose a username to continue using Caution. This can only be set once and cannot be changed afterward.'
                   : 'Your username is permanent and cannot be changed.' }}
               </p>
             </div>
@@ -1229,6 +1231,7 @@ make build-cli
                 <div class="email-settings-row">
                   <input
                     id="accountUsername"
+                    ref="usernameInputEl"
                     v-model="usernameInput"
                     type="text"
                     placeholder="Enter a username"
@@ -1726,7 +1729,7 @@ make build-cli
 </template>
 
 <script>
-import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import DashboardLayout from "../components/DashboardLayout.vue";
 import AttestationModal from "../components/AttestationModal.vue";
 import { authFetch } from "../composables/useWebAuthn.js";
@@ -2451,6 +2454,14 @@ export default {
     const usernameInput = ref('');
     const savingUsername = ref(false);
     const usernameError = ref('');
+    const usernameInputEl = ref(null);
+
+    // Triggered by the action-required banner's "Set username" button. Runs
+    // unconditionally (not a watcher on activeTab) because clicking it while
+    // already on the account tab wouldn't otherwise change anything to react to.
+    const focusUsernameInput = () => {
+      nextTick(() => usernameInputEl.value?.focus());
+    };
 
     const emailSettingsStatus = computed(() => {
       if (!userEmail.value) {
@@ -4511,6 +4522,8 @@ export default {
       username,
       usernameIsPlaceholder,
       usernameInput,
+      usernameInputEl,
+      focusUsernameInput,
       savingUsername,
       usernameError,
       loadUsername,

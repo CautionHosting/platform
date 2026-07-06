@@ -149,6 +149,52 @@
   text-align: center;
 }
 
+.action-required-banner {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: var(--color-warning);
+  color: var(--color-white);
+  padding: 12px 20px;
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+.action-required-banner-content {
+  max-width: 1550px;
+  margin: 0 auto;
+  padding: 0 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.action-required-banner-icon {
+  flex-shrink: 0;
+}
+
+.action-required-banner-button {
+  background: var(--color-white);
+  color: var(--color-warning);
+  border: none;
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.action-required-banner-button:hover {
+  opacity: 0.85;
+}
+
+.sidebar-nav--disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
 /* ==========================================================================
    DESKTOP REQUIRED SCREEN (Mobile/Tablet Only)
    ========================================================================== */
