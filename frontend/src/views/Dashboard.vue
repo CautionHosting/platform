@@ -1224,7 +1224,7 @@ make build-cli
               </p>
             </div>
             <div class="account-settings-content">
-              <div v-if="usernameIsPlaceholder" class="form-group">
+              <div v-if="usernameIsPlaceholder" class="email-settings-controls">
                 <label class="sr-only" for="accountUsername">Username</label>
                 <div class="email-settings-row">
                   <input
@@ -1232,7 +1232,7 @@ make build-cli
                     v-model="usernameInput"
                     type="text"
                     placeholder="Enter a username"
-                    class="form-input"
+                    class="email-input"
                     :disabled="savingUsername"
                     @keyup.enter="saveUsername"
                   />
