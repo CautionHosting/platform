@@ -49,7 +49,7 @@ export async function authFetch(url, options = {}) {
   // Handle username_required gate: if 403 with username_required error, redirect to dashboard
   if (response.status === 403) {
     try {
-      const data = await response.json();
+      const data = await response.clone().json();
       if (data.error === 'username_required') {
         // Redirect to dashboard with account tab active (for username claim)
         window.location.href = '/#account';
@@ -162,10 +162,15 @@ export function useWebAuthn() {
       }
 
       delete publicKey.hints;
-      delete publicKey.mediation;
 
       let assertion;
       try {
+        // NOTE: modal (button-triggered) get. We deliberately do NOT forward
+        // the server's `mediation: "conditional"` here: conditional mediation
+        // shows no modal and silently waits for an autofill pick from an
+        // `autocomplete="... webauthn"` input, so passing it on a button click
+        // would hang with no UI. Real conditional-UI autofill (get() on mount,
+        // tied to the tagged input, with AbortController) is a separate feature.
         assertion = await navigator.credentials.get({ publicKey });
       } catch (credError) {
         console.error("WebAuthn error:", credError);
@@ -329,6 +334,7 @@ export function useWebAuthn() {
             attestationObject: uint8ArrayToBase64url(attestationObject),
             clientDataJSON: uint8ArrayToBase64url(clientDataJSON),
           },
+          clientExtensionResults: credential.getClientExtensionResults(),
           session: beginData.session,
         }),
       });

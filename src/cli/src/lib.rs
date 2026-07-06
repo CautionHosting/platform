@@ -762,6 +762,11 @@ enum Commands {
     Register {
         #[arg(long)]
         alpha_code: String,
+        #[arg(
+            long,
+            help = "Username to register with (prompted interactively if omitted)"
+        )]
+        username: Option<String>,
     },
     #[command(about = "Login to your Caution account")]
     Login {
@@ -1848,6 +1853,22 @@ impl ApiClient {
             }
 
             if response.status() == reqwest::StatusCode::CONFLICT {
+                let error = self.api_error_message(response).await;
+                // The gateway returns 409 for two distinct cases with the
+                // same status code: the chosen name is taken (retry with a
+                // different name), or the account already has a real
+                // username (e.g. a concurrent claim raced this one). Only
+                // the former is worth re-prompting for; looping on the
+                // latter would spin forever since no name would ever work.
+                // Match on the handler's `#[error(...)]` Display text
+                // (see UsernameClaimError in gateway/src/handlers.rs).
+                if error.contains("already set your username") {
+                    bail!(
+                        "Your account already has a username set: {}. Re-run the command that required a username.",
+                        error
+                    );
+                }
+
                 println!(
                     "Username '{}' is already taken. Please choose another.",
                     username
@@ -2688,7 +2709,7 @@ enclave "default" {{
         ])
     }
 
-    async fn register(&self, alpha_code: &str) -> Result<()> {
+    async fn register(&self, alpha_code: &str, username: &str) -> Result<()> {
         log_verbose(self.verbose, "Starting FIDO2 registration...");
         log_verbose(self.verbose, &format!("Target URL: {}", self.base_url));
 
@@ -2703,7 +2724,7 @@ enclave "default" {{
         );
         let response = client
             .post(format!("{}/auth/register/begin", self.base_url))
-            .json(&serde_json::json!({ "alpha_code": alpha_code }))
+            .json(&serde_json::json!({ "alpha_code": alpha_code, "username": username }))
             .send()
             .await
             .context("Failed to send registration begin request")?;
@@ -8314,8 +8335,20 @@ pub async fn run() -> Result<(), RunError> {
     log_verbose(cli.verbose, "API client ready");
 
     match cli.command {
-        Commands::Register { alpha_code } => {
-            client.register(&alpha_code).await.map_err(RunError::CommandDispatch)?;
+        Commands::Register {
+            alpha_code,
+            username,
+        } => {
+            let username = match username {
+                Some(u) if !u.trim().is_empty() => u,
+                Some(_) | None => prompt_for_claimed_username()
+                    .context("Failed to read username")
+                    .map_err(RunError::CommandDispatch)?,
+            };
+            client
+                .register(&alpha_code, &username)
+                .await
+                .map_err(RunError::CommandDispatch)?;
         }
         Commands::Login { qr, username } => {
             if qr {

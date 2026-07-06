@@ -1073,8 +1073,12 @@ fn deserialize_security_keys(public_keys: &[Vec<u8>]) -> Result<Vec<SecurityKey>
 
 /// Build a username-scoped `allowCredentials` challenge for a known username,
 /// or a discoverable decoy challenge for an unknown one — same shape either
-/// way, so the caller can't use this to enumerate usernames. Shared by the
-/// direct login-begin path and the QR cross-device login path.
+/// way, so the caller can't use this to enumerate usernames. A known username
+/// with zero registered credentials also takes the decoy path, since the
+/// scoped path never sets `mediation` while the decoy path always does —
+/// taking the scoped path with an empty list would otherwise be a
+/// distinguishing oracle. Shared by the direct login-begin path and the QR
+/// cross-device login path.
 async fn scoped_or_decoy_challenge(
     state: &AppState,
     username: &str,
@@ -1088,6 +1092,23 @@ async fn scoped_or_decoy_challenge(
                     anyhow::anyhow!("Failed to fetch credentials: {}", e)
                 })?;
             let allow_credentials = deserialize_security_keys(&public_keys)?;
+
+            if allow_credentials.is_empty() {
+                // Known username but zero registered credentials (e.g. a
+                // race with account deletion/credential removal): fall
+                // through to the same discoverable decoy path used for
+                // unknown usernames below. `start_securitykey_authentication`
+                // never sets `mediation`, while `start_discoverable_authentication`
+                // always sets `mediation: Conditional` — if we took the
+                // scoped path here with an empty list, the presence/absence
+                // of `mediation` would leak whether the username exists.
+                let (rcr, auth_state) =
+                    state.webauthn.start_discoverable_authentication().map_err(|e| {
+                        tracing::error!("Failed to start decoy authentication: {:?}", e);
+                        anyhow::anyhow!("Failed to start authentication: {}", e)
+                    })?;
+                return Ok((rcr, AuthState::Discoverable(auth_state)));
+            }
 
             tracing::debug!(
                 "Starting username-scoped authentication challenge with {} credentials",

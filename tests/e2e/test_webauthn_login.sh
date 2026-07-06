@@ -24,6 +24,12 @@
 #  10. QR cross-device login: /auth/qr-login/begin with an UNKNOWN username
 #      -> /auth/qr-login/authenticate returns empty allowCredentials (decoy,
 #      no enumeration oracle on the QR path either)
+#  11. /auth/register/begin without a `username` field -> 422 (username is a
+#      required field of RegisterBeginRequest; guards the CLI<->gateway
+#      contract that the CLI must send one)
+#  12. re-claiming a username on an already-claimed account -> 409 with the
+#      "already set your username" text the CLI matches on to break its
+#      claim-retry loop (distinct from the "name taken" 409)
 #
 # The full assertion round-trip (scoped/broadcast/discoverable finish) needs a
 # WebAuthn authenticator and is covered by the manual Chrome-virtual-authenticator
@@ -201,6 +207,34 @@ for i in $(seq 1 30); do
     [ "$i" = 30 ] && step_fail "gateway never became healthy after restoring default flag"
     sleep 1
 done
+
+# ── Step 11: register/begin requires a username field ────────────────
+STEP_NUM=11
+# Guards the CLI<->gateway contract: RegisterBeginRequest requires `username`
+# (no Option/default), so a begin body without it must be rejected by the Json
+# extractor (422), never silently accepted. If this regresses, `caution
+# register` (which now sends the field) would be the only thing keeping it honest.
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/auth/register/begin" \
+    -H 'Content-Type: application/json' -d '{"alpha_code":"nonexistent-code"}')
+[ "$CODE" = 422 ] || step_fail "register/begin without username returned HTTP $CODE (want 422 — username is required)"
+step_pass "register/begin without username -> 422 (username is a required field)"
+
+# ── Step 12: re-claim on an already-claimed account -> 409 (loop guard) ──
+STEP_NUM=12
+# The user from steps 4-6 already claimed a username. A second claim must
+# return 409 with the "already set your username" text that
+# claim_username_interactively (cli/src/lib.rs) matches on to STOP its retry
+# loop — otherwise the CLI would spin forever reprompting for a name that can
+# never succeed. This is a different 409 from "name taken" (which should loop).
+RECLAIM=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/user/username" \
+    -H "X-Session-ID: $SESSION_ID" -H 'Content-Type: application/json' \
+    -d '{"username":"reclaimattempt"}')
+CODE=$(echo "$RECLAIM" | tail -1)
+JSON=$(echo "$RECLAIM" | sed '$d')
+[ "$CODE" = 409 ] || step_fail "re-claim on already-claimed account returned HTTP $CODE (want 409); body: $JSON"
+echo "$JSON" | grep -qi "already set your username" \
+    || step_fail "re-claim body '$JSON' lacks the 'already set your username' text the CLI matches on"
+step_pass "Re-claim on already-claimed account -> 409 'already set your username' (CLI loop guard)"
 
 echo ""
 log "All $STEPS_PASSED steps passed ✓"
