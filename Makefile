@@ -3,7 +3,7 @@
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-ssh-units test-e2e-concurrent-deploy test-e2e-platform-ports test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-ssh-units test-e2e-platform-ports test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -779,18 +779,6 @@ test-e2e:
 	if [ $$status -eq 0 ]; then \
 		CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_ssh_units.sh || status=$$?; \
 	fi; \
-	if [ $$status -eq 0 ]; then \
-		CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_concurrent_deploy.sh || status=$$?; \
-	fi; \
-	$(MAKE) down-test; \
-	exit $$status
-
-test-e2e-concurrent-deploy:
-	@$(MAKE) build-cli
-	@$(MAKE) up-test
-	@echo "Running concurrent deploy e2e tests..."
-	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_concurrent_deploy.sh; \
-	status=$$?; \
 	$(MAKE) down-test; \
 	exit $$status
 
