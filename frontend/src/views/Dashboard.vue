@@ -3111,7 +3111,13 @@ export default {
 
     const loadCreditBalance = async () => {
       try {
-        const response = await authFetch('/api/billing/credits/balance');
+        // Polls every 30s (startBalancePolling); never the right trigger for the
+        // username-claim redirect — suppress it so a gated user isn't yanked to
+        // the account tab mid-action every poll. The primary status check owns
+        // that redirect.
+        const response = await authFetch('/api/billing/credits/balance', {
+          suppressGateRedirect: true,
+        });
         if (response.ok) {
           creditBalance.value = await response.json();
         }

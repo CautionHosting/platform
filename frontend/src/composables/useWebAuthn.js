@@ -28,7 +28,13 @@ export function getCsrfToken() {
   return match ? match[1] : null;
 }
 
-// Helper for authenticated API calls with CSRF protection
+// Helper for authenticated API calls with CSRF protection.
+//
+// `options.suppressGateRedirect` opts a call out of the automatic
+// username_required redirect below. Background/polling calls (e.g. the 30s
+// balance poll) set it so they don't hijack navigation out from under a user
+// who is mid-action on another tab; only user-initiated fetches should route
+// to the claim screen.
 export async function authFetch(url, options = {}) {
   const headers = options.headers || {};
 
@@ -47,7 +53,7 @@ export async function authFetch(url, options = {}) {
   });
 
   // Handle username_required gate: if 403 with username_required error, redirect to dashboard
-  if (response.status === 403) {
+  if (response.status === 403 && !options.suppressGateRedirect) {
     try {
       const data = await response.clone().json();
       if (data.error === 'username_required') {
