@@ -494,12 +494,17 @@ pub async fn execute_remote_build(
         .context("Failed to begin build reservation transaction")?;
 
     let app_lock_key = request.app_id.as_u128() as i64;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+    let is_locked: bool = sqlx::query("SELECT pg_try_advisory_xact_lock($1)")
         .bind(app_lock_key)
-        .execute(&mut *db_tx)
+        .fetch_one(&mut *db_tx)
         .await
         .context("Failed to acquire per-app build lock")?;
 
+    if !is_locked {
+        bail!("Deployment already locked for app: {}", request.app_name);
+    }
+
+    // NOTE: The above advisory lock should ensure we don't have an existing build.
     let existing = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM eif_builds WHERE app_id = $1 AND status IN ('pending', 'building')"
     )
