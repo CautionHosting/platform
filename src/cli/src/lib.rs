@@ -536,17 +536,38 @@ fn prompt_line_from<R: std::io::BufRead>(
 /// Unlike [`prompt_for_claimed_username`], an empty line here is valid input
 /// (not just EOF): leaving it blank opts into the discoverable/broadcast
 /// login path for accounts that don't have a username yet.
-fn prompt_for_login_username() -> Result<String, PromptLineError> {
-    prompt_optional_line("Username (leave blank if you don't have one): ")
+const LOGIN_USERNAME_PROMPT: &str = "Username (leave blank if you don't have one): ";
+
+#[derive(Debug, thiserror::Error)]
+enum LoginUsernameError {
+    #[error(
+        "Session expired and no username was provided. \
+         Re-authenticate with `caution login --username <name>`."
+    )]
+    NonInteractive,
+    #[error(transparent)]
+    Prompt(#[from] PromptLineError),
 }
 
-/// Reads a single trimmed line from stdin, returning it as-is (including
+/// Resolves the username used for login. Returns the explicitly provided
+/// username as-is; otherwise prompts (reading from `reader`) only when a human
+/// terminal is attached. Non-interactive callers with no username — e.g. an
+/// `ensure_authenticated` auto-relogin fired from a CI/cron invocation — get a
+/// fail-fast error instead of a blocking stdin read that would hang forever.
+fn resolve_login_username<R: std::io::BufRead>(
+    provided: Option<String>,
+    is_terminal: bool,
+    reader: &mut R,
+) -> Result<String, LoginUsernameError> {
+    match provided {
+        Some(username) => Ok(username),
+        None if is_terminal => Ok(prompt_optional_line_from(reader, LOGIN_USERNAME_PROMPT)?),
+        None => Err(LoginUsernameError::NonInteractive),
+    }
+}
+
+/// Reads a single trimmed line from `reader`, returning it as-is (including
 /// empty). No retry loop: an empty line is a valid answer here.
-fn prompt_optional_line(prompt: &str) -> Result<String, PromptLineError> {
-    prompt_optional_line_from(&mut io::stdin().lock(), prompt)
-}
-
-/// Testable core of [`prompt_optional_line`].
 fn prompt_optional_line_from<R: std::io::BufRead>(
     reader: &mut R,
     prompt: &str,
@@ -2804,10 +2825,11 @@ enclave "default" {{
     async fn login(&self, username: Option<String>) -> Result<()> {
         log_verbose(self.verbose, "Starting FIDO2 login...");
 
-        let username = match username {
-            Some(username) => username,
-            None => prompt_for_login_username()?,
-        };
+        let username = resolve_login_username(
+            username,
+            std::io::IsTerminal::is_terminal(&std::io::stdin()),
+            &mut std::io::stdin().lock(),
+        )?;
 
         let (session_id, _expires_at) = self.perform_login(&username).await?;
         println!("Login successful");
@@ -8593,9 +8615,9 @@ mod tests {
     use super::{
         encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility, load_recipient_cert,
         login_begin_request_body, normalize_keyring, parse_env_assignments, prompt_line_from,
-        prompt_optional_line_from, resolve_local_build_command_from_dir,
+        prompt_optional_line_from, resolve_local_build_command_from_dir, resolve_login_username,
         resolve_procfile_build_command,
-        resolve_quorum_parameters, ApiClient, Cli, Commands,
+        resolve_quorum_parameters, ApiClient, Cli, Commands, LoginUsernameError,
     };
     use caution_config::ConfigurationFile;
     use clap::Parser;
@@ -9181,6 +9203,32 @@ containerfile: Missing.Containerfile\n",
         let mut input = Cursor::new(b"".to_vec());
         let username = prompt_optional_line_from(&mut input, "Username: ").unwrap();
         assert_eq!(username, "");
+    }
+
+    #[test]
+    fn resolve_login_username_returns_provided_username_without_prompting() {
+        // An explicit --username wins regardless of terminal state; the reader
+        // must never be touched (empty input would otherwise yield "").
+        let mut input = Cursor::new(b"".to_vec());
+        let username =
+            resolve_login_username(Some("alice".to_string()), false, &mut input).unwrap();
+        assert_eq!(username, "alice");
+    }
+
+    #[test]
+    fn resolve_login_username_prompts_when_interactive() {
+        let mut input = Cursor::new(b"bob\n".to_vec());
+        let username = resolve_login_username(None, true, &mut input).unwrap();
+        assert_eq!(username, "bob");
+    }
+
+    #[test]
+    fn resolve_login_username_errors_non_interactive_instead_of_hanging() {
+        // The #3 regression guard: a headless auto-relogin (no username, no TTY)
+        // must fail fast rather than block on a stdin read that never returns.
+        let mut input = Cursor::new(b"".to_vec());
+        let err = resolve_login_username(None, false, &mut input).unwrap_err();
+        assert!(matches!(err, LoginUsernameError::NonInteractive));
     }
 
     #[test]
