@@ -37,6 +37,10 @@
 #      leak existence). Note this does NOT make the endpoint oracle-free: a known
 #      username WITH credentials is still distinguishable (non-empty
 #      allowCredentials, no mediation) — closing that is Phase 2 (HMAC decoys).
+#  14. POST /user/username with an INVALID username -> 400 (validation runs
+#      before the claim logic). Pins the contract the CLI's claim loop relies on:
+#      400 is a retryable validation error (reprompt), distinct from the 409
+#      taken/already-claimed cases.
 #
 # The full assertion round-trip (scoped/broadcast/discoverable finish) needs a
 # WebAuthn authenticator and is covered by the manual Chrome-virtual-authenticator
@@ -268,6 +272,23 @@ N=$(echo "$JSON" | jq '.publicKey.allowCredentials | length')
 MEDIATION=$(echo "$JSON" | jq -r '.mediation')
 [ "$MEDIATION" = conditional ] || step_fail "known-zero-cred begin mediation was '$MEDIATION' (want conditional — scoped path would omit it and leak existence)"
 step_pass "Known username with zero credentials -> uniform empty challenge (empty allowCredentials + conditional mediation, indistinguishable from unknown)"
+
+# ── Step 14: claiming an INVALID username -> 400 (CLI reprompt contract) ──
+STEP_NUM=14
+# validate_username runs before the claim/placeholder/taken logic, so an invalid
+# name (here "ab", below the 3-char minimum) returns 400. The CLI's claim loop
+# treats 400 as a RETRYABLE validation error (print message + reprompt) rather
+# than aborting the command; this pins that contract, distinct from the 409
+# (taken/already-claimed) cases. Mint a FRESH session — step 13 deleted the
+# earlier user's credential, so SESSION_ID no longer authenticates.
+LOGIN2=$(curl -sf -X POST "$GATEWAY_URL/auth/e2e-login" -H 'Content-Type: application/json')
+SESSION2=$(echo "$LOGIN2" | jq -r '.session_id')
+[ -n "$SESSION2" ] && [ "$SESSION2" != null ] || step_fail "e2e-login (step 14) returned no session"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/user/username" \
+    -H "X-Session-ID: $SESSION2" -H 'Content-Type: application/json' \
+    -d '{"username":"ab"}')
+[ "$CODE" = 400 ] || step_fail "invalid username claim returned HTTP $CODE (want 400 — the CLI relies on 400 being a retryable validation error, not a fatal abort)"
+step_pass "Invalid username claim -> 400 (retryable validation, distinct from 409 taken/claimed)"
 
 echo ""
 log "All $STEPS_PASSED steps passed ✓"
