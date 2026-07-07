@@ -30,6 +30,13 @@
 #  12. re-claiming a username on an already-claimed account -> 409 with the
 #      "already set your username" text the CLI matches on to break its
 #      claim-retry loop (distinct from the "name taken" 409)
+#  13. /auth/login/begin with a KNOWN, non-placeholder username that has ZERO
+#      credentials -> empty allowCredentials + conditional mediation, i.e. the
+#      SAME uniform empty challenge as an unknown username. Proves known-zero-cred
+#      is indistinguishable from unknown (the scoped path would omit mediation and
+#      leak existence). Note this does NOT make the endpoint oracle-free: a known
+#      username WITH credentials is still distinguishable (non-empty
+#      allowCredentials, no mediation) — closing that is Phase 2 (HMAC decoys).
 #
 # The full assertion round-trip (scoped/broadcast/discoverable finish) needs a
 # WebAuthn authenticator and is covered by the manual Chrome-virtual-authenticator
@@ -235,6 +242,32 @@ JSON=$(echo "$RECLAIM" | sed '$d')
 echo "$JSON" | grep -qi "already set your username" \
     || step_fail "re-claim body '$JSON' lacks the 'already set your username' text the CLI matches on"
 step_pass "Re-claim on already-claimed account -> 409 'already set your username' (CLI loop guard)"
+
+# ── Step 13: known username with ZERO credentials -> uniform empty challenge ──
+STEP_NUM=13
+# A REAL, non-placeholder user who happens to have zero registered credentials
+# (e.g. a race with credential/account removal) must return the SAME uniform
+# empty challenge as an unknown username — empty allowCredentials AND
+# `mediation: conditional` — rather than a scoped challenge (which never sets
+# mediation). If it took the scoped path, the presence/absence of `mediation`
+# would make known-zero-cred distinguishable from unknown. This only equalizes
+# the two EMPTY cases; a known user WITH credentials stays distinguishable
+# (that's the Phase 2 HMAC-decoy work, not asserted here). SCOPED_USERNAME is
+# the real user from steps 4-7; strip their credential to reach zero.
+psql_q "DELETE FROM fido2_credentials WHERE user_id = '$USER_ID';" >/dev/null
+LEFT=$(psql_q "SELECT count(*) FROM fido2_credentials WHERE user_id = '$USER_ID';")
+[ "$LEFT" = 0 ] || step_fail "test setup: user still has $LEFT credentials (want 0)"
+BODY=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/login/begin" \
+    -H 'Content-Type: application/json' \
+    -d "{\"username\":\"$SCOPED_USERNAME\"}")
+CODE=$(echo "$BODY" | tail -1)
+JSON=$(echo "$BODY" | sed '$d')
+[ "$CODE" = 200 ] || step_fail "known-zero-cred begin returned HTTP $CODE (want 200)"
+N=$(echo "$JSON" | jq '.publicKey.allowCredentials | length')
+[ "$N" = 0 ] || step_fail "known-zero-cred begin leaked $N allowCredentials (want 0 — must match the unknown-username empty challenge)"
+MEDIATION=$(echo "$JSON" | jq -r '.mediation')
+[ "$MEDIATION" = conditional ] || step_fail "known-zero-cred begin mediation was '$MEDIATION' (want conditional — scoped path would omit it and leak existence)"
+step_pass "Known username with zero credentials -> uniform empty challenge (empty allowCredentials + conditional mediation, indistinguishable from unknown)"
 
 echo ""
 log "All $STEPS_PASSED steps passed ✓"
