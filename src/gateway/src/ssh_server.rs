@@ -8,6 +8,7 @@ use russh::keys::{PrivateKey, PublicKey, PublicKeyBase64};
 use russh::server::{Auth, Msg, Server, Session};
 use russh::{Channel, ChannelId};
 use sqlx::PgPool;
+use std::time::Instant;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -105,11 +106,18 @@ fn public_key_line(public_key: &PublicKey) -> String {
 }
 
 fn deploy_progress_started_message(milestone: &str) -> String {
-    format!("remote: [ ] {milestone}\n")
+    format!("remote: {milestone}...")
 }
 
-fn deploy_progress_completed_message(milestone: &str) -> String {
-    format!("remote: [x] {milestone}\n")
+fn deploy_progress_completed_message(elapsed: std::time::Duration) -> String {
+    let duration_str = if elapsed.as_secs() >= 60 {
+        let mins = elapsed.as_secs() / 60;
+        let secs = elapsed.as_secs() % 60;
+        format!("{mins}m{secs}s")
+    } else {
+        format!("{}.{:01}s", elapsed.as_secs(), elapsed.subsec_millis() / 100)
+    };
+    format!(" Complete! ({duration_str})\n")
 }
 
 #[cfg(test)]
@@ -886,7 +894,7 @@ async fn handle_git_push(
         let mut stream = response.bytes_stream();
         let mut last_line = String::new();
         let mut buffer = String::new();
-        let mut current_milestone: Option<String> = None;
+        let mut current_milestone: Option<(String, Instant)> = None;
         let mut stream_reported_error = false;
 
         while let Some(chunk_result) = stream.next().await {
@@ -902,19 +910,25 @@ async fn handle_git_push(
 
                         // Check if this line is JSON (the final result)
                         if line.starts_with('{') {
-                            if let Some(milestone) = current_milestone.take() {
-                                let done_msg = deploy_progress_completed_message(&milestone);
-                                let _ = session_handle
-                                    .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
-                                    .await;
+                            if let Some((milestone, start_time)) = current_milestone.take() {
+                                let elapsed = start_time.elapsed();
+                                let done_msg = deploy_progress_completed_message(elapsed);
+                                if !done_msg.is_empty() {
+                                    let _ = session_handle
+                                        .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
+                                        .await;
+                                }
                             }
                             last_line = line;
                         } else if let Some(step_msg) = line.strip_prefix("STEP:") {
-                            if let Some(prev_milestone) = current_milestone.take() {
-                                let done_msg = deploy_progress_completed_message(&prev_milestone);
-                                let _ = session_handle
-                                    .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
-                                    .await;
+                            if let Some((prev_milestone, start_time)) = current_milestone.take() {
+                                let elapsed = start_time.elapsed();
+                                let done_msg = deploy_progress_completed_message(elapsed);
+                                if !done_msg.is_empty() {
+                                    let _ = session_handle
+                                        .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
+                                        .await;
+                                }
                             }
 
                             let milestone_text = step_msg.to_string();
@@ -922,13 +936,16 @@ async fn handle_git_push(
                             let _ = session_handle
                                 .extended_data(channel, 1, Bytes::from(step_msg.into_bytes()))
                                 .await;
-                            current_milestone = Some(milestone_text);
+                            current_milestone = Some((milestone_text, Instant::now()));
                         } else if !line.is_empty() {
-                            if let Some(milestone) = current_milestone.take() {
-                                let done_msg = deploy_progress_completed_message(&milestone);
-                                let _ = session_handle
-                                    .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
-                                    .await;
+                            if let Some((milestone, start_time)) = current_milestone.take() {
+                                let elapsed = start_time.elapsed();
+                                let done_msg = deploy_progress_completed_message(elapsed);
+                                if !done_msg.is_empty() {
+                                    let _ = session_handle
+                                        .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
+                                        .await;
+                                }
                             }
                             if line.starts_with("error:") {
                                 stream_reported_error = true;
@@ -954,11 +971,14 @@ async fn handle_git_push(
         }
 
         // Handle any remaining content in buffer
-        if let Some(milestone) = current_milestone.take() {
-            let done_msg = deploy_progress_completed_message(&milestone);
-            let _ = session_handle
-                .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
-                .await;
+        if let Some((milestone, start_time)) = current_milestone.take() {
+            let elapsed = start_time.elapsed();
+            let done_msg = deploy_progress_completed_message(elapsed);
+            if !done_msg.is_empty() {
+                let _ = session_handle
+                    .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
+                    .await;
+            }
         }
         if !buffer.is_empty() && buffer.starts_with('{') {
             last_line = buffer;
@@ -1044,25 +1064,51 @@ mod tests {
 
     #[test]
     fn deploy_progress_messages_are_git_safe_line_output() {
-        let messages = [
-            deploy_progress_started_message("Building enclave"),
-            deploy_progress_completed_message("Building enclave"),
-        ];
+        // Started message should have no newline (cursor stays on same line)
+        let started_msg = deploy_progress_started_message("Building enclave");
+        assert!(
+            started_msg.starts_with("remote: "),
+            "git progress should remain remote-prefixed: {started_msg:?}"
+        );
+        assert!(
+            !started_msg.contains('\n'),
+            "started message should NOT end with newline: {started_msg:?}"
+        );
+        assert!(
+            !contains_non_line_terminal_control(&started_msg),
+            "git progress must not contain carriage returns or terminal escape controls: {started_msg:?}"
+        );
 
-        for message in messages {
-            assert!(
-                message.starts_with("remote: "),
-                "git progress should remain remote-prefixed: {message:?}"
-            );
-            assert!(
-                message.ends_with('\n'),
-                "git progress should be line-oriented: {message:?}"
-            );
-            assert!(
-                !contains_non_line_terminal_control(&message),
-                "git progress must not contain carriage returns or terminal escape controls: {message:?}"
-            );
-        }
+        // Completed message includes duration and ends with newline
+        let elapsed = std::time::Duration::from_secs(2) + std::time::Duration::from_millis(300);
+        let completed_msg = deploy_progress_completed_message(elapsed);
+        assert!(
+            completed_msg.contains("Complete!"),
+            "completed message should contain 'Complete!': {completed_msg:?}"
+        );
+        assert!(
+            completed_msg.contains("(2.3s)"),
+            "completed message should include duration: {completed_msg:?}"
+        );
+        assert!(
+            completed_msg.ends_with('\n'),
+            "completed message should end with newline: {completed_msg:?}"
+        );
+    }
+
+    #[test]
+    fn deploy_progress_duration_format_minutes_and_seconds() {
+        // Under 1 minute: format as seconds
+        let msg = deploy_progress_completed_message(std::time::Duration::from_secs(45));
+        assert!(msg.contains("(45.0s)"));
+
+        // Over 1 minute: format as minutes and seconds
+        let msg = deploy_progress_completed_message(std::time::Duration::from_secs(125));
+        assert!(msg.contains("(2m5s)"));
+
+        // Zero duration
+        let msg = deploy_progress_completed_message(std::time::Duration::from_millis(100));
+        assert!(msg.contains("(0.1s)"));
     }
 
     #[test]
