@@ -71,7 +71,10 @@ pub async fn update_current_user(
     if payload.username.is_none() && payload.email.is_none() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "at least one field is required" })),
+            Json(serde_json::json!({
+                "success": false,
+                "message": "at least one field is required",
+            })),
         )
             .into_response());
     }
