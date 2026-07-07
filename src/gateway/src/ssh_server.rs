@@ -106,7 +106,7 @@ fn public_key_line(public_key: &PublicKey) -> String {
 }
 
 fn deploy_progress_started_message(milestone: &str) -> String {
-    format!("remote: {milestone}...")
+    format!("remote: {milestone}")
 }
 
 fn deploy_progress_completed_message(elapsed: std::time::Duration) -> String {
@@ -1065,7 +1065,8 @@ mod tests {
     #[test]
     fn deploy_progress_messages_are_git_safe_line_output() {
         // Started message should have no newline (cursor stays on same line)
-        let started_msg = deploy_progress_started_message("Building enclave");
+        // Note: The "..." is already part of the milestone text from the source
+        let started_msg = deploy_progress_started_message("Building enclave...");
         assert!(
             started_msg.starts_with("remote: "),
             "git progress should remain remote-prefixed: {started_msg:?}"
