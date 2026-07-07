@@ -484,12 +484,27 @@ pub async fn execute_remote_build(
     let eif_s3_key = format!("eifs/{}/{}.eif", request.org_id, cache_key);
     let procfile_hash = format!("{:x}", Sha256::digest(request.procfile_content.as_bytes()));
 
-    // 1. Check no active build exists for this app
+    // 1. Atomically reserve the single active-build slot for this app.
+    // A per-app transaction-scoped advisory lock serializes concurrent deploys so the
+    // check-then-insert below cannot race (two `git push` both passing the COUNT check).
+    // The lock is released automatically when the transaction commits or rolls back.
+    let mut db_tx = db
+        .begin()
+        .await
+        .context("Failed to begin build reservation transaction")?;
+
+    let app_lock_key = request.app_id.as_u128() as i64;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(app_lock_key)
+        .execute(&mut *db_tx)
+        .await
+        .context("Failed to acquire per-app build lock")?;
+
     let existing = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM eif_builds WHERE app_id = $1 AND status IN ('pending', 'building')"
     )
     .bind(request.app_id)
-    .fetch_one(db)
+    .fetch_one(&mut *db_tx)
     .await
     .context("Failed to check for existing builds")?;
 
@@ -497,7 +512,7 @@ pub async fn execute_remote_build(
         bail!(ACTIVE_BUILD_CONFLICT_MSG);
     }
 
-    // 2. Insert pending build row
+    // 2. Insert pending build row and commit, releasing the lock.
     sqlx::query(
         "INSERT INTO eif_builds (id, organization_id, app_id, user_id, commit_sha, procfile_hash, cache_key, builder_instance_type, status, started_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', NOW())"
@@ -510,9 +525,14 @@ pub async fn execute_remote_build(
     .bind(&procfile_hash)
     .bind(cache_key)
     .bind(instance_type)
-    .execute(db)
+    .execute(&mut *db_tx)
     .await
     .context("Failed to insert eif_builds row")?;
+
+    db_tx
+        .commit()
+        .await
+        .context("Failed to commit build reservation")?;
 
     // 2. Generate user-data and launch EC2 instance
     let helper_artifact =
