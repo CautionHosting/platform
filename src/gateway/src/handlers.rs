@@ -1095,16 +1095,23 @@ async fn scoped_or_decoy_challenge(
 
             if allow_credentials.is_empty() {
                 // Known username but zero registered credentials (e.g. a
-                // race with account deletion/credential removal): fall
-                // through to the same discoverable decoy path used for
-                // unknown usernames below. `start_securitykey_authentication`
-                // never sets `mediation`, while `start_discoverable_authentication`
-                // always sets `mediation: Conditional` — if we took the
-                // scoped path here with an empty list, the presence/absence
-                // of `mediation` would leak whether the username exists.
+                // race with account deletion/credential removal): return the
+                // same uniform empty challenge as an unknown username below,
+                // so these two cases are indistinguishable from each other.
+                // `start_securitykey_authentication` never sets `mediation`,
+                // while `start_discoverable_authentication` always sets
+                // `mediation: Conditional` — taking the scoped path here with
+                // an empty list would leave `mediation` absent and make
+                // known-zero-cred distinguishable from unknown.
+                //
+                // NOTE: this only equalizes the *empty* cases. A known
+                // username that HAS credentials still returns a non-empty
+                // `allowCredentials` with no `mediation`, which remains
+                // distinguishable — closing that enumeration oracle is Phase 2
+                // (synthesized HMAC decoys), not done here.
                 let (rcr, auth_state) =
                     state.webauthn.start_discoverable_authentication().map_err(|e| {
-                        tracing::error!("Failed to start decoy authentication: {:?}", e);
+                        tracing::error!("Failed to start empty challenge: {:?}", e);
                         anyhow::anyhow!("Failed to start authentication: {}", e)
                     })?;
                 return Ok((rcr, AuthState::Discoverable(auth_state)));
@@ -1126,12 +1133,14 @@ async fn scoped_or_decoy_challenge(
             Ok((rcr, AuthState::SecurityKey(auth_state)))
         }
         None => {
-            // Unknown username: no 404, no distinct shape — return an
-            // empty-allowCredentials challenge just like the discoverable
-            // path so an attacker can't distinguish "unknown" from "known".
+            // Unknown username: no 404, no distinct error — return the same
+            // uniform empty challenge as the discoverable path so "unknown" is
+            // indistinguishable from "known but zero credentials". This does
+            // NOT hide a known username that has credentials (that response is
+            // non-empty); eliminating that remaining oracle is Phase 2.
             let (rcr, auth_state) =
                 state.webauthn.start_discoverable_authentication().map_err(|e| {
-                    tracing::error!("Failed to start decoy authentication: {:?}", e);
+                    tracing::error!("Failed to start empty challenge: {:?}", e);
                     anyhow::anyhow!("Failed to start authentication: {}", e)
                 })?;
             Ok((rcr, AuthState::Discoverable(auth_state)))
@@ -1144,10 +1153,13 @@ async fn scoped_or_decoy_challenge(
 ///
 /// - `username` present & non-empty, and matches a user -> username-scoped
 ///   `allowCredentials` (that user's credentials only).
-/// - `username` present & non-empty, but no such user -> a normal challenge
-///   with EMPTY `allowCredentials` (discoverable) — never a 404. Returning a
-///   distinct response for unknown usernames would make this endpoint a
-///   username-enumeration oracle.
+/// - `username` present & non-empty, but no such user (or a known user with
+///   zero credentials) -> a normal challenge with EMPTY `allowCredentials`
+///   (discoverable) — never a 404. This makes "unknown" indistinguishable from
+///   "known but zero credentials", removing the crude status/shape oracle. It
+///   does NOT hide a known username that HAS credentials (non-empty
+///   `allowCredentials`, no mediation); closing that residual enumeration
+///   oracle via synthesized decoys is Phase 2.
 /// - `username` absent/empty:
 ///   - `login_allow_broadcast == true` (default) -> legacy broadcast:
 ///     `allowCredentials` = every credential in the DB, byte-for-byte
