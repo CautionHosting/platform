@@ -494,7 +494,7 @@ pub async fn execute_remote_build(
         .context("Failed to begin build reservation transaction")?;
 
     let app_lock_key = request.app_id.as_u128() as i64;
-    let is_locked: bool = sqlx::query("SELECT pg_try_advisory_xact_lock($1)")
+    let is_locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(app_lock_key)
         .fetch_one(&mut *db_tx)
         .await
