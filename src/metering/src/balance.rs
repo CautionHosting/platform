@@ -127,7 +127,7 @@ pub(crate) async fn check_balance_thresholds(state: &AppState, org_id: uuid::Uui
                 serde_json::json!({
                     "balance": format!("${:.2}", balance_cents as f64 / 100.0),
                     "amount": format!("${:.2}", balance_cents as f64 / 100.0),
-                    "add_credits_url": "https://caution.dev/settings/billing",
+                    "add_credits_url": crate::BILLING_URL,
                 }),
             )
             .await;
@@ -192,7 +192,7 @@ pub(crate) async fn suspend_fully_managed_org(state: &AppState, org_id: uuid::Uu
                 "suspension_notice",
                 serde_json::json!({
                     "reason": "credit_exhaustion",
-                    "add_credits_url": "https://caution.dev/settings/billing",
+                    "add_credits_url": crate::BILLING_URL,
                 }),
             )
             .await;
@@ -322,7 +322,7 @@ pub(crate) async fn trigger_auto_topup(
         "payment_failure",
         serde_json::json!({
             "reason": "auto_topup_failed",
-            "update_payment_url": "https://caution.dev/settings/billing",
+            "update_payment_url": crate::BILLING_URL,
         }),
     )
     .await;

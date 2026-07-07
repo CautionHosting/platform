@@ -20,6 +20,8 @@ use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 use uuid::Uuid;
 
+const BILLING_URL: &str = "https://caution.dev/#billing";
+
 struct AppError(anyhow::Error);
 
 impl IntoResponse for AppError {
@@ -952,7 +954,7 @@ fn generate_suspension_warning_email(data: &serde_json::Value) -> (String, Strin
         </p>
 
         <div style="text-align: center; margin: 30px 0;">
-            <a href="https://caution.dev/settings/billing"
+            <a href="{}"
                style="background-color: #e74c3c; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">
                 Update Payment Method
             </a>
@@ -970,6 +972,7 @@ fn generate_suspension_warning_email(data: &serde_json::Value) -> (String, Strin
         "#,
         amount,
         days_remaining,
+        BILLING_URL,
         html_email_footer()
     );
 
@@ -977,12 +980,12 @@ fn generate_suspension_warning_email(data: &serde_json::Value) -> (String, Strin
         "Your Services Will Be Suspended\n\n\
          We've been unable to collect payment of {} for your account.\n\n\
          Your running deployments will be suspended in {} days if payment is not received.\n\n\
-         Update your payment method at https://caution.dev/settings/billing\n\n\
+         Update your payment method at {}\n\n\
          Suspended instances are stopped but not destroyed. Once payment is received, \
          your services will be automatically restored.\n\n\
          --\n\
          Caution Team",
-        amount_raw, days_remaining
+        amount_raw, days_remaining, BILLING_URL
     );
 
     (subject, html_body, text_body)
@@ -1012,7 +1015,7 @@ fn generate_suspension_notice_email(data: &serde_json::Value) -> (String, String
         <p>Your data has <strong>not</strong> been deleted. Once payment is received, your services will be automatically restored.</p>
 
         <div style="text-align: center; margin: 30px 0;">
-            <a href="https://caution.dev/settings/billing"
+            <a href="{}"
                style="background-color: #27ae60; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">
                 Resolve Payment &amp; Restore Services
             </a>
@@ -1030,6 +1033,7 @@ fn generate_suspension_notice_email(data: &serde_json::Value) -> (String, String
         "#,
         amount,
         app_count,
+        BILLING_URL,
         html_email_footer()
     );
 
@@ -1038,10 +1042,10 @@ fn generate_suspension_notice_email(data: &serde_json::Value) -> (String, String
          Due to non-payment of {}, we have stopped {} running deployment(s).\n\n\
          Your data has NOT been deleted. Once payment is received, your services \
          will be automatically restored.\n\n\
-         Resolve payment at https://caution.dev/settings/billing\n\n\
+         Resolve payment at {}\n\n\
          --\n\
          Caution Team",
-        amount_raw, app_count
+        amount_raw, app_count, BILLING_URL
     );
 
     (subject, html_body, text_body)
@@ -1178,10 +1182,10 @@ mod tests {
         assert_eq!(subject, "Action Required: Your services will be suspended");
         assert!(html.contains("$25.00"));
         assert!(html.contains("4 days"));
-        assert!(html.contains("https://caution.dev/settings/billing"));
+        assert!(html.contains("https://caution.dev/#billing"));
         assert!(text.contains("$25.00"));
         assert!(text.contains("4 days"));
-        assert!(text.contains("https://caution.dev/settings/billing"));
+        assert!(text.contains("https://caution.dev/#billing"));
     }
 
     #[test]
@@ -1223,7 +1227,7 @@ mod tests {
         assert!(html.contains("$42.50"));
         assert!(html.contains("<strong>3</strong> running deployment(s)"));
         assert!(html.contains("has <strong>not</strong> been deleted"));
-        assert!(html.contains("https://caution.dev/settings/billing"));
+        assert!(html.contains("https://caution.dev/#billing"));
         assert!(text.contains("$42.50"));
         assert!(text.contains("3 running deployment(s)"));
         assert!(text.contains("has NOT been deleted"));
