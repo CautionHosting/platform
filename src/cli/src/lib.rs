@@ -1860,6 +1860,17 @@ impl ApiClient {
     /// Prompts for a username and claims it via `POST /user/username`
     /// (a FIDO2-signed protected mutation), reprompting on 409 (taken).
     async fn claim_username_interactively(&self, session_id: &str) -> Result<()> {
+        // This prompts on stdin in a loop; without a terminal a non-interactive
+        // caller (CI/cron reaching a placeholder account) would block forever on
+        // the read, or hit EOF and spin on empty input. Fail fast instead — the
+        // same guard `resolve_login_username` applies to the login prompt.
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            bail!(
+                "This account needs a username set before continuing, but stdin \
+                 is not interactive. Re-run this command from a terminal to choose one."
+            );
+        }
+
         loop {
             let username = prompt_for_claimed_username()?;
             let body = serde_json::json!({ "username": username });
@@ -1894,6 +1905,15 @@ impl ApiClient {
                     "Username '{}' is already taken. Please choose another.",
                     username
                 );
+                continue;
+            }
+
+            // A 400 is a validation failure (too short/long, illegal chars):
+            // user-fixable, so surface the server's message and reprompt rather
+            // than aborting the whole command over a typo.
+            if response.status() == reqwest::StatusCode::BAD_REQUEST {
+                let error = self.api_error_message(response).await;
+                println!("{}", error);
                 continue;
             }
 
