@@ -44,7 +44,15 @@ pub struct PendingPasskeyRegistration {
 #[derive(Clone)]
 pub enum AuthState {
     SecurityKey(SecurityKeyAuthentication),
-    Discoverable(DiscoverableAuthentication),
+    Discoverable {
+        auth_state: DiscoverableAuthentication,
+        /// Whether this challenge was scoped to a specific username, and if
+        /// so which user (or the decoy indicating none). See
+        /// `handlers::UsernameScope` / `handlers::check_username_scope`,
+        /// checked at finish time so a decoy challenge can't be completed by
+        /// authenticating as a different resident user.
+        scope: crate::handlers::UsernameScope,
+    },
 }
 
 /// Authentication state with expiration

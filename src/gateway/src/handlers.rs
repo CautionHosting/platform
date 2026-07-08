@@ -152,6 +152,11 @@ pub enum LoginError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("resolved credential belongs to a different user than the login was scoped to")]
+    UnexpectedCredentialOwner {
+        expected_user_id: Option<Uuid>,
+        actual_user_id: Uuid,
+    },
 }
 
 impl IntoResponse for LoginError {
@@ -164,6 +169,12 @@ impl IntoResponse for LoginError {
             Self::ParsePubkeyCredential { source: _ } => {
                 (StatusCode::BAD_REQUEST, self.to_string())
             }
+            // A decoy/scope rejection is an expected client-side failure, not an
+            // internal error: return 400 like other bad-credential outcomes so a
+            // decoy rejection isn't distinguishable by status code (and don't log
+            // it at error level). Full normalization of every finish failure into
+            // one generic response is Phase 2 (P1#4).
+            Self::UnexpectedCredentialOwner { .. } => (StatusCode::BAD_REQUEST, self.to_string()),
             _ => {
                 tracing::error!(?self, "Login error");
                 (
@@ -1071,6 +1082,49 @@ fn deserialize_security_keys(public_keys: &[Vec<u8>]) -> Result<Vec<SecurityKey>
         .collect()
 }
 
+/// Username scope recorded on an `AuthState::Discoverable` challenge, checked
+/// against the resolved user at finish time. Only ever meaningfully set by
+/// `scoped_or_decoy_challenge` (i.e. a username was supplied for this
+/// challenge) — the plain broadcast/discoverable login (no username at all)
+/// always uses `Unscoped`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UsernameScope {
+    /// No username was supplied for this challenge — any resolved user is
+    /// acceptable, since nothing was scoped to begin with.
+    Unscoped,
+    /// A username was supplied but the challenge is a decoy: either the
+    /// username didn't resolve to any user (`expected_user_id: None`) or it
+    /// resolved to a user with zero registered credentials
+    /// (`expected_user_id: Some`). Either way this challenge must never
+    /// successfully authenticate as any user — that's the whole point of a
+    /// decoy: it looks identical to a real scoped challenge but can't be
+    /// completed.
+    Decoy { expected_user_id: Option<Uuid> },
+}
+
+/// Verifies a resolved discoverable-auth user is consistent with the
+/// username scope recorded when the challenge began (Finding 1: a
+/// username-scoped decoy challenge must not silently authenticate whichever
+/// resident credential the browser/authenticator happens to return).
+fn check_username_scope(
+    scope: &UsernameScope,
+    resolved_user_id: Uuid,
+) -> Result<(), LoginError> {
+    match scope {
+        UsernameScope::Unscoped => Ok(()),
+        UsernameScope::Decoy { expected_user_id } => {
+            if *expected_user_id == Some(resolved_user_id) {
+                Ok(())
+            } else {
+                Err(LoginError::UnexpectedCredentialOwner {
+                    expected_user_id: *expected_user_id,
+                    actual_user_id: resolved_user_id,
+                })
+            }
+        }
+    }
+}
+
 /// Build a username-scoped `allowCredentials` challenge for a known username,
 /// or a discoverable decoy challenge for an unknown one — same shape either
 /// way, so the caller can't use this to enumerate usernames. A known username
@@ -1114,7 +1168,18 @@ async fn scoped_or_decoy_challenge(
                         tracing::error!("Failed to start empty challenge: {:?}", e);
                         anyhow::anyhow!("Failed to start authentication: {}", e)
                     })?;
-                return Ok((rcr, AuthState::Discoverable(auth_state)));
+                return Ok((
+                    rcr,
+                    AuthState::Discoverable {
+                        auth_state,
+                        // Decoy: this user is known but has zero credentials,
+                        // so finish must always reject regardless of which
+                        // resident credential the browser returns.
+                        scope: UsernameScope::Decoy {
+                            expected_user_id: Some(user_id),
+                        },
+                    },
+                ));
             }
 
             tracing::debug!(
@@ -1143,7 +1208,18 @@ async fn scoped_or_decoy_challenge(
                     tracing::error!("Failed to start empty challenge: {:?}", e);
                     anyhow::anyhow!("Failed to start authentication: {}", e)
                 })?;
-            Ok((rcr, AuthState::Discoverable(auth_state)))
+            // Decoy: no such user exists. Stays indistinguishable from the
+            // known-zero-cred case above — both are `Decoy` and both always
+            // reject at finish, regardless of which credential is returned.
+            Ok((
+                rcr,
+                AuthState::Discoverable {
+                    auth_state,
+                    scope: UsernameScope::Decoy {
+                        expected_user_id: None,
+                    },
+                },
+            ))
         }
     }
 }
@@ -1227,7 +1303,13 @@ pub async fn begin_login_handler(
             tracing::error!("Failed to start discoverable authentication: {:?}", e);
             anyhow::anyhow!("Failed to start authentication: {}", e)
         })?;
-        (rcr, AuthState::Discoverable(auth_state))
+        (
+            rcr,
+            AuthState::Discoverable {
+                auth_state,
+                scope: UsernameScope::Unscoped,
+            },
+        )
     };
 
     let session_key = Uuid::new_v4().to_string();
@@ -1307,7 +1389,7 @@ pub async fn finish_login_handler(
 
             (user_id, credential_id_bytes, seckey, auth_result)
         }
-        AuthState::Discoverable(auth_state) => {
+        AuthState::Discoverable { auth_state, scope } => {
             // Primary path: resolve the user from the assertion's userHandle,
             // then reload the credential by its rawId to reuse the rest of
             // the (PIN check / counter update / session creation) pipeline
@@ -1349,6 +1431,16 @@ pub async fn finish_login_handler(
                 .webauthn
                 .finish_discoverable_authentication(&auth_response, auth_state, &[discoverable_key])
                 .map_err(|source| LoginError::FinishDiscoverableAuthentication { user_id, source })?;
+
+            // Ceremony is consumed (challenge validated) at this point even
+            // if the scope check below rejects it, so a decoy challenge can't
+            // be completed by authenticating as a different resident user
+            // (Finding 1). The rejection returns 400 (see `IntoResponse`),
+            // matching other bad-credential finish outcomes; note it is not yet
+            // byte-for-byte indistinguishable from every finish failure (e.g.
+            // `FinishDiscoverableAuthentication` still 500s) — that full
+            // normalization is Phase 2 (P1#4).
+            check_username_scope(&scope, user_id)?;
 
             // Opportunistic residency backfill: a successful discoverable
             // finish proves the authenticator surfaced this credential via
@@ -1885,7 +1977,13 @@ pub async fn qr_login_authenticate_handler(
             .webauthn
             .start_discoverable_authentication()
             .map_err(|source| QrLoginError::StartAuthentication { source })?;
-        (rcr, AuthState::Discoverable(auth_state))
+        (
+            rcr,
+            AuthState::Discoverable {
+                auth_state,
+                scope: UsernameScope::Unscoped,
+            },
+        )
     };
 
     let session_key = uuid::Uuid::new_v4().to_string();
@@ -1997,7 +2095,7 @@ pub async fn qr_login_authenticate_finish_handler(
 
             (user_id, credential_id_bytes, seckey, auth_result)
         }
-        AuthState::Discoverable(auth_state) => {
+        AuthState::Discoverable { auth_state, scope } => {
             let (_user_handle, cred_id) = state
                 .webauthn
                 .identify_discoverable_authentication(&auth_response)
@@ -2025,6 +2123,10 @@ pub async fn qr_login_authenticate_finish_handler(
                 .webauthn
                 .finish_discoverable_authentication(&auth_response, auth_state, &[discoverable_key])
                 .map_err(|source| LoginError::FinishDiscoverableAuthentication { user_id, source })?;
+
+            // See the equivalent check in `finish_login_handler` (Finding 1):
+            // ceremony is consumed above regardless of outcome.
+            check_username_scope(&scope, user_id)?;
 
             if let Err(e) =
                 db::mark_credential_resident_if_unknown(&state.db, &credential_id_bytes).await
@@ -2441,5 +2543,63 @@ mod login_begin_tests {
     fn deserialize_security_keys_rejects_garbage() {
         let garbage = vec![b"not valid json".to_vec()];
         assert!(deserialize_security_keys(&garbage).is_err());
+    }
+
+    // --- check_username_scope -------------------------------------------
+    //
+    // Guards the discoverable-auth finish paths against resolving to a user
+    // other than the one a username-scoped challenge expected (Finding 1:
+    // decoy/zero-cred challenges must not silently authenticate whichever
+    // resident credential the browser happens to return). `Unscoped` (no
+    // username was ever supplied — plain broadcast/discoverable login) must
+    // allow any resolved user; `Decoy` (a username was supplied, whether
+    // unknown or known-zero-cred) must never succeed.
+
+    #[test]
+    fn check_username_scope_allows_unscoped_login() {
+        let resolved = Uuid::new_v4();
+        assert!(check_username_scope(&UsernameScope::Unscoped, resolved).is_ok());
+    }
+
+    #[test]
+    fn check_username_scope_rejects_decoy_for_unknown_username() {
+        // Username didn't resolve to any user at all: no expected_user_id,
+        // but must still always reject, not just no-op like `Unscoped`.
+        let resolved = Uuid::new_v4();
+        let err = check_username_scope(&UsernameScope::Decoy { expected_user_id: None }, resolved)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            LoginError::UnexpectedCredentialOwner { expected_user_id: None, actual_user_id }
+            if actual_user_id == resolved
+        ));
+    }
+
+    #[test]
+    fn check_username_scope_rejects_decoy_for_known_zero_cred_user_mismatch() {
+        let expected = Uuid::new_v4();
+        let resolved = Uuid::new_v4();
+        let err = check_username_scope(
+            &UsernameScope::Decoy { expected_user_id: Some(expected) },
+            resolved,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            LoginError::UnexpectedCredentialOwner { expected_user_id: Some(e), actual_user_id }
+            if e == expected && actual_user_id == resolved
+        ));
+    }
+
+    #[test]
+    fn check_username_scope_allows_decoy_matching_expected_user() {
+        // Can't practically happen (the zero-cred decoy's user has no
+        // credentials to resolve to), but if the expected user ever does
+        // match the resolved one, it should be honored rather than rejected.
+        let user = Uuid::new_v4();
+        assert!(
+            check_username_scope(&UsernameScope::Decoy { expected_user_id: Some(user) }, user)
+                .is_ok()
+        );
     }
 }

@@ -589,6 +589,39 @@ fn prompt_for_claimed_username() -> Result<String, PromptLineError> {
     )
 }
 
+#[derive(Debug, thiserror::Error)]
+enum RegisterUsernameError {
+    #[error(
+        "No username was provided and stdin is not interactive. \
+         Re-run with `caution register --username <name>`."
+    )]
+    NonInteractive,
+    #[error(transparent)]
+    Prompt(#[from] PromptLineError),
+}
+
+/// Resolves the username used for `register`. Returns the explicitly
+/// provided username as-is (blank/whitespace-only treated as not provided);
+/// otherwise prompts (reading from `reader`, re-prompting on empty input)
+/// only when a human terminal is attached. Non-interactive callers with no
+/// username get a fail-fast error instead of silently registering with an
+/// empty username (mirrors `resolve_login_username`'s guard).
+fn resolve_register_username<R: std::io::BufRead>(
+    provided: Option<String>,
+    is_terminal: bool,
+    reader: &mut R,
+) -> Result<String, RegisterUsernameError> {
+    match provided {
+        Some(username) if !username.trim().is_empty() => Ok(username),
+        _ if is_terminal => Ok(prompt_line_from(
+            reader,
+            "Choose a username: ",
+            "Username cannot be empty, please try again.",
+        )?),
+        _ => Err(RegisterUsernameError::NonInteractive),
+    }
+}
+
 /// Wrapper that zeroizes the PIN string on drop.
 struct ZeroizePin(String);
 
@@ -8381,12 +8414,13 @@ pub async fn run() -> Result<(), RunError> {
             alpha_code,
             username,
         } => {
-            let username = match username {
-                Some(u) if !u.trim().is_empty() => u,
-                Some(_) | None => prompt_for_claimed_username()
-                    .context("Failed to read username")
-                    .map_err(RunError::CommandDispatch)?,
-            };
+            let username = resolve_register_username(
+                username,
+                std::io::IsTerminal::is_terminal(&std::io::stdin()),
+                &mut std::io::stdin().lock(),
+            )
+            .context("Failed to read username")
+            .map_err(RunError::CommandDispatch)?;
             client
                 .register(&alpha_code, &username)
                 .await
@@ -8636,8 +8670,9 @@ mod tests {
         encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility, load_recipient_cert,
         login_begin_request_body, normalize_keyring, parse_env_assignments, prompt_line_from,
         prompt_optional_line_from, resolve_local_build_command_from_dir, resolve_login_username,
-        resolve_procfile_build_command,
+        resolve_procfile_build_command, resolve_register_username,
         resolve_quorum_parameters, ApiClient, Cli, Commands, LoginUsernameError,
+        RegisterUsernameError,
     };
     use caution_config::ConfigurationFile;
     use clap::Parser;
@@ -9249,6 +9284,40 @@ containerfile: Missing.Containerfile\n",
         let mut input = Cursor::new(b"".to_vec());
         let err = resolve_login_username(None, false, &mut input).unwrap_err();
         assert!(matches!(err, LoginUsernameError::NonInteractive));
+    }
+
+    #[test]
+    fn resolve_register_username_returns_provided_username_without_prompting() {
+        let mut input = Cursor::new(b"".to_vec());
+        let username =
+            resolve_register_username(Some("alice".to_string()), false, &mut input).unwrap();
+        assert_eq!(username, "alice");
+    }
+
+    #[test]
+    fn resolve_register_username_prompts_when_interactive() {
+        let mut input = Cursor::new(b"bob\n".to_vec());
+        let username = resolve_register_username(None, true, &mut input).unwrap();
+        assert_eq!(username, "bob");
+    }
+
+    #[test]
+    fn resolve_register_username_errors_non_interactive_instead_of_hanging() {
+        // Finding 4: register lacked the noninteractive guard that login has
+        // (`resolve_login_username_errors_non_interactive_instead_of_hanging`
+        // above) — a noninteractive caller with no --username must fail fast
+        // instead of getting an empty username silently sent to the server.
+        let mut input = Cursor::new(b"".to_vec());
+        let err = resolve_register_username(None, false, &mut input).unwrap_err();
+        assert!(matches!(err, RegisterUsernameError::NonInteractive));
+    }
+
+    #[test]
+    fn resolve_register_username_treats_blank_provided_as_absent() {
+        let mut input = Cursor::new(b"bob\n".to_vec());
+        let username =
+            resolve_register_username(Some("   ".to_string()), true, &mut input).unwrap();
+        assert_eq!(username, "bob");
     }
 
     #[test]
