@@ -1448,6 +1448,14 @@ pub async fn qr_login_status_handler(
                     expires_at: session_expires,
                 }));
             }
+
+            // consume returned None: another poll already took the session id
+            // (one-shot), or it was cleared. The token is terminal-completed
+            // with nothing left to hand back.
+            tracing::debug!(
+                "QR login status completed but session id already consumed (token: {})",
+                query.token
+            );
         }
 
         return Ok(Json(crate::types::QrLoginStatusResponse {

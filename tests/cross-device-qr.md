@@ -43,7 +43,7 @@ caution login --qr
 | Ctrl+C during polling | CLI exits cleanly |
 | Poll the requestee token (the one in the QR URL) at `GET /auth/qr-login/status?token=<requestee>` | Returns `not_found` — only the CLI's requester token can read the session |
 | After a successful login, replay the same `GET /auth/qr-login/status` poll again | First poll returns the `session_id`; the second returns `completed` with `session_id: null` (one-shot consume) |
-| Kill the gateway's session store mid-poll so `get_auth_session` errors on the completing poll (or drop the completing response) | Next poll still succeeds and returns the `session_id` — the session id is consumed only after the response is built, so a transient failure is retry-safe |
+| Kill the gateway's session store mid-poll so `get_auth_session` errors on the completing poll (or drop the completing response) | Next poll still succeeds and returns the `session_id` — the session id is consumed only after the auth session is fetched, so a transient failure leaves it intact and is retry-safe |
 
 ## 2. QR-Signed Operations
 

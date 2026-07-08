@@ -791,6 +791,14 @@ test-e2e-ssh-units:
 	$(MAKE) down-test; \
 	exit $$status
 
+test-e2e-qr-login:
+	@$(MAKE) up-test
+	@echo "Running QR login e2e tests..."
+	@bash tests/e2e/test_qr_login.sh; \
+	status=$$?; \
+	$(MAKE) down-test; \
+	exit $$status
+
 test-e2e-platform-ports:
 	@$(MAKE) build-cli
 	@$(MAKE) up-test
