@@ -746,6 +746,33 @@ pub async fn complete_qr_login_token(
     Ok(result.rows_affected() == 1)
 }
 
+pub async fn consume_qr_login_session_id(
+    pool: &PgPool,
+    token: &str,
+) -> Result<Option<String>> {
+    // Postgres `RETURNING` yields the post-update value, which would be NULL
+    // here. Capture the old session id in a CTE (locked FOR UPDATE so concurrent
+    // pollers can't both consume it) and return that instead.
+    let row: Option<(String,)> = sqlx::query_as(
+        "WITH old AS (
+             SELECT token, session_id FROM qr_login_tokens
+             WHERE token = $1 AND status = 'completed' AND session_id IS NOT NULL
+             FOR UPDATE
+         )
+         UPDATE qr_login_tokens t
+         SET session_id = NULL
+         FROM old
+         WHERE t.token = old.token
+         RETURNING old.session_id",
+    )
+    .bind(token)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to consume QR login session id")?;
+
+    Ok(row.map(|(sid,)| sid))
+}
+
 // QR Sign token functions
 
 pub async fn create_qr_sign_token(

@@ -1426,19 +1426,35 @@ pub async fn qr_login_status_handler(
     };
 
     if status == QrStatus::Completed {
-        if let Some(ref sid) = row.session_id {
-            let session = db::get_auth_session(&state.db, sid)
+        if let Some(sid) = row.session_id.clone() {
+            // Fetch the session BEFORE consuming, so a failure here leaves the
+            // session_id intact and the next poll can retry.
+            let session = db::get_auth_session(&state.db, &sid)
                 .await
                 .map_err(|source| QrLoginError::DbGetSession { source })?;
 
             let session_expires = session.map(|s| s.expires_at.to_string());
 
-            return Ok(Json(crate::types::QrLoginStatusResponse {
-                status: QrStatus::Completed,
-                session_id: row.session_id,
-                expires_at: session_expires,
-            }));
+            // Consume last: atomically NULLs session_id and confirms we won any
+            // concurrent-poll race. Only hand back the session if we did.
+            let consumed = db::consume_qr_login_session_id(&state.db, &query.token)
+                .await
+                .map_err(|source| QrLoginError::DbGetToken { source })?;
+
+            if consumed.is_some() {
+                return Ok(Json(crate::types::QrLoginStatusResponse {
+                    status: QrStatus::Completed,
+                    session_id: Some(sid),
+                    expires_at: session_expires,
+                }));
+            }
         }
+
+        return Ok(Json(crate::types::QrLoginStatusResponse {
+            status: QrStatus::Completed,
+            session_id: None,
+            expires_at: None,
+        }));
     }
 
     Ok(Json(crate::types::QrLoginStatusResponse {
