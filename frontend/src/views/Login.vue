@@ -74,7 +74,7 @@
             v-if="validationError && !status && !error"
             class="validation-message"
           >
-            Please enter a valid access code to continue.
+            Please enter both a username and access code to continue.
           </div>
 
           <div v-if="status" class="status-message">

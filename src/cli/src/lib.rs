@@ -831,7 +831,7 @@ enum Commands {
         qr: bool,
         #[arg(
             long,
-            help = "Username to log in with (prompted interactively if omitted)"
+            help = "Username to log in with (prompted interactively if omitted; --qr uses discoverable credentials by default and skips this prompt)"
         )]
         username: Option<String>,
     },

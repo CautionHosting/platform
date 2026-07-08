@@ -124,6 +124,7 @@
         <nav class="sidebar-nav" :class="{ 'sidebar-nav--disabled': requireUsername }" :aria-disabled="requireUsername ? 'true' : undefined">
           <button
             :class="['nav-item', { active: activeTab === 'apps' }]"
+            :disabled="requireUsername"
             @click="selectTab('apps')"
           >
             <img
@@ -137,6 +138,7 @@
           <div class="nav-group" :class="{ 'is-open': securityNavOpen }">
             <button
               :class="['nav-item', 'nav-item--parent', { active: isSecurityNavActive }]"
+              :disabled="requireUsername"
               :aria-expanded="securityNavOpen ? 'true' : 'false'"
               aria-controls="security-nav-submenu"
               @click="selectTab('ssh')"
@@ -176,6 +178,7 @@
             >
               <button
                 :class="['nav-subitem', { active: activeTab === 'ssh' }]"
+                :disabled="requireUsername"
                 :aria-current="activeTab === 'ssh' ? 'page' : undefined"
                 @click="selectTab('ssh')"
               >
@@ -183,6 +186,7 @@
               </button>
               <button
                 :class="['nav-subitem', { active: activeTab === 'security' }]"
+                :disabled="requireUsername"
                 :aria-current="activeTab === 'security' ? 'page' : undefined"
                 @click="selectTab('security')"
               >
@@ -193,6 +197,7 @@
 
           <button
             :class="['nav-item', { active: activeTab === 'keys' }]"
+            :disabled="requireUsername"
             @click="selectTab('keys')"
           >
             <svg
@@ -213,6 +218,7 @@
 
           <button
             :class="['nav-item', { active: activeTab === 'billing' }]"
+            :disabled="requireUsername"
             @click="selectTab('billing')"
           >
             <svg
