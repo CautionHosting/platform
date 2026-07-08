@@ -41,6 +41,12 @@
 #      before the claim logic). Pins the contract the CLI's claim loop relies on:
 #      400 is a retryable validation error (reprompt), distinct from the 409
 #      taken/already-claimed cases.
+#  15. QR status lifecycle: a fresh /auth/qr-login/begin token queried via
+#      GET /auth/qr-login/status -> 200 status "pending" with no session_id
+#      (the desktop poll's starting state, before any phone authenticates).
+#  16. QR status oracle: GET /auth/qr-login/status with an UNKNOWN token -> 200
+#      status "not_found" (row absence is derived, NOT surfaced as a 404 — a
+#      distinct status/HTTP shape would let an attacker probe token validity).
 #
 # The full assertion round-trip (scoped/broadcast/discoverable finish) needs a
 # WebAuthn authenticator and is covered by the manual Chrome-virtual-authenticator
@@ -289,6 +295,43 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/user/usernam
     -d '{"username":"ab"}')
 [ "$CODE" = 400 ] || step_fail "invalid username claim returned HTTP $CODE (want 400 — the CLI relies on 400 being a retryable validation error, not a fatal abort)"
 step_pass "Invalid username claim -> 400 (retryable validation, distinct from 409 taken/claimed)"
+
+# ── Step 15: fresh QR token -> status "pending" (desktop poll start state) ──
+STEP_NUM=15
+# GET /auth/qr-login/status is what the desktop side polls while waiting for the
+# phone to authenticate. A just-issued token must report "pending" with no
+# session_id yet — the starting state of the cross-device handoff. Independent
+# of credential state (step 13 deleted the user's cred), so a bare begin is fine.
+QR_BEGIN=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/begin" \
+    -H 'Content-Type: application/json' -d '{}')
+CODE=$(echo "$QR_BEGIN" | tail -1)
+JSON=$(echo "$QR_BEGIN" | sed '$d')
+[ "$CODE" = 200 ] || step_fail "qr-login/begin (status test) returned HTTP $CODE (want 200)"
+QR_TOKEN=$(echo "$JSON" | jq -r '.token')
+[ -n "$QR_TOKEN" ] && [ "$QR_TOKEN" != null ] || step_fail "qr-login/begin response missing token"
+STATUS=$(curl -s -w '\n%{http_code}' "$GATEWAY_URL/auth/qr-login/status?token=$QR_TOKEN")
+CODE=$(echo "$STATUS" | tail -1)
+JSON=$(echo "$STATUS" | sed '$d')
+[ "$CODE" = 200 ] || step_fail "qr-login/status (fresh token) returned HTTP $CODE (want 200)"
+S=$(echo "$JSON" | jq -r '.status')
+[ "$S" = pending ] || step_fail "qr-login/status (fresh token) status was '$S' (want pending)"
+echo "$JSON" | jq -e 'has("session_id") | not' >/dev/null \
+    || step_fail "qr-login/status (fresh token) leaked a session_id before authentication"
+step_pass "Fresh QR token -> status pending, no session_id (desktop poll start state)"
+
+# ── Step 16: unknown QR token -> status "not_found", 200 (no oracle) ──
+STEP_NUM=16
+# Row absence is DERIVED into a "not_found" status (qr_login_status_handler),
+# never a 404. A distinct HTTP code or a different shape for absent-vs-pending
+# would turn the poll endpoint into a token-validity oracle, so the response
+# must be an ordinary 200 that only differs in the status string.
+STATUS=$(curl -s -w '\n%{http_code}' "$GATEWAY_URL/auth/qr-login/status?token=definitely-not-a-real-token-xyz")
+CODE=$(echo "$STATUS" | tail -1)
+JSON=$(echo "$STATUS" | sed '$d')
+[ "$CODE" = 200 ] || step_fail "qr-login/status (unknown token) returned HTTP $CODE (want 200 — a 404 would be a token oracle)"
+S=$(echo "$JSON" | jq -r '.status')
+[ "$S" = not_found ] || step_fail "qr-login/status (unknown token) status was '$S' (want not_found)"
+step_pass "Unknown QR token -> 200 status not_found (no token-validity oracle)"
 
 echo ""
 log "All $STEPS_PASSED steps passed ✓"
