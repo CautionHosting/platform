@@ -2514,6 +2514,9 @@ export default {
       if (normalizedMessage.includes('at least one field')) {
         return 'Enter an email address.';
       }
+      if (normalizedMessage.includes('verification email recently sent')) {
+        return message;
+      }
       return "We couldn't update your email. Try again.";
     };
 
