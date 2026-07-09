@@ -137,39 +137,25 @@ fn derive_id_length(decoy_secret: &[u8; 32], normalized_username: &str, index: u
     }
 }
 
-/// Derive the `transports` hint for the `i`-th decoy credential, keyed off
-/// its ID length so the value stays internally consistent (short IDs read
-/// as platform/resident keys, long IDs as roaming hardware keys).
-///
-/// A real `AllowCredentials.transports` is `Option<Vec<AuthenticatorTransport>>`
-/// straight from the stored credential (`webauthn-rs-core`'s
-/// `cred.transports.clone()`) — it is frequently `None` because many
-/// authenticators never report transports at registration time. We mirror
-/// that by making `None` a real possibility here too.
+/// The `transports` hint for a decoy credential. A real
+/// `AllowCredentials.transports` comes straight from the stored credential
+/// (`webauthn-rs-core`'s `cred.transports.clone()`), which this gateway
+/// never actually populates: the frontend sends `getTransports()` as a
+/// top-level field on the registration-finish body rather than nested under
+/// `response.transports` where `webauthn-rs`'s `RegisterPublicKeyCredential`
+/// (and thus `finish_securitykey_registration`) expects it, so every real
+/// stored credential's `cred.transports` is `None`. A decoy MUST therefore
+/// always omit it too — fabricating one here would be a 100%-reliable
+/// decoy tell, worse than emitting nothing. (Fixing the frontend to
+/// populate real transports is a separate, non-security data-quality bug —
+/// if that's ever fixed, this must go back to modeling `Some` sometimes.)
 fn derive_transports(
-    decoy_secret: &[u8; 32],
-    normalized_username: &str,
-    index: usize,
-    id_len: usize,
+    _decoy_secret: &[u8; 32],
+    _normalized_username: &str,
+    _index: usize,
+    _id_len: usize,
 ) -> Option<Vec<AuthenticatorTransport>> {
-    let tag = format!(":tr:{index}");
-    let block = keystream_block(decoy_secret, normalized_username, &tag);
-    // 25% chance of no transport hint at all, matching real-world gaps.
-    if block[0] % 100 < 25 {
-        return None;
-    }
-    let transports = match id_len {
-        16 => vec![AuthenticatorTransport::Internal],
-        64 => vec![AuthenticatorTransport::Usb],
-        _ => {
-            if block[1] % 2 == 0 {
-                vec![AuthenticatorTransport::Internal, AuthenticatorTransport::Hybrid]
-            } else {
-                vec![AuthenticatorTransport::Usb, AuthenticatorTransport::Nfc]
-            }
-        }
-    };
-    Some(transports)
+    None
 }
 
 /// Synthesize a deterministic, plausible-looking fake `allowCredentials`
