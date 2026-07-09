@@ -653,14 +653,16 @@ pub struct SshKeyInfo {
 pub async fn create_qr_login_token(
     pool: &PgPool,
     token: &str,
+    requestee_token: &str,
     ip_address: Option<&str>,
     expires_at: OffsetDateTime,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO qr_login_tokens (token, status, ip_address, expires_at)
-         VALUES ($1, 'pending', $2, $3)",
+        "INSERT INTO qr_login_tokens (token, requestee_token, status, ip_address, expires_at)
+         VALUES ($1, $2, 'pending', $3, $4)",
     )
     .bind(token)
+    .bind(requestee_token)
     .bind(ip_address)
     .bind(expires_at)
     .execute(pool)
@@ -675,7 +677,7 @@ pub async fn get_qr_login_token(
     token: &str,
 ) -> Result<Option<crate::types::DbQrLoginToken>> {
     let row: Option<crate::types::DbQrLoginToken> = sqlx::query_as(
-        "SELECT token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at
+        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at
          FROM qr_login_tokens
          WHERE token = $1"
     )
@@ -687,18 +689,35 @@ pub async fn get_qr_login_token(
     Ok(row)
 }
 
+pub async fn get_qr_login_token_by_requestee_token(
+    pool: &PgPool,
+    requestee_token: &str,
+) -> Result<Option<crate::types::DbQrLoginToken>> {
+    let row: Option<crate::types::DbQrLoginToken> = sqlx::query_as(
+        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at
+         FROM qr_login_tokens
+         WHERE requestee_token = $1"
+    )
+    .bind(requestee_token)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to get QR login token by requestee token")?;
+
+    Ok(row)
+}
+
 pub async fn claim_qr_login_token(
     pool: &PgPool,
-    token: &str,
+    requestee_token: &str,
     auth_challenge_key: &str,
     browser_ip: Option<&str>,
 ) -> Result<bool> {
     let result = sqlx::query(
         "UPDATE qr_login_tokens
          SET status = 'authenticated', auth_challenge_key = $2, browser_ip_address = $3
-         WHERE token = $1 AND status = 'pending' AND expires_at > NOW()",
+         WHERE requestee_token = $1 AND status = 'pending' AND expires_at > NOW()",
     )
-    .bind(token)
+    .bind(requestee_token)
     .bind(auth_challenge_key)
     .bind(browser_ip)
     .execute(pool)
@@ -708,19 +727,50 @@ pub async fn claim_qr_login_token(
     Ok(result.rows_affected() == 1)
 }
 
-pub async fn complete_qr_login_token(pool: &PgPool, token: &str, session_id: &str) -> Result<bool> {
+pub async fn complete_qr_login_token(
+    pool: &PgPool,
+    requestee_token: &str,
+    session_id: &str,
+) -> Result<bool> {
     let result = sqlx::query(
         "UPDATE qr_login_tokens
          SET status = 'completed', session_id = $2
-         WHERE token = $1 AND status = 'authenticated'",
+         WHERE requestee_token = $1 AND status = 'authenticated'",
     )
-    .bind(token)
+    .bind(requestee_token)
     .bind(session_id)
     .execute(pool)
     .await
     .context("Failed to complete QR login token")?;
 
     Ok(result.rows_affected() == 1)
+}
+
+pub async fn consume_qr_login_session_id(
+    pool: &PgPool,
+    token: &str,
+) -> Result<Option<String>> {
+    // Postgres `RETURNING` yields the post-update value, which would be NULL
+    // here. Capture the old session id in a CTE (locked FOR UPDATE so concurrent
+    // pollers can't both consume it) and return that instead.
+    let row: Option<(String,)> = sqlx::query_as(
+        "WITH old AS (
+             SELECT token, session_id FROM qr_login_tokens
+             WHERE token = $1 AND status = 'completed' AND session_id IS NOT NULL
+             FOR UPDATE
+         )
+         UPDATE qr_login_tokens t
+         SET session_id = NULL
+         FROM old
+         WHERE t.token = old.token
+         RETURNING old.session_id",
+    )
+    .bind(token)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to consume QR login session id")?;
+
+    Ok(row.map(|(sid,)| sid))
 }
 
 // QR Sign token functions
