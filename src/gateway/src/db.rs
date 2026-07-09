@@ -819,7 +819,7 @@ pub async fn get_qr_login_token_by_requestee_token(
     requestee_token: &str,
 ) -> Result<Option<crate::types::DbQrLoginToken>> {
     let row: Option<crate::types::DbQrLoginToken> = sqlx::query_as(
-        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at
+        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at, username
          FROM qr_login_tokens
          WHERE requestee_token = $1"
     )

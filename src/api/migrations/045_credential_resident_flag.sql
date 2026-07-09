@@ -4,4 +4,4 @@
 -- the credProps registration extension when available, and opportunistically
 -- backfilled to true on a successful discoverable (username-less) login.
 
-ALTER TABLE fido2_credentials ADD COLUMN resident BOOLEAN;
+ALTER TABLE fido2_credentials ADD COLUMN IF NOT EXISTS resident BOOLEAN;

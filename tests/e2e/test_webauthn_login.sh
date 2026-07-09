@@ -208,12 +208,15 @@ QR_BEGIN=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/begin
 CODE=$(echo "$QR_BEGIN" | tail -1)
 JSON=$(echo "$QR_BEGIN" | sed '$d')
 [ "$CODE" = 200 ] || step_fail "qr-login/begin with known username returned HTTP $CODE (want 200)"
-QR_TOKEN=$(echo "$JSON" | jq -r '.token')
-[ -n "$QR_TOKEN" ] && [ "$QR_TOKEN" != null ] || step_fail "qr-login/begin response missing token"
+# /authenticate is the phone's endpoint: it keys on the requestee_token, which
+# is exposed only inside the QR `url`. `.token` is the desktop's polling secret
+# and is accepted only by /auth/qr-login/status.
+QR_REQUESTEE=$(echo "$JSON" | jq -r '.url' | sed 's/.*[?&]token=//;s/&.*//')
+[ -n "$QR_REQUESTEE" ] && [ "$QR_REQUESTEE" != null ] || step_fail "qr-login/begin response url missing requestee token"
 
 BODY=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/authenticate" \
     -H 'Content-Type: application/json' \
-    -d "{\"token\":\"$QR_TOKEN\"}")
+    -d "{\"token\":\"$QR_REQUESTEE\"}")
 CODE=$(echo "$BODY" | tail -1)
 JSON=$(echo "$BODY" | sed '$d')
 [ "$CODE" = 200 ] || step_fail "qr-login/authenticate (known username) returned HTTP $CODE (want 200)"
@@ -229,11 +232,11 @@ QR_BEGIN=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/begin
 CODE=$(echo "$QR_BEGIN" | tail -1)
 JSON=$(echo "$QR_BEGIN" | sed '$d')
 [ "$CODE" = 200 ] || step_fail "qr-login/begin with unknown username returned HTTP $CODE (want 200)"
-QR_TOKEN=$(echo "$JSON" | jq -r '.token')
+QR_REQUESTEE=$(echo "$JSON" | jq -r '.url' | sed 's/.*[?&]token=//;s/&.*//')
 
 BODY=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/authenticate" \
     -H 'Content-Type: application/json' \
-    -d "{\"token\":\"$QR_TOKEN\"}")
+    -d "{\"token\":\"$QR_REQUESTEE\"}")
 CODE=$(echo "$BODY" | tail -1)
 JSON=$(echo "$BODY" | sed '$d')
 [ "$CODE" = 200 ] || step_fail "qr-login/authenticate (unknown username) returned HTTP $CODE (want 200 — a distinct shape would be an enumeration oracle)"

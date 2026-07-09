@@ -48,6 +48,12 @@ const ID_LENGTHS: [usize; 3] = [16, 32, 64];
 ///
 /// # Returns
 /// A 32-byte HMAC-SHA256 tag, used as the root key for the decoy keystream.
+///
+/// NB: decoy stability is coupled to `CSRF_SECRET`. Rotating `CSRF_SECRET`
+/// (e.g. to roll CSRF tokens) also reshuffles every username's decoy
+/// credential list — accepted for now: a rotation resets the enumeration
+/// baseline for all usernames at once, not per-username, so it leaks nothing.
+/// If decoys ever need to survive CSRF rotation, give them a dedicated key.
 pub fn decoy_secret(csrf_secret: &str) -> [u8; 32] {
     let mut mac = HmacSha256::new_from_slice(csrf_secret.as_bytes())
         .expect("HMAC can take key of any size");
