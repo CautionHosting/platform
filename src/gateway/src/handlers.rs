@@ -1270,17 +1270,25 @@ fn apply_decoy_shape(
 /// `scoped_or_decoy_challenge`: the natural decoy (unknown username, or a
 /// known username with zero credentials) and the forced decoy (a username
 /// that tripped the per-username rate limit, whether or not it's real).
+///
+/// `equalize` controls whether `equalize_decoy_work` runs: skip it
+/// (`false`) only when `username` is provably not a real account by format
+/// alone (e.g. fails `validate_username`) — there's no real per-credential
+/// cost to match in that case, and it saves the crypto work.
 async fn force_decoy_challenge(
     state: &AppState,
     username: &str,
     expected_user_id: Option<Uuid>,
+    equalize: bool,
 ) -> anyhow::Result<(RequestChallengeResponse, AuthState)> {
     let (mut rcr, auth_state) = state.webauthn.start_discoverable_authentication().map_err(|e| {
         tracing::error!("Failed to start decoy challenge: {:?}", e);
         anyhow::anyhow!("Failed to start authentication: {}", e)
     })?;
     apply_decoy_shape(&mut rcr, &state.csrf_secret, username);
-    equalize_decoy_work(state, rcr.public_key.allow_credentials.len());
+    if equalize {
+        equalize_decoy_work(state, rcr.public_key.allow_credentials.len());
+    }
 
     Ok((
         rcr,
@@ -1299,6 +1307,15 @@ async fn force_decoy_challenge(
 /// enumerate usernames. Shared by the direct login-begin path and the QR
 /// cross-device login path.
 ///
+/// Format pre-check (before rate limiting or DB work): a username that
+/// fails `validate_username` (too short/long, disallowed characters) can
+/// never belong to a real account — registration enforces the same rule —
+/// so there is no real per-credential cost to equalize against and no
+/// benefit to spending a per-username rate-limit bucket on it (that map is
+/// keyed by raw username string, so accepting arbitrary garbage here would
+/// let a prober grow it unboundedly). Route straight to the same decoy
+/// shape everything else gets, skipping `equalize_decoy_work`.
+///
 /// Per-username rate limiting (enumeration defense item #3): before doing
 /// ANY DB work, check `state.username_begin_limiter` keyed by the
 /// (already-normalized) username. If that username has been requested too
@@ -1314,11 +1331,15 @@ async fn scoped_or_decoy_challenge(
     state: &AppState,
     username: &str,
 ) -> anyhow::Result<(RequestChallengeResponse, AuthState)> {
+    if crate::validation::validate_username(username).is_err() {
+        return force_decoy_challenge(state, username, None, false).await;
+    }
+
     if !state.username_begin_limiter.check_rate_limit(username).await {
         tracing::warn!(
             "Per-username begin-login rate limit exceeded; forcing decoy response"
         );
-        return force_decoy_challenge(state, username, None).await;
+        return force_decoy_challenge(state, username, None, true).await;
     }
 
     let user_id = db::get_user_id_by_username(&state.db, username).await?;
@@ -1385,7 +1406,7 @@ async fn scoped_or_decoy_challenge(
     // known but has zero credentials (`Some`) — either way finish must
     // always reject, regardless of which resident credential the browser
     // returns.
-    force_decoy_challenge(state, username, user_id).await
+    force_decoy_challenge(state, username, user_id, true).await
 }
 
 /// `POST /auth/login/begin`. Tolerates an absent/empty JSON body (treated as
@@ -3028,6 +3049,40 @@ mod login_begin_tests {
         assert_eq!(
             forced_rcr.public_key.user_verification,
             natural_rcr.public_key.user_verification
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_or_decoy_challenge_invalid_username_format_still_returns_decoy_shape() {
+        // A username that fails `validate_username` (too short here) can
+        // never be a real account, so this must short-circuit to a decoy
+        // WITHOUT touching the per-username limiter or the (never-connecting)
+        // DB pool, while still returning the same shape as every other decoy.
+        let state = test_app_state(1000);
+
+        let (rcr, auth_state) = scoped_or_decoy_challenge(&state, "ab")
+            .await
+            .expect("invalid-format username must not touch the DB and so must not error");
+
+        assert!(!rcr.public_key.allow_credentials.is_empty());
+        assert!(rcr.mediation.is_none());
+        assert_eq!(rcr.public_key.user_verification, UserVerificationPolicy::Preferred);
+
+        match auth_state {
+            AuthState::Discoverable { scope, .. } => {
+                assert!(matches!(scope, UsernameScope::Decoy { expected_user_id: None }));
+            }
+            AuthState::SecurityKey(_) => {
+                panic!("invalid-format username must never produce a real SecurityKey auth state")
+            }
+        }
+
+        // The per-username limiter budget must be untouched by the
+        // format-invalid short-circuit (it never got a chance to grow the
+        // limiter's key space for this garbage username).
+        assert!(
+            state.username_begin_limiter.check_rate_limit("ab").await,
+            "format short-circuit must not have consumed a rate-limit slot for this username"
         );
     }
 }
