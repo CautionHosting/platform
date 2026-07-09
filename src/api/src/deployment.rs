@@ -6,11 +6,141 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
+use std::sync::{Arc, LazyLock};
 use tokio::fs;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
+
+// Module-level semaphore for lockfile generation coordination (LazyLock enables deref access)
+static LOCKFILE_SEMAPHORE: LazyLock<Arc<Semaphore>> = LazyLock::new(|| {
+    Arc::new(Semaphore::new(1))
+});
+
+/// Generate lockfile config using hcl-rs types instead of string template
+fn generate_provider_lock_config() -> String {
+    use hcl::expr::Expression;
+    use hcl::structure::{Block, Body};
+    use hcl::Ident;
+    
+    // Build: terraform { required_providers { aws = { source = "hashicorp/aws", version = "~> 5.0" } } }
+    let aws_source = Expression::from("hashicorp/aws");
+    let aws_version = Expression::from("~> 5.0");
+    
+    let mut aws_attrs = indexmap::IndexMap::new();
+    aws_attrs.insert("source", aws_source);
+    aws_attrs.insert("version", aws_version);
+    
+    let aws_block = Block::new(("aws",), aws_attrs);
+    
+    let mut req_providers_attrs = indexmap::IndexMap::new();
+    req_providers_attrs.insert("aws", Expression::from(aws_block));
+    
+    let req_providers_block = Block::new(("required_providers",), req_providers_attrs);
+    
+    let mut terraform_attrs = indexmap::IndexMap::new();
+    terraform_attrs.insert("required_providers", Expression::from(req_providers_block));
+    
+    let terraform_block = Block::new(("terraform",), terraform_attrs);
+    
+    let body = Body::from(vec![terraform_block]);
+    
+    body.to_string()
+}
+
+// Module-level semaphore for lockfile generation coordination
+static LOCKFILE_SEMAPHORE: OnceCell<Arc<Semaphore>> = OnceCell::const_new();
 
 /// Default timeout for tofu init/apply/destroy operations (10 minutes).
 const TOFU_TIMEOUT_SECS: u64 = 600;
+
+/// Returns the path to the cached provider lockfile in the data directory.
+pub fn cached_lockfile_path(data_dir: &str) -> PathBuf {
+    Path::new(data_dir).join("terraform").join(".terraform.lock.hcl")
+}
+
+/// Attempts to get or generate the provider lockfile on-demand.
+/// 
+/// - Acquires module-level semaphore (only one generation at a time per container)
+/// - Checks if lockfile exists; if yes, returns path immediately (~0.1 sec)
+/// - If missing: writes temp .tf with hashicorp/aws ~> 5.0, runs tofu providers lock,
+///   copies resulting lockfile to cache dir, returns path
+/// - Always fail-open: logs warning on error, releases semaphore, returns None
+pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
+    let _permit = LOCKFILE_SEMAPHORE.acquire().await.expect("Semaphore closed");
+    
+    let lockfile_path = cached_lockfile_path(data_dir);
+    
+    // Check if lockfile already exists (common case after first generation)
+    if tokio::fs::try_exists(&lockfile_path).await.unwrap_or(false) {
+        tracing::debug!("Provider lockfile already cached at {}", lockfile_path.display());
+        return Some(lockfile_path);
+    }
+    
+    // Lockfile doesn't exist - generate it
+    tracing::info!("Generating provider lockfile in {}...", data_dir);
+    
+    let temp_dir = match TempDir::new() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("Failed to create temp dir for lockfile generation: {}; proceeding without cache", e);
+            return None;
+        }
+    };
+    
+    // Write minimal .tf with our provider constraint using hcl-rs
+    let minimal_tf = generate_provider_lock_config();
+    
+    let main_tf_path = temp_dir.path().join("main.tf");
+    if let Err(e) = std::fs::write(&main_tf_path, minimal_tf) {
+        tracing::warn!("Failed to write temp .tf for lockfile generation: {}; proceeding without cache", e);
+        return None;
+    }
+    
+    // Run tofu providers lock
+    let mut cmd = Command::new("tofu");
+    cmd.args(&["providers", "lock", "-platform=linux_amd64"])
+        .current_dir(temp_dir.path());
+    
+    let output = match run_with_timeout(&mut cmd, 60) {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!("tofu providers lock failed: {}; proceeding without cache", e);
+            return None;
+        }
+    };
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        tracing::warn!(
+            "tofu providers lock failed (exit code {:?}): stderr={}, stdout={}; proceeding without cache",
+            output.status.code(),
+            stderr,
+            stdout
+        );
+        return None;
+    }
+    
+    // Copy the generated lockfile to the cache directory
+    let temp_lockfile = temp_dir.path().join(".terraform.lock.hcl");
+    let cache_terraform_dir = Path::new(data_dir).join("terraform");
+    
+    if let Err(e) = tokio::fs::create_dir_all(&cache_terraform_dir).await {
+        tracing::warn!("Failed to create terraform cache dir {}: {}; proceeding without cache", cache_terraform_dir.display(), e);
+        return None;
+    }
+    
+    match tokio::fs::copy(&temp_lockfile, &lockfile_path).await {
+        Ok(_) => {
+            tracing::info!("Provider lockfile cached at {}", lockfile_path.display());
+            Some(lockfile_path)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to copy lockfile to {}: {}; proceeding without cache", lockfile_path.display(), e);
+            None
+        }
+    }
+}
 
 /// Run a command with a timeout. Kills the process if deadline expires.
 fn run_with_timeout(cmd: &mut Command, timeout_secs: u64) -> Result<std::process::Output> {
@@ -652,7 +782,11 @@ provider "aws" {{
         .await
         .context("Failed to write main.tf")?;
 
-    run_tofu_init(work_dir, None).context("Failed to run tofu init")?;
+    // Get or generate lockfile for deployment init
+    let data_dir = std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
+    let lockfile_path = get_or_generate_lockfile(&data_dir).await;
+
+    run_tofu_init(work_dir, lockfile_path.as_deref(), None).context("Failed to run tofu init")?;
 
     run_tofu_destroy(work_dir, resource_name, credentials).context("Failed to run tofu destroy")?;
 
@@ -688,8 +822,17 @@ async fn generate_backend_config(
     Ok(())
 }
 
-fn run_tofu_init(work_dir: &Path, credentials: Option<&AwsCredentials>) -> Result<()> {
+fn run_tofu_init(work_dir: &Path, lockfile_path: Option<&Path>, credentials: Option<&AwsCredentials>) -> Result<()> {
     tracing::info!("Running tofu init in {}...", work_dir.display());
+    
+    // Copy lockfile into work dir if provided
+    if let Some(src) = lockfile_path {
+        let dst = work_dir.join(".terraform.lock.hcl");
+        match tokio::fs::copy(src, &dst).await {
+            Ok(_) => tracing::debug!("Copied provider lockfile to {}", dst.display()),
+            Err(e) => tracing::warn!("Failed to copy lockfile from {} to {}: {}; proceeding without cache", src.display(), dst.display(), e),
+        }
+    }
 
     let mut cmd = Command::new("tofu");
     cmd.args(&["init", "-no-color", "-upgrade=false", "-reconfigure"])
@@ -1292,7 +1435,9 @@ async fn provision_nitro_enclave(
         .context("Failed to write user-data.sh")?;
 
     // Always use Caution's env credentials for init (S3 state backend access)
-    run_tofu_init(work_dir, None).context("Failed to run tofu init")?;
+    let data_dir = std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
+    let lockfile_path = get_or_generate_lockfile(&data_dir).await;
+    run_tofu_init(work_dir, lockfile_path.as_deref(), None).context("Failed to run tofu init")?;
 
     // Pass user credentials as Terraform variables, not env vars
     // This keeps Caution's creds for S3 state but uses user's creds for AWS provider
@@ -1353,7 +1498,9 @@ async fn provision_managed_onprem(
     std::fs::write(work_dir.join("user-data.sh"), user_data_template)
         .context("Failed to write user-data.sh")?;
 
-    run_tofu_init(work_dir, None).context("Failed to run tofu init")?;
+    let data_dir = std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
+    let lockfile_path = get_or_generate_lockfile(&data_dir).await;
+    run_tofu_init(work_dir, lockfile_path.as_deref(), None).context("Failed to run tofu init")?;
 
     run_tofu_apply_with_provider_creds(
         work_dir,
