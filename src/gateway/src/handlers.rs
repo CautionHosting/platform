@@ -1134,6 +1134,69 @@ fn deserialize_security_keys(public_keys: &[Vec<u8>]) -> Result<Vec<SecurityKey>
         .collect()
 }
 
+/// Real, throwaway-generated `SecurityKey`s (serialized the same way
+/// `finish_securitykey_registration` output is stored — see
+/// `finish_passkey_registration_handler`), used ONLY to size decoy-path CPU
+/// work to match the real path. Their private key material corresponds to
+/// no real user, is never checked against a real challenge, and is never
+/// returned to a client. Two algorithms (ES256 and RS256 — the two the
+/// gateway's `Webauthn` instance accepts, see `COSEAlgorithm::secure_algs()`
+/// / `main.rs`) are alternated in `equalize_decoy_work` so the decoy's
+/// per-credential JSON/COSE-deserialize cost isn't systematically cheaper
+/// than a real account that holds RSA credentials (whose much larger
+/// modulus costs more to base64-decode and parse than an EC point).
+const DECOY_TIMING_FIXTURE_ES256: &[u8] = br#"{"cred":{"cred_id":"7ySFchbdsv8y8B5oR-1cxOlY5Trjo1auESH25Co0nTI","cred":{"type_":"ES256","key":{"EC_EC2":{"curve":"SECP256R1","x":"SveqzIeBhZDl0phwAvHY0rAIEdeTphQu4ReAuCzq8bs","y":"6mm9arrmm2MqgpwkdTvN0-X-cduiZd4zAQdvDuEDO7M"}}},"counter":0,"transports":null,"user_verified":false,"backup_eligible":false,"backup_state":false,"registration_policy":"preferred","extensions":{"cred_protect":"Ignored","hmac_create_secret":"NotRequested","appid":"NotRequested","cred_props":"Ignored"},"attestation":{"data":"Self_","metadata":"None"},"attestation_format":"packed"}}"#;
+const DECOY_TIMING_FIXTURE_RS256: &[u8] = br#"{"cred":{"cred_id":"Zf6IREgEOMUe8fugN_Td2VjbdNuKDMDBbp3kgUjn4kk","cred":{"type_":"RS256","key":{"RSA":{"n":"BYLwR4Q78LFZmPfF5N_7iQg8FYJ2gB8t7W0Wqtwte6v0-aDMmCNhEu1eikRqosqqPyPOUhSfVy7f8e6gFHGznMhHt7c2IS687B9aH57XV78ySjitd55wLeMhzMdRFZxKcPja1IhyZ_yesU6aJFBWvRujd4Ufqj__WEs4IkJetjeT6KlpBQy67AQozbqcDvtq4NokcpfGLGbimMTEkGMyzARY28jyzgvJj82EZwzUC8LMEa5CYIbKZUIeZwMpaA63OoFexxJt9vCMAPathraD6A4yiwDswJ9bMKekblYDqJBpwAmJFnHK5nEpHNkGkXobhXel5pBw9RJ0DY8cjKe1uA","e":[1,0,1]}}},"counter":0,"transports":null,"user_verified":false,"backup_eligible":false,"backup_state":false,"registration_policy":"preferred","extensions":{"cred_protect":"Ignored","hmac_create_secret":"NotRequested","appid":"NotRequested","cred_props":"Ignored"},"attestation":{"data":"Self_","metadata":"None"},"attestation_format":"packed"}}"#;
+
+/// Both decoy timing fixtures, in the order `equalize_decoy_work` alternates
+/// them. Panics at process startup (see `validate_decoy_timing_fixtures`,
+/// called from `main`) if either ever fails to deserialize, rather than
+/// silently degrading the decoy path's timing-equalization at request time.
+const DECOY_TIMING_FIXTURES: [&[u8]; 2] = [DECOY_TIMING_FIXTURE_ES256, DECOY_TIMING_FIXTURE_RS256];
+
+/// Called once from `main` at startup: fail fast (panic via `expect`) if
+/// either `DECOY_TIMING_FIXTURE_*` constant ever fails to deserialize — e.g.
+/// format drift on a future `webauthn-rs` upgrade — rather than letting
+/// `equalize_decoy_work`'s per-request fail-open path silently reopen the
+/// timing side-channel it exists to close.
+pub fn validate_decoy_timing_fixtures() {
+    for fixture in DECOY_TIMING_FIXTURES {
+        deserialize_security_keys(&[fixture.to_vec()])
+            .expect("DECOY_TIMING_FIXTURE failed to deserialize at startup");
+    }
+}
+
+/// Perform throwaway deserialize + auth-challenge-build work on the decoy
+/// path, sized to match the real branch's dominant per-credential cost
+/// (JSON/COSE deserialize + `start_securitykey_authentication`'s O(N)
+/// build), so begin-login response latency stops leaking whether a
+/// username exists or how many credentials it has. Alternates the ES256 and
+/// RS256 fixtures so the decoy path isn't systematically cheaper than a real
+/// account holding RSA credentials. Never stores or returns its result — the
+/// real `AuthState::Discoverable{Decoy}` from
+/// `start_discoverable_authentication` is what actually gets persisted, so a
+/// decoy still can never complete a ceremony. Fails open: both fixtures are
+/// validated once at startup (`validate_decoy_timing_fixtures`), so a
+/// per-request deserialize error here would mean in-process corruption, not
+/// format drift — log and skip rather than fail the login-begin request.
+fn equalize_decoy_work(state: &AppState, n: usize) {
+    let blobs: Vec<Vec<u8>> = (0..n)
+        .map(|i| DECOY_TIMING_FIXTURES[i % DECOY_TIMING_FIXTURES.len()].to_vec())
+        .collect();
+    match deserialize_security_keys(&blobs) {
+        Ok(keys) => {
+            let result = state.webauthn.start_securitykey_authentication(&keys);
+            std::hint::black_box(result);
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Decoy timing-equalization fixture failed to deserialize: {:?}",
+                e
+            );
+        }
+    }
+}
+
 /// Username scope recorded on an `AuthState::Discoverable` challenge, checked
 /// against the resolved user at finish time. Only ever meaningfully set by
 /// `scoped_or_decoy_challenge` (i.e. a username was supplied for this
@@ -1217,6 +1280,7 @@ async fn force_decoy_challenge(
         anyhow::anyhow!("Failed to start authentication: {}", e)
     })?;
     apply_decoy_shape(&mut rcr, &state.csrf_secret, username);
+    equalize_decoy_work(state, rcr.public_key.allow_credentials.len());
 
     Ok((
         rcr,
@@ -1270,17 +1334,17 @@ async fn scoped_or_decoy_challenge(
     // and the result is discarded.
     //
     // SCOPE OF THIS EQUALIZATION: it only equalizes the *DB round trips*
-    // (count and kind of queries) on a single gateway replica/process. It is
-    // NOT constant-time overall: the real-user branch below additionally runs
-    // `deserialize_security_keys` over N real credential blobs plus
-    // `start_securitykey_authentication`, whose cost scales with that user's
-    // credential count, while the decoy branch does a fixed-cost
-    // `start_discoverable_authentication` + HMAC synthesis. A network-observing
-    // attacker measuring response latency can therefore still distinguish
-    // "exists with credentials" from "unknown / zero-cred" and estimate a real
-    // account's credential count. Closing that residual timing side-channel
-    // (dummy deserialize/crypto work on the decoy path, or padding to a
-    // deadline) is deliberately out of scope here.
+    // (count and kind of queries) on a single gateway replica/process. The
+    // dominant remaining CPU cost is `deserialize_security_keys` over N
+    // credential blobs plus `start_securitykey_authentication`'s O(N) build:
+    // the real-user branch below runs that over the user's actual credential
+    // blobs, while the decoy branch (`force_decoy_challenge` ->
+    // `equalize_decoy_work`) now runs the SAME deserialize + auth-build work
+    // over N copies of a throwaway fixture (`DECOY_TIMING_FIXTURE`), sized to
+    // the same allowCredentials count the decoy shape advertises — closing
+    // the gap for that dominant cost. This is still not a hard constant-time
+    // guarantee overall: scheduler/OS-level jitter, cache effects, and other
+    // lower-order timing sources remain out of scope.
     let credential_lookup_id = user_id.unwrap_or_else(Uuid::new_v4);
     let public_keys = db::get_credential_public_keys_by_user_id(&state.db, credential_lookup_id)
         .await
@@ -2824,6 +2888,22 @@ mod login_begin_tests {
             real.public_key.user_verification,
             decoy_rcr.public_key.user_verification
         );
+    }
+
+    #[test]
+    fn decoy_timing_fixtures_round_trip_through_deserialize_security_keys() {
+        // Guards against future format drift (e.g. a webauthn-rs upgrade
+        // changing `SecurityKey`'s serde shape) silently breaking
+        // `equalize_decoy_work` in CI before `validate_decoy_timing_fixtures`
+        // would catch it at startup in a real deployment.
+        for fixture in DECOY_TIMING_FIXTURES {
+            assert!(deserialize_security_keys(&[fixture.to_vec()]).is_ok());
+        }
+    }
+
+    #[test]
+    fn validate_decoy_timing_fixtures_does_not_panic() {
+        validate_decoy_timing_fixtures();
     }
 
     // --- per-username rate limiting (enumeration defense item #3) --------

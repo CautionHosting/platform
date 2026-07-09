@@ -107,6 +107,12 @@ async fn main() -> Result<()> {
         .build()
         .context("Failed to build WebAuthn")?;
 
+    // Fail fast if the login-begin decoy timing-equalization fixtures ever
+    // stop deserializing (e.g. a future webauthn-rs upgrade changing
+    // `SecurityKey`'s serde shape), rather than silently degrading the
+    // enumeration-defense timing fix at request time.
+    handlers::validate_decoy_timing_fixtures();
+
     tracing::info!("WebAuthn configured:");
     tracing::info!("  RP ID: {}", config.rp_id);
     tracing::info!("  RP Display Name: {}", config.rp_display_name);
