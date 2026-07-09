@@ -18,7 +18,12 @@ The Makefile assumes the presence of a few basic tools:
 
 - `make`
 - `bash`
-- `Docker`
+- `Docker` with BuildKit and the containerd image store enabled
+
+The default installation path is Linux/x86_64-oriented because it runs the
+StageX container build. The untrusted host-toolchain build also requires the
+native Rust and C dependencies listed in the `make install-cli-untrusted` error
+messages.
 
 ### Build Compatibility
 
@@ -54,13 +59,27 @@ anti-pattern when it comes to good security practices.
 
 #### From Source
 
+This is the quickest install path. It builds the release-style StageX CLI in
+Docker and installs it to `$HOME/.local/bin/caution`.
+
 ```sh
 git clone https://codeberg.org/caution/platform
 cd platform
 make install-cli
 ```
 
-If you need to send locksmith shards, use `make install-cli-untrusted` instead.
+If you need to send locksmith shards with `caution secret send-shard`, use the
+host-toolchain build instead. That path links against the host PC/SC stack and
+installs to a writable binary directory, defaulting to `$HOME/.local/bin`:
+
+```sh
+make install-cli-untrusted
+```
+
+On Linux, the untrusted build needs development packages for clang/libclang,
+pkg-config, nettle, GMP, OpenSSL, libudev, and PC/SC. On macOS, it checks for
+Homebrew or MacPorts equivalents and prints install hints when packages are
+missing.
 
 ### CI SSH App Access
 
