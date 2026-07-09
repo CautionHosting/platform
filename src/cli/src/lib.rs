@@ -8382,12 +8382,26 @@ struct AssertionResult {
     response_json: Vec<u8>,
 }
 
+/// `--qr` is global, so it parses on every subcommand. It only means something
+/// for flows that authenticate an existing credential (signing, login);
+/// registration creates one and has no cross-device path.
+fn validate_global_qr(command: &Commands, qr: bool) -> Result<(), RunError> {
+    if qr && matches!(command, Commands::Register { .. }) {
+        return Err(RunError::ArgValidation(
+            "--qr is not supported for register: creating a credential requires a local authenticator. Register on this device, then use --qr for login and deploys.",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn run() -> Result<(), RunError> {
     let cli = Cli::parse();
 
     log_verbose(cli.verbose, "API CLI v0.1.0");
     log_verbose(cli.verbose, &format!("Gateway URL: {}", cli.url));
     log_verbose(cli.verbose, &format!("Command: {:?}", cli.command));
+
+    validate_global_qr(&cli.command, cli.qr)?;
 
     if let Err(e) = check_dependencies(cli.verbose) {
         eprintln!("Dependency check failed: {}", e);
@@ -8671,8 +8685,8 @@ mod tests {
         login_begin_request_body, normalize_keyring, parse_env_assignments, prompt_line_from,
         prompt_optional_line_from, resolve_local_build_command_from_dir, resolve_login_username,
         resolve_procfile_build_command, resolve_register_username,
-        resolve_quorum_parameters, ApiClient, Cli, Commands, LoginUsernameError,
-        RegisterUsernameError,
+        resolve_quorum_parameters, validate_global_qr, ApiClient, Cli, Commands, LoginUsernameError,
+        RegisterUsernameError, RunError,
     };
     use caution_config::ConfigurationFile;
     use clap::Parser;
@@ -9211,6 +9225,27 @@ containerfile: Missing.Containerfile\n",
             }
             other => panic!("expected Commands::Login, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn register_rejects_qr_flag() {
+        let cli =
+            Cli::try_parse_from(["caution", "register", "--qr", "--alpha-code", "abc"]).unwrap();
+        let err = validate_global_qr(&cli.command, cli.qr)
+            .expect_err("register --qr must be rejected, not silently fall back to a local key");
+        assert!(matches!(err, RunError::ArgValidation(_)));
+    }
+
+    #[test]
+    fn register_without_qr_is_allowed() {
+        let cli = Cli::try_parse_from(["caution", "register", "--alpha-code", "abc"]).unwrap();
+        assert!(validate_global_qr(&cli.command, cli.qr).is_ok());
+    }
+
+    #[test]
+    fn global_qr_is_allowed_for_non_register_commands() {
+        let cli = Cli::try_parse_from(["caution", "login", "--qr"]).unwrap();
+        assert!(validate_global_qr(&cli.command, cli.qr).is_ok());
     }
 
     #[test]
