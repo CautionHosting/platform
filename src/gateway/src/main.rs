@@ -22,6 +22,7 @@ mod auth_middleware;
 mod config;
 mod csrf;
 mod db;
+mod decoy;
 mod handlers;
 mod proxy;
 mod rate_limit;
@@ -131,6 +132,26 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Three independent in-memory rate limiters (see doc comments in
+    // `rate_limit.rs` for the single-gateway-replica assumption):
+    //  - `rate_limiter`: blanket per-IP budget over all /auth/* routes.
+    //  - `scoped_begin_limiter`: tighter per-IP budget on username-scoped
+    //    begin requests only (409/handlers.rs), hard 429 on exceed.
+    //  - `username_begin_limiter`: per-username budget on scoped begin
+    //    requests; exceeding it forces a decoy response instead of a 429.
+    let rate_limiter = rate_limit::RateLimiter::new(
+        rate_limit::GLOBAL_MAX_REQUESTS,
+        rate_limit::GLOBAL_WINDOW_SECS,
+    );
+    let scoped_begin_limiter = rate_limit::RateLimiter::new(
+        rate_limit::SCOPED_BEGIN_MAX_REQUESTS,
+        rate_limit::SCOPED_BEGIN_WINDOW_SECS,
+    );
+    let username_begin_limiter = rate_limit::RateLimiter::new(
+        rate_limit::USERNAME_BEGIN_MAX_REQUESTS,
+        rate_limit::USERNAME_BEGIN_WINDOW_SECS,
+    );
+
     let state = AppState {
         db: pool.clone(),
         webauthn,
@@ -144,13 +165,19 @@ async fn main() -> Result<()> {
         internal_service_secret: internal_service_secret.clone(),
         csrf_secret: config.csrf_secret.clone(),
         login_allow_broadcast,
+        scoped_begin_limiter: scoped_begin_limiter.clone(),
+        username_begin_limiter: username_begin_limiter.clone(),
     };
-
-    let rate_limiter = rate_limit::RateLimiter::new(100, 60);
 
     let rate_limiter_cleanup = rate_limiter.clone();
     tokio::spawn(async move {
         rate_limiter_cleanup.cleanup_task().await;
+    });
+    tokio::spawn(async move {
+        scoped_begin_limiter.cleanup_task().await;
+    });
+    tokio::spawn(async move {
+        username_begin_limiter.cleanup_task().await;
     });
 
     let cors = CorsLayer::new()

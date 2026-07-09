@@ -13,6 +13,8 @@ use time::Duration;
 use uuid::Uuid;
 use webauthn_rs::prelude::*;
 use webauthn_rs_proto::{ResidentKeyRequirement, UserVerificationPolicy};
+#[cfg(test)]
+use webauthn_rs_proto::Mediation;
 
 /// Clear the `credProtect` extension (which forces UV=Required and conflicts
 /// with our UV=Preferred authenticator selection, rejecting PIN-less smart
@@ -41,6 +43,7 @@ fn read_credprops_rk(reg_response: &RegisterPublicKeyCredential) -> Option<bool>
 const MAX_PENDING_CHALLENGES: usize = 10_000;
 
 use crate::db;
+use crate::decoy;
 use crate::types::*;
 use base64::Engine as _;
 
@@ -159,31 +162,77 @@ pub enum LoginError {
     },
 }
 
+/// Fixed body returned for every credential-verification failure at the
+/// login/QR-login finish endpoints (unknown credential, bad signature,
+/// decoy/scope rejection, expired/invalid session, etc). These outcomes are
+/// intentionally collapsed into one byte-for-byte identical status+body so a
+/// caller cannot distinguish "no such credential" from "bad signature" from
+/// "session expired" — that distinction is exactly the username-enumeration
+/// oracle the decoy-challenge mechanism exists to close.
+const GENERIC_AUTH_FAILURE_BODY: &str = r#"{"error":"authentication_failed"}"#;
+
+fn generic_auth_failure_response() -> (StatusCode, HeaderMap, &'static str) {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    (StatusCode::UNAUTHORIZED, headers, GENERIC_AUTH_FAILURE_BODY)
+}
+
 impl IntoResponse for LoginError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
+        match self {
+            // Session/challenge lifecycle errors are folded into the same
+            // generic 401 as credential-verification failures below: the
+            // frontend only checks `response.ok` on the finish calls and
+            // shows a generic message, so distinguishing "session expired"
+            // from "bad credential" would just reopen the oracle at a
+            // different layer.
             Self::InvalidSession(_) | Self::ChallengeExpired => {
-                (StatusCode::UNAUTHORIZED, self.to_string())
+                tracing::debug!(?self, "Login finish: session/challenge error");
+                generic_auth_failure_response().into_response()
             }
-            Self::PinRequired => (StatusCode::FORBIDDEN, self.to_string()),
+            Self::PinRequired => (StatusCode::FORBIDDEN, self.to_string()).into_response(),
             Self::ParsePubkeyCredential { source: _ } => {
-                (StatusCode::BAD_REQUEST, self.to_string())
+                (StatusCode::BAD_REQUEST, self.to_string()).into_response()
             }
-            // A decoy/scope rejection is an expected client-side failure, not an
-            // internal error: return 400 like other bad-credential outcomes so a
-            // decoy rejection isn't distinguishable by status code (and don't log
-            // it at error level). Full normalization of every finish failure into
-            // one generic response is Phase 2 (P1#4).
-            Self::UnexpectedCredentialOwner { .. } => (StatusCode::BAD_REQUEST, self.to_string()),
+            // Every credential-verification outcome — unknown credential,
+            // failed signature verification, and decoy/scope rejection —
+            // collapses to the same generic 401 response so none of them is
+            // distinguishable from another by status code or body. These are
+            // expected client-side authentication failures, not internal
+            // errors, so they're logged at debug/warn, not error.
+            Self::UnexpectedCredentialOwner { .. } => {
+                tracing::debug!(?self, "Login finish: decoy/scope rejection");
+                generic_auth_failure_response().into_response()
+            }
+            Self::DbGetUserIdByCredential { .. } => {
+                tracing::error!(?self, "Login finish: credential not found");
+                generic_auth_failure_response().into_response()
+            }
+            Self::DbGetPublicKeyForCredential { .. } | Self::ParseSecurityKey { .. } => {
+                tracing::warn!(?self, "Login finish: credential lookup/parse failure");
+                generic_auth_failure_response().into_response()
+            }
+            Self::IdentifyDiscoverableCredential { .. } => {
+                tracing::error!(?self, "Login finish: could not identify discoverable credential");
+                generic_auth_failure_response().into_response()
+            }
+            Self::FinishSecurityKeyAuthentication { .. }
+            | Self::FinishDiscoverableAuthentication { .. } => {
+                tracing::warn!(?self, "Login finish: signature verification failed");
+                generic_auth_failure_response().into_response()
+            }
             _ => {
                 tracing::error!(?self, "Login error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "an internal error occurred".into(),
+                    "an internal error occurred".to_string(),
                 )
+                    .into_response()
             }
-        };
-        (status, message).into_response()
+        }
     }
 }
 
@@ -237,6 +286,8 @@ pub enum QrLoginError {
         #[source]
         source: anyhow::Error,
     },
+    #[error("Rate limit exceeded. Please try again later.")]
+    RateLimited,
 }
 
 impl IntoResponse for QrLoginError {
@@ -247,6 +298,7 @@ impl IntoResponse for QrLoginError {
             Self::UnexpectedState(_) | Self::AlreadyClaimed => {
                 (StatusCode::CONFLICT, self.to_string())
             }
+            Self::RateLimited => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
             _ => {
                 tracing::error!(?self, "QR login error");
                 (
@@ -1125,117 +1177,168 @@ fn check_username_scope(
     }
 }
 
-/// Build a username-scoped `allowCredentials` challenge for a known username,
-/// or a discoverable decoy challenge for an unknown one — same shape either
-/// way, so the caller can't use this to enumerate usernames. A known username
-/// with zero registered credentials also takes the decoy path, since the
-/// scoped path never sets `mediation` while the decoy path always does —
-/// taking the scoped path with an empty list would otherwise be a
-/// distinguishing oracle. Shared by the direct login-begin path and the QR
+/// Overwrite a freshly-started discoverable-auth challenge's client-facing
+/// shape to match a real username-scoped challenge, so a decoy is
+/// indistinguishable from a real account: a non-empty, per-username-stable,
+/// HMAC-synthesized `allowCredentials` list, no `mediation`, and
+/// `UserVerificationPolicy::Preferred` — exactly what the real scoped branch
+/// of `scoped_or_decoy_challenge` produces. The underlying `auth_state`
+/// (the actual server-side challenge from `start_discoverable_authentication`)
+/// is untouched and real; only the response sent to the client is reshaped.
+/// The synthesized credential IDs never exist in server state, so they can
+/// never complete a ceremony — and `check_username_scope` additionally
+/// rejects any resident credential a decoy challenge does resolve to.
+fn apply_decoy_shape(
+    rcr: &mut RequestChallengeResponse,
+    csrf_secret: &str,
+    normalized_username: &str,
+) {
+    rcr.public_key.allow_credentials =
+        decoy::synthesize_allow_credentials(csrf_secret, normalized_username);
+    rcr.mediation = None;
+    rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
+}
+
+/// Start a real (never-completable) discoverable-auth ceremony and reshape
+/// its response to the decoy shape via `apply_decoy_shape`, recording
+/// `expected_user_id` on the returned `UsernameScope::Decoy` so
+/// `check_username_scope` rejects it at finish regardless of which resident
+/// credential the browser returns. Shared by both decoy call sites in
+/// `scoped_or_decoy_challenge`: the natural decoy (unknown username, or a
+/// known username with zero credentials) and the forced decoy (a username
+/// that tripped the per-username rate limit, whether or not it's real).
+async fn force_decoy_challenge(
+    state: &AppState,
+    username: &str,
+    expected_user_id: Option<Uuid>,
+) -> anyhow::Result<(RequestChallengeResponse, AuthState)> {
+    let (mut rcr, auth_state) = state.webauthn.start_discoverable_authentication().map_err(|e| {
+        tracing::error!("Failed to start decoy challenge: {:?}", e);
+        anyhow::anyhow!("Failed to start authentication: {}", e)
+    })?;
+    apply_decoy_shape(&mut rcr, &state.csrf_secret, username);
+
+    Ok((
+        rcr,
+        AuthState::Discoverable {
+            auth_state,
+            scope: UsernameScope::Decoy { expected_user_id },
+        },
+    ))
+}
+
+/// Build a username-scoped `allowCredentials` challenge for a known username
+/// with credentials, or a synthesized decoy challenge otherwise (unknown
+/// username, or known username with zero registered credentials) — same
+/// shape either way (non-empty `allowCredentials`, no `mediation`,
+/// `user_verification: Preferred`), so the caller can't use this to
+/// enumerate usernames. Shared by the direct login-begin path and the QR
 /// cross-device login path.
+///
+/// Per-username rate limiting (enumeration defense item #3): before doing
+/// ANY DB work, check `state.username_begin_limiter` keyed by the
+/// (already-normalized) username. If that username has been requested too
+/// many times in the window, short-circuit straight to a forced decoy
+/// (`force_decoy_challenge`) WITHOUT touching the DB — this deliberately
+/// runs ahead of the real-vs-decoy branching below so a flooded username
+/// (real or not) always degrades to "looks real but can never
+/// authenticate" rather than a hard error. Because this check lives inside
+/// `scoped_or_decoy_challenge` rather than in `begin_login_handler`, the QR
+/// cross-device begin path (`qr_login_authenticate_handler`, which also
+/// calls this function) inherits the same per-username cap automatically.
 async fn scoped_or_decoy_challenge(
     state: &AppState,
     username: &str,
 ) -> anyhow::Result<(RequestChallengeResponse, AuthState)> {
-    match db::get_user_id_by_username(&state.db, username).await? {
-        Some(user_id) => {
-            let public_keys = db::get_credential_public_keys_by_user_id(&state.db, user_id)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to fetch credentials for user {}: {:?}", user_id, e);
-                    anyhow::anyhow!("Failed to fetch credentials: {}", e)
-                })?;
-            let allow_credentials = deserialize_security_keys(&public_keys)?;
-
-            if allow_credentials.is_empty() {
-                // Known username but zero registered credentials (e.g. a
-                // race with account deletion/credential removal): return the
-                // same uniform empty challenge as an unknown username below,
-                // so these two cases are indistinguishable from each other.
-                // `start_securitykey_authentication` never sets `mediation`,
-                // while `start_discoverable_authentication` always sets
-                // `mediation: Conditional` — taking the scoped path here with
-                // an empty list would leave `mediation` absent and make
-                // known-zero-cred distinguishable from unknown.
-                //
-                // NOTE: this only equalizes the *empty* cases. A known
-                // username that HAS credentials still returns a non-empty
-                // `allowCredentials` with no `mediation`, which remains
-                // distinguishable — closing that enumeration oracle is Phase 2
-                // (synthesized HMAC decoys), not done here.
-                let (rcr, auth_state) =
-                    state.webauthn.start_discoverable_authentication().map_err(|e| {
-                        tracing::error!("Failed to start empty challenge: {:?}", e);
-                        anyhow::anyhow!("Failed to start authentication: {}", e)
-                    })?;
-                return Ok((
-                    rcr,
-                    AuthState::Discoverable {
-                        auth_state,
-                        // Decoy: this user is known but has zero credentials,
-                        // so finish must always reject regardless of which
-                        // resident credential the browser returns.
-                        scope: UsernameScope::Decoy {
-                            expected_user_id: Some(user_id),
-                        },
-                    },
-                ));
-            }
-
-            tracing::debug!(
-                "Starting username-scoped authentication challenge with {} credentials",
-                allow_credentials.len()
-            );
-
-            let (mut rcr, auth_state) = state
-                .webauthn
-                .start_securitykey_authentication(&allow_credentials)
-                .map_err(|e| {
-                    tracing::error!("Failed to start scoped authentication: {:?}", e);
-                    anyhow::anyhow!("Failed to start authentication: {}", e)
-                })?;
-            rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
-            Ok((rcr, AuthState::SecurityKey(auth_state)))
-        }
-        None => {
-            // Unknown username: no 404, no distinct error — return the same
-            // uniform empty challenge as the discoverable path so "unknown" is
-            // indistinguishable from "known but zero credentials". This does
-            // NOT hide a known username that has credentials (that response is
-            // non-empty); eliminating that remaining oracle is Phase 2.
-            let (rcr, auth_state) =
-                state.webauthn.start_discoverable_authentication().map_err(|e| {
-                    tracing::error!("Failed to start empty challenge: {:?}", e);
-                    anyhow::anyhow!("Failed to start authentication: {}", e)
-                })?;
-            // Decoy: no such user exists. Stays indistinguishable from the
-            // known-zero-cred case above — both are `Decoy` and both always
-            // reject at finish, regardless of which credential is returned.
-            Ok((
-                rcr,
-                AuthState::Discoverable {
-                    auth_state,
-                    scope: UsernameScope::Decoy {
-                        expected_user_id: None,
-                    },
-                },
-            ))
-        }
+    if !state.username_begin_limiter.check_rate_limit(username).await {
+        tracing::warn!(
+            "Per-username begin-login rate limit exceeded; forcing decoy response"
+        );
+        return force_decoy_challenge(state, username, None).await;
     }
+
+    let user_id = db::get_user_id_by_username(&state.db, username).await?;
+
+    // Timing equalization: always issue the same shape of DB work (a user
+    // lookup followed by a credential fetch keyed on a real/plausible user
+    // id) regardless of whether the username resolved, so the number and
+    // kind of DB round trips can't themselves leak existence over a timing
+    // side-channel. For an unknown username there's no real user id to
+    // fetch credentials for, so we query a random UUID instead — it can
+    // never match a row in `fido2_credentials` (whose `user_id` is a real
+    // FK), so the query costs the same indexed lookup and returns empty,
+    // and the result is discarded.
+    //
+    // SCOPE OF THIS EQUALIZATION: it only equalizes the *DB round trips*
+    // (count and kind of queries) on a single gateway replica/process. It is
+    // NOT constant-time overall: the real-user branch below additionally runs
+    // `deserialize_security_keys` over N real credential blobs plus
+    // `start_securitykey_authentication`, whose cost scales with that user's
+    // credential count, while the decoy branch does a fixed-cost
+    // `start_discoverable_authentication` + HMAC synthesis. A network-observing
+    // attacker measuring response latency can therefore still distinguish
+    // "exists with credentials" from "unknown / zero-cred" and estimate a real
+    // account's credential count. Closing that residual timing side-channel
+    // (dummy deserialize/crypto work on the decoy path, or padding to a
+    // deadline) is deliberately out of scope here.
+    let credential_lookup_id = user_id.unwrap_or_else(Uuid::new_v4);
+    let public_keys = db::get_credential_public_keys_by_user_id(&state.db, credential_lookup_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fetch credentials for scoped login: {:?}", e);
+            anyhow::anyhow!("Failed to fetch credentials: {}", e)
+        })?;
+    let allow_credentials = match user_id {
+        Some(_) => deserialize_security_keys(&public_keys)?,
+        None => Vec::new(),
+    };
+
+    if user_id.is_some() && !allow_credentials.is_empty() {
+        tracing::debug!(
+            "Starting username-scoped authentication challenge with {} credentials",
+            allow_credentials.len()
+        );
+
+        let (mut rcr, auth_state) = state
+            .webauthn
+            .start_securitykey_authentication(&allow_credentials)
+            .map_err(|e| {
+                tracing::error!("Failed to start scoped authentication: {:?}", e);
+                anyhow::anyhow!("Failed to start authentication: {}", e)
+            })?;
+        rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
+        return Ok((rcr, AuthState::SecurityKey(auth_state)));
+    }
+
+    // Decoy path: either the username doesn't resolve to any user, or it
+    // resolves to a user with zero registered credentials. Both cases are
+    // indistinguishable from each other AND from the real scoped response
+    // above — same non-empty `allowCredentials` shape, no `mediation`,
+    // Preferred UV. `force_decoy_challenge` starts a real server-side
+    // challenge + state (so a probing client can't tell this apart from a
+    // real ceremony start) and reshapes the client-facing response.
+    // `expected_user_id` is either no such user (`None`) or the user is
+    // known but has zero credentials (`Some`) — either way finish must
+    // always reject, regardless of which resident credential the browser
+    // returns.
+    force_decoy_challenge(state, username, user_id).await
 }
 
 /// `POST /auth/login/begin`. Tolerates an absent/empty JSON body (treated as
 /// `{ "username": null }`) since axum's `Json` extractor rejects those.
 ///
-/// - `username` present & non-empty, and matches a user -> username-scoped
-///   `allowCredentials` (that user's credentials only).
-/// - `username` present & non-empty, but no such user (or a known user with
-///   zero credentials) -> a normal challenge with EMPTY `allowCredentials`
-///   (discoverable) — never a 404. This makes "unknown" indistinguishable from
-///   "known but zero credentials", removing the crude status/shape oracle. It
-///   does NOT hide a known username that HAS credentials (non-empty
-///   `allowCredentials`, no mediation); closing that residual enumeration
-///   oracle via synthesized decoys is Phase 2.
+/// - `username` present & non-empty, and matches a user with ≥1 registered
+///   credential -> username-scoped `allowCredentials` (that user's
+///   credentials only), no `mediation`, `user_verification: Preferred`.
+/// - `username` present & non-empty, but no such user, or a known user with
+///   zero credentials -> a decoy challenge with the SAME shape: a non-empty,
+///   deterministically HMAC-synthesized `allowCredentials` list (see
+///   `decoy::synthesize_allow_credentials`), no `mediation`,
+///   `user_verification: Preferred`. Never a 404, and never distinguishable
+///   by shape from the real-user case above — the existence of the username
+///   is unanswerable from this response. The synthesized IDs never exist in
+///   server state, so a decoy can never complete a ceremony
+///   (`check_username_scope` enforces this at finish).
 /// - `username` absent/empty:
 ///   - `login_allow_broadcast == true` (default) -> legacy broadcast:
 ///     `allowCredentials` = every credential in the DB, byte-for-byte
@@ -1245,8 +1348,9 @@ async fn scoped_or_decoy_challenge(
 ///     `start_discoverable_authentication`).
 pub async fn begin_login_handler(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     body: axum::body::Bytes,
-) -> Result<Json<LoginBeginResponse>, AppError> {
+) -> Result<Response, AppError> {
     let username: Option<String> = normalize_login_username(if body.is_empty() {
         None
     } else {
@@ -1256,7 +1360,28 @@ pub async fn begin_login_handler(
     });
 
     let (rcr, auth_state) = if let Some(username) = username {
+        // Tighter per-IP budget on top of the blanket global limiter (item
+        // #3 of the enumeration defense): a scoped-begin request does more
+        // per-call work (a DB lookup) than a plain broadcast begin, and is
+        // the shape an enumeration attacker actually wants to spam. A hard
+        // 429 here is safe — it's keyed by IP, not by username, so it can't
+        // leak whether any particular username exists.
+        if !state
+            .scoped_begin_limiter
+            .check_rate_limit(&addr.ip().to_string())
+            .await
+        {
+            tracing::warn!("Scoped begin-login rate limit exceeded for IP: {}", addr.ip());
+            return Ok((
+                StatusCode::TOO_MANY_REQUESTS,
+                "Rate limit exceeded. Please try again later.",
+            )
+                .into_response());
+        }
+
         // Username-scoped fallback path (e.g. CLI / non-resident keys).
+        // `scoped_or_decoy_challenge` additionally enforces a per-username
+        // budget and forces a decoy (never a 429) once that's exceeded.
         scoped_or_decoy_challenge(&state, &username).await?
     } else if state.login_allow_broadcast {
         // Legacy behavior: broadcast every credential in the DB. Kept
@@ -1328,7 +1453,8 @@ pub async fn begin_login_handler(
     Ok(Json(LoginBeginResponse {
         challenge: rcr,
         session: session_key,
-    }))
+    })
+    .into_response())
 }
 
 pub async fn finish_login_handler(
@@ -1435,11 +1561,10 @@ pub async fn finish_login_handler(
             // Ceremony is consumed (challenge validated) at this point even
             // if the scope check below rejects it, so a decoy challenge can't
             // be completed by authenticating as a different resident user
-            // (Finding 1). The rejection returns 400 (see `IntoResponse`),
-            // matching other bad-credential finish outcomes; note it is not yet
-            // byte-for-byte indistinguishable from every finish failure (e.g.
-            // `FinishDiscoverableAuthentication` still 500s) — that full
-            // normalization is Phase 2 (P1#4).
+            // (Finding 1). The rejection is intentionally byte-for-byte
+            // identical to every other credential-verification failure (see
+            // `LoginError::into_response`) to avoid a username-enumeration
+            // oracle.
             check_username_scope(&scope, user_id)?;
 
             // Opportunistic residency backfill: a successful discoverable
@@ -1950,6 +2075,15 @@ pub async fn qr_login_authenticate_handler(
     // Otherwise mirror begin_login_handler's flag-driven behavior: broadcast
     // when the flag is on (unchanged), otherwise discoverable.
     let (rcr, auth_state) = if let Some(username) = row.username.as_deref() {
+        // Same per-IP scoped-begin budget as begin_login_handler: this branch
+        // does the same username-scoped DB lookup and is the same enumeration
+        // shape, just reached via the QR flow instead of /auth/login/begin.
+        let ip = connect_info.0.ip();
+        if !state.scoped_begin_limiter.check_rate_limit(&ip.to_string()).await {
+            tracing::warn!("Scoped begin-login rate limit exceeded for IP: {}", ip);
+            return Err(QrLoginError::RateLimited);
+        }
+
         scoped_or_decoy_challenge(&state, username)
             .await
             .map_err(|source| QrLoginError::ScopedChallenge { source })?
@@ -2600,6 +2734,220 @@ mod login_begin_tests {
         assert!(
             check_username_scope(&UsernameScope::Decoy { expected_user_id: Some(user) }, user)
                 .is_ok()
+        );
+    }
+
+    // --- apply_decoy_shape -----------------------------------------------
+    //
+    // `scoped_or_decoy_challenge` itself needs a live Postgres + a real
+    // `Webauthn` instance (see the DB-backed-branches note above), but the
+    // decoy *response-shaping* step it delegates to is pure: it just
+    // mutates an already-built `RequestChallengeResponse`. That's covered
+    // directly here without needing a DB or a webauthn ceremony, which is
+    // what actually enforces the closed oracle: after this call, a
+    // known-with-credentials response and a decoy response must be
+    // byte-for-byte identical in shape (non-empty allowCredentials, no
+    // mediation, Preferred UV).
+
+    fn dummy_discoverable_rcr() -> RequestChallengeResponse {
+        // Mirrors what `start_discoverable_authentication` hands back
+        // before `apply_decoy_shape` overwrites it: empty allowCredentials
+        // and `mediation: Conditional`.
+        RequestChallengeResponse {
+            public_key: webauthn_rs_proto::PublicKeyCredentialRequestOptions {
+                challenge: vec![0u8; 32].into(),
+                timeout: None,
+                rp_id: "example.com".to_string(),
+                allow_credentials: Vec::new(),
+                user_verification: UserVerificationPolicy::Required,
+                hints: None,
+                extensions: None,
+            },
+            mediation: Some(Mediation::Conditional),
+        }
+    }
+
+    #[test]
+    fn apply_decoy_shape_produces_non_empty_allow_credentials() {
+        let mut rcr = dummy_discoverable_rcr();
+        apply_decoy_shape(&mut rcr, "secret", "nobody");
+        assert!(!rcr.public_key.allow_credentials.is_empty());
+    }
+
+    #[test]
+    fn apply_decoy_shape_clears_mediation() {
+        let mut rcr = dummy_discoverable_rcr();
+        apply_decoy_shape(&mut rcr, "secret", "nobody");
+        assert!(rcr.mediation.is_none());
+    }
+
+    #[test]
+    fn apply_decoy_shape_sets_preferred_user_verification() {
+        let mut rcr = dummy_discoverable_rcr();
+        apply_decoy_shape(&mut rcr, "secret", "nobody");
+        assert_eq!(rcr.public_key.user_verification, UserVerificationPolicy::Preferred);
+    }
+
+    #[test]
+    fn apply_decoy_shape_stable_across_calls_for_same_username() {
+        let mut a = dummy_discoverable_rcr();
+        let mut b = dummy_discoverable_rcr();
+        apply_decoy_shape(&mut a, "secret", "alice");
+        apply_decoy_shape(&mut b, "secret", "alice");
+        let ids_a: Vec<_> = a.public_key.allow_credentials.iter().map(|c| c.id.as_ref().to_vec()).collect();
+        let ids_b: Vec<_> = b.public_key.allow_credentials.iter().map(|c| c.id.as_ref().to_vec()).collect();
+        assert_eq!(ids_a, ids_b, "decoy for a given username must be stable across calls");
+    }
+
+    #[test]
+    fn apply_decoy_shape_matches_real_scoped_response_shape() {
+        // Simulates the real-user branch's shape: non-empty allowCredentials,
+        // no mediation, Preferred UV — built independently of
+        // `apply_decoy_shape` to assert the two are indistinguishable.
+        let mut real = dummy_discoverable_rcr();
+        real.public_key.allow_credentials = vec![webauthn_rs_proto::AllowCredentials {
+            type_: "public-key".to_string(),
+            id: vec![1, 2, 3].into(),
+            transports: None,
+        }];
+        real.mediation = None;
+        real.public_key.user_verification = UserVerificationPolicy::Preferred;
+
+        let mut decoy_rcr = dummy_discoverable_rcr();
+        apply_decoy_shape(&mut decoy_rcr, "secret", "someone");
+
+        assert!(!real.public_key.allow_credentials.is_empty());
+        assert!(!decoy_rcr.public_key.allow_credentials.is_empty());
+        assert_eq!(real.mediation.is_none(), decoy_rcr.mediation.is_none());
+        assert!(decoy_rcr.mediation.is_none());
+        assert_eq!(
+            real.public_key.user_verification,
+            decoy_rcr.public_key.user_verification
+        );
+    }
+
+    // --- per-username rate limiting (enumeration defense item #3) --------
+    //
+    // `scoped_or_decoy_challenge` checks `state.username_begin_limiter`
+    // BEFORE any DB work, so the forced-decoy branch is exercisable without
+    // a live Postgres: build an `AppState` around a lazy (never-connecting)
+    // pool via `PgPoolOptions::connect_lazy`, which is safe here specifically
+    // because a tripped username limiter short-circuits before the first
+    // query would ever be issued.
+
+    fn test_app_state(username_limiter_max: u32) -> AppState {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let rp_origin = Url::parse("https://example.com").unwrap();
+        let webauthn = WebauthnBuilder::new("example.com", &rp_origin)
+            .unwrap()
+            .rp_name("Test RP")
+            .build()
+            .unwrap();
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://user:pass@localhost/nonexistent")
+            .expect("connect_lazy does not actually connect");
+
+        AppState {
+            db,
+            webauthn,
+            api_service_url: String::new(),
+            metering_service_url: String::new(),
+            reg_states: Arc::new(RwLock::new(HashMap::new())),
+            passkey_reg_states: Arc::new(RwLock::new(HashMap::new())),
+            auth_states: Arc::new(RwLock::new(HashMap::new())),
+            sign_challenges: Arc::new(RwLock::new(HashMap::new())),
+            session_timeout_hours: 24,
+            internal_service_secret: None,
+            csrf_secret: "test-secret".to_string(),
+            login_allow_broadcast: true,
+            scoped_begin_limiter: crate::rate_limit::RateLimiter::new(1000, 60),
+            username_begin_limiter: crate::rate_limit::RateLimiter::new(username_limiter_max, 60),
+        }
+    }
+
+    #[tokio::test]
+    async fn username_limiter_trips_after_budget_exhausted() {
+        let state = test_app_state(3);
+
+        for _ in 0..3 {
+            assert!(state.username_begin_limiter.check_rate_limit("alice").await);
+        }
+        assert!(!state.username_begin_limiter.check_rate_limit("alice").await);
+    }
+
+    #[tokio::test]
+    async fn username_limiter_is_independent_per_username() {
+        let state = test_app_state(1);
+
+        assert!(state.username_begin_limiter.check_rate_limit("alice").await);
+        assert!(!state.username_begin_limiter.check_rate_limit("alice").await);
+
+        // "bob" has his own untouched budget.
+        assert!(state.username_begin_limiter.check_rate_limit("bob").await);
+    }
+
+    #[tokio::test]
+    async fn scoped_or_decoy_challenge_forces_decoy_when_username_limiter_exceeded() {
+        // Budget of 1: the first call is allowed through to the (never
+        // reached, thanks to the lazy pool) DB path; the second call must
+        // be forced to a decoy WITHOUT touching the DB.
+        let state = test_app_state(1);
+
+        // Exhaust the budget directly rather than via a real DB-backed call.
+        assert!(state.username_begin_limiter.check_rate_limit("realuser").await);
+        assert!(!state.username_begin_limiter.check_rate_limit("realuser").await);
+
+        let (rcr, auth_state) = scoped_or_decoy_challenge(&state, "realuser")
+            .await
+            .expect("forced decoy must not touch the DB and so must not error");
+
+        assert!(
+            !rcr.public_key.allow_credentials.is_empty(),
+            "forced decoy must still carry a non-empty allowCredentials list"
+        );
+        assert!(rcr.mediation.is_none());
+        assert_eq!(rcr.public_key.user_verification, UserVerificationPolicy::Preferred);
+
+        match auth_state {
+            AuthState::Discoverable { scope, .. } => {
+                assert!(
+                    matches!(scope, UsernameScope::Decoy { expected_user_id: None }),
+                    "a forced decoy never did the DB lookup, so expected_user_id must be None"
+                );
+            }
+            AuthState::SecurityKey(_) => {
+                panic!("forced decoy must never produce a real SecurityKey auth state")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_or_decoy_challenge_forced_decoy_matches_natural_decoy_shape() {
+        // The forced-decoy response (limiter tripped) must be shape-identical
+        // to the natural decoy response `apply_decoy_shape` produces
+        // (non-empty allowCredentials, no mediation, Preferred UV) — an
+        // observer must not be able to tell "rate limited" apart from
+        // "unknown username" apart from "known but zero creds".
+        let state = test_app_state(1);
+        assert!(state.username_begin_limiter.check_rate_limit("someone").await);
+        assert!(!state.username_begin_limiter.check_rate_limit("someone").await);
+
+        let (forced_rcr, _) = scoped_or_decoy_challenge(&state, "someone").await.unwrap();
+
+        let mut natural_rcr = dummy_discoverable_rcr();
+        apply_decoy_shape(&mut natural_rcr, &state.csrf_secret, "someone");
+
+        assert_eq!(
+            forced_rcr.public_key.allow_credentials.len(),
+            natural_rcr.public_key.allow_credentials.len()
+        );
+        assert_eq!(forced_rcr.mediation.is_none(), natural_rcr.mediation.is_none());
+        assert_eq!(
+            forced_rcr.public_key.user_verification,
+            natural_rcr.public_key.user_verification
         );
     }
 }

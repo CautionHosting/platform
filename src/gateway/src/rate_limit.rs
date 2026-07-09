@@ -13,12 +13,55 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
+/// In-memory, per-process, sliding-window (best-effort) rate limiter keyed
+/// by an arbitrary string (an IP, a username, etc).
+///
+/// IMPORTANT ASSUMPTION: state is a plain `HashMap` behind a `tokio::RwLock`
+/// with NO cross-process or cross-host sharing. This is only correct when a
+/// single gateway process/replica handles all traffic for its counters (true
+/// today: one gateway per enclave). It resets on every process restart, and
+/// if the gateway is ever scaled to multiple replicas behind a load
+/// balancer, each replica gets its own independent budget — the effective
+/// limit becomes `max_requests * replica_count`. Revisit with a shared store
+/// (e.g. Redis) before going multi-replica.
 #[derive(Clone)]
 pub struct RateLimiter {
     state: Arc<RwLock<HashMap<String, (u32, Instant)>>>,
     max_requests: u32,
     window_duration: Duration,
 }
+
+/// Global per-IP budget applied as blanket middleware over all `/auth/*`
+/// routes. See `main.rs`.
+pub const GLOBAL_MAX_REQUESTS: u32 = 100;
+pub const GLOBAL_WINDOW_SECS: u64 = 60;
+
+/// Tighter per-IP budget on username-scoped `begin` requests
+/// (`/auth/login/begin` and `/auth/qr-login/authenticate`, only when a
+/// `username` is supplied). This is on top of the global 100/60s bucket and
+/// exists because a scoped-begin request does more per-call work (a DB
+/// lookup) than a plain broadcast begin, and is the request shape an
+/// enumeration attacker actually wants to spam. Exceeding this bucket
+/// returns a hard 429 — that's safe here because the check is keyed by IP,
+/// not by username, so a 429 leaks nothing about any particular username's
+/// existence.
+pub const SCOPED_BEGIN_MAX_REQUESTS: u32 = 20;
+pub const SCOPED_BEGIN_WINDOW_SECS: u64 = 60;
+
+/// Per-username budget on scoped `begin` requests, keyed by the normalized
+/// username rather than the caller's IP. Deliberately small: once a
+/// username has been probed this many times in the window, EVERY further
+/// scoped-begin request for that username is forced to the decoy shape
+/// (see `handlers::scoped_or_decoy_challenge`) regardless of whether the
+/// username is real, instead of returning a 429. A hard 429 here would (a)
+/// let an attacker DoS a real user's login just by spamming their username,
+/// and (b) itself leak that the username is being targeted. Forcing a decoy
+/// keeps the response shape identical to a real challenge and caps how much
+/// enumeration signal a sustained per-username probe can extract, while a
+/// legitimate user still has the username-less discoverable/broadcast path
+/// as an escape hatch.
+pub const USERNAME_BEGIN_MAX_REQUESTS: u32 = 10;
+pub const USERNAME_BEGIN_WINDOW_SECS: u64 = 60;
 
 impl RateLimiter {
     pub fn new(max_requests: u32, window_seconds: u64) -> Self {
@@ -29,7 +72,7 @@ impl RateLimiter {
         }
     }
 
-    async fn check_rate_limit(&self, ip: &str) -> bool {
+    pub async fn check_rate_limit(&self, ip: &str) -> bool {
         let mut state = self.state.write().await;
         let now = Instant::now();
 
@@ -173,6 +216,28 @@ mod tests {
             let state = limiter.state.read().await;
             assert_eq!(state.len(), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn test_username_begin_limiter_trips_at_configured_budget() {
+        // Exercises the actual constants item #3 wires into
+        // `AppState::username_begin_limiter`, not just an arbitrary budget.
+        let limiter = RateLimiter::new(USERNAME_BEGIN_MAX_REQUESTS, USERNAME_BEGIN_WINDOW_SECS);
+
+        for _ in 0..USERNAME_BEGIN_MAX_REQUESTS {
+            assert!(limiter.check_rate_limit("alice").await);
+        }
+        assert!(!limiter.check_rate_limit("alice").await);
+    }
+
+    #[tokio::test]
+    async fn test_scoped_begin_limiter_trips_at_configured_budget() {
+        let limiter = RateLimiter::new(SCOPED_BEGIN_MAX_REQUESTS, SCOPED_BEGIN_WINDOW_SECS);
+
+        for _ in 0..SCOPED_BEGIN_MAX_REQUESTS {
+            assert!(limiter.check_rate_limit("10.0.0.1").await);
+        }
+        assert!(!limiter.check_rate_limit("10.0.0.1").await);
     }
 
     #[tokio::test]

@@ -83,6 +83,15 @@ pub struct AppState {
     /// Toggling requires setting the env var and restarting the gateway — it is
     /// read once at startup, not re-read per request.
     pub login_allow_broadcast: bool,
+    /// Per-IP budget on username-scoped `begin` requests, on top of the
+    /// blanket global limiter. In-memory/single-replica; see
+    /// `rate_limit.rs`. Exceeding it returns a hard 429 (safe: keyed by IP,
+    /// not username).
+    pub scoped_begin_limiter: crate::rate_limit::RateLimiter,
+    /// Per-username budget on scoped `begin` requests. In-memory/
+    /// single-replica; see `rate_limit.rs`. Exceeding it forces a decoy
+    /// response rather than a 429 (see `handlers::scoped_or_decoy_challenge`).
+    pub username_begin_limiter: crate::rate_limit::RateLimiter,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
