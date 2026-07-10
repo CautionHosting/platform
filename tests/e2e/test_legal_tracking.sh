@@ -14,6 +14,18 @@
 #   6. Outdated privacy notice triggers requires_action=true
 #   7. Re-acceptance endpoint clears requires_action
 #   8. Legal notice email sender dry-runs, sends once, and dedupes
+#   9. add-legal-doc-from-website.sh ingests a doc and rejects a duplicate
+#  10. admin publish-legal-doc: ingest+activate+notify end-to-end
+#  11. Signup event recording is unaffected by admin/legal-notice tooling
+#
+# Steps 9-10 exercise utils/admin and utils/add-legal-doc-from-website.sh,
+# which connect via LOCAL psql (DB_HOST/DB_PORT). The test postgres
+# container ("postgres-test") is only attached to the docker network used
+# by the stack and has no published host port, so those tools can't reach
+# it directly from the host. We run them inside a short-lived helper
+# container joined to that same docker network instead (see HARNESS_*
+# below) - this only changes how the *test* invokes the tools; the tools
+# themselves are unmodified.
 
 set -euo pipefail
 
@@ -37,6 +49,20 @@ cleanup() {
     echo ""
     echo "=== Cleanup ==="
 
+    # Tear down the helper container/tempdirs used for steps 9-10, if any.
+    if [[ -n "${HARNESS_NAME:-}" ]]; then
+        docker rm -f "$HARNESS_NAME" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${HARNESS_DIR:-}" && -d "${HARNESS_DIR:-}" ]]; then
+        rm -rf "$HARNESS_DIR" 2>/dev/null || true
+    fi
+    if [[ -n "${WEBSITE_DIR:-}" && -d "${WEBSITE_DIR:-}" ]]; then
+        rm -rf "$WEBSITE_DIR" 2>/dev/null || true
+    fi
+    if [[ -n "${WEBSITE_DIR2:-}" && -d "${WEBSITE_DIR2:-}" ]]; then
+        rm -rf "$WEBSITE_DIR2" 2>/dev/null || true
+    fi
+
     # Remove test document versions and restore originals
     docker exec "$DB_CONTAINER" psql -U postgres -d "$DB_NAME" -c "
         BEGIN;
@@ -44,17 +70,17 @@ cleanup() {
         WHERE batch_id IN (
             SELECT lnb.id
             FROM legal_notice_batches lnb
-            WHERE lnb.terms_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01')
-               OR lnb.privacy_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01')
+            WHERE lnb.terms_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01' OR version LIKE '2099-07-%')
+               OR lnb.privacy_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01' OR version LIKE '2099-07-%')
         );
         DELETE FROM legal_notice_batches
-        WHERE terms_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01')
-           OR privacy_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01');
-        UPDATE legal_documents SET is_active = false WHERE version = '2099-06-01';
+        WHERE terms_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01' OR version LIKE '2099-07-%')
+           OR privacy_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01' OR version LIKE '2099-07-%');
+        UPDATE legal_documents SET is_active = false WHERE version = '2099-06-01' OR version LIKE '2099-07-%';
         UPDATE legal_documents SET is_active = true WHERE version = '$SEED_TOS_VERSION' AND document_type = 'terms_of_service';
         UPDATE legal_documents SET is_active = true WHERE version = '$SEED_PN_VERSION' AND document_type = 'privacy_notice';
-        DELETE FROM user_legal_events WHERE document_version = '2099-06-01';
-        DELETE FROM legal_documents WHERE version = '2099-06-01';
+        DELETE FROM user_legal_events WHERE document_version = '2099-06-01' OR document_version LIKE '2099-07-%';
+        DELETE FROM legal_documents WHERE version = '2099-06-01' OR version LIKE '2099-07-%';
         COMMIT;
     " >/dev/null 2>&1 || true
 
@@ -339,6 +365,235 @@ else
     else
         step_fail "Legal notice sender: dry_run=$DRY_RUN_PENDING docs=$DRY_RUN_DOCS sent=$SENT_COUNT failed=$FAILED_COUNT emails=$LEGAL_EMAIL_COUNT second_pending=$SECOND_DRY_RUN_PENDING"
     fi
+fi
+
+# ── Steps 9-11 setup: helper container joined to the test DB network ──
+#
+# utils/add-legal-doc-from-website.sh and utils/admin talk to Postgres via
+# LOCAL psql (DB_HOST/DB_PORT), but postgres-test has no published host
+# port. We run those tools inside a throwaway container attached to the
+# same docker network as postgres-test, with a *copy* of just the utils/
+# scripts bind-mounted (not the whole repo) so the scripts' own
+# "source ../.env" logic finds no .env file and can't pick up unrelated
+# host defaults (e.g. an empty INTERNAL_SERVICE_SECRET=) that would
+# clobber the values we pass in explicitly.
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+HARNESS_DIR=""
+WEBSITE_DIR=""
+WEBSITE_DIR2=""
+HARNESS_NAME=""
+HARNESS_READY="false"
+
+DOCKER_NETWORK="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$DB_CONTAINER" 2>/dev/null | awk '{print $1}')"
+
+if [[ -z "$DOCKER_NETWORK" ]]; then
+    log "Could not determine docker network for $DB_CONTAINER; skipping steps 9-11."
+else
+    HARNESS_DIR="$(mktemp -d)"
+    mkdir -p "$HARNESS_DIR/utils"
+    cp "$REPO_ROOT/utils/admin" "$HARNESS_DIR/utils/admin"
+    cp "$REPO_ROOT/utils/add-legal-doc-from-website.sh" "$HARNESS_DIR/utils/add-legal-doc-from-website.sh"
+    chmod +x "$HARNESS_DIR/utils/admin" "$HARNESS_DIR/utils/add-legal-doc-from-website.sh"
+
+    HARNESS_NAME="legal-e2e-harness-$$"
+    WEBSITE_DIR="$(mktemp -d)"
+    WEBSITE_DIR2="$(mktemp -d)"
+
+    if docker run -d --name "$HARNESS_NAME" \
+        --network "$DOCKER_NETWORK" \
+        -v "$HARNESS_DIR:/harness:ro" \
+        -v "$WEBSITE_DIR:/website" \
+        -v "$WEBSITE_DIR2:/website2" \
+        postgres:16-alpine sleep 3600 >/dev/null 2>&1; then
+        if docker exec "$HARNESS_NAME" sh -c "apk add --no-cache bash git curl jq >/dev/null 2>&1 && git config --system --add safe.directory '*'"; then
+            HARNESS_READY="true"
+        else
+            log "Failed to install tools in harness container"
+        fi
+    else
+        log "Failed to start harness container"
+    fi
+fi
+
+harness_run() {
+    docker exec \
+        -e DB_HOST="$DB_CONTAINER" \
+        -e DB_PORT=5432 \
+        -e DB_USER=postgres \
+        -e DB_PASSWORD=postgres \
+        -e DB_NAME="$DB_NAME" \
+        -e INTERNAL_SERVICE_SECRET="$INTERNAL_SERVICE_SECRET" \
+        -e API_URL="http://api:8080" \
+        -w /harness \
+        "$HARNESS_NAME" bash "$@"
+}
+
+make_website_repo() {
+    local dir="$1"
+    local content="$2"
+    (
+        cd "$dir"
+        git init -q
+        git config user.email "legal-e2e@example.com"
+        git config user.name "Legal E2E"
+        printf '%s\n' "$content" > terms.md
+        git add terms.md
+        git commit -q -m "terms update"
+    )
+    git -C "$dir" rev-parse HEAD
+}
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+# ── Step 9: add-legal-doc-from-website.sh ingests + dedupes ───────────
+
+STEP_NUM=9
+if [[ "$HARNESS_READY" != "true" ]]; then
+    step_fail "Ingest helper: harness container unavailable"
+else
+    log "Testing add-legal-doc-from-website.sh ingest + dedupe..."
+
+    COMMIT9=$(make_website_repo "$WEBSITE_DIR" "Terms of Service v2099-07-01 (e2e)")
+    EXPECTED_SHA9=$(sha256_of "$WEBSITE_DIR/terms.md")
+
+    INGEST9_OUT=$(harness_run utils/add-legal-doc-from-website.sh \
+        --website-repo /website \
+        --document-type terms_of_service \
+        --source-path terms.md \
+        --commit "$COMMIT9" \
+        --version 2099-07-01 \
+        --url https://example.com/terms-2099-07-01.html \
+        --effective-at 2099-07-01 2>&1) && INGEST9_STATUS=0 || INGEST9_STATUS=$?
+
+    ROW9=$(db_query "SELECT is_active, content_sha256, source_commit_sha FROM legal_documents WHERE document_type = 'terms_of_service' AND version = '2099-07-01';")
+    ROW9_ACTIVE=$(echo "$ROW9" | awk -F'|' '{print $1}')
+    ROW9_SHA=$(echo "$ROW9" | awk -F'|' '{print $2}')
+    ROW9_COMMIT=$(echo "$ROW9" | awk -F'|' '{print $3}')
+
+    if [[ $INGEST9_STATUS -eq 0 && "$ROW9_ACTIVE" == "f" && "$ROW9_SHA" == "$EXPECTED_SHA9" && "$ROW9_COMMIT" == "$COMMIT9" ]]; then
+        step_pass "Ingest: new inactive doc with matching content_sha256 and commit"
+    else
+        step_fail "Ingest: status=$INGEST9_STATUS active=$ROW9_ACTIVE sha_match=$([[ "$ROW9_SHA" == "$EXPECTED_SHA9" ]] && echo yes || echo no) commit_match=$([[ "$ROW9_COMMIT" == "$COMMIT9" ]] && echo yes || echo no)"
+    fi
+
+    STEP_NUM=9
+    DEDUPE9_OUT=$(harness_run utils/add-legal-doc-from-website.sh \
+        --website-repo /website \
+        --document-type terms_of_service \
+        --source-path terms.md \
+        --commit "$COMMIT9" \
+        --version 2099-07-01b \
+        --url https://example.com/terms-2099-07-01.html \
+        --effective-at 2099-07-01 2>&1) && DEDUPE9_STATUS=0 || DEDUPE9_STATUS=$?
+
+    if [[ $DEDUPE9_STATUS -ne 0 && "$DEDUPE9_OUT" == *"already exists"* ]]; then
+        step_pass "Ingest: duplicate content_sha256 rejected"
+    else
+        step_fail "Ingest: duplicate not rejected (status=$DEDUPE9_STATUS out=$DEDUPE9_OUT)"
+    fi
+fi
+
+# ── Step 10: admin publish-legal-doc end-to-end ────────────────────────
+
+STEP_NUM=10
+if [[ "$HARNESS_READY" != "true" ]]; then
+    step_fail "publish-legal-doc: harness container unavailable"
+else
+    log "Testing admin publish-legal-doc end-to-end..."
+
+    COMMIT10=$(make_website_repo "$WEBSITE_DIR2" "Terms of Service v2099-07-02 (e2e)")
+
+    curl -sf -X DELETE "$EMAIL_EXTERNAL_URL/sent" >/dev/null 2>&1 || true
+
+    PUBLISH10_OUT=$(harness_run utils/admin publish-legal-doc \
+        --website-repo /website2 \
+        --document-type terms_of_service \
+        --source-path terms.md \
+        --commit "$COMMIT10" \
+        --version 2099-07-02 \
+        --url https://example.com/terms-2099-07-02.html \
+        --effective-at 2099-07-02 \
+        --blocking true \
+        --confirm 2>&1) && PUBLISH10_STATUS=0 || PUBLISH10_STATUS=$?
+
+    DOC10_ID=$(printf '%s\n' "$PUBLISH10_OUT" | awk -F': *' '/^[[:space:]]*id:/ {print $2; exit}')
+    ACTIVE_TOS10=$(db_query "SELECT version FROM legal_documents WHERE document_type = 'terms_of_service' AND is_active = true;")
+
+    if [[ $PUBLISH10_STATUS -eq 0 && "$ACTIVE_TOS10" == "2099-07-02" ]]; then
+        step_pass "publish-legal-doc: new TOS version activated (id=$DOC10_ID)"
+    else
+        step_fail "publish-legal-doc: status=$PUBLISH10_STATUS active=$ACTIVE_TOS10 out=$PUBLISH10_OUT"
+    fi
+
+    STEP_NUM=10
+    STATUS10=$(curl -sf "$GATEWAY_URL/api/user/status" -H "X-Session-ID: $SESSION_ID")
+    TOS_ACTION10=$(echo "$STATUS10" | jq -r '.legal.terms_of_service.requires_action')
+    TOS_ACTIVE10=$(echo "$STATUS10" | jq -r '.legal.terms_of_service.active_version')
+
+    if [[ "$TOS_ACTION10" == "true" && "$TOS_ACTIVE10" == "2099-07-02" ]]; then
+        step_pass "publish-legal-doc: tracked user now requires_action=true"
+    else
+        step_fail "publish-legal-doc: requires_action=$TOS_ACTION10 active=$TOS_ACTIVE10"
+    fi
+
+    STEP_NUM=10
+    ACCEPT10_RESPONSE=$(curl -sf -X POST "$GATEWAY_URL/api/legal/accept" \
+        -H "X-Session-ID: $SESSION_ID" \
+        -H "Content-Type: application/json" \
+        -d '{"document_type": "terms_of_service"}')
+    ACCEPT10_SUCCESS=$(echo "$ACCEPT10_RESPONSE" | jq -r '.success')
+    ACCEPT10_VERSION=$(echo "$ACCEPT10_RESPONSE" | jq -r '.version')
+    TOS_ACTION10B=$(echo "$ACCEPT10_RESPONSE" | jq -r '.legal.terms_of_service.requires_action')
+    EVENT10_COUNT=$(db_query "SELECT COUNT(*) FROM user_legal_events WHERE user_id = '$USER_ID' AND document_version = '2099-07-02' AND occurred_at IS NOT NULL;")
+
+    if [[ "$ACCEPT10_SUCCESS" == "true" && "$ACCEPT10_VERSION" == "2099-07-02" && "$TOS_ACTION10B" == "false" && "$EVENT10_COUNT" -ge 1 ]]; then
+        step_pass "publish-legal-doc: accept clears requires_action and records event"
+    else
+        step_fail "publish-legal-doc accept: success=$ACCEPT10_SUCCESS version=$ACCEPT10_VERSION action=$TOS_ACTION10B events=$EVENT10_COUNT"
+    fi
+
+    STEP_NUM=10
+    LEGAL_EMAIL_COUNT10=$(curl -sf "$EMAIL_EXTERNAL_URL/sent?template=legal_notice" 2>/dev/null | jq '.count // 0')
+
+    SECOND_NOTIFY10_PENDING="unknown"
+    if [[ -n "$DOC10_ID" ]]; then
+        # Re-run notify through admin; dedupe must prevent a second email.
+        harness_run utils/admin send-legal-notices "$DOC10_ID" --send --confirm >/dev/null 2>&1 || true
+        # Read pending count from a clean API dry-run (admin pretty-prints,
+        # so its stdout is not reliably line-parseable JSON).
+        SECOND_NOTIFY10_PENDING=$(curl -s -X POST "$API_URL/internal/legal-notices/send" \
+            -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "{\"dry_run\":true,\"document_ids\":[\"$DOC10_ID\"]}" 2>/dev/null \
+            | jq -r '.pending_recipient_count // "unknown"') || SECOND_NOTIFY10_PENDING="unknown"
+    fi
+    LEGAL_EMAIL_COUNT10B=$(curl -sf "$EMAIL_EXTERNAL_URL/sent?template=legal_notice" 2>/dev/null | jq '.count // 0')
+
+    if [[ "$LEGAL_EMAIL_COUNT10" -eq 1 && "$SECOND_NOTIFY10_PENDING" == "0" && "$LEGAL_EMAIL_COUNT10B" -eq "$LEGAL_EMAIL_COUNT10" ]]; then
+        step_pass "publish-legal-doc: notice email sent exactly once and second run dedupes"
+    else
+        step_fail "publish-legal-doc email: first=$LEGAL_EMAIL_COUNT10 second_pending=$SECOND_NOTIFY10_PENDING second_total=$LEGAL_EMAIL_COUNT10B"
+    fi
+fi
+
+# ── Step 11: signup event recording unaffected ─────────────────────────
+
+STEP_NUM=11
+log "Testing signup event recording is unaffected..."
+
+SIGNUP_EVENT_COUNT=$(db_query "SELECT COUNT(*) FROM user_legal_events WHERE user_id = '$USER_ID' AND event_source = 'signup';")
+
+if [[ "$SIGNUP_EVENT_COUNT" -ge 2 ]]; then
+    step_pass "Signup events unaffected by admin tooling: $SIGNUP_EVENT_COUNT signup-sourced rows remain"
+else
+    step_fail "Signup events: expected >=2 signup-sourced rows, found $SIGNUP_EVENT_COUNT"
 fi
 
 log "All legal tracking tests complete."

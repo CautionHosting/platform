@@ -250,7 +250,11 @@ INSERTED_ID="$(psql_cmd -c "
         $SUMMARY_SQL
     )
     RETURNING id;
-")"
+" | awk 'NF {print $1; exit}')"
+
+if ! [[ "$INSERTED_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    die "Failed to capture inserted document id (got: '$INSERTED_ID')"
+fi
 
 if [[ "$ACTIVATE" == "true" ]]; then
     psql_cmd -c "
