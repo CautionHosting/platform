@@ -147,7 +147,6 @@ pub struct BuildRequest {
     pub procfile_content: String,
     pub run_command: Option<String>,
     pub containerfile: String,
-    pub binary_path: Option<String>,
     pub ports: Vec<u16>,
     pub http_port: Option<u16>,
     pub e2e: bool,
@@ -902,7 +901,7 @@ fn generate_builder_userdata(
             url: enclave_builder::FRAMEWORK_SOURCE.to_string(),
             commit: framework_commit,
         },
-        request.binary_path.clone(),
+        None,
         request.run_command.clone(),
         None,
     );
@@ -1490,7 +1489,6 @@ mod tests {
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
             containerfile: "Dockerfile".to_string(),
-            binary_path: None,
             ports: vec![],
             http_port: None,
             e2e: false,
@@ -1575,6 +1573,10 @@ mod tests {
             "should pass manifest to helper"
         );
         assert!(
+            !userdata.contains("\"binary\""),
+            "remote build manifests should not carry the removed binary field"
+        );
+        assert!(
             userdata.contains("NO_CACHE=\"true\"")
                 && userdata.contains("CAUTION_NO_CACHE=\"$NO_CACHE\""),
             "should pass no_cache to helper"
@@ -1629,7 +1631,6 @@ mod tests {
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
             containerfile: "Containerfile".to_string(),
-            binary_path: None,
             ports: vec![],
             http_port: None,
             e2e: false,
@@ -1683,7 +1684,6 @@ mod tests {
             procfile_content: "containerfile: Custom.Containerfile\nrun: /app\n".to_string(),
             run_command: Some("/app".to_string()),
             containerfile: "Custom.Containerfile".to_string(),
-            binary_path: None,
             ports: vec![],
             http_port: None,
             e2e: false,
@@ -1736,7 +1736,6 @@ mod tests {
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
             containerfile: "Dockerfile".to_string(),
-            binary_path: None,
             ports: vec![],
             http_port: None,
             e2e: false,
@@ -1797,7 +1796,6 @@ mod tests {
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
             containerfile: "Dockerfile$(aws)".to_string(),
-            binary_path: None,
             ports: vec![],
             http_port: None,
             e2e: false,
@@ -1854,7 +1852,6 @@ mod tests {
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
             containerfile: "Dockerfile".to_string(),
-            binary_path: None,
             ports: vec![],
             http_port: None,
             e2e: false,
@@ -1908,7 +1905,6 @@ mod tests {
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
             containerfile: "Dockerfile".to_string(),
-            binary_path: None,
             ports: vec![],
             http_port: None,
             e2e: false,

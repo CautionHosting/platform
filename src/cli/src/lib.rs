@@ -5035,10 +5035,6 @@ enclave "default" {{
             reference: image_ref.clone(),
         };
 
-        let binary_path = default_enclave
-            .and_then(|e| e.build.as_ref())
-            .and_then(|b| b.binary.clone());
-
         let run_command = default_enclave
             .and_then(|e| e.unit.as_ref())
             .and_then(|u| u.values().next())
@@ -5091,50 +5087,25 @@ enclave "default" {{
             .map(|origins| origins.join(","));
 
         let mut loader = Loader::new("Building enclave image", LoaderStyle::Processing);
-        let deployment = if let Some(ref bin_path) = binary_path {
-            log_verbose(
-                self.verbose,
-                &format!("Using build_enclave_auto with binary: {}", bin_path),
-            );
-            builder
-                .build_enclave_auto(
-                    &user_image,
-                    bin_path,
-                    run_command,
-                    app_source_urls_opt,
-                    app_branch.clone(),
-                    app_commit.clone(),
-                    None,
-                    None,
-                    &ports,
-                    http_port,
-                    e2e,
-                    locksmith,
-                    e2e_cors_origins,
-                    egress,
-                )
-                .await
-        } else {
-            log_verbose(self.verbose, "Using build_enclave (no binary specified)");
-            builder
-                .build_enclave(
-                    &user_image,
-                    None,
-                    run_command,
-                    app_source_urls_opt,
-                    app_branch.clone(),
-                    app_commit.clone(),
-                    None,
-                    None,
-                    &ports,
-                    http_port,
-                    e2e,
-                    locksmith,
-                    e2e_cors_origins,
-                    egress,
-                )
-                .await
-        }
+        log_verbose(self.verbose, "Using build_enclave");
+        let deployment = builder
+            .build_enclave(
+                &user_image,
+                None,
+                run_command,
+                app_source_urls_opt,
+                app_branch.clone(),
+                app_commit.clone(),
+                None,
+                None,
+                &ports,
+                http_port,
+                e2e,
+                locksmith,
+                e2e_cors_origins,
+                egress,
+            )
+            .await
         .map_err(BuildLocalError::BuildEnclave)?;
         loader.stop();
 
@@ -5393,9 +5364,7 @@ enclave "default" {{
                 let cfg = self.read_config_from_dir(config_dir)?;
                 let default_enclave = cfg.enclave.as_ref().and_then(|e| e.get("default"));
 
-                let binary = default_enclave
-                    .and_then(|e| e.build.as_ref())
-                    .and_then(|b| b.binary.clone());
+                let binary = None;
                 let run_cmd = default_enclave
                     .and_then(|e| e.unit.as_ref())
                     .and_then(|u| u.values().next())
@@ -5435,7 +5404,6 @@ enclave "default" {{
                         }
                     });
 
-                log_verbose(self.verbose, &format!("Binary from config: {:?}", binary));
                 log_verbose(
                     self.verbose,
                     &format!("Run command from config: {:?}", run_cmd),
