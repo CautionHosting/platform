@@ -68,7 +68,7 @@
           </svg>
           <span>Account</span>
         </button>
-        <button class="header-action-button header-logout-button" @click="$emit('logout')">
+        <button class="header-action-button header-logout-button" @click="requestLogout">
           <svg
             class="header-action-icon header-logout-icon"
             xmlns="http://www.w3.org/2000/svg"
@@ -313,6 +313,26 @@
         </template>
       </div>
     </footer>
+
+    <div
+      v-if="showLogoutConfirmation"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="logout-confirmation-title"
+      @click.self="cancelLogout"
+    >
+      <div class="modal-content">
+        <h3 id="logout-confirmation-title" class="modal-title">Log out?</h3>
+        <p class="modal-message">
+          You will need to authenticate again before managing apps, billing, SSH keys, or secrets.
+        </p>
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" @click="cancelLogout">Cancel</button>
+          <button type="button" class="btn-danger" @click="confirmLogout">Log out</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -351,6 +371,7 @@ export default {
     const isSecurityNavActive = computed(() => securityTabs.includes(props.activeTab));
     const securityNavOpen = ref(isSecurityNavActive.value);
     const developmentBannerDismissed = ref(isDevelopmentBannerDismissed());
+    const showLogoutConfirmation = ref(false);
     const showDevelopmentBanner = computed(() => {
       return props.showDevelopmentWarning && !developmentBannerDismissed.value;
     });
@@ -363,6 +384,19 @@ export default {
     const dismissDevelopmentBanner = () => {
       developmentBannerDismissed.value = true;
       dismissDevelopmentBannerForSession();
+    };
+
+    const requestLogout = () => {
+      showLogoutConfirmation.value = true;
+    };
+
+    const cancelLogout = () => {
+      showLogoutConfirmation.value = false;
+    };
+
+    const confirmLogout = () => {
+      showLogoutConfirmation.value = false;
+      emit("logout");
     };
 
     const copyrightLabel = computed(() => {
@@ -402,11 +436,15 @@ export default {
 
     return {
       buildInputs,
+      cancelLogout,
+      confirmLogout,
       copyrightLabel,
       dismissDevelopmentBanner,
       isSecurityNavActive,
+      requestLogout,
       securityNavOpen,
       showDevelopmentBanner,
+      showLogoutConfirmation,
       selectTab,
     };
   },
