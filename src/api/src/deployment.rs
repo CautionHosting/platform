@@ -18,37 +18,20 @@ static LOCKFILE_SEMAPHORE: LazyLock<Arc<Semaphore>> = LazyLock::new(|| {
 
 /// Generate lockfile config using hcl-rs types instead of string template
 fn generate_provider_lock_config() -> String {
-    use hcl::expr::Expression;
-    use hcl::structure::{Block, Body};
-    use hcl::Ident;
+    let structure = hcl::structure!(
+        terraform {
+            required_version = ">= 1.0"
+            required_providers {
+                aws = {
+                    source = "hashicorp/aws"
+                    version = "~> 5.0"
+                }
+            }
+        }
+    );
     
-    // Build: terraform { required_providers { aws = { source = "hashicorp/aws", version = "~> 5.0" } } }
-    let aws_source = Expression::from("hashicorp/aws");
-    let aws_version = Expression::from("~> 5.0");
-    
-    let mut aws_attrs = indexmap::IndexMap::new();
-    aws_attrs.insert("source", aws_source);
-    aws_attrs.insert("version", aws_version);
-    
-    let aws_block = Block::new(("aws",), aws_attrs);
-    
-    let mut req_providers_attrs = indexmap::IndexMap::new();
-    req_providers_attrs.insert("aws", Expression::from(aws_block));
-    
-    let req_providers_block = Block::new(("required_providers",), req_providers_attrs);
-    
-    let mut terraform_attrs = indexmap::IndexMap::new();
-    terraform_attrs.insert("required_providers", Expression::from(req_providers_block));
-    
-    let terraform_block = Block::new(("terraform",), terraform_attrs);
-    
-    let body = Body::from(vec![terraform_block]);
-    
-    body.to_string()
+    hcl::to_string(&structure).expect("static structure can be built")
 }
-
-// Module-level semaphore for lockfile generation coordination
-static LOCKFILE_SEMAPHORE: OnceCell<Arc<Semaphore>> = OnceCell::const_new();
 
 /// Default timeout for tofu init/apply/destroy operations (10 minutes).
 const TOFU_TIMEOUT_SECS: u64 = 600;
@@ -786,7 +769,7 @@ provider "aws" {{
     let data_dir = std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
     let lockfile_path = get_or_generate_lockfile(&data_dir).await;
 
-    run_tofu_init(work_dir, lockfile_path.as_deref(), None).context("Failed to run tofu init")?;
+    run_tofu_init(work_dir, lockfile_path.as_deref(), None).await.context("Failed to run tofu init")?;
 
     run_tofu_destroy(work_dir, resource_name, credentials).context("Failed to run tofu destroy")?;
 
@@ -822,7 +805,7 @@ async fn generate_backend_config(
     Ok(())
 }
 
-fn run_tofu_init(work_dir: &Path, lockfile_path: Option<&Path>, credentials: Option<&AwsCredentials>) -> Result<()> {
+async fn run_tofu_init(work_dir: &Path, lockfile_path: Option<&Path>, credentials: Option<&AwsCredentials>) -> Result<()> {
     tracing::info!("Running tofu init in {}...", work_dir.display());
     
     // Copy lockfile into work dir if provided
@@ -1437,7 +1420,7 @@ async fn provision_nitro_enclave(
     // Always use Caution's env credentials for init (S3 state backend access)
     let data_dir = std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
     let lockfile_path = get_or_generate_lockfile(&data_dir).await;
-    run_tofu_init(work_dir, lockfile_path.as_deref(), None).context("Failed to run tofu init")?;
+    run_tofu_init(work_dir, lockfile_path.as_deref(), None).await.context("Failed to run tofu init")?;
 
     // Pass user credentials as Terraform variables, not env vars
     // This keeps Caution's creds for S3 state but uses user's creds for AWS provider
@@ -1500,7 +1483,7 @@ async fn provision_managed_onprem(
 
     let data_dir = std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
     let lockfile_path = get_or_generate_lockfile(&data_dir).await;
-    run_tofu_init(work_dir, lockfile_path.as_deref(), None).context("Failed to run tofu init")?;
+    run_tofu_init(work_dir, lockfile_path.as_deref(), None).await.context("Failed to run tofu init")?;
 
     run_tofu_apply_with_provider_creds(
         work_dir,
