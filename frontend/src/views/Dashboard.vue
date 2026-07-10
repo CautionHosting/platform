@@ -1692,6 +1692,7 @@ import DashboardLayout from "../components/DashboardLayout.vue";
 import AttestationModal from "../components/AttestationModal.vue";
 import { authFetch } from "../composables/useWebAuthn.js";
 import { formatLocalDate, formatLocalTime } from "../utils/dateTime.js";
+import { findDuplicateSshKey } from "../utils/sshKeys.js";
 
 async function sha256Hex(message) {
   const msgBuffer = new TextEncoder().encode(message);
@@ -2628,16 +2629,20 @@ export default {
         if (response.ok) {
           const data = await response.json();
           sshKeys.value = data.keys || [];
+          return true;
         } else if (response.status === 401) {
           window.location.href = "/login";
+          return false;
         } else {
           sshKeys.value = [];
           const data = await response.json().catch(() => ({}));
           showToast(data.error || "Failed to load SSH keys", 'error');
+          return false;
         }
       } catch (err) {
         sshKeys.value = [];
         showToast("Failed to connect to server", 'error');
+        return false;
       } finally {
         loadingKeys.value = false;
       }
@@ -3273,6 +3278,19 @@ export default {
       error.value = null;
 
       try {
+        const loadedKeys = await loadKeys();
+        if (!loadedKeys) {
+          error.value = "Failed to check existing SSH keys. Please try again.";
+          return;
+        }
+
+        const duplicateKey = findDuplicateSshKey(newPublicKey.value, sshKeys.value);
+        if (duplicateKey) {
+          const duplicateName = duplicateKey.name?.trim() || "an existing SSH key";
+          error.value = `This SSH key is already added as ${duplicateName}.`;
+          return;
+        }
+
         const body = JSON.stringify({
           public_key: newPublicKey.value.trim(),
           name: newKeyName.value.trim() || null,
