@@ -550,6 +550,27 @@ mod tests {
         assert!(user_data.contains(r#"%{ if e2e == "true" ~}"#));
         assert!(user_data.contains(r#"CADDY_DEFAULT_UPSTREAM="reverse_proxy localhost:49500""#));
     }
+
+    #[test]
+    fn test_http_port_proxy_is_loopback_only() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let user_data = std::fs::read_to_string(
+            manifest_dir.join("../../terraform/modules/aws/nitro-enclave/user-data.sh"),
+        )
+        .unwrap();
+
+        assert!(user_data.contains(r#"%{ if http_port != 0 ~}"#));
+        assert!(user_data.contains(
+            "ExecStart=/usr/bin/socat TCP-LISTEN:${http_port},bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:16:${http_port}"
+        ));
+    }
+
+    #[test]
+    fn test_http_port_is_not_a_public_ingress_port() {
+        assert_eq!(public_ingress_ports(&[8080, 9000], Some(8080)), vec![9000]);
+        assert_eq!(public_ingress_ports(&[9000], Some(8080)), vec![9000]);
+        assert_eq!(public_ingress_ports(&[8080], None), vec![8080]);
+    }
 }
 
 struct TerraformConfig {
@@ -721,6 +742,14 @@ fn run_tofu_init(work_dir: &Path, credentials: Option<&AwsCredentials>) -> Resul
     Ok(())
 }
 
+fn public_ingress_ports(ports: &[u16], http_port: Option<u16>) -> Vec<u16> {
+    ports
+        .iter()
+        .copied()
+        .filter(|port| Some(*port) != http_port)
+        .collect()
+}
+
 fn run_tofu_apply_with_provider_creds(
     work_dir: &Path,
     resource_name: &str,
@@ -728,11 +757,12 @@ fn run_tofu_apply_with_provider_creds(
     http_port: Option<u16>,
     credentials: Option<&AwsCredentials>,
 ) -> Result<()> {
+    let public_ports = public_ingress_ports(ports, http_port);
     tracing::info!(
         "Running tofu apply for {} in {} (ports={:?}, http_port={:?})...",
         resource_name,
         work_dir.display(),
-        ports,
+        public_ports,
         http_port
     );
 
@@ -742,8 +772,8 @@ fn run_tofu_apply_with_provider_creds(
         .arg("-no-color")
         .current_dir(work_dir);
 
-    let ports_var = if !ports.is_empty() {
-        let ports_str: Vec<String> = ports.iter().map(|p| p.to_string()).collect();
+    let ports_var = if !public_ports.is_empty() {
+        let ports_str: Vec<String> = public_ports.iter().map(|p| p.to_string()).collect();
         format!("ports=[{}]", ports_str.join(","))
     } else {
         "ports=[]".to_string()
