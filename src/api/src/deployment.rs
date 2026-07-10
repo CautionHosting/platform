@@ -55,7 +55,7 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
     
     // Check if lockfile already exists (common case after first generation)
     if tokio::fs::try_exists(&lockfile_path).await.unwrap_or(false) {
-        tracing::debug!("Provider lockfile already cached at {}", lockfile_path.display());
+        tracing::info!("Provider lockfile cache hit at {}", lockfile_path.display());
         return Some(lockfile_path);
     }
     
@@ -812,7 +812,7 @@ async fn run_tofu_init(work_dir: &Path, lockfile_path: Option<&Path>, credential
     if let Some(src) = lockfile_path {
         let dst = work_dir.join(".terraform.lock.hcl");
         match tokio::fs::copy(src, &dst).await {
-            Ok(_) => tracing::debug!("Copied provider lockfile to {}", dst.display()),
+            Ok(_) => tracing::info!("Using cached provider lockfile from {}", src.display()),
             Err(e) => tracing::warn!("Failed to copy lockfile from {} to {}: {}; proceeding without cache", src.display(), dst.display(), e),
         }
     }
