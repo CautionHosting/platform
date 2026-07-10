@@ -699,6 +699,11 @@ enum Commands {
     },
     #[command(about = "Logout and clear local session")]
     Logout,
+    #[command(about = "Show account information")]
+    Account {
+        #[command(subcommand)]
+        command: AccountCommands,
+    },
     #[command(about = "Initialize a new deployment in the current directory")]
     Init {
         #[arg(
@@ -813,6 +818,12 @@ enum Commands {
         #[command(subcommand)]
         command: SecretCommands,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum AccountCommands {
+    #[command(about = "Print the current account ID")]
+    Id,
 }
 
 #[derive(Subcommand, Debug)]
@@ -2835,6 +2846,13 @@ enclave "default" {{
         }
 
         Ok(orgs[0].id.clone())
+    }
+
+    async fn print_account_id(&self) -> Result<()> {
+        let config = self.require_existing_authenticated_config()?;
+        let account_id = self.primary_organization_id(config.session_id()).await?;
+        println!("{}", account_id);
+        Ok(())
     }
 
     async fn check_org_security_settings(&self, session_id: &str) -> Result<OrgSettings> {
@@ -8165,6 +8183,14 @@ pub async fn run() -> Result<(), RunError> {
         Commands::Logout => {
             client.logout().await.map_err(RunError::CommandDispatch)?;
         }
+        Commands::Account { command } => match command {
+            AccountCommands::Id => {
+                client
+                    .print_account_id()
+                    .await
+                    .map_err(RunError::CommandDispatch)?;
+            }
+        },
         Commands::Init {
             bring_your_own_cloud,
             platform,
@@ -8390,11 +8416,13 @@ pub async fn run() -> Result<(), RunError> {
 mod tests {
     use super::openpgp;
     use super::{
-        encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility, load_recipient_cert,
-        normalize_keyring, parse_env_assignments, resolve_local_build_command_from_dir,
-        resolve_procfile_build_command, resolve_quorum_parameters, ApiClient,
+        AccountCommands, ApiClient, Cli, Commands, encrypt_env_file, encrypt_secret_value,
+        keymaker_cert_eligibility, load_recipient_cert, normalize_keyring, parse_env_assignments,
+        resolve_local_build_command_from_dir, resolve_procfile_build_command,
+        resolve_quorum_parameters,
     };
     use caution_config::ConfigurationFile;
+    use clap::Parser;
     use keymaker_models::generate_quorum::GenerateQuorumResponse;
     use openpgp::cert::prelude::*;
     use openpgp::parse::Parse;
@@ -8413,6 +8441,18 @@ mod tests {
             qr: false,
             workdir: None,
         }
+    }
+
+    #[test]
+    fn cli_parses_account_id_command() {
+        let cli = Cli::try_parse_from(["caution", "account", "id"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::Account {
+                command: AccountCommands::Id
+            }
+        ));
     }
 
     fn test_public_key() -> String {

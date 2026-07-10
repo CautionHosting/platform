@@ -1173,6 +1173,40 @@ make build-cli
       </div>
 
       <div class="account-settings-list">
+        <!-- Account ID Section -->
+        <section class="account-settings-section">
+          <h3 class="billing-section-title">Account ID</h3>
+          <div class="account-settings-row">
+            <div class="account-settings-label">
+              <p class="account-settings-description">
+                Use this identifier when contacting support or matching CLI and billing records.
+              </p>
+            </div>
+            <div class="account-settings-content">
+              <div class="account-id-card">
+                <span v-if="loadingOrgSettings" class="account-id-value account-id-value--muted">Loading...</span>
+                <span v-else-if="currentOrgId" class="account-id-value">{{ currentOrgId }}</span>
+                <span v-else class="account-id-value account-id-value--muted">Unavailable</span>
+                <button
+                  v-if="currentOrgId"
+                  class="copy-inline-btn"
+                  @click="copyToClipboard(currentOrgId, 'accountId')"
+                  :title="copiedField === 'accountId' ? 'Copied!' : 'Copy to clipboard'"
+                  :aria-label="copiedField === 'accountId' ? 'Copied Account ID' : 'Copy Account ID to clipboard'"
+                >
+                  <svg v-if="copiedField !== 'accountId'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                  </svg>
+                  <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <!-- Email Section -->
         <section class="account-settings-section">
           <div class="account-settings-title-row">
@@ -7002,6 +7036,31 @@ export default {
 
 .account-settings-content {
   min-width: 0;
+}
+
+.account-id-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 100%;
+  padding: 12px 18px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+
+.account-id-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #111827;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 0.95rem;
+  line-height: 1.4;
+}
+
+.account-id-value--muted {
+  color: var(--color-text-secondary, #666);
+  font-family: inherit;
 }
 
 .sr-only {
