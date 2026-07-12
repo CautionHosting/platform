@@ -5,11 +5,11 @@ use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
-use crate::AppState;
 use crate::balance::check_balance_thresholds;
 use crate::types::*;
+use crate::AppState;
 
 // Advisory lock IDs for distributed coordination
 pub(crate) const LOCK_COLLECTION: i64 = 1001;

@@ -3,21 +3,21 @@
 
 use anyhow::{Context, Result};
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::sync::Arc;
 
+use crate::AppState;
 use crate::balance::check_balance_thresholds;
 use crate::collection::{
-    advisory_unlock, try_advisory_lock, LOCK_MONTHLY_BILLING, LOCK_SUBSCRIPTION_BILLING,
+    LOCK_MONTHLY_BILLING, LOCK_SUBSCRIPTION_BILLING, advisory_unlock, try_advisory_lock,
 };
 use crate::cost_explorer;
 use crate::credits::get_ledger_balance_cents;
-use crate::AppState;
 
 /// Monthly billing loop.
 ///
@@ -313,7 +313,8 @@ async fn run_subscription_maintenance_inner(state: &AppState) -> Result<()> {
         r#"
         SELECT id, organization_id, status, cancel_at_period_end
         FROM subscriptions
-        WHERE status IN ('active', 'past_due')
+        WHERE billing_source = 'legacy_credits'
+          AND status IN ('active', 'past_due')
         "#,
     )
     .fetch_all(&state.pool)

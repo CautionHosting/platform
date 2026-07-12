@@ -3,17 +3,16 @@
 
 use anyhow::Context;
 use axum::{
+    Json, Router,
     body::Body,
     extract::{Extension, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
-    Json, Router,
 };
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::sync::{Arc, LazyLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::trace::TraceLayer;
@@ -21,7 +20,8 @@ use tracing::info;
 use uuid::Uuid;
 
 static BILLING_URL: LazyLock<String> = LazyLock::new(|| {
-    let caution_domain = std::env::var("CAUTION_DOMAIN").unwrap_or_else(|_| "caution.dev".to_string());
+    let caution_domain =
+        std::env::var("CAUTION_DOMAIN").unwrap_or_else(|_| "caution.dev".to_string());
     billing_url_for_domain(&caution_domain)
 });
 
@@ -66,32 +66,16 @@ mod validation;
 
 const DEFAULT_DEPLOYMENT_HEALTH_TIMEOUT_SECS: u64 = 600;
 
-#[derive(Clone, Debug, Deserialize)]
+use caution_config::pricing::{
+    CreditPackagePricing, PaddleCatalog, PricingConfig as SharedPricingConfig, TierPricing,
+};
+
+#[derive(Clone, Debug)]
 pub(crate) struct PricingConfig {
     pub(crate) compute_margin_percent: f64,
-    #[serde(default)]
-    pub(crate) subscription_tiers: std::collections::HashMap<String, TierPricing>,
-    #[serde(default)]
+    pub(crate) subscription_tiers: caution_config::pricing::DuplicateCheckedTiers,
     pub(crate) credit_packages: std::collections::HashMap<String, CreditPackagePricing>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-pub(crate) struct TierPricing {
-    #[serde(default)]
-    pub(crate) annual_cents: i64,
-    #[serde(default)]
-    pub(crate) enclaves: i32,
-}
-
-impl TierPricing {
-    pub(crate) fn monthly_price_cents(&self) -> i64 {
-        self.annual_cents / 12
-    }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub(crate) struct CreditPackagePricing {
-    pub(crate) bonus_percent: f64,
+    pub(crate) paddle_catalog: Option<PaddleCatalog>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -120,7 +104,7 @@ impl PricingConfig {
 
     pub(crate) fn subscription_cost_hourly_usd(&self, tier_id: &str) -> Option<f64> {
         const HOURS_PER_YEAR: f64 = 365.0 * 24.0;
-        let annual_tier_cents = self.subscription_tiers.get(tier_id)?.annual_cents;
+        let annual_tier_cents = self.subscription_tiers.get(tier_id)?.annual_cents();
         Some(annual_tier_cents as f64 / 100.0 / HOURS_PER_YEAR)
     }
 
@@ -128,9 +112,17 @@ impl PricingConfig {
         let contents = std::fs::read_to_string("prices.json").context(
             "prices.json not found. Configure explicit pricing before starting the API.",
         )?;
-        let config = serde_json::from_str(&contents).context(
+        let paddle_enabled = std::env::var("BYOC_PADDLE_SUBSCRIPTIONS_ENABLED")
+            .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
+        let shared = SharedPricingConfig::parse(&contents, paddle_enabled).context(
             "Failed to parse prices.json. Ensure compute_margin_percent is explicitly set.",
         )?;
+        let config = Self {
+            compute_margin_percent: shared.compute_margin_percent,
+            subscription_tiers: shared.subscription_tiers,
+            credit_packages: shared.credit_packages,
+            paddle_catalog: shared.paddle_catalog,
+        };
         tracing::info!("Loaded pricing config from prices.json");
         Ok(config)
     }
@@ -349,7 +341,10 @@ async fn build_inputs() -> impl IntoResponse {
     let platform = std::env::var("PLATFORM_GIT_SHA")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .map(|commit| PlatformSource { commit, repo: PLATFORM_REPO });
+        .map(|commit| PlatformSource {
+            commit,
+            repo: PLATFORM_REPO,
+        });
 
     Json(BuildInputs {
         platform,
@@ -381,16 +376,9 @@ async fn wait_for_health(public_ip: &str, timeout_secs: u64) -> Result<(), Strin
 
     loop {
         attempt += 1;
-        tracing::info!(
-            "Polling endpoint (attempt {}): {}",
-            attempt,
-            url
-        );
+        tracing::info!("Polling endpoint (attempt {}): {}", attempt, url);
 
-        let result = client
-            .get(&url)
-            .send()
-            .await;
+        let result = client.get(&url).send().await;
 
         match result {
             Ok(_resp) => {
@@ -1491,11 +1479,13 @@ async fn load_build_config_for_deploy(
 
     if hcl_output.status.success() {
         let raw_content = String::from_utf8_lossy(&hcl_output.stdout).to_string();
-        let config_file =
-            config::ConfigurationFile::from_str(&raw_content).map_err(|e| {
-                tracing::error!("Failed to parse caution.hcl: {}", e);
-                (StatusCode::BAD_REQUEST, format!("Invalid caution.hcl: {}", e))
-            })?;
+        let config_file = config::ConfigurationFile::from_str(&raw_content).map_err(|e| {
+            tracing::error!("Failed to parse caution.hcl: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid caution.hcl: {}", e),
+            )
+        })?;
 
         tracing::info!("Loaded build config from caution.hcl");
         return Ok((raw_content, config_file));
@@ -1531,11 +1521,10 @@ async fn load_build_config_for_deploy(
     }
 
     let procfile_content = String::from_utf8_lossy(&procfile_output.stdout).to_string();
-    let config_file =
-        config::ConfigurationFile::from_procfile(&procfile_content).map_err(|e| {
-            tracing::error!("Failed to parse Procfile: {}", e);
-            (StatusCode::BAD_REQUEST, format!("Invalid Procfile: {}", e))
-        })?;
+    let config_file = config::ConfigurationFile::from_procfile(&procfile_content).map_err(|e| {
+        tracing::error!("Failed to parse Procfile: {}", e);
+        (StatusCode::BAD_REQUEST, format!("Invalid Procfile: {}", e))
+    })?;
 
     tracing::info!("Loaded build config from Procfile (fallback)");
     Ok((procfile_content, config_file))
@@ -1553,12 +1542,8 @@ async fn resolve_containerfile_for_deploy(
         .and_then(|(_name, ec)| ec.build.as_ref())
         .and_then(|b| b.containerfile.as_deref());
 
-    let containerfile = validate_explicit_containerfile_for_deploy(
-        git_dir,
-        commit_sha,
-        containerfile,
-    )
-    .await?;
+    let containerfile =
+        validate_explicit_containerfile_for_deploy(git_dir, commit_sha, containerfile).await?;
     let containerfile = if containerfile.is_none()
         && repo_has_file_at_commit(git_dir, commit_sha, "Containerfile").await?
     {
@@ -1572,8 +1557,8 @@ async fn resolve_containerfile_for_deploy(
 
 #[cfg(test)]
 mod build_inputs_tests {
-    use crate::PLATFORM_REPO;
     use super::build_inputs;
+    use crate::PLATFORM_REPO;
     use axum::body::to_bytes;
     use axum::response::IntoResponse;
 
@@ -1705,7 +1690,16 @@ mod deploy_containerfile_tests {
                 .await
                 .unwrap();
         assert_eq!(procfile_content, "run: /app\n");
-        assert!(config_file.enclave.as_ref().unwrap().get("default").unwrap().build.is_none());
+        assert!(
+            config_file
+                .enclave
+                .as_ref()
+                .unwrap()
+                .get("default")
+                .unwrap()
+                .build
+                .is_none()
+        );
 
         let containerfile =
             resolve_containerfile_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &config_file)
@@ -1734,7 +1728,12 @@ mod deploy_containerfile_tests {
             procfile_content,
             "containerfile: Custom.Containerfile\nrun: /app\n"
         );
-        let enclave = config_file.enclave.as_ref().unwrap().get("default").unwrap();
+        let enclave = config_file
+            .enclave
+            .as_ref()
+            .unwrap()
+            .get("default")
+            .unwrap();
         assert_eq!(
             enclave.build.as_ref().unwrap().containerfile.as_deref(),
             Some("Custom.Containerfile")
@@ -1755,10 +1754,9 @@ mod deploy_containerfile_tests {
             ("Dockerfile", "FROM alpine:3.20\n"),
         ]);
         let git_dir = repo_dir.path().join(".git");
-        let (_, config_file) =
-            load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
-                .await
-                .unwrap();
+        let (_, config_file) = load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
+            .await
+            .unwrap();
 
         let containerfile =
             resolve_containerfile_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &config_file)
@@ -1778,10 +1776,9 @@ mod deploy_containerfile_tests {
             ("Dockerfile", "FROM alpine:3.20\n"),
         ]);
         let git_dir = repo_dir.path().join(".git");
-        let (_, config_file) =
-            load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
-                .await
-                .unwrap();
+        let (_, config_file) = load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
+            .await
+            .unwrap();
 
         let containerfile =
             resolve_containerfile_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &config_file)
@@ -1992,7 +1989,7 @@ async fn deploy_logic(
                 return Err((
                     StatusCode::NOT_FOUND,
                     format!("App with id {} not found", req.app_id),
-                ))
+                ));
             }
         };
 
@@ -2004,57 +2001,131 @@ async fn deploy_logic(
     let is_managed_onprem = cred.as_ref().map(|c| c.managed_on_prem).unwrap_or(false);
 
     if is_managed_onprem {
-        // Managed on-prem: require active subscription with capacity
-        let sub: Option<(Uuid, String, i32)> = sqlx::query_as(
-            "SELECT id, tier, max_apps FROM subscriptions
-             WHERE organization_id = $1 AND status IN ('active', 'past_due') LIMIT 1",
-        )
-        .bind(req.org_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| {
+        // Managed on-prem: resolve the stored entitlement under an organization lock.
+        let mut entitlement_tx = state.db.begin().await.map_err(|e| {
+            tracing::error!(error = %e, "failed to start entitlement transaction");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                "Unable to check deployment entitlement".to_string(),
+            )
+        })?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(req.org_id.to_string())
+            .execute(&mut *entitlement_tx)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "failed to lock deployment entitlement");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Unable to check deployment entitlement".to_string(),
+                )
+            })?;
+
+        let sub: Option<(
+            Uuid,
+            i32,
+            Option<i32>,
+            String,
+            String,
+            bool,
+            Option<DateTime<Utc>>,
+        )> = sqlx::query_as(
+            "SELECT id, max_apps, pending_max_apps, billing_source, status,
+                    catalog_valid, enterprise_expires_at
+             FROM subscriptions
+             WHERE organization_id = $1 AND status <> 'canceled'
+             LIMIT 1
+             FOR UPDATE",
+        )
+        .bind(req.org_id)
+        .fetch_optional(&mut *entitlement_tx)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to read deployment entitlement");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to check deployment entitlement".to_string(),
             )
         })?;
 
-        let Some((sub_id, tier_id, stored_max_apps)) = sub else {
+        let Some((
+            sub_id,
+            stored_max_apps,
+            pending_max_apps,
+            billing_source,
+            subscription_status,
+            catalog_valid,
+            enterprise_expires_at,
+        )) = sub
+        else {
             return Err((StatusCode::PAYMENT_REQUIRED,
                 "Managed on-premises deployment requires an active subscription. Choose a plan in Settings at https://caution.dev".to_string()));
         };
 
-        let max_apps = state
-            .pricing
-            .subscription_tiers
-            .get(&tier_id)
-            .map(|tier| tier.enclaves)
-            .unwrap_or(stored_max_apps);
+        let status_permits_deploy = match billing_source.as_str() {
+            "legacy_credits" => matches!(subscription_status.as_str(), "active" | "past_due"),
+            "paddle" => subscription_status == "active" && catalog_valid,
+            "enterprise" => {
+                subscription_status == "active"
+                    && enterprise_expires_at.is_none_or(|expires_at| expires_at > Utc::now())
+            }
+            _ => false,
+        };
+        if !status_permits_deploy {
+            return Err((
+                StatusCode::PAYMENT_REQUIRED,
+                "Managed on-premises subscription is not active".to_string(),
+            ));
+        }
 
-        // Count current managed on-prem apps (exclude this resource if redeploying)
+        let max_apps = pending_max_apps
+            .map(|pending| pending.min(stored_max_apps))
+            .unwrap_or(stored_max_apps);
+        if max_apps <= 0 {
+            return Err((
+                StatusCode::PAYMENT_REQUIRED,
+                "Managed on-premises subscription has no deployment capacity".to_string(),
+            ));
+        }
+
+        // Pending, provisioning, running, and stopped BYOC resources all consume capacity.
         let current_apps: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM compute_resources cr
              JOIN cloud_credentials cc ON cc.resource_id = cr.id
              WHERE cr.organization_id = $1 AND cc.managed_on_prem = true
-               AND cr.state != 'terminated' AND cr.id != $2",
+               AND cr.destroyed_at IS NULL
+               AND cr.state NOT IN ('terminated', 'failed')
+               AND cr.id != $2",
         )
         .bind(req.org_id)
         .bind(resource_id)
-        .fetch_one(&state.db)
+        .fetch_one(&mut *entitlement_tx)
         .await
         .map_err(|e| {
+            tracing::error!(error = %e, "failed to count allocated BYOC resources");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
+                "Unable to check deployment capacity".to_string(),
             )
         })?;
 
-        // +1 for the app being deployed
         if current_apps + 1 > max_apps as i64 {
-            return Err((StatusCode::PAYMENT_REQUIRED,
-                format!("App limit reached ({}/{}). Upgrade your plan in Settings at https://caution.dev",
-                    current_apps + 1, max_apps)));
+            return Err((
+                StatusCode::PAYMENT_REQUIRED,
+                format!(
+                    "App limit reached ({}/{}). Upgrade your plan in Settings at https://caution.dev",
+                    current_apps + 1,
+                    max_apps
+                ),
+            ));
         }
+        entitlement_tx.commit().await.map_err(|e| {
+            tracing::error!(error = %e, "failed to commit entitlement check");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to finish deployment entitlement check".to_string(),
+            )
+        })?;
 
         tracing::info!(
             "Billing gate passed: managed on-prem app {}/{}, sub={}",
@@ -2220,8 +2291,7 @@ async fn deploy_logic(
             })?;
 
     let git_dir = format!("{}/git-repos/{}.git", state.data_dir, app_id_str);
-    let (config_content, config_file) =
-        load_build_config_for_deploy(&git_dir, &commit_sha).await?;
+    let (config_content, config_file) = load_build_config_for_deploy(&git_dir, &commit_sha).await?;
 
     let containerfile =
         resolve_containerfile_for_deploy(&git_dir, &commit_sha, &config_file).await?;
@@ -2256,28 +2326,18 @@ async fn deploy_logic(
     let cpu_count = ec_resources.map(|r| r.cpu).unwrap_or(2);
     let debug_enabled = ec_debug.and_then(|d| d.enabled).unwrap_or(false);
     let ssh_keys = ec_debug.map(|d| d.ssh_keys.clone()).unwrap_or_default();
-    let http_port = ec_network
-        .and_then(|n| n.http.as_ref())
-        .map(|h| h.port);
+    let http_port = ec_network.and_then(|n| n.http.as_ref()).map(|h| h.port);
     let domain = ec_network
         .and_then(|n| n.http.as_ref())
         .and_then(|h| h.domain.clone());
     let e2e_config = ec_network
         .and_then(|n| n.http.as_ref())
         .and_then(|h| h.e2e_encryption.as_ref());
-    let e2e = e2e_config
-        .and_then(|e| e.enabled)
-        .unwrap_or(false);
+    let e2e = e2e_config.and_then(|e| e.enabled).unwrap_or(false);
 
-    let no_cache = ec_build
-        .and_then(|b| b.cache)
-        .map(|c| !c)
-        .unwrap_or(false);
-    let app_sources = ec_build
-        .map(|b| b.app_sources.clone())
-        .unwrap_or_default();
-    let binary_path = ec_build
-        .and_then(|b| b.binary.clone());
+    let no_cache = ec_build.and_then(|b| b.cache).map(|c| !c).unwrap_or(false);
+    let app_sources = ec_build.map(|b| b.app_sources.clone()).unwrap_or_default();
+    let binary_path = ec_build.and_then(|b| b.binary.clone());
 
     let egress = ec_network.map(|n| n.egress_enabled()).unwrap_or(false);
 
@@ -2288,9 +2348,10 @@ async fn deploy_logic(
                 .iter()
                 .flat_map(|rule| match &rule.port_spec {
                     Some(config::PortSpec::Exact { port }) => vec![*port],
-                    Some(config::PortSpec::FromTo { start_port, end_port }) => {
-                        (*start_port..=*end_port).collect::<Vec<u16>>()
-                    }
+                    Some(config::PortSpec::FromTo {
+                        start_port,
+                        end_port,
+                    }) => (*start_port..=*end_port).collect::<Vec<u16>>(),
                     _ => Vec::new(),
                 })
                 .collect();
@@ -2300,9 +2361,7 @@ async fn deploy_logic(
         })
         .unwrap_or_default();
 
-    if !is_managed_onprem
-        && cpu_count > fully_managed_capacity::MAX_FULLY_MANAGED_ENCLAVE_VCPUS
-    {
+    if !is_managed_onprem && cpu_count > fully_managed_capacity::MAX_FULLY_MANAGED_ENCLAVE_VCPUS {
         return Err((
             StatusCode::BAD_REQUEST,
             format!(
@@ -2343,7 +2402,11 @@ async fn deploy_logic(
 
     // Overlay inline provider config from caution.hcl onto DB credential defaults.
     // Fields specified in the provider block take precedence.
-    if let Some(ref provider) = config_file.caution.as_ref().and_then(|c| c.provider.as_ref()) {
+    if let Some(ref provider) = config_file
+        .caution
+        .as_ref()
+        .and_then(|c| c.provider.as_ref())
+    {
         if let Some(ref mut onprem) = managed_onprem_config {
             merge_provider_into_onprem(provider, onprem);
         }
@@ -2373,7 +2436,10 @@ async fn deploy_logic(
             &config_content,
             e2e,
             config_file.has_vault_env(), // auto-enable locksmith when env::vault is used
-            e2e_config.as_ref().and_then(|e2e| e2e.cors_origins.as_ref()).unwrap_or(&vec![]),
+            e2e_config
+                .as_ref()
+                .and_then(|e2e| e2e.cors_origins.as_ref())
+                .unwrap_or(&vec![]),
         );
         let s3_client = s3_client_for_credentials(&builder_target.aws_credentials).await;
 
@@ -2487,9 +2553,7 @@ async fn deploy_logic(
                 containerfile: containerfile.clone(),
                 binary_path,
                 ports: ingress_ports.clone(),
-                http_port: ec_network
-                    .and_then(|n| n.http.as_ref())
-                    .map(|h| h.port),
+                http_port: ec_network.and_then(|n| n.http.as_ref()).map(|h| h.port),
                 e2e,
                 locksmith: config_file.has_vault_env(),
                 egress,
@@ -2592,10 +2656,8 @@ async fn deploy_logic(
     }
 
     let capacity_reservation = if managed_onprem_config.is_none() {
-        let requirements = fully_managed_capacity::DeploymentRequirements::for_enclave(
-            cpu_count,
-            memory_mb,
-        );
+        let requirements =
+            fully_managed_capacity::DeploymentRequirements::for_enclave(cpu_count, memory_mb);
         let _ = tx
             .send(Ok(milestone("Checking fully managed capacity...")))
             .await;
@@ -2775,7 +2837,9 @@ async fn deploy_logic(
         tracing::info!("Skipping attestation check: enclave is in debug mode");
     } else {
         tracing::info!("Waiting for attestation endpoint to become healthy...");
-        if let Err(e) = wait_for_attestation_health(&deployment_result.public_ip, health_timeout_secs).await {
+        if let Err(e) =
+            wait_for_attestation_health(&deployment_result.public_ip, health_timeout_secs).await
+        {
             tracing::error!("Attestation health check failed: {}", e);
             if let Some(reservation) = capacity_reservation.as_ref() {
                 fully_managed_capacity::release_reservation(&state.db, reservation).await;
@@ -2900,10 +2964,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let env = std::env::var("ENVIRONMENT").unwrap_or_default();
         if env == "production" {
-            eprintln!("FATAL: e2e-testing-unsafe feature is enabled in a production build. Refusing to start.");
+            eprintln!(
+                "FATAL: e2e-testing-unsafe feature is enabled in a production build. Refusing to start."
+            );
             std::process::exit(1);
         }
-        tracing::warn!("e2e-testing-unsafe feature is enabled — /internal/cleanup/destroy-next-app endpoint is active. Do NOT use in production.");
+        tracing::warn!(
+            "e2e-testing-unsafe feature is enabled — /internal/cleanup/destroy-next-app endpoint is active. Do NOT use in production."
+        );
     }
 
     if let Err(e) = provisioning::validate_setup() {
@@ -3135,6 +3203,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(subscriptions::get_subscription),
         )
         .route(
+            "/billing/subscription/checkout",
+            post(subscriptions::checkout_subscription),
+        )
+        .route(
             "/billing/subscription/subscribe",
             post(subscriptions::subscribe),
         )
@@ -3187,9 +3259,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let internal_routes = internal_routes.layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            middleware::internal_auth_middleware,
-        ));
+        state.clone(),
+        middleware::internal_auth_middleware,
+    ));
 
     let public_routes = Router::new()
         .route("/health", get(health_check))

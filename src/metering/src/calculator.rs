@@ -3,7 +3,6 @@
 
 use crate::types::{Provider, ResourceType, ResourceUsage};
 use anyhow::Context;
-use serde::Deserialize;
 
 pub struct CostCalculator {
     pricing: PricingRules,
@@ -200,11 +199,6 @@ impl Default for PricingRules {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct PricingFileConfig {
-    compute_margin_percent: f64,
-}
-
 impl PricingRate {
     pub fn matches(&self, usage: &ResourceUsage) -> bool {
         if self.provider != usage.provider {
@@ -295,7 +289,9 @@ impl PricingRules {
         let contents = std::fs::read_to_string("prices.json").context(
             "prices.json not found. Configure explicit pricing before starting metering.",
         )?;
-        let config = serde_json::from_str::<PricingFileConfig>(&contents)
+        let paddle_enabled = std::env::var("BYOC_PADDLE_SUBSCRIPTIONS_ENABLED")
+            .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
+        let config = caution_config::pricing::PricingConfig::parse(&contents, paddle_enabled)
             .context("Failed to parse prices.json for metering pricing. Ensure compute_margin_percent is explicitly set.")?;
         rules.margin_percent = config.compute_margin_percent;
         tracing::info!("Loaded metering pricing config from prices.json");
