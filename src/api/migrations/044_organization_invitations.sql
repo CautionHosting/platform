@@ -18,6 +18,8 @@ CREATE TABLE organization_invitations (
         CHECK (accepted_at IS NULL OR revoked_at IS NULL)
 );
 
+-- invite_member revokes expired rows before reinviting; uniqueness also closes
+-- concurrent check-and-insert races for the same organization and email.
 CREATE UNIQUE INDEX idx_org_invitations_active_email
     ON organization_invitations (organization_id, lower(email))
     WHERE accepted_at IS NULL AND revoked_at IS NULL;
