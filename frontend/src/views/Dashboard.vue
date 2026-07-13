@@ -1692,13 +1692,17 @@ import DashboardLayout from "../components/DashboardLayout.vue";
 import AttestationModal from "../components/AttestationModal.vue";
 import { authFetch } from "../composables/useWebAuthn.js";
 import { formatLocalDate, formatLocalTime } from "../utils/dateTime.js";
-import { findDuplicateSshKey } from "../utils/sshKeys.js";
 
 async function sha256Hex(message) {
   const msgBuffer = new TextEncoder().encode(message);
   const hashBuffer = await crypto.subtle.digest("SHA-256", msgBuffer);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function sshPublicKeyIdentity(publicKey) {
+  const parts = publicKey.trim().split(/\s+/);
+  return parts.length >= 2 ? `${parts[0]} ${parts[1]}` : null;
 }
 
 function arrayBufferToBase64Url(buffer) {
@@ -3284,7 +3288,10 @@ export default {
           return;
         }
 
-        const duplicateKey = findDuplicateSshKey(newPublicKey.value, sshKeys.value);
+        const newKeyIdentity = sshPublicKeyIdentity(newPublicKey.value);
+        const duplicateKey = sshKeys.value.find((key) => {
+          return sshPublicKeyIdentity(key.public_key || "") === newKeyIdentity;
+        });
         if (duplicateKey) {
           const duplicateName = duplicateKey.name?.trim() || "an existing SSH key";
           error.value = `This SSH key is already added as ${duplicateName}.`;
