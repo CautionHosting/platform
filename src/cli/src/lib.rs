@@ -2064,6 +2064,14 @@ impl ApiClient {
         Ok(general_purpose::STANDARD_NO_PAD.encode(Sha256::digest(&decoded)))
     }
 
+    fn ssh_key_identity(public_key: &str) -> Option<String> {
+        let parts: Vec<&str> = public_key.trim().split_whitespace().collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        Some(format!("{} {}", parts[0], parts[1]))
+    }
+
     fn canonical_ssh_request(method: &str, path: &str, timestamp: u64, body: &[u8]) -> String {
         let canonical_path = path.strip_prefix("/api").unwrap_or(path);
         let body_hash = hex::encode(Sha256::digest(body));
@@ -6837,6 +6845,33 @@ enclave "default" {{
         bail!("No source URLs available and no git fallback configured")
     }
 
+    async fn fetch_existing_ssh_keys(&self, session_id: &str) -> Result<Vec<(String, String)>> {
+        let response = self
+            .client
+            .get(format!("{}/ssh-keys", self.base_url))
+            .header("X-Session-ID", session_id)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            bail!("Failed to fetch existing SSH keys: {}", response.status());
+        }
+
+        let response_data: serde_json::Value = response.json().await?;
+        let keys = response_data["keys"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
+
+        Ok(keys
+            .iter()
+            .filter_map(|key| {
+                let name = key["name"].as_str()?.to_string();
+                let public_key = key["public_key"].as_str()?.to_string();
+                Some((name, public_key))
+            })
+            .collect())
+    }
+
     async fn add_ssh_key(
         &self,
         key_file: Option<PathBuf>,
@@ -6845,6 +6880,9 @@ enclave "default" {{
         name: Option<String>,
     ) -> Result<()> {
         let config = self.ensure_authenticated().await?;
+
+        // Fetch existing keys to check for duplicates
+        let existing_keys = self.fetch_existing_ssh_keys(&config.session_id).await?;
 
         if from_agent {
             let keys = self.get_ssh_agent_keys();
@@ -6884,6 +6922,20 @@ enclave "default" {{
             let fingerprint = ssh_fingerprint(k);
             let key_name = name.clone().unwrap_or(comment.clone());
 
+            // Check for duplicate before adding
+            if let Some(new_identity) = Self::ssh_key_identity(k) {
+                for (existing_name, existing_key) in &existing_keys {
+                    if let Some(existing_identity) = Self::ssh_key_identity(existing_key) {
+                        if new_identity == existing_identity {
+                            bail!(
+                                "This SSH key is already added as '{}'.",
+                                existing_name
+                            );
+                        }
+                    }
+                }
+            }
+
             self.add_single_key(&config.session_id, &key_name, k)
                 .await?;
             println!("Added SSH key: [{}] [{}]", key_name, fingerprint);
@@ -6893,6 +6945,21 @@ enclave "default" {{
                 bail!("Invalid SSH key format");
             }
             let key_name = name.unwrap_or_else(|| "key".to_string());
+
+            // Check for duplicate before adding
+            if let Some(new_identity) = Self::ssh_key_identity(key_content) {
+                for (existing_name, existing_key) in &existing_keys {
+                    if let Some(existing_identity) = Self::ssh_key_identity(existing_key) {
+                        if new_identity == existing_identity {
+                            bail!(
+                                "This SSH key is already added as '{}'.",
+                                existing_name
+                            );
+                        }
+                    }
+                }
+            }
+
             self.add_single_key(&config.session_id, &key_name, key_content)
                 .await?;
             println!("Added: {}", key_name);
@@ -6913,6 +6980,20 @@ enclave "default" {{
                     .unwrap_or("key")
                     .to_string()
             });
+
+            // Check for duplicate before adding
+            if let Some(new_identity) = Self::ssh_key_identity(&key_content) {
+                for (existing_name, existing_key) in &existing_keys {
+                    if let Some(existing_identity) = Self::ssh_key_identity(existing_key) {
+                        if new_identity == existing_identity {
+                            bail!(
+                                "This SSH key is already added as '{}'.",
+                                existing_name
+                            );
+                        }
+                    }
+                }
+            }
 
             self.add_single_key(&config.session_id, &key_name, &key_content)
                 .await?;
@@ -8890,5 +8971,30 @@ containerfile: Missing.Containerfile\n",
         let result =
             ApiClient::classify_app_source_refs(LS_REMOTE, "1111111", Some(""));
         assert_eq!(result, Err("".to_string()));
+    }
+
+    #[test]
+    fn ssh_key_identity_extracts_type_and_data_without_comment() {
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMatchingKeyMaterial user@example";
+        assert_eq!(
+            ApiClient::ssh_key_identity(key),
+            Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMatchingKeyMaterial".to_string())
+        );
+    }
+
+    #[test]
+    fn ssh_key_identity_handles_extra_whitespace() {
+        let key = "  ssh-rsa   AAAAB3NzaC1yc2EAAAADAQABAAABAQ...  comment  ";
+        assert_eq!(
+            ApiClient::ssh_key_identity(key),
+            Some("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ...".to_string())
+        );
+    }
+
+    #[test]
+    fn ssh_key_identity_rejects_malformed_keys() {
+        assert_eq!(ApiClient::ssh_key_identity("not-a-valid-key"), None);
+        assert_eq!(ApiClient::ssh_key_identity(""), None);
+        assert_eq!(ApiClient::ssh_key_identity("ssh-ed25519"), None);
     }
 }
