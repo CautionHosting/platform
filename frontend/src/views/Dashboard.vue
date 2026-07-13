@@ -1682,6 +1682,11 @@ async function sha256Hex(message) {
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+function sshPublicKeyIdentity(publicKey) {
+  const parts = publicKey.trim().split(/\s+/);
+  return parts.length >= 2 ? `${parts[0]} ${parts[1]}` : null;
+}
+
 function arrayBufferToBase64Url(buffer) {
   const bytes = new Uint8Array(buffer);
   let binary = "";
@@ -2610,16 +2615,20 @@ export default {
         if (response.ok) {
           const data = await response.json();
           sshKeys.value = data.keys || [];
+          return true;
         } else if (response.status === 401) {
           window.location.href = "/login";
+          return false;
         } else {
           sshKeys.value = [];
           const data = await response.json().catch(() => ({}));
           showToast(data.error || "Failed to load SSH keys", 'error');
+          return false;
         }
       } catch (err) {
         sshKeys.value = [];
         showToast("Failed to connect to server", 'error');
+        return false;
       } finally {
         loadingKeys.value = false;
       }
@@ -3255,6 +3264,22 @@ export default {
       error.value = null;
 
       try {
+        const loadedKeys = await loadKeys();
+        if (!loadedKeys) {
+          error.value = "Failed to check existing SSH keys. Please try again.";
+          return;
+        }
+
+        const newKeyIdentity = sshPublicKeyIdentity(newPublicKey.value);
+        const duplicateKey = sshKeys.value.find((key) => {
+          return sshPublicKeyIdentity(key.public_key || "") === newKeyIdentity;
+        });
+        if (duplicateKey) {
+          const duplicateName = duplicateKey.name?.trim() || "an existing SSH key";
+          error.value = `This SSH key is already added as ${duplicateName}.`;
+          return;
+        }
+
         const body = JSON.stringify({
           public_key: newPublicKey.value.trim(),
           name: newKeyName.value.trim() || null,
