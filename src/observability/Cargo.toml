@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2025 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+[package]
+name = "caution-observability"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sentry = { version = "0.48.4", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
+
+[dev-dependencies]
+serial_test = "3"

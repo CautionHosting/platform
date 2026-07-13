@@ -1046,12 +1046,13 @@ fn generate_suspension_notice_email(data: &serde_json::Value) -> (String, String
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+
     tracing_subscriber::fmt()
         .with_target(false)
         .compact()
         .init();
-
-    dotenvy::dotenv().ok();
+    let _sentry_guard = caution_observability::init_sentry("email-service");
 
     let test_mode = std::env::var("EMAIL_TEST_MODE")
         .unwrap_or_else(|_| "false".to_string())

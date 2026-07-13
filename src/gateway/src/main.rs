@@ -43,6 +43,7 @@ async fn main() -> Result<()> {
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
+    let _sentry_guard = caution_observability::init_sentry("gateway");
 
     #[cfg(feature = "e2e-testing-unsafe")]
     {

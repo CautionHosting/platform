@@ -2891,6 +2891,7 @@ async fn deploy_logic(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
+    let _sentry_guard = caution_observability::init_sentry("api");
 
     #[cfg(feature = "e2e-testing-unsafe")]
     {

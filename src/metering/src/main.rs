@@ -77,6 +77,7 @@ async fn main() -> Result<()> {
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
+    let _sentry_guard = caution_observability::init_sentry("metering");
 
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
 

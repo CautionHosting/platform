@@ -8,6 +8,7 @@
     "build": "vite build"
   },
   "dependencies": {
+    "@sentry/vue": "10.30.0",
     "attestation-widget": "git+https://git.distrust.co/public/attestation-widget.git#2a9111cdc9b1bfa855fc48032b4ffd013162fb42",
     "tee-attestation-js": "git+https://git.distrust.co/public/tee-attestation-js.git#03420e7a9a5d967075f81c999b68598fa15a9ee2",
     "vue": "3.5.34"

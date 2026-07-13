@@ -19,12 +19,17 @@ ifdef NOCACHE
 endif
 
 DEV_BUILD_ARGS := --build-arg CARGO_BUILD_FLAGS="" --build-arg CARGO_PROFILE_DIR="debug" --build-arg EXTRA_RUSTFLAGS=""
+FRONTEND_BUILD_ARGS := \
+	$(if $(VITE_PADDLE_SANDBOX),--build-arg VITE_PADDLE_SANDBOX=$(VITE_PADDLE_SANDBOX)) \
+	$(if $(VITE_SENTRY_DSN),--build-arg VITE_SENTRY_DSN=$(VITE_SENTRY_DSN)) \
+	$(if $(VITE_SENTRY_ENVIRONMENT),--build-arg VITE_SENTRY_ENVIRONMENT=$(VITE_SENTRY_ENVIRONMENT)) \
+	$(if $(VITE_SENTRY_RELEASE),--build-arg VITE_SENTRY_RELEASE=$(VITE_SENTRY_RELEASE))
 
 build-gateway:
 	@echo "Building Gateway binary..."
 	@mkdir -p $(OUT_DIR)
 	@docker rmi -f caution-gateway 2>/dev/null || true
-	@docker build -t caution-gateway -f ./containerfiles/Containerfile.gateway .
+	@docker build -t caution-gateway $(FRONTEND_BUILD_ARGS) -f ./containerfiles/Containerfile.gateway .
 	@echo "Gateway image build complete"
 
 build-api:
@@ -41,7 +46,7 @@ build-gateway-dev:
 	@echo "Building Gateway binary (dev)..."
 	@mkdir -p $(OUT_DIR)
 	@docker rmi -f caution-gateway 2>/dev/null || true
-	@docker build -t caution-gateway $(DEV_BUILD_ARGS) -f ./containerfiles/Containerfile.gateway .
+	@docker build -t caution-gateway $(DEV_BUILD_ARGS) $(FRONTEND_BUILD_ARGS) -f ./containerfiles/Containerfile.gateway .
 	@echo "Gateway dev image build complete"
 
 build-api-dev:
@@ -63,7 +68,7 @@ build-gateway-e2e:
 	@echo "Building Gateway binary (e2e test mode)..."
 	@mkdir -p $(OUT_DIR)
 	@docker rmi -f caution-gateway 2>/dev/null || true
-	@docker build -t caution-gateway $(DEV_BUILD_ARGS) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.gateway .
+	@docker build -t caution-gateway $(DEV_BUILD_ARGS) $(FRONTEND_BUILD_ARGS) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.gateway .
 	@echo "Gateway e2e image build complete"
 
 build-metering:
@@ -77,7 +82,7 @@ build-frontend-dist:
 	@docker build \
 		-f ./containerfiles/Containerfile.frontend \
 		--target static \
-		$(if $(VITE_PADDLE_SANDBOX),--build-arg VITE_PADDLE_SANDBOX=$(VITE_PADDLE_SANDBOX)) \
+		$(FRONTEND_BUILD_ARGS) \
 		--output type=local,dest=$(OUT_DIR)/frontend \
 		.
 	@echo "Frontend static assets built in $(OUT_DIR)/frontend"
