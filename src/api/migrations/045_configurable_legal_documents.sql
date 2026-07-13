@@ -6,8 +6,8 @@
 -- and user_legal_events.document_type are now open strings. The FK from
 -- user_legal_events(document_type, version) -> legal_documents(document_type, version)
 -- still guarantees every event points at a real, known document.
-ALTER TABLE legal_documents DROP CONSTRAINT chk_legal_documents_type;
-ALTER TABLE user_legal_events DROP CONSTRAINT chk_user_legal_events_doc_type;
+ALTER TABLE legal_documents DROP CONSTRAINT IF EXISTS chk_legal_documents_type;
+ALTER TABLE user_legal_events DROP CONSTRAINT IF EXISTS chk_user_legal_events_doc_type;
 
 -- Optional display title per document. Falls back to a humanized
 -- document_type (e.g. "terms_of_service" -> "Terms Of Service") in the
@@ -46,8 +46,8 @@ FROM (
 ) normalized
 WHERE lnb.id = normalized.batch_id;
 
-ALTER TABLE legal_notice_batches DROP CONSTRAINT chk_legal_notice_batches_has_document;
+ALTER TABLE legal_notice_batches DROP CONSTRAINT IF EXISTS chk_legal_notice_batches_has_document;
 DROP INDEX IF EXISTS idx_legal_notice_batches_terms_document;
 DROP INDEX IF EXISTS idx_legal_notice_batches_privacy_document;
-ALTER TABLE legal_notice_batches DROP COLUMN terms_document_id;
-ALTER TABLE legal_notice_batches DROP COLUMN privacy_document_id;
+ALTER TABLE legal_notice_batches DROP COLUMN IF EXISTS terms_document_id;
+ALTER TABLE legal_notice_batches DROP COLUMN IF EXISTS privacy_document_id;

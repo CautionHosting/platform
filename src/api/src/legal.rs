@@ -9,7 +9,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -65,7 +65,10 @@ pub struct LegalDocumentStatus {
 /// Legal status for a user across every document type that currently has
 /// an active version, keyed by `document_type`. Not hardcoded to a fixed
 /// set of types — whatever `legal_documents` has active shows up here.
-pub type UserLegalStatus = HashMap<String, LegalDocumentStatus>;
+/// BTreeMap (not HashMap) so the serialized order is stable across requests
+/// — the frontend renders these in iteration order and a HashMap would
+/// reshuffle the rows on every refresh.
+pub type UserLegalStatus = BTreeMap<String, LegalDocumentStatus>;
 
 #[derive(Debug, Serialize)]
 pub struct PublicLegalDocumentSummary {
@@ -393,7 +396,7 @@ pub async fn get_user_legal_status(
 
     let predates_tracking = user_predates_legal_tracking(pool, user_id).await?;
 
-    let mut status = HashMap::with_capacity(document_types.len());
+    let mut status = BTreeMap::new();
     for document_type in document_types {
         let active = get_active_document(pool, &document_type).await?;
         let user_doc = get_latest_user_document_by_type(pool, user_id, &document_type).await?;
