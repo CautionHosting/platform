@@ -27,7 +27,7 @@ Create a new inactive legal_documents row from a caution/website commit.
 Usage:
   ./utils/add-legal-doc-from-website.sh \\
     --website-repo /path/to/caution/website \\
-    --document-type terms_of_service|privacy_notice \\
+    --document-type terms_of_service|privacy_notice|<any-type> \\
     --source-path terms.md|privacy.md \\
     --commit <sha> \\
     --version <display-version> \\
@@ -35,15 +35,20 @@ Usage:
     --effective-at YYYY-MM-DD [options]
 
 Options:
-  --blocking true|false    Override requires_blocking_reacceptance
-  --ack true|false         Override requires_acknowledgment
+  --title <text>           Display title (defaults to a humanized document_type, e.g.
+                            "dpa" -> "Dpa", if omitted)
+  --blocking true|false    requires_blocking_reacceptance (required for unknown types;
+                            defaulted for terms_of_service/privacy_notice below)
+  --ack true|false         requires_acknowledgment (required for unknown types; defaulted
+                            for terms_of_service/privacy_notice below)
   --summary-json <json>    Optional summary_json payload
   --activate               Activate immediately after insert
   --help                   Show this message
 
-Defaults:
+document_type is not restricted to a fixed list — any string works. Known-type defaults:
   terms_of_service => blocking=true, ack=false
   privacy_notice   => blocking=false, ack=true
+Any other document_type requires --blocking and --ack to be passed explicitly.
 
 Requires local commands: git, psql, sed, awk, and a SHA-256 tool.
 EOF
@@ -101,6 +106,7 @@ COMMIT_SHA=""
 VERSION=""
 URL=""
 EFFECTIVE_AT=""
+TITLE=""
 BLOCKING=""
 ACK=""
 SUMMARY_JSON=""
@@ -134,6 +140,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --effective-at)
             EFFECTIVE_AT="${2:-}"
+            shift 2
+            ;;
+        --title)
+            TITLE="${2:-}"
             shift 2
             ;;
         --blocking)
@@ -189,7 +199,8 @@ case "$DOCUMENT_TYPE" in
         : "${ACK:=true}"
         ;;
     *)
-        die "--document-type must be terms_of_service or privacy_notice"
+        [[ -n "$BLOCKING" ]] || die "--blocking is required for document-type '$DOCUMENT_TYPE' (no default for unknown types)"
+        [[ -n "$ACK" ]] || die "--ack is required for document-type '$DOCUMENT_TYPE' (no default for unknown types)"
         ;;
 esac
 
@@ -223,9 +234,15 @@ if [[ -n "$SUMMARY_JSON" ]]; then
     SUMMARY_SQL="'$(sql_quote "$SUMMARY_JSON")'::jsonb"
 fi
 
+TITLE_SQL="NULL"
+if [[ -n "$TITLE" ]]; then
+    TITLE_SQL="'$(sql_quote "$TITLE")'"
+fi
+
 INSERTED_ID="$(psql_cmd -c "
     INSERT INTO legal_documents (
         document_type,
+        title,
         version,
         url,
         effective_at,
@@ -238,6 +255,7 @@ INSERTED_ID="$(psql_cmd -c "
         summary_json
     ) VALUES (
         '$(sql_quote "$DOCUMENT_TYPE")',
+        $TITLE_SQL,
         '$(sql_quote "$VERSION")',
         '$(sql_quote "$URL")',
         '$(sql_quote "$EFFECTIVE_AT")',

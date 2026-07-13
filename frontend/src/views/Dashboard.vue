@@ -1224,37 +1224,19 @@ make build-cli
             <div class="account-settings-content">
               <div class="legal-settings-card">
                 <a
-                  href="https://caution.co/terms.html"
+                  v-for="(status, docType) in legalStatus"
+                  :key="docType"
+                  :href="status?.url"
                   target="_blank"
                   rel="noopener noreferrer"
                   class="legal-settings-row"
-                  aria-label="Review Terms of Service"
+                  :aria-label="`Review ${status?.title}`"
                 >
                   <div class="legal-settings-copy">
-                    <div class="legal-settings-name">Terms of Service</div>
+                    <div class="legal-settings-name">{{ status?.title }}</div>
                     <div class="legal-settings-meta">
-                      <span>{{ getLegalStatusDatePrefix(legalStatus?.terms_of_service) }}</span>
-                      <span class="legal-settings-meta-time">{{ getLegalStatusDateTime(legalStatus?.terms_of_service) }}</span>
-                    </div>
-                  </div>
-                  <svg class="legal-settings-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M15 3h6v6"/>
-                    <path d="M10 14 21 3"/>
-                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-                  </svg>
-                </a>
-                <a
-                  href="https://caution.co/privacy.html"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="legal-settings-row"
-                  aria-label="Review Privacy Notice"
-                >
-                  <div class="legal-settings-copy">
-                    <div class="legal-settings-name">Privacy Notice</div>
-                    <div class="legal-settings-meta">
-                      <span>{{ getLegalStatusDatePrefix(legalStatus?.privacy_notice) }}</span>
-                      <span class="legal-settings-meta-time">{{ getLegalStatusDateTime(legalStatus?.privacy_notice) }}</span>
+                      <span>{{ getLegalStatusDatePrefix(status) }}</span>
+                      <span class="legal-settings-meta-time">{{ getLegalStatusDateTime(status) }}</span>
                     </div>
                   </div>
                   <svg class="legal-settings-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

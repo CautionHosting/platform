@@ -665,7 +665,7 @@ cmd_publish_legal_doc() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --website-repo|--source-path|--commit|--version|--url|--effective-at|--blocking|--ack|--summary-json)
+            --website-repo|--source-path|--commit|--version|--url|--effective-at|--title|--blocking|--ack|--summary-json)
                 ingest_args+=("$1" "${2:-}")
                 shift 2
                 ;;
@@ -705,12 +705,16 @@ show a notice dry-run, and (with --confirm) email affected users.
 Usage:
   ./utils/admin publish-legal-doc \\
     --website-repo /path/to/caution/website \\
-    --document-type terms_of_service|privacy_notice \\
+    --document-type terms_of_service|privacy_notice|<any-type> \\
     --source-path terms.md|privacy.md \\
     --commit <sha> --version <display-version> \\
     --url <public-url> --effective-at YYYY-MM-DD [options]
 
+document_type is not restricted to a fixed list. terms_of_service/privacy_notice have
+built-in blocking/ack defaults; any other type requires --blocking and --ack explicitly.
+
 Options:
+  --title <text>             Display title (defaults to a humanized document_type)
   --blocking true|false     Override requires_blocking_reacceptance
   --ack true|false          Override requires_acknowledgment
   --summary-json <json>     Optional summary_json payload

@@ -17,6 +17,12 @@
 #   9. add-legal-doc-from-website.sh ingests a doc and rejects a duplicate
 #  10. admin publish-legal-doc: ingest+activate+notify end-to-end
 #  11. Signup event recording is unaffected by admin/legal-notice tooling
+#  12. A non-hardcoded document type ("dpa") publishes, blocks server-side,
+#      and accepts end-to-end - proves document types aren't hardcoded
+#  13. Public /legal/active-documents lists dpa with the same title/url the
+#      signup consent notice would use
+#  14. A 'notice_shown'-only event does not satisfy a document (only
+#      accepted/acknowledged count)
 #
 # Steps 9-10 exercise utils/admin and utils/add-legal-doc-from-website.sh,
 # which connect via LOCAL psql (DB_HOST/DB_PORT). The test postgres
@@ -68,19 +74,23 @@ cleanup() {
         BEGIN;
         DELETE FROM legal_email_deliveries
         WHERE batch_id IN (
-            SELECT lnb.id
-            FROM legal_notice_batches lnb
-            WHERE lnb.terms_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01' OR version LIKE '2099-07-%')
-               OR lnb.privacy_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01' OR version LIKE '2099-07-%')
+            SELECT DISTINCT lnbd.batch_id
+            FROM legal_notice_batch_documents lnbd
+            JOIN legal_documents ld ON ld.id = lnbd.document_id
+            WHERE ld.version = '2099-06-01' OR ld.version LIKE '2099-07-%' OR ld.version LIKE '2099-08-%'
         );
         DELETE FROM legal_notice_batches
-        WHERE terms_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01' OR version LIKE '2099-07-%')
-           OR privacy_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01' OR version LIKE '2099-07-%');
-        UPDATE legal_documents SET is_active = false WHERE version = '2099-06-01' OR version LIKE '2099-07-%';
+        WHERE id IN (
+            SELECT DISTINCT lnbd.batch_id
+            FROM legal_notice_batch_documents lnbd
+            JOIN legal_documents ld ON ld.id = lnbd.document_id
+            WHERE ld.version = '2099-06-01' OR ld.version LIKE '2099-07-%' OR ld.version LIKE '2099-08-%'
+        );
+        UPDATE legal_documents SET is_active = false WHERE version = '2099-06-01' OR version LIKE '2099-07-%' OR version LIKE '2099-08-%';
         UPDATE legal_documents SET is_active = true WHERE version = '$SEED_TOS_VERSION' AND document_type = 'terms_of_service';
         UPDATE legal_documents SET is_active = true WHERE version = '$SEED_PN_VERSION' AND document_type = 'privacy_notice';
-        DELETE FROM user_legal_events WHERE document_version = '2099-06-01' OR document_version LIKE '2099-07-%';
-        DELETE FROM legal_documents WHERE version = '2099-06-01' OR version LIKE '2099-07-%';
+        DELETE FROM user_legal_events WHERE document_version = '2099-06-01' OR document_version LIKE '2099-07-%' OR document_version LIKE '2099-08-%';
+        DELETE FROM legal_documents WHERE version = '2099-06-01' OR version LIKE '2099-07-%' OR version LIKE '2099-08-%';
         COMMIT;
     " >/dev/null 2>&1 || true
 
@@ -594,6 +604,143 @@ if [[ "$SIGNUP_EVENT_COUNT" -ge 2 ]]; then
     step_pass "Signup events unaffected by admin tooling: $SIGNUP_EVENT_COUNT signup-sourced rows remain"
 else
     step_fail "Signup events: expected >=2 signup-sourced rows, found $SIGNUP_EVENT_COUNT"
+fi
+
+# ── Step 12: a third, non-hardcoded document type works end to end ────
+#
+# document_type is not restricted to terms_of_service/privacy_notice (the
+# DB CHECK constraints were dropped, legal.rs enumerates active types
+# dynamically). This proves it with a synthetic "dpa" type: publish,
+# server-side block, accept, block cleared - reusing COMMIT10's content
+# under a new document_type (the content-hash dedupe index is scoped per
+# type, so no collision).
+
+STEP_NUM=12
+if [[ "$HARNESS_READY" != "true" || -z "${COMMIT10:-}" ]]; then
+    step_fail "Configurable document type: harness/commit unavailable"
+else
+    log "Testing a non-hardcoded document type (dpa)..."
+
+    PUBLISH12_OUT=$(harness_run utils/admin publish-legal-doc \
+        --website-repo /website2 \
+        --document-type dpa \
+        --source-path terms.md \
+        --commit "$COMMIT10" \
+        --version 2099-08-01 \
+        --url https://example.com/dpa.html \
+        --effective-at 2099-08-01 \
+        --title "Data Processing Agreement" \
+        --blocking true \
+        --ack false \
+        --confirm 2>&1) && PUBLISH12_STATUS=0 || PUBLISH12_STATUS=$?
+
+    ACTIVE_DPA12=$(db_query "SELECT version FROM legal_documents WHERE document_type = 'dpa' AND is_active = true;")
+
+    if [[ $PUBLISH12_STATUS -eq 0 && "$ACTIVE_DPA12" == "2099-08-01" ]]; then
+        step_pass "Configurable type: 'dpa' published and activated with no code change"
+    else
+        step_fail "Configurable type publish: status=$PUBLISH12_STATUS active=$ACTIVE_DPA12 out=$PUBLISH12_OUT"
+    fi
+
+    STEP_NUM=12
+    STATUS12=$(curl -sf "$GATEWAY_URL/api/user/status" -H "X-Session-ID: $SESSION_ID")
+    DPA_ACTION12=$(echo "$STATUS12" | jq -r '.legal.dpa.requires_action')
+    DPA_TITLE12=$(echo "$STATUS12" | jq -r '.legal.dpa.title')
+    DPA_URL12=$(echo "$STATUS12" | jq -r '.legal.dpa.url')
+
+    if [[ "$DPA_ACTION12" == "true" && "$DPA_TITLE12" == "Data Processing Agreement" && "$DPA_URL12" == "https://example.com/dpa.html" ]]; then
+        step_pass "Configurable type: status API reports dpa with explicit title/url"
+    else
+        step_fail "Configurable type status: action=$DPA_ACTION12 title=$DPA_TITLE12 url=$DPA_URL12"
+    fi
+
+    STEP_NUM=12
+    BLOCKED12=$(curl -s -o /dev/null -w '%{http_code}' "$GATEWAY_URL/api/billing/subscription" -H "X-Session-ID: $SESSION_ID")
+    BLOCKED12_BODY=$(curl -s "$GATEWAY_URL/api/billing/subscription" -H "X-Session-ID: $SESSION_ID")
+    BLOCKED12_CODE=$(echo "$BLOCKED12_BODY" | jq -r '.code // ""')
+    BLOCKED12_TYPE=$(echo "$BLOCKED12_BODY" | jq -r '.document_type // ""')
+
+    if [[ "$BLOCKED12" == "403" && "$BLOCKED12_CODE" == "legal_acceptance_required" && "$BLOCKED12_TYPE" == "dpa" ]]; then
+        step_pass "Configurable type: server-side blocking enforced for dpa (403, not just the UI modal)"
+    else
+        step_fail "Configurable type blocking: http=$BLOCKED12 code=$BLOCKED12_CODE type=$BLOCKED12_TYPE"
+    fi
+
+    STEP_NUM=12
+    ACCEPT12_RESPONSE=$(curl -sf -X POST "$GATEWAY_URL/api/legal/accept" \
+        -H "X-Session-ID: $SESSION_ID" \
+        -H "Content-Type: application/json" \
+        -d '{"document_type": "dpa"}')
+    ACCEPT12_SUCCESS=$(echo "$ACCEPT12_RESPONSE" | jq -r '.success')
+    ACCEPT12_EVENT_TYPE=$(echo "$ACCEPT12_RESPONSE" | jq -r '.event_type')
+    DPA_ACTION12B=$(echo "$ACCEPT12_RESPONSE" | jq -r '.legal.dpa.requires_action')
+    UNBLOCKED12_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$GATEWAY_URL/api/billing/subscription" -H "X-Session-ID: $SESSION_ID")
+
+    if [[ "$ACCEPT12_SUCCESS" == "true" && "$ACCEPT12_EVENT_TYPE" == "accepted" && "$DPA_ACTION12B" == "false" && "$UNBLOCKED12_CODE" != "403" ]]; then
+        step_pass "Configurable type: accept clears requires_action and unblocks the API"
+    else
+        step_fail "Configurable type accept: success=$ACCEPT12_SUCCESS event_type=$ACCEPT12_EVENT_TYPE action=$DPA_ACTION12B unblocked_http=$UNBLOCKED12_CODE"
+    fi
+
+    # ── Step 13: public /legal/active-documents matches what signup records ──
+    #
+    # gateway::create_user loops over every active document and records a
+    # consent event; the registration UI builds its notice from this same
+    # endpoint. They must agree, or signup silently records consent for a
+    # document the user was never shown.
+
+    STEP_NUM=13
+    ACTIVE_DOCS13=$(curl -sf "$GATEWAY_URL/api/legal/active-documents")
+    ACTIVE_DPA13=$(echo "$ACTIVE_DOCS13" | jq -r '.[] | select(.document_type == "dpa")')
+    ACTIVE_DPA13_TITLE=$(echo "$ACTIVE_DPA13" | jq -r '.title')
+    ACTIVE_DPA13_URL=$(echo "$ACTIVE_DPA13" | jq -r '.url')
+    ACTIVE_DOCS13_COUNT=$(echo "$ACTIVE_DOCS13" | jq 'length')
+
+    if [[ "$ACTIVE_DOCS13_COUNT" -ge 3 && "$ACTIVE_DPA13_TITLE" == "Data Processing Agreement" && -n "$ACTIVE_DPA13_URL" ]]; then
+        step_pass "Public active-documents endpoint lists dpa with explicit title/url ($ACTIVE_DOCS13_COUNT active types)"
+    else
+        step_fail "Public active-documents endpoint: count=$ACTIVE_DOCS13_COUNT title=$ACTIVE_DPA13_TITLE url=$ACTIVE_DPA13_URL"
+    fi
+
+    # ── Step 14: a non-affirmative event alone must not satisfy a document ──
+    #
+    # get_latest_user_document_by_type only counts 'accepted'/'acknowledged'
+    # events. Regression test: it used to match the *latest event of any
+    # type*, so a 'notice_shown' row (no real acceptance) for the active
+    # document would have wrongly cleared requires_action.
+
+    STEP_NUM=14
+    db_query "
+        UPDATE legal_documents SET is_active = false WHERE document_type = 'dpa' AND is_active = true;
+        INSERT INTO legal_documents (
+            id, document_type, version, url, effective_at, is_active,
+            requires_blocking_reacceptance, title,
+            source_commit_sha, source_path, content_sha256
+        ) VALUES (
+            '44444444-4444-4444-4444-444444444444', 'dpa', '2099-08-02',
+            'https://example.com/dpa2.html', '2099-08-02', true, true,
+            'Data Processing Agreement',
+            'dddddddddddddddddddddddddddddddddddddddd', 'dpa.md',
+            'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+        );
+        INSERT INTO user_legal_events (
+            user_id, legal_document_id, document_type, document_version,
+            event_type, event_source
+        ) VALUES (
+            '$USER_ID', '44444444-4444-4444-4444-444444444444', 'dpa', '2099-08-02',
+            'notice_shown', 'banner'
+        );
+    " >/dev/null
+
+    STATUS14=$(curl -sf "$GATEWAY_URL/api/user/status" -H "X-Session-ID: $SESSION_ID")
+    DPA_ACTION14=$(echo "$STATUS14" | jq -r '.legal.dpa.requires_action')
+    BLOCKED14_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$GATEWAY_URL/api/billing/subscription" -H "X-Session-ID: $SESSION_ID")
+
+    if [[ "$DPA_ACTION14" == "true" && "$BLOCKED14_CODE" == "403" ]]; then
+        step_pass "notice_shown-only history does not satisfy the document; still gated"
+    else
+        step_fail "Non-affirmative event bypass: requires_action=$DPA_ACTION14 http=$BLOCKED14_CODE"
+    fi
 fi
 
 log "All legal tracking tests complete."
