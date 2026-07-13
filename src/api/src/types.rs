@@ -191,8 +191,6 @@ pub struct BuildConfig {
 
     pub oci_tarball: Option<String>,
 
-    pub binary: Option<String>,
-
     pub run: Option<String>,
 
     #[serde(default)]
@@ -244,7 +242,6 @@ impl Default for BuildConfig {
             containerfile: None,
             build: None,
             oci_tarball: None,
-            binary: None,
             run: None,
             app_sources: Vec::new(),
             enclave_sources: Vec::new(),
@@ -298,7 +295,6 @@ impl BuildConfig {
         let mut containerfile = None;
         let mut build = None;
         let mut oci_tarball = None;
-        let mut binary = None;
         let mut run = None;
         let mut app_sources: Vec<String> = Vec::new();
         let mut enclave_sources: Vec<String> = Vec::new();
@@ -353,11 +349,6 @@ impl BuildConfig {
                             oci_tarball = Some(value);
                         } else {
                             tracing::warn!("oci_tarball field found but value is empty");
-                        }
-                    }
-                    "binary" => {
-                        if !value.is_empty() {
-                            binary = Some(value);
                         }
                     }
                     "run" => {
@@ -584,7 +575,6 @@ impl BuildConfig {
             containerfile,
             build,
             oci_tarball,
-            binary,
             run,
             app_sources,
             enclave_sources,

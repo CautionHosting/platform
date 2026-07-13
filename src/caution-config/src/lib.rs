@@ -52,7 +52,6 @@ pub struct CautionConfig {
 #[serde(deny_unknown_fields)]
 pub struct BuildConfig {
     pub containerfile: Option<String>,
-    pub binary: Option<String>,
     #[serde(default)]
     pub app_sources: Vec<String>,
     pub cache: Option<bool>,
@@ -277,13 +276,6 @@ pub enum FromProcfileError {
     #[error("http_port {0} must also be listed in ports")]
     HttpPortNotInPorts(u16),
 
-    #[error(
-        "`binary:` and `locksmith: true` cannot be used together. The `binary:` directive \
-         extracts only the binary's directory, so /etc/caution/ (bundle + secrets) is \
-         dropped and locksmithd panics at boot. Remove one of them."
-    )]
-    BinaryWithLocksmith,
-
     #[error("managed_on_prem requires 'platform' to be specified")]
     ManagedOnPremMissingPlatform,
 
@@ -422,7 +414,6 @@ fn validate_provider(provider: &Provider) -> Result<(), String> {
 impl ConfigurationFile {
     pub fn from_procfile(content: &str) -> Result<Self, FromProcfileError> {
         let mut containerfile = None;
-        let mut binary = None;
         let mut app_sources: Vec<String> = Vec::new();
         let mut cache: Option<bool> = None;
         let mut memory_mb = None;
@@ -433,7 +424,6 @@ impl ConfigurationFile {
         let mut http_port: Option<u16> = None;
         let mut domain: Option<String> = None;
         let mut run = None;
-        let mut locksmith = false;
         let mut procfile_e2e: Option<bool> = None;
         let mut managed_on_prem = false;
         let mut platform: Option<String> = None;
@@ -459,11 +449,6 @@ impl ConfigurationFile {
                     "containerfile" => {
                         if !value.is_empty() {
                             containerfile = Some(value);
-                        }
-                    }
-                    "binary" => {
-                        if !value.is_empty() {
-                            binary = Some(value);
                         }
                     }
                     "app_source" | "app_sources" => {
@@ -537,9 +522,6 @@ impl ConfigurationFile {
                             domain = Some(value);
                         }
                     }
-                    "locksmith" => {
-                        locksmith = value.to_lowercase() == "true";
-                    }
                     "e2e" => {
                         procfile_e2e = Some(value.to_lowercase() == "true");
                     }
@@ -576,9 +558,6 @@ impl ConfigurationFile {
             }
         }
 
-        if binary.is_some() && locksmith {
-            return Err(FromProcfileError::BinaryWithLocksmith);
-        }
 
         if let Some(hp) = http_port {
             if !ports.contains(&hp) {
@@ -598,14 +577,9 @@ impl ConfigurationFile {
         // Procfile (not auto-derived from a single ports entry).
         let has_explicit_http_port = explicit_http_port.is_some() || domain.is_some();
 
-        let build = if containerfile.is_some()
-            || binary.is_some()
-            || !app_sources.is_empty()
-            || cache.is_some()
-        {
+        let build = if containerfile.is_some() || !app_sources.is_empty() || cache.is_some() {
             Some(BuildConfig {
                 containerfile,
-                binary,
                 app_sources,
                 cache,
             })
@@ -871,7 +845,6 @@ mod tests {
                 EnclaveConfig {
                     build: Some(BuildConfig {
                         containerfile: Some("Containerfile.example".into()),
-                        binary: Some("static-binary".into()),
                         app_sources: vec![
                             "git@codeberg.org:caution/demo-hello-world-enclave".into(),
                             "https://codeberg.org/caution/demo-hello-world-enclave".into(),
@@ -1214,7 +1187,6 @@ enclave "main" {
 enclave "myapp" {
   build {
     containerfile = "Containerfile.custom"
-    binary = "mybinary"
   }
   resources {
     cpu = 4
@@ -1417,7 +1389,6 @@ enclave "main" {
         let procfile = "\
 run: /app/server --port 8080
 containerfile: Containerfile.custom
-binary: myapp
 app_sources: url1, url2
 memory_mb: 2000
 cpus: 4
@@ -1434,7 +1405,6 @@ cache: false
 
         let build = e.build.as_ref().unwrap();
         assert_eq!(build.containerfile.as_deref(), Some("Containerfile.custom"));
-        assert_eq!(build.binary.as_deref(), Some("myapp"));
         assert_eq!(build.app_sources, vec!["url1", "url2"]);
         assert_eq!(build.cache, Some(false));
 
@@ -1629,8 +1599,6 @@ enclave "main" {
         assert!(unit.args.is_empty());
 
         let build = e.build.as_ref().unwrap();
-        assert_eq!(build.binary.as_deref(), Some("/usr/local/bin/hello"));
-
         assert_eq!(
             build.app_sources,
             vec!["git@codeberg.org:caution/demo-hello-world-enclave.git"]
@@ -1736,8 +1704,6 @@ enclave "main" {
         assert!(unit.args.is_empty());
 
         let build = e.build.as_ref().unwrap();
-        assert_eq!(build.binary.as_deref(), Some("/usr/local/bin/hello"));
-
         assert_eq!(
             build.app_sources,
             vec!["git@codeberg.org:caution/demo-hello-world-enclave.git"]
@@ -2073,19 +2039,37 @@ aws_region: us-east-1
     }
 
     #[test]
-    fn test_from_procfile_rejects_binary_with_locksmith() {
-        let procfile = "run: /app\nbinary: /app/x\nlocksmith: true\n";
-        let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
+    fn test_from_str_rejects_build_binary() {
+        let hcl = r#"
+enclave "default" {
+  build {
+    binary = "/app/x"
+  }
+  unit "default" {
+    command = "/app/x"
+  }
+}
+"#;
+        let err = ConfigurationFile::from_str(hcl).unwrap_err();
+        let FromStrError::HclParse(source) = err else {
+            panic!("unexpected error: {err}");
+        };
         assert!(
-            matches!(err, FromProcfileError::BinaryWithLocksmith),
-            "unexpected error: {err}"
+            source.to_string().contains("binary"),
+            "unexpected parse error: {source}"
         );
     }
 
     #[test]
-    fn test_from_procfile_allows_binary_without_locksmith() {
+    fn test_from_procfile_ignores_binary_field() {
         let procfile = "run: /app\nbinary: /app/x\nports: 8080\n";
-        ConfigurationFile::from_procfile(procfile).unwrap();
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let default = enclave.get("default").unwrap();
+        assert!(
+            default.build.is_none(),
+            "binary alone should not create a build block"
+        );
     }
 
     #[test]

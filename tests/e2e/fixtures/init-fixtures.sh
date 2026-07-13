@@ -84,7 +84,6 @@ README_EOF
 
 CAUTION_HCL_STANDARD='enclave "default" {
   build {
-    binary = "/usr/local/bin/hello"
     app_sources = ["git@codeberg.org:caution/demo-hello-world-enclave.git"]
   }
   network {
@@ -101,7 +100,6 @@ CAUTION_HCL_STANDARD='enclave "default" {
 
 CAUTION_HCL_E2E='enclave "default" {
   build {
-    binary = "/usr/local/bin/hello"
     app_sources = ["git@codeberg.org:caution/demo-hello-world-enclave.git"]
   }
   network {
