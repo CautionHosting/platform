@@ -87,9 +87,6 @@ CREATE TABLE IF NOT EXISTS subscription_intents (
     applied_at TIMESTAMPTZ
 );
 
-ALTER TABLE subscription_intents
-    ADD COLUMN IF NOT EXISTS paddle_subscription_id TEXT;
-
 CREATE UNIQUE INDEX IF NOT EXISTS idx_subscription_intents_paddle_transaction
     ON subscription_intents(paddle_transaction_id)
     WHERE paddle_transaction_id IS NOT NULL;

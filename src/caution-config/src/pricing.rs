@@ -116,13 +116,6 @@ impl PricingConfig {
         }
         Ok(config)
     }
-
-    /// Returns tiers in deterministic display order without relying on legacy annual storage.
-    pub fn sorted_subscription_tiers(&self) -> Vec<(&String, &TierPricing)> {
-        let mut tiers: Vec<_> = self.subscription_tiers.iter().collect();
-        tiers.sort_by_key(|(key, tier)| (tier.enclaves, key.as_str()));
-        tiers
-    }
 }
 
 fn normalize_tiers(tiers: &mut DuplicateCheckedTiers) -> Result<(), PricingConfigError> {
@@ -309,21 +302,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_documented_shape_with_exact_values_and_order() {
+    fn parses_documented_shape_with_exact_values() {
         let parsed = PricingConfig::parse(&catalog(true).to_string(), true).unwrap();
-        let ordered = parsed.sorted_subscription_tiers();
-        assert_eq!(
-            ordered.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
-            [
-                "1_enclave",
-                "2_enclaves",
-                "3_enclaves",
-                "4_enclaves",
-                "5_enclaves"
-            ]
-        );
-        assert_eq!(ordered[2].1.monthly_cents(), 50000);
-        assert_eq!(ordered[2].1.annual_cents(), 600000);
+        assert_eq!(parsed.subscription_tiers["3_enclaves"].monthly_cents(), 50000);
+        assert_eq!(parsed.subscription_tiers["3_enclaves"].annual_cents(), 600000);
         assert_eq!(parsed.credit_packages["1000"].bonus_percent, 2.5);
     }
 
