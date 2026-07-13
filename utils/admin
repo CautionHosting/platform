@@ -86,6 +86,10 @@ Commands:
                          batching, and explicit confirmation
                          Flags: --recipient-id <uuid>, --recipient-email <email>,
                          --limit <n>, --confirm, --api-url <url>
+  publish-legal-doc      One-step publish: ingest a doc from a caution/website
+                         commit, activate it, dry-run the notice, and (with
+                         --confirm) email affected users. Run with --help for
+                         the full flag list.
   user-legal-status <id> Show legal status for a user
 
 Examples:
@@ -98,6 +102,10 @@ Examples:
   ./utils/admin send-legal-notices
   ./utils/admin send-legal-notices --send --limit 25 --recipient-email ops@caution.co
   ./utils/admin send-legal-notices --send --confirm 123e4567-e89b-12d3-a456-426614174000
+  ./utils/admin publish-legal-doc --website-repo ~/caution/website \\
+    --document-type terms_of_service --source-path terms.md \\
+    --commit abc1234 --version 2026-08-01 \\
+    --url https://caution.co/terms.html --effective-at 2026-08-01
 EOF
 }
 
@@ -551,7 +559,7 @@ cmd_send_legal_notices() {
                 fi
                 ids_json+="\"$doc_id\""
             done
-            payload="${payload%}}"
+            payload="${payload%\}}"
             payload+=",\"document_ids\":[$ids_json]}"
         fi
 
@@ -564,7 +572,7 @@ cmd_send_legal_notices() {
                 fi
                 recipient_ids_json+="\"$recipient_id\""
             done
-            payload="${payload%}}"
+            payload="${payload%\}}"
             payload+=",\"recipient_ids\":[$recipient_ids_json]}"
         fi
 
@@ -577,12 +585,12 @@ cmd_send_legal_notices() {
                 fi
                 recipient_emails_json+="\"$(json_escape "$recipient_email")\""
             done
-            payload="${payload%}}"
+            payload="${payload%\}}"
             payload+=",\"recipient_emails\":[$recipient_emails_json]}"
         fi
 
         if [[ -n "$limit" ]]; then
-            payload="${payload%}}"
+            payload="${payload%\}}"
             payload+=",\"limit\":$limit}"
         fi
 
@@ -649,6 +657,120 @@ cmd_send_legal_notices() {
     print_response "$(request_send "$(build_payload "false")")"
 }
 
+cmd_publish_legal_doc() {
+    local ingest_args=()
+    local notify_args=()
+    local confirm="false"
+    local document_type=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --website-repo|--source-path|--commit|--version|--url|--effective-at|--title|--blocking|--ack|--summary-json)
+                ingest_args+=("$1" "${2:-}")
+                shift 2
+                ;;
+            --document-type)
+                document_type="${2:-}"
+                ingest_args+=("$1" "${2:-}")
+                shift 2
+                ;;
+            --confirm)
+                confirm="true"
+                shift
+                ;;
+            --limit)
+                validate_positive_integer "${2:-}"
+                notify_args+=("$1" "${2:-}")
+                shift 2
+                ;;
+            --recipient-email)
+                validate_email_arg "${2:-}"
+                notify_args+=("$1" "${2:-}")
+                shift 2
+                ;;
+            --recipient-id)
+                validate_uuid "${2:-}"
+                notify_args+=("$1" "${2:-}")
+                shift 2
+                ;;
+            --api-url)
+                notify_args+=("$1" "${2:-}")
+                shift 2
+                ;;
+            --help|-h)
+                cat <<EOF
+Publish a legal document: ingest from a caution/website commit, activate it,
+show a notice dry-run, and (with --confirm) email affected users.
+
+Usage:
+  ./utils/admin publish-legal-doc \\
+    --website-repo /path/to/caution/website \\
+    --document-type terms_of_service|privacy_notice|<any-type> \\
+    --source-path terms.md|privacy.md \\
+    --commit <sha> --version <display-version> \\
+    --url <public-url> --effective-at YYYY-MM-DD [options]
+
+document_type is not restricted to a fixed list. terms_of_service/privacy_notice have
+built-in blocking/ack defaults; any other type requires --blocking and --ack explicitly.
+
+Options:
+  --title <text>             Display title (defaults to a humanized document_type)
+  --blocking true|false     Override requires_blocking_reacceptance
+  --ack true|false          Override requires_acknowledgment
+  --summary-json <json>     Optional summary_json payload
+  --confirm                 Send notice emails (default is dry-run only)
+  --limit <n>               Cap recipients for this send
+  --recipient-email <email> Scope send to a recipient (repeatable)
+  --recipient-id <uuid>     Scope send to a recipient (repeatable)
+  --api-url <url>           API base URL (default http://localhost:8080)
+
+Without --confirm the document is still ingested and activated (users see the
+modal immediately); only the email send is withheld pending --confirm.
+EOF
+                return 0
+                ;;
+            *)
+                echo "Error: Unknown argument: $1"
+                exit 1
+                ;;
+        esac
+    done
+
+    if [[ ${#ingest_args[@]} -eq 0 ]]; then
+        echo "Error: missing ingest arguments; run 'publish-legal-doc --help'"
+        exit 1
+    fi
+
+    echo "=== Step 1/2: ingest + activate ==="
+    local ingest_output
+    ingest_output="$("$SCRIPT_DIR/add-legal-doc-from-website.sh" "${ingest_args[@]}" --activate)"
+    echo "$ingest_output"
+
+    local doc_id
+    doc_id="$(printf '%s\n' "$ingest_output" | awk -F': *' '/^[[:space:]]*id:/ {print $2; exit}')"
+    if [[ -z "$doc_id" ]]; then
+        echo "Error: could not determine inserted document id from ingest output"
+        exit 1
+    fi
+    validate_uuid "$doc_id"
+
+    echo ""
+    echo "=== Step 2/2: notify (scoped to document $doc_id) ==="
+    local send_args=("$doc_id")
+    if [[ ${#notify_args[@]} -gt 0 ]]; then
+        send_args+=("${notify_args[@]}")
+    fi
+    if [[ "$confirm" == "true" ]]; then
+        send_args+=(--send --confirm)
+    fi
+    cmd_send_legal_notices "${send_args[@]}"
+
+    if [[ "$confirm" != "true" ]]; then
+        echo ""
+        echo "Dry-run only. Re-run with --confirm to email affected users."
+    fi
+}
+
 main() {
     local cmd="${1:-help}"
     shift || true
@@ -708,6 +830,9 @@ main() {
             ;;
         send-legal-notices)
             cmd_send_legal_notices "$@"
+            ;;
+        publish-legal-doc)
+            cmd_publish_legal_doc "$@"
             ;;
         *)
             echo "Unknown command: $cmd"

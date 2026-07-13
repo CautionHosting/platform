@@ -139,17 +139,6 @@
 import { computed, ref } from "vue";
 import { formatLocalDate } from "../utils/dateTime.js";
 
-const DOCUMENT_META = {
-  terms_of_service: {
-    title: "Terms of Service",
-    url: "https://caution.co/terms.html",
-  },
-  privacy_notice: {
-    title: "Privacy Notice",
-    url: "https://caution.co/privacy.html",
-  },
-};
-
 export default {
   name: "LegalAcceptanceModal",
   props: {
@@ -182,12 +171,13 @@ export default {
     };
 
     const pendingDocuments = computed(() =>
-      Object.entries(DOCUMENT_META)
-        .filter(([type]) => props.legal?.[type]?.requires_action)
-        .map(([type, meta]) => ({
+      Object.entries(props.legal || {})
+        .filter(([, status]) => status?.requires_action)
+        .map(([type, status]) => ({
           type,
-          ...meta,
-          effectiveDateLabel: formatEffectiveDate(props.legal?.[type]?.active_version),
+          title: status.title,
+          url: status.url,
+          effectiveDateLabel: formatEffectiveDate(status.active_version),
         }))
     );
 

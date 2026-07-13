@@ -1,5 +1,6 @@
 out/
-dist/cli/caution-*
+dist/
+node_modules/
 Procfile.json
 env
 .env

@@ -3194,7 +3194,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let public_routes = Router::new()
         .route("/health", get(health_check))
         .route("/.well-known/caution/build-inputs", get(build_inputs))
-        .route("/onboarding/verify", get(onboarding::verify_email));
+        .route("/onboarding/verify", get(onboarding::verify_email))
+        .route(
+            "/legal/active-documents",
+            get(legal::list_active_legal_documents),
+        );
 
     // Background task: reap orphaned builder instances
     let reaper_state = state.clone();

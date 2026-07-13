@@ -14,6 +14,24 @@
 #   6. Outdated privacy notice triggers requires_action=true
 #   7. Re-acceptance endpoint clears requires_action
 #   8. Legal notice email sender dry-runs, sends once, and dedupes
+#   9. add-legal-doc-from-website.sh ingests a doc and rejects a duplicate
+#  10. admin publish-legal-doc: ingest+activate+notify end-to-end
+#  11. Signup event recording is unaffected by admin/legal-notice tooling
+#  12. A non-hardcoded document type ("dpa") publishes, blocks server-side,
+#      and accepts end-to-end - proves document types aren't hardcoded
+#  13. Public /legal/active-documents lists dpa with the same title/url the
+#      signup consent notice would use
+#  14. A 'notice_shown'-only event does not satisfy a document (only
+#      accepted/acknowledged count)
+#
+# Steps 9-10 exercise utils/admin and utils/add-legal-doc-from-website.sh,
+# which connect via LOCAL psql (DB_HOST/DB_PORT). The test postgres
+# container ("postgres-test") is only attached to the docker network used
+# by the stack and has no published host port, so those tools can't reach
+# it directly from the host. We run them inside a short-lived helper
+# container joined to that same docker network instead (see HARNESS_*
+# below) - this only changes how the *test* invokes the tools; the tools
+# themselves are unmodified.
 
 set -euo pipefail
 
@@ -37,24 +55,42 @@ cleanup() {
     echo ""
     echo "=== Cleanup ==="
 
+    # Tear down the helper container/tempdirs used for steps 9-10, if any.
+    if [[ -n "${HARNESS_NAME:-}" ]]; then
+        docker rm -f "$HARNESS_NAME" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${HARNESS_DIR:-}" && -d "${HARNESS_DIR:-}" ]]; then
+        rm -rf "$HARNESS_DIR" 2>/dev/null || true
+    fi
+    if [[ -n "${WEBSITE_DIR:-}" && -d "${WEBSITE_DIR:-}" ]]; then
+        rm -rf "$WEBSITE_DIR" 2>/dev/null || true
+    fi
+    if [[ -n "${WEBSITE_DIR2:-}" && -d "${WEBSITE_DIR2:-}" ]]; then
+        rm -rf "$WEBSITE_DIR2" 2>/dev/null || true
+    fi
+
     # Remove test document versions and restore originals
     docker exec "$DB_CONTAINER" psql -U postgres -d "$DB_NAME" -c "
         BEGIN;
         DELETE FROM legal_email_deliveries
         WHERE batch_id IN (
-            SELECT lnb.id
-            FROM legal_notice_batches lnb
-            WHERE lnb.terms_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01')
-               OR lnb.privacy_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01')
+            SELECT DISTINCT lnbd.batch_id
+            FROM legal_notice_batch_documents lnbd
+            JOIN legal_documents ld ON ld.id = lnbd.document_id
+            WHERE ld.version = '2099-06-01' OR ld.version LIKE '2099-07-%' OR ld.version LIKE '2099-08-%'
         );
         DELETE FROM legal_notice_batches
-        WHERE terms_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01')
-           OR privacy_document_id IN (SELECT id FROM legal_documents WHERE version = '2099-06-01');
-        UPDATE legal_documents SET is_active = false WHERE version = '2099-06-01';
+        WHERE id IN (
+            SELECT DISTINCT lnbd.batch_id
+            FROM legal_notice_batch_documents lnbd
+            JOIN legal_documents ld ON ld.id = lnbd.document_id
+            WHERE ld.version = '2099-06-01' OR ld.version LIKE '2099-07-%' OR ld.version LIKE '2099-08-%'
+        );
+        UPDATE legal_documents SET is_active = false WHERE version = '2099-06-01' OR version LIKE '2099-07-%' OR version LIKE '2099-08-%';
         UPDATE legal_documents SET is_active = true WHERE version = '$SEED_TOS_VERSION' AND document_type = 'terms_of_service';
         UPDATE legal_documents SET is_active = true WHERE version = '$SEED_PN_VERSION' AND document_type = 'privacy_notice';
-        DELETE FROM user_legal_events WHERE document_version = '2099-06-01';
-        DELETE FROM legal_documents WHERE version = '2099-06-01';
+        DELETE FROM user_legal_events WHERE document_version = '2099-06-01' OR document_version LIKE '2099-07-%' OR document_version LIKE '2099-08-%';
+        DELETE FROM legal_documents WHERE version = '2099-06-01' OR version LIKE '2099-07-%' OR version LIKE '2099-08-%';
         COMMIT;
     " >/dev/null 2>&1 || true
 
@@ -338,6 +374,372 @@ else
         step_pass "Legal notice sender: dry-run=$DRY_RUN_PENDING sent=$SENT_COUNT emails=$LEGAL_EMAIL_COUNT deduped"
     else
         step_fail "Legal notice sender: dry_run=$DRY_RUN_PENDING docs=$DRY_RUN_DOCS sent=$SENT_COUNT failed=$FAILED_COUNT emails=$LEGAL_EMAIL_COUNT second_pending=$SECOND_DRY_RUN_PENDING"
+    fi
+fi
+
+# ── Steps 9-11 setup: helper container joined to the test DB network ──
+#
+# utils/add-legal-doc-from-website.sh and utils/admin talk to Postgres via
+# LOCAL psql (DB_HOST/DB_PORT), but postgres-test has no published host
+# port. We run those tools inside a throwaway container attached to the
+# same docker network as postgres-test, with a *copy* of just the utils/
+# scripts bind-mounted (not the whole repo) so the scripts' own
+# "source ../.env" logic finds no .env file and can't pick up unrelated
+# host defaults (e.g. an empty INTERNAL_SERVICE_SECRET=) that would
+# clobber the values we pass in explicitly.
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+HARNESS_DIR=""
+WEBSITE_DIR=""
+WEBSITE_DIR2=""
+HARNESS_NAME=""
+HARNESS_READY="false"
+
+DOCKER_NETWORK="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$DB_CONTAINER" 2>/dev/null | awk '{print $1}')"
+
+if [[ -z "$DOCKER_NETWORK" ]]; then
+    log "Could not determine docker network for $DB_CONTAINER; skipping steps 9-11."
+else
+    HARNESS_DIR="$(mktemp -d)"
+    mkdir -p "$HARNESS_DIR/utils"
+    cp "$REPO_ROOT/utils/admin" "$HARNESS_DIR/utils/admin"
+    cp "$REPO_ROOT/utils/add-legal-doc-from-website.sh" "$HARNESS_DIR/utils/add-legal-doc-from-website.sh"
+    chmod +x "$HARNESS_DIR/utils/admin" "$HARNESS_DIR/utils/add-legal-doc-from-website.sh"
+
+    HARNESS_NAME="legal-e2e-harness-$$"
+    WEBSITE_DIR="$(mktemp -d)"
+    WEBSITE_DIR2="$(mktemp -d)"
+
+    if docker run -d --name "$HARNESS_NAME" \
+        --network "$DOCKER_NETWORK" \
+        -v "$HARNESS_DIR:/harness:ro" \
+        -v "$WEBSITE_DIR:/website" \
+        -v "$WEBSITE_DIR2:/website2" \
+        postgres:16-alpine sleep 3600 >/dev/null 2>&1; then
+        if docker exec "$HARNESS_NAME" sh -c "apk add --no-cache bash git curl jq >/dev/null 2>&1 && git config --system --add safe.directory '*'"; then
+            HARNESS_READY="true"
+        else
+            log "Failed to install tools in harness container"
+        fi
+    else
+        log "Failed to start harness container"
+    fi
+fi
+
+harness_run() {
+    docker exec \
+        -e DB_HOST="$DB_CONTAINER" \
+        -e DB_PORT=5432 \
+        -e DB_USER=postgres \
+        -e DB_PASSWORD=postgres \
+        -e DB_NAME="$DB_NAME" \
+        -e INTERNAL_SERVICE_SECRET="$INTERNAL_SERVICE_SECRET" \
+        -e API_URL="http://api:8080" \
+        -w /harness \
+        "$HARNESS_NAME" bash "$@"
+}
+
+make_website_repo() {
+    local dir="$1"
+    local content="$2"
+    (
+        cd "$dir"
+        git init -q
+        git config user.email "legal-e2e@example.com"
+        git config user.name "Legal E2E"
+        printf '%s\n' "$content" > terms.md
+        git add terms.md
+        git commit -q -m "terms update"
+    )
+    git -C "$dir" rev-parse HEAD
+}
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+# ── Step 9: add-legal-doc-from-website.sh ingests + dedupes ───────────
+
+STEP_NUM=9
+if [[ "$HARNESS_READY" != "true" ]]; then
+    step_fail "Ingest helper: harness container unavailable"
+else
+    log "Testing add-legal-doc-from-website.sh ingest + dedupe..."
+
+    COMMIT9=$(make_website_repo "$WEBSITE_DIR" "Terms of Service v2099-07-01 (e2e)")
+    EXPECTED_SHA9=$(sha256_of "$WEBSITE_DIR/terms.md")
+
+    INGEST9_OUT=$(harness_run utils/add-legal-doc-from-website.sh \
+        --website-repo /website \
+        --document-type terms_of_service \
+        --source-path terms.md \
+        --commit "$COMMIT9" \
+        --version 2099-07-01 \
+        --url https://example.com/terms-2099-07-01.html \
+        --effective-at 2099-07-01 2>&1) && INGEST9_STATUS=0 || INGEST9_STATUS=$?
+
+    ROW9=$(db_query "SELECT is_active, content_sha256, source_commit_sha FROM legal_documents WHERE document_type = 'terms_of_service' AND version = '2099-07-01';")
+    ROW9_ACTIVE=$(echo "$ROW9" | awk -F'|' '{print $1}')
+    ROW9_SHA=$(echo "$ROW9" | awk -F'|' '{print $2}')
+    ROW9_COMMIT=$(echo "$ROW9" | awk -F'|' '{print $3}')
+
+    if [[ $INGEST9_STATUS -eq 0 && "$ROW9_ACTIVE" == "f" && "$ROW9_SHA" == "$EXPECTED_SHA9" && "$ROW9_COMMIT" == "$COMMIT9" ]]; then
+        step_pass "Ingest: new inactive doc with matching content_sha256 and commit"
+    else
+        step_fail "Ingest: status=$INGEST9_STATUS active=$ROW9_ACTIVE sha_match=$([[ "$ROW9_SHA" == "$EXPECTED_SHA9" ]] && echo yes || echo no) commit_match=$([[ "$ROW9_COMMIT" == "$COMMIT9" ]] && echo yes || echo no)"
+    fi
+
+    STEP_NUM=9
+    DEDUPE9_OUT=$(harness_run utils/add-legal-doc-from-website.sh \
+        --website-repo /website \
+        --document-type terms_of_service \
+        --source-path terms.md \
+        --commit "$COMMIT9" \
+        --version 2099-07-01b \
+        --url https://example.com/terms-2099-07-01.html \
+        --effective-at 2099-07-01 2>&1) && DEDUPE9_STATUS=0 || DEDUPE9_STATUS=$?
+
+    if [[ $DEDUPE9_STATUS -ne 0 && "$DEDUPE9_OUT" == *"already exists"* ]]; then
+        step_pass "Ingest: duplicate content_sha256 rejected"
+    else
+        step_fail "Ingest: duplicate not rejected (status=$DEDUPE9_STATUS out=$DEDUPE9_OUT)"
+    fi
+fi
+
+# ── Step 10: admin publish-legal-doc end-to-end ────────────────────────
+
+STEP_NUM=10
+if [[ "$HARNESS_READY" != "true" ]]; then
+    step_fail "publish-legal-doc: harness container unavailable"
+else
+    log "Testing admin publish-legal-doc end-to-end..."
+
+    COMMIT10=$(make_website_repo "$WEBSITE_DIR2" "Terms of Service v2099-07-02 (e2e)")
+
+    curl -sf -X DELETE "$EMAIL_EXTERNAL_URL/sent" >/dev/null 2>&1 || true
+
+    PUBLISH10_OUT=$(harness_run utils/admin publish-legal-doc \
+        --website-repo /website2 \
+        --document-type terms_of_service \
+        --source-path terms.md \
+        --commit "$COMMIT10" \
+        --version 2099-07-02 \
+        --url https://example.com/terms-2099-07-02.html \
+        --effective-at 2099-07-02 \
+        --blocking true \
+        --confirm 2>&1) && PUBLISH10_STATUS=0 || PUBLISH10_STATUS=$?
+
+    DOC10_ID=$(printf '%s\n' "$PUBLISH10_OUT" | awk -F': *' '/^[[:space:]]*id:/ {print $2; exit}')
+    ACTIVE_TOS10=$(db_query "SELECT version FROM legal_documents WHERE document_type = 'terms_of_service' AND is_active = true;")
+
+    if [[ $PUBLISH10_STATUS -eq 0 && "$ACTIVE_TOS10" == "2099-07-02" ]]; then
+        step_pass "publish-legal-doc: new TOS version activated (id=$DOC10_ID)"
+    else
+        step_fail "publish-legal-doc: status=$PUBLISH10_STATUS active=$ACTIVE_TOS10 out=$PUBLISH10_OUT"
+    fi
+
+    STEP_NUM=10
+    STATUS10=$(curl -sf "$GATEWAY_URL/api/user/status" -H "X-Session-ID: $SESSION_ID")
+    TOS_ACTION10=$(echo "$STATUS10" | jq -r '.legal.terms_of_service.requires_action')
+    TOS_ACTIVE10=$(echo "$STATUS10" | jq -r '.legal.terms_of_service.active_version')
+
+    if [[ "$TOS_ACTION10" == "true" && "$TOS_ACTIVE10" == "2099-07-02" ]]; then
+        step_pass "publish-legal-doc: tracked user now requires_action=true"
+    else
+        step_fail "publish-legal-doc: requires_action=$TOS_ACTION10 active=$TOS_ACTIVE10"
+    fi
+
+    STEP_NUM=10
+    ACCEPT10_RESPONSE=$(curl -sf -X POST "$GATEWAY_URL/api/legal/accept" \
+        -H "X-Session-ID: $SESSION_ID" \
+        -H "Content-Type: application/json" \
+        -d '{"document_type": "terms_of_service"}')
+    ACCEPT10_SUCCESS=$(echo "$ACCEPT10_RESPONSE" | jq -r '.success')
+    ACCEPT10_VERSION=$(echo "$ACCEPT10_RESPONSE" | jq -r '.version')
+    TOS_ACTION10B=$(echo "$ACCEPT10_RESPONSE" | jq -r '.legal.terms_of_service.requires_action')
+    EVENT10_COUNT=$(db_query "SELECT COUNT(*) FROM user_legal_events WHERE user_id = '$USER_ID' AND document_version = '2099-07-02' AND occurred_at IS NOT NULL;")
+
+    if [[ "$ACCEPT10_SUCCESS" == "true" && "$ACCEPT10_VERSION" == "2099-07-02" && "$TOS_ACTION10B" == "false" && "$EVENT10_COUNT" -ge 1 ]]; then
+        step_pass "publish-legal-doc: accept clears requires_action and records event"
+    else
+        step_fail "publish-legal-doc accept: success=$ACCEPT10_SUCCESS version=$ACCEPT10_VERSION action=$TOS_ACTION10B events=$EVENT10_COUNT"
+    fi
+
+    STEP_NUM=10
+    LEGAL_EMAIL_COUNT10=$(curl -sf "$EMAIL_EXTERNAL_URL/sent?template=legal_notice" 2>/dev/null | jq '.count // 0')
+
+    SECOND_NOTIFY10_PENDING="unknown"
+    if [[ -n "$DOC10_ID" ]]; then
+        # Re-run notify through admin; dedupe must prevent a second email.
+        harness_run utils/admin send-legal-notices "$DOC10_ID" --send --confirm >/dev/null 2>&1 || true
+        # Read pending count from a clean API dry-run (admin pretty-prints,
+        # so its stdout is not reliably line-parseable JSON).
+        SECOND_NOTIFY10_PENDING=$(curl -s -X POST "$API_URL/internal/legal-notices/send" \
+            -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "{\"dry_run\":true,\"document_ids\":[\"$DOC10_ID\"]}" 2>/dev/null \
+            | jq -r '.pending_recipient_count // "unknown"') || SECOND_NOTIFY10_PENDING="unknown"
+    fi
+    LEGAL_EMAIL_COUNT10B=$(curl -sf "$EMAIL_EXTERNAL_URL/sent?template=legal_notice" 2>/dev/null | jq '.count // 0')
+
+    if [[ "$LEGAL_EMAIL_COUNT10" -eq 1 && "$SECOND_NOTIFY10_PENDING" == "0" && "$LEGAL_EMAIL_COUNT10B" -eq "$LEGAL_EMAIL_COUNT10" ]]; then
+        step_pass "publish-legal-doc: notice email sent exactly once and second run dedupes"
+    else
+        step_fail "publish-legal-doc email: first=$LEGAL_EMAIL_COUNT10 second_pending=$SECOND_NOTIFY10_PENDING second_total=$LEGAL_EMAIL_COUNT10B"
+    fi
+fi
+
+# ── Step 11: signup event recording unaffected ─────────────────────────
+
+STEP_NUM=11
+log "Testing signup event recording is unaffected..."
+
+SIGNUP_EVENT_COUNT=$(db_query "SELECT COUNT(*) FROM user_legal_events WHERE user_id = '$USER_ID' AND event_source = 'signup';")
+
+if [[ "$SIGNUP_EVENT_COUNT" -ge 2 ]]; then
+    step_pass "Signup events unaffected by admin tooling: $SIGNUP_EVENT_COUNT signup-sourced rows remain"
+else
+    step_fail "Signup events: expected >=2 signup-sourced rows, found $SIGNUP_EVENT_COUNT"
+fi
+
+# ── Step 12: a third, non-hardcoded document type works end to end ────
+#
+# document_type is not restricted to terms_of_service/privacy_notice (the
+# DB CHECK constraints were dropped, legal.rs enumerates active types
+# dynamically). This proves it with a synthetic "dpa" type: publish,
+# server-side block, accept, block cleared - reusing COMMIT10's content
+# under a new document_type (the content-hash dedupe index is scoped per
+# type, so no collision).
+
+STEP_NUM=12
+if [[ "$HARNESS_READY" != "true" || -z "${COMMIT10:-}" ]]; then
+    step_fail "Configurable document type: harness/commit unavailable"
+else
+    log "Testing a non-hardcoded document type (dpa)..."
+
+    PUBLISH12_OUT=$(harness_run utils/admin publish-legal-doc \
+        --website-repo /website2 \
+        --document-type dpa \
+        --source-path terms.md \
+        --commit "$COMMIT10" \
+        --version 2099-08-01 \
+        --url https://example.com/dpa.html \
+        --effective-at 2099-08-01 \
+        --title "Data Processing Agreement" \
+        --blocking true \
+        --ack false \
+        --confirm 2>&1) && PUBLISH12_STATUS=0 || PUBLISH12_STATUS=$?
+
+    ACTIVE_DPA12=$(db_query "SELECT version FROM legal_documents WHERE document_type = 'dpa' AND is_active = true;")
+
+    if [[ $PUBLISH12_STATUS -eq 0 && "$ACTIVE_DPA12" == "2099-08-01" ]]; then
+        step_pass "Configurable type: 'dpa' published and activated with no code change"
+    else
+        step_fail "Configurable type publish: status=$PUBLISH12_STATUS active=$ACTIVE_DPA12 out=$PUBLISH12_OUT"
+    fi
+
+    STEP_NUM=12
+    STATUS12=$(curl -sf "$GATEWAY_URL/api/user/status" -H "X-Session-ID: $SESSION_ID")
+    DPA_ACTION12=$(echo "$STATUS12" | jq -r '.legal.dpa.requires_action')
+    DPA_TITLE12=$(echo "$STATUS12" | jq -r '.legal.dpa.title')
+    DPA_URL12=$(echo "$STATUS12" | jq -r '.legal.dpa.url')
+
+    if [[ "$DPA_ACTION12" == "true" && "$DPA_TITLE12" == "Data Processing Agreement" && "$DPA_URL12" == "https://example.com/dpa.html" ]]; then
+        step_pass "Configurable type: status API reports dpa with explicit title/url"
+    else
+        step_fail "Configurable type status: action=$DPA_ACTION12 title=$DPA_TITLE12 url=$DPA_URL12"
+    fi
+
+    STEP_NUM=12
+    BLOCKED12=$(curl -s -o /dev/null -w '%{http_code}' "$GATEWAY_URL/api/billing/subscription" -H "X-Session-ID: $SESSION_ID")
+    BLOCKED12_BODY=$(curl -s "$GATEWAY_URL/api/billing/subscription" -H "X-Session-ID: $SESSION_ID")
+    BLOCKED12_CODE=$(echo "$BLOCKED12_BODY" | jq -r '.code // ""')
+    BLOCKED12_TYPE=$(echo "$BLOCKED12_BODY" | jq -r '.document_type // ""')
+
+    if [[ "$BLOCKED12" == "403" && "$BLOCKED12_CODE" == "legal_acceptance_required" && "$BLOCKED12_TYPE" == "dpa" ]]; then
+        step_pass "Configurable type: server-side blocking enforced for dpa (403, not just the UI modal)"
+    else
+        step_fail "Configurable type blocking: http=$BLOCKED12 code=$BLOCKED12_CODE type=$BLOCKED12_TYPE"
+    fi
+
+    STEP_NUM=12
+    ACCEPT12_RESPONSE=$(curl -sf -X POST "$GATEWAY_URL/api/legal/accept" \
+        -H "X-Session-ID: $SESSION_ID" \
+        -H "Content-Type: application/json" \
+        -d '{"document_type": "dpa"}')
+    ACCEPT12_SUCCESS=$(echo "$ACCEPT12_RESPONSE" | jq -r '.success')
+    ACCEPT12_EVENT_TYPE=$(echo "$ACCEPT12_RESPONSE" | jq -r '.event_type')
+    DPA_ACTION12B=$(echo "$ACCEPT12_RESPONSE" | jq -r '.legal.dpa.requires_action')
+    UNBLOCKED12_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$GATEWAY_URL/api/billing/subscription" -H "X-Session-ID: $SESSION_ID")
+
+    if [[ "$ACCEPT12_SUCCESS" == "true" && "$ACCEPT12_EVENT_TYPE" == "accepted" && "$DPA_ACTION12B" == "false" && "$UNBLOCKED12_CODE" != "403" ]]; then
+        step_pass "Configurable type: accept clears requires_action and unblocks the API"
+    else
+        step_fail "Configurable type accept: success=$ACCEPT12_SUCCESS event_type=$ACCEPT12_EVENT_TYPE action=$DPA_ACTION12B unblocked_http=$UNBLOCKED12_CODE"
+    fi
+
+    # ── Step 13: public /legal/active-documents matches what signup records ──
+    #
+    # gateway::create_user loops over every active document and records a
+    # consent event; the registration UI builds its notice from this same
+    # endpoint. They must agree, or signup silently records consent for a
+    # document the user was never shown.
+
+    STEP_NUM=13
+    ACTIVE_DOCS13=$(curl -sf "$GATEWAY_URL/api/legal/active-documents")
+    ACTIVE_DPA13=$(echo "$ACTIVE_DOCS13" | jq -r '.[] | select(.document_type == "dpa")')
+    ACTIVE_DPA13_TITLE=$(echo "$ACTIVE_DPA13" | jq -r '.title')
+    ACTIVE_DPA13_URL=$(echo "$ACTIVE_DPA13" | jq -r '.url')
+    ACTIVE_DOCS13_COUNT=$(echo "$ACTIVE_DOCS13" | jq 'length')
+
+    if [[ "$ACTIVE_DOCS13_COUNT" -ge 3 && "$ACTIVE_DPA13_TITLE" == "Data Processing Agreement" && -n "$ACTIVE_DPA13_URL" ]]; then
+        step_pass "Public active-documents endpoint lists dpa with explicit title/url ($ACTIVE_DOCS13_COUNT active types)"
+    else
+        step_fail "Public active-documents endpoint: count=$ACTIVE_DOCS13_COUNT title=$ACTIVE_DPA13_TITLE url=$ACTIVE_DPA13_URL"
+    fi
+
+    # ── Step 14: a non-affirmative event alone must not satisfy a document ──
+    #
+    # get_latest_user_document_by_type only counts 'accepted'/'acknowledged'
+    # events. Regression test: it used to match the *latest event of any
+    # type*, so a 'notice_shown' row (no real acceptance) for the active
+    # document would have wrongly cleared requires_action.
+
+    STEP_NUM=14
+    db_query "
+        UPDATE legal_documents SET is_active = false WHERE document_type = 'dpa' AND is_active = true;
+        INSERT INTO legal_documents (
+            id, document_type, version, url, effective_at, is_active,
+            requires_blocking_reacceptance, title,
+            source_commit_sha, source_path, content_sha256
+        ) VALUES (
+            '44444444-4444-4444-4444-444444444444', 'dpa', '2099-08-02',
+            'https://example.com/dpa2.html', '2099-08-02', true, true,
+            'Data Processing Agreement',
+            'dddddddddddddddddddddddddddddddddddddddd', 'dpa.md',
+            'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+        );
+        INSERT INTO user_legal_events (
+            user_id, legal_document_id, document_type, document_version,
+            event_type, event_source
+        ) VALUES (
+            '$USER_ID', '44444444-4444-4444-4444-444444444444', 'dpa', '2099-08-02',
+            'notice_shown', 'banner'
+        );
+    " >/dev/null
+
+    STATUS14=$(curl -sf "$GATEWAY_URL/api/user/status" -H "X-Session-ID: $SESSION_ID")
+    DPA_ACTION14=$(echo "$STATUS14" | jq -r '.legal.dpa.requires_action')
+    BLOCKED14_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$GATEWAY_URL/api/billing/subscription" -H "X-Session-ID: $SESSION_ID")
+
+    if [[ "$DPA_ACTION14" == "true" && "$BLOCKED14_CODE" == "403" ]]; then
+        step_pass "notice_shown-only history does not satisfy the document; still gated"
+    else
+        step_fail "Non-affirmative event bypass: requires_action=$DPA_ACTION14 http=$BLOCKED14_CODE"
     fi
 fi
 
