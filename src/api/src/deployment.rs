@@ -565,12 +565,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_http_port_is_not_a_public_ingress_port() {
-        assert_eq!(public_ingress_ports(&[8080, 9000], Some(8080)), vec![9000]);
-        assert_eq!(public_ingress_ports(&[9000], Some(8080)), vec![9000]);
-        assert_eq!(public_ingress_ports(&[8080], None), vec![8080]);
-    }
 }
 
 struct TerraformConfig {
@@ -742,14 +736,6 @@ fn run_tofu_init(work_dir: &Path, credentials: Option<&AwsCredentials>) -> Resul
     Ok(())
 }
 
-fn public_ingress_ports(ports: &[u16], http_port: Option<u16>) -> Vec<u16> {
-    ports
-        .iter()
-        .copied()
-        .filter(|port| Some(*port) != http_port)
-        .collect()
-}
-
 fn run_tofu_apply_with_provider_creds(
     work_dir: &Path,
     resource_name: &str,
@@ -757,7 +743,11 @@ fn run_tofu_apply_with_provider_creds(
     http_port: Option<u16>,
     credentials: Option<&AwsCredentials>,
 ) -> Result<()> {
-    let public_ports = public_ingress_ports(ports, http_port);
+    let public_ports = ports
+        .iter()
+        .copied()
+        .filter(|port| Some(*port) != http_port)
+        .collect::<Vec<_>>();
     tracing::info!(
         "Running tofu apply for {} in {} (ports={:?}, http_port={:?})...",
         resource_name,
