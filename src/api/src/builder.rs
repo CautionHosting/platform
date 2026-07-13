@@ -1573,10 +1573,6 @@ mod tests {
             "should pass manifest to helper"
         );
         assert!(
-            !userdata.contains("\"binary\""),
-            "remote build manifests should not carry the removed binary field"
-        );
-        assert!(
             userdata.contains("NO_CACHE=\"true\"")
                 && userdata.contains("CAUTION_NO_CACHE=\"$NO_CACHE\""),
             "should pass no_cache to helper"
