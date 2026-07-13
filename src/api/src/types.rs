@@ -542,14 +542,11 @@ impl BuildConfig {
             ));
         }
 
-        // Default http_port to the single port if only one is specified
+        // Default http_port to the single public app port for legacy Procfiles,
+        // but do not require explicit http_port values to also be public ingress
+        // ports. Caddy only needs a host-local vsock proxy for the HTTP upstream.
         let http_port = match http_port {
-            Some(hp) => {
-                if !ports.contains(&hp) {
-                    return Err(format!("http_port {} must also be listed in ports", hp));
-                }
-                Some(hp)
-            }
+            Some(hp) => Some(hp),
             None if ports.len() == 1 => {
                 tracing::info!("Defaulting http_port to {} (only port specified)", ports[0]);
                 Some(ports[0])
@@ -678,6 +675,14 @@ mod tests {
         let procfile = "run: /app/server\nports: 8080\n";
         let config = BuildConfig::from_procfile(procfile).unwrap();
         assert_eq!(config.ports, vec![8080]);
+        assert_eq!(config.http_port, Some(8080));
+    }
+
+    #[test]
+    fn test_allows_http_port_without_public_ingress_port() {
+        let procfile = "run: /app/server\nhttp_port: 8080\n";
+        let config = BuildConfig::from_procfile(procfile).unwrap();
+        assert!(config.ports.is_empty());
         assert_eq!(config.http_port, Some(8080));
     }
 
