@@ -664,7 +664,7 @@ pub async fn invite_preview_handler(
         return Err(RegisterError::InvalidInvitation);
     }
 
-    let token_hash = db::hash_invitation_token(token);
+    let token_hash = db::hash_invitation_token(token).ok_or(RegisterError::InvalidInvitation)?;
     let invitation = db::get_valid_invitation(&state.db, &token_hash)
         .await
         .map_err(|e| RegisterError::Internal(e))?
@@ -686,7 +686,7 @@ pub async fn begin_invite_register_handler(
         return Err(RegisterError::InvalidInvitation);
     }
 
-    let token_hash = db::hash_invitation_token(token);
+    let token_hash = db::hash_invitation_token(token).ok_or(RegisterError::InvalidInvitation)?;
     let invitation = db::get_valid_invitation(&state.db, &token_hash)
         .await
         .map_err(|e| RegisterError::Internal(e))?

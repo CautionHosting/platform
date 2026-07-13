@@ -563,38 +563,7 @@ fn generate_organization_invite_email(data: &serde_json::Value) -> (String, Stri
     let subject = format!("Join {} on Caution.co", org_name_raw);
 
     let html_body = format!(
-        r#"
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Organization invite</title>
-</head>
-<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
-    <div style="background-color: #f4f4f4; padding: 20px; border-radius: 10px;">
-        <p>{inviter} invited you to join <strong>{org_name}</strong>.</p>
-
-        <div style="text-align: center; margin: 30px 0;">
-            <a href="{invite_url}"
-               style="background-color: #111; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold; border: 1px solid #fff;">
-                Accept invite
-            </a>
-        </div>
-
-        <p style="color: #7f8c8d; font-size: 14px;">
-            If the button doesn't work, copy and paste this link into your browser:<br>
-            <a href="{invite_url}" style="color: #3498db; word-break: break-all;">{invite_url}</a>
-        </p>
-
-        <p style="color: #7f8c8d; font-size: 14px; margin-top: 30px;">
-            This link expires at {expires_at} and can only be used once.
-        </p>
-    </div>
-
-{footer}
-</body>
-</html>
-        "#,
+        include_str!("../templates/organization_invite.html"),
         org_name = org_name,
         inviter = inviter,
         invite_url = invite_url,
@@ -603,11 +572,7 @@ fn generate_organization_invite_email(data: &serde_json::Value) -> (String, Stri
     );
 
     let text_body = format!(
-        "{inviter} invited you to join {org_name}.\n\n\
-         Accept invite: {invite_url}\n\n\
-         This link expires at {expires_at} and can only be used once.\n\n\
-         --\n\
-         Caution Team",
+        include_str!("../templates/organization_invite.txt"),
         org_name = org_name_raw,
         inviter = inviter_raw,
         invite_url = invite_url_raw,

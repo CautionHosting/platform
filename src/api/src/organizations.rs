@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
-    Json,
     extract::{Extension, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
+    Json,
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration, Utc};
-use rand::{RngCore, rngs::OsRng};
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgPool};
@@ -22,7 +22,7 @@ use crate::validated_types::{
     AddMemberRequest, CreateOrganizationRequest, InviteMemberRequest, UpdateMemberRequest,
     UpdateOrgSettingsRequest, UpdateOrganizationRequest,
 };
-use crate::{AppState, AuthContext, can_manage_org, check_org_access, is_owner};
+use crate::{can_manage_org, check_org_access, is_owner, AppState, AuthContext};
 
 const INVITATION_EXPIRY_HOURS: i64 = 72;
 const LEGACY_DEFAULT_ORG_PREFIX: &str = "Organization for user ";
@@ -76,7 +76,7 @@ pub struct OrgSettings {
 
 #[derive(Debug, thiserror::Error)]
 pub enum InvitationError {
-    #[error("not found")]
+    #[error("organization invitation not found")]
     NotFound,
     #[error("you do not have permission to manage this organization")]
     Forbidden,
@@ -116,14 +116,14 @@ impl IntoResponse for InvitationError {
     }
 }
 
-fn hash_invitation_token(token: &str) -> String {
-    hex::encode(Sha256::digest(token.as_bytes()))
-}
-
-fn generate_invitation_token() -> String {
+fn generate_invitation_token() -> (String, String) {
     let mut token_bytes = [0u8; 32];
     OsRng.fill_bytes(&mut token_bytes);
-    URL_SAFE_NO_PAD.encode(token_bytes)
+
+    let token = URL_SAFE_NO_PAD.encode(token_bytes);
+    let token_hash = hex::encode(Sha256::digest(token_bytes));
+
+    (token, token_hash)
 }
 
 fn public_organization_name(name: &str) -> String {
@@ -519,8 +519,7 @@ pub async fn invite_member(
         })?
         .flatten();
 
-    let token = generate_invitation_token();
-    let token_hash = hash_invitation_token(&token);
+    let (token, token_hash) = generate_invitation_token();
     let expires_at = Utc::now() + Duration::hours(INVITATION_EXPIRY_HOURS);
 
     let invitation = sqlx::query_as::<_, OrganizationInvitation>(

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use anyhow::{Context, Result};
-use base64::Engine;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -177,8 +177,9 @@ async fn insert_user_with_legal_events(
     Ok(user_id)
 }
 
-pub fn hash_invitation_token(token: &str) -> String {
-    hex::encode(Sha256::digest(token.as_bytes()))
+pub fn hash_invitation_token(token: &str) -> Option<String> {
+    let token_bytes = URL_SAFE_NO_PAD.decode(token).ok()?;
+    Some(hex::encode(Sha256::digest(token_bytes)))
 }
 
 pub async fn get_valid_invitation(
@@ -1065,7 +1066,7 @@ pub async fn user_requires_pin(pool: &PgPool, user_id: Uuid) -> Result<bool, sql
 
 #[cfg(test)]
 mod tests {
-    use super::generate_ssh_fingerprint;
+    use super::{generate_ssh_fingerprint, hash_invitation_token};
 
     // Golden vector cross-checked with `ssh-keygen -lf`:
     //   ssh-keygen -t ed25519 ...  ->  SHA256:vO7cKxkbEOoI4Qix7nsJMasdWsJHDFVfgXsKQrA0DhM
@@ -1101,5 +1102,21 @@ mod tests {
     #[test]
     fn fingerprint_rejects_invalid_base64() {
         assert!(generate_ssh_fingerprint("ssh-ed25519 not_base64!!!").is_err());
+    }
+
+    #[test]
+    fn invitation_token_hashes_decoded_token_bytes() {
+        // URL-safe base64 without padding for bytes [0, 1, 2, 3]. The invitation
+        // table stores a hash of the decoded random token bytes, not a hash of
+        // the transport encoding shown in the emailed URL.
+        assert_eq!(
+            hash_invitation_token("AAECAw").unwrap(),
+            "054edec1d0211f624fed0cbca9d4f9400b0e491c43742af2c5b0abebf0c990d8"
+        );
+    }
+
+    #[test]
+    fn invitation_token_hash_rejects_invalid_base64() {
+        assert!(hash_invitation_token("not base64!!!").is_none());
     }
 }
