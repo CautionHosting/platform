@@ -275,7 +275,11 @@ fn build_network_block(network: &caution_config::NetworkConfig) -> Option<hcl::B
 
     if let Some(ref http) = network.http {
         let mut http_builder = hcl::Block::builder("http");
-        http_builder = http_builder.add_attribute(("domain", http.domain.as_str()));
+
+        if let Some(ref domain) = http.domain {
+            http_builder = http_builder.add_attribute(("domain", domain.as_str()));
+        }
+
         http_builder = http_builder.add_attribute(("port", http.port));
 
         if let Some(ref e2e) = http.e2e_encryption {

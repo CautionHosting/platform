@@ -14,11 +14,27 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use uuid::Uuid;
+
+static BILLING_URL: LazyLock<String> = LazyLock::new(|| {
+    let caution_domain = std::env::var("CAUTION_DOMAIN").unwrap_or_else(|_| "caution.dev".to_string());
+    billing_url_for_domain(&caution_domain)
+});
+
+fn billing_url_for_domain(caution_domain: &str) -> String {
+    let caution_domain = caution_domain.trim().trim_end_matches('/');
+    let caution_domain = if caution_domain.is_empty() {
+        "caution.dev"
+    } else {
+        caution_domain
+    };
+
+    format!("https://{caution_domain}/#billing")
+}
 
 mod billing;
 mod builder;
@@ -1556,6 +1572,7 @@ async fn resolve_containerfile_for_deploy(
 
 #[cfg(test)]
 mod build_inputs_tests {
+    use crate::PLATFORM_REPO;
     use super::build_inputs;
     use axum::body::to_bytes;
     use axum::response::IntoResponse;
@@ -1807,6 +1824,27 @@ mod deploy_commit_tests {
     }
 }
 
+#[cfg(test)]
+mod billing_url_tests {
+    use super::billing_url_for_domain;
+
+    #[test]
+    fn billing_url_points_to_dashboard_billing_hash() {
+        assert_eq!(
+            billing_url_for_domain("caution.dev"),
+            "https://caution.dev/#billing"
+        );
+    }
+
+    #[test]
+    fn billing_url_uses_configured_caution_domain() {
+        assert_eq!(
+            billing_url_for_domain("staging.caution.example/"),
+            "https://staging.caution.example/#billing"
+        );
+    }
+}
+
 async fn deploy_logic(
     state: Arc<AppState>,
     auth: AuthContext,
@@ -2040,8 +2078,9 @@ async fn deploy_logic(
                 StatusCode::PAYMENT_REQUIRED,
                 format!(
                     "Minimum $25.00 in credits required to deploy (current balance: ${:.2}). \
-                         Purchase credits at https://caution.dev/settings/billing",
-                    balance as f64 / 100.0
+                         Purchase credits at {}",
+                    balance as f64 / 100.0,
+                    BILLING_URL.as_str()
                 ),
             ));
         }
@@ -2063,9 +2102,11 @@ async fn deploy_logic(
         if credit_suspended.is_some() {
             return Err((
                 StatusCode::PAYMENT_REQUIRED,
-                "Your organization is suspended due to credit exhaustion. \
-                 Add credits at https://caution.dev/settings/billing to resume."
-                    .to_string(),
+                format!(
+                    "Your organization is suspended due to credit exhaustion. \
+                     Add credits at {} to resume.",
+                    BILLING_URL.as_str()
+                ),
             ));
         }
 
@@ -2107,13 +2148,21 @@ async fn deploy_logic(
     // Atomically transition to Pending — rejects concurrent deploys via the check above
     if was_destroyed {
         tracing::info!("Reactivating previously destroyed resource {}", resource_id);
-        sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1 WHERE id = $2 AND organization_id = $3")
+        let updated = sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1 WHERE id = $2 AND organization_id = $3 AND state != $1")
             .bind(types::ResourceState::Pending)
             .bind(resource_id)
             .bind(req.org_id)
             .execute(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to reactivate resource: {}", e)))?;
+
+        if updated.rows_affected() == 0 {
+            return Err((
+                StatusCode::CONFLICT,
+                "A deployment is already in progress for this app. Please wait for it to complete."
+                    .to_string(),
+            ));
+        }
     } else {
         // Mark as Pending so concurrent pushes are rejected
         let updated = sqlx::query(
@@ -2212,7 +2261,7 @@ async fn deploy_logic(
         .map(|h| h.port);
     let domain = ec_network
         .and_then(|n| n.http.as_ref())
-        .map(|h| h.domain.clone());
+        .and_then(|h| h.domain.clone());
     let e2e_config = ec_network
         .and_then(|n| n.http.as_ref())
         .and_then(|h| h.e2e_encryption.as_ref());
@@ -3077,8 +3126,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/billing/credits/purchase", post(billing::purchase_credits))
         .route("/billing/credits/ledger", get(billing::get_credit_ledger))
         .route("/billing/credits/redeem", post(billing::redeem_credit_code))
-        .route("/billing/auto-topup", get(billing::get_auto_topup))
-        .route("/billing/auto-topup", put(billing::put_auto_topup))
         .route(
             "/billing/subscription/tiers",
             get(subscriptions::get_subscription_tiers),

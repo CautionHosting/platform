@@ -342,7 +342,10 @@ async fn handle_transaction_completed(
             Some(intent_user_id),
             credit_cents,
             "purchase",
-            &format!("Prepaid credit purchase: ${:.2}", credit_cents as f64 / 100.0),
+            &format!(
+                "Prepaid credit purchase: ${:.2}",
+                credit_cents as f64 / 100.0
+            ),
             transaction_id,
         )
         .await?
@@ -365,71 +368,6 @@ async fn handle_transaction_completed(
             }
         }
         return Ok(());
-    }
-
-    // Check if this was an auto top-up transaction — deposit credits and unsuspend if needed
-    let line_items = payload.data["details"]["line_items"].as_array();
-    let is_auto_topup = line_items
-        .map(|items| {
-            items.iter().any(|item| {
-                item["description"]
-                    .as_str()
-                    .map(|d| d.starts_with("Auto top-up"))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false);
-
-    if is_auto_topup {
-        let total_cents = payload.data["details"]["totals"]["total"]
-            .as_str()
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(0);
-
-        if total_cents <= 0 {
-            tracing::error!(
-                "Auto top-up transaction {} has invalid total_cents: {}",
-                transaction_id,
-                total_cents
-            );
-            anyhow::bail!("Auto top-up transaction has non-positive amount");
-        }
-
-        tracing::info!(
-            "Auto top-up completed: depositing {} cents for org {}",
-            total_cents,
-            org_id
-        );
-
-        // Record the deposited credits in the source-of-truth ledger. The same
-        // UNIQUE(paddle_transaction_id) gate makes a redelivery a no-op.
-        match credit_ledger_once(
-            &state.pool,
-            org_id,
-            None,
-            total_cents,
-            "auto_topup",
-            &format!("Auto top-up: ${:.2}", total_cents as f64 / 100.0),
-            transaction_id,
-        )
-        .await?
-        {
-            CreditOutcome::AlreadyCredited => {
-                tracing::info!(
-                    "Auto top-up transaction {} already credited, skipping",
-                    transaction_id
-                );
-            }
-            CreditOutcome::Credited { new_balance } => {
-                tracing::info!(
-                    "Auto top-up credited: org={}, +{}c, new_balance={}",
-                    org_id,
-                    total_cents,
-                    new_balance
-                );
-                clear_credit_suspension_if_needed(state, org_id, new_balance).await?;
-            }
-        }
     }
 
     Ok(())

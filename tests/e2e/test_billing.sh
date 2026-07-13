@@ -28,18 +28,18 @@
 #  20. Real-time credit deduction
 #  21. Credit exhaustion and suspension
 #  22. Unsuspend on credit deposit
-#  23. Auto top-up configuration (DB)
-#  24. Low balance warning
-#  25. Auto top-up API endpoint round-trip
-#  26. Webhook idempotency (duplicate detection)
-#  27. Deploy gate blocks credit-suspended orgs
-#  28. Credit code redemption
-#  29. Duplicate code redemption rejected
-#  30. Invalid code rejected
-#  34. Credit purchase webhook uses server-authoritative intent amount
-#  35. Credit purchase webhook refuses to mint without an intent row
-#  36. Credit purchase webhook is idempotent on duplicate delivery
-#  37. credit_ledger UNIQUE(paddle_transaction_id) one-grant invariant
+#  23. Low balance warning
+#  24. Webhook idempotency (duplicate detection)
+#  25. Deploy gate blocks credit-suspended orgs
+#  26. Credit code redemption
+#  27. Duplicate code redemption rejected
+#  28. Invalid code rejected
+#  29. Resource limit enforcement
+#  30. Webhook duplicate delivery idempotency
+#  31. Credit purchase webhook uses server-authoritative intent amount
+#  32. Credit purchase webhook refuses to mint without an intent row
+#  33. Credit purchase webhook is idempotent on duplicate delivery
+#  34. credit_ledger UNIQUE(paddle_transaction_id) one-grant invariant
 
 set -euo pipefail
 
@@ -983,50 +983,15 @@ else
     step_fail "Unsuspend on deposit: credit_suspended_at still set"
 fi
 
-# ── Step 23: Auto top-up configuration ────────────────────────────────
+# ── Step 23: Low balance warning ──────────────────────────────────────
 
 STEP_NUM=23
-log "Testing auto top-up configuration..."
-
-# Set auto-topup config directly in DB (testing the storage, not the API endpoint)
-docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE billing_config SET
-    auto_topup_enabled = true,
-    auto_topup_amount_dollars = 50
-WHERE organization_id = '$ORG_ID';
-" >/dev/null 2>&1
-
-TOPUP_ENABLED=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT auto_topup_enabled FROM billing_config WHERE organization_id = '$ORG_ID';
-" 2>/dev/null | tr -d ' \n')
-
-TOPUP_AMOUNT=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT auto_topup_amount_dollars FROM billing_config WHERE organization_id = '$ORG_ID';
-" 2>/dev/null | tr -d ' \n')
-
-log "  auto_topup_enabled: $TOPUP_ENABLED"
-log "  auto_topup_amount_dollars: $TOPUP_AMOUNT"
-
-if [ "$TOPUP_ENABLED" = "t" ] && [ "$TOPUP_AMOUNT" = "50" ]; then
-    step_pass "Auto top-up config: enabled=true, target=\$50"
-else
-    step_fail "Auto top-up config (enabled=$TOPUP_ENABLED, amount=$TOPUP_AMOUNT)"
-fi
-
-# Reset auto-topup for clean state
-docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE billing_config SET auto_topup_enabled = false WHERE organization_id = '$ORG_ID';
-" >/dev/null 2>&1
-
-# ── Step 24: Low balance warning ──────────────────────────────────────
-
-STEP_NUM=24
 log "Testing low balance warning..."
 
-# Set balance below the $25 deploy threshold and no auto-topup
+# Set balance below the $25 deploy threshold.
 reset_effective_balance 2000 "low balance seed"
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE billing_config SET auto_topup_enabled = false, low_balance_warned_at = NULL WHERE organization_id = '$ORG_ID';
+UPDATE billing_config SET low_balance_warned_at = NULL WHERE organization_id = '$ORG_ID';
 " >/dev/null 2>&1
 
 INSUFFICIENT_BEFORE=$(curl -sf "$EMAIL_EXTERNAL_URL/sent?template=insufficient_balance" 2>/dev/null | jq ".count // 0" || echo 0)
@@ -1076,49 +1041,9 @@ curl -sf "${METERING_AUTH[@]}" -X POST "$METERING_EXTERNAL_URL/api/resources/$LB
 # Reset balance for remaining tests
 reset_effective_balance 5000 "post warning reset"
 
-# ── Step 25: Auto top-up API endpoint ─────────────────────────────────
+# ── Step 24: Webhook idempotency (DB constraint) ──────────────────────
 
-STEP_NUM=25
-log "Testing auto top-up API endpoint..."
-
-# Seed a dummy payment method (required for enabling auto-topup)
-docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO payment_methods (organization_id, payment_type, provider_token, is_active)
-VALUES ('$ORG_ID', 'card', 'test_token_dummy', true)
-ON CONFLICT DO NOTHING;
-" >/dev/null 2>&1 || true
-
-# PUT auto-topup config via API
-TOPUP_PUT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$GATEWAY_URL/api/billing/auto-topup" \
-    -H "X-Session-ID: $SESSION_ID" \
-    -H "Content-Type: application/json" \
-    -d '{"enabled": true, "amount_dollars": 100}' 2>/dev/null || echo "000")
-
-log "  PUT /api/billing/auto-topup status: $TOPUP_PUT_STATUS"
-
-# GET auto-topup config via API
-TOPUP_GET=$(curl -sf "$GATEWAY_URL/api/billing/auto-topup" \
-    -H "X-Session-ID: $SESSION_ID" 2>/dev/null || echo "{}")
-
-log "  GET /billing/auto-topup: $TOPUP_GET"
-
-TOPUP_GET_ENABLED=$(echo "$TOPUP_GET" | jq -r '.enabled // false')
-TOPUP_GET_AMOUNT=$(echo "$TOPUP_GET" | jq -r '.amount_dollars // 0')
-
-if [ "$TOPUP_PUT_STATUS" = "200" ] && [ "$TOPUP_GET_ENABLED" = "true" ] && [ "$TOPUP_GET_AMOUNT" = "100" ]; then
-    step_pass "Auto top-up API: PUT/GET round-trip OK (enabled=true, amount=\$100)"
-else
-    step_fail "Auto top-up API: PUT=$TOPUP_PUT_STATUS, GET enabled=$TOPUP_GET_ENABLED amount=$TOPUP_GET_AMOUNT"
-fi
-
-# Clean up
-docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-UPDATE billing_config SET auto_topup_enabled = false WHERE organization_id = '$ORG_ID';
-" >/dev/null 2>&1
-
-# ── Step 26: Webhook idempotency (DB constraint) ──────────────────────
-
-STEP_NUM=26
+STEP_NUM=24
 log "Testing webhook idempotency via UNIQUE constraint..."
 
 # Pick an existing event_id from the events recorded in steps 7-10
@@ -1142,9 +1067,9 @@ else
     step_fail "Webhook idempotency: unexpected result: $DUPE_RESULT"
 fi
 
-# ── Step 27: Verify credit suspension flag persists ───────────────────
+# ── Step 25: Verify credit suspension flag persists ───────────────────
 
-STEP_NUM=27
+STEP_NUM=25
 log "Testing credit_suspended_at flag round-trip..."
 
 # Set org as credit-suspended
@@ -1172,9 +1097,9 @@ else
     step_fail "Credit suspension flag (suspended=$IS_SUSPENDED, unsuspended=$IS_UNSUSPENDED)"
 fi
 
-# ── Step 28: Redeem credit code ─────────────────────────────────────
+# ── Step 26: Redeem credit code ─────────────────────────────────────
 
-STEP_NUM=28
+STEP_NUM=26
 log "Testing credit code redemption..."
 
 # Generate a credit code worth $10 directly in DB
@@ -1204,9 +1129,9 @@ else
     step_fail "Credit code redemption (success=$REDEEM_SUCCESS, amount=$REDEEM_AMOUNT)"
 fi
 
-# ── Step 29: Redeem same code again fails ──────────────────────────────
+# ── Step 27: Redeem same code again fails ──────────────────────────────
 
-STEP_NUM=29
+STEP_NUM=27
 log "Testing duplicate credit code redemption fails..."
 
 DUPE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$GATEWAY_URL/api/billing/credits/redeem" \
@@ -1222,9 +1147,9 @@ else
     step_fail "Duplicate code redemption got HTTP $DUPE_STATUS (expected 404)"
 fi
 
-# ── Step 30: Invalid credit code fails ─────────────────────────────────
+# ── Step 28: Invalid credit code fails ─────────────────────────────────
 
-STEP_NUM=30
+STEP_NUM=28
 log "Testing invalid credit code fails..."
 
 INVALID_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$GATEWAY_URL/api/billing/credits/redeem" \
@@ -1240,9 +1165,9 @@ else
     step_fail "Invalid code got HTTP $INVALID_STATUS (expected 404)"
 fi
 
-# ── Step 31: Resource limit enforcement ──────────────────────────────
+# ── Step 29: Resource limit enforcement ──────────────────────────────
 
-STEP_NUM=31
+STEP_NUM=29
 log "Testing per-org resource limit enforcement..."
 
 # Ensure balance is high enough to pass billing gate
@@ -1299,9 +1224,9 @@ DELETE FROM compute_resources WHERE resource_name LIKE 'limit-test-%' AND organi
 DELETE FROM provider_accounts WHERE account_name = 'Limit Test' AND organization_id = '$ORG_ID';
 " >/dev/null 2>&1
 
-# ── Step 32: Webhook idempotency — duplicate delivery ────────────────
+# ── Step 30: Webhook idempotency — duplicate delivery ────────────────
 
-STEP_NUM=32
+STEP_NUM=30
 log "Testing webhook idempotency with duplicate event_id..."
 
 DUPE_EVENT_ID="evt_test_dupe_$(date +%s)"
@@ -1354,44 +1279,9 @@ else
     step_fail "Webhook idempotency: expected 1 row for event_id, got $EVENTS_AFTER"
 fi
 
-# ── Step 33: Auto top-up rejects zero amount ─────────────────────────
+# ── Step 31: Credit purchase webhook uses server-authoritative amount ─
 
-STEP_NUM=33
-log "Testing auto top-up rejects zero/negative amount..."
-
-# Set up billing config with auto-topup enabled
-docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO billing_config (organization_id, auto_topup_enabled, auto_topup_amount_dollars, paddle_customer_id)
-VALUES ('$ORG_ID', true, 50, 'ctm_test_$USER_ID')
-ON CONFLICT (organization_id) DO UPDATE SET auto_topup_enabled = true, auto_topup_amount_dollars = 50;
-" >/dev/null 2>&1
-
-# Record balance before
-BALANCE_BEFORE=$(get_effective_balance)
-
-# Simulate a completed auto top-up with zero amount
-ZERO_TOPUP=$(curl -sf -X POST "$METERING_EXTERNAL_URL/test/simulate-paddle-transaction" \
-    -H "Content-Type: application/json" \
-    -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
-    -d "{
-        \"user_id\": \"$USER_ID\",
-        \"organization_id\": \"$ORG_ID\",
-        \"amount_cents\": 0,
-        \"event_type\": \"transaction.completed\"
-    }" 2>/dev/null || echo '{"error":"rejected"}')
-
-# Balance should not have changed
-BALANCE_AFTER=$(get_effective_balance)
-
-if [ "$BALANCE_BEFORE" = "$BALANCE_AFTER" ]; then
-    step_pass "Auto top-up: zero amount correctly rejected (balance unchanged)"
-else
-    step_fail "Auto top-up: zero amount was deposited (balance changed from $BALANCE_BEFORE to $BALANCE_AFTER)"
-fi
-
-# ── Step 34: Credit purchase webhook uses server-authoritative amount ─
-
-STEP_NUM=34
+STEP_NUM=31
 log "Testing credit purchase webhook credits the intent row, not custom_data..."
 
 # Clean slate, then record a server-authoritative intent: $25.00 of credit.
@@ -1436,9 +1326,9 @@ else
     step_fail "Credit purchase webhook: credited ${INTENT_DELTA}c, expected 2500 (intent amount)"
 fi
 
-# ── Step 35: Credit purchase webhook refuses without an intent row ────
+# ── Step 32: Credit purchase webhook refuses without an intent row ────
 
-STEP_NUM=35
+STEP_NUM=32
 log "Testing credit purchase webhook refuses to mint without an intent row..."
 
 reset_effective_balance 0 "no-intent test reset"
@@ -1475,9 +1365,9 @@ else
     step_fail "Credit purchase webhook: minted without intent (rows=$NO_INTENT_ROWS, balance=${NO_INTENT_BALANCE}c)"
 fi
 
-# ── Step 36: Credit purchase webhook is idempotent on redelivery ─────
+# ── Step 33: Credit purchase webhook is idempotent on redelivery ─────
 
-STEP_NUM=36
+STEP_NUM=33
 log "Testing credit purchase webhook idempotency on duplicate delivery..."
 
 reset_effective_balance 0 "idempotency test reset"
@@ -1516,14 +1406,14 @@ else
     step_fail "Credit purchase webhook: double-credit (rows=$IDEM_ROWS, balance=${IDEM_BALANCE}c)"
 fi
 
-# ── Step 37: credit_ledger UNIQUE(paddle_transaction_id) is enforced ──
+# ── Step 34: credit_ledger UNIQUE(paddle_transaction_id) is enforced ──
 
-STEP_NUM=37
+STEP_NUM=34
 log "Testing credit_ledger one-payment-one-grant invariant (migration 044)..."
 
-# This unique constraint is the durable backstop behind both the prepaid and
-# auto-topup ON CONFLICT idempotency. Verify a plain duplicate is rejected and an
-# ON CONFLICT duplicate is a no-op.
+# This unique constraint is the durable backstop behind prepaid credit purchase
+# idempotency. Verify a plain duplicate is rejected and an ON CONFLICT duplicate
+# is a no-op.
 CONSTRAINT_TXN="txn_constraint_$(date +%s)_$RANDOM"
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
 INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description, paddle_transaction_id)

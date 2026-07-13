@@ -7,7 +7,7 @@ use chrono::{DateTime, Datelike, Utc};
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
-use sqlx::{Executor, PgPool, Postgres, Row};
+use sqlx::{Executor, PgPool, Postgres};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -2528,110 +2528,6 @@ pub async fn apply_credit(
     Ok(new_balance)
 }
 
-// -- Auto top-up API endpoints --
-
-#[derive(Deserialize)]
-pub struct AutoTopupConfig {
-    enabled: bool,
-    amount_dollars: i32,
-}
-
-pub async fn get_auto_topup(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
-        .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
-
-    let row = sqlx::query(
-        "SELECT auto_topup_enabled, auto_topup_amount_dollars FROM billing_config WHERE organization_id = $1"
-    )
-    .bind(org_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-
-    let (enabled, amount) = match row {
-        Some(r) => (
-            r.get::<Option<bool>, _>("auto_topup_enabled")
-                .unwrap_or(false),
-            r.get::<Option<i32>, _>("auto_topup_amount_dollars")
-                .unwrap_or(0),
-        ),
-        None => (false, 0),
-    };
-
-    Ok(Json(serde_json::json!({
-        "enabled": enabled,
-        "amount_dollars": amount,
-    })))
-}
-
-pub async fn put_auto_topup(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
-    Json(req): Json<AutoTopupConfig>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if req.amount_dollars < 0 || req.amount_dollars > 10_000 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Auto top-up amount must be between $0 and $10,000".to_string(),
-        ));
-    }
-    if req.enabled && req.amount_dollars < 10 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Auto top-up target must be at least $10".to_string(),
-        ));
-    }
-
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
-        .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
-
-    // Verify user has an active payment method (required for auto-topup)
-    if req.enabled {
-        let payment_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM payment_methods WHERE organization_id = $1 AND is_active = true",
-        )
-        .bind(org_id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
-
-        if payment_count == 0 {
-            return Err((
-                StatusCode::PAYMENT_REQUIRED,
-                "An active payment method is required to enable auto top-up".to_string(),
-            ));
-        }
-    }
-
-    sqlx::query(
-        "INSERT INTO billing_config (organization_id, auto_topup_enabled, auto_topup_amount_dollars)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (organization_id) DO UPDATE SET
-             auto_topup_enabled = $2,
-             auto_topup_amount_dollars = $3"
-    )
-    .bind(org_id)
-    .bind(req.enabled)
-    .bind(req.amount_dollars)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
-
-    Ok(Json(serde_json::json!({
-        "enabled": req.enabled,
-        "amount_dollars": req.amount_dollars,
-    })))
-}
 
 #[cfg(test)]
 mod tests {

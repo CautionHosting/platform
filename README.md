@@ -24,6 +24,7 @@ An enclave is **verifiable** when you can independently confirm that the code ru
 
 - Docker with <a href="https://docs.docker.com/engine/storage/containerd/#enable-containerd-image-store-on-docker-engine" target="_blank">containerd</a> enabled
 - GNU Make
+- Bash
 - x86_64 based system (Mac support coming soon)
 
 ### 1. Bootstrap AWS infrastructure
@@ -39,13 +40,22 @@ cp env.example $HOME/.config/caution/.env
 # Edit .env with your AWS credentials and bucket names from bootstrapping
 ```
 
-Install the CLI:
+Install the CLI. The default target builds the release-style StageX CLI in
+Docker and installs it to `$HOME/.local/bin/caution`:
 
 ```bash
 make install-cli
 ```
 
-See [src/cli/README.md](src/cli/README.md) for additional installation options including signature verification and reproducible builds.
+If you need local PC/SC support for locksmith shard submission, use the
+host-toolchain build instead:
+
+```bash
+make install-cli-untrusted
+```
+
+See [src/cli/README.md](src/cli/README.md) for additional installation options,
+signature verification, and reproducible builds.
 
 Start the platform services:
 
@@ -73,10 +83,12 @@ make up
    caution init
    ```
 
-   You may need to adjust the Procfile. Caution remote builds run Docker from
-   the repository root; your app should build with `docker build -f <file> .`.
-   Put setup, compilation, and asset build steps in the Dockerfile or
-   Containerfile.
+   This writes a `caution.hcl` template when one does not already exist and
+   configures the `caution` git remote. Caution remote builds run Docker from
+   the repository root, using `build.containerfile` when configured, then a
+   repo-root `Containerfile`, then a repo-root `Dockerfile`. Put setup,
+   compilation, asset builds, and runtime packaging in that Containerfile or
+   Dockerfile so the build inputs are explicit and reproducible.
 
    The <a href="https://codeberg.org/Caution/hello-world-enclave" target="_blank">hello-world-enclave</a> repo is a good test app to deploy.
 

@@ -1642,7 +1642,14 @@ impl ApiClient {
 
         Ok(Self {
             base_url: base_url.to_string(),
-            client: reqwest::Client::new(),
+            // A connect timeout bounds the TCP+TLS handshake for every request so
+            // an unresponsive host (e.g. an enclave IP that accepts the connection
+            // but never replies) can't hang the CLI forever. It does not cap body
+            // transfer, so large downloads are unaffected.
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             config_path,
             deployment_path,
             verbose,
@@ -1785,6 +1792,17 @@ impl ApiClient {
                 self.load_config()
             }
         }
+    }
+
+    fn require_existing_authenticated_config(&self) -> Result<Config> {
+        let config = self.load_config()?;
+        if self.is_session_expired(&config) {
+            bail!("Session expired. Run 'login' command first");
+        }
+        if !self.is_same_server(&config) {
+            bail!("Session is for a different server. Run 'login' command first");
+        }
+        Ok(config)
     }
 
     fn is_same_server(&self, config: &Config) -> bool {
@@ -2346,13 +2364,21 @@ enclave "default" {{
     }
 
     fn create_config_file_if_needed(&self, byoc: bool) -> Result<()> {
-        use std::fs;
         use std::path::Path;
 
-        let config_path = Path::new("caution.hcl");
+        self.create_config_file_in_dir_if_needed(Path::new("."), byoc)
+    }
+
+    fn create_config_file_in_dir_if_needed(&self, dir: &Path, byoc: bool) -> Result<()> {
+        use std::fs;
+
+        let config_path = dir.join("caution.hcl");
 
         if config_path.exists() {
-            log_verbose(self.verbose, "caution.hcl already exists, skipping creation");
+            log_verbose(
+                self.verbose,
+                "caution.hcl already exists, skipping creation",
+            );
             return Ok(());
         }
 
@@ -2362,7 +2388,7 @@ enclave "default" {{
 
         let hcl_content = Self::generate_config_hcl(&source_url, byoc);
 
-        fs::write(config_path, hcl_content).context("Failed to create caution.hcl")?;
+        fs::write(&config_path, hcl_content).context("Failed to create caution.hcl")?;
 
         println!("\nCreated caution.hcl in current directory");
         println!("Edit the unit \"default\" command to match your application");
@@ -2433,6 +2459,14 @@ enclave "default" {{
             && (git_url.ends_with(".tar.gz") || git_url.ends_with(".tar"))
         {
             return Ok(vec![git_url.to_string()]);
+        }
+
+        // An explicit ssh:// URL signals the caller expects an authenticated
+        // clone. Guessing at anonymous HTTP(S) archive endpoints for it just
+        // wastes round trips on hosts that require auth, so skip straight to
+        // the git-clone fallback instead.
+        if git_url.starts_with("ssh://") {
+            return Ok(vec![]);
         }
 
         let (host, path) = if git_url.starts_with("git@") {
@@ -4151,6 +4185,8 @@ enclave "default" {{
     async fn init_byoc(&self, config_path: &PathBuf) -> Result<()> {
         println!("Initializing bring-your-own-compute deployment...");
 
+        let auth_config = self.require_existing_authenticated_config()?;
+
         log_verbose(
             self.verbose,
             &format!("Reading config from {:?}", config_path),
@@ -4238,8 +4274,6 @@ enclave "default" {{
             log_verbose(self.verbose, "Config file validated");
             serde_json::to_string(&config_json)?
         };
-
-        let auth_config = self.ensure_authenticated().await?;
 
         self.create_config_file_if_needed(true)?;
 
@@ -4701,8 +4735,9 @@ enclave "default" {{
             serde_json::to_string_pretty(&byoc_state)?,
         )?;
 
-        // Also save deployment.json in current directory
+        // Also save deployment.json and caution.hcl in current directory
         self.save_deployment(resource_id)?;
+        self.create_config_file_if_needed(true)?;
 
         // Set up git remote
         if !git_url.is_empty() {
@@ -5247,6 +5282,18 @@ enclave "default" {{
             return Ok(cached.pcrs);
         }
 
+        // Preflight the enclave/framework source archives before the expensive
+        // build. They are deterministic URLs derived from the manifest; a 404'd
+        // commit otherwise only surfaces after the Docker image build and
+        // user-filesystem extraction (minutes in). Only meaningful when
+        // reproducing from a manifest.
+        if external_manifest.is_some() {
+            self.preflight_archive_url("Enclave source", &enclave_source)
+                .await?;
+            self.preflight_archive_url("Framework source", &framework_source)
+                .await?;
+        }
+
         log_verbose(self.verbose, "Building Docker image locally...");
 
         let mut loader = Loader::new("Reproducing enclave image", LoaderStyle::Processing);
@@ -5278,6 +5325,15 @@ enclave "default" {{
                     app_source.branch.clone(),
                 )
             });
+
+            // Cheap network preflight before the expensive reproduce. A missing
+            // branch/commit otherwise surfaces only after minutes of archive
+            // downloads and clone/fetch fallbacks (each bounded by a 5-minute
+            // low-speed timeout); `git ls-remote` transfers no objects and fails
+            // in seconds.
+            if let Some((ref url, ref commit, ref branch)) = git_fallback {
+                self.preflight_app_source_ref(url, commit, branch.as_deref())?;
+            }
 
             let app_dir = self
                 .download_and_extract_app_source_with_git_fallback(
@@ -5641,13 +5697,17 @@ enclave "default" {{
         );
         println!("Requesting attestation...");
 
+        // Bound the challenge/response: a reachable-but-unresponsive enclave must
+        // not hang verify indefinitely. The connect phase is already bounded by
+        // the client's connect_timeout; this caps the whole request.
         let response = self
             .client
             .post(&attestation_url)
+            .timeout(Duration::from_secs(60))
             .json(&serde_json::json!({"nonce": general_purpose::STANDARD.encode(&nonce)}))
             .send()
             .await
-            .context("Failed to fetch attestation document")?;
+            .context("Failed to fetch attestation document (timed out or unreachable)")?;
 
         if !response.status().is_success() {
             bail!("Failed to fetch attestation: {}", response.status());
@@ -6357,8 +6417,215 @@ enclave "default" {{
         // output, so git gets empty credentials and fails fast.
         .env("GIT_ASKPASS", "true")
         // Detach stdin so git can't wait on the parent's TTY either.
-        .stdin(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null())
+        // Prevent SSH from prompting for host-key confirmation or credentials
+        // via /dev/tty, which hangs non-interactive callers. BatchMode=yes
+        // makes SSH fail immediately instead. accept-new accepts unknown hosts
+        // on first contact (no TOFU hang in fresh CI) while still rejecting
+        // changed keys (MITM protection). Preserve any caller-set
+        // GIT_SSH_COMMAND (e.g. a custom -i key) by appending rather than
+        // replacing.
+        .env(
+            "GIT_SSH_COMMAND",
+            format!(
+                "{} -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+                std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| "ssh".to_string())
+            ),
+        );
         cmd
+    }
+
+    /// Cheap reachability check for an enclave/framework source archive. A `HEAD`
+    /// transfers no body, so a commit the remote no longer serves (404/410) fails
+    /// in seconds instead of after the Docker image build and user-filesystem
+    /// extraction. Only a definitive "not found" blocks; any other status, an
+    /// unsupported HEAD (405), or a transport error is treated as inconclusive and
+    /// left for the real download to resolve. Non-HTTP sources (git URLs, local
+    /// paths) are skipped.
+    async fn preflight_archive_url(&self, label: &str, url: &str) -> Result<()> {
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Ok(());
+        }
+
+        println!("\nChecking {} is reachable on remote...", label.to_lowercase());
+        let response = match self
+            .client
+            .head(url)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                log_verbose(
+                    self.verbose,
+                    &format!("{} preflight inconclusive ({})", label, e),
+                );
+                return Ok(());
+            }
+        };
+
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
+            bail!(
+                "{label} archive is not available on the remote (HTTP {code}):\n  \
+                 {url}\n\n\
+                 The deployed enclave references a {lower} commit that the remote no \
+                 longer serves — it may have been garbage-collected, or the manifest \
+                 is stale. This build cannot be reproduced from the remote manifest.",
+                label = label,
+                lower = label.to_lowercase(),
+                code = status.as_u16(),
+                url = url,
+            );
+        }
+
+        log_verbose(
+            self.verbose,
+            &format!("{} reachable (HTTP {})", label, status.as_u16()),
+        );
+        println!("  {} reachable ✓", label);
+        Ok(())
+    }
+
+    /// Cheap network preflight: confirm the app source branch is present on the
+    /// remote before kicking off an expensive reproduce build.
+    ///
+    /// `git ls-remote` lists refs without transferring any objects, so a branch
+    /// that was never pushed (or was renamed/deleted) fails here in seconds
+    /// instead of after minutes of archive downloads and clone/fetch fallbacks.
+    ///
+    /// Scope and limits (intentionally conservative — never blocks a valid build):
+    /// - We run `ls-remote` with credentials disabled, so a **private** repo
+    ///   auth-fails and is treated as inconclusive: the fast-fail only fires for
+    ///   public (or SSH-agent-reachable) remotes.
+    /// - A missing/unreachable repo (`ls-remote` non-zero) is also inconclusive,
+    ///   not a hard fail — only an *existing, reachable* remote that lacks the
+    ///   branch fast-fails.
+    /// - A commit force-pushed off an existing branch is **not** caught here
+    ///   (we only check branch presence, not commit reachability); the real fetch
+    ///   surfaces that.
+    fn preflight_app_source_ref(
+        &self,
+        git_url: &str,
+        commit: &str,
+        branch: Option<&str>,
+    ) -> Result<()> {
+        // Archive tarball URLs aren't ls-remote-able and 404 quickly on their own.
+        if git_url.contains("/archive/")
+            && (git_url.ends_with(".tar.gz") || git_url.ends_with(".tar"))
+        {
+            return Ok(());
+        }
+
+        println!("\nChecking app source is reachable on remote...");
+        let output = match Self::git_command(&["ls-remote", git_url]).output() {
+            Ok(output) => output,
+            Err(e) => {
+                log_verbose(
+                    self.verbose,
+                    &format!("App source preflight skipped (ls-remote could not run): {}", e),
+                );
+                return Ok(());
+            }
+        };
+
+        if !output.status.success() {
+            // Likely auth/network rather than a missing ref; don't hard-block.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log_verbose(
+                self.verbose,
+                &format!(
+                    "App source preflight inconclusive (ls-remote failed): {}",
+                    stderr.trim()
+                ),
+            );
+            return Ok(());
+        }
+
+        let listing = String::from_utf8_lossy(&output.stdout);
+        match Self::classify_app_source_refs(&listing, commit, branch) {
+            Ok(true) => {
+                println!("  App source reachable ✓");
+            }
+            Ok(false) => {
+                // No branch hint and the commit is not a current ref tip. It may
+                // still live in history; only warn and let the fetch resolve it.
+                log_verbose(
+                    self.verbose,
+                    &format!(
+                        "App source commit {} is not a current ref tip; relying on fetch to resolve",
+                        commit
+                    ),
+                );
+            }
+            Err(missing_branch) => {
+                bail!(
+                    "App source branch '{branch}' is not present on the remote:\n  \
+                     {url}\n\n\
+                     The deployed enclave was built from commit {commit} on branch \
+                     '{branch}', but that branch is not on the remote — it was never \
+                     pushed, or was renamed/deleted. This build cannot be reproduced \
+                     from the remote manifest.\n\n\
+                     Fixes:\n  \
+                     - Push the branch:        git push <remote> {branch}\n  \
+                     - Verify a local checkout: caution verify --from-local\n  \
+                     - Verify a source tarball: caution verify --from-tarball <path>",
+                    branch = missing_branch,
+                    url = git_url,
+                    commit = commit,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Decide whether a `git ls-remote` listing confirms the app source is
+    /// reachable. Pure logic split out from [`Self::preflight_app_source_ref`]
+    /// so it can be unit-tested without the network.
+    ///
+    /// - `Ok(true)`  — reachable confirmed (branch present, or commit is a ref tip)
+    /// - `Ok(false)` — inconclusive (no branch hint and commit isn't a tip; proceed)
+    /// - `Err(branch)` — the named branch is definitively absent from the remote
+    fn classify_app_source_refs(
+        listing: &str,
+        commit: &str,
+        branch: Option<&str>,
+    ) -> std::result::Result<bool, String> {
+        // Require a meaningful abbreviation before prefix-matching a commit against
+        // a ref tip. Without this, a blank ls-remote field (empty `sha`) or a
+        // 1-char `commit` would falsely match an unrelated ref. Git's default
+        // minimum abbreviation is 7; deployed manifests carry full 40-char SHAs.
+        const MIN_SHA_PREFIX: usize = 7;
+        let commit_matchable = commit.len() >= MIN_SHA_PREFIX;
+
+        let branch_ref = branch.map(|b| format!("refs/heads/{}", b));
+        let mut branch_present = false;
+        let mut commit_is_ref_tip = false;
+        for line in listing.lines() {
+            let mut parts = line.split('\t');
+            let sha = parts.next().unwrap_or("");
+            let r = parts.next().unwrap_or("");
+            if commit_matchable
+                && sha.len() >= MIN_SHA_PREFIX
+                && (sha.starts_with(commit) || commit.starts_with(sha))
+            {
+                commit_is_ref_tip = true;
+            }
+            if let Some(ref br) = branch_ref {
+                if r == br {
+                    branch_present = true;
+                }
+            }
+        }
+
+        match branch {
+            Some(branch_name) if !branch_present => Err(branch_name.to_string()),
+            Some(_) => Ok(true),
+            None if commit_is_ref_tip => Ok(true),
+            None => Ok(false),
+        }
     }
 
     async fn download_and_extract_app_source_with_git_fallback(
@@ -8133,7 +8400,20 @@ mod tests {
     use openpgp::parse::Parse;
     use openpgp::serialize::SerializeInto;
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use tempfile::tempdir;
+
+    fn test_api_client() -> ApiClient {
+        ApiClient {
+            base_url: "http://localhost".to_string(),
+            client: reqwest::Client::new(),
+            config_path: PathBuf::new(),
+            deployment_path: None,
+            verbose: false,
+            qr: false,
+            workdir: None,
+        }
+    }
 
     fn test_public_key() -> String {
         let (cert, _revocation) = CertBuilder::new()
@@ -8390,10 +8670,86 @@ containerfile: Missing.Containerfile\n",
     }
 
     #[test]
+    fn git_url_to_archive_urls_skips_archive_guessing_for_ssh_scheme_urls() {
+        let client = test_api_client();
+        let commit = "50e2608f857ee2c9777b89af0f9af02ffba9999d";
+
+        let urls = client
+            .git_url_to_archive_urls(
+                "ssh://git@codeberg.org/caution/demo-pq-enclave-binding.git",
+                commit,
+            )
+            .unwrap();
+
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn git_command_disables_interactive_ssh_prompts() {
+        let cmd = ApiClient::git_command(&[
+            "ls-remote",
+            "ssh://git@codeberg.org/caution/demo-pq-enclave-binding.git",
+        ]);
+        let envs: HashMap<_, _> = cmd
+            .get_envs()
+            .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
+            .collect();
+
+        assert_eq!(envs.get("GIT_TERMINAL_PROMPT"), Some(&"0"));
+        assert_eq!(envs.get("GIT_ASKPASS"), Some(&"true"));
+
+        let ssh_command = envs
+            .get("GIT_SSH_COMMAND")
+            .expect("git SSH fallback must not be able to prompt through /dev/tty");
+        assert!(ssh_command.contains("BatchMode=yes"));
+        assert!(ssh_command.contains("StrictHostKeyChecking=accept-new"));
+    }
+
+    #[test]
     fn generated_config_hcl_parses_as_valid_configuration_file() {
-        let hcl = ApiClient::generate_config_hcl("git@codeberg.org:user/repo.git", false);
-        let config = ConfigurationFile::from_str(&hcl);
-        assert!(config.is_ok(), "generated HCL should parse: {:?}", config.err());
+        for byoc in [false, true] {
+            let hcl = ApiClient::generate_config_hcl("git@codeberg.org:user/repo.git", byoc);
+            let config = ConfigurationFile::from_str(&hcl);
+            assert!(
+                config.is_ok(),
+                "generated HCL should parse for byoc={byoc}: {:?}",
+                config.err()
+            );
+        }
+    }
+
+    #[test]
+    fn create_config_file_in_dir_writes_byoc_template() {
+        let work_dir = tempdir().unwrap();
+        let client = test_api_client();
+
+        client
+            .create_config_file_in_dir_if_needed(work_dir.path(), true)
+            .unwrap();
+
+        let hcl = std::fs::read_to_string(work_dir.path().join("caution.hcl")).unwrap();
+        assert!(hcl.contains("caution {"));
+        assert!(hcl.contains("type         = \"aws\""));
+        assert!(hcl.contains("region       = \"us-east-1\""));
+        ConfigurationFile::from_str(&hcl).unwrap();
+    }
+
+    #[tokio::test]
+    async fn init_byoc_requires_login_before_reading_credentials_file() {
+        let work_dir = tempdir().unwrap();
+        let missing_credentials = work_dir.path().join("missing-byoc-credentials.json");
+        let client = ApiClient {
+            config_path: work_dir.path().join("missing-session.json"),
+            ..test_api_client()
+        };
+
+        let err = client.init_byoc(&missing_credentials).await.unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Not logged in. Run 'login' command first"),
+            "BYOC init should check authentication before reading credential material: {err:?}"
+        );
     }
 
     fn cert_armor(builder: CertBuilder) -> String {
@@ -8434,5 +8790,105 @@ containerfile: Missing.Containerfile\n",
         assert_eq!(certs.len(), 1);
         assert!(!certs[0].is_eligible());
         assert_eq!(certs[0].missing(), vec!["authentication"]);
+    }
+
+    // Sample `git ls-remote` output: "<sha>\t<ref>" lines.
+    const LS_REMOTE: &str = "\
+1111111111111111111111111111111111111111\tHEAD\n\
+1111111111111111111111111111111111111111\trefs/heads/main\n\
+2222222222222222222222222222222222222222\trefs/heads/deploy-tests\n\
+3333333333333333333333333333333333333333\trefs/tags/v1.0\n";
+
+    #[test]
+    fn preflight_fails_when_branch_absent_from_remote() {
+        // The reported regression: branch was never pushed.
+        let result = ApiClient::classify_app_source_refs(
+            LS_REMOTE,
+            "6d1c5d3550cdaf45411052e7194bdcd34c41dac4",
+            Some("deploy-tests-missing"),
+        );
+        assert_eq!(result, Err("deploy-tests-missing".to_string()));
+    }
+
+    #[test]
+    fn preflight_passes_when_branch_present() {
+        // Branch exists even though the deployed commit is an older,
+        // non-tip commit on that branch — reachable, proceed.
+        let result = ApiClient::classify_app_source_refs(
+            LS_REMOTE,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            Some("deploy-tests"),
+        );
+        assert_eq!(result, Ok(true));
+    }
+
+    #[test]
+    fn preflight_passes_when_commit_is_ref_tip_without_branch_hint() {
+        // No branch in the manifest, but the commit is a current ref tip.
+        let result = ApiClient::classify_app_source_refs(
+            LS_REMOTE,
+            "2222222222222222222222222222222222222222",
+            None,
+        );
+        assert_eq!(result, Ok(true));
+    }
+
+    #[test]
+    fn preflight_inconclusive_when_commit_not_tip_without_branch_hint() {
+        // No branch hint and the commit isn't a ref tip; can't prove it's gone
+        // (may be deep in history), so stay inconclusive and let the fetch decide.
+        let result = ApiClient::classify_app_source_refs(
+            LS_REMOTE,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            None,
+        );
+        assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn preflight_matches_short_commit_against_full_ref_sha() {
+        // Manifests may carry an abbreviated commit; it should still match the
+        // full SHA advertised by ls-remote.
+        let result =
+            ApiClient::classify_app_source_refs(LS_REMOTE, "3333333", None);
+        assert_eq!(result, Ok(true));
+    }
+
+    #[test]
+    fn preflight_dangerously_short_commit_does_not_false_match() {
+        // A 1-char commit prefixes "1111..." but must NOT be treated as a ref
+        // tip — below the 7-char minimum it's not matchable.
+        let result = ApiClient::classify_app_source_refs(LS_REMOTE, "1", None);
+        assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn preflight_empty_commit_is_inconclusive_not_a_match() {
+        // An empty commit must never match a ref tip (would otherwise prefix-match
+        // every line). No branch hint => inconclusive.
+        let result = ApiClient::classify_app_source_refs(LS_REMOTE, "", None);
+        assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn preflight_blank_ls_remote_line_does_not_false_match() {
+        // A malformed/blank line yields an empty sha field; it must not match the
+        // commit and flip an inconclusive result to reachable.
+        let listing = "\n   \n\t\n";
+        let result = ApiClient::classify_app_source_refs(
+            listing,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            None,
+        );
+        assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn preflight_empty_branch_name_absent_bails() {
+        // Defensive: Some("") builds refs/heads/ which won't be present, so it is
+        // reported absent rather than silently passing.
+        let result =
+            ApiClient::classify_app_source_refs(LS_REMOTE, "1111111", Some(""));
+        assert_eq!(result, Err("".to_string()));
     }
 }
