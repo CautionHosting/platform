@@ -324,9 +324,7 @@
     >
       <div class="modal-content">
         <h3 id="logout-confirmation-title" class="modal-title">Log out?</h3>
-        <p class="modal-message">
-          You will need to authenticate again before managing apps, billing, SSH keys, or secrets.
-        </p>
+        <p class="modal-message">You’ll need to log in again to access your account.</p>
         <div class="modal-actions">
           <button type="button" class="btn-secondary" @click="cancelLogout">Cancel</button>
           <button type="button" class="btn-danger" @click="confirmLogout">Log out</button>
