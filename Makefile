@@ -3,7 +3,7 @@
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-ssh-units test-e2e-platform-ports test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-ssh-units test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -681,6 +681,7 @@ run-gateway-test: network
 		--env-file $(HOME)/.config/caution/.env \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
+		$(GATEWAY_EXTRA_ENV) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		caution-gateway
 	@echo "Gateway started on 127.0.0.1:8000 (HTTP) and 127.0.0.1:2222 (SSH)"
@@ -804,6 +805,36 @@ test-e2e-platform-ports:
 	@$(MAKE) up-test
 	@echo "Running platform ports e2e tests..."
 	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_platform_ports.sh; \
+	status=$$?; \
+	$(MAKE) down-test; \
+	exit $$status
+
+test-e2e-webauthn:
+	@$(MAKE) up-test
+	@echo "Running WebAuthn login e2e tests..."
+	@TEST_DB_HOST=$(TEST_DB_HOST) \
+	TEST_DB_NAME=$(TEST_DB_NAME) \
+	bash tests/e2e/test_webauthn_login.sh; \
+	status=$$?; \
+	$(MAKE) down-test; \
+	exit $$status
+
+test-e2e-webauthn-roundtrip:
+	@$(MAKE) up-test
+	@echo "Running WebAuthn software-passkey round-trip e2e test..."
+	@TEST_DB_HOST=$(TEST_DB_HOST) \
+	TEST_DB_NAME=$(TEST_DB_NAME) \
+	bash tests/e2e/test_webauthn_roundtrip.sh; \
+	status=$$?; \
+	$(MAKE) down-test; \
+	exit $$status
+
+test-e2e-webauthn-browser:
+	@$(MAKE) up-test
+	@echo "Running WebAuthn CDP resident-passkey browser e2e test..."
+	@TEST_DB_HOST=$(TEST_DB_HOST) \
+	TEST_DB_NAME=$(TEST_DB_NAME) \
+	bash tests/e2e/test_webauthn_browser.sh; \
 	status=$$?; \
 	$(MAKE) down-test; \
 	exit $$status

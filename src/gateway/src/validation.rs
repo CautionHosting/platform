@@ -9,11 +9,19 @@ const APP_NAME_MIN_LEN: usize = 3;
 const APP_NAME_MAX_LEN: usize = 63;
 const APP_NAME_PATTERN: &str = r"^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$";
 const PASSKEY_NAME_MAX_LEN: usize = 80;
+const USERNAME_MIN_LEN: usize = 3;
+const USERNAME_MAX_LEN: usize = 32;
+const USERNAME_PATTERN: &str = r"^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$";
 
 static APP_NAME_REGEX: OnceLock<Regex> = OnceLock::new();
+static USERNAME_REGEX: OnceLock<Regex> = OnceLock::new();
 
 fn get_app_name_regex() -> &'static Regex {
     APP_NAME_REGEX.get_or_init(|| Regex::new(APP_NAME_PATTERN).unwrap())
+}
+
+fn get_username_regex() -> &'static Regex {
+    USERNAME_REGEX.get_or_init(|| Regex::new(USERNAME_PATTERN).unwrap())
 }
 
 pub fn validate_app_id(id: &str) -> Result<()> {
@@ -32,6 +40,24 @@ pub fn validate_app_name(name: &str) -> Result<()> {
 
     if !get_app_name_regex().is_match(name) {
         bail!("App name must contain only letters, numbers, hyphens, and underscores, and must start/end with alphanumeric");
+    }
+
+    Ok(())
+}
+
+/// Validates a chosen username. Validation is case-insensitive (the pattern
+/// allows both cases); the caller is responsible for normalizing to lowercase
+/// before storage.
+pub fn validate_username(name: &str) -> Result<()> {
+    if name.len() < USERNAME_MIN_LEN {
+        bail!("Username must be at least {} characters", USERNAME_MIN_LEN);
+    }
+    if name.len() > USERNAME_MAX_LEN {
+        bail!("Username must be at most {} characters", USERNAME_MAX_LEN);
+    }
+
+    if !get_username_regex().is_match(name) {
+        bail!("Username must contain only letters, numbers, hyphens, and underscores, and must start/end with alphanumeric");
     }
 
     Ok(())
@@ -256,6 +282,29 @@ mod tests {
         assert!(!is_valid_base64(""));
         assert!(!is_valid_base64("abc!"));
         assert!(!is_valid_base64("abc def"));
+    }
+
+    #[test]
+    fn test_username_valid() {
+        assert!(validate_username("alice").is_ok());
+        assert!(validate_username("bob_1").is_ok());
+        assert!(validate_username("a-b").is_ok());
+        assert!(validate_username("abc").is_ok()); // 3-char min
+        assert!(validate_username(&"a".repeat(32)).is_ok()); // 32-char max
+    }
+
+    #[test]
+    fn test_username_invalid() {
+        assert!(validate_username("ab").is_err()); // 2-char, too short
+        assert!(validate_username(&"a".repeat(33)).is_err()); // 33-char, too long
+        assert!(validate_username("-alice").is_err()); // leading hyphen
+        assert!(validate_username("alice-").is_err()); // trailing hyphen
+        assert!(validate_username("_alice").is_err()); // leading underscore
+        assert!(validate_username("alice_").is_err()); // trailing underscore
+        assert!(validate_username("bad name").is_err()); // space
+        assert!(validate_username("bad.name").is_err()); // dot
+        assert!(validate_username("café").is_err()); // non-ascii
+        assert!(validate_username("").is_err()); // empty
     }
 
     #[test]

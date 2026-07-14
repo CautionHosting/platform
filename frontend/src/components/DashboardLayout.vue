@@ -3,6 +3,26 @@
 
 <template>
   <div class="dashboard-page">
+    <div v-if="requireUsername" class="action-required-banner" role="alert">
+      <div class="action-required-banner-content">
+        <svg
+          class="action-required-banner-icon"
+          width="20" height="20" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+          <line x1="12" x2="12" y1="9" y2="13" />
+          <line x1="12" x2="12.01" y1="17" y2="17" />
+        </svg>
+        <span>
+          <strong>Action required:</strong> choose a username before you can use Caution.
+        </span>
+        <button type="button" class="action-required-banner-button" @click="requestUsernameFocus">
+          Set username
+        </button>
+      </div>
+    </div>
     <div v-if="showDevelopmentBanner" class="development-banner">
       <div class="development-banner-content">
         <span>
@@ -101,9 +121,10 @@
     <div class="dashboard-layout">
       <!-- Sidebar -->
       <aside class="sidebar">
-        <nav class="sidebar-nav">
+        <nav class="sidebar-nav" :class="{ 'sidebar-nav--disabled': requireUsername }" :aria-disabled="requireUsername ? 'true' : undefined">
           <button
             :class="['nav-item', { active: activeTab === 'apps' }]"
+            :disabled="requireUsername"
             @click="selectTab('apps')"
           >
             <img
@@ -141,6 +162,7 @@
           <div class="nav-group" :class="{ 'is-open': securityNavOpen }">
             <button
               :class="['nav-item', 'nav-item--parent', { active: isSecurityNavActive }]"
+              :disabled="requireUsername"
               :aria-expanded="securityNavOpen ? 'true' : 'false'"
               aria-controls="security-nav-submenu"
               @click="selectTab('ssh')"
@@ -180,6 +202,7 @@
             >
               <button
                 :class="['nav-subitem', { active: activeTab === 'ssh' }]"
+                :disabled="requireUsername"
                 :aria-current="activeTab === 'ssh' ? 'page' : undefined"
                 @click="selectTab('ssh')"
               >
@@ -187,6 +210,7 @@
               </button>
               <button
                 :class="['nav-subitem', { active: activeTab === 'security' }]"
+                :disabled="requireUsername"
                 :aria-current="activeTab === 'security' ? 'page' : undefined"
                 @click="selectTab('security')"
               >
@@ -197,6 +221,7 @@
 
           <button
             :class="['nav-item', { active: activeTab === 'keys' }]"
+            :disabled="requireUsername"
             @click="selectTab('keys')"
           >
             <svg
@@ -217,6 +242,7 @@
 
           <button
             :class="['nav-item', { active: activeTab === 'billing' }]"
+            :disabled="requireUsername"
             @click="selectTab('billing')"
           >
             <svg
@@ -386,8 +412,12 @@ export default {
       type: Boolean,
       default: false,
     },
+    requireUsername: {
+      type: Boolean,
+      default: false,
+    },
   },
-  emits: ["tab-change", "logout"],
+  emits: ["tab-change", "logout", "focus-username"],
   setup(props, { emit }) {
     const securityTabs = ["ssh", "security"];
     const isSecurityNavActive = computed(() => securityTabs.includes(props.activeTab));
@@ -401,6 +431,13 @@ export default {
     const selectTab = (tab) => {
       securityNavOpen.value = securityTabs.includes(tab);
       emit("tab-change", tab);
+    };
+
+    // Always emits, even if already on the account tab — a plain tab-change
+    // event is a no-op there, but the user still needs the input focused.
+    const requestUsernameFocus = () => {
+      selectTab("account");
+      emit("focus-username");
     };
 
     const dismissDevelopmentBanner = () => {
@@ -468,6 +505,7 @@ export default {
       showDevelopmentBanner,
       showLogoutConfirmation,
       selectTab,
+      requestUsernameFocus,
     };
   },
 };

@@ -38,6 +38,7 @@ pub struct CreateUserInput<'a> {
     pub beta_code_id: Option<Uuid>,
     pub email_verified: bool,
     pub payment_onboarding_complete: bool,
+    pub username: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -66,10 +67,75 @@ fn public_organization_name(name: &str) -> String {
 /// Creates a user and records legal consent events in a single transaction.
 /// If either the user creation or legal event recording fails, the entire
 /// transaction rolls back — no account exists without consent records.
+/// Sentinel error message signalling a unique-constraint violation on
+/// `users.username` (Postgres error code 23505). We can't return a typed
+/// error here without restructuring this fn's `Result<Uuid>` signature (it's
+/// wrapped in a transaction and shares error handling with the legal-event
+/// inserts below), so callers that need to distinguish "username taken" from
+/// other failures should match on this exact anyhow message via
+/// `is_username_taken_error`.
+const USERNAME_TAKEN_ERROR: &str = "USERNAME_TAKEN";
+
+/// Returns true if `err` (as produced by `create_user`) indicates the
+/// username was already taken, so callers can map it to a 409 response.
+pub fn is_username_taken_error(err: &anyhow::Error) -> bool {
+    err.to_string().contains(USERNAME_TAKEN_ERROR)
+}
+
+/// Attempts the one-time username claim for a placeholder account. The
+/// `UPDATE` only matches rows still marked as a placeholder, so a second
+/// concurrent or later claim attempt affects zero rows instead of silently
+/// overwriting an already-chosen username.
+///
+/// Returns `Ok(true)` if the claim succeeded, `Ok(false)` if the user had
+/// already claimed a username (no row matched `username_is_placeholder =
+/// true`). A unique-constraint violation on `users.username` is surfaced as
+/// the same `USERNAME_TAKEN_ERROR` sentinel used by `create_user`, so
+/// callers should check `is_username_taken_error` on the returned error.
+pub async fn claim_username(pool: &PgPool, user_id: Uuid, username: &str) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE users
+         SET username = $1, username_is_placeholder = false
+         WHERE id = $2 AND username_is_placeholder = true",
+    )
+    .bind(username)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        if let sqlx::Error::Database(ref db_err) = e {
+            if db_err.code().as_deref() == Some("23505")
+                && db_err.constraint().is_some_and(|c| c.contains("username"))
+            {
+                tracing::warn!("Username already taken on claim: {}", username);
+                return anyhow::anyhow!(USERNAME_TAKEN_ERROR);
+            }
+        }
+        tracing::error!("Database error claiming username: {:?}", e);
+        anyhow::anyhow!("Failed to claim username: {}", e)
+    })?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Returns `(username, username_is_placeholder)` for the given user.
+pub async fn get_username_status(pool: &PgPool, user_id: Uuid) -> Result<(String, bool)> {
+    let row: (String, bool) = sqlx::query_as(
+        "SELECT username, username_is_placeholder FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to fetch username status")?;
+
+    Ok(row)
+}
+
 pub async fn create_user(
     pool: &PgPool,
     fido2_user_handle: &[u8],
     alpha_code_id: Uuid,
+    username: &str,
     legal: &SignupLegalContext,
 ) -> Result<Uuid> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
@@ -82,6 +148,7 @@ pub async fn create_user(
             beta_code_id: Some(alpha_code_id),
             email_verified: false,
             payment_onboarding_complete: false,
+            username: Some(username),
         },
         legal,
     )
@@ -100,7 +167,12 @@ async fn insert_user_with_legal_events(
     input: CreateUserInput<'_>,
     legal: &SignupLegalContext,
 ) -> Result<Uuid> {
-    let username = generate_user_identifier();
+    let username = input
+        .username
+        .map(|s| s.to_string())
+        .unwrap_or_else(generate_user_identifier);
+
+    let is_placeholder = input.username.is_none();
 
     let user_id: Uuid = sqlx::query_scalar(
         "INSERT INTO users (
@@ -109,7 +181,8 @@ async fn insert_user_with_legal_events(
              email,
              beta_code_id,
              email_verified_at,
-             payment_method_added_at
+             payment_method_added_at,
+             username_is_placeholder
          )
          VALUES (
              $1,
@@ -117,7 +190,8 @@ async fn insert_user_with_legal_events(
              $3,
              $4,
              CASE WHEN $5 THEN NOW() ELSE NULL END,
-             CASE WHEN $6 THEN NOW() ELSE NULL END
+             CASE WHEN $6 THEN NOW() ELSE NULL END,
+             $7
          )
          RETURNING id",
     )
@@ -127,9 +201,18 @@ async fn insert_user_with_legal_events(
     .bind(input.beta_code_id)
     .bind(input.email_verified)
     .bind(input.payment_onboarding_complete)
+    .bind(is_placeholder)
     .fetch_one(&mut **tx)
     .await
     .map_err(|e| {
+        if let sqlx::Error::Database(ref db_err) = e {
+            if db_err.code().as_deref() == Some("23505")
+                && db_err.constraint().is_some_and(|c| c.contains("username"))
+            {
+                tracing::warn!("Username already taken: {}", username);
+                return anyhow::anyhow!(USERNAME_TAKEN_ERROR);
+            }
+        }
         tracing::error!("Database error creating user: {:?}", e);
         tracing::error!("Username attempted: {}", username);
         tracing::error!(
@@ -260,6 +343,7 @@ pub async fn accept_invitation_and_create_user(
             beta_code_id: None,
             email_verified: true,
             payment_onboarding_complete: true,
+            username: None,
         },
         legal,
     )
@@ -354,6 +438,7 @@ fn generate_user_identifier() -> String {
     format!("u_{}", encoded)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn save_fido2_credential(
     pool: &PgPool,
     credential_id: &[u8],
@@ -365,6 +450,7 @@ pub async fn save_fido2_credential(
     sign_count: u32,
     transport: Option<serde_json::Value>,
     flags: Option<serde_json::Value>,
+    resident: Option<bool>,
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO fido2_credentials (
@@ -377,9 +463,10 @@ pub async fn save_fido2_credential(
             sign_count,
             transport,
             flags,
+            resident,
             created_at,
             updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())",
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())",
     )
     .bind(credential_id)
     .bind(user_id)
@@ -390,6 +477,7 @@ pub async fn save_fido2_credential(
     .bind(sign_count as i64)
     .bind(transport)
     .bind(flags)
+    .bind(resident)
     .execute(pool)
     .await
     .context("Failed to save credential")?;
@@ -470,6 +558,54 @@ pub async fn get_credential_ids_by_user_id(pool: &PgPool, user_id: Uuid) -> Resu
     .context("Failed to query credentials")?;
 
     Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+/// Look up a user by their (normalized) username. Returns `None` rather than
+/// an error when not found — callers must NOT translate a `None` here into a
+/// distinct HTTP response for unauthenticated login flows, or they'll create a
+/// username-enumeration oracle (see `begin_login_handler`).
+pub async fn get_user_id_by_username(pool: &PgPool, username: &str) -> Result<Option<Uuid>> {
+    let user_id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(username)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to get user ID by username")?;
+
+    Ok(user_id)
+}
+
+/// Fetch the serialized `SecurityKey` public keys for every credential
+/// belonging to a user, for building a username-scoped `allowCredentials` list.
+pub async fn get_credential_public_keys_by_user_id(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Vec<Vec<u8>>> {
+    let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
+        "SELECT public_key FROM fido2_credentials WHERE user_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to query credential public keys by user")?;
+
+    Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+/// Opportunistically mark a credential as resident (discoverable) after it was
+/// successfully used in a discoverable (username-less) login assertion. Only
+/// touches rows where residency is still unknown (`NULL`) — never overwrites
+/// an explicit `false` recorded from a registration-time `credProps` reading.
+pub async fn mark_credential_resident_if_unknown(pool: &PgPool, credential_id: &[u8]) -> Result<()> {
+    sqlx::query(
+        "UPDATE fido2_credentials SET resident = true, updated_at = NOW()
+         WHERE credential_id = $1 AND resident IS NULL",
+    )
+    .bind(credential_id)
+    .execute(pool)
+    .await
+    .context("Failed to backfill credential resident flag")?;
+
+    Ok(())
 }
 
 pub async fn list_user_credentials(
@@ -842,15 +978,17 @@ pub async fn create_qr_login_token(
     requestee_token: &str,
     ip_address: Option<&str>,
     expires_at: OffsetDateTime,
+    username: Option<&str>,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO qr_login_tokens (token, requestee_token, status, ip_address, expires_at)
-         VALUES ($1, $2, 'pending', $3, $4)",
+        "INSERT INTO qr_login_tokens (token, requestee_token, status, ip_address, expires_at, username)
+         VALUES ($1, $2, 'pending', $3, $4, $5)",
     )
     .bind(token)
     .bind(requestee_token)
     .bind(ip_address)
     .bind(expires_at)
+    .bind(username)
     .execute(pool)
     .await
     .context("Failed to create QR login token")?;
@@ -863,7 +1001,7 @@ pub async fn get_qr_login_token(
     token: &str,
 ) -> Result<Option<crate::types::DbQrLoginToken>> {
     let row: Option<crate::types::DbQrLoginToken> = sqlx::query_as(
-        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at
+        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at, username
          FROM qr_login_tokens
          WHERE token = $1"
     )
@@ -880,7 +1018,7 @@ pub async fn get_qr_login_token_by_requestee_token(
     requestee_token: &str,
 ) -> Result<Option<crate::types::DbQrLoginToken>> {
     let row: Option<crate::types::DbQrLoginToken> = sqlx::query_as(
-        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at
+        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at, username
          FROM qr_login_tokens
          WHERE requestee_token = $1"
     )
@@ -1071,9 +1209,14 @@ pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>)> {
     let credential_id: [u8; 16] = rand::thread_rng().gen();
     let credential_id_vec = credential_id.to_vec();
 
+    // Mark e2e users as non-placeholder so the username-claim gate
+    // (`username_claim_gate_middleware`) doesn't 403 every e2e session on
+    // protected/`/api` routes. Real registrations already set this false;
+    // only the placeholder gate test flips a user back to placeholder on
+    // purpose.
     let user_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (fido2_user_handle, username, email, beta_code_id)
-         VALUES ($1, $2, NULL, NULL)
+        "INSERT INTO users (fido2_user_handle, username, email, beta_code_id, username_is_placeholder)
+         VALUES ($1, $2, NULL, NULL, false)
          RETURNING id",
     )
     .bind(&user_handle[..])

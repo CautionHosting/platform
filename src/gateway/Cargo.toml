@@ -34,7 +34,7 @@ async-trait = { workspace = true }
 tempfile = { workspace = true }
 
 # Gateway-specific dependencies
-webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui", "danger-credential-internals"] }
 webauthn-rs-proto = "0.5"
 russh = "0.61"
 ssh-key = { version = "0.6.7", features = ["crypto"] }

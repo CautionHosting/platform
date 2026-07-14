@@ -15,10 +15,24 @@
       <div v-if="!authenticated" class="login-container">
         <h2 class="login-title">Welcome back</h2>
 
+        <div class="register-field">
+          <input
+            v-model="username"
+            type="text"
+            placeholder="Username (optional)"
+            class="register-input"
+            autocomplete="username webauthn"
+            data-testid="login-username"
+            :disabled="loading"
+            @keyup.enter="() => handleLogin(username)"
+          />
+        </div>
+
         <button
-          @click="handleLogin"
+          @click="() => handleLogin(username)"
           :disabled="loading"
           class="btn-dark btn login-btn"
+          data-testid="login-submit"
         >
           <svg class="btn-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
           {{ loading ? "Authenticating..." : "Log in with passkey" }}
@@ -46,7 +60,7 @@
 </template>
 
 <script>
-import { onMounted } from "vue";
+import { onMounted, ref } from "vue";
 import AuthLayout from "../components/AuthLayout.vue";
 import { useWebAuthn } from "../composables/useWebAuthn.js";
 
@@ -59,6 +73,7 @@ export default {
     session: String,
   },
   setup(props) {
+    const username = ref("");
     const {
       authenticated,
       loading,
@@ -78,6 +93,7 @@ export default {
     });
 
     return {
+      username,
       authenticated,
       loading,
       loginLoading,

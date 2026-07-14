@@ -7,8 +7,10 @@
     :active-tab="activeTab"
     :show-title="false"
     :show-development-warning="!orgSettings.require_pin && !loadingOrgSettings"
+    :require-username="usernameIsPlaceholder"
     @tab-change="handleTabChange"
     @logout="logout"
+    @focus-username="focusUsernameInput"
   >
 
     <!-- Applications Tab -->
@@ -1384,6 +1386,46 @@ make build-cli
           </div>
         </section>
 
+        <!-- Username Section -->
+        <section class="account-settings-section">
+          <h3 class="billing-section-title">Username</h3>
+          <div class="account-settings-row">
+            <div class="account-settings-label">
+              <p class="account-settings-description">
+                {{ usernameIsPlaceholder
+                  ? 'Choose a username to continue using Caution. This can only be set once and cannot be changed afterward.'
+                  : 'Your username is permanent and cannot be changed.' }}
+              </p>
+            </div>
+            <div class="account-settings-content">
+              <div v-if="usernameIsPlaceholder" class="email-settings-controls">
+                <label class="sr-only" for="accountUsername">Username</label>
+                <div class="email-settings-row">
+                  <input
+                    id="accountUsername"
+                    ref="usernameInputEl"
+                    v-model="usernameInput"
+                    type="text"
+                    placeholder="Enter a username"
+                    class="email-input"
+                    :disabled="savingUsername"
+                    @keyup.enter="saveUsername"
+                  />
+                  <button
+                    @click="saveUsername"
+                    :disabled="savingUsername || !usernameInput.trim()"
+                    class="btn-primary email-action-button"
+                  >
+                    {{ savingUsername ? 'Saving...' : 'Set username' }}
+                  </button>
+                </div>
+                <div v-if="usernameError" class="message message--error">{{ usernameError }}</div>
+              </div>
+              <p v-else class="account-settings-description">{{ username }}</p>
+            </div>
+          </div>
+        </section>
+
         <!-- Legal Section -->
         <section class="account-settings-section">
           <h3 class="billing-section-title">Legal documents</h3>
@@ -1841,7 +1883,7 @@ make build-cli
 </template>
 
 <script>
-import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import DashboardLayout from "../components/DashboardLayout.vue";
 import AttestationModal from "../components/AttestationModal.vue";
 import { authFetch } from "../composables/useWebAuthn.js";
@@ -2761,6 +2803,21 @@ export default {
     const emailError = ref('');
     const emailVerificationDeliveryStatus = ref(null);
 
+    // Username claim (one-time, immutable once set)
+    const username = ref('');
+    const usernameIsPlaceholder = ref(false);
+    const usernameInput = ref('');
+    const savingUsername = ref(false);
+    const usernameError = ref('');
+    const usernameInputEl = ref(null);
+
+    // Triggered by the action-required banner's "Set username" button. Runs
+    // unconditionally (not a watcher on activeTab) because clicking it while
+    // already on the account tab wouldn't otherwise change anything to react to.
+    const focusUsernameInput = () => {
+      nextTick(() => usernameInputEl.value?.focus());
+    };
+
     const emailSettingsStatus = computed(() => {
       if (!userEmail.value) {
         return 'No email added';
@@ -3139,6 +3196,52 @@ export default {
       } catch (err) {
         // ignore
       }
+      await loadUsername();
+    };
+
+    const loadUsername = async () => {
+      try {
+        const response = await authFetch("/user/username");
+        if (response.ok) {
+          const data = await response.json();
+          username.value = data.username || '';
+          usernameIsPlaceholder.value = Boolean(data.username_is_placeholder);
+          usernameInput.value = '';
+          usernameError.value = '';
+        }
+      } catch (err) {
+        // ignore
+      }
+    };
+
+    const saveUsername = async () => {
+      const value = usernameInput.value.trim().toLowerCase();
+      if (!value) {
+        usernameError.value = 'Enter a username.';
+        return;
+      }
+      savingUsername.value = true;
+      usernameError.value = '';
+      try {
+        const response = await authFetch("/user/username", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: value }),
+        });
+        if (response.ok) {
+          const data = await response.json();
+          username.value = data.username || value;
+          usernameIsPlaceholder.value = Boolean(data.username_is_placeholder);
+          usernameInput.value = '';
+          showToast('Username set');
+        } else {
+          usernameError.value = await readResponseError(response, 'Failed to set username.');
+        }
+      } catch (err) {
+        usernameError.value = "We couldn't connect to the server. Try again.";
+      } finally {
+        savingUsername.value = false;
+      }
     };
 
     const startEditEmail = () => {
@@ -3367,7 +3470,13 @@ export default {
 
     const loadCreditBalance = async () => {
       try {
-        const response = await authFetch('/api/billing/credits/balance');
+        // Polls every 30s (startBalancePolling); never the right trigger for the
+        // username-claim redirect — suppress it so a gated user isn't yanked to
+        // the account tab mid-action every poll. The primary status check owns
+        // that redirect.
+        const response = await authFetch('/api/billing/credits/balance', {
+          suppressGateRedirect: true,
+        });
         if (response.ok) {
           creditBalance.value = await response.json();
         }
@@ -4825,6 +4934,15 @@ export default {
       startEditEmail,
       handleEmailAction,
       saveEmail,
+      username,
+      usernameIsPlaceholder,
+      usernameInput,
+      usernameInputEl,
+      focusUsernameInput,
+      savingUsername,
+      usernameError,
+      loadUsername,
+      saveUsername,
       calculateAppMonthlyCost,
       logout,
       handleTabChange,

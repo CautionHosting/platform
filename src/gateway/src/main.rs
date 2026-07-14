@@ -22,6 +22,7 @@ mod auth_middleware;
 mod config;
 mod csrf;
 mod db;
+mod decoy;
 mod handlers;
 mod proxy;
 mod rate_limit;
@@ -106,6 +107,12 @@ async fn main() -> Result<()> {
         .build()
         .context("Failed to build WebAuthn")?;
 
+    // Fail fast if the login-begin decoy timing-equalization fixtures ever
+    // stop deserializing (e.g. a future webauthn-rs upgrade changing
+    // `SecurityKey`'s serde shape), rather than silently degrading the
+    // enumeration-defense timing fix at request time.
+    handlers::validate_decoy_timing_fixtures();
+
     tracing::info!("WebAuthn configured:");
     tracing::info!("  RP ID: {}", config.rp_id);
     tracing::info!("  RP Display Name: {}", config.rp_display_name);
@@ -113,6 +120,14 @@ async fn main() -> Result<()> {
 
     let host_key = load_or_generate_host_key(&config.ssh_host_key_path)
         .context("Failed to load SSH host key")?;
+
+    // Kill-switch for legacy credential-broadcast login (see AppState::login_allow_broadcast
+    // doc comment). Read once at startup — toggling requires an env var change + restart.
+    let login_allow_broadcast = std::env::var("LOGIN_ALLOW_BROADCAST")
+        .ok()
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(true);
+    tracing::info!("login_allow_broadcast = {}", login_allow_broadcast);
 
     let internal_service_secret = std::env::var("INTERNAL_SERVICE_SECRET").ok();
     if internal_service_secret.is_some() {
@@ -122,6 +137,26 @@ async fn main() -> Result<()> {
             "INTERNAL_SERVICE_SECRET not set - internal service authentication disabled"
         );
     }
+
+    // Three independent in-memory rate limiters (see doc comments in
+    // `rate_limit.rs` for the single-gateway-replica assumption):
+    //  - `rate_limiter`: blanket per-IP budget over all /auth/* routes.
+    //  - `scoped_begin_limiter`: tighter per-IP budget on username-scoped
+    //    begin requests only (409/handlers.rs), hard 429 on exceed.
+    //  - `username_begin_limiter`: per-username budget on scoped begin
+    //    requests; exceeding it forces a decoy response instead of a 429.
+    let rate_limiter = rate_limit::RateLimiter::new(
+        rate_limit::GLOBAL_MAX_REQUESTS,
+        rate_limit::GLOBAL_WINDOW_SECS,
+    );
+    let scoped_begin_limiter = rate_limit::RateLimiter::new(
+        rate_limit::SCOPED_BEGIN_MAX_REQUESTS,
+        rate_limit::SCOPED_BEGIN_WINDOW_SECS,
+    );
+    let username_begin_limiter = rate_limit::RateLimiter::new(
+        rate_limit::USERNAME_BEGIN_MAX_REQUESTS,
+        rate_limit::USERNAME_BEGIN_WINDOW_SECS,
+    );
 
     let state = AppState {
         db: pool.clone(),
@@ -135,13 +170,20 @@ async fn main() -> Result<()> {
         session_timeout_hours: config.session_timeout_hours,
         internal_service_secret: internal_service_secret.clone(),
         csrf_secret: config.csrf_secret.clone(),
+        login_allow_broadcast,
+        scoped_begin_limiter: scoped_begin_limiter.clone(),
+        username_begin_limiter: username_begin_limiter.clone(),
     };
-
-    let rate_limiter = rate_limit::RateLimiter::new(100, 60);
 
     let rate_limiter_cleanup = rate_limiter.clone();
     tokio::spawn(async move {
         rate_limiter_cleanup.cleanup_task().await;
+    });
+    tokio::spawn(async move {
+        scoped_begin_limiter.cleanup_task().await;
+    });
+    tokio::spawn(async move {
+        username_begin_limiter.cleanup_task().await;
     });
 
     let cors = CorsLayer::new()
@@ -261,6 +303,18 @@ async fn main() -> Result<()> {
             "/ssh-keys/{fingerprint}",
             delete(handlers::delete_ssh_key_handler),
         )
+        .route(
+            "/user/username",
+            get(handlers::get_username_status_handler),
+        )
+        .route("/user/username", post(handlers::claim_username_handler))
+        // Added before (so innermost relative to) fido2_auth_middleware, so
+        // it runs AFTER auth has resolved AuthenticatedUserId — order of
+        // execution for an incoming request is sign -> auth -> gate -> handler.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware::username_claim_gate_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware::fido2_auth_middleware,
@@ -283,6 +337,10 @@ async fn main() -> Result<()> {
 
     let api_proxy = Router::new()
         .fallback(proxy::proxy_handler)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware::username_claim_gate_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware::fido2_auth_middleware,
