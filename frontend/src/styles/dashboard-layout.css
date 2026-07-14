@@ -382,6 +382,14 @@
   color: var(--color-pink);
 }
 
+.header-logout-button {
+  color: var(--color-danger);
+}
+
+.header-logout-button:hover {
+  color: #b02a37;
+}
+
 .header-action-icon {
   display: block;
   width: 18px;

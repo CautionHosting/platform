@@ -56,11 +56,13 @@
             </button>
           </div>
 
-          <p class="tos-notice">
+          <p v-if="activeLegalDocuments.length" class="tos-notice">
             By creating an account, you agree to the Caution
-            <a href="https://caution.co/terms.html" target="_blank" rel="noopener noreferrer">terms of service</a>
-            and
-            <a href="https://caution.co/privacy.html" target="_blank" rel="noopener noreferrer">privacy notice</a>.
+            <template v-for="(doc, index) in activeLegalDocuments" :key="doc.document_type">
+              <a :href="doc.url" target="_blank" rel="noopener noreferrer">{{ doc.title.toLowerCase() }}</a
+              ><template v-if="index < activeLegalDocuments.length - 2">, </template
+              ><template v-else-if="index === activeLegalDocuments.length - 2"> and </template
+              ></template>.
           </p>
           <p class="register-prompt account-switch">
             Already have an account?
@@ -154,6 +156,7 @@ export default {
     const validationError = ref(false);
     const isLoginMode = ref(false);
     const loginUsername = ref("");
+    const activeLegalDocuments = ref([]);
 
     const {
       authenticated,
@@ -171,6 +174,19 @@ export default {
       checkWebAuthnSupport();
       if (props.session) {
         await verifySession(props.session);
+      }
+
+      // Drives both what the registration notice shows and, via
+      // gateway::create_user, what consent gets recorded at signup - keep
+      // them backed by the same source instead of hardcoding link text here.
+      try {
+        const response = await fetch("/api/legal/active-documents");
+        if (response.ok) {
+          activeLegalDocuments.value = await response.json();
+        }
+      } catch {
+        // Leave activeLegalDocuments empty; the notice paragraph just
+        // won't render rather than showing broken/stale links.
       }
     });
 
@@ -207,6 +223,7 @@ export default {
       validationError,
       isLoginMode,
       loginUsername,
+      activeLegalDocuments,
       handleLogin,
       onRegister,
       onLogin,

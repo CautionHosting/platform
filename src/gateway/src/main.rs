@@ -321,6 +321,7 @@ async fn main() -> Result<()> {
     let public_api_proxy = Router::new()
         .route("/onboarding/verify", get(proxy::proxy_handler))
         .route("/config/stripe-key", get(proxy::proxy_handler))
+        .route("/legal/active-documents", get(proxy::proxy_handler))
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .with_state(state.clone())
         .layer(cors.clone());

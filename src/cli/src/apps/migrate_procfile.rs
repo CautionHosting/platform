@@ -165,10 +165,6 @@ fn build_build_block(build: &caution_config::BuildConfig) -> Option<hcl::Block> 
         has_content = true;
     }
 
-    if let Some(ref val) = build.binary {
-        builder = builder.add_attribute(("binary", val.as_str()));
-        has_content = true;
-    }
 
     if !build.app_sources.is_empty() {
         let exprs: Vec<hcl::Expression> = build
@@ -433,7 +429,6 @@ mod tests {
     fn hello_world_procfile_uses_block_syntax() {
         let procfile = r#"run: /usr/local/bin/hello
 containerfile: Containerfile
-binary: /usr/local/bin/hello
 app_sources: git@codeberg.org:caution/demo-hello-world-enclave.git
 cache: false
 ports: 8083
@@ -442,7 +437,6 @@ ports: 8083
         let output = build_body(&config);
         assert!(output.contains("enclave \"default\""), "labeled enclave block");
         assert!(output.contains("build {"), "build block");
-        assert!(output.contains("binary = \"/usr/local/bin/hello\""), "binary attribute");
         assert!(output.contains("port = 8083"), "port attribute in ingress");
         assert!(output.contains("ingress {"), "ingress block");
         assert!(!output.contains("= null"), "no null values");
@@ -463,7 +457,6 @@ ports: 8083
         let procfile = "\
 run: /app/server --port 8080
 containerfile: Containerfile.custom
-binary: myapp
 app_sources: url1, url2
 memory_mb: 2000
 cpus: 4

@@ -837,6 +837,11 @@ enum Commands {
     },
     #[command(about = "Logout and clear local session")]
     Logout,
+    #[command(about = "Show account information")]
+    Account {
+        #[command(subcommand)]
+        command: AccountCommands,
+    },
     #[command(about = "Initialize a new deployment in the current directory")]
     Init {
         #[arg(
@@ -951,6 +956,12 @@ enum Commands {
         #[command(subcommand)]
         command: SecretCommands,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum AccountCommands {
+    #[command(about = "Print the current account ID")]
+    Id,
 }
 
 #[derive(Subcommand, Debug)]
@@ -2336,6 +2347,14 @@ impl ApiClient {
         Ok(general_purpose::STANDARD_NO_PAD.encode(Sha256::digest(&decoded)))
     }
 
+    fn ssh_key_identity(public_key: &str) -> Option<String> {
+        let parts: Vec<&str> = public_key.trim().split_whitespace().collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        Some(format!("{} {}", parts[0], parts[1]))
+    }
+
     fn canonical_ssh_request(method: &str, path: &str, timestamp: u64, body: &[u8]) -> String {
         let canonical_path = path.strip_prefix("/api").unwrap_or(path);
         let body_hash = hex::encode(Sha256::digest(body));
@@ -3100,6 +3119,13 @@ enclave "default" {{
         }
 
         Ok(orgs[0].id.clone())
+    }
+
+    async fn print_account_id(&self) -> Result<()> {
+        let config = self.require_existing_authenticated_config()?;
+        let account_id = self.primary_organization_id(config.session_id()).await?;
+        println!("{}", account_id);
+        Ok(())
     }
 
     async fn check_org_security_settings(&self, session_id: &str) -> Result<OrgSettings> {
@@ -5293,10 +5319,6 @@ enclave "default" {{
             reference: image_ref.clone(),
         };
 
-        let binary_path = default_enclave
-            .and_then(|e| e.build.as_ref())
-            .and_then(|b| b.binary.clone());
-
         let run_command = default_enclave
             .and_then(|e| e.unit.as_ref())
             .and_then(|u| u.values().next())
@@ -5349,50 +5371,25 @@ enclave "default" {{
             .map(|origins| origins.join(","));
 
         let mut loader = Loader::new("Building enclave image", LoaderStyle::Processing);
-        let deployment = if let Some(ref bin_path) = binary_path {
-            log_verbose(
-                self.verbose,
-                &format!("Using build_enclave_auto with binary: {}", bin_path),
-            );
-            builder
-                .build_enclave_auto(
-                    &user_image,
-                    bin_path,
-                    run_command,
-                    app_source_urls_opt,
-                    app_branch.clone(),
-                    app_commit.clone(),
-                    None,
-                    None,
-                    &ports,
-                    http_port,
-                    e2e,
-                    locksmith,
-                    e2e_cors_origins,
-                    egress,
-                )
-                .await
-        } else {
-            log_verbose(self.verbose, "Using build_enclave (no binary specified)");
-            builder
-                .build_enclave(
-                    &user_image,
-                    None,
-                    run_command,
-                    app_source_urls_opt,
-                    app_branch.clone(),
-                    app_commit.clone(),
-                    None,
-                    None,
-                    &ports,
-                    http_port,
-                    e2e,
-                    locksmith,
-                    e2e_cors_origins,
-                    egress,
-                )
-                .await
-        }
+        log_verbose(self.verbose, "Using build_enclave");
+        let deployment = builder
+            .build_enclave(
+                &user_image,
+                None,
+                run_command,
+                app_source_urls_opt,
+                app_branch.clone(),
+                app_commit.clone(),
+                None,
+                None,
+                &ports,
+                http_port,
+                e2e,
+                locksmith,
+                e2e_cors_origins,
+                egress,
+            )
+            .await
         .map_err(BuildLocalError::BuildEnclave)?;
         loader.stop();
 
@@ -5651,9 +5648,7 @@ enclave "default" {{
                 let cfg = self.read_config_from_dir(config_dir)?;
                 let default_enclave = cfg.enclave.as_ref().and_then(|e| e.get("default"));
 
-                let binary = default_enclave
-                    .and_then(|e| e.build.as_ref())
-                    .and_then(|b| b.binary.clone());
+                let binary = None;
                 let run_cmd = default_enclave
                     .and_then(|e| e.unit.as_ref())
                     .and_then(|u| u.values().next())
@@ -5693,7 +5688,6 @@ enclave "default" {{
                         }
                     });
 
-                log_verbose(self.verbose, &format!("Binary from config: {:?}", binary));
                 log_verbose(
                     self.verbose,
                     &format!("Run command from config: {:?}", run_cmd),
@@ -7095,6 +7089,33 @@ enclave "default" {{
         bail!("No source URLs available and no git fallback configured")
     }
 
+    async fn fetch_existing_ssh_keys(&self, session_id: &str) -> Result<Vec<(String, String)>> {
+        let response = self
+            .client
+            .get(format!("{}/ssh-keys", self.base_url))
+            .header("X-Session-ID", session_id)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            bail!("Failed to fetch existing SSH keys: {}", response.status());
+        }
+
+        let response_data: serde_json::Value = response.json().await?;
+        let keys = response_data["keys"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
+
+        Ok(keys
+            .iter()
+            .filter_map(|key| {
+                let name = key["name"].as_str()?.to_string();
+                let public_key = key["public_key"].as_str()?.to_string();
+                Some((name, public_key))
+            })
+            .collect())
+    }
+
     async fn add_ssh_key(
         &self,
         key_file: Option<PathBuf>,
@@ -7103,6 +7124,9 @@ enclave "default" {{
         name: Option<String>,
     ) -> Result<()> {
         let config = self.ensure_authenticated().await?;
+
+        // Fetch existing keys to check for duplicates
+        let existing_keys = self.fetch_existing_ssh_keys(&config.session_id).await?;
 
         if from_agent {
             let keys = self.get_ssh_agent_keys();
@@ -7142,6 +7166,20 @@ enclave "default" {{
             let fingerprint = ssh_fingerprint(k);
             let key_name = name.clone().unwrap_or(comment.clone());
 
+            // Check for duplicate before adding
+            if let Some(new_identity) = Self::ssh_key_identity(k) {
+                for (existing_name, existing_key) in &existing_keys {
+                    if let Some(existing_identity) = Self::ssh_key_identity(existing_key) {
+                        if new_identity == existing_identity {
+                            bail!(
+                                "This SSH key is already added as '{}'.",
+                                existing_name
+                            );
+                        }
+                    }
+                }
+            }
+
             self.add_single_key(&config.session_id, &key_name, k)
                 .await?;
             println!("Added SSH key: [{}] [{}]", key_name, fingerprint);
@@ -7151,6 +7189,21 @@ enclave "default" {{
                 bail!("Invalid SSH key format");
             }
             let key_name = name.unwrap_or_else(|| "key".to_string());
+
+            // Check for duplicate before adding
+            if let Some(new_identity) = Self::ssh_key_identity(key_content) {
+                for (existing_name, existing_key) in &existing_keys {
+                    if let Some(existing_identity) = Self::ssh_key_identity(existing_key) {
+                        if new_identity == existing_identity {
+                            bail!(
+                                "This SSH key is already added as '{}'.",
+                                existing_name
+                            );
+                        }
+                    }
+                }
+            }
+
             self.add_single_key(&config.session_id, &key_name, key_content)
                 .await?;
             println!("Added: {}", key_name);
@@ -7171,6 +7224,20 @@ enclave "default" {{
                     .unwrap_or("key")
                     .to_string()
             });
+
+            // Check for duplicate before adding
+            if let Some(new_identity) = Self::ssh_key_identity(&key_content) {
+                for (existing_name, existing_key) in &existing_keys {
+                    if let Some(existing_identity) = Self::ssh_key_identity(existing_key) {
+                        if new_identity == existing_identity {
+                            bail!(
+                                "This SSH key is already added as '{}'.",
+                                existing_name
+                            );
+                        }
+                    }
+                }
+            }
 
             self.add_single_key(&config.session_id, &key_name, &key_content)
                 .await?;
@@ -8456,6 +8523,14 @@ pub async fn run() -> Result<(), RunError> {
         Commands::Logout => {
             client.logout().await.map_err(RunError::CommandDispatch)?;
         }
+        Commands::Account { command } => match command {
+            AccountCommands::Id => {
+                client
+                    .print_account_id()
+                    .await
+                    .map_err(RunError::CommandDispatch)?;
+            }
+        },
         Commands::Init {
             bring_your_own_cloud,
             platform,
@@ -8681,12 +8756,12 @@ pub async fn run() -> Result<(), RunError> {
 mod tests {
     use super::openpgp;
     use super::{
-        encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility, load_recipient_cert,
-        login_begin_request_body, normalize_keyring, parse_env_assignments, prompt_line_from,
-        prompt_optional_line_from, resolve_local_build_command_from_dir, resolve_login_username,
-        resolve_procfile_build_command, resolve_register_username,
-        resolve_quorum_parameters, validate_global_qr, ApiClient, Cli, Commands, LoginUsernameError,
-        RegisterUsernameError, RunError,
+        AccountCommands, ApiClient, Cli, Commands, LoginUsernameError, RegisterUsernameError,
+        RunError, encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility,
+        load_recipient_cert, login_begin_request_body, normalize_keyring, parse_env_assignments,
+        prompt_line_from, prompt_optional_line_from, resolve_local_build_command_from_dir,
+        resolve_login_username, resolve_procfile_build_command, resolve_quorum_parameters,
+        resolve_register_username, validate_global_qr,
     };
     use caution_config::ConfigurationFile;
     use clap::Parser;
@@ -8709,6 +8784,18 @@ mod tests {
             qr: false,
             workdir: None,
         }
+    }
+
+    #[test]
+    fn cli_parses_account_id_command() {
+        let cli = Cli::try_parse_from(["caution", "account", "id"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::Account {
+                command: AccountCommands::Id
+            }
+        ));
     }
 
     fn test_public_key() -> String {
@@ -9367,5 +9454,30 @@ containerfile: Missing.Containerfile\n",
         let obj = body.as_object().unwrap();
         assert_eq!(obj.len(), 1);
         assert_eq!(obj.get("username").and_then(|v| v.as_str()), Some("grace"));
+    }
+
+    #[test]
+    fn ssh_key_identity_extracts_type_and_data_without_comment() {
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMatchingKeyMaterial user@example";
+        assert_eq!(
+            ApiClient::ssh_key_identity(key),
+            Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMatchingKeyMaterial".to_string())
+        );
+    }
+
+    #[test]
+    fn ssh_key_identity_handles_extra_whitespace() {
+        let key = "  ssh-rsa   AAAAB3NzaC1yc2EAAAADAQABAAABAQ...  comment  ";
+        assert_eq!(
+            ApiClient::ssh_key_identity(key),
+            Some("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ...".to_string())
+        );
+    }
+
+    #[test]
+    fn ssh_key_identity_rejects_malformed_keys() {
+        assert_eq!(ApiClient::ssh_key_identity("not-a-valid-key"), None);
+        assert_eq!(ApiClient::ssh_key_identity(""), None);
+        assert_eq!(ApiClient::ssh_key_identity("ssh-ed25519"), None);
     }
 }

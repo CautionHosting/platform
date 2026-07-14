@@ -135,23 +135,26 @@ pub async fn create_user(
         anyhow::anyhow!("Failed to create user: {}", e)
     })?;
 
-    // Record TOS acceptance and privacy notice acknowledgment.
-    // Uses the currently active version of each document.
-    for (doc_type, event_type) in [
-        ("terms_of_service", "accepted"),
-        ("privacy_notice", "acknowledged"),
-    ] {
-        let (legal_document_id, version): (Uuid, String) = sqlx::query_as(
-            "SELECT id, version FROM legal_documents
-             WHERE document_type = $1 AND is_active = true
-             ORDER BY effective_at DESC
-             LIMIT 1",
-        )
-        .bind(doc_type)
-        .fetch_optional(&mut *tx)
-        .await
-        .context("Failed to query active legal document version")?
-        .ok_or_else(|| anyhow::anyhow!("No active {} document found", doc_type))?;
+    // Record acceptance/acknowledgment for every currently active document
+    // type, not a hardcoded pair — a new document type (e.g. added via
+    // utils/admin publish-legal-doc) must not leave fresh signups already
+    // "behind" on it. Event wording mirrors legal::accept_legal_document:
+    // derived from the document's own requires_blocking_reacceptance flag.
+    let active_documents: Vec<(String, Uuid, String, bool)> = sqlx::query_as(
+        "SELECT document_type, id, version, requires_blocking_reacceptance
+         FROM legal_documents
+         WHERE is_active = true",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .context("Failed to query active legal documents")?;
+
+    for (doc_type, legal_document_id, version, requires_blocking) in active_documents {
+        let event_type = if requires_blocking {
+            "accepted"
+        } else {
+            "acknowledged"
+        };
 
         sqlx::query(
             "INSERT INTO user_legal_events (
@@ -162,7 +165,7 @@ pub async fn create_user(
         )
         .bind(user_id)
         .bind(legal_document_id)
-        .bind(doc_type)
+        .bind(&doc_type)
         .bind(&version)
         .bind(event_type)
         .bind(&legal.ip_address)

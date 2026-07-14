@@ -8,8 +8,14 @@
 
       <div class="modal-body">
         <div class="endpoint-info">
-          <span class="label">Endpoint:</span>
-          <code>{{ attestationUrl }}</code>
+          <div>
+            <span class="label">Verification endpoint:</span>
+            <code>{{ attestationUrl }}</code>
+          </div>
+          <p>
+            This endpoint expects a POST with a fresh nonce. Opening it directly in a browser
+            is not the attestation verification flow.
+          </p>
         </div>
 
         <div class="verification-section">
@@ -319,6 +325,12 @@ export default {
 .endpoint-info code {
   font-family: 'Monaco', monospace;
   color: #333;
+}
+
+.endpoint-info p {
+  margin: 8px 0 0;
+  color: #666;
+  line-height: 1.4;
 }
 
 .loading-state {
