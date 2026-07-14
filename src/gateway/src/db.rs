@@ -6,7 +6,6 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-use std::panic::Location;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -988,23 +987,20 @@ pub struct NewSignedRequestAudit<'a> {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("Unable to record verified signed request {challenge_id} for user {user_id} [{location}]")]
+#[error("Unable to record verified signed request {challenge_id} for user {user_id}")]
 pub struct RecordSignedRequestAuditError {
     user_id: Uuid,
     challenge_id: Uuid,
-    location: &'static Location<'static>,
 
     #[source]
     source: sqlx::Error,
 }
 
 impl RecordSignedRequestAuditError {
-    #[track_caller]
     fn new(user_id: Uuid, challenge_id: Uuid, source: sqlx::Error) -> Self {
         Self {
             user_id,
             challenge_id,
-            location: Location::caller(),
             source,
         }
     }
@@ -1048,37 +1044,32 @@ pub enum CompleteSignedRequestAuditErrorKind {
 
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "Unable to complete signed request audit {audit_id} with HTTP status {response_status}: {kind:?} [{location}]"
+    "Unable to complete signed request audit {audit_id} with HTTP status {response_status}: {kind:?}"
 )]
 pub struct CompleteSignedRequestAuditError {
     kind: CompleteSignedRequestAuditErrorKind,
     audit_id: Uuid,
     response_status: u16,
-    location: &'static Location<'static>,
 
     #[source]
     source: Option<sqlx::Error>,
 }
 
 impl CompleteSignedRequestAuditError {
-    #[track_caller]
     fn database(audit_id: Uuid, response_status: u16, source: sqlx::Error) -> Self {
         Self {
             kind: CompleteSignedRequestAuditErrorKind::Database,
             audit_id,
             response_status,
-            location: Location::caller(),
             source: Some(source),
         }
     }
 
-    #[track_caller]
     fn audit_not_pending(audit_id: Uuid, response_status: u16) -> Self {
         Self {
             kind: CompleteSignedRequestAuditErrorKind::AuditNotPending,
             audit_id,
             response_status,
-            location: Location::caller(),
             source: None,
         }
     }
@@ -1156,23 +1147,20 @@ pub struct PgpKeyInfo {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("Unable to remove PGP public key {key_id} for user {user_id} [{location}]")]
+#[error("Unable to remove PGP public key {key_id} for user {user_id}")]
 pub struct RemovePgpKeyError {
     user_id: Uuid,
     key_id: Uuid,
-    location: &'static Location<'static>,
 
     #[source]
     source: sqlx::Error,
 }
 
 impl RemovePgpKeyError {
-    #[track_caller]
     fn new(user_id: Uuid, key_id: Uuid, source: sqlx::Error) -> Self {
         Self {
             user_id,
             key_id,
-            location: Location::caller(),
             source,
         }
     }
