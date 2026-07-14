@@ -204,23 +204,23 @@ export function useWebAuthn() {
     }
   }
 
-  async function handleRegister(alphaCode) {
-    if (!alphaCode || !alphaCode.trim()) {
-      return { success: false, validationError: true };
-    }
-
+  async function registerWithPasskey({
+    beginUrl,
+    beginBody,
+    finishUrl,
+    validatingStatus,
+  }) {
     error.value = null;
     status.value = null;
     loading.value = true;
 
     try {
-      // Step 1: Begin registration with alpha code
-      status.value = "Validating access code...";
-      const beginResponse = await fetch("/auth/register/begin", {
+      status.value = validatingStatus;
+      const beginResponse = await fetch(beginUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ alpha_code: alphaCode.trim() }),
+        body: JSON.stringify(beginBody),
       });
 
       if (!beginResponse.ok) {
@@ -230,14 +230,12 @@ export function useWebAuthn() {
 
       const beginData = await beginResponse.json();
 
-      // Step 2: Create credential with passkey
       status.value = "Use your passkey";
 
       const publicKey = beginData.publicKey;
       publicKey.challenge = base64urlToUint8Array(publicKey.challenge);
       publicKey.user.id = base64urlToUint8Array(publicKey.user.id);
 
-      // Convert excludeCredentials IDs from base64url to ArrayBuffer
       if (publicKey.excludeCredentials) {
         publicKey.excludeCredentials = publicKey.excludeCredentials.map((cred) => ({
           type: cred.type,
@@ -276,7 +274,6 @@ export function useWebAuthn() {
         throw new Error("No credential created");
       }
 
-      // Step 3: Finish registration
       status.value = "Completing registration...";
 
       const attestationObject = new Uint8Array(
@@ -284,7 +281,7 @@ export function useWebAuthn() {
       );
       const clientDataJSON = new Uint8Array(credential.response.clientDataJSON);
 
-      const finishResponse = await fetch("/auth/register/finish", {
+      const finishResponse = await fetch(finishUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -325,6 +322,19 @@ export function useWebAuthn() {
     }
   }
 
+  async function handleRegister(alphaCode) {
+    if (!alphaCode || !alphaCode.trim()) {
+      return { success: false, validationError: true };
+    }
+
+    return registerWithPasskey({
+      beginUrl: "/auth/register/begin",
+      beginBody: { alpha_code: alphaCode.trim() },
+      finishUrl: "/auth/register/finish",
+      validatingStatus: "Validating access code...",
+    });
+  }
+
   return {
     authenticated,
     loading,
@@ -335,5 +345,6 @@ export function useWebAuthn() {
     verifySession,
     handleLogin,
     handleRegister,
+    registerWithPasskey,
   };
 }

@@ -244,18 +244,18 @@ pub async fn ensure_user_has_org(db: &PgPool, user_id: Uuid) -> Result<(), Statu
         return Err(StatusCode::PAYMENT_REQUIRED);
     }
 
-    let has_org: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT organization_id FROM organization_members WHERE user_id = $1 LIMIT 1",
+    let has_org: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM organization_members WHERE user_id = $1)",
     )
     .bind(user_id)
-    .fetch_optional(db)
+    .fetch_one(db)
     .await
     .map_err(|e| {
         tracing::error!("Failed to check user org membership: {:?}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    if has_org.is_some() {
+    if has_org {
         tracing::debug!("User {} already has organization", user_id);
         return Ok(());
     }

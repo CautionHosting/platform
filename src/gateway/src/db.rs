@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use anyhow::{Context, Result};
-use base64::Engine;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::Rng;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -31,6 +32,37 @@ pub struct SignupLegalContext {
     pub user_agent: Option<String>,
 }
 
+pub struct CreateUserInput<'a> {
+    pub fido2_user_handle: &'a [u8],
+    pub email: Option<&'a str>,
+    pub beta_code_id: Option<Uuid>,
+    pub email_verified: bool,
+    pub payment_onboarding_complete: bool,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct OrganizationInvitation {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub organization_name: String,
+    pub email: String,
+    pub role: String,
+    pub invited_by: Option<Uuid>,
+    pub expires_at: OffsetDateTime,
+}
+
+const LEGACY_DEFAULT_ORG_PREFIX: &str = "Organization for user ";
+
+fn public_organization_name(name: &str) -> String {
+    let trimmed = name.trim();
+    if let Some(user_id) = trimmed.strip_prefix(LEGACY_DEFAULT_ORG_PREFIX) {
+        if Uuid::parse_str(user_id).is_ok() {
+            return "your organization".to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 /// Creates a user and records legal consent events in a single transaction.
 /// If either the user creation or legal event recording fails, the entire
 /// transaction rolls back — no account exists without consent records.
@@ -40,26 +72,69 @@ pub async fn create_user(
     alpha_code_id: Uuid,
     legal: &SignupLegalContext,
 ) -> Result<Uuid> {
-    let username = generate_user_identifier();
-
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
+    let user_id = insert_user_with_legal_events(
+        &mut tx,
+        CreateUserInput {
+            fido2_user_handle,
+            email: None,
+            beta_code_id: Some(alpha_code_id),
+            email_verified: false,
+            payment_onboarding_complete: false,
+        },
+        legal,
+    )
+    .await
+    .context("Failed to insert alpha user")?;
+
+    tx.commit()
+        .await
+        .context("Failed to commit user creation transaction")?;
+
+    Ok(user_id)
+}
+
+async fn insert_user_with_legal_events(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: CreateUserInput<'_>,
+    legal: &SignupLegalContext,
+) -> Result<Uuid> {
+    let username = generate_user_identifier();
+
     let user_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (fido2_user_handle, username, email, beta_code_id)
-         VALUES ($1, $2, NULL, $3)
+        "INSERT INTO users (
+             fido2_user_handle,
+             username,
+             email,
+             beta_code_id,
+             email_verified_at,
+             payment_method_added_at
+         )
+         VALUES (
+             $1,
+             $2,
+             $3,
+             $4,
+             CASE WHEN $5 THEN NOW() ELSE NULL END,
+             CASE WHEN $6 THEN NOW() ELSE NULL END
+         )
          RETURNING id",
     )
-    .bind(fido2_user_handle)
+    .bind(input.fido2_user_handle)
     .bind(&username)
-    .bind(alpha_code_id)
-    .fetch_one(&mut *tx)
+    .bind(input.email)
+    .bind(input.beta_code_id)
+    .bind(input.email_verified)
+    .bind(input.payment_onboarding_complete)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|e| {
         tracing::error!("Database error creating user: {:?}", e);
         tracing::error!("Username attempted: {}", username);
         tracing::error!(
             "fido2_user_handle (hex): {}",
-            hex::encode(fido2_user_handle)
+            hex::encode(input.fido2_user_handle)
         );
         anyhow::anyhow!("Failed to create user: {}", e)
     })?;
@@ -74,7 +149,7 @@ pub async fn create_user(
          FROM legal_documents
          WHERE is_active = true",
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .context("Failed to query active legal documents")?;
 
@@ -84,6 +159,7 @@ pub async fn create_user(
         } else {
             "acknowledged"
         };
+
 
         sqlx::query(
             "INSERT INTO user_legal_events (
@@ -99,14 +175,123 @@ pub async fn create_user(
         .bind(event_type)
         .bind(&legal.ip_address)
         .bind(&legal.user_agent)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context(format!("Failed to record {} legal event", doc_type))?;
     }
 
+    Ok(user_id)
+}
+
+pub fn hash_invitation_token(token: &str) -> Option<String> {
+    let token_bytes = URL_SAFE_NO_PAD.decode(token).ok()?;
+    Some(hex::encode(Sha256::digest(token_bytes)))
+}
+
+pub async fn get_valid_invitation(
+    pool: &PgPool,
+    token_hash: &str,
+) -> Result<Option<OrganizationInvitation>> {
+    let mut invitation = sqlx::query_as::<_, OrganizationInvitation>(
+        "SELECT oi.id,
+                oi.organization_id,
+                o.name as organization_name,
+                oi.email,
+                oi.role::text as role,
+                oi.invited_by,
+                oi.expires_at
+         FROM organization_invitations oi
+         INNER JOIN organizations o ON o.id = oi.organization_id
+         WHERE oi.token_hash = $1
+           AND oi.accepted_at IS NULL
+           AND oi.revoked_at IS NULL
+           AND oi.expires_at > NOW()",
+    )
+    .bind(token_hash)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to load organization invitation")?;
+
+    if let Some(invitation) = invitation.as_mut() {
+        invitation.organization_name = public_organization_name(&invitation.organization_name);
+    }
+
+    Ok(invitation)
+}
+
+pub async fn accept_invitation_and_create_user(
+    pool: &PgPool,
+    invitation_id: Uuid,
+    token_hash: &str,
+    fido2_user_handle: &[u8],
+    legal: &SignupLegalContext,
+) -> Result<Uuid> {
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+
+    let invitation: OrganizationInvitation = sqlx::query_as(
+        "SELECT oi.id,
+                oi.organization_id,
+                o.name as organization_name,
+                oi.email,
+                oi.role::text as role,
+                oi.invited_by,
+                oi.expires_at
+         FROM organization_invitations oi
+         INNER JOIN organizations o ON o.id = oi.organization_id
+         WHERE oi.id = $1
+           AND oi.token_hash = $2
+           AND oi.accepted_at IS NULL
+           AND oi.revoked_at IS NULL
+           AND oi.expires_at > NOW()
+         FOR UPDATE OF oi",
+    )
+    .bind(invitation_id)
+    .bind(token_hash)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to lock organization invitation")?
+    .ok_or_else(|| anyhow::anyhow!("Invitation is invalid or already used"))?;
+
+    let user_id = insert_user_with_legal_events(
+        &mut tx,
+        CreateUserInput {
+            fido2_user_handle,
+            email: Some(&invitation.email),
+            beta_code_id: None,
+            email_verified: true,
+            payment_onboarding_complete: true,
+        },
+        legal,
+    )
+    .await
+    .context("Failed to create invited user")?;
+
+    sqlx::query(
+        "INSERT INTO organization_members (organization_id, user_id, role, invited_by)
+         VALUES ($1, $2, $3::user_role, $4)",
+    )
+    .bind(invitation.organization_id)
+    .bind(user_id)
+    .bind(&invitation.role)
+    .bind(invitation.invited_by)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to add invited user to organization")?;
+
+    sqlx::query(
+        "UPDATE organization_invitations
+         SET accepted_by = $1, accepted_at = NOW()
+         WHERE id = $2",
+    )
+    .bind(user_id)
+    .bind(invitation_id)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to mark invitation accepted")?;
+
     tx.commit()
         .await
-        .context("Failed to commit user creation transaction")?;
+        .context("Failed to commit invitation acceptance")?;
 
     Ok(user_id)
 }
@@ -487,8 +672,6 @@ pub fn generate_session_id() -> String {
     let random_bytes: [u8; 32] = rand::thread_rng().gen();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes)
 }
-
-use sha2::{Digest, Sha256};
 
 pub async fn add_ssh_key(
     pool: &PgPool,
@@ -939,7 +1122,7 @@ pub async fn user_requires_pin(pool: &PgPool, user_id: Uuid) -> Result<bool, sql
 
 #[cfg(test)]
 mod tests {
-    use super::generate_ssh_fingerprint;
+    use super::{generate_ssh_fingerprint, hash_invitation_token};
 
     // Golden vector cross-checked with `ssh-keygen -lf`:
     //   ssh-keygen -t ed25519 ...  ->  SHA256:vO7cKxkbEOoI4Qix7nsJMasdWsJHDFVfgXsKQrA0DhM
@@ -975,5 +1158,21 @@ mod tests {
     #[test]
     fn fingerprint_rejects_invalid_base64() {
         assert!(generate_ssh_fingerprint("ssh-ed25519 not_base64!!!").is_err());
+    }
+
+    #[test]
+    fn invitation_token_hashes_decoded_token_bytes() {
+        // URL-safe base64 without padding for bytes [0, 1, 2, 3]. The invitation
+        // table stores a hash of the decoded random token bytes, not a hash of
+        // the transport encoding shown in the emailed URL.
+        assert_eq!(
+            hash_invitation_token("AAECAw").unwrap(),
+            "054edec1d0211f624fed0cbca9d4f9400b0e491c43742af2c5b0abebf0c990d8"
+        );
+    }
+
+    #[test]
+    fn invitation_token_hash_rejects_invalid_base64() {
+        assert!(hash_invitation_token("not base64!!!").is_none());
     }
 }

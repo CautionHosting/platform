@@ -138,6 +138,18 @@ impl Validate for AddMemberRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct InviteMemberRequest {
+    pub email: String,
+}
+
+impl Validate for InviteMemberRequest {
+    fn validate(&self) -> Result<(), String> {
+        validation::validate_email(self.email.trim()).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct UpdateMemberRequest {
     pub role: String,
 }

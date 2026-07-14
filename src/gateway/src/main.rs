@@ -179,6 +179,15 @@ async fn main() -> Result<()> {
             "/auth/register/finish",
             post(handlers::finish_register_handler),
         )
+        .route("/auth/invite", get(handlers::invite_preview_handler))
+        .route(
+            "/auth/invite/register/begin",
+            post(handlers::begin_invite_register_handler),
+        )
+        .route(
+            "/auth/invite/register/finish",
+            post(handlers::finish_register_handler),
+        )
         .route("/auth/login/begin", post(handlers::begin_login_handler))
         .route("/auth/login/finish", post(handlers::finish_login_handler))
         .route("/auth/logout", post(handlers::logout_handler))
@@ -294,6 +303,7 @@ async fn main() -> Result<()> {
     let frontend_routes = Router::new()
         .route_service("/login", ServeFile::new(frontend_index.clone()))
         .route_service("/onboarding", ServeFile::new(frontend_index.clone()))
+        .route_service("/invite", ServeFile::new(frontend_index.clone()))
         .route_service("/dashboard", ServeFile::new(frontend_index.clone()))
         .route_service("/qr-login", ServeFile::new(frontend_index.clone()))
         .route_service("/qr-sign", ServeFile::new(frontend_index));

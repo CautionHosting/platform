@@ -1,0 +1,8 @@
+{inviter} invited you to join {org_name}.
+
+Accept invite: {invite_url}
+
+This link expires at {expires_at} and can only be used once.
+
+--
+Caution Team

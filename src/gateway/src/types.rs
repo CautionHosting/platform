@@ -14,11 +14,23 @@ use webauthn_rs::prelude::*;
 #[derive(Clone)]
 pub struct AuthenticatedUserId(pub Uuid);
 
-/// Registration state that includes the alpha code ID for closed alpha
+/// Registration state for account creation.
+#[derive(Clone)]
+pub enum PendingRegistrationKind {
+    AlphaCode {
+        alpha_code_id: Uuid,
+    },
+    OrganizationInvite {
+        invitation_id: Uuid,
+        token_hash: String,
+    },
+}
+
+/// Registration state that records which signup path created the challenge.
 #[derive(Clone)]
 pub struct PendingRegistration {
     pub reg_state: SecurityKeyRegistration,
-    pub alpha_code_id: Uuid,
+    pub kind: PendingRegistrationKind,
     pub expires_at: time::OffsetDateTime,
 }
 
@@ -143,6 +155,23 @@ pub struct LoginFinishResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterBeginRequest {
     pub alpha_code: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InvitePreviewQuery {
+    pub token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InviteRegisterBeginRequest {
+    pub token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InvitePreviewResponse {
+    pub email: String,
+    pub organization_name: String,
+    pub expires_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
