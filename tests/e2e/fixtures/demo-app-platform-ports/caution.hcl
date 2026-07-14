@@ -1,6 +1,5 @@
 enclave "default" {
   build {
-    binary = "/usr/local/bin/hello"
     app_sources = ["git@codeberg.org:caution/demo-hello-world-enclave.git"]
   }
   network {

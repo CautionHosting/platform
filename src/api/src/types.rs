@@ -191,8 +191,6 @@ pub struct BuildConfig {
 
     pub oci_tarball: Option<String>,
 
-    pub binary: Option<String>,
-
     pub run: Option<String>,
 
     #[serde(default)]
@@ -244,7 +242,6 @@ impl Default for BuildConfig {
             containerfile: None,
             build: None,
             oci_tarball: None,
-            binary: None,
             run: None,
             app_sources: Vec::new(),
             enclave_sources: Vec::new(),
@@ -298,7 +295,6 @@ impl BuildConfig {
         let mut containerfile = None;
         let mut build = None;
         let mut oci_tarball = None;
-        let mut binary = None;
         let mut run = None;
         let mut app_sources: Vec<String> = Vec::new();
         let mut enclave_sources: Vec<String> = Vec::new();
@@ -353,11 +349,6 @@ impl BuildConfig {
                             oci_tarball = Some(value);
                         } else {
                             tracing::warn!("oci_tarball field found but value is empty");
-                        }
-                    }
-                    "binary" => {
-                        if !value.is_empty() {
-                            binary = Some(value);
                         }
                     }
                     "run" => {
@@ -542,14 +533,11 @@ impl BuildConfig {
             ));
         }
 
-        // Default http_port to the single port if only one is specified
+        // Default http_port to the single public app port for legacy Procfiles,
+        // but do not require explicit http_port values to also be public ingress
+        // ports. Caddy only needs a host-local vsock proxy for the HTTP upstream.
         let http_port = match http_port {
-            Some(hp) => {
-                if !ports.contains(&hp) {
-                    return Err(format!("http_port {} must also be listed in ports", hp));
-                }
-                Some(hp)
-            }
+            Some(hp) => Some(hp),
             None if ports.len() == 1 => {
                 tracing::info!("Defaulting http_port to {} (only port specified)", ports[0]);
                 Some(ports[0])
@@ -587,7 +575,6 @@ impl BuildConfig {
             containerfile,
             build,
             oci_tarball,
-            binary,
             run,
             app_sources,
             enclave_sources,
@@ -678,6 +665,14 @@ mod tests {
         let procfile = "run: /app/server\nports: 8080\n";
         let config = BuildConfig::from_procfile(procfile).unwrap();
         assert_eq!(config.ports, vec![8080]);
+        assert_eq!(config.http_port, Some(8080));
+    }
+
+    #[test]
+    fn test_allows_http_port_without_public_ingress_port() {
+        let procfile = "run: /app/server\nhttp_port: 8080\n";
+        let config = BuildConfig::from_procfile(procfile).unwrap();
+        assert!(config.ports.is_empty());
         assert_eq!(config.http_port, Some(8080));
     }
 

@@ -2335,10 +2335,13 @@ async fn deploy_logic(
         .and_then(|h| h.e2e_encryption.as_ref());
     let e2e = e2e_config.and_then(|e| e.enabled).unwrap_or(false);
 
-    let no_cache = ec_build.and_then(|b| b.cache).map(|c| !c).unwrap_or(false);
-    let app_sources = ec_build.map(|b| b.app_sources.clone()).unwrap_or_default();
-    let binary_path = ec_build.and_then(|b| b.binary.clone());
-
+    let no_cache = ec_build
+        .and_then(|b| b.cache)
+        .map(|c| !c)
+        .unwrap_or(false);
+    let app_sources = ec_build
+        .map(|b| b.app_sources.clone())
+        .unwrap_or_default();
     let egress = ec_network.map(|n| n.egress_enabled()).unwrap_or(false);
 
     let ingress_ports: Vec<u16> = ec_network
@@ -2551,7 +2554,6 @@ async fn deploy_logic(
                 procfile_content: config_content,
                 run_command: run_command.clone(),
                 containerfile: containerfile.clone(),
-                binary_path,
                 ports: ingress_ports.clone(),
                 http_port: ec_network.and_then(|n| n.http.as_ref()).map(|h| h.port),
                 e2e,
@@ -3266,7 +3268,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let public_routes = Router::new()
         .route("/health", get(health_check))
         .route("/.well-known/caution/build-inputs", get(build_inputs))
-        .route("/onboarding/verify", get(onboarding::verify_email));
+        .route("/onboarding/verify", get(onboarding::verify_email))
+        .route(
+            "/legal/active-documents",
+            get(legal::list_active_legal_documents),
+        );
 
     // Background task: reap orphaned builder instances
     let reaper_state = state.clone();

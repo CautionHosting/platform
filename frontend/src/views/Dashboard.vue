@@ -1173,6 +1173,40 @@ make build-cli
       </div>
 
       <div class="account-settings-list">
+        <!-- Account ID Section -->
+        <section class="account-settings-section">
+          <h3 class="billing-section-title">Account ID</h3>
+          <div class="account-settings-row">
+            <div class="account-settings-label">
+              <p class="account-settings-description">
+                Use this identifier when contacting support or matching CLI and billing records.
+              </p>
+            </div>
+            <div class="account-settings-content">
+              <div class="account-id-card">
+                <span v-if="loadingOrgSettings" class="account-id-value account-id-value--muted">Loading...</span>
+                <span v-else-if="currentOrgId" class="account-id-value">{{ currentOrgId }}</span>
+                <span v-else class="account-id-value account-id-value--muted">Unavailable</span>
+                <button
+                  v-if="currentOrgId"
+                  class="copy-inline-btn"
+                  @click="copyToClipboard(currentOrgId, 'accountId')"
+                  :title="copiedField === 'accountId' ? 'Copied!' : 'Copy to clipboard'"
+                  :aria-label="copiedField === 'accountId' ? 'Copied Account ID' : 'Copy Account ID to clipboard'"
+                >
+                  <svg v-if="copiedField !== 'accountId'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                  </svg>
+                  <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <!-- Email Section -->
         <section class="account-settings-section">
           <div class="account-settings-title-row">
@@ -1224,37 +1258,19 @@ make build-cli
             <div class="account-settings-content">
               <div class="legal-settings-card">
                 <a
-                  href="https://caution.co/terms.html"
+                  v-for="(status, docType) in legalStatus"
+                  :key="docType"
+                  :href="status?.url"
                   target="_blank"
                   rel="noopener noreferrer"
                   class="legal-settings-row"
-                  aria-label="Review Terms of Service"
+                  :aria-label="`Review ${status?.title}`"
                 >
                   <div class="legal-settings-copy">
-                    <div class="legal-settings-name">Terms of Service</div>
+                    <div class="legal-settings-name">{{ status?.title }}</div>
                     <div class="legal-settings-meta">
-                      <span>{{ getLegalStatusDatePrefix(legalStatus?.terms_of_service) }}</span>
-                      <span class="legal-settings-meta-time">{{ getLegalStatusDateTime(legalStatus?.terms_of_service) }}</span>
-                    </div>
-                  </div>
-                  <svg class="legal-settings-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M15 3h6v6"/>
-                    <path d="M10 14 21 3"/>
-                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-                  </svg>
-                </a>
-                <a
-                  href="https://caution.co/privacy.html"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="legal-settings-row"
-                  aria-label="Review Privacy Notice"
-                >
-                  <div class="legal-settings-copy">
-                    <div class="legal-settings-name">Privacy Notice</div>
-                    <div class="legal-settings-meta">
-                      <span>{{ getLegalStatusDatePrefix(legalStatus?.privacy_notice) }}</span>
-                      <span class="legal-settings-meta-time">{{ getLegalStatusDateTime(legalStatus?.privacy_notice) }}</span>
+                      <span>{{ getLegalStatusDatePrefix(status) }}</span>
+                      <span class="legal-settings-meta-time">{{ getLegalStatusDateTime(status) }}</span>
                     </div>
                   </div>
                   <svg class="legal-settings-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1698,6 +1714,11 @@ async function sha256Hex(message) {
   const hashBuffer = await crypto.subtle.digest("SHA-256", msgBuffer);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function sshPublicKeyIdentity(publicKey) {
+  const parts = publicKey.trim().split(/\s+/);
+  return parts.length >= 2 ? `${parts[0]} ${parts[1]}` : null;
 }
 
 function arrayBufferToBase64Url(buffer) {
@@ -2628,16 +2649,20 @@ export default {
         if (response.ok) {
           const data = await response.json();
           sshKeys.value = data.keys || [];
+          return true;
         } else if (response.status === 401) {
           window.location.href = "/login";
+          return false;
         } else {
           sshKeys.value = [];
           const data = await response.json().catch(() => ({}));
           showToast(data.error || "Failed to load SSH keys", 'error');
+          return false;
         }
       } catch (err) {
         sshKeys.value = [];
         showToast("Failed to connect to server", 'error');
+        return false;
       } finally {
         loadingKeys.value = false;
       }
@@ -3273,6 +3298,22 @@ export default {
       error.value = null;
 
       try {
+        const loadedKeys = await loadKeys();
+        if (!loadedKeys) {
+          error.value = "Failed to check existing SSH keys. Please try again.";
+          return;
+        }
+
+        const newKeyIdentity = sshPublicKeyIdentity(newPublicKey.value);
+        const duplicateKey = sshKeys.value.find((key) => {
+          return sshPublicKeyIdentity(key.public_key || "") === newKeyIdentity;
+        });
+        if (duplicateKey) {
+          const duplicateName = duplicateKey.name?.trim() || "an existing SSH key";
+          error.value = `This SSH key is already added as ${duplicateName}.`;
+          return;
+        }
+
         const body = JSON.stringify({
           public_key: newPublicKey.value.trim(),
           name: newKeyName.value.trim() || null,
@@ -7002,6 +7043,31 @@ export default {
 
 .account-settings-content {
   min-width: 0;
+}
+
+.account-id-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 100%;
+  padding: 12px 18px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+
+.account-id-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #111827;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 0.95rem;
+  line-height: 1.4;
+}
+
+.account-id-value--muted {
+  color: var(--color-text-secondary, #666);
+  font-family: inherit;
 }
 
 .sr-only {
