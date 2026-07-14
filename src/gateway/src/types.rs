@@ -272,6 +272,7 @@ pub struct QrLoginAuthenticateFinishRequest {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DbQrLoginToken {
     pub token: String,
+    pub requestee_token: Option<String>,
     pub status: String,
     pub ip_address: Option<String>,
     pub browser_ip_address: Option<String>,

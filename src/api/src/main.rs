@@ -14,11 +14,27 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use uuid::Uuid;
+
+static BILLING_URL: LazyLock<String> = LazyLock::new(|| {
+    let caution_domain = std::env::var("CAUTION_DOMAIN").unwrap_or_else(|_| "caution.dev".to_string());
+    billing_url_for_domain(&caution_domain)
+});
+
+fn billing_url_for_domain(caution_domain: &str) -> String {
+    let caution_domain = caution_domain.trim().trim_end_matches('/');
+    let caution_domain = if caution_domain.is_empty() {
+        "caution.dev"
+    } else {
+        caution_domain
+    };
+
+    format!("https://{caution_domain}/#billing")
+}
 
 mod billing;
 mod builder;
@@ -311,9 +327,37 @@ async fn health_check() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
-// Uses the same resolver as the builder so this response can never drift from what is actually deployed.
+const PLATFORM_REPO: &str = "https://codeberg.org/caution/platform.git";
+
 async fn build_inputs() -> impl IntoResponse {
-    Json(enclave_builder::build::resolve_tool_commits())
+    #[derive(serde::Serialize)]
+    struct BuildInputs {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        platform: Option<PlatformSource>,
+        enclaveos: enclave_builder::build::ToolSource,
+        bootproof: enclave_builder::build::ToolSource,
+        steve: enclave_builder::build::ToolSource,
+        locksmith: enclave_builder::build::ToolSource,
+    }
+    #[derive(serde::Serialize)]
+    struct PlatformSource {
+        commit: String,
+        repo: &'static str,
+    }
+
+    let tools = enclave_builder::build::resolve_tool_commits();
+    let platform = std::env::var("PLATFORM_GIT_SHA")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|commit| PlatformSource { commit, repo: PLATFORM_REPO });
+
+    Json(BuildInputs {
+        platform,
+        enclaveos: tools.enclaveos,
+        bootproof: tools.bootproof,
+        steve: tools.steve,
+        locksmith: tools.locksmith,
+    })
 }
 
 fn deployment_health_timeout_secs() -> u64 {
@@ -1528,17 +1572,52 @@ async fn resolve_containerfile_for_deploy(
 
 #[cfg(test)]
 mod build_inputs_tests {
+    use crate::PLATFORM_REPO;
     use super::build_inputs;
     use axum::body::to_bytes;
     use axum::response::IntoResponse;
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: This test owns PLATFORM_GIT_SHA for the duration of the call;
+            // the API test module has no other environment-mutating tests.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: Restores the process environment value captured by this guard.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn build_inputs_returns_commits_and_repos() {
+        let _platform_sha = EnvVarGuard::set("PLATFORM_GIT_SHA", "test-sha");
+
         let resp = build_inputs().await.into_response();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
 
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(json["platform"]["commit"].as_str(), Some("test-sha"));
+        assert_eq!(json["platform"]["repo"].as_str(), Some(PLATFORM_REPO));
 
         // Each tool carries its commit paired with the repo the footer builds
         // its commit URLs from.
@@ -1742,6 +1821,27 @@ mod deploy_commit_tests {
         .unwrap_err();
 
         assert!(err.contains("commit_sha does not match refs/heads/feature"));
+    }
+}
+
+#[cfg(test)]
+mod billing_url_tests {
+    use super::billing_url_for_domain;
+
+    #[test]
+    fn billing_url_points_to_dashboard_billing_hash() {
+        assert_eq!(
+            billing_url_for_domain("caution.dev"),
+            "https://caution.dev/#billing"
+        );
+    }
+
+    #[test]
+    fn billing_url_uses_configured_caution_domain() {
+        assert_eq!(
+            billing_url_for_domain("staging.caution.example/"),
+            "https://staging.caution.example/#billing"
+        );
     }
 }
 
@@ -1978,8 +2078,9 @@ async fn deploy_logic(
                 StatusCode::PAYMENT_REQUIRED,
                 format!(
                     "Minimum $25.00 in credits required to deploy (current balance: ${:.2}). \
-                         Purchase credits at https://caution.dev/settings/billing",
-                    balance as f64 / 100.0
+                         Purchase credits at {}",
+                    balance as f64 / 100.0,
+                    BILLING_URL.as_str()
                 ),
             ));
         }
@@ -2001,9 +2102,11 @@ async fn deploy_logic(
         if credit_suspended.is_some() {
             return Err((
                 StatusCode::PAYMENT_REQUIRED,
-                "Your organization is suspended due to credit exhaustion. \
-                 Add credits at https://caution.dev/settings/billing to resume."
-                    .to_string(),
+                format!(
+                    "Your organization is suspended due to credit exhaustion. \
+                     Add credits at {} to resume.",
+                    BILLING_URL.as_str()
+                ),
             ));
         }
 
@@ -2045,13 +2148,21 @@ async fn deploy_logic(
     // Atomically transition to Pending — rejects concurrent deploys via the check above
     if was_destroyed {
         tracing::info!("Reactivating previously destroyed resource {}", resource_id);
-        sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1 WHERE id = $2 AND organization_id = $3")
+        let updated = sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1 WHERE id = $2 AND organization_id = $3 AND state != $1")
             .bind(types::ResourceState::Pending)
             .bind(resource_id)
             .bind(req.org_id)
             .execute(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to reactivate resource: {}", e)))?;
+
+        if updated.rows_affected() == 0 {
+            return Err((
+                StatusCode::CONFLICT,
+                "A deployment is already in progress for this app. Please wait for it to complete."
+                    .to_string(),
+            ));
+        }
     } else {
         // Mark as Pending so concurrent pushes are rejected
         let updated = sqlx::query(
@@ -2150,7 +2261,7 @@ async fn deploy_logic(
         .map(|h| h.port);
     let domain = ec_network
         .and_then(|n| n.http.as_ref())
-        .map(|h| h.domain.clone());
+        .and_then(|h| h.domain.clone());
     let e2e_config = ec_network
         .and_then(|n| n.http.as_ref())
         .and_then(|h| h.e2e_encryption.as_ref());
@@ -2165,9 +2276,6 @@ async fn deploy_logic(
     let app_sources = ec_build
         .map(|b| b.app_sources.clone())
         .unwrap_or_default();
-    let binary_path = ec_build
-        .and_then(|b| b.binary.clone());
-
     let egress = ec_network.map(|n| n.egress_enabled()).unwrap_or(false);
 
     let ingress_ports: Vec<u16> = ec_network
@@ -2374,7 +2482,6 @@ async fn deploy_logic(
                 procfile_content: config_content,
                 run_command: run_command.clone(),
                 containerfile: containerfile.clone(),
-                binary_path,
                 ports: ingress_ports.clone(),
                 http_port: ec_network
                     .and_then(|n| n.http.as_ref())
@@ -3023,8 +3130,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/billing/credits/purchase", post(billing::purchase_credits))
         .route("/billing/credits/ledger", get(billing::get_credit_ledger))
         .route("/billing/credits/redeem", post(billing::redeem_credit_code))
-        .route("/billing/auto-topup", get(billing::get_auto_topup))
-        .route("/billing/auto-topup", put(billing::put_auto_topup))
         .route(
             "/billing/subscription/tiers",
             get(subscriptions::get_subscription_tiers),
@@ -3093,7 +3198,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let public_routes = Router::new()
         .route("/health", get(health_check))
         .route("/.well-known/caution/build-inputs", get(build_inputs))
-        .route("/onboarding/verify", get(onboarding::verify_email));
+        .route("/onboarding/verify", get(onboarding::verify_email))
+        .route(
+            "/legal/active-documents",
+            get(legal::list_active_legal_documents),
+        );
 
     // Background task: reap orphaned builder instances
     let reaper_state = state.clone();

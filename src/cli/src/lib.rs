@@ -699,6 +699,11 @@ enum Commands {
     },
     #[command(about = "Logout and clear local session")]
     Logout,
+    #[command(about = "Show account information")]
+    Account {
+        #[command(subcommand)]
+        command: AccountCommands,
+    },
     #[command(about = "Initialize a new deployment in the current directory")]
     Init {
         #[arg(
@@ -813,6 +818,12 @@ enum Commands {
         #[command(subcommand)]
         command: SecretCommands,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum AccountCommands {
+    #[command(about = "Print the current account ID")]
+    Id,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1511,6 +1522,89 @@ fn write_keyring(path: &Path, contents: &[u8], force: bool, sensitive: bool) -> 
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum BuildLocalError {
+    #[error("failed to read deployment config")]
+    ReadConfig(#[source] anyhow::Error),
+
+    #[error("failed to build Docker image")]
+    BuildDockerImage(#[source] anyhow::Error),
+
+    #[error("failed to resolve cache directory")]
+    CacheDir(#[source] anyhow::Error),
+
+    #[error("failed to initialize enclave builder")]
+    InitBuilder(#[source] anyhow::Error),
+
+    #[error("failed to parse run command")]
+    ParseRunCommand(#[source] caution_config::FromStrError),
+
+    #[error("failed to build enclave")]
+    BuildEnclave(#[source] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    #[error("dependency check failed")]
+    DependencyCheck(#[source] anyhow::Error),
+
+    #[error("gateway connectivity check failed")]
+    GatewayConnectivity(#[source] anyhow::Error),
+
+    #[error("failed to initialize API client")]
+    ApiClientInit(#[source] anyhow::Error),
+
+    #[error("{0}")]
+    ArgValidation(&'static str),
+
+    #[error("command execution failed")]
+    CommandDispatch(#[source] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ReadConfigError {
+    #[error("failed to read caution.hcl")]
+    ReadHcl(#[source] std::io::Error),
+
+    #[error("invalid caution.hcl: {0}")]
+    ParseHcl(#[source] caution_config::FromStrError),
+
+    #[error("failed to read Procfile")]
+    ReadProcfile(#[source] std::io::Error),
+
+    #[error("invalid Procfile: {0}")]
+    ParseProcfile(#[source] caution_config::FromProcfileError),
+
+    #[error("no configuration file found; run `caution init` to generate a caution.hcl template")]
+    ConfigNotFound,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ReadConfigFromDirError {
+    #[error("failed to read {path}")]
+    ReadHcl {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("invalid caution.hcl: {0}")]
+    ParseHcl(#[source] caution_config::FromStrError),
+
+    #[error("failed to read {path}")]
+    ReadProcfile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("invalid Procfile: {0}")]
+    ParseProcfile(#[source] caution_config::FromProcfileError),
+
+    #[error("no configuration file found in {0}; create a caution.hcl or Procfile file")]
+    ConfigNotFound(PathBuf),
+}
+
 struct ApiClient {
     base_url: String,
     client: reqwest::Client,
@@ -1559,7 +1653,14 @@ impl ApiClient {
 
         Ok(Self {
             base_url: base_url.to_string(),
-            client: reqwest::Client::new(),
+            // A connect timeout bounds the TCP+TLS handshake for every request so
+            // an unresponsive host (e.g. an enclave IP that accepts the connection
+            // but never replies) can't hang the CLI forever. It does not cap body
+            // transfer, so large downloads are unaffected.
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             config_path,
             deployment_path,
             verbose,
@@ -1704,6 +1805,17 @@ impl ApiClient {
         }
     }
 
+    fn require_existing_authenticated_config(&self) -> Result<Config> {
+        let config = self.load_config()?;
+        if self.is_session_expired(&config) {
+            bail!("Session expired. Run 'login' command first");
+        }
+        if !self.is_same_server(&config) {
+            bail!("Session is for a different server. Run 'login' command first");
+        }
+        Ok(config)
+    }
+
     fn is_same_server(&self, config: &Config) -> bool {
         config
             .server_url
@@ -1733,57 +1845,59 @@ impl ApiClient {
         Ok(deployment_info)
     }
 
-    fn read_config(&self) -> Result<caution_config::ConfigurationFile> {
+    fn read_config(&self) -> Result<caution_config::ConfigurationFile, ReadConfigError> {
         use std::path::Path;
 
         let hcl_path = Path::new("caution.hcl");
         if hcl_path.exists() {
             let content = std::fs::read_to_string(hcl_path)
-                .context("Failed to read caution.hcl")?;
+                .map_err(ReadConfigError::ReadHcl)?;
             let config = caution_config::ConfigurationFile::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Invalid caution.hcl: {}", e))?;
+                .map_err(ReadConfigError::ParseHcl)?;
             return Ok(config);
         }
 
         let procfile_path = Path::new("Procfile");
         if procfile_path.exists() {
             let content = std::fs::read_to_string(procfile_path)
-                .context("Failed to read Procfile")?;
+                .map_err(ReadConfigError::ReadProcfile)?;
             let config = caution_config::ConfigurationFile::from_procfile(&content)
-                .map_err(|e| anyhow::anyhow!("Invalid Procfile: {}", e))?;
+                .map_err(ReadConfigError::ParseProcfile)?;
             return Ok(config);
         }
 
-        eprintln!("No configuration file found.");
-        eprintln!();
-        eprintln!("  Run `caution init` to generate a caution.hcl template.");
-        std::process::exit(1);
+        Err(ReadConfigError::ConfigNotFound)
     }
 
     fn read_config_from_dir(
         &self,
         dir: &Path,
-    ) -> Result<caution_config::ConfigurationFile> {
+    ) -> Result<caution_config::ConfigurationFile, ReadConfigFromDirError> {
         let hcl_path = dir.join("caution.hcl");
         if hcl_path.exists() {
             let content = std::fs::read_to_string(&hcl_path)
-                .with_context(|| format!("Failed to read {}", hcl_path.display()))?;
-            return caution_config::ConfigurationFile::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Invalid caution.hcl: {}", e));
+                .map_err(|source| ReadConfigFromDirError::ReadHcl {
+                    path: hcl_path.clone(),
+                    source,
+                })?;
+            let config = caution_config::ConfigurationFile::from_str(&content)
+                .map_err(ReadConfigFromDirError::ParseHcl)?;
+            return Ok(config);
         }
 
         let procfile_path = dir.join("Procfile");
         if procfile_path.exists() {
             let content = std::fs::read_to_string(&procfile_path)
-                .with_context(|| format!("Failed to read {}", procfile_path.display()))?;
-            return caution_config::ConfigurationFile::from_procfile(&content)
-                .map_err(|e| anyhow::anyhow!("Invalid Procfile: {}", e));
+                .map_err(|source| ReadConfigFromDirError::ReadProcfile {
+                    path: procfile_path.clone(),
+                    source,
+                })?;
+            let config = caution_config::ConfigurationFile::from_procfile(&content)
+                .map_err(ReadConfigFromDirError::ParseProcfile)?;
+            return Ok(config);
         }
 
-        bail!(
-            "No configuration file found in {}. Create a caution.hcl or Procfile file.",
-            dir.display()
-        )
+        Err(ReadConfigFromDirError::ConfigNotFound(dir.to_path_buf()))
     }
 
     fn read_caution_git_remote(&self) -> Option<String> {
@@ -1959,6 +2073,14 @@ impl ApiClient {
             .decode(key_data)
             .context("Invalid SSH public key")?;
         Ok(general_purpose::STANDARD_NO_PAD.encode(Sha256::digest(&decoded)))
+    }
+
+    fn ssh_key_identity(public_key: &str) -> Option<String> {
+        let parts: Vec<&str> = public_key.trim().split_whitespace().collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        Some(format!("{} {}", parts[0], parts[1]))
     }
 
     fn canonical_ssh_request(method: &str, path: &str, timestamp: u64, body: &[u8]) -> String {
@@ -2261,13 +2383,21 @@ enclave "default" {{
     }
 
     fn create_config_file_if_needed(&self, byoc: bool) -> Result<()> {
-        use std::fs;
         use std::path::Path;
 
-        let config_path = Path::new("caution.hcl");
+        self.create_config_file_in_dir_if_needed(Path::new("."), byoc)
+    }
+
+    fn create_config_file_in_dir_if_needed(&self, dir: &Path, byoc: bool) -> Result<()> {
+        use std::fs;
+
+        let config_path = dir.join("caution.hcl");
 
         if config_path.exists() {
-            log_verbose(self.verbose, "caution.hcl already exists, skipping creation");
+            log_verbose(
+                self.verbose,
+                "caution.hcl already exists, skipping creation",
+            );
             return Ok(());
         }
 
@@ -2277,7 +2407,7 @@ enclave "default" {{
 
         let hcl_content = Self::generate_config_hcl(&source_url, byoc);
 
-        fs::write(config_path, hcl_content).context("Failed to create caution.hcl")?;
+        fs::write(&config_path, hcl_content).context("Failed to create caution.hcl")?;
 
         println!("\nCreated caution.hcl in current directory");
         println!("Edit the unit \"default\" command to match your application");
@@ -2348,6 +2478,14 @@ enclave "default" {{
             && (git_url.ends_with(".tar.gz") || git_url.ends_with(".tar"))
         {
             return Ok(vec![git_url.to_string()]);
+        }
+
+        // An explicit ssh:// URL signals the caller expects an authenticated
+        // clone. Guessing at anonymous HTTP(S) archive endpoints for it just
+        // wastes round trips on hosts that require auth, so skip straight to
+        // the git-clone fallback instead.
+        if git_url.starts_with("ssh://") {
+            return Ok(vec![]);
         }
 
         let (host, path) = if git_url.starts_with("git@") {
@@ -2716,6 +2854,13 @@ enclave "default" {{
         }
 
         Ok(orgs[0].id.clone())
+    }
+
+    async fn print_account_id(&self) -> Result<()> {
+        let config = self.require_existing_authenticated_config()?;
+        let account_id = self.primary_organization_id(config.session_id()).await?;
+        println!("{}", account_id);
+        Ok(())
     }
 
     async fn check_org_security_settings(&self, session_id: &str) -> Result<OrgSettings> {
@@ -4066,6 +4211,8 @@ enclave "default" {{
     async fn init_byoc(&self, config_path: &PathBuf) -> Result<()> {
         println!("Initializing bring-your-own-compute deployment...");
 
+        let auth_config = self.require_existing_authenticated_config()?;
+
         log_verbose(
             self.verbose,
             &format!("Reading config from {:?}", config_path),
@@ -4153,8 +4300,6 @@ enclave "default" {{
             log_verbose(self.verbose, "Config file validated");
             serde_json::to_string(&config_json)?
         };
-
-        let auth_config = self.ensure_authenticated().await?;
 
         self.create_config_file_if_needed(true)?;
 
@@ -4616,8 +4761,9 @@ enclave "default" {{
             serde_json::to_string_pretty(&byoc_state)?,
         )?;
 
-        // Also save deployment.json in current directory
+        // Also save deployment.json and caution.hcl in current directory
         self.save_deployment(resource_id)?;
+        self.create_config_file_if_needed(true)?;
 
         // Set up git remote
         if !git_url.is_empty() {
@@ -4852,7 +4998,7 @@ enclave "default" {{
         }
     }
 
-    async fn build_local(&self, no_cache: bool) -> Result<()> {
+    async fn build_local(&self, no_cache: bool) -> Result<(), BuildLocalError> {
         println!("Building EIF locally for inspection...\n");
 
         let app_commit = Command::new("git")
@@ -4881,7 +5027,7 @@ enclave "default" {{
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        let cfg = self.read_config()?;
+        let cfg = self.read_config().map_err(|e| BuildLocalError::ReadConfig(e.into()))?;
         let default_enclave = cfg.enclave.as_ref().and_then(|e| e.get("default"));
 
         let config_no_cache = default_enclave
@@ -4892,10 +5038,11 @@ enclave "default" {{
         let no_cache = no_cache || config_no_cache;
 
         let mut loader = Loader::new("Building application image", LoaderStyle::Processing);
-        let image_ref = self.build_local_docker_image(no_cache).await?;
+        let image_ref = self.build_local_docker_image(no_cache).await.map_err(BuildLocalError::BuildDockerImage)?;
         loader.stop();
         println!("✓ Application image built: {}\n", image_ref);
 
+        let cache_dir = self.get_cache_dir().map_err(BuildLocalError::CacheDir)?;
         let builder = enclave_builder::EnclaveBuilder::new_with_cache(
             enclave_builder::enclave_source_url(&enclave_builder::build::resolve_enclaveos_commit()),
             "unused",
@@ -4904,8 +5051,9 @@ enclave "default" {{
             &commit_sha,
             enclave_builder::CacheType::Build,
             no_cache,
-            &self.get_cache_dir()?,
-        )?;
+            &cache_dir,
+        )
+        .map_err(BuildLocalError::InitBuilder)?;
 
         let work_dir = builder.work_dir.clone();
 
@@ -4913,15 +5061,12 @@ enclave "default" {{
             reference: image_ref.clone(),
         };
 
-        let binary_path = default_enclave
-            .and_then(|e| e.build.as_ref())
-            .and_then(|b| b.binary.clone());
-
         let run_command = default_enclave
             .and_then(|e| e.unit.as_ref())
             .and_then(|u| u.values().next())
             .map(|u| u.run_command_string())
-            .transpose()?;
+            .transpose()
+            .map_err(BuildLocalError::ParseRunCommand)?;
 
         let app_source_urls_opt = default_enclave
             .and_then(|e| e.build.as_ref())
@@ -4968,51 +5113,26 @@ enclave "default" {{
             .map(|origins| origins.join(","));
 
         let mut loader = Loader::new("Building enclave image", LoaderStyle::Processing);
-        let deployment = if let Some(ref bin_path) = binary_path {
-            log_verbose(
-                self.verbose,
-                &format!("Using build_enclave_auto with binary: {}", bin_path),
-            );
-            builder
-                .build_enclave_auto(
-                    &user_image,
-                    bin_path,
-                    run_command,
-                    app_source_urls_opt,
-                    app_branch.clone(),
-                    app_commit.clone(),
-                    None,
-                    None,
-                    &ports,
-                    http_port,
-                    e2e,
-                    locksmith,
-                    e2e_cors_origins,
-                    egress,
-                )
-                .await
-        } else {
-            log_verbose(self.verbose, "Using build_enclave (no binary specified)");
-            builder
-                .build_enclave(
-                    &user_image,
-                    None,
-                    run_command,
-                    app_source_urls_opt,
-                    app_branch.clone(),
-                    app_commit.clone(),
-                    None,
-                    None,
-                    &ports,
-                    http_port,
-                    e2e,
-                    locksmith,
-                    e2e_cors_origins,
-                    egress,
-                )
-                .await
-        }
-        .context("Failed to build enclave")?;
+        log_verbose(self.verbose, "Using build_enclave");
+        let deployment = builder
+            .build_enclave(
+                &user_image,
+                None,
+                run_command,
+                app_source_urls_opt,
+                app_branch.clone(),
+                app_commit.clone(),
+                None,
+                None,
+                &ports,
+                http_port,
+                e2e,
+                locksmith,
+                e2e_cors_origins,
+                egress,
+            )
+            .await
+        .map_err(BuildLocalError::BuildEnclave)?;
         loader.stop();
 
         println!("✓ Enclave built successfully!\n");
@@ -5159,6 +5279,18 @@ enclave "default" {{
             return Ok(cached.pcrs);
         }
 
+        // Preflight the enclave/framework source archives before the expensive
+        // build. They are deterministic URLs derived from the manifest; a 404'd
+        // commit otherwise only surfaces after the Docker image build and
+        // user-filesystem extraction (minutes in). Only meaningful when
+        // reproducing from a manifest.
+        if external_manifest.is_some() {
+            self.preflight_archive_url("Enclave source", &enclave_source)
+                .await?;
+            self.preflight_archive_url("Framework source", &framework_source)
+                .await?;
+        }
+
         log_verbose(self.verbose, "Building Docker image locally...");
 
         let mut loader = Loader::new("Reproducing enclave image", LoaderStyle::Processing);
@@ -5190,6 +5322,15 @@ enclave "default" {{
                     app_source.branch.clone(),
                 )
             });
+
+            // Cheap network preflight before the expensive reproduce. A missing
+            // branch/commit otherwise surfaces only after minutes of archive
+            // downloads and clone/fetch fallbacks (each bounded by a 5-minute
+            // low-speed timeout); `git ls-remote` transfers no objects and fails
+            // in seconds.
+            if let Some((ref url, ref commit, ref branch)) = git_fallback {
+                self.preflight_app_source_ref(url, commit, branch.as_deref())?;
+            }
 
             let app_dir = self
                 .download_and_extract_app_source_with_git_fallback(
@@ -5249,9 +5390,7 @@ enclave "default" {{
                 let cfg = self.read_config_from_dir(config_dir)?;
                 let default_enclave = cfg.enclave.as_ref().and_then(|e| e.get("default"));
 
-                let binary = default_enclave
-                    .and_then(|e| e.build.as_ref())
-                    .and_then(|b| b.binary.clone());
+                let binary = None;
                 let run_cmd = default_enclave
                     .and_then(|e| e.unit.as_ref())
                     .and_then(|u| u.values().next())
@@ -5291,7 +5430,6 @@ enclave "default" {{
                         }
                     });
 
-                log_verbose(self.verbose, &format!("Binary from config: {:?}", binary));
                 log_verbose(
                     self.verbose,
                     &format!("Run command from config: {:?}", run_cmd),
@@ -5553,13 +5691,17 @@ enclave "default" {{
         );
         println!("Requesting attestation...");
 
+        // Bound the challenge/response: a reachable-but-unresponsive enclave must
+        // not hang verify indefinitely. The connect phase is already bounded by
+        // the client's connect_timeout; this caps the whole request.
         let response = self
             .client
             .post(&attestation_url)
+            .timeout(Duration::from_secs(60))
             .json(&serde_json::json!({"nonce": general_purpose::STANDARD.encode(&nonce)}))
             .send()
             .await
-            .context("Failed to fetch attestation document")?;
+            .context("Failed to fetch attestation document (timed out or unreachable)")?;
 
         if !response.status().is_success() {
             bail!("Failed to fetch attestation: {}", response.status());
@@ -5945,7 +6087,7 @@ enclave "default" {{
         }
 
         let temp_dir = tempfile::TempDir::new().context("Failed to create temp source dir")?;
-        Self::extract_tarball_bytes_to_dir(&archive_output.stdout, temp_dir.path(), 0)?;
+        Self::extract_tarball_bytes_to_dir(&archive_output.stdout, temp_dir.path())?;
 
         log_verbose(
             self.verbose,
@@ -5971,7 +6113,7 @@ enclave "default" {{
         let archive_hash = hex::encode(Sha256::digest(&archive_bytes));
         let temp_dir = tempfile::TempDir::new().context("Failed to create temp source dir")?;
 
-        Self::extract_tarball_bytes_to_dir(&archive_bytes, temp_dir.path(), 0)?;
+        Self::extract_tarball_bytes_to_dir(&archive_bytes, temp_dir.path())?;
 
         log_verbose(
             self.verbose,
@@ -5993,20 +6135,17 @@ enclave "default" {{
     fn extract_tarball_bytes_to_dir(
         archive_bytes: &[u8],
         extract_dir: &Path,
-        strip_components: usize,
     ) -> Result<()> {
         if archive_bytes.starts_with(&[0x1f, 0x8b]) {
             let decoder = flate2::read::GzDecoder::new(archive_bytes);
             Self::extract_tar_archive_to_dir(
                 tar::Archive::new(decoder),
                 extract_dir,
-                strip_components,
             )
         } else {
             Self::extract_tar_archive_to_dir(
                 tar::Archive::new(archive_bytes),
                 extract_dir,
-                strip_components,
             )
         }
     }
@@ -6014,56 +6153,15 @@ enclave "default" {{
     fn extract_tar_archive_to_dir<R: std::io::Read>(
         mut archive: tar::Archive<R>,
         extract_dir: &Path,
-        strip_components: usize,
     ) -> Result<()> {
-        std::fs::create_dir_all(extract_dir)
-            .with_context(|| format!("Failed to create extract dir: {}", extract_dir.display()))?;
-        let canonical_extract = extract_dir.canonicalize().with_context(|| {
-            format!(
-                "Failed to canonicalize extract dir: {}",
-                extract_dir.display()
-            )
-        })?;
-
         for entry in archive
             .entries()
             .context("Failed to read archive entries")?
         {
             let mut entry = entry.context("Failed to read archive entry")?;
-            let path = entry.path().context("Failed to get entry path")?;
-            if path.is_absolute() {
-                bail!("Archive path traversal detected: {}", path.display());
-            }
-
-            let components: Vec<_> = path.components().collect();
-            if components.len() <= strip_components {
-                continue;
-            }
-
-            let stripped_path: PathBuf = components[strip_components..].iter().collect();
-            if stripped_path.as_os_str().is_empty() {
-                continue;
-            }
-            let dest_path = canonical_extract.join(&stripped_path);
-
-            if let Some(parent) = dest_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-
-                let canonical_parent = parent
-                    .canonicalize()
-                    .with_context(|| format!("Failed to canonicalize: {}", parent.display()))?;
-                if !canonical_parent.starts_with(&canonical_extract) {
-                    bail!(
-                        "Archive path traversal detected: {}",
-                        stripped_path.display()
-                    );
-                }
-            }
-
             entry
-                .unpack(&dest_path)
-                .with_context(|| format!("Failed to extract: {}", stripped_path.display()))?;
+                .unpack_in(extract_dir)
+                .with_context(|| format!("Failed to extract entry"))?;
         }
 
         Ok(())
@@ -6240,7 +6338,7 @@ enclave "default" {{
             &format!("Downloaded {} bytes, extracting...", archive_bytes.len()),
         );
 
-        Self::extract_tarball_bytes_to_dir(&archive_bytes, &extract_dir, 1)?;
+        Self::extract_tarball_bytes_to_dir(&archive_bytes, &extract_dir)?;
 
         log_verbose(
             self.verbose,
@@ -6313,8 +6411,215 @@ enclave "default" {{
         // output, so git gets empty credentials and fails fast.
         .env("GIT_ASKPASS", "true")
         // Detach stdin so git can't wait on the parent's TTY either.
-        .stdin(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null())
+        // Prevent SSH from prompting for host-key confirmation or credentials
+        // via /dev/tty, which hangs non-interactive callers. BatchMode=yes
+        // makes SSH fail immediately instead. accept-new accepts unknown hosts
+        // on first contact (no TOFU hang in fresh CI) while still rejecting
+        // changed keys (MITM protection). Preserve any caller-set
+        // GIT_SSH_COMMAND (e.g. a custom -i key) by appending rather than
+        // replacing.
+        .env(
+            "GIT_SSH_COMMAND",
+            format!(
+                "{} -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
+                std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| "ssh".to_string())
+            ),
+        );
         cmd
+    }
+
+    /// Cheap reachability check for an enclave/framework source archive. A `HEAD`
+    /// transfers no body, so a commit the remote no longer serves (404/410) fails
+    /// in seconds instead of after the Docker image build and user-filesystem
+    /// extraction. Only a definitive "not found" blocks; any other status, an
+    /// unsupported HEAD (405), or a transport error is treated as inconclusive and
+    /// left for the real download to resolve. Non-HTTP sources (git URLs, local
+    /// paths) are skipped.
+    async fn preflight_archive_url(&self, label: &str, url: &str) -> Result<()> {
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Ok(());
+        }
+
+        println!("\nChecking {} is reachable on remote...", label.to_lowercase());
+        let response = match self
+            .client
+            .head(url)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                log_verbose(
+                    self.verbose,
+                    &format!("{} preflight inconclusive ({})", label, e),
+                );
+                return Ok(());
+            }
+        };
+
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
+            bail!(
+                "{label} archive is not available on the remote (HTTP {code}):\n  \
+                 {url}\n\n\
+                 The deployed enclave references a {lower} commit that the remote no \
+                 longer serves — it may have been garbage-collected, or the manifest \
+                 is stale. This build cannot be reproduced from the remote manifest.",
+                label = label,
+                lower = label.to_lowercase(),
+                code = status.as_u16(),
+                url = url,
+            );
+        }
+
+        log_verbose(
+            self.verbose,
+            &format!("{} reachable (HTTP {})", label, status.as_u16()),
+        );
+        println!("  {} reachable ✓", label);
+        Ok(())
+    }
+
+    /// Cheap network preflight: confirm the app source branch is present on the
+    /// remote before kicking off an expensive reproduce build.
+    ///
+    /// `git ls-remote` lists refs without transferring any objects, so a branch
+    /// that was never pushed (or was renamed/deleted) fails here in seconds
+    /// instead of after minutes of archive downloads and clone/fetch fallbacks.
+    ///
+    /// Scope and limits (intentionally conservative — never blocks a valid build):
+    /// - We run `ls-remote` with credentials disabled, so a **private** repo
+    ///   auth-fails and is treated as inconclusive: the fast-fail only fires for
+    ///   public (or SSH-agent-reachable) remotes.
+    /// - A missing/unreachable repo (`ls-remote` non-zero) is also inconclusive,
+    ///   not a hard fail — only an *existing, reachable* remote that lacks the
+    ///   branch fast-fails.
+    /// - A commit force-pushed off an existing branch is **not** caught here
+    ///   (we only check branch presence, not commit reachability); the real fetch
+    ///   surfaces that.
+    fn preflight_app_source_ref(
+        &self,
+        git_url: &str,
+        commit: &str,
+        branch: Option<&str>,
+    ) -> Result<()> {
+        // Archive tarball URLs aren't ls-remote-able and 404 quickly on their own.
+        if git_url.contains("/archive/")
+            && (git_url.ends_with(".tar.gz") || git_url.ends_with(".tar"))
+        {
+            return Ok(());
+        }
+
+        println!("\nChecking app source is reachable on remote...");
+        let output = match Self::git_command(&["ls-remote", git_url]).output() {
+            Ok(output) => output,
+            Err(e) => {
+                log_verbose(
+                    self.verbose,
+                    &format!("App source preflight skipped (ls-remote could not run): {}", e),
+                );
+                return Ok(());
+            }
+        };
+
+        if !output.status.success() {
+            // Likely auth/network rather than a missing ref; don't hard-block.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log_verbose(
+                self.verbose,
+                &format!(
+                    "App source preflight inconclusive (ls-remote failed): {}",
+                    stderr.trim()
+                ),
+            );
+            return Ok(());
+        }
+
+        let listing = String::from_utf8_lossy(&output.stdout);
+        match Self::classify_app_source_refs(&listing, commit, branch) {
+            Ok(true) => {
+                println!("  App source reachable ✓");
+            }
+            Ok(false) => {
+                // No branch hint and the commit is not a current ref tip. It may
+                // still live in history; only warn and let the fetch resolve it.
+                log_verbose(
+                    self.verbose,
+                    &format!(
+                        "App source commit {} is not a current ref tip; relying on fetch to resolve",
+                        commit
+                    ),
+                );
+            }
+            Err(missing_branch) => {
+                bail!(
+                    "App source branch '{branch}' is not present on the remote:\n  \
+                     {url}\n\n\
+                     The deployed enclave was built from commit {commit} on branch \
+                     '{branch}', but that branch is not on the remote — it was never \
+                     pushed, or was renamed/deleted. This build cannot be reproduced \
+                     from the remote manifest.\n\n\
+                     Fixes:\n  \
+                     - Push the branch:        git push <remote> {branch}\n  \
+                     - Verify a local checkout: caution verify --from-local\n  \
+                     - Verify a source tarball: caution verify --from-tarball <path>",
+                    branch = missing_branch,
+                    url = git_url,
+                    commit = commit,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Decide whether a `git ls-remote` listing confirms the app source is
+    /// reachable. Pure logic split out from [`Self::preflight_app_source_ref`]
+    /// so it can be unit-tested without the network.
+    ///
+    /// - `Ok(true)`  — reachable confirmed (branch present, or commit is a ref tip)
+    /// - `Ok(false)` — inconclusive (no branch hint and commit isn't a tip; proceed)
+    /// - `Err(branch)` — the named branch is definitively absent from the remote
+    fn classify_app_source_refs(
+        listing: &str,
+        commit: &str,
+        branch: Option<&str>,
+    ) -> std::result::Result<bool, String> {
+        // Require a meaningful abbreviation before prefix-matching a commit against
+        // a ref tip. Without this, a blank ls-remote field (empty `sha`) or a
+        // 1-char `commit` would falsely match an unrelated ref. Git's default
+        // minimum abbreviation is 7; deployed manifests carry full 40-char SHAs.
+        const MIN_SHA_PREFIX: usize = 7;
+        let commit_matchable = commit.len() >= MIN_SHA_PREFIX;
+
+        let branch_ref = branch.map(|b| format!("refs/heads/{}", b));
+        let mut branch_present = false;
+        let mut commit_is_ref_tip = false;
+        for line in listing.lines() {
+            let mut parts = line.split('\t');
+            let sha = parts.next().unwrap_or("");
+            let r = parts.next().unwrap_or("");
+            if commit_matchable
+                && sha.len() >= MIN_SHA_PREFIX
+                && (sha.starts_with(commit) || commit.starts_with(sha))
+            {
+                commit_is_ref_tip = true;
+            }
+            if let Some(ref br) = branch_ref {
+                if r == br {
+                    branch_present = true;
+                }
+            }
+        }
+
+        match branch {
+            Some(branch_name) if !branch_present => Err(branch_name.to_string()),
+            Some(_) => Ok(true),
+            None if commit_is_ref_tip => Ok(true),
+            None => Ok(false),
+        }
     }
 
     async fn download_and_extract_app_source_with_git_fallback(
@@ -6526,6 +6831,33 @@ enclave "default" {{
         bail!("No source URLs available and no git fallback configured")
     }
 
+    async fn fetch_existing_ssh_keys(&self, session_id: &str) -> Result<Vec<(String, String)>> {
+        let response = self
+            .client
+            .get(format!("{}/ssh-keys", self.base_url))
+            .header("X-Session-ID", session_id)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            bail!("Failed to fetch existing SSH keys: {}", response.status());
+        }
+
+        let response_data: serde_json::Value = response.json().await?;
+        let keys = response_data["keys"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
+
+        Ok(keys
+            .iter()
+            .filter_map(|key| {
+                let name = key["name"].as_str()?.to_string();
+                let public_key = key["public_key"].as_str()?.to_string();
+                Some((name, public_key))
+            })
+            .collect())
+    }
+
     async fn add_ssh_key(
         &self,
         key_file: Option<PathBuf>,
@@ -6534,6 +6866,9 @@ enclave "default" {{
         name: Option<String>,
     ) -> Result<()> {
         let config = self.ensure_authenticated().await?;
+
+        // Fetch existing keys to check for duplicates
+        let existing_keys = self.fetch_existing_ssh_keys(&config.session_id).await?;
 
         if from_agent {
             let keys = self.get_ssh_agent_keys();
@@ -6573,6 +6908,20 @@ enclave "default" {{
             let fingerprint = ssh_fingerprint(k);
             let key_name = name.clone().unwrap_or(comment.clone());
 
+            // Check for duplicate before adding
+            if let Some(new_identity) = Self::ssh_key_identity(k) {
+                for (existing_name, existing_key) in &existing_keys {
+                    if let Some(existing_identity) = Self::ssh_key_identity(existing_key) {
+                        if new_identity == existing_identity {
+                            bail!(
+                                "This SSH key is already added as '{}'.",
+                                existing_name
+                            );
+                        }
+                    }
+                }
+            }
+
             self.add_single_key(&config.session_id, &key_name, k)
                 .await?;
             println!("Added SSH key: [{}] [{}]", key_name, fingerprint);
@@ -6582,6 +6931,21 @@ enclave "default" {{
                 bail!("Invalid SSH key format");
             }
             let key_name = name.unwrap_or_else(|| "key".to_string());
+
+            // Check for duplicate before adding
+            if let Some(new_identity) = Self::ssh_key_identity(key_content) {
+                for (existing_name, existing_key) in &existing_keys {
+                    if let Some(existing_identity) = Self::ssh_key_identity(existing_key) {
+                        if new_identity == existing_identity {
+                            bail!(
+                                "This SSH key is already added as '{}'.",
+                                existing_name
+                            );
+                        }
+                    }
+                }
+            }
+
             self.add_single_key(&config.session_id, &key_name, key_content)
                 .await?;
             println!("Added: {}", key_name);
@@ -6602,6 +6966,20 @@ enclave "default" {{
                     .unwrap_or("key")
                     .to_string()
             });
+
+            // Check for duplicate before adding
+            if let Some(new_identity) = Self::ssh_key_identity(&key_content) {
+                for (existing_name, existing_key) in &existing_keys {
+                    if let Some(existing_identity) = Self::ssh_key_identity(existing_key) {
+                        if new_identity == existing_identity {
+                            bail!(
+                                "This SSH key is already added as '{}'.",
+                                existing_name
+                            );
+                        }
+                    }
+                }
+            }
 
             self.add_single_key(&config.session_id, &key_name, &key_content)
                 .await?;
@@ -7813,7 +8191,7 @@ struct AssertionResult {
     response_json: Vec<u8>,
 }
 
-pub async fn run() -> Result<()> {
+pub async fn run() -> Result<(), RunError> {
     let cli = Cli::parse();
 
     log_verbose(cli.verbose, "API CLI v0.1.0");
@@ -7822,14 +8200,14 @@ pub async fn run() -> Result<()> {
 
     if let Err(e) = check_dependencies(cli.verbose) {
         eprintln!("Dependency check failed: {}", e);
-        return Err(e);
+        return Err(RunError::DependencyCheck(e));
     }
 
     match &cli.command {
         Commands::Register { .. } | Commands::Login { .. } => {
             if let Err(e) = check_gateway_connectivity(&cli.url, cli.verbose).await {
                 eprintln!("Pre-flight check failed");
-                return Err(e);
+                return Err(RunError::GatewayConnectivity(e));
             }
         }
         _ => {}
@@ -7837,23 +8215,31 @@ pub async fn run() -> Result<()> {
 
     log_verbose(cli.verbose, "Initializing API client...");
     let client = ApiClient::new(&cli.url, cli.verbose, cli.qr, cli.workdir.clone())
-        .context("Failed to initialize API client")?;
+        .map_err(RunError::ApiClientInit)?;
     log_verbose(cli.verbose, "API client ready");
 
     match cli.command {
         Commands::Register { alpha_code } => {
-            client.register(&alpha_code).await?;
+            client.register(&alpha_code).await.map_err(RunError::CommandDispatch)?;
         }
         Commands::Login { qr } => {
             if qr {
-                client.login_qr().await?;
+                client.login_qr().await.map_err(RunError::CommandDispatch)?;
             } else {
-                client.login().await?;
+                client.login().await.map_err(RunError::CommandDispatch)?;
             }
         }
         Commands::Logout => {
-            client.logout().await?;
+            client.logout().await.map_err(RunError::CommandDispatch)?;
         }
+        Commands::Account { command } => match command {
+            AccountCommands::Id => {
+                client
+                    .print_account_id()
+                    .await
+                    .map_err(RunError::CommandDispatch)?;
+            }
+        },
         Commands::Init {
             bring_your_own_cloud,
             platform,
@@ -7863,13 +8249,14 @@ pub async fn run() -> Result<()> {
             config,
         } => {
             if bring_your_own_cloud && platform != "aws" {
-                bail!(
-                    "Only --platform aws is currently supported for bring-your-own-compute deployments"
-                );
+                return Err(RunError::ArgValidation(
+                    "Only --platform aws is currently supported for bring-your-own-compute deployments",
+                ));
             }
             client
                 .init(bring_your_own_cloud, name, region, local, config)
-                .await?;
+                .await
+                .map_err(RunError::CommandDispatch)?;
         }
         Commands::Teardown {
             bring_your_own_cloud,
@@ -7879,13 +8266,15 @@ pub async fn run() -> Result<()> {
         } => {
             if bring_your_own_cloud {
                 if platform != "aws" {
-                    bail!(
-                        "Only --platform aws is currently supported for bring-your-own-compute deployments"
-                    );
+                    return Err(RunError::ArgValidation(
+                        "Only --platform aws is currently supported for bring-your-own-compute deployments",
+                    ));
                 }
-                client.teardown_byoc(force, local).await?;
+                client.teardown_byoc(force, local).await.map_err(RunError::CommandDispatch)?;
             } else {
-                bail!("Please specify --byoc to tear down BYOC infrastructure");
+                return Err(RunError::ArgValidation(
+                    "Please specify --byoc to tear down BYOC infrastructure",
+                ));
             }
         }
         Commands::Verify {
@@ -7907,20 +8296,21 @@ pub async fn run() -> Result<()> {
                     no_cache,
                     save_pcrs,
                 )
-                .await?;
+                .await
+                .map_err(RunError::CommandDispatch)?;
         }
         Commands::Apps { command } => match command {
             AppCommands::Create => {
-                client.create_app().await?;
+                client.create_app().await.map_err(RunError::CommandDispatch)?;
             }
             AppCommands::List => {
-                client.list_apps().await?;
+                client.list_apps().await.map_err(RunError::CommandDispatch)?;
             }
             AppCommands::Get {
                 id,
                 this_is_a_ci_machine,
             } => {
-                client.get_app(id, this_is_a_ci_machine).await?;
+                client.get_app(id, this_is_a_ci_machine).await.map_err(RunError::CommandDispatch)?;
             }
             AppCommands::Destroy {
                 id,
@@ -7930,19 +8320,23 @@ pub async fn run() -> Result<()> {
             } => {
                 client
                     .destroy_app(id, force, force_delete, this_is_a_ci_machine)
-                    .await?;
+                    .await
+                    .map_err(RunError::CommandDispatch)?;
             }
             AppCommands::Build { no_cache } => {
-                client.build_local(no_cache).await?;
+                client.build_local(no_cache).await
+                    .map_err(|e| RunError::CommandDispatch(anyhow::Error::from(e)))?;
             }
             AppCommands::Rename { name, id } => {
-                client.rename_app(id, name).await?;
+                client.rename_app(id, name).await.map_err(RunError::CommandDispatch)?;
             }
             AppCommands::DownloadEif(args) => {
-                apps::download_eif::download_eif(&client, &args).await?;
+                apps::download_eif::download_eif(&client, &args).await
+                    .map_err(|e| RunError::CommandDispatch(e.into()))?;
             }
             AppCommands::MigrateProcfile(args) => {
-                apps::migrate_procfile::migrate_procfile(&client, &args).await?;
+                apps::migrate_procfile::migrate_procfile(&client, &args).await
+                    .map_err(|e| RunError::CommandDispatch(e.into()))?;
             }
         },
         Commands::SshKeys { command } => match command {
@@ -7952,27 +8346,27 @@ pub async fn run() -> Result<()> {
                 key,
                 name,
             } => {
-                client.add_ssh_key(key_file, from_agent, key, name).await?;
+                client.add_ssh_key(key_file, from_agent, key, name).await.map_err(RunError::CommandDispatch)?;
             }
             SshKeyCommands::List => {
-                client.list_ssh_keys().await?;
+                client.list_ssh_keys().await.map_err(RunError::CommandDispatch)?;
             }
             SshKeyCommands::Remove { fingerprint } => {
-                client.remove_ssh_key(&fingerprint).await?;
+                client.remove_ssh_key(&fingerprint).await.map_err(RunError::CommandDispatch)?;
             }
         },
         Commands::Cache { command } => match command {
             CacheCommands::Path => {
-                client.cache_path()?;
+                client.cache_path().map_err(RunError::CommandDispatch)?;
             }
             CacheCommands::Size => {
-                client.cache_size()?;
+                client.cache_size().map_err(RunError::CommandDispatch)?;
             }
             CacheCommands::List => {
-                client.cache_list()?;
+                client.cache_list().map_err(RunError::CommandDispatch)?;
             }
             CacheCommands::Destroy { force } => {
-                client.cache_destroy(force)?;
+                client.cache_destroy(force).map_err(RunError::CommandDispatch)?;
             }
         },
         Commands::Credentials { command } => match command {
@@ -7984,21 +8378,22 @@ pub async fn run() -> Result<()> {
             } => {
                 client
                     .add_credential(platform, name, default, region)
-                    .await?;
+                    .await
+                    .map_err(RunError::CommandDispatch)?;
             }
             CredentialCommands::List => {
-                client.list_credentials().await?;
+                client.list_credentials().await.map_err(RunError::CommandDispatch)?;
             }
             CredentialCommands::Remove { id, force } => {
-                client.remove_credential(&id, force).await?;
+                client.remove_credential(&id, force).await.map_err(RunError::CommandDispatch)?;
             }
             CredentialCommands::SetDefault { id } => {
-                client.set_default_credential(&id).await?;
+                client.set_default_credential(&id).await.map_err(RunError::CommandDispatch)?;
             }
         },
         Commands::Capacity { command } => match command {
             CapacityCommands::Waitlist { email, vcpus } => {
-                client.join_capacity_waitlist(&email, vcpus).await?;
+                client.join_capacity_waitlist(&email, vcpus).await.map_err(RunError::CommandDispatch)?;
             }
         },
         Commands::Secret { command } => match command {
@@ -8017,7 +8412,8 @@ pub async fn run() -> Result<()> {
                     email,
                     force,
                     shoot_self_in_foot,
-                )?;
+                )
+                .map_err(RunError::CommandDispatch)?;
             }
             SecretCommands::New {
                 keyring,
@@ -8029,7 +8425,8 @@ pub async fn run() -> Result<()> {
             } => {
                 client
                     .secret_new(keyring, threshold, max, !no_upload, name, labels)
-                    .await?;
+                    .await
+                    .map_err(RunError::CommandDispatch)?;
             }
             SecretCommands::Encrypt {
                 keys,
@@ -8037,17 +8434,18 @@ pub async fn run() -> Result<()> {
                 bundle,
                 secrets_dir,
             } => {
-                client.secret_encrypt(keys, env_file, bundle, secrets_dir)?;
+                client.secret_encrypt(keys, env_file, bundle, secrets_dir)
+                    .map_err(RunError::CommandDispatch)?;
             }
             SecretCommands::Rename { id, name } => {
-                client.secret_rename(id, name).await?;
+                client.secret_rename(id, name).await.map_err(RunError::CommandDispatch)?;
             }
             SecretCommands::Label { command } => match command {
                 LabelCommands::Set { id, labels } => {
-                    client.secret_label_set(id, labels).await?;
+                    client.secret_label_set(id, labels).await.map_err(RunError::CommandDispatch)?;
                 }
                 LabelCommands::Remove { id, keys } => {
-                    client.secret_label_remove(id, keys).await?;
+                    client.secret_label_remove(id, keys).await.map_err(RunError::CommandDispatch)?;
                 }
             },
             SecretCommands::SendShard {
@@ -8055,7 +8453,7 @@ pub async fn run() -> Result<()> {
                 bundle,
                 keyring,
             } => {
-                client.secret_send_shard(app, bundle, keyring).await?;
+                client.secret_send_shard(app, bundle, keyring).await.map_err(RunError::CommandDispatch)?;
             }
         },
     }
@@ -8067,17 +8465,44 @@ pub async fn run() -> Result<()> {
 mod tests {
     use super::openpgp;
     use super::{
-        encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility, load_recipient_cert,
-        normalize_keyring, parse_env_assignments, resolve_local_build_command_from_dir,
-        resolve_procfile_build_command, resolve_quorum_parameters, ApiClient,
+        AccountCommands, ApiClient, Cli, Commands, encrypt_env_file, encrypt_secret_value,
+        keymaker_cert_eligibility, load_recipient_cert, normalize_keyring, parse_env_assignments,
+        resolve_local_build_command_from_dir, resolve_procfile_build_command,
+        resolve_quorum_parameters,
     };
     use caution_config::ConfigurationFile;
+    use clap::Parser;
     use keymaker_models::generate_quorum::GenerateQuorumResponse;
     use openpgp::cert::prelude::*;
     use openpgp::parse::Parse;
     use openpgp::serialize::SerializeInto;
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use tempfile::tempdir;
+
+    fn test_api_client() -> ApiClient {
+        ApiClient {
+            base_url: "http://localhost".to_string(),
+            client: reqwest::Client::new(),
+            config_path: PathBuf::new(),
+            deployment_path: None,
+            verbose: false,
+            qr: false,
+            workdir: None,
+        }
+    }
+
+    #[test]
+    fn cli_parses_account_id_command() {
+        let cli = Cli::try_parse_from(["caution", "account", "id"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::Account {
+                command: AccountCommands::Id
+            }
+        ));
+    }
 
     fn test_public_key() -> String {
         let (cert, _revocation) = CertBuilder::new()
@@ -8334,10 +8759,86 @@ containerfile: Missing.Containerfile\n",
     }
 
     #[test]
+    fn git_url_to_archive_urls_skips_archive_guessing_for_ssh_scheme_urls() {
+        let client = test_api_client();
+        let commit = "50e2608f857ee2c9777b89af0f9af02ffba9999d";
+
+        let urls = client
+            .git_url_to_archive_urls(
+                "ssh://git@codeberg.org/caution/demo-pq-enclave-binding.git",
+                commit,
+            )
+            .unwrap();
+
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn git_command_disables_interactive_ssh_prompts() {
+        let cmd = ApiClient::git_command(&[
+            "ls-remote",
+            "ssh://git@codeberg.org/caution/demo-pq-enclave-binding.git",
+        ]);
+        let envs: HashMap<_, _> = cmd
+            .get_envs()
+            .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
+            .collect();
+
+        assert_eq!(envs.get("GIT_TERMINAL_PROMPT"), Some(&"0"));
+        assert_eq!(envs.get("GIT_ASKPASS"), Some(&"true"));
+
+        let ssh_command = envs
+            .get("GIT_SSH_COMMAND")
+            .expect("git SSH fallback must not be able to prompt through /dev/tty");
+        assert!(ssh_command.contains("BatchMode=yes"));
+        assert!(ssh_command.contains("StrictHostKeyChecking=accept-new"));
+    }
+
+    #[test]
     fn generated_config_hcl_parses_as_valid_configuration_file() {
-        let hcl = ApiClient::generate_config_hcl("git@codeberg.org:user/repo.git", false);
-        let config = ConfigurationFile::from_str(&hcl);
-        assert!(config.is_ok(), "generated HCL should parse: {:?}", config.err());
+        for byoc in [false, true] {
+            let hcl = ApiClient::generate_config_hcl("git@codeberg.org:user/repo.git", byoc);
+            let config = ConfigurationFile::from_str(&hcl);
+            assert!(
+                config.is_ok(),
+                "generated HCL should parse for byoc={byoc}: {:?}",
+                config.err()
+            );
+        }
+    }
+
+    #[test]
+    fn create_config_file_in_dir_writes_byoc_template() {
+        let work_dir = tempdir().unwrap();
+        let client = test_api_client();
+
+        client
+            .create_config_file_in_dir_if_needed(work_dir.path(), true)
+            .unwrap();
+
+        let hcl = std::fs::read_to_string(work_dir.path().join("caution.hcl")).unwrap();
+        assert!(hcl.contains("caution {"));
+        assert!(hcl.contains("type         = \"aws\""));
+        assert!(hcl.contains("region       = \"us-east-1\""));
+        ConfigurationFile::from_str(&hcl).unwrap();
+    }
+
+    #[tokio::test]
+    async fn init_byoc_requires_login_before_reading_credentials_file() {
+        let work_dir = tempdir().unwrap();
+        let missing_credentials = work_dir.path().join("missing-byoc-credentials.json");
+        let client = ApiClient {
+            config_path: work_dir.path().join("missing-session.json"),
+            ..test_api_client()
+        };
+
+        let err = client.init_byoc(&missing_credentials).await.unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Not logged in. Run 'login' command first"),
+            "BYOC init should check authentication before reading credential material: {err:?}"
+        );
     }
 
     fn cert_armor(builder: CertBuilder) -> String {
@@ -8378,5 +8879,130 @@ containerfile: Missing.Containerfile\n",
         assert_eq!(certs.len(), 1);
         assert!(!certs[0].is_eligible());
         assert_eq!(certs[0].missing(), vec!["authentication"]);
+    }
+
+    // Sample `git ls-remote` output: "<sha>\t<ref>" lines.
+    const LS_REMOTE: &str = "\
+1111111111111111111111111111111111111111\tHEAD\n\
+1111111111111111111111111111111111111111\trefs/heads/main\n\
+2222222222222222222222222222222222222222\trefs/heads/deploy-tests\n\
+3333333333333333333333333333333333333333\trefs/tags/v1.0\n";
+
+    #[test]
+    fn preflight_fails_when_branch_absent_from_remote() {
+        // The reported regression: branch was never pushed.
+        let result = ApiClient::classify_app_source_refs(
+            LS_REMOTE,
+            "6d1c5d3550cdaf45411052e7194bdcd34c41dac4",
+            Some("deploy-tests-missing"),
+        );
+        assert_eq!(result, Err("deploy-tests-missing".to_string()));
+    }
+
+    #[test]
+    fn preflight_passes_when_branch_present() {
+        // Branch exists even though the deployed commit is an older,
+        // non-tip commit on that branch — reachable, proceed.
+        let result = ApiClient::classify_app_source_refs(
+            LS_REMOTE,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            Some("deploy-tests"),
+        );
+        assert_eq!(result, Ok(true));
+    }
+
+    #[test]
+    fn preflight_passes_when_commit_is_ref_tip_without_branch_hint() {
+        // No branch in the manifest, but the commit is a current ref tip.
+        let result = ApiClient::classify_app_source_refs(
+            LS_REMOTE,
+            "2222222222222222222222222222222222222222",
+            None,
+        );
+        assert_eq!(result, Ok(true));
+    }
+
+    #[test]
+    fn preflight_inconclusive_when_commit_not_tip_without_branch_hint() {
+        // No branch hint and the commit isn't a ref tip; can't prove it's gone
+        // (may be deep in history), so stay inconclusive and let the fetch decide.
+        let result = ApiClient::classify_app_source_refs(
+            LS_REMOTE,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            None,
+        );
+        assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn preflight_matches_short_commit_against_full_ref_sha() {
+        // Manifests may carry an abbreviated commit; it should still match the
+        // full SHA advertised by ls-remote.
+        let result =
+            ApiClient::classify_app_source_refs(LS_REMOTE, "3333333", None);
+        assert_eq!(result, Ok(true));
+    }
+
+    #[test]
+    fn preflight_dangerously_short_commit_does_not_false_match() {
+        // A 1-char commit prefixes "1111..." but must NOT be treated as a ref
+        // tip — below the 7-char minimum it's not matchable.
+        let result = ApiClient::classify_app_source_refs(LS_REMOTE, "1", None);
+        assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn preflight_empty_commit_is_inconclusive_not_a_match() {
+        // An empty commit must never match a ref tip (would otherwise prefix-match
+        // every line). No branch hint => inconclusive.
+        let result = ApiClient::classify_app_source_refs(LS_REMOTE, "", None);
+        assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn preflight_blank_ls_remote_line_does_not_false_match() {
+        // A malformed/blank line yields an empty sha field; it must not match the
+        // commit and flip an inconclusive result to reachable.
+        let listing = "\n   \n\t\n";
+        let result = ApiClient::classify_app_source_refs(
+            listing,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            None,
+        );
+        assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn preflight_empty_branch_name_absent_bails() {
+        // Defensive: Some("") builds refs/heads/ which won't be present, so it is
+        // reported absent rather than silently passing.
+        let result =
+            ApiClient::classify_app_source_refs(LS_REMOTE, "1111111", Some(""));
+        assert_eq!(result, Err("".to_string()));
+    }
+
+    #[test]
+    fn ssh_key_identity_extracts_type_and_data_without_comment() {
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMatchingKeyMaterial user@example";
+        assert_eq!(
+            ApiClient::ssh_key_identity(key),
+            Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMatchingKeyMaterial".to_string())
+        );
+    }
+
+    #[test]
+    fn ssh_key_identity_handles_extra_whitespace() {
+        let key = "  ssh-rsa   AAAAB3NzaC1yc2EAAAADAQABAAABAQ...  comment  ";
+        assert_eq!(
+            ApiClient::ssh_key_identity(key),
+            Some("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ...".to_string())
+        );
+    }
+
+    #[test]
+    fn ssh_key_identity_rejects_malformed_keys() {
+        assert_eq!(ApiClient::ssh_key_identity("not-a-valid-key"), None);
+        assert_eq!(ApiClient::ssh_key_identity(""), None);
+        assert_eq!(ApiClient::ssh_key_identity("ssh-ed25519"), None);
     }
 }

@@ -29,7 +29,7 @@ build-gateway:
 
 build-api:
 	@echo "Building API service..."
-	@docker build -t caution-api -f ./containerfiles/Containerfile.api .
+	@docker build -t caution-api --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) -f ./containerfiles/Containerfile.api .
 	@echo "API service image built: caution-api"
 
 build-email:
@@ -46,12 +46,12 @@ build-gateway-dev:
 
 build-api-dev:
 	@echo "Building API service (dev)..."
-	@docker build -t caution-api $(DEV_BUILD_ARGS) -f ./containerfiles/Containerfile.api .
+	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) -f ./containerfiles/Containerfile.api .
 	@echo "API dev service image built: caution-api"
 
 build-api-e2e:
 	@echo "Building API service (e2e test mode)..."
-	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.api .
+	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.api .
 	@echo "API e2e image build complete"
 
 build-email-dev:
@@ -787,6 +787,14 @@ test-e2e-ssh-units:
 	@$(MAKE) up-test
 	@echo "Running SSH units e2e tests..."
 	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_ssh_units.sh; \
+	status=$$?; \
+	$(MAKE) down-test; \
+	exit $$status
+
+test-e2e-qr-login:
+	@$(MAKE) up-test
+	@echo "Running QR login e2e tests..."
+	@bash tests/e2e/test_qr_login.sh; \
 	status=$$?; \
 	$(MAKE) down-test; \
 	exit $$status

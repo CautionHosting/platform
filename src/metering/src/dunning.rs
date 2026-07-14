@@ -128,7 +128,7 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
                     *org_id,
                     "payment_failure",
                     serde_json::json!({
-                        "update_payment_url": "https://caution.dev/settings/billing",
+                        "update_payment_url": crate::BILLING_URL,
                     }),
                 )
                 .await;

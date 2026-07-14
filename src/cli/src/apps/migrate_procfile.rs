@@ -165,10 +165,6 @@ fn build_build_block(build: &caution_config::BuildConfig) -> Option<hcl::Block> 
         has_content = true;
     }
 
-    if let Some(ref val) = build.binary {
-        builder = builder.add_attribute(("binary", val.as_str()));
-        has_content = true;
-    }
 
     if !build.app_sources.is_empty() {
         let exprs: Vec<hcl::Expression> = build
@@ -275,7 +271,11 @@ fn build_network_block(network: &caution_config::NetworkConfig) -> Option<hcl::B
 
     if let Some(ref http) = network.http {
         let mut http_builder = hcl::Block::builder("http");
-        http_builder = http_builder.add_attribute(("domain", http.domain.as_str()));
+
+        if let Some(ref domain) = http.domain {
+            http_builder = http_builder.add_attribute(("domain", domain.as_str()));
+        }
+
         http_builder = http_builder.add_attribute(("port", http.port));
 
         if let Some(ref e2e) = http.e2e_encryption {
@@ -429,7 +429,6 @@ mod tests {
     fn hello_world_procfile_uses_block_syntax() {
         let procfile = r#"run: /usr/local/bin/hello
 containerfile: Containerfile
-binary: /usr/local/bin/hello
 app_sources: git@codeberg.org:caution/demo-hello-world-enclave.git
 cache: false
 ports: 8083
@@ -438,7 +437,6 @@ ports: 8083
         let output = build_body(&config);
         assert!(output.contains("enclave \"default\""), "labeled enclave block");
         assert!(output.contains("build {"), "build block");
-        assert!(output.contains("binary = \"/usr/local/bin/hello\""), "binary attribute");
         assert!(output.contains("port = 8083"), "port attribute in ingress");
         assert!(output.contains("ingress {"), "ingress block");
         assert!(!output.contains("= null"), "no null values");
@@ -459,7 +457,6 @@ ports: 8083
         let procfile = "\
 run: /app/server --port 8080
 containerfile: Containerfile.custom
-binary: myapp
 app_sources: url1, url2
 memory_mb: 2000
 cpus: 4
@@ -504,7 +501,7 @@ run: /app
 managed_on_prem: true
 platform: aws
 aws_region: us-east-1
-aws_vpc_id: vpc-123
+aws_vpc_id: vpc-0a1b2c3d
 ";
         let config = caution_config::ConfigurationFile::from_procfile(procfile).unwrap();
         let output = build_body(&config);
@@ -512,6 +509,6 @@ aws_vpc_id: vpc-123
         assert!(output.contains("provider {"), "provider block");
         assert!(output.contains("type = \"aws\""), "aws provider type");
         assert!(output.contains("region = \"us-east-1\""), "aws region");
-        assert!(output.contains("vpc_id = \"vpc-123\""), "vpc id");
+        assert!(output.contains("vpc_id = \"vpc-0a1b2c3d\""), "vpc id");
     }
 }

@@ -20,6 +20,8 @@ use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 use uuid::Uuid;
 
+const BILLING_URL: &str = "https://caution.dev/#billing";
+
 struct AppError(anyhow::Error);
 
 impl IntoResponse for AppError {
@@ -806,20 +808,19 @@ fn generate_payment_failure_email(data: &serde_json::Value) -> (String, String, 
 }
 
 fn generate_insufficient_balance_email(data: &serde_json::Value) -> (String, String, String) {
-    let invoice_number_raw = data["invoice_number"].as_str().unwrap_or("N/A");
-    let amount_raw = data["amount"].as_str().unwrap_or("$0.00");
-    let topup_url_raw = data["topup_url"]
+    let balance_raw = data["balance"]
         .as_str()
-        .unwrap_or("https://caution.co/billing/topup");
+        .or_else(|| data["amount"].as_str())
+        .unwrap_or("$0.00");
+    let topup_url_raw = data["add_credits_url"]
+        .as_str()
+        .or_else(|| data["topup_url"].as_str())
+        .unwrap_or("https://caution.dev/#billing");
 
-    let invoice_number = html_escape(invoice_number_raw);
-    let amount = html_escape(amount_raw);
+    let balance = html_escape(balance_raw);
     let topup_url = html_escape(topup_url_raw);
 
-    let subject = format!(
-        "Action Required: Insufficient Balance - Invoice {}",
-        invoice_number_raw
-    );
+    let subject = "Low credit balance on your Caution account".to_string();
 
     let html_body = format!(
         r#"
@@ -827,22 +828,18 @@ fn generate_insufficient_balance_email(data: &serde_json::Value) -> (String, Str
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Insufficient Balance</title>
+    <title>Low Credit Balance</title>
 </head>
 <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
     <div style="background-color: #f4f4f4; padding: 20px; border-radius: 10px;">
-        <h1 style="color: #f39c12; margin-top: 0;">Insufficient Balance</h1>
+        <h1 style="color: #f39c12; margin-top: 0;">Low Credit Balance</h1>
 
-        <p>Your account balance is insufficient to cover your latest invoice.</p>
+        <p>Your Caution credit balance is running low.</p>
 
         <div style="background-color: white; padding: 20px; border-radius: 5px; margin: 20px 0;">
             <table style="width: 100%;">
                 <tr>
-                    <td style="color: #7f8c8d;">Invoice Number:</td>
-                    <td style="text-align: right; font-weight: bold;">{}</td>
-                </tr>
-                <tr>
-                    <td style="color: #7f8c8d;">Amount Due:</td>
+                    <td style="color: #7f8c8d;">Current Balance:</td>
                     <td style="text-align: right; font-weight: bold;">{}</td>
                 </tr>
             </table>
@@ -851,12 +848,12 @@ fn generate_insufficient_balance_email(data: &serde_json::Value) -> (String, Str
         <div style="text-align: center; margin: 30px 0;">
             <a href="{}"
                style="background-color: #27ae60; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">
-                Add Funds to Your Account
+                Add Credits
             </a>
         </div>
 
         <p style="color: #7f8c8d; font-size: 14px;">
-            Please add funds to your account to continue using Caution services.
+            Please add credits to your account to continue using Caution services.
             Your services may be suspended if the balance is not replenished.
         </p>
     </div>
@@ -865,22 +862,20 @@ fn generate_insufficient_balance_email(data: &serde_json::Value) -> (String, Str
 </body>
 </html>
         "#,
-        invoice_number,
-        amount,
+        balance,
         topup_url,
         html_email_footer()
     );
 
     let text_body = format!(
-        "Insufficient Balance\n\n\
-         Your account balance is insufficient to cover your latest invoice.\n\n\
-         Invoice Number: {}\n\
-         Amount Due: {}\n\n\
-         Please add funds at {} to continue using Caution services.\n\n\
+        "Low Credit Balance\n\n\
+         Your Caution credit balance is running low.\n\n\
+         Current balance: {}\n\n\
+         Please add credits at {} to continue using Caution services.\n\n\
          Your services may be suspended if the balance is not replenished.\n\n\
          --\n\
          Caution Team",
-        invoice_number_raw, amount_raw, topup_url_raw
+        balance_raw, topup_url_raw
     );
 
     (subject, html_body, text_body)
@@ -987,7 +982,7 @@ fn generate_suspension_warning_email(data: &serde_json::Value) -> (String, Strin
         </p>
 
         <div style="text-align: center; margin: 30px 0;">
-            <a href="https://caution.dev/settings/billing"
+            <a href="{}"
                style="background-color: #e74c3c; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">
                 Update Payment Method
             </a>
@@ -1005,6 +1000,7 @@ fn generate_suspension_warning_email(data: &serde_json::Value) -> (String, Strin
         "#,
         amount,
         days_remaining,
+        BILLING_URL,
         html_email_footer()
     );
 
@@ -1012,12 +1008,12 @@ fn generate_suspension_warning_email(data: &serde_json::Value) -> (String, Strin
         "Your Services Will Be Suspended\n\n\
          We've been unable to collect payment of {} for your account.\n\n\
          Your running deployments will be suspended in {} days if payment is not received.\n\n\
-         Update your payment method at https://caution.dev/settings/billing\n\n\
+         Update your payment method at {}\n\n\
          Suspended instances are stopped but not destroyed. Once payment is received, \
          your services will be automatically restored.\n\n\
          --\n\
          Caution Team",
-        amount_raw, days_remaining
+        amount_raw, days_remaining, BILLING_URL
     );
 
     (subject, html_body, text_body)
@@ -1047,7 +1043,7 @@ fn generate_suspension_notice_email(data: &serde_json::Value) -> (String, String
         <p>Your data has <strong>not</strong> been deleted. Once payment is received, your services will be automatically restored.</p>
 
         <div style="text-align: center; margin: 30px 0;">
-            <a href="https://caution.dev/settings/billing"
+            <a href="{}"
                style="background-color: #27ae60; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">
                 Resolve Payment &amp; Restore Services
             </a>
@@ -1065,6 +1061,7 @@ fn generate_suspension_notice_email(data: &serde_json::Value) -> (String, String
         "#,
         amount,
         app_count,
+        BILLING_URL,
         html_email_footer()
     );
 
@@ -1073,10 +1070,10 @@ fn generate_suspension_notice_email(data: &serde_json::Value) -> (String, String
          Due to non-payment of {}, we have stopped {} running deployment(s).\n\n\
          Your data has NOT been deleted. Once payment is received, your services \
          will be automatically restored.\n\n\
-         Resolve payment at https://caution.dev/settings/billing\n\n\
+         Resolve payment at {}\n\n\
          --\n\
          Caution Team",
-        amount_raw, app_count
+        amount_raw, app_count, BILLING_URL
     );
 
     (subject, html_body, text_body)
@@ -1213,10 +1210,10 @@ mod tests {
         assert_eq!(subject, "Action Required: Your services will be suspended");
         assert!(html.contains("$25.00"));
         assert!(html.contains("4 days"));
-        assert!(html.contains("https://caution.dev/settings/billing"));
+        assert!(html.contains("https://caution.dev/#billing"));
         assert!(text.contains("$25.00"));
         assert!(text.contains("4 days"));
-        assert!(text.contains("https://caution.dev/settings/billing"));
+        assert!(text.contains("https://caution.dev/#billing"));
     }
 
     #[test]
@@ -1258,7 +1255,7 @@ mod tests {
         assert!(html.contains("$42.50"));
         assert!(html.contains("<strong>3</strong> running deployment(s)"));
         assert!(html.contains("has <strong>not</strong> been deleted"));
-        assert!(html.contains("https://caution.dev/settings/billing"));
+        assert!(html.contains("https://caution.dev/#billing"));
         assert!(text.contains("$42.50"));
         assert!(text.contains("3 running deployment(s)"));
         assert!(text.contains("has NOT been deleted"));
@@ -1286,6 +1283,26 @@ mod tests {
         let (_, html, text) = generate_suspension_notice_email(&data);
         assert!(html.contains("<strong>1</strong> running deployment(s)"));
         assert!(text.contains("1 running deployment(s)"));
+    }
+
+    // ---- insufficient_balance template ----
+
+    #[test]
+    fn test_insufficient_balance_email_uses_low_balance_context() {
+        let data = serde_json::json!({
+            "balance": "$12.34",
+            "amount": "$12.34",
+            "add_credits_url": "https://caution.dev/#billing",
+        });
+
+        let (subject, html, text) = generate_insufficient_balance_email(&data);
+
+        assert_eq!(subject, "Low credit balance on your Caution account");
+        assert!(html.contains("$12.34"));
+        assert!(text.contains("Current balance: $12.34"));
+        assert!(html.contains("https://caution.dev/#billing"));
+        assert!(text.contains("https://caution.dev/#billing"));
+        assert!(!subject.contains("Invoice"));
     }
 
     // ---- template dispatch ----

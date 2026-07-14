@@ -17,6 +17,8 @@ use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+const BILLING_URL: &str = "https://caution.dev/#billing";
+
 mod calculator;
 mod cost_explorer;
 mod credits;
@@ -53,6 +55,16 @@ fn has_valid_internal_service_secret(
     provided_secret: Option<&str>,
 ) -> bool {
     matches!(provided_secret, Some(secret) if secret == configured_secret)
+}
+
+#[cfg(test)]
+mod billing_url_tests {
+    use super::BILLING_URL;
+
+    #[test]
+    fn billing_url_points_to_dashboard_billing_hash() {
+        assert_eq!(BILLING_URL, "https://caution.dev/#billing");
+    }
 }
 
 #[tokio::main]
@@ -454,7 +466,9 @@ async fn untrack_resource(
     Path(resource_id): Path<String>,
 ) -> impl IntoResponse {
     // First collect any remaining usage before stopping tracking
-    if let Err(e) = collection::collect_resource_usage(&state, &resource_id).await {
+    if let Err(e) =
+        collection::collect_resource_usage(&state, &resource_id, std::time::Duration::ZERO).await
+    {
         tracing::warn!("Failed to collect final usage for {}: {}", resource_id, e);
     }
 

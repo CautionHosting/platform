@@ -9,6 +9,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -21,10 +22,23 @@ struct LegalDocumentIdentity {
     occurred_at: Option<DateTime<Utc>>,
 }
 
+/// The currently-active row for a document type, plus everything needed to
+/// compute status/enforcement/display for it without further queries.
+#[derive(Debug, Clone, FromRow)]
+struct ActiveLegalDocument {
+    id: Uuid,
+    version: String,
+    title: Option<String>,
+    url: String,
+    requires_blocking_reacceptance: bool,
+    requires_acknowledgment: bool,
+}
+
 #[derive(Debug, Clone, FromRow)]
 struct LegalNoticeDocument {
     id: Uuid,
     document_type: String,
+    title: Option<String>,
     version: String,
     url: String,
     effective_at: DateTime<Utc>,
@@ -40,16 +54,59 @@ struct LegalNoticeRecipient {
 
 #[derive(Debug, Serialize)]
 pub struct LegalDocumentStatus {
+    pub title: String,
+    pub url: Option<String>,
     pub active_version: Option<String>,
     pub accepted_version: Option<String>,
     pub accepted_at: Option<DateTime<Utc>>,
     pub requires_action: bool,
 }
 
+/// Legal status for a user across every document type that currently has
+/// an active version, keyed by `document_type`. Not hardcoded to a fixed
+/// set of types — whatever `legal_documents` has active shows up here.
+/// BTreeMap (not HashMap) so the serialized order is stable across requests
+/// — the frontend renders these in iteration order and a HashMap would
+/// reshuffle the rows on every refresh.
+pub type UserLegalStatus = BTreeMap<String, LegalDocumentStatus>;
+
 #[derive(Debug, Serialize)]
-pub struct UserLegalStatus {
-    pub terms_of_service: LegalDocumentStatus,
-    pub privacy_notice: LegalDocumentStatus,
+pub struct PublicLegalDocumentSummary {
+    pub document_type: String,
+    pub title: String,
+    pub url: String,
+}
+
+/// Public (unauthenticated) list of every currently-active document. The
+/// registration screen renders this list to build its "by creating an
+/// account, you agree to X and Y" notice, and signup records a consent
+/// event for exactly these documents — so what's presented and what's
+/// recorded always match, however many document types are configured.
+pub async fn list_active_legal_documents(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<PublicLegalDocumentSummary>>, (StatusCode, String)> {
+    let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT document_type, title, url FROM legal_documents WHERE is_active = true ORDER BY document_type",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to list active legal documents: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to load legal documents".to_string(),
+        )
+    })?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|(document_type, title, url)| PublicLegalDocumentSummary {
+                title: resolve_title(title.as_deref(), &document_type),
+                document_type,
+                url,
+            })
+            .collect(),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,44 +232,45 @@ impl RecipientSelection {
     }
 }
 
-fn expected_event_type(document_type: &str) -> Option<&'static str> {
-    match document_type {
-        "terms_of_service" => Some("accepted"),
-        "privacy_notice" => Some("acknowledged"),
-        _ => None,
+/// Display title for a document: the row's own `title` if set, else a
+/// humanized form of its `document_type` (e.g. "terms_of_service" ->
+/// "Terms Of Service"). Lets a new document type work without a code change.
+fn resolve_title(title: Option<&str>, document_type: &str) -> String {
+    match title {
+        Some(t) if !t.trim().is_empty() => t.to_string(),
+        _ => humanize_document_type(document_type),
     }
 }
 
-fn legal_document_title(document_type: &str) -> &'static str {
-    match document_type {
-        "terms_of_service" => "Terms of Service",
-        "privacy_notice" => "Privacy Notice",
-        _ => "Legal Document",
-    }
+fn humanize_document_type(document_type: &str) -> String {
+    document_type
+        .split('_')
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-fn legal_notice_dedupe_key(
-    terms_document_id: Option<Uuid>,
-    privacy_document_id: Option<Uuid>,
-) -> String {
-    format!(
-        "terms={};privacy={}",
-        terms_document_id
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "none".to_string()),
-        privacy_document_id
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "none".to_string())
-    )
+fn legal_notice_dedupe_key(document_ids: &[Uuid]) -> String {
+    let mut ids: Vec<String> = document_ids.iter().map(|id| id.to_string()).collect();
+    ids.sort_unstable();
+    ids.join(";")
 }
 
 /// Get the active version for a document type, or None if no active version exists.
 async fn get_active_document(
     pool: &PgPool,
     document_type: &str,
-) -> Result<Option<LegalDocumentIdentity>, sqlx::Error> {
+) -> Result<Option<ActiveLegalDocument>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, version, NULL::timestamptz AS occurred_at FROM legal_documents
+        "SELECT id, version, title, url, requires_blocking_reacceptance, requires_acknowledgment
+         FROM legal_documents
          WHERE document_type = $1 AND is_active = true",
     )
     .bind(document_type)
@@ -220,14 +278,19 @@ async fn get_active_document(
     .await
 }
 
-/// Get the user's most recent accepted/acknowledged document for a document type.
-/// This is derived from append-only user_legal_events by document_type + event_type,
-/// ordered by occurred_at descending.
+/// Get the user's most recent legal event for a document type, of any
+/// event of either affirmative type ("accepted" or "acknowledged"). Event
+/// wording is derived from the document's own flags at accept time, not
+/// fixed per document_type, so this can't match on one specific expected
+/// string — but it must still exclude non-affirmative events. The
+/// user_legal_events CHECK constraint also permits "declined" and
+/// "notice_shown"; if either were ever the most recent row for a document,
+/// an unfiltered "most recent event of any type" query would treat it as
+/// satisfying the document and clear requires_action without real consent.
 async fn get_latest_user_document_by_type(
     pool: &PgPool,
     user_id: Uuid,
     document_type: &str,
-    event_type: &str,
 ) -> Result<Option<LegalDocumentIdentity>, sqlx::Error> {
     sqlx::query_as(
         "SELECT
@@ -237,39 +300,68 @@ async fn get_latest_user_document_by_type(
          FROM user_legal_events
          WHERE user_id = $1
            AND document_type = $2
-           AND event_type = $3
+           AND event_type IN ('accepted', 'acknowledged')
          ORDER BY occurred_at DESC
          LIMIT 1",
     )
     .bind(user_id)
     .bind(document_type)
-    .bind(event_type)
     .fetch_optional(pool)
     .await
 }
 
 /// Compute legal status for a single document type.
+///
+/// `user_predates_tracking` distinguishes two different reasons a user can
+/// have no event for this document type: they registered before legal
+/// tracking existed at all (skip gating, a deliberate no-retroactive-gate
+/// policy), vs. they have other legal history but this specific document
+/// type was introduced after they last touched the flow (must gate — that's
+/// the entire point of re-acceptance). Without this distinction, adding a
+/// new document type would never gate any existing user, since no one has
+/// an event for a type that didn't exist yet.
 fn compute_document_status(
-    active_document: Option<LegalDocumentIdentity>,
+    document_type: &str,
+    active_document: Option<&ActiveLegalDocument>,
     latest_user_document: Option<LegalDocumentIdentity>,
+    user_predates_tracking: bool,
 ) -> LegalDocumentStatus {
-    let active_version = active_document.as_ref().map(|doc| doc.version.clone());
+    let active_version = active_document.map(|doc| doc.version.clone());
     let accepted_version = latest_user_document.as_ref().map(|doc| doc.version.clone());
     let accepted_at = latest_user_document
         .as_ref()
         .and_then(|doc| doc.occurred_at);
 
+    // A document configured with both flags false is purely informational —
+    // tracked, but never something a user must act on. Without this check, a
+    // version bump on such a document would still flip requires_action and
+    // pop the full-screen modal for everyone, which the flags say shouldn't
+    // happen. Previously safe by coincidence (the two hardcoded types always
+    // had exactly one flag set); no longer guaranteed once document_type is
+    // an open string an operator configures.
+    let action_capable = |doc: &ActiveLegalDocument| {
+        doc.requires_blocking_reacceptance || doc.requires_acknowledgment
+    };
+
     let requires_action = match (&active_document, &latest_user_document) {
         // Compare exact legal document rows, not just display versions.
-        (Some(active), Some(user_doc)) => active.id != user_doc.id,
-        // Active version exists, user has no record: user predates tracking,
-        // do not retroactively gate
-        (Some(_), None) => false,
+        (Some(active), Some(user_doc)) => active.id != user_doc.id && action_capable(active),
+        // Active version exists, user has no record for this type: gate
+        // unless the user predates legal tracking entirely.
+        (Some(active), None) => !user_predates_tracking && action_capable(active),
         // No active version: nothing to enforce
         (None, _) => false,
     };
 
+    let title = resolve_title(
+        active_document.and_then(|doc| doc.title.as_deref()),
+        document_type,
+    );
+    let url = active_document.map(|doc| doc.url.clone());
+
     LegalDocumentStatus {
+        title,
+        url,
         active_version,
         accepted_version,
         accepted_at,
@@ -277,23 +369,44 @@ fn compute_document_status(
     }
 }
 
-/// Get the full legal status for a user across all document types.
+/// True if the user has no legal event history at all (registered before
+/// legal tracking existed), as opposed to having history for other document
+/// types but not this one. See `compute_document_status` for why this
+/// distinction matters.
+async fn user_predates_legal_tracking(pool: &PgPool, user_id: Uuid) -> Result<bool, sqlx::Error> {
+    let has_any_event: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_legal_events WHERE user_id = $1)")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?;
+    Ok(!has_any_event)
+}
+
+/// Get the full legal status for a user across every document type that
+/// currently has an active version.
 pub async fn get_user_legal_status(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<UserLegalStatus, sqlx::Error> {
-    let tos_active = get_active_document(pool, "terms_of_service").await?;
-    let pn_active = get_active_document(pool, "privacy_notice").await?;
+    let document_types: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT document_type FROM legal_documents WHERE is_active = true ORDER BY document_type",
+    )
+    .fetch_all(pool)
+    .await?;
 
-    let tos_user =
-        get_latest_user_document_by_type(pool, user_id, "terms_of_service", "accepted").await?;
-    let pn_user =
-        get_latest_user_document_by_type(pool, user_id, "privacy_notice", "acknowledged").await?;
+    let predates_tracking = user_predates_legal_tracking(pool, user_id).await?;
 
-    Ok(UserLegalStatus {
-        terms_of_service: compute_document_status(tos_active, tos_user),
-        privacy_notice: compute_document_status(pn_active, pn_user),
-    })
+    let mut status = BTreeMap::new();
+    for document_type in document_types {
+        let active = get_active_document(pool, &document_type).await?;
+        let user_doc = get_latest_user_document_by_type(pool, user_id, &document_type).await?;
+        status.insert(
+            document_type.clone(),
+            compute_document_status(&document_type, active.as_ref(), user_doc, predates_tracking),
+        );
+    }
+
+    Ok(status)
 }
 
 pub async fn get_blocking_document_requiring_acceptance(
@@ -302,30 +415,21 @@ pub async fn get_blocking_document_requiring_acceptance(
 ) -> Result<Option<String>, sqlx::Error> {
     let legal = get_user_legal_status(pool, user_id).await?;
 
-    let tos_blocking: bool = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(requires_blocking_reacceptance::int), 0)::bool
-         FROM legal_documents
-         WHERE document_type = 'terms_of_service'
-           AND is_active = true",
+    let blocking_types: Vec<String> = sqlx::query_scalar(
+        "SELECT document_type FROM legal_documents
+         WHERE is_active = true AND requires_blocking_reacceptance = true
+         ORDER BY document_type",
     )
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await?;
 
-    if tos_blocking && legal.terms_of_service.requires_action {
-        return Ok(Some("terms_of_service".to_string()));
-    }
-
-    let pn_blocking: bool = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(requires_blocking_reacceptance::int), 0)::bool
-         FROM legal_documents
-         WHERE document_type = 'privacy_notice'
-           AND is_active = true",
-    )
-    .fetch_one(pool)
-    .await?;
-
-    if pn_blocking && legal.privacy_notice.requires_action {
-        return Ok(Some("privacy_notice".to_string()));
+    for document_type in blocking_types {
+        if legal
+            .get(&document_type)
+            .is_some_and(|status| status.requires_action)
+        {
+            return Ok(Some(document_type));
+        }
     }
 
     Ok(None)
@@ -353,16 +457,6 @@ pub async fn accept_legal_document(
     headers: HeaderMap,
     Json(payload): Json<AcceptLegalRequest>,
 ) -> Result<Json<AcceptLegalResponse>, (StatusCode, String)> {
-    let event_type = expected_event_type(payload.document_type.as_str()).ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!(
-                "Invalid document_type: '{}'. Must be 'terms_of_service' or 'privacy_notice'",
-                payload.document_type
-            ),
-        )
-    })?;
-
     let active_document = get_active_document(&state.db, &payload.document_type)
         .await
         .map_err(|e| {
@@ -380,6 +474,15 @@ pub async fn accept_legal_document(
         )
     })?;
     let version = active_document.version.clone();
+
+    // Event wording is derived from the document's own flags (set at publish
+    // time via --blocking/--ack), not from a hardcoded document_type match,
+    // so a new document type works without a code change.
+    let event_type = if active_document.requires_blocking_reacceptance {
+        "accepted"
+    } else {
+        "acknowledged"
+    };
 
     let session_id = headers.get("x-session-id").and_then(|v| v.to_str().ok());
 
@@ -439,8 +542,8 @@ pub async fn send_legal_notices(
 ) -> Result<Json<SendLegalNoticesResponse>, (StatusCode, String)> {
     let recipient_selection = RecipientSelection::from_request(&payload)?;
     let documents = load_legal_notice_documents(&state.db, payload.document_ids.as_deref()).await?;
-    let (terms_document_id, privacy_document_id) = legal_notice_document_ids(&documents)?;
-    let dedupe_key = legal_notice_dedupe_key(terms_document_id, privacy_document_id);
+    let document_ids = legal_notice_document_ids(&documents)?;
+    let dedupe_key = legal_notice_dedupe_key(&document_ids);
 
     let existing_batch_id: Option<Uuid> =
         sqlx::query_scalar("SELECT id FROM legal_notice_batches WHERE dedupe_key = $1")
@@ -459,15 +562,7 @@ pub async fn send_legal_notices(
     let batch_id = if payload.dry_run {
         dry_run_batch_id
     } else {
-        Some(
-            upsert_legal_notice_batch(
-                &state.db,
-                &dedupe_key,
-                terms_document_id,
-                privacy_document_id,
-            )
-            .await?,
-        )
+        Some(upsert_legal_notice_batch(&state.db, &dedupe_key, &document_ids).await?)
     };
 
     let eligible_recipient_count =
@@ -498,7 +593,7 @@ pub async fn send_legal_notices(
         .map(|doc| LegalNoticeDocumentResponse {
             id: doc.id,
             document_type: doc.document_type.clone(),
-            title: legal_document_title(&doc.document_type).to_string(),
+            title: resolve_title(doc.title.as_deref(), &doc.document_type),
             version: doc.version.clone(),
             url: doc.url.clone(),
             effective_at: doc.effective_at.clone(),
@@ -616,6 +711,7 @@ async fn load_legal_notice_documents(
         sqlx::query_as::<_, LegalNoticeDocument>(
             "SELECT id,
                     document_type,
+                    title,
                     version,
                     url,
                     effective_at,
@@ -623,11 +719,7 @@ async fn load_legal_notice_documents(
                     requires_acknowledgment
              FROM legal_documents
              WHERE id = ANY($1)
-             ORDER BY CASE document_type
-                 WHEN 'terms_of_service' THEN 1
-                 WHEN 'privacy_notice' THEN 2
-                 ELSE 3
-             END",
+             ORDER BY document_type",
         )
         .bind(document_ids)
         .fetch_all(pool)
@@ -636,6 +728,7 @@ async fn load_legal_notice_documents(
         sqlx::query_as::<_, LegalNoticeDocument>(
             "SELECT id,
                     document_type,
+                    title,
                     version,
                     url,
                     effective_at,
@@ -643,12 +736,7 @@ async fn load_legal_notice_documents(
                     requires_acknowledgment
              FROM legal_documents
              WHERE is_active = true
-               AND document_type IN ('terms_of_service', 'privacy_notice')
-             ORDER BY CASE document_type
-                 WHEN 'terms_of_service' THEN 1
-                 WHEN 'privacy_notice' THEN 2
-                 ELSE 3
-             END",
+             ORDER BY document_type",
         )
         .fetch_all(pool)
         .await
@@ -680,61 +768,49 @@ async fn load_legal_notice_documents(
     Ok(documents)
 }
 
+/// Validate at most one document per type in a notice batch, and collect
+/// their ids. Generalized over an arbitrary set of document types instead
+/// of two named slots.
 fn legal_notice_document_ids(
     documents: &[LegalNoticeDocument],
-) -> Result<(Option<Uuid>, Option<Uuid>), (StatusCode, String)> {
-    let mut terms_document_id = None;
-    let mut privacy_document_id = None;
+) -> Result<Vec<Uuid>, (StatusCode, String)> {
+    let mut seen_types = HashSet::with_capacity(documents.len());
 
     for document in documents {
-        match document.document_type.as_str() {
-            "terms_of_service" if terms_document_id.is_none() => {
-                terms_document_id = Some(document.id);
-            }
-            "privacy_notice" if privacy_document_id.is_none() => {
-                privacy_document_id = Some(document.id);
-            }
-            "terms_of_service" | "privacy_notice" => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "Legal notice batches can include at most one document of each type"
-                        .to_string(),
-                ));
-            }
-            _ => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "Unsupported legal document type: {}",
-                        document.document_type
-                    ),
-                ));
-            }
+        if !seen_types.insert(document.document_type.as_str()) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Legal notice batches can include at most one document of each type"
+                    .to_string(),
+            ));
         }
     }
 
-    Ok((terms_document_id, privacy_document_id))
+    Ok(documents.iter().map(|document| document.id).collect())
 }
 
 async fn upsert_legal_notice_batch(
     pool: &PgPool,
     dedupe_key: &str,
-    terms_document_id: Option<Uuid>,
-    privacy_document_id: Option<Uuid>,
+    document_ids: &[Uuid],
 ) -> Result<Uuid, (StatusCode, String)> {
-    sqlx::query_scalar(
-        "INSERT INTO legal_notice_batches (
-            dedupe_key, terms_document_id, privacy_document_id
-         )
-         VALUES ($1, $2, $3)
+    let mut tx = pool.begin().await.map_err(|e| {
+        tracing::error!("Failed to start legal notice batch transaction: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to create legal notice batch".to_string(),
+        )
+    })?;
+
+    let batch_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO legal_notice_batches (dedupe_key)
+         VALUES ($1)
          ON CONFLICT (dedupe_key) DO UPDATE
             SET dedupe_key = EXCLUDED.dedupe_key
          RETURNING id",
     )
     .bind(dedupe_key)
-    .bind(terms_document_id)
-    .bind(privacy_document_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
         tracing::error!("Failed to upsert legal notice batch: {:?}", e);
@@ -742,7 +818,36 @@ async fn upsert_legal_notice_batch(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to create legal notice batch".to_string(),
         )
-    })
+    })?;
+
+    for document_id in document_ids {
+        sqlx::query(
+            "INSERT INTO legal_notice_batch_documents (batch_id, document_id)
+             VALUES ($1, $2)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(batch_id)
+        .bind(document_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to link legal notice batch document: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to create legal notice batch".to_string(),
+            )
+        })?;
+    }
+
+    tx.commit().await.map_err(|e| {
+        tracing::error!("Failed to commit legal notice batch: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to create legal notice batch".to_string(),
+        )
+    })?;
+
+    Ok(batch_id)
 }
 
 async fn count_legal_notice_recipients(
@@ -905,7 +1010,7 @@ fn build_legal_notice_email_data(documents: &[LegalNoticeDocument]) -> serde_jso
                 document.requires_blocking_reacceptance || document.requires_acknowledgment;
             serde_json::json!({
                 "document_type": &document.document_type,
-                "document_title": legal_document_title(&document.document_type),
+                "document_title": resolve_title(document.title.as_deref(), &document.document_type),
                 "version": &document.version,
                 "effective_at": document.effective_at.format("%Y-%m-%d").to_string(),
                 "url": &document.url,
@@ -1001,57 +1106,79 @@ async fn record_legal_notice_delivery(
 mod tests {
     use super::*;
 
+    fn active_doc(id: Uuid, version: &str, blocking: bool, ack: bool) -> ActiveLegalDocument {
+        ActiveLegalDocument {
+            id,
+            version: version.to_string(),
+            title: None,
+            url: "https://example.com/doc".to_string(),
+            requires_blocking_reacceptance: blocking,
+            requires_acknowledgment: ack,
+        }
+    }
+
     #[test]
-    fn test_legal_notice_dedupe_key_includes_selected_documents() {
-        let terms_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
-        let privacy_id = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+    fn test_humanize_document_type() {
+        assert_eq!(humanize_document_type("terms_of_service"), "Terms Of Service");
+        assert_eq!(humanize_document_type("privacy_notice"), "Privacy Notice");
+        assert_eq!(humanize_document_type("dpa"), "Dpa");
+    }
+
+    #[test]
+    fn test_resolve_title_prefers_explicit_title() {
+        assert_eq!(
+            resolve_title(Some("Data Processing Agreement"), "dpa"),
+            "Data Processing Agreement"
+        );
+        assert_eq!(resolve_title(None, "dpa"), "Dpa");
+        assert_eq!(resolve_title(Some("  "), "dpa"), "Dpa");
+    }
+
+    #[test]
+    fn test_legal_notice_dedupe_key_is_order_independent_over_n_documents() {
+        let a = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let b = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let c = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
 
         assert_eq!(
-            legal_notice_dedupe_key(Some(terms_id), Some(privacy_id)),
-            "terms=11111111-1111-1111-1111-111111111111;privacy=22222222-2222-2222-2222-222222222222"
+            legal_notice_dedupe_key(&[a, b, c]),
+            legal_notice_dedupe_key(&[c, a, b])
         );
-        assert_eq!(
-            legal_notice_dedupe_key(Some(terms_id), None),
-            "terms=11111111-1111-1111-1111-111111111111;privacy=none"
-        );
-        assert_eq!(
-            legal_notice_dedupe_key(None, Some(privacy_id)),
-            "terms=none;privacy=22222222-2222-2222-2222-222222222222"
-        );
+        assert_eq!(legal_notice_dedupe_key(&[a]), a.to_string());
     }
 
     #[test]
     fn test_current_user_requires_no_action() {
+        let id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
         let status = compute_document_status(
+            "terms_of_service",
+            Some(&active_doc(id, "2026-04-08", true, false)),
             Some(LegalDocumentIdentity {
-                id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+                id,
                 version: "2026-04-08".to_string(),
                 occurred_at: None,
             }),
-            Some(LegalDocumentIdentity {
-                id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
-                version: "2026-04-08".to_string(),
-                occurred_at: None,
-            }),
+            false,
         );
         assert!(!status.requires_action);
         assert_eq!(status.active_version.as_deref(), Some("2026-04-08"));
         assert_eq!(status.accepted_version.as_deref(), Some("2026-04-08"));
+        assert_eq!(status.title, "Terms Of Service");
     }
 
     #[test]
     fn test_outdated_user_requires_action() {
+        let active_id = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let old_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
         let status = compute_document_status(
+            "terms_of_service",
+            Some(&active_doc(active_id, "2026-06-01", true, false)),
             Some(LegalDocumentIdentity {
-                id: Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap(),
-                version: "2026-06-01".to_string(),
-                occurred_at: None,
-            }),
-            Some(LegalDocumentIdentity {
-                id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+                id: old_id,
                 version: "2026-04-08".to_string(),
                 occurred_at: None,
             }),
+            false,
         );
         assert!(status.requires_action);
         assert_eq!(status.active_version.as_deref(), Some("2026-06-01"));
@@ -1060,14 +1187,14 @@ mod tests {
 
     #[test]
     fn test_pre_tracking_user_no_action() {
-        // User has no legal event rows (predates tracking)
+        // User has zero legal event rows across every type (predates all
+        // tracking) - do not retroactively gate.
+        let id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
         let status = compute_document_status(
-            Some(LegalDocumentIdentity {
-                id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
-                version: "2026-04-08".to_string(),
-                occurred_at: None,
-            }),
+            "terms_of_service",
+            Some(&active_doc(id, "2026-04-08", true, false)),
             None,
+            true,
         );
         assert!(!status.requires_action);
         assert_eq!(status.active_version.as_deref(), Some("2026-04-08"));
@@ -1075,10 +1202,63 @@ mod tests {
     }
 
     #[test]
+    fn test_new_document_type_gates_user_with_other_legal_history() {
+        // User has legal history (e.g. accepted ToS/Privacy at signup) but
+        // none for this type, because it was published after they signed
+        // up. Must gate - this is the whole point of adding a new document
+        // type. Regression test for a bug where `(Some(_), None) => false`
+        // meant a newly-added document type never gated anyone.
+        let id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let status = compute_document_status(
+            "dpa",
+            Some(&active_doc(id, "2026-08-01", true, false)),
+            None,
+            false,
+        );
+        assert!(status.requires_action);
+    }
+
+    #[test]
+    fn test_informational_document_never_requires_action() {
+        // Both flags false = purely informational, tracked but never
+        // something a user must act on. A version bump must not pop the
+        // full-screen modal. Regression test: requires_action used to
+        // compare document IDs only, ignoring the flags entirely.
+        let old_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let new_id = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+
+        // Version changed, user has an old record: would gate if flags were
+        // ignored.
+        let status = compute_document_status(
+            "changelog",
+            Some(&active_doc(new_id, "2026-06-01", false, false)),
+            Some(LegalDocumentIdentity {
+                id: old_id,
+                version: "2026-01-01".to_string(),
+                occurred_at: None,
+            }),
+            false,
+        );
+        assert!(!status.requires_action);
+
+        // No record at all, user has other legal history: would gate if
+        // flags were ignored (this is the exact shape of the new-type-gates
+        // regression test above, minus the flags).
+        let status_no_record = compute_document_status(
+            "changelog",
+            Some(&active_doc(new_id, "2026-06-01", false, false)),
+            None,
+            false,
+        );
+        assert!(!status_no_record.requires_action);
+    }
+
+    #[test]
     fn test_no_active_version_no_action() {
-        let status = compute_document_status(None, None);
+        let status = compute_document_status("terms_of_service", None, None, false);
         assert!(!status.requires_action);
         assert_eq!(status.active_version, None);
+        assert_eq!(status.url, None);
     }
 
     #[test]
@@ -1086,14 +1266,43 @@ mod tests {
         // Edge case: user accepted a version that's since been deactivated
         // with no replacement. Should not require action.
         let status = compute_document_status(
+            "terms_of_service",
             None,
             Some(LegalDocumentIdentity {
                 id: Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
                 version: "2026-04-08".to_string(),
                 occurred_at: None,
             }),
+            false,
         );
         assert!(!status.requires_action);
+    }
+
+    #[test]
+    fn test_legal_notice_document_ids_rejects_duplicate_type_across_n_documents() {
+        let make = |id: Uuid, document_type: &str| LegalNoticeDocument {
+            id,
+            document_type: document_type.to_string(),
+            title: None,
+            version: "2026-01-01".to_string(),
+            url: "https://example.com".to_string(),
+            effective_at: Utc::now(),
+            requires_blocking_reacceptance: false,
+            requires_acknowledgment: false,
+        };
+
+        let documents = vec![
+            make(Uuid::new_v4(), "terms_of_service"),
+            make(Uuid::new_v4(), "privacy_notice"),
+            make(Uuid::new_v4(), "dpa"),
+        ];
+        assert!(legal_notice_document_ids(&documents).is_ok());
+
+        let dup_type_id = documents[0].document_type.clone();
+        let documents_with_dup = vec![make(Uuid::new_v4(), &dup_type_id), make(Uuid::new_v4(), &dup_type_id)];
+        let error = legal_notice_document_ids(&documents_with_dup).unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("at most one document of each type"));
     }
 
     #[test]

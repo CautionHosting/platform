@@ -156,6 +156,31 @@ fn extract_ref_from_archive_url(url: &str) -> Option<String> {
     None
 }
 
+/// A `git` invocation hardened for non-interactive use: never prompts on the
+/// TTY for credentials, detaches stdin, and aborts a transfer that stalls below
+/// 1000 B/s for 300s. Without these guards a private/redirecting remote can hang
+/// `ls-remote` on a credential prompt forever.
+fn guarded_git() -> Command {
+    let mut cmd = Command::new("git");
+    cmd.args(["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=300"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "true")
+        .stdin(std::process::Stdio::null());
+    cmd
+}
+
+/// HTTP client for enclave/framework source archive downloads. A connect timeout
+/// bounds an unresponsive mirror and a total timeout bounds a stalled transfer,
+/// so a missing or hung source fails in minutes at worst instead of hanging
+/// forever — reqwest's default client (`reqwest::get`) has neither bound.
+fn archive_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .context("Failed to build archive HTTP client")
+}
+
 /// Resolve a branch/tag name to a commit SHA using git ls-remote
 pub async fn resolve_ref_to_commit(git_url: &str, ref_name: &str) -> Option<String> {
     tracing::info!(
@@ -173,7 +198,7 @@ pub async fn resolve_ref_to_commit(git_url: &str, ref_name: &str) -> Option<Stri
     // Try as branch first (refs/heads/)
     let branch_ref = format!("refs/heads/{}", ref_name);
     tracing::info!("Trying git ls-remote {} {}", git_url, branch_ref);
-    match Command::new("git")
+    match guarded_git()
         .args(["ls-remote", git_url, &branch_ref])
         .output()
         .await
@@ -205,7 +230,7 @@ pub async fn resolve_ref_to_commit(git_url: &str, ref_name: &str) -> Option<Stri
     // Try as tag (refs/tags/)
     let tag_ref = format!("refs/tags/{}", ref_name);
     tracing::info!("Trying git ls-remote {} {}", git_url, tag_ref);
-    match Command::new("git")
+    match guarded_git()
         .args(["ls-remote", git_url, &tag_ref])
         .output()
         .await
@@ -298,7 +323,9 @@ pub async fn get_or_clone_enclave_source(
 
         // Download archive using reqwest
         tracing::info!("Downloading archive...");
-        let response = reqwest::get(enclave_source)
+        let response = archive_http_client()?
+            .get(enclave_source)
+            .send()
             .await
             .context("Failed to download archive")?;
 
@@ -317,49 +344,22 @@ pub async fn get_or_clone_enclave_source(
         let decoder = GzDecoder::new(&archive_bytes[..]);
         let mut archive = Archive::new(decoder);
 
-        // Extract with strip_components=1 equivalent (skip first path component)
         for entry in archive
             .entries()
             .context("Failed to read archive entries")?
         {
             let mut entry = entry.context("Failed to read archive entry")?;
-            let path = entry.path().context("Failed to get entry path")?;
-
-            // Skip the first path component (equivalent to --strip-components=1)
-            let components: Vec<_> = path.components().collect();
-            if components.len() <= 1 {
-                continue; // Skip the top-level directory itself
-            }
-
-            let stripped_path: PathBuf = components[1..].iter().collect();
-
-            // Reject paths with .. components (zip-slip prevention)
-            if stripped_path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                anyhow::bail!(
-                    "Path traversal detected in archive entry: {}",
-                    path.display()
-                );
-            }
-
-            let dest_path = download_dir.join(&stripped_path);
-
-            // Create parent directories if needed
-            if let Some(parent) = dest_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-            }
-
             entry
-                .unpack(&dest_path)
-                .with_context(|| format!("Failed to extract: {}", stripped_path.display()))?;
+                .unpack_in(&download_dir)
+                .with_context(|| format!("Failed to extract entry"))?;
         }
 
-        tracing::info!("Enclave source extracted to: {}", download_dir.display());
+        let enclave_source_dir = find_top_level_dir(&download_dir)
+            .await
+            .context("Failed to find top-level directory in extracted enclave source")?;
+        tracing::info!("Enclave source extracted to: {}", enclave_source_dir.display());
         Ok(EnclaveSourceResult {
-            path: download_dir,
+            path: enclave_source_dir,
             commit,
         })
     } else if enclave_source.starts_with("http://")
@@ -467,7 +467,9 @@ pub async fn get_or_clone_framework_source(
         "Downloading framework source archive from: {}",
         framework_source_url
     );
-    let response = reqwest::get(framework_source_url)
+    let response = archive_http_client()?
+        .get(framework_source_url)
+        .send()
         .await
         .context("Failed to download framework source archive")?;
 
@@ -493,38 +495,57 @@ pub async fn get_or_clone_framework_source(
         .context("Failed to read framework archive entries")?
     {
         let mut entry = entry.context("Failed to read framework archive entry")?;
-        let path = entry.path().context("Failed to get entry path")?;
-
-        let components: Vec<_> = path.components().collect();
-        if components.len() <= 1 {
-            continue;
-        }
-
-        let stripped_path: PathBuf = components[1..].iter().collect();
-
-        // Reject paths with .. components (zip-slip prevention)
-        if stripped_path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            anyhow::bail!(
-                "Path traversal detected in archive entry: {}",
-                path.display()
-            );
-        }
-
-        let dest_path = download_dir.join(&stripped_path);
-
-        if let Some(parent) = dest_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-        }
-
         entry
-            .unpack(&dest_path)
-            .with_context(|| format!("Failed to extract: {}", stripped_path.display()))?;
+            .unpack_in(&download_dir)
+            .with_context(|| format!("Failed to extract entry"))?;
     }
 
-    tracing::info!("Framework source extracted to: {}", download_dir.display());
-    Ok(download_dir)
+    let framework_source_dir = find_top_level_dir(&download_dir)
+        .await
+        .context("Failed to find top-level directory in extracted framework source")?;
+    tracing::info!("Framework source extracted to: {}", framework_source_dir.display());
+    Ok(framework_source_dir)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum FindTopLevelDirError {
+    #[error("failed to read directory {0}")]
+    ReadDir(String, #[source] std::io::Error),
+    #[error("failed to read directory entry")]
+    ReadEntry(#[source] std::io::Error),
+    #[error("failed to read entry file type")]
+    FileType(#[source] std::io::Error),
+    #[error("multiple top-level directories found in {0}")]
+    MultipleTopLevelDirs(String),
+    #[error("no top-level directory found in {0}")]
+    NoTopLevelDir(String),
+}
+
+async fn find_top_level_dir(dir: &Path) -> Result<PathBuf, FindTopLevelDirError> {
+    let mut entries = fs::read_dir(dir)
+        .await
+        .map_err(|e| FindTopLevelDirError::ReadDir(dir.display().to_string(), e))?;
+    let mut top_dir = None;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(FindTopLevelDirError::ReadEntry)?
+    {
+        if entry
+            .file_type()
+            .await
+            .map_err(FindTopLevelDirError::FileType)?
+            .is_dir()
+        {
+            if top_dir.is_some() {
+                return Err(FindTopLevelDirError::MultipleTopLevelDirs(
+                    dir.display().to_string(),
+                ));
+            }
+            top_dir = Some(entry.path());
+        }
+    }
+    top_dir.ok_or(FindTopLevelDirError::NoTopLevelDir(
+        dir.display().to_string(),
+    ))
 }

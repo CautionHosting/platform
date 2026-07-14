@@ -68,7 +68,7 @@
           </svg>
           <span>Account</span>
         </button>
-        <button class="header-action-button header-logout-button" @click="$emit('logout')">
+        <button class="header-action-button header-logout-button" @click="requestLogout">
           <svg
             class="header-action-icon header-logout-icon"
             xmlns="http://www.w3.org/2000/svg"
@@ -323,9 +323,9 @@
       <div
         v-if="buildInputs.length"
         class="footer-build-inputs"
-        title="Tool commits the platform builds new enclaves with. Build inputs, not attested measurements — verify a running enclave with `caution verify`."
+        title="Commits the platform builds new enclaves with. Build inputs, not attested measurements — verify a running enclave with `caution verify`."
       >
-        <span class="footer-build-inputs-label">Enclave build inputs:</span>
+        <span class="footer-build-inputs-label">Build inputs:</span>
         <template v-for="(input, i) in buildInputs" :key="input.name">
           <a
             :href="input.url"
@@ -337,6 +337,24 @@
         </template>
       </div>
     </footer>
+
+    <div
+      v-if="showLogoutConfirmation"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="logout-confirmation-title"
+      @click.self="cancelLogout"
+    >
+      <div class="modal-content">
+        <h3 id="logout-confirmation-title" class="modal-title">Log out?</h3>
+        <p class="modal-message">You’ll need to log in again to access your account.</p>
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" @click="cancelLogout">Cancel</button>
+          <button type="button" class="btn-danger" @click="confirmLogout">Log out</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -347,7 +365,7 @@ import {
   isDevelopmentBannerDismissed,
 } from "../utils/developmentBanner.js";
 
-const TOOL_ORDER = ["enclaveos", "bootproof", "steve", "locksmith"];
+const TOOL_ORDER = ["platform", "enclaveos", "bootproof", "steve", "locksmith"];
 
 export default {
   name: "DashboardLayout",
@@ -375,6 +393,7 @@ export default {
     const isSecurityNavActive = computed(() => securityTabs.includes(props.activeTab));
     const securityNavOpen = ref(isSecurityNavActive.value);
     const developmentBannerDismissed = ref(isDevelopmentBannerDismissed());
+    const showLogoutConfirmation = ref(false);
     const showDevelopmentBanner = computed(() => {
       return props.showDevelopmentWarning && !developmentBannerDismissed.value;
     });
@@ -387,6 +406,19 @@ export default {
     const dismissDevelopmentBanner = () => {
       developmentBannerDismissed.value = true;
       dismissDevelopmentBannerForSession();
+    };
+
+    const requestLogout = () => {
+      showLogoutConfirmation.value = true;
+    };
+
+    const cancelLogout = () => {
+      showLogoutConfirmation.value = false;
+    };
+
+    const confirmLogout = () => {
+      showLogoutConfirmation.value = false;
+      emit("logout");
     };
 
     const copyrightLabel = computed(() => {
@@ -426,11 +458,15 @@ export default {
 
     return {
       buildInputs,
+      cancelLogout,
+      confirmLogout,
       copyrightLabel,
       dismissDevelopmentBanner,
       isSecurityNavActive,
+      requestLogout,
       securityNavOpen,
       showDevelopmentBanner,
+      showLogoutConfirmation,
       selectTab,
     };
   },

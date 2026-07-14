@@ -7,7 +7,6 @@ caution {
 enclave "main" {
   build {
     containerfile = "Containerfile.example"
-    binary = "static-binary"
     app_sources = [
       "git@codeberg.org:caution/demo-hello-world-enclave",
       "https://codeberg.org/caution/demo-hello-world-enclave",

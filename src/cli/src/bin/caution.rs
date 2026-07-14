@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+use std::error::Error;
+
 fn print_heuristics() {
     let build_heuristics_content = include_str!(concat!(env!("OUT_DIR"), "/heuristics.json"));
     let mut build_heuristics: Vec<caution_environment_heuristics::Heuristic> =

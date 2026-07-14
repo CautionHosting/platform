@@ -29,6 +29,7 @@ pub enum Provider {
 
 /// Configuration for the `provider { type = "aws" ... }` block.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AwsProviderConfig {
     pub region: String,
     pub vpc_id: Option<String>,
@@ -38,6 +39,7 @@ pub struct AwsProviderConfig {
 
 /// Top-level `caution { }` block.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CautionConfig {
     pub managed_credentials: Option<String>,
     pub machine_type: Option<String>,
@@ -47,9 +49,9 @@ pub struct CautionConfig {
 
 /// The `build { }` block inside an enclave definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildConfig {
     pub containerfile: Option<String>,
-    pub binary: Option<String>,
     #[serde(default)]
     pub app_sources: Vec<String>,
     pub cache: Option<bool>,
@@ -57,6 +59,7 @@ pub struct BuildConfig {
 
 /// The `debug { }` block inside an enclave definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DebugConfig {
     pub enabled: Option<bool>,
     #[serde(default)]
@@ -72,6 +75,11 @@ pub enum PortSpec {
 }
 
 /// A single traffic rule.
+///
+/// NOTE: `deny_unknown_fields` is intentionally absent here -- `#[serde(flatten)]`
+/// on `Option<PortSpec>` (untagged) is incompatible with it. Serde can't
+/// distinguish "field consumed by flattened type" from "unknown field" when
+/// the flattened type uses multi-field untagged variants (e.g. `FromTo`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrafficRule {
     pub cidr_ipv4: String,
@@ -82,6 +90,7 @@ pub struct TrafficRule {
 
 /// The `e2e_encryption { }` block inside HTTP config.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct E2eEncryption {
     pub enabled: Option<bool>,
     pub cors_origins: Option<Vec<String>>,
@@ -89,14 +98,17 @@ pub struct E2eEncryption {
 
 /// The `http { }` block inside network config.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HttpConfig {
-    pub domain: String,
+    #[serde(default)]
+    pub domain: Option<String>,
     pub port: u16,
     pub e2e_encryption: Option<E2eEncryption>,
 }
 
 /// The `resources { }` block inside an enclave definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResourceConfig {
     pub cpu: u32,
     pub memory_mb: u32,
@@ -104,6 +116,7 @@ pub struct ResourceConfig {
 
 /// A single unit block (`unit "label" { }`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UnitConfig {
     pub command: String,
     #[serde(default)]
@@ -218,6 +231,7 @@ impl UnitConfig {
 
 /// The `network { }` block inside an enclave definition.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkConfig {
     #[serde(deserialize_with = "single_or_vec", default)]
     pub ingress: Vec<TrafficRule>,
@@ -235,6 +249,7 @@ impl NetworkConfig {
 
 /// An enclave definition (`enclave "label" { }`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnclaveConfig {
     pub build: Option<BuildConfig>,
     pub debug: Option<DebugConfig>,
@@ -245,6 +260,7 @@ pub struct EnclaveConfig {
 
 /// Top-level configuration file matching the `example.hcl` schema.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConfigurationFile {
     pub caution: Option<CautionConfig>,
     pub enclave: Option<BTreeMap<String, EnclaveConfig>>,
@@ -260,13 +276,6 @@ pub enum FromProcfileError {
     #[error("http_port {0} must also be listed in ports")]
     HttpPortNotInPorts(u16),
 
-    #[error(
-        "`binary:` and `locksmith: true` cannot be used together. The `binary:` directive \
-         extracts only the binary's directory, so /etc/caution/ (bundle + secrets) is \
-         dropped and locksmithd panics at boot. Remove one of them."
-    )]
-    BinaryWithLocksmith,
-
     #[error("managed_on_prem requires 'platform' to be specified")]
     ManagedOnPremMissingPlatform,
 
@@ -275,6 +284,12 @@ pub enum FromProcfileError {
 
     #[error("managed_on_prem with platform 'aws' requires 'aws_region'")]
     ManagedOnPremMissingRegion,
+
+    #[error("invalid domain: {0}")]
+    InvalidDomain(String),
+
+    #[error("invalid provider config: {0}")]
+    InvalidProvider(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -309,6 +324,12 @@ pub enum FromStrError {
 
     #[error("Failed to parse HCL")]
     HclParse(#[from] hcl::Error),
+
+    #[error("invalid domain: {0}")]
+    InvalidDomain(String),
+
+    #[error("invalid provider config: {0}")]
+    InvalidProvider(String),
 }
 
 const RESERVED_INTERNAL_PORT_START: u16 = 49_500;
@@ -318,10 +339,81 @@ fn is_reserved(port: u16) -> bool {
     (RESERVED_INTERNAL_PORT_START..=RESERVED_INTERNAL_PORT_END).contains(&port)
 }
 
+/// Validate that `domain` is a well-formed fully-qualified hostname.
+///
+/// The value flows into generated infrastructure (Terraform variables, the
+/// instance bootstrap script, and the Caddy config), so it must be a plain DNS
+/// name with no characters that could carry meaning in those contexts.
+fn validate_domain(domain: Option<&str>) -> Result<(), String> {
+    let Some(domain) = domain else {
+        return Ok(());
+    };
+    if domain.is_empty() || domain.len() > 253 {
+        return Err("domain must be between 1 and 253 characters".to_string());
+    }
+    if !domain.contains('.') {
+        return Err("domain must be a fully-qualified hostname".to_string());
+    }
+    if domain.starts_with('.') || domain.ends_with('.') {
+        return Err("domain must not start or end with '.'".to_string());
+    }
+    for label in domain.split('.') {
+        if label.is_empty() {
+            return Err("domain must not contain empty labels".to_string());
+        }
+        if label.len() > 63 {
+            return Err("domain labels must be 63 characters or fewer".to_string());
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err("domain labels must not start or end with '-'".to_string());
+        }
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Err("domain contains invalid characters".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Validate that `value` is a well-formed AWS resource id of the form
+/// `<prefix>-<id>`, where `<id>` is 8 or 17 lowercase hex digits.
+///
+/// These ids flow from the deployer-controlled `provider { }` block into
+/// generated Terraform, so they must contain no characters that could carry
+/// meaning there. Real AWS ids always match this shape, so the check is strict
+/// without rejecting any legitimate value.
+fn validate_aws_id(prefix: &str, value: &str) -> Result<(), String> {
+    let id = value
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .ok_or_else(|| format!("expected an AWS {prefix}-… id, got {value:?}"))?;
+    if !matches!(id.len(), 8 | 17)
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(format!("malformed AWS {prefix} id: {value:?}"));
+    }
+    Ok(())
+}
+
+/// Validate every AWS resource identifier carried by a `provider { }` block.
+fn validate_provider(provider: &Provider) -> Result<(), String> {
+    let Provider::Aws(aws) = provider;
+    if let Some(ref vpc_id) = aws.vpc_id {
+        validate_aws_id("vpc", vpc_id)?;
+    }
+    for subnet_id in aws.subnet_ids.iter().flatten() {
+        validate_aws_id("subnet", subnet_id)?;
+    }
+    if let Some(ref sg_id) = aws.security_group_id {
+        validate_aws_id("sg", sg_id)?;
+    }
+    Ok(())
+}
+
 impl ConfigurationFile {
     pub fn from_procfile(content: &str) -> Result<Self, FromProcfileError> {
         let mut containerfile = None;
-        let mut binary = None;
         let mut app_sources: Vec<String> = Vec::new();
         let mut cache: Option<bool> = None;
         let mut memory_mb = None;
@@ -332,7 +424,6 @@ impl ConfigurationFile {
         let mut http_port: Option<u16> = None;
         let mut domain: Option<String> = None;
         let mut run = None;
-        let mut locksmith = false;
         let mut procfile_e2e: Option<bool> = None;
         let mut managed_on_prem = false;
         let mut platform: Option<String> = None;
@@ -358,11 +449,6 @@ impl ConfigurationFile {
                     "containerfile" => {
                         if !value.is_empty() {
                             containerfile = Some(value);
-                        }
-                    }
-                    "binary" => {
-                        if !value.is_empty() {
-                            binary = Some(value);
                         }
                     }
                     "app_source" | "app_sources" => {
@@ -436,9 +522,6 @@ impl ConfigurationFile {
                             domain = Some(value);
                         }
                     }
-                    "locksmith" => {
-                        locksmith = value.to_lowercase() == "true";
-                    }
                     "e2e" => {
                         procfile_e2e = Some(value.to_lowercase() == "true");
                     }
@@ -475,9 +558,6 @@ impl ConfigurationFile {
             }
         }
 
-        if binary.is_some() && locksmith {
-            return Err(FromProcfileError::BinaryWithLocksmith);
-        }
 
         if let Some(hp) = http_port {
             if !ports.contains(&hp) {
@@ -485,20 +565,21 @@ impl ConfigurationFile {
             }
         }
 
+        let explicit_http_port = http_port;
+
         let http_port = match http_port {
             Some(hp) => Some(hp),
             None if ports.len() == 1 => Some(ports[0]),
             None => None,
         };
 
-        let build = if containerfile.is_some()
-            || binary.is_some()
-            || !app_sources.is_empty()
-            || cache.is_some()
-        {
+        // Only construct HttpConfig when http_port was explicitly set in the
+        // Procfile (not auto-derived from a single ports entry).
+        let has_explicit_http_port = explicit_http_port.is_some() || domain.is_some();
+
+        let build = if containerfile.is_some() || !app_sources.is_empty() || cache.is_some() {
             Some(BuildConfig {
                 containerfile,
-                binary,
                 app_sources,
                 cache,
             })
@@ -537,18 +618,17 @@ impl ConfigurationFile {
             cors_origins: None,
         });
 
-        let http = match (domain, http_port) {
-            (Some(d), Some(p)) => Some(HttpConfig {
-                domain: d,
-                port: p,
+        validate_domain(domain.as_deref()).map_err(FromProcfileError::InvalidDomain)?;
+
+        let http = if has_explicit_http_port {
+            let port = http_port.unwrap_or(80);
+            Some(HttpConfig {
+                domain,
+                port,
                 e2e_encryption: e2e_encryption.clone(),
-            }),
-            (Some(d), None) => Some(HttpConfig {
-                domain: d,
-                port: 80,
-                e2e_encryption: e2e_encryption.clone(),
-            }),
-            (None, _) => None,
+            })
+        } else {
+            None
         };
 
         let network = if !ports.is_empty() || http.is_some() {
@@ -630,6 +710,10 @@ impl ConfigurationFile {
             None
         };
 
+        if let Some(ref p) = provider {
+            validate_provider(p).map_err(FromProcfileError::InvalidProvider)?;
+        }
+
         let caution = provider.map(|p| CautionConfig {
             managed_credentials: None,
             machine_type: None,
@@ -642,6 +726,10 @@ impl ConfigurationFile {
 
     pub fn from_str(s: &str) -> Result<Self, FromStrError> {
         let config: ConfigurationFile = hcl::from_str(s)?;
+
+        if let Some(provider) = config.caution.as_ref().and_then(|c| c.provider.as_ref()) {
+            validate_provider(provider).map_err(FromStrError::InvalidProvider)?;
+        }
 
         if let Some((_, enclave)) = &config.enclave.iter().flatten().next()
             && let Some(network) = &enclave.network
@@ -674,6 +762,8 @@ impl ConfigurationFile {
                 if let Some(ref network) = enclave.network
                     && let Some(ref http) = network.http
                 {
+                    validate_domain(http.domain.as_deref()).map_err(FromStrError::InvalidDomain)?;
+
                     let port_covered = network.ingress.iter().any(|rule| match &rule.port_spec {
                         Some(PortSpec::Exact { port }) => *port == http.port,
                         Some(PortSpec::FromTo {
@@ -755,7 +845,6 @@ mod tests {
                 EnclaveConfig {
                     build: Some(BuildConfig {
                         containerfile: Some("Containerfile.example".into()),
-                        binary: Some("static-binary".into()),
                         app_sources: vec![
                             "git@codeberg.org:caution/demo-hello-world-enclave".into(),
                             "https://codeberg.org/caution/demo-hello-world-enclave".into(),
@@ -781,7 +870,7 @@ mod tests {
                             ip_protocol: None,
                         }],
                         http: Some(HttpConfig {
-                            domain: "chat.caution.dev".into(),
+                            domain: Some("chat.caution.dev".into()),
                             port: 8000,
                             e2e_encryption: Some(E2eEncryption {
                                 enabled: Some(true),
@@ -1098,7 +1187,6 @@ enclave "main" {
 enclave "myapp" {
   build {
     containerfile = "Containerfile.custom"
-    binary = "mybinary"
   }
   resources {
     cpu = 4
@@ -1301,7 +1389,6 @@ enclave "main" {
         let procfile = "\
 run: /app/server --port 8080
 containerfile: Containerfile.custom
-binary: myapp
 app_sources: url1, url2
 memory_mb: 2000
 cpus: 4
@@ -1318,7 +1405,6 @@ cache: false
 
         let build = e.build.as_ref().unwrap();
         assert_eq!(build.containerfile.as_deref(), Some("Containerfile.custom"));
-        assert_eq!(build.binary.as_deref(), Some("myapp"));
         assert_eq!(build.app_sources, vec!["url1", "url2"]);
         assert_eq!(build.cache, Some(false));
 
@@ -1337,7 +1423,7 @@ cache: false
             Some(PortSpec::Exact { port: 8080 })
         );
         let http = network.http.as_ref().unwrap();
-        assert_eq!(http.domain, "example.com");
+        assert_eq!(http.domain.as_deref(), Some("example.com"));
         assert_eq!(http.port, 8080);
 
         let unit = e.unit.as_ref().unwrap();
@@ -1387,8 +1473,53 @@ cache: false
         let enclave = config.enclave.unwrap();
         let network = enclave.get("default").unwrap().network.as_ref().unwrap();
         let http = network.http.as_ref().unwrap();
-        assert_eq!(http.domain, "myapp.example.com");
+        assert_eq!(http.domain.as_deref(), Some("myapp.example.com"));
         assert_eq!(http.port, 8080);
+    }
+
+    #[test]
+    fn test_from_procfile_rejects_malformed_domain() {
+        // Shell/HCL metacharacters must not survive parsing.
+        for bad in [
+            "x.$(id).example.com",
+            "a\"b.example.com",
+            "a b.example.com",
+            "nodot",
+        ] {
+            let procfile = format!("run: /app\nports: 8080\nhttp_port: 8080\ndomain: {bad}\n");
+            assert!(
+                matches!(
+                    ConfigurationFile::from_procfile(&procfile),
+                    Err(FromProcfileError::InvalidDomain(_))
+                ),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_str_rejects_malformed_domain() {
+        let hcl = r#"
+enclave "main" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port      = 8080
+    }
+    http {
+      domain = "x.$(id).example.com"
+      port   = 8080
+    }
+  }
+  unit "default" {
+    command = "/app"
+  }
+}
+"#;
+        assert!(matches!(
+            ConfigurationFile::from_str(hcl),
+            Err(FromStrError::InvalidDomain(_))
+        ));
     }
 
     #[test]
@@ -1468,8 +1599,6 @@ cache: false
         assert!(unit.args.is_empty());
 
         let build = e.build.as_ref().unwrap();
-        assert_eq!(build.binary.as_deref(), Some("/usr/local/bin/hello"));
-
         assert_eq!(
             build.app_sources,
             vec!["git@codeberg.org:caution/demo-hello-world-enclave.git"]
@@ -1512,7 +1641,7 @@ cache: false
 
         let network = e.network.as_ref().unwrap();
         let http = network.http.as_ref().unwrap();
-        assert_eq!(http.domain, "chat.caution.dev");
+        assert_eq!(http.domain.as_deref(), Some("chat.caution.dev"));
         assert_eq!(http.port, 80);
 
         let build = e.build.as_ref().unwrap();
@@ -1552,7 +1681,9 @@ cache: false
             network.ingress[0].port_spec,
             Some(PortSpec::Exact { port: 8080 })
         );
-        assert!(network.http.is_none());
+        let http = network.http.as_ref().unwrap();
+        assert!(http.domain.is_none());
+        assert_eq!(http.port, 8080);
 
         let debug = e.debug.as_ref().unwrap();
         assert_eq!(debug.enabled, Some(true));
@@ -1573,8 +1704,6 @@ cache: false
         assert!(unit.args.is_empty());
 
         let build = e.build.as_ref().unwrap();
-        assert_eq!(build.binary.as_deref(), Some("/usr/local/bin/hello"));
-
         assert_eq!(
             build.app_sources,
             vec!["git@codeberg.org:caution/demo-hello-world-enclave.git"]
@@ -1617,7 +1746,7 @@ cache: false
 
         let network = e.network.as_ref().unwrap();
         let http = network.http.as_ref().unwrap();
-        assert_eq!(http.domain, "chat.caution.dev");
+        assert_eq!(http.domain.as_deref(), Some("chat.caution.dev"));
         assert_eq!(http.port, 80);
 
         let build = e.build.as_ref().unwrap();
@@ -1675,9 +1804,9 @@ caution {
   provider {
     type = "aws"
     region = "us-east-1"
-    vpc_id = "vpc-123"
-    subnet_ids = ["subnet-a", "subnet-b"]
-    security_group_id = "sg-456"
+    vpc_id = "vpc-0a1b2c3d"
+    subnet_ids = ["subnet-01234567", "subnet-0123456789abcdef0"]
+    security_group_id = "sg-0a1b2c3d"
   }
 }
 "#;
@@ -1688,12 +1817,15 @@ caution {
             Provider::Aws(aws) => aws,
         };
         assert_eq!(aws.region, "us-east-1");
-        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-123"));
+        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-0a1b2c3d"));
         assert_eq!(
             aws.subnet_ids,
-            Some(vec!["subnet-a".into(), "subnet-b".into()])
+            Some(vec![
+                "subnet-01234567".into(),
+                "subnet-0123456789abcdef0".into()
+            ])
         );
-        assert_eq!(aws.security_group_id.as_deref(), Some("sg-456"));
+        assert_eq!(aws.security_group_id.as_deref(), Some("sg-0a1b2c3d"));
     }
 
     #[test]
@@ -1725,9 +1857,9 @@ caution {
   provider {
     type = "aws"
     region = "eu-west-1"
-    vpc_id = "vpc-xxx"
-    subnet_ids = ["subnet-1"]
-    security_group_id = "sg-yyy"
+    vpc_id = "vpc-0123456789abcdef0"
+    subnet_ids = ["subnet-89abcdef"]
+    security_group_id = "sg-89abcdef"
   }
 }
 "#;
@@ -1738,9 +1870,9 @@ caution {
             Provider::Aws(aws) => aws,
         };
         assert_eq!(aws.region, "eu-west-1");
-        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-xxx"));
-        assert_eq!(aws.subnet_ids, Some(vec!["subnet-1".into()]));
-        assert_eq!(aws.security_group_id.as_deref(), Some("sg-yyy"));
+        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-0123456789abcdef0"));
+        assert_eq!(aws.subnet_ids, Some(vec!["subnet-89abcdef".into()]));
+        assert_eq!(aws.security_group_id.as_deref(), Some("sg-89abcdef"));
     }
 
     #[test]
@@ -1764,8 +1896,8 @@ caution {
                 build_machine_type: None,
                 provider: Some(Provider::Aws(AwsProviderConfig {
                     region: "ap-southeast-1".into(),
-                    vpc_id: Some("vpc-roundtrip".into()),
-                    subnet_ids: Some(vec!["subnet-a".into()]),
+                    vpc_id: Some("vpc-0a1b2c3d".into()),
+                    subnet_ids: Some(vec!["subnet-0a1b2c3d".into()]),
                     security_group_id: None,
                 })),
             }),
@@ -1778,7 +1910,7 @@ caution {
             Provider::Aws(aws) => aws,
         };
         assert_eq!(aws.region, "ap-southeast-1");
-        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-roundtrip"));
+        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-0a1b2c3d"));
     }
 
     #[test]
@@ -1795,6 +1927,63 @@ caution {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_from_str_rejects_malformed_provider_ids() {
+        // Values that parse as valid HCL strings but are not well-formed AWS ids
+        // must be rejected by the provider validator. (Embedded quotes/newlines
+        // are separately caught by the HCL parser before this point.)
+        for (field, value) in [
+            ("vpc_id", "vpc-$(id)"),           // shell command substitution
+            ("vpc_id", "vpc-123"),             // too short to be a real id
+            ("vpc_id", "vpc-0A1B2C3D"),        // uppercase is not a valid id
+            ("subnet_ids", "subnet-zzzzzzzz"), // non-hex
+            ("security_group_id", "sg-../etc"), // path traversal characters
+        ] {
+            let line = if field == "subnet_ids" {
+                format!("subnet_ids = [\"{value}\"]")
+            } else {
+                format!("{field} = \"{value}\"")
+            };
+            let hcl = format!(
+                "caution {{\n  provider {{\n    type = \"aws\"\n    region = \"us-east-1\"\n    {line}\n  }}\n}}\n"
+            );
+            assert!(
+                matches!(
+                    ConfigurationFile::from_str(&hcl),
+                    Err(FromStrError::InvalidProvider(_))
+                ),
+                "expected {field}={value:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_procfile_rejects_malformed_provider_ids() {
+        let procfile = "\
+run: /app
+managed_on_prem: true
+platform: aws
+aws_region: us-east-1
+aws_vpc_id: vpc-$(id).example
+";
+        assert!(matches!(
+            ConfigurationFile::from_procfile(procfile),
+            Err(FromProcfileError::InvalidProvider(_))
+        ));
+    }
+
+    #[test]
+    fn test_validate_aws_id_accepts_8_and_17_hex() {
+        assert!(validate_aws_id("vpc", "vpc-0a1b2c3d").is_ok());
+        assert!(validate_aws_id("vpc", "vpc-0123456789abcdef0").is_ok());
+        assert!(validate_aws_id("subnet", "subnet-00000000").is_ok());
+        // Wrong prefix, wrong length, and uppercase are all rejected.
+        assert!(validate_aws_id("vpc", "subnet-0a1b2c3d").is_err());
+        assert!(validate_aws_id("vpc", "vpc-0a1b2c3").is_err());
+        assert!(validate_aws_id("vpc", "vpc-0A1B2C3D").is_err());
+        assert!(validate_aws_id("vpc", "vpc-").is_err());
+    }
+
     // ── from_procfile managed_on_prem tests ─────────────────────────
 
     #[test]
@@ -1804,9 +1993,9 @@ run: /app
 managed_on_prem: true
 platform: aws
 aws_region: us-east-1
-aws_vpc_id: vpc-123
-aws_subnet_id: subnet-a
-aws_security_group_id: sg-456
+aws_vpc_id: vpc-0a1b2c3d
+aws_subnet_id: subnet-0a1b2c3d
+aws_security_group_id: sg-0a1b2c3d
 ";
         let config = ConfigurationFile::from_procfile(procfile).unwrap();
         let caution = config.caution.expect("caution block");
@@ -1814,9 +2003,9 @@ aws_security_group_id: sg-456
             Provider::Aws(aws) => aws,
         };
         assert_eq!(aws.region, "us-east-1");
-        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-123"));
-        assert_eq!(aws.subnet_ids, Some(vec!["subnet-a".into()]));
-        assert_eq!(aws.security_group_id.as_deref(), Some("sg-456"));
+        assert_eq!(aws.vpc_id.as_deref(), Some("vpc-0a1b2c3d"));
+        assert_eq!(aws.subnet_ids, Some(vec!["subnet-0a1b2c3d".into()]));
+        assert_eq!(aws.security_group_id.as_deref(), Some("sg-0a1b2c3d"));
     }
 
     #[test]
@@ -1850,19 +2039,37 @@ aws_region: us-east-1
     }
 
     #[test]
-    fn test_from_procfile_rejects_binary_with_locksmith() {
-        let procfile = "run: /app\nbinary: /app/x\nlocksmith: true\n";
-        let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
+    fn test_from_str_rejects_build_binary() {
+        let hcl = r#"
+enclave "default" {
+  build {
+    binary = "/app/x"
+  }
+  unit "default" {
+    command = "/app/x"
+  }
+}
+"#;
+        let err = ConfigurationFile::from_str(hcl).unwrap_err();
+        let FromStrError::HclParse(source) = err else {
+            panic!("unexpected error: {err}");
+        };
         assert!(
-            matches!(err, FromProcfileError::BinaryWithLocksmith),
-            "unexpected error: {err}"
+            source.to_string().contains("binary"),
+            "unexpected parse error: {source}"
         );
     }
 
     #[test]
-    fn test_from_procfile_allows_binary_without_locksmith() {
+    fn test_from_procfile_ignores_binary_field() {
         let procfile = "run: /app\nbinary: /app/x\nports: 8080\n";
-        ConfigurationFile::from_procfile(procfile).unwrap();
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let default = enclave.get("default").unwrap();
+        assert!(
+            default.build.is_none(),
+            "binary alone should not create a build block"
+        );
     }
 
     #[test]
@@ -2202,5 +2409,265 @@ enclave "main" {
         let cfg2: ConfigurationFile = hcl::from_str(hcl_empty).expect("parse HCL");
         let net2 = cfg2.enclave.unwrap().get("main").unwrap().network.clone().unwrap();
         assert!(!net2.egress_enabled());
+    }
+
+    #[test]
+    fn test_deny_unknown_caution_config() {
+        let hcl = r#"managed_credentials = "x" unknown = 1"#;
+        let err = hcl::from_str::<CautionConfig>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_aws_provider_config() {
+        let hcl = r#"region = "us-east-1" unknown = "x""#;
+        let err = hcl::from_str::<AwsProviderConfig>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_provider_block() {
+        let hcl = r#"
+caution {
+  provider {
+    type = "aws"
+    region = "us-east-1"
+    unknown = 1
+  }
+}
+"#;
+        let err = ConfigurationFile::from_str(hcl).unwrap_err();
+        assert!(matches!(err, FromStrError::HclParse(_)));
+    }
+
+    #[test]
+    fn test_deny_unknown_build_config() {
+        let hcl = r#"containerfile = "C" unknown = true"#;
+        let err = hcl::from_str::<BuildConfig>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_debug_config() {
+        let hcl = r#"enabled = true unknown = 1"#;
+        let err = hcl::from_str::<DebugConfig>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_e2e_encryption() {
+        let hcl = r#"enabled = true unknown = false"#;
+        let err = hcl::from_str::<E2eEncryption>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_http_config() {
+        let hcl = r#"domain = "x.com" port = 80 unknown = "y""#;
+        let err = hcl::from_str::<HttpConfig>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_resource_config() {
+        let hcl = r#"cpu = 1 memory_mb = 512 unknown = 2"#;
+        let err = hcl::from_str::<ResourceConfig>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_unit_config() {
+        let hcl = r#"command = "/bin/sh" unknown = true"#;
+        let err = hcl::from_str::<UnitConfig>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_network_config() {
+        let hcl = r#"unknown = true"#;
+        let err = hcl::from_str::<NetworkConfig>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_enclave_config() {
+        let hcl = r#"
+enclave "test" {
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+  unknown_block {
+    foo = 1
+  }
+}
+"#;
+        let err = ConfigurationFile::from_str(hcl).unwrap_err();
+        assert!(matches!(err, FromStrError::HclParse(_)));
+    }
+
+    #[test]
+    fn test_deny_unknown_configuration_file() {
+        let hcl = r#"
+unknown_top_block { }
+"#;
+        let err = hcl::from_str::<ConfigurationFile>(hcl).unwrap_err();
+        assert!(err.to_string().contains("unknown_top_block") || err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_deny_unknown_enclave_field() {
+        let hcl = r#"
+enclave "test" {
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+  unknown_field = "x"
+}
+"#;
+        let err = ConfigurationFile::from_str(hcl).unwrap_err();
+        assert!(matches!(err, FromStrError::HclParse(_)));
+    }
+
+    #[test]
+    fn test_network_without_http_is_valid() {
+        let hcl = r#"
+enclave "test" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let cfg = ConfigurationFile::from_str(hcl).expect("should accept network without http");
+        let enclave = cfg.enclave.unwrap().get("test").unwrap().clone();
+        assert!(enclave.network.unwrap().http.is_none());
+    }
+
+    #[test]
+    fn test_enclave_without_unit_is_valid() {
+        let hcl = r#"
+enclave "test" {
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let cfg = ConfigurationFile::from_str(hcl).expect("should accept enclave without unit");
+        let enclave = cfg.enclave.unwrap().get("test").unwrap().clone();
+        assert!(enclave.unit.is_none());
+    }
+
+    #[test]
+    fn test_from_str_http_without_domain_is_valid() {
+        let hcl = r#"
+enclave "main" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }
+    http {
+      port = 8080
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let cfg = ConfigurationFile::from_str(hcl)
+            .expect("should accept http without domain");
+        let enclave = cfg.enclave.unwrap();
+        let main = enclave.get("main").unwrap();
+        let http = main.network.as_ref().unwrap().http.as_ref().unwrap();
+        assert!(http.domain.is_none());
+        assert_eq!(http.port, 8080);
+    }
+
+    #[test]
+    fn test_from_str_http_with_domain_still_works() {
+        let hcl = r#"
+enclave "main" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }
+    http {
+      domain = "x.com"
+      port = 8080
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        let cfg = ConfigurationFile::from_str(hcl)
+            .expect("should accept http with domain");
+        let enclave = cfg.enclave.unwrap();
+        let main = enclave.get("main").unwrap();
+        let http = main.network.as_ref().unwrap().http.as_ref().unwrap();
+        assert_eq!(http.domain.as_deref(), Some("x.com"));
+        assert_eq!(http.port, 8080);
+    }
+
+    #[test]
+    fn test_from_procfile_http_port_only() {
+        let procfile = "run: /app\nports: 8080\nhttp_port: 8080\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let network = enclave.get("default").unwrap().network.as_ref().unwrap();
+        let http = network.http.as_ref().unwrap();
+        assert!(http.domain.is_none());
+        assert_eq!(http.port, 8080);
+    }
+
+    #[test]
+    fn test_from_procfile_no_http_at_all() {
+        let procfile = "run: /app\nports: 8080\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let network = enclave.get("default").unwrap().network.as_ref().unwrap();
+        assert!(network.http.is_none());
+    }
+
+    #[test]
+    fn test_network_with_only_http_is_valid() {
+        let hcl = r#"
+enclave "test" {
+  network {
+    http {
+      domain = "x.com"
+      port = 80
+    }
+  }
+  resources {
+    cpu = 1
+    memory_mb = 512
+  }
+}
+"#;
+        // Use raw hcl::from_str to test serde deserialization independently
+        // of the extra from_str() validation (which requires the port to be
+        // covered by an ingress rule).
+        let cfg: ConfigurationFile =
+            hcl::from_str(hcl).expect("should accept network with only http");
+        let enclave = cfg.enclave.unwrap().get("test").unwrap().clone();
+        let net = enclave.network.unwrap();
+        assert!(net.ingress.is_empty());
+        assert!(net.egress.is_empty());
+        assert!(net.http.is_some());
     }
 }

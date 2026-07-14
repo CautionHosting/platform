@@ -213,6 +213,26 @@ WantedBy=multi-user.target
 EOF
 done
 
+# Create host-local vsock proxy for the HTTP gateway upstream. Caddy fronts this
+# on public HTTP/HTTPS, so the raw application HTTP port must stay loopback-only.
+%{ if http_port != 0 ~}
+cat > /etc/systemd/system/vsock-proxy-http.service <<EOF
+[Unit]
+Description=VSock Proxy for HTTP Gateway Port ${http_port}
+After=nitro-enclave.service
+Requires=nitro-enclave.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat TCP-LISTEN:${http_port},bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:16:${http_port}
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+%{ endif ~}
+
 # Create vsock proxy services for custom user ports
 %{ for port in ports ~}
 cat > /etc/systemd/system/vsock-proxy-${port}.service <<EOF
@@ -240,6 +260,9 @@ systemctl enable nitro-enclave-console.service
 for port in $standard_ports; do
 systemctl enable vsock-proxy-$port.service
 done
+%{ if http_port != 0 ~}
+systemctl enable vsock-proxy-http.service
+%{ endif ~}
 %{ for port in ports ~}
 systemctl enable vsock-proxy-${port}.service
 %{ endfor ~}
@@ -255,6 +278,9 @@ sleep 15
 for port in $standard_ports; do
 systemctl start vsock-proxy-$port.service
 done
+%{ if http_port != 0 ~}
+systemctl start vsock-proxy-http.service
+%{ endif ~}
 %{ for port in ports ~}
 systemctl start vsock-proxy-${port}.service
 %{ endfor ~}

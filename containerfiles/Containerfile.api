@@ -47,7 +47,6 @@ ARG EXTRA_RUSTFLAGS="-C codegen-units=1"
 ARG CARGO_BUILD_FLAGS="--release"
 ARG CARGO_PROFILE_DIR="release"
 ARG EXTRA_FEATURES=""
-
 ENV RUSTFLAGS="${EXTRA_RUSTFLAGS} -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
 ENV NETTLE_STATIC=1
 
@@ -95,6 +94,9 @@ COPY src/enclave-builder/templates /app/templates
 WORKDIR /app
 
 ENV RUST_LOG=info
+
+ARG PLATFORM_GIT_SHA=""
+ENV PLATFORM_GIT_SHA=$PLATFORM_GIT_SHA
 
 EXPOSE 8080
 

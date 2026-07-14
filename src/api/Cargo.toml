@@ -59,5 +59,9 @@ dirs = { workspace = true }
 sequoia-openpgp = { workspace = true }
 caution-config = { version = "0.1.0", path = "../caution-config" }
 
+# HCL generation for lockfile config
+hcl-rs = { version = "0.19", features = ["perf"] }
+indexmap = { version = "2", features = ["serde"] }
+
 [features]
 e2e-testing-unsafe = []
