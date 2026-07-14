@@ -209,6 +209,13 @@
                 SSH keys
               </button>
               <button
+                :class="['nav-subitem', { active: activeTab === 'pgp' }]"
+                :aria-current="activeTab === 'pgp' ? 'page' : undefined"
+                @click="selectTab('pgp')"
+              >
+                PGP keys
+              </button>
+              <button
                 :class="['nav-subitem', { active: activeTab === 'security' }]"
                 :disabled="requireUsername"
                 :aria-current="activeTab === 'security' ? 'page' : undefined"
@@ -419,7 +426,7 @@ export default {
   },
   emits: ["tab-change", "logout", "focus-username"],
   setup(props, { emit }) {
-    const securityTabs = ["ssh", "security"];
+    const securityTabs = ["ssh", "pgp", "security"];
     const isSecurityNavActive = computed(() => securityTabs.includes(props.activeTab));
     const securityNavOpen = ref(isSecurityNavActive.value);
     const developmentBannerDismissed = ref(isDevelopmentBannerDismissed());

@@ -1000,6 +1000,119 @@ make build-cli
       </template>
     </div>
 
+    <!-- PGP Keys Tab -->
+    <div v-if="activeTab === 'pgp'" class="content-card content-card--dashboard-tab">
+      <div class="content-header">
+        <div class="content-header-text">
+          <h2 class="content-header-title">PGP keys</h2>
+          <p class="content-header-description">
+            OpenPGP public keys associated with your account. Adding or removing a key requires
+            passkey approval; removed keys remain in the security audit history.
+          </p>
+        </div>
+        <div class="ssh-key-header-action">
+          <button
+            v-if="!showAddPgpKeyForm"
+            class="btn-primary ssh-key-add-btn"
+            @click="showAddPgpKeyForm = true"
+          >
+            Add PGP key
+          </button>
+        </div>
+      </div>
+
+      <div v-if="showAddPgpKeyForm" class="inline-form-panel ssh-key-form-panel">
+        <h3 class="inline-form-panel-title">Add new PGP key</h3>
+        <div class="form-group">
+          <label class="form-label" for="pgpKeyName">Key name</label>
+          <input
+            id="pgpKeyName"
+            v-model="newPgpKeyName"
+            type="text"
+            class="form-input"
+            maxlength="255"
+            autocomplete="off"
+            :disabled="addingPgpKey"
+          />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="pgpPublicKey">Armored public key</label>
+          <div class="form-input-wrapper">
+            <textarea
+              id="pgpPublicKey"
+              v-model="newPgpPublicKey"
+              class="form-textarea"
+              placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----"
+              rows="10"
+              maxlength="65536"
+              spellcheck="false"
+              :disabled="addingPgpKey"
+            ></textarea>
+            <div class="form-message-container">
+              <div v-if="pgpError && showAddPgpKeyForm" class="message message--error">
+                {{ pgpError }}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button
+            @click="addPgpKey"
+            class="btn-primary"
+            :disabled="addingPgpKey || !newPgpPublicKey.trim()"
+          >
+            {{ addingPgpKey ? "Adding..." : "Add PGP key" }}
+          </button>
+          <button
+            @click="cancelPgpKeyForm"
+            class="btn-secondary"
+            :disabled="addingPgpKey"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+
+      <template v-else>
+        <div class="items-list ssh-keys-list">
+          <div v-if="loadingPgpKeys" class="list-item-empty">Loading PGP keys...</div>
+          <div v-else-if="pgpKeys.length === 0" class="list-item-empty dashboard-tab-empty">
+            No PGP keys yet. Add an armored public key to your account.
+          </div>
+          <div v-else>
+            <div v-for="key in pgpKeys" :key="key.id" class="ssh-key-item">
+              <div class="ssh-key-icon" aria-hidden="true">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="7.5" cy="15.5" r="4.5" />
+                  <path d="m10.7 12.3 8.8-8.8" />
+                  <path d="m15 8 2 2" />
+                  <path d="m17 6 2 2" />
+                </svg>
+              </div>
+              <div class="ssh-key-info">
+                <div class="ssh-key-title">{{ key.name || "Unnamed PGP key" }}</div>
+                <div class="ssh-key-fingerprint">{{ formatPgpFingerprint(key.fingerprint) }}</div>
+                <div class="ssh-key-meta">
+                  <span class="ssh-key-date">Added on {{ formatDate(key.created_at) }}</span>
+                </div>
+              </div>
+              <button
+                class="ssh-key-delete"
+                :disabled="removingPgpKey === key.id"
+                @click="removePgpKey(key)"
+              >
+                <svg v-if="removingPgpKey === key.id" class="spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10" stroke-opacity="0.25"/>
+                  <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/>
+                </svg>
+                {{ removingPgpKey === key.id ? "Removing..." : "Remove" }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+
     <!-- Authentication Tab -->
     <div v-if="activeTab === 'security'" class="content-card content-card--dashboard-tab">
       <div class="content-header">
@@ -1937,6 +2050,7 @@ export default {
     const DASHBOARD_TAB_HASHES = {
       apps: "",
       ssh: "ssh",
+      pgp: "pgp",
       keys: "keys",
       security: "security",
       users: "users",
@@ -2098,6 +2212,16 @@ export default {
     const newPublicKey = ref("");
     const showDeleteModal = ref(false);
     const keyToDelete = ref(null);
+
+    // PGP keys state
+    const pgpKeys = ref([]);
+    const loadingPgpKeys = ref(true);
+    const addingPgpKey = ref(false);
+    const removingPgpKey = ref(null);
+    const showAddPgpKeyForm = ref(false);
+    const newPgpKeyName = ref("");
+    const newPgpPublicKey = ref("");
+    const pgpError = ref(null);
 
     // Toast notification state
     const toast = ref(null);
@@ -3056,6 +3180,126 @@ export default {
         return false;
       } finally {
         loadingKeys.value = false;
+      }
+    };
+
+    const loadPgpKeys = async () => {
+      if (pgpKeys.value.length === 0) {
+        loadingPgpKeys.value = true;
+      }
+
+      try {
+        const response = await authFetch("/pgp-keys");
+        if (response.ok) {
+          const data = await response.json();
+          pgpKeys.value = data.keys || [];
+        } else if (response.status === 401) {
+          window.location.href = "/login";
+        } else {
+          pgpKeys.value = [];
+          showToast(await readResponseError(response, "Failed to load PGP keys"), "error");
+        }
+      } catch {
+        pgpKeys.value = [];
+        showToast("Failed to connect to server", "error");
+      } finally {
+        loadingPgpKeys.value = false;
+      }
+    };
+
+    const cancelPgpKeyForm = () => {
+      showAddPgpKeyForm.value = false;
+      newPgpKeyName.value = "";
+      newPgpPublicKey.value = "";
+      pgpError.value = null;
+    };
+
+    const addPgpKey = async () => {
+      const publicKey = newPgpPublicKey.value.trim();
+      if (!publicKey) return;
+
+      pgpError.value = null;
+      if (publicKey.includes("-----BEGIN PGP PRIVATE KEY BLOCK-----")) {
+        pgpError.value = "Private key material cannot be uploaded. Export and paste only your public key.";
+        return;
+      }
+      if (new TextEncoder().encode(publicKey).byteLength > 64 * 1024) {
+        pgpError.value = "PGP public key must be no larger than 64 KiB.";
+        return;
+      }
+
+      addingPgpKey.value = true;
+      try {
+        const body = JSON.stringify({
+          public_key: publicKey,
+          name: newPgpKeyName.value.trim() || null,
+        });
+        const signedHeaders = await buildSignedHeaders("POST", "/pgp-keys", body);
+        const response = await authFetch("/pgp-keys", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...signedHeaders,
+          },
+          body,
+        });
+
+        if (!response.ok) {
+          pgpError.value = await readResponseError(response, "Failed to add PGP key");
+          return;
+        }
+
+        const added = await response.json();
+        const keyName = newPgpKeyName.value.trim() || "PGP key";
+        cancelPgpKeyForm();
+        await loadPgpKeys();
+        showToast(`${keyName} added (${formatPgpFingerprint(added.fingerprint)})`);
+      } catch (err) {
+        if (err.name === "NotAllowedError") {
+          pgpError.value = "Passkey authentication was cancelled or timed out";
+        } else {
+          pgpError.value = err.message || "Failed to add PGP key";
+        }
+      } finally {
+        addingPgpKey.value = false;
+      }
+    };
+
+    const formatPgpFingerprint = (fingerprint) => {
+      if (!fingerprint) return "";
+      return fingerprint.toUpperCase().match(/.{1,4}/g)?.join(" ") || fingerprint;
+    };
+
+    const removePgpKey = async (key) => {
+      const title = key.name || formatPgpFingerprint(key.fingerprint);
+      if (!confirm(`Remove ${title}? The historical record will be retained.`)) {
+        return;
+      }
+
+      removingPgpKey.value = key.id;
+      try {
+        const path = `/pgp-keys/${key.id}`;
+        const signedHeaders = await buildSignedHeaders("DELETE", path, "");
+        const response = await authFetch(path, {
+          method: "DELETE",
+          headers: signedHeaders,
+        });
+
+        if (!response.ok) {
+          showToast(await readResponseError(response, "Failed to remove PGP key"), "error");
+          return;
+        }
+
+        await loadPgpKeys();
+        showToast(`${title} removed`);
+      } catch (err) {
+        if (err.name === "NotAllowedError") {
+          showToast("Passkey authentication was cancelled or timed out", "error");
+        } else {
+          showToast(err.message || "Failed to remove PGP key", "error");
+        }
+      } finally {
+        removingPgpKey.value = null;
       }
     };
 
@@ -4305,6 +4549,9 @@ export default {
         newPublicKey.value = "";
         error.value = null;
         loadKeys();
+      } else if (newTab === "pgp") {
+        cancelPgpKeyForm();
+        loadPgpKeys();
       } else if (newTab === "security") {
         loadPasskeys();
         loadOrgSettings();
@@ -4629,6 +4876,8 @@ export default {
         loadApps();
       } else if (activeTab.value === "ssh") {
         loadKeys();
+      } else if (activeTab.value === "pgp") {
+        loadPgpKeys();
       } else if (activeTab.value === "credentials") {
         loadCredentials();
       } else if (activeTab.value === "security") {
@@ -4694,7 +4943,15 @@ export default {
       window.addEventListener("popstate", handleHistoryNavigation);
       window.addEventListener("hashchange", handleHistoryNavigation);
 
-      await Promise.all([loadApps(), loadKeys(), loadCredentials(), loadBundles(), loadOrgSettings(), loadPasskeys()]);
+      await Promise.all([
+        loadApps(),
+        loadKeys(),
+        loadPgpKeys(),
+        loadCredentials(),
+        loadBundles(),
+        loadOrgSettings(),
+        loadPasskeys(),
+      ]);
 
       if (initialTab === "account") {
         loadUserEmail();
@@ -4737,6 +4994,8 @@ export default {
           loadApps();
         } else if (activeTab.value === "ssh") {
           loadKeys();
+        } else if (activeTab.value === "pgp") {
+          loadPgpKeys();
         } else if (activeTab.value === "credentials") {
           loadCredentials();
         } else if (activeTab.value === "users") {
@@ -4815,6 +5074,18 @@ export default {
       deleteKey,
       confirmDelete,
       cancelDelete,
+      pgpKeys,
+      loadingPgpKeys,
+      addingPgpKey,
+      removingPgpKey,
+      showAddPgpKeyForm,
+      newPgpKeyName,
+      newPgpPublicKey,
+      pgpError,
+      addPgpKey,
+      removePgpKey,
+      cancelPgpKeyForm,
+      formatPgpFingerprint,
       quorumBundles,
       loadingBundles,
       deletingBundle,

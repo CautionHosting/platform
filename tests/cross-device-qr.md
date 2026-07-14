@@ -47,7 +47,7 @@ caution login --qr
 
 ## 2. QR-Signed Operations
 
-The `--qr` flag enables cross-device FIDO2 signing for any operation that requires a signature (e.g. uploading secrets, modifying SSH keys, changing org settings). The flow is the same regardless of the operation: the CLI requests a signing challenge, renders a QR code, the user approves on their phone, and the CLI sends the signed request.
+The `--qr` flag enables cross-device FIDO2 signing for any operation that requires a signature (e.g. uploading secrets, adding or removing PGP keys, modifying SSH keys, or changing org settings). The flow is the same regardless of the operation: the CLI requests a signing challenge, renders a QR code, the user approves on their phone, and the CLI sends the signed request.
 
 The example below uses `secret new` as a concrete test case, but any `--qr`-signed operation follows the same pattern.
 

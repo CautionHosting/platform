@@ -6,6 +6,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::panic::Location;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -969,6 +970,232 @@ pub struct SshKeyInfo {
     pub public_key: String,
     pub created_at: time::OffsetDateTime,
     pub last_used_at: Option<time::OffsetDateTime>,
+}
+
+pub struct NewSignedRequestAudit<'a> {
+    pub user_id: Uuid,
+    pub credential_id: &'a [u8],
+    pub credential_public_key: &'a [u8],
+    pub relying_party_id: &'a str,
+    pub request_method: &'a str,
+    pub request_path: &'a str,
+    pub request_body_sha256: &'a str,
+    pub request_body_size_bytes: i64,
+    pub challenge_id: Uuid,
+    pub authentication_state: &'a [u8],
+    pub assertion: &'a [u8],
+    pub authorization_flow: &'a str,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Unable to record verified signed request {challenge_id} for user {user_id} [{location}]")]
+pub struct RecordSignedRequestAuditError {
+    user_id: Uuid,
+    challenge_id: Uuid,
+    location: &'static Location<'static>,
+
+    #[source]
+    source: sqlx::Error,
+}
+
+impl RecordSignedRequestAuditError {
+    #[track_caller]
+    fn new(user_id: Uuid, challenge_id: Uuid, source: sqlx::Error) -> Self {
+        Self {
+            user_id,
+            challenge_id,
+            location: Location::caller(),
+            source,
+        }
+    }
+}
+
+pub async fn record_signed_request_audit(
+    pool: &PgPool,
+    audit: &NewSignedRequestAudit<'_>,
+) -> Result<Uuid, RecordSignedRequestAuditError> {
+    sqlx::query_scalar(
+        "INSERT INTO signed_request_audit (
+            user_id, credential_id, credential_public_key, relying_party_id,
+            request_method, request_path, request_body_sha256,
+            request_body_size_bytes, challenge_id, authentication_state,
+            assertion, authorization_flow
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         RETURNING id",
+    )
+    .bind(audit.user_id)
+    .bind(audit.credential_id)
+    .bind(audit.credential_public_key)
+    .bind(audit.relying_party_id)
+    .bind(audit.request_method)
+    .bind(audit.request_path)
+    .bind(audit.request_body_sha256)
+    .bind(audit.request_body_size_bytes)
+    .bind(audit.challenge_id)
+    .bind(audit.authentication_state)
+    .bind(audit.assertion)
+    .bind(audit.authorization_flow)
+    .fetch_one(pool)
+    .await
+    .map_err(|source| RecordSignedRequestAuditError::new(audit.user_id, audit.challenge_id, source))
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum CompleteSignedRequestAuditErrorKind {
+    Database,
+    AuditNotPending,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Unable to complete signed request audit {audit_id} with HTTP status {response_status}: {kind:?} [{location}]"
+)]
+pub struct CompleteSignedRequestAuditError {
+    kind: CompleteSignedRequestAuditErrorKind,
+    audit_id: Uuid,
+    response_status: u16,
+    location: &'static Location<'static>,
+
+    #[source]
+    source: Option<sqlx::Error>,
+}
+
+impl CompleteSignedRequestAuditError {
+    #[track_caller]
+    fn database(audit_id: Uuid, response_status: u16, source: sqlx::Error) -> Self {
+        Self {
+            kind: CompleteSignedRequestAuditErrorKind::Database,
+            audit_id,
+            response_status,
+            location: Location::caller(),
+            source: Some(source),
+        }
+    }
+
+    #[track_caller]
+    fn audit_not_pending(audit_id: Uuid, response_status: u16) -> Self {
+        Self {
+            kind: CompleteSignedRequestAuditErrorKind::AuditNotPending,
+            audit_id,
+            response_status,
+            location: Location::caller(),
+            source: None,
+        }
+    }
+}
+
+pub async fn complete_signed_request_audit(
+    pool: &PgPool,
+    audit_id: Uuid,
+    response_status: u16,
+) -> Result<(), CompleteSignedRequestAuditError> {
+    let result = sqlx::query(
+        "UPDATE signed_request_audit
+         SET response_status = $2, completed_at = NOW()
+         WHERE id = $1 AND completed_at IS NULL",
+    )
+    .bind(audit_id)
+    .bind(i32::from(response_status))
+    .execute(pool)
+    .await
+    .map_err(|source| {
+        CompleteSignedRequestAuditError::database(audit_id, response_status, source)
+    })?;
+
+    if result.rows_affected() != 1 {
+        return Err(CompleteSignedRequestAuditError::audit_not_pending(
+            audit_id,
+            response_status,
+        ));
+    }
+
+    Ok(())
+}
+
+pub async fn add_pgp_key(
+    pool: &PgPool,
+    user_id: Uuid,
+    public_key: &str,
+    fingerprint: &str,
+    name: Option<&str>,
+    signed_request_id: Option<Uuid>,
+) -> Result<Uuid, sqlx::Error> {
+    sqlx::query_scalar(
+        "INSERT INTO pgp_keys (
+            user_id, public_key, fingerprint, name, added_by_signed_request_id
+         ) VALUES ($1, $2, $3, $4, $5)
+         RETURNING id",
+    )
+    .bind(user_id)
+    .bind(public_key)
+    .bind(fingerprint)
+    .bind(name)
+    .bind(signed_request_id)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn list_pgp_keys(pool: &PgPool, user_id: Uuid) -> Result<Vec<PgpKeyInfo>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, fingerprint, name, created_at
+         FROM pgp_keys
+         WHERE user_id = $1 AND removed_at IS NULL
+         ORDER BY created_at DESC, id DESC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct PgpKeyInfo {
+    pub id: Uuid,
+    pub fingerprint: String,
+    pub name: Option<String>,
+    pub created_at: time::OffsetDateTime,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Unable to remove PGP public key {key_id} for user {user_id} [{location}]")]
+pub struct RemovePgpKeyError {
+    user_id: Uuid,
+    key_id: Uuid,
+    location: &'static Location<'static>,
+
+    #[source]
+    source: sqlx::Error,
+}
+
+impl RemovePgpKeyError {
+    #[track_caller]
+    fn new(user_id: Uuid, key_id: Uuid, source: sqlx::Error) -> Self {
+        Self {
+            user_id,
+            key_id,
+            location: Location::caller(),
+            source,
+        }
+    }
+}
+
+pub async fn remove_pgp_key(
+    pool: &PgPool,
+    user_id: Uuid,
+    key_id: Uuid,
+    signed_request_id: Option<Uuid>,
+) -> Result<Option<String>, RemovePgpKeyError> {
+    sqlx::query_scalar(
+        "UPDATE pgp_keys
+         SET removed_at = NOW(), removed_by_signed_request_id = $3
+         WHERE id = $1 AND user_id = $2 AND removed_at IS NULL
+         RETURNING fingerprint",
+    )
+    .bind(key_id)
+    .bind(user_id)
+    .bind(signed_request_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|source| RemovePgpKeyError::new(user_id, key_id, source))
 }
 
 // QR Login token functions
