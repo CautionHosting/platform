@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2025 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+#
+# Standalone e2e helper: an in-process software WebAuthn authenticator that drives
+# a full register + login assertion ceremony against a live gateway. Kept OUT of the
+# root workspace (own empty [workspace] table below) so its OpenSSL-backed
+# webauthn-authenticator-rs dep never enters the gateway/api build graph.
+[package]
+name = "soft-authenticator"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "soft-authenticator"
+path = "src/main.rs"
+
+[dependencies]
+# Software passkey. `softpasskey` transitively enables `crypto` (OpenSSL) + the
+# blanket AuthenticatorBackend impl we call through WebauthnAuthenticator.
+webauthn-authenticator-rs = { version = "0.5", default-features = false, features = ["softpasskey"] }
+# Same proto types the gateway's webauthn-rs 0.5 uses on the wire — no manual mapping.
+webauthn-rs-proto = "0.5"
+# http-only localhost client; no TLS backend needed.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
+serde_json = "1"
+url = "2"
+anyhow = "1"
+
+# Detach from the parent workspace.
+[workspace]

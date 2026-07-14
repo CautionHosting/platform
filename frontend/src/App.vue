@@ -26,6 +26,7 @@ import Register from './views/Login.vue'
 import AuthLogin from './views/AuthLogin.vue'
 import Dashboard from './views/Dashboard.vue'
 import QrLogin from './views/QrLogin.vue'
+import InviteAccept from './views/InviteAccept.vue'
 import LegalAcceptanceModal from './components/LegalAcceptanceModal.vue'
 import { authFetch, getCsrfToken } from './composables/useWebAuthn.js'
 
@@ -37,6 +38,7 @@ export default {
     AuthLogin,
     Dashboard,
     QrLogin,
+    InviteAccept,
     LegalAcceptanceModal
   },
   setup() {
@@ -93,6 +95,11 @@ export default {
         description: 'Complete your Caution account setup.',
         path: '/onboarding'
       },
+      '/invite': {
+        title: 'Accept invite • Caution',
+        description: 'Join a Caution organization with a passkey.',
+        path: '/invite'
+      },
       '/qr-login': {
         title: 'CLI login • Caution',
         description: 'Authenticate a Caution CLI login request.',
@@ -139,6 +146,11 @@ export default {
       account: {
         title: 'Account • Caution',
         description: 'Manage Caution account notifications and legal documents.',
+        path: '/'
+      },
+      users: {
+        title: 'Users • Caution',
+        description: 'Manage Caution organization users.',
         path: '/'
       },
       billing: {
@@ -326,6 +338,8 @@ export default {
           return 'Register'
         }
         return 'Onboarding'
+      } else if (path === '/invite') {
+        return 'InviteAccept'
       } else if (path === '/dashboard') {
         // Protected route - show nothing until auth check completes
         if (!authChecked.value) return null

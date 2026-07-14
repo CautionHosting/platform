@@ -5,6 +5,8 @@ use sqlx::PgPool;
 use anyhow::{Context, Result};
 use uuid::Uuid;
 
+const DEFAULT_ORGANIZATION_NAME: &str = "My organization";
+
 pub async fn is_user_initialized(pool: &PgPool, user_id: Uuid) -> Result<bool> {
     let org_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM organization_members WHERE user_id = $1"
@@ -26,7 +28,7 @@ pub async fn initialize_user_account(pool: &PgPool, user_id: Uuid) -> Result<Uui
     let org_id: Uuid = sqlx::query_scalar(
         "INSERT INTO organizations (name) VALUES ($1) RETURNING id"
     )
-    .bind(format!("Organization for user {}", user_id))
+    .bind(DEFAULT_ORGANIZATION_NAME)
     .fetch_one(&mut *tx)
     .await
     .context("Failed to create organization")?;
