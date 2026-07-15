@@ -3994,47 +3994,41 @@ enclave "default" {{
     async fn list_apps(&self) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
-        let response = self
-            .client
-            .get(format!("{}/api/resources", self.base_url))
-            .header("X-Session-ID", config.session_id)
-            .send()
+        let apps: Vec<App> = self
+            .get_protected_json(
+                &config.session_id,
+                "/api/resources",
+                "Failed to list apps"
+            )
             .await?;
 
-        if response.status().is_success() {
-            let apps: Vec<App> = response.json().await?;
+        if apps.is_empty() {
+            println!("No deployed apps found.");
+        } else {
+            println!("Apps:");
+            for app in apps {
+                let name = app.resource_name.as_deref().unwrap_or("unnamed");
+                let mut details = vec![app.state.clone()];
 
-            if apps.is_empty() {
-                println!("No deployed apps found.");
-            } else {
-                println!("Apps:");
-                for app in apps {
-                    let name = app.resource_name.as_deref().unwrap_or("unnamed");
-                    let mut details = vec![app.state.clone()];
-
-                    if let Some(config) = &app.configuration {
-                        if let Some(enclave_config) = config.get("enclave_config") {
-                            if let (Some(mem), Some(cpus)) = (
-                                enclave_config.get("memory_mb").and_then(|v| v.as_u64()),
-                                enclave_config.get("cpus").and_then(|v| v.as_u64()),
-                            ) {
-                                details.push(format!("{}MB/{}cpu", mem, cpus));
-                            }
+                if let Some(config) = &app.configuration {
+                    if let Some(enclave_config) = config.get("enclave_config") {
+                        if let (Some(mem), Some(cpus)) = (
+                            enclave_config.get("memory_mb").and_then(|v| v.as_u64()),
+                            enclave_config.get("cpus").and_then(|v| v.as_u64()),
+                        ) {
+                            details.push(format!("{}MB/{}cpu", mem, cpus));
                         }
                     }
-
-                    if let Some(ip) = &app.public_ip {
-                        details.push(ip.clone());
-                    }
-
-                    println!("  {} - {} ({})", app.id, name, details.join(", "));
                 }
+
+                if let Some(ip) = &app.public_ip {
+                    details.push(ip.clone());
+                }
+
+                println!("  {} - {} ({})", app.id, name, details.join(", "));
             }
-            Ok(())
-        } else {
-            let error = self.api_error_message(response).await;
-            bail!("Failed to list apps: {}", error)
         }
+        Ok(())
     }
 
     async fn join_capacity_waitlist(&self, email: &str, vcpus: Option<u32>) -> Result<()> {
@@ -4099,20 +4093,12 @@ enclave "default" {{
     async fn fetch_app(&self, id: &str) -> Result<App> {
         let config = self.ensure_authenticated().await?;
 
-        let response = self
-            .client
-            .get(format!("{}/api/resources/{}", self.base_url, id))
-            .header("X-Session-ID", config.session_id)
-            .send()
-            .await?;
-
-        if response.status().is_success() {
-            let app: App = response.json().await?;
-            Ok(app)
-        } else {
-            let error = self.api_error_message(response).await;
-            bail!("Failed to get app: {}", error)
-        }
+        self.get_protected_json(
+            &config.session_id,
+            &format!("/api/resources/{}", id),
+            "Failed to get app"
+        )
+        .await
     }
 
     async fn get_current_app(&self) -> Result<App> {
@@ -4247,15 +4233,29 @@ enclave "default" {{
             Ok(())
         } else {
             let config = self.ensure_authenticated().await?;
-            let url = if force_delete {
+            
+            // We can't use get_protected_json here since DELETE returns no body.
+            // Instead, we check if username_required error appears during the call.
+            let path = if force_delete {
                 format!("{}/api/resources/{}?force=true", self.base_url, app.id)
             } else {
                 format!("{}/api/resources/{}", self.base_url, app.id)
             };
-
+            
+            // First check: try a protected GET to ensure username is claimed
+            // This will prompt for username if needed, then proceed with DELETE
+            let _: serde_json::Value = self
+                .get_protected_json(
+                    &config.session_id,
+                    &format!("/api/resources/{}", app.id),
+                    "Failed to get app status"
+                )
+                .await?;
+            
+            // If we got here, username claim is handled. Now perform the DELETE.
             let response = self
                 .client
-                .delete(&url)
+                .delete(&path)
                 .header("X-Session-ID", config.session_id)
                 .send()
                 .await?;
@@ -4289,6 +4289,9 @@ enclave "default" {{
             "name": new_name
         });
 
+        // Note: This is a PATCH mutation. get_protected_json only handles GETs,
+        // so we still use the raw client call here since it's not idempotent.
+        // The username_required check happens during fetch_app above.
         let response = self
             .client
             .patch(format!("{}/api/resources/{}", self.base_url, app.id))
@@ -7090,18 +7093,10 @@ enclave "default" {{
     }
 
     async fn fetch_existing_ssh_keys(&self, session_id: &str) -> Result<Vec<(String, String)>> {
-        let response = self
-            .client
-            .get(format!("{}/ssh-keys", self.base_url))
-            .header("X-Session-ID", session_id)
-            .send()
+        let response_data: serde_json::Value = self
+            .get_protected_json(session_id, "/ssh-keys", "Failed to fetch existing SSH keys")
             .await?;
-
-        if !response.status().is_success() {
-            bail!("Failed to fetch existing SSH keys: {}", response.status());
-        }
-
-        let response_data: serde_json::Value = response.json().await?;
+        
         let keys = response_data["keys"]
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
@@ -7271,6 +7266,9 @@ enclave "default" {{
     async fn remove_ssh_key(&self, fingerprint: &str) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
+        // Note: This is a DELETE mutation. get_protected_json only handles GETs.
+        // Username claim gate check relies on the server returning username_required error
+        // which we don't handle here - mutations would need a separate delete_protected helper.
         let response = self
             .client
             .delete(format!("{}/ssh-keys/{}", self.base_url, fingerprint))
@@ -7306,34 +7304,30 @@ enclave "default" {{
     async fn list_ssh_keys(&self) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
-        let response = self
-            .client
-            .get(format!("{}/ssh-keys", self.base_url))
-            .header("X-Session-ID", config.session_id)
-            .send()
+        let response_data: serde_json::Value = self
+            .get_protected_json(
+                &config.session_id,
+                "/ssh-keys",
+                "Failed to list SSH keys"
+            )
             .await?;
+        
+        let keys = response_data["keys"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
 
-        if response.status().is_success() {
-            let response_data: serde_json::Value = response.json().await?;
-            let keys = response_data["keys"]
-                .as_array()
-                .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
-
-            if keys.is_empty() {
-                println!("No SSH keys found. Add one with 'caution ssh-keys add'");
-            } else {
-                println!("SSH Keys:");
-                for key in keys {
-                    let name = key["name"].as_str().unwrap_or("untitled");
-                    let public_key = key["public_key"].as_str().unwrap_or("");
-                    let fingerprint = ssh_fingerprint(public_key);
-                    println!("  {} ({})", name, fingerprint);
-                }
-            }
-            Ok(())
+        if keys.is_empty() {
+            println!("No SSH keys found. Add one with 'caution ssh-keys add'");
         } else {
-            bail!("Failed to list SSH keys: {}", response.status())
+            println!("SSH Keys:");
+            for key in keys {
+                let name = key["name"].as_str().unwrap_or("untitled");
+                let public_key = key["public_key"].as_str().unwrap_or("");
+                let fingerprint = ssh_fingerprint(public_key);
+                println!("  {} ({})", name, fingerprint);
+            }
         }
+        Ok(())
     }
 
     fn get_cache_dir(&self) -> Result<PathBuf> {
@@ -7674,46 +7668,40 @@ enclave "default" {{
     async fn list_credentials(&self) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
-        let response = self
-            .client
-            .get(format!("{}/credentials", self.base_url))
-            .header("X-Session-ID", &config.session_id)
-            .send()
+        let credentials: Vec<serde_json::Value> = self
+            .get_protected_json(
+                &config.session_id,
+                "/credentials",
+                "Failed to list credentials"
+            )
             .await?;
 
-        if response.status().is_success() {
-            let credentials: Vec<serde_json::Value> = response.json().await?;
-
-            if credentials.is_empty() {
-                println!(
-                    "No cloud credentials found. Add one with 'caution credentials add <platform> <name>'"
-                );
-            } else {
-                println!("Cloud Credentials:");
-                println!();
-                for cred in credentials {
-                    let id = cred["id"].as_str().unwrap_or("unknown");
-                    let name = cred["name"].as_str().unwrap_or("untitled");
-                    let platform = cred["platform"].as_str().unwrap_or("unknown");
-                    let identifier = cred["identifier"].as_str().unwrap_or("");
-                    let is_default = cred["is_default"].as_bool().unwrap_or(false);
-                    let region = cred["default_region"].as_str();
-
-                    let default_marker = if is_default { " (default)" } else { "" };
-                    let region_str = region.map(|r| format!(" [{}]", r)).unwrap_or_default();
-
-                    println!(
-                        "  [{}] {} - {}{}{}",
-                        id, name, platform, default_marker, region_str
-                    );
-                    println!("       Identifier: {}", identifier);
-                }
-            }
-            Ok(())
+        if credentials.is_empty() {
+            println!(
+                "No cloud credentials found. Add one with 'caution credentials add <platform> <name>'"
+            );
         } else {
-            let error = self.api_error_message(response).await;
-            bail!("Failed to list credentials: {}", error)
+            println!("Cloud Credentials:");
+            println!();
+            for cred in credentials {
+                let id = cred["id"].as_str().unwrap_or("unknown");
+                let name = cred["name"].as_str().unwrap_or("untitled");
+                let platform = cred["platform"].as_str().unwrap_or("unknown");
+                let identifier = cred["identifier"].as_str().unwrap_or("");
+                let is_default = cred["is_default"].as_bool().unwrap_or(false);
+                let region = cred["default_region"].as_str();
+
+                let default_marker = if is_default { " (default)" } else { "" };
+                let region_str = region.map(|r| format!(" [{}]", r)).unwrap_or_default();
+
+                println!(
+                    "  [{}] {} - {}{}{}",
+                    id, name, platform, default_marker, region_str
+                );
+                println!("       Identifier: {}", identifier);
+            }
         }
+        Ok(())
     }
 
     async fn remove_credential(&self, id: &str, force: bool) -> Result<()> {
@@ -7722,22 +7710,14 @@ enclave "default" {{
         let credential_id =
             uuid::Uuid::parse_str(id).context("Invalid credential ID - must be a valid UUID")?;
 
-        let response = self
-            .client
-            .get(format!("{}/credentials/{}", self.base_url, credential_id))
-            .header("X-Session-ID", &config.session_id)
-            .send()
+        let cred: serde_json::Value = self
+            .get_protected_json(
+                &config.session_id,
+                &format!("/credentials/{}", credential_id),
+                "Failed to fetch credential"
+            )
             .await?;
 
-        if !response.status().is_success() {
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                bail!("Credential '{}' not found", id);
-            }
-            let error = self.api_error_message(response).await;
-            bail!("Failed to fetch credential '{}': {}", id, error);
-        }
-
-        let cred: serde_json::Value = response.json().await?;
         let name = cred["name"].as_str().unwrap_or("unknown");
         let platform = cred["platform"].as_str().unwrap_or("unknown");
 
@@ -8096,21 +8076,14 @@ enclave "default" {{
         let config = self.ensure_authenticated().await?;
 
         // Get current bundle to read existing labels
-        let response = self
-            .client
-            .get(format!("{}/api/quorum-bundles/{}", self.base_url, id))
-            .header("X-Session-ID", &config.session_id)
-            .send()
-            .await
-            .context("Failed to connect to server")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error = self.api_error_message(response).await;
-            bail!("Failed to fetch quorum bundle ({}): {}", status, error);
-        }
-
-        let bundle: serde_json::Value = response.json().await?;
+        let bundle: serde_json::Value = self
+            .get_protected_json(
+                &config.session_id,
+                &format!("/api/quorum-bundles/{}", id),
+                "Failed to fetch quorum bundle"
+            )
+            .await?;
+        
         let mut current_labels = bundle
             .get("labels")
             .and_then(|l| l.as_object().cloned())
@@ -8150,21 +8123,14 @@ enclave "default" {{
         let config = self.ensure_authenticated().await?;
 
         // Get current bundle to read existing labels
-        let response = self
-            .client
-            .get(format!("{}/api/quorum-bundles/{}", self.base_url, id))
-            .header("X-Session-ID", &config.session_id)
-            .send()
-            .await
-            .context("Failed to connect to server")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error = self.api_error_message(response).await;
-            bail!("Failed to fetch quorum bundle ({}): {}", status, error);
-        }
-
-        let bundle: serde_json::Value = response.json().await?;
+        let bundle: serde_json::Value = self
+            .get_protected_json(
+                &config.session_id,
+                &format!("/api/quorum-bundles/{}", id),
+                "Failed to fetch quorum bundle"
+            )
+            .await?;
+        
         let mut current_labels = bundle
             .get("labels")
             .and_then(|l| l.as_object().cloned())
@@ -8229,24 +8195,14 @@ enclave "default" {{
                 // Try to pull from Caution API
                 eprintln!("No local bundle found, checking Caution...");
                 let config = self.ensure_authenticated().await?;
-                let response = self
-                    .client
-                    .get(format!("{}/api/quorum-bundles", self.base_url))
-                    .header("X-Session-ID", &config.session_id)
-                    .send()
-                    .await
-                    .context("Failed to fetch quorum bundles from Caution")?;
-
-                if !response.status().is_success() {
-                    bail!(
-                        "No bundle found locally or on Caution. Create one with: caution secret new <keyring>"
-                    );
-                }
-
-                let bundles: Vec<serde_json::Value> = response
-                    .json()
-                    .await
-                    .context("Failed to parse bundles response")?;
+                
+                let bundles: Vec<serde_json::Value> = self
+                    .get_protected_json(
+                        &config.session_id,
+                        "/api/quorum-bundles",
+                        "Failed to fetch quorum bundles from Caution"
+                    )
+                    .await?;
 
                 if bundles.is_empty() {
                     bail!(
