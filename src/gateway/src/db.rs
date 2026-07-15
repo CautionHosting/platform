@@ -79,7 +79,11 @@ const USERNAME_TAKEN_ERROR: &str = "USERNAME_TAKEN";
 /// Returns true if `err` (as produced by `create_user`) indicates the
 /// username was already taken, so callers can map it to a 409 response.
 pub fn is_username_taken_error(err: &anyhow::Error) -> bool {
-    err.to_string().contains(USERNAME_TAKEN_ERROR)
+    // Walk the full cause chain: callers such as `create_user` wrap the
+    // sentinel with `.context(...)`, and anyhow's `Display` only renders the
+    // outermost context, so a top-level `to_string()` would miss it.
+    err.chain()
+        .any(|cause| cause.to_string().contains(USERNAME_TAKEN_ERROR))
 }
 
 /// Attempts the one-time username claim for a placeholder account. The
@@ -1482,7 +1486,11 @@ pub async fn user_requires_pin(pool: &PgPool, user_id: Uuid) -> Result<bool, sql
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_ssh_fingerprint, hash_invitation_token};
+    use super::{
+        generate_ssh_fingerprint, hash_invitation_token, is_username_taken_error,
+        USERNAME_TAKEN_ERROR,
+    };
+    use anyhow::Context as _;
 
     // Golden vector cross-checked with `ssh-keygen -lf`:
     //   ssh-keygen -t ed25519 ...  ->  SHA256:vO7cKxkbEOoI4Qix7nsJMasdWsJHDFVfgXsKQrA0DhM
@@ -1492,6 +1500,24 @@ mod tests {
         AAAAC3NzaC1lZDI1NTE5AAAAIMBnPZP2DQ1v1MC9AQKLsNo0M649c6MVmz9O+P9UiBrT \
         test@example.com";
     const EXPECTED_FINGERPRINT: &str = "vO7cKxkbEOoI4Qix7nsJMasdWsJHDFVfgXsKQrA0DhM";
+
+    #[test]
+    fn username_taken_error_detected_through_context_wrapping() {
+        // Bare sentinel (as returned by claim_username).
+        let bare = anyhow::anyhow!(USERNAME_TAKEN_ERROR);
+        assert!(is_username_taken_error(&bare));
+
+        // Sentinel wrapped in .context(), as create_user does. anyhow's Display
+        // only shows the outermost context, so detection must walk the chain.
+        let wrapped = Result::<(), _>::Err(anyhow::anyhow!(USERNAME_TAKEN_ERROR))
+            .context("Failed to insert alpha user")
+            .unwrap_err();
+        assert!(is_username_taken_error(&wrapped));
+
+        // An unrelated error must not be misclassified.
+        let other = anyhow::anyhow!("some other database failure");
+        assert!(!is_username_taken_error(&other));
+    }
 
     #[test]
     fn fingerprint_matches_openssh_for_known_key() {
