@@ -214,6 +214,7 @@ pub struct InvitePreviewQuery {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InviteRegisterBeginRequest {
     pub token: String,
+    pub username: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

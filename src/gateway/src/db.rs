@@ -307,6 +307,7 @@ pub async fn accept_invitation_and_create_user(
     invitation_id: Uuid,
     token_hash: &str,
     fido2_user_handle: &[u8],
+    username: &str,
     legal: &SignupLegalContext,
 ) -> Result<Uuid> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
@@ -343,7 +344,7 @@ pub async fn accept_invitation_and_create_user(
             beta_code_id: None,
             email_verified: true,
             payment_onboarding_complete: true,
-            username: None,
+            username: Some(username),
         },
         legal,
     )
