@@ -897,9 +897,19 @@ pub async fn begin_invite_register_handler(
         .map_err(|e| RegisterError::Internal(e))?
         .ok_or(RegisterError::InvalidInvitation)?;
 
+    // Validate username if provided, otherwise use email
+    let username_for_registration = if let Some(username) = req.username {
+        let username = username.trim().to_lowercase();
+        crate::validation::validate_username(&username)
+            .map_err(|e| RegisterError::InvalidUsername(e.to_string()))?;
+        username
+    } else {
+        invitation.email.clone()
+    };
+
     begin_registration_challenge(
         &state,
-        invitation.email.clone(),
+        username_for_registration,
         PendingRegistrationKind::OrganizationInvite {
             invitation_id: invitation.id,
             token_hash,
@@ -1111,14 +1121,19 @@ pub async fn finish_register_handler(
                 invitation_id,
                 &token_hash,
                 &user_unique_id.as_bytes()[..],
+                &pending.username,
                 &legal,
             )
             .await
             .map_err(|e| {
-                RegisterError::Internal(anyhow::anyhow!(
-                    "Failed to accept organization invitation: {}",
-                    e
-                ))
+                if db::is_username_taken_error(&e) {
+                    RegisterError::UsernameTaken
+                } else {
+                    RegisterError::Internal(anyhow::anyhow!(
+                        "Failed to accept organization invitation: {}",
+                        e
+                    ))
+                }
             })?;
 
             tracing::debug!("User registered from organization invitation");

@@ -24,9 +24,23 @@
             <a href="https://caution.co/privacy.html" target="_blank" rel="noopener noreferrer">privacy notice</a>.
           </p>
 
+          <div class="register-field" :class="{ 'register-field--error': validationError }">
+            <input
+              v-model="username"
+              type="text"
+              placeholder="Choose a username"
+              class="register-input"
+              autocomplete="username"
+              data-testid="invite-username"
+              :disabled="loading"
+              @keyup.enter="acceptInvite"
+              @input="validationError = false"
+            />
+          </div>
+
           <button
             @click="acceptInvite"
-            :disabled="loading"
+            :disabled="loading || !username.trim()"
             class="btn-dark btn register-submit"
           >
             <svg class="btn-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
@@ -40,6 +54,13 @@
         </div>
 
         <div class="messages-container">
+          <div
+            v-if="validationError"
+            class="validation-message"
+          >
+            Please enter a username to continue.
+          </div>
+
           <div v-if="status" class="status-message">{{ status }}</div>
           <div v-if="error" class="error-message">{{ error }}</div>
         </div>
@@ -67,6 +88,8 @@ export default {
     const inviteError = ref("");
     const loadingInvite = ref(true);
     const token = new URLSearchParams(window.location.search).get("token") || "";
+    const username = ref("");
+    const validationError = ref(false);
 
     const {
       authenticated,
@@ -102,9 +125,16 @@ export default {
     };
 
     const acceptInvite = () => {
+      if (!username.value || !username.value.trim()) {
+        validationError.value = true;
+        return;
+      }
+
+      validationError.value = false;
+
       return registerWithPasskey({
         beginUrl: "/auth/invite/register/begin",
-        beginBody: { token },
+        beginBody: { token, username: username.value.trim() },
         finishUrl: "/auth/invite/register/finish",
         validatingStatus: "Validating invitation...",
       });
@@ -126,6 +156,8 @@ export default {
       status,
       handleLogin,
       acceptInvite,
+      username,
+      validationError,
     };
   },
 };
