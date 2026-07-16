@@ -293,6 +293,13 @@ impl RateLimiter {
 }
 
 /// Rate-limiting middleware for webhook routes.
+///
+/// `x-forwarded-for` is trustworthy here because metering is not reachable
+/// directly from the internet — the gateway is the only caller and it
+/// overwrites this header with the real peer IP (see
+/// `gateway::proxy::metering_proxy_handler`), discarding whatever the original
+/// client sent. Without that, this header would be client-controlled and every
+/// caller could collapse into the same rate-limit bucket.
 async fn webhook_rate_limit_middleware(
     State(limiter): State<RateLimiter>,
     req: axum::http::Request<axum::body::Body>,
@@ -531,16 +538,15 @@ async fn get_user_usage(
 ) -> impl IntoResponse {
     let result = sqlx::query(
         r#"
-        SELECT DISTINCT
+        SELECT
             provider,
             resource_type,
-            quantity,
-            base_unit_cost_usd,
-            margin_percent,
+            quantity::float8           AS quantity,
+            base_unit_cost_usd::float8 AS base_unit_cost_usd,
+            margin_percent::float8     AS margin_percent
         FROM usage_ledger
         WHERE user_id = $1
         AND recorded_at >= NOW() - INTERVAL '30 days'
-	GROUP BY provider, resource_type
         "#,
     )
     .bind(user_id)
@@ -707,6 +713,8 @@ struct TestSimulatePaddleTransactionRequest {
     event_type: Option<String>, // transaction.completed, transaction.billed, transaction.payment_failed
     #[serde(default)]
     transaction_id: Option<String>, // reuse a specific transaction ID (e.g. from a prior billed event)
+    #[serde(default)]
+    custom_data: Option<serde_json::Value>, // optional transaction custom_data (e.g. to exercise credit-purchase paths)
 }
 
 /// Simulate a Paddle transaction webhook for testing email and billing flow
@@ -764,7 +772,8 @@ async fn test_simulate_paddle_transaction(
                     "total": req.amount_cents.to_string(),
                     "tax": "0"
                 }
-            }
+            },
+            "custom_data": req.custom_data.clone().unwrap_or(serde_json::Value::Null)
         }),
     };
 

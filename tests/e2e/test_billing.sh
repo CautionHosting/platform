@@ -36,6 +36,10 @@
 #  28. Invalid code rejected
 #  29. Resource limit enforcement
 #  30. Webhook duplicate delivery idempotency
+#  31. Credit purchase webhook uses server-authoritative intent amount
+#  32. Credit purchase webhook refuses to mint without an intent row
+#  33. Credit purchase webhook is idempotent on duplicate delivery
+#  34. credit_ledger UNIQUE(paddle_transaction_id) one-grant invariant
 
 set -euo pipefail
 
@@ -379,7 +383,7 @@ log "  Total cost from DB: \$$TOTAL_DB_COST"
 
 # Also check directly in the database
 DB_RECORD_COUNT=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM usage_records WHERE organization_id = '$ORG_ID';
+SELECT COUNT(*) FROM usage_ledger WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 
 log "  Raw record count in DB: $DB_RECORD_COUNT"
@@ -1275,6 +1279,177 @@ else
     step_fail "Webhook idempotency: expected 1 row for event_id, got $EVENTS_AFTER"
 fi
 
+# ── Step 31: Credit purchase webhook uses server-authoritative amount ─
+
+STEP_NUM=31
+log "Testing credit purchase webhook credits the intent row, not custom_data..."
+
+# Clean slate, then record a server-authoritative intent: $25.00 of credit.
+reset_effective_balance 0 "intent test reset"
+INTENT_TXN="txn_intent_$(date +%s)_$RANDOM"
+docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
+INSERT INTO credit_purchase_intents
+    (paddle_transaction_id, organization_id, user_id, purchase_cents, credit_cents)
+VALUES ('$INTENT_TXN', '$ORG_ID', '$USER_ID', 2500, 2500);
+" >/dev/null 2>&1
+
+# Deliver transaction.completed paying only 100c while custom_data DECLARES
+# 100_000_000c — the exact shape of the original mint exploit. The credited
+# amount must come from the intent row (2500), ignoring both custom_data and the
+# tiny paid total.
+curl -sf -X POST "$METERING_EXTERNAL_URL/test/simulate-paddle-transaction" \
+    -H "Content-Type: application/json" \
+    -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
+    -d "{
+        \"user_id\": \"$USER_ID\",
+        \"organization_id\": \"$ORG_ID\",
+        \"amount_cents\": 100,
+        \"event_type\": \"transaction.completed\",
+        \"transaction_id\": \"$INTENT_TXN\",
+        \"custom_data\": {
+            \"caution_credit_purchase\": true,
+            \"caution_credit_purchase_credit_cents\": 100000000
+        }
+    }" >/dev/null 2>&1
+
+sleep 1
+INTENT_DELTA=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
+SELECT COALESCE(SUM(delta_cents), 0) FROM credit_ledger
+WHERE paddle_transaction_id = '$INTENT_TXN';
+" 2>/dev/null | tr -d ' \n')
+
+log "  Credited for intent txn: ${INTENT_DELTA}c (paid 100c, custom_data declared 100000000c)"
+
+if [ "$INTENT_DELTA" = "2500" ]; then
+    step_pass "Credit purchase webhook: credited intent amount (\$25.00), ignored custom_data"
+else
+    step_fail "Credit purchase webhook: credited ${INTENT_DELTA}c, expected 2500 (intent amount)"
+fi
+
+# ── Step 32: Credit purchase webhook refuses without an intent row ────
+
+STEP_NUM=32
+log "Testing credit purchase webhook refuses to mint without an intent row..."
+
+reset_effective_balance 0 "no-intent test reset"
+NO_INTENT_TXN="txn_nointent_$(date +%s)_$RANDOM"
+
+# Faithful reproduction of the CVE payload: signed transaction.completed with
+# attacker-declared custom_data and NO server-created intent row. Must not credit.
+curl -sf -X POST "$METERING_EXTERNAL_URL/test/simulate-paddle-transaction" \
+    -H "Content-Type: application/json" \
+    -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
+    -d "{
+        \"user_id\": \"$USER_ID\",
+        \"organization_id\": \"$ORG_ID\",
+        \"amount_cents\": 100,
+        \"event_type\": \"transaction.completed\",
+        \"transaction_id\": \"$NO_INTENT_TXN\",
+        \"custom_data\": {
+            \"caution_credit_purchase\": true,
+            \"caution_credit_purchase_credit_cents\": 100000000
+        }
+    }" >/dev/null 2>&1
+
+sleep 1
+NO_INTENT_ROWS=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
+SELECT COUNT(*) FROM credit_ledger WHERE paddle_transaction_id = '$NO_INTENT_TXN';
+" 2>/dev/null | tr -d ' \n')
+NO_INTENT_BALANCE=$(get_effective_balance)
+
+log "  Ledger rows for unauthorized txn: $NO_INTENT_ROWS, balance: ${NO_INTENT_BALANCE}c"
+
+if [ "$NO_INTENT_ROWS" = "0" ] && [ "$NO_INTENT_BALANCE" = "0" ]; then
+    step_pass "Credit purchase webhook: no intent row → no credit (mint blocked)"
+else
+    step_fail "Credit purchase webhook: minted without intent (rows=$NO_INTENT_ROWS, balance=${NO_INTENT_BALANCE}c)"
+fi
+
+# ── Step 33: Credit purchase webhook is idempotent on redelivery ─────
+
+STEP_NUM=33
+log "Testing credit purchase webhook idempotency on duplicate delivery..."
+
+reset_effective_balance 0 "idempotency test reset"
+IDEM_TXN="txn_idem_$(date +%s)_$RANDOM"
+docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
+INSERT INTO credit_purchase_intents
+    (paddle_transaction_id, organization_id, user_id, purchase_cents, credit_cents)
+VALUES ('$IDEM_TXN', '$ORG_ID', '$USER_ID', 1500, 1500);
+" >/dev/null 2>&1
+
+# Deliver the same completed webhook twice.
+for _ in 1 2; do
+    curl -sf -X POST "$METERING_EXTERNAL_URL/test/simulate-paddle-transaction" \
+        -H "Content-Type: application/json" \
+        -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
+        -d "{
+            \"user_id\": \"$USER_ID\",
+            \"organization_id\": \"$ORG_ID\",
+            \"amount_cents\": 1500,
+            \"event_type\": \"transaction.completed\",
+            \"transaction_id\": \"$IDEM_TXN\"
+        }" >/dev/null 2>&1
+done
+
+sleep 1
+IDEM_ROWS=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
+SELECT COUNT(*) FROM credit_ledger WHERE paddle_transaction_id = '$IDEM_TXN';
+" 2>/dev/null | tr -d ' \n')
+IDEM_BALANCE=$(get_effective_balance)
+
+log "  Ledger rows after 2 deliveries: $IDEM_ROWS, balance: ${IDEM_BALANCE}c"
+
+if [ "$IDEM_ROWS" = "1" ] && [ "$IDEM_BALANCE" = "1500" ]; then
+    step_pass "Credit purchase webhook: duplicate delivery credited once (\$15.00)"
+else
+    step_fail "Credit purchase webhook: double-credit (rows=$IDEM_ROWS, balance=${IDEM_BALANCE}c)"
+fi
+
+# ── Step 34: credit_ledger UNIQUE(paddle_transaction_id) is enforced ──
+
+STEP_NUM=34
+log "Testing credit_ledger one-payment-one-grant invariant (migration 044)..."
+
+# This unique constraint is the durable backstop behind prepaid credit purchase
+# idempotency. Verify a plain duplicate is rejected and an ON CONFLICT duplicate
+# is a no-op.
+CONSTRAINT_TXN="txn_constraint_$(date +%s)_$RANDOM"
+docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
+INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description, paddle_transaction_id)
+VALUES ('$ORG_ID', '$USER_ID', 1000, 'purchase', 'constraint test', '$CONSTRAINT_TXN');
+" >/dev/null 2>&1
+
+# Plain duplicate must violate the unique constraint.
+DUP_PLAIN=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
+INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description, paddle_transaction_id)
+VALUES ('$ORG_ID', '$USER_ID', 1000, 'purchase', 'constraint dup', '$CONSTRAINT_TXN');
+" 2>&1 || true)
+
+# ON CONFLICT duplicate must be a silent no-op ("INSERT 0 0").
+DUP_ONCONFLICT=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
+INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description, paddle_transaction_id)
+VALUES ('$ORG_ID', '$USER_ID', 1000, 'purchase', 'constraint dup', '$CONSTRAINT_TXN')
+ON CONFLICT (paddle_transaction_id) DO NOTHING;
+" 2>&1 || true)
+
+CONSTRAINT_ROWS=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
+SELECT COUNT(*) FROM credit_ledger WHERE paddle_transaction_id = '$CONSTRAINT_TXN';
+" 2>/dev/null | tr -d ' \n')
+
+# Clean up so the constraint seed doesn't skew the final summary.
+docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
+DELETE FROM credit_ledger WHERE paddle_transaction_id = '$CONSTRAINT_TXN';
+" >/dev/null 2>&1 || true
+
+if echo "$DUP_PLAIN" | grep -qi "duplicate key" \
+    && echo "$DUP_ONCONFLICT" | grep -q "INSERT 0 0" \
+    && [ "$CONSTRAINT_ROWS" = "1" ]; then
+    step_pass "credit_ledger UNIQUE(paddle_transaction_id): duplicate rejected, ON CONFLICT no-op"
+else
+    step_fail "credit_ledger unique constraint (plain='$DUP_PLAIN', onconflict='$DUP_ONCONFLICT', rows=$CONSTRAINT_ROWS)"
+fi
+
 # ── Final: Database summary ──────────────────────────────────────────
 
 echo ""
@@ -1286,7 +1461,7 @@ SELECT COUNT(*) FROM invoices WHERE user_id = '$USER_ID';
 log "  Invoices: $INVOICE_COUNT"
 
 USAGE_COUNT_FINAL=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -c "
-SELECT COUNT(*) FROM usage_records WHERE organization_id = '$ORG_ID';
+SELECT COUNT(*) FROM usage_ledger WHERE organization_id = '$ORG_ID';
 " 2>/dev/null | tr -d ' \n')
 log "  Usage records: $USAGE_COUNT_FINAL"
 

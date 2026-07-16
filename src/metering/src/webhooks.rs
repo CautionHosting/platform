@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::sync::Arc;
 
-use crate::credits::get_ledger_balance_cents;
+use crate::credits::{credit_ledger_once, CreditOutcome};
 use crate::AppState;
 
 /// Paddle webhook payload
@@ -26,12 +26,6 @@ pub struct PaddleWebhookPayload {
     pub event_type: String,
     pub occurred_at: String,
     pub data: serde_json::Value,
-}
-
-#[derive(Debug)]
-struct PrepaidCreditPurchaseMetadata {
-    credit_cents: i64,
-    description: String,
 }
 
 /// Handle incoming Paddle webhooks
@@ -181,35 +175,6 @@ pub async fn paddle_webhook_handler(
     )
 }
 
-fn extract_prepaid_credit_purchase_metadata(
-    data: &serde_json::Value,
-) -> Option<PrepaidCreditPurchaseMetadata> {
-    let custom_data = data["custom_data"].as_object()?;
-
-    if custom_data
-        .get("caution_credit_purchase")
-        .and_then(|value| value.as_bool())
-        != Some(true)
-    {
-        return None;
-    }
-
-    let credit_cents = custom_data
-        .get("caution_credit_purchase_credit_cents")
-        .and_then(|value| value.as_i64())?;
-
-    let description = custom_data
-        .get("caution_credit_purchase_description")
-        .and_then(|value| value.as_str())
-        .unwrap_or("Prepaid credit purchase")
-        .to_string();
-
-    Some(PrepaidCreditPurchaseMetadata {
-        credit_cents,
-        description,
-    })
-}
-
 async fn clear_credit_suspension_if_needed(
     state: &AppState,
     org_id: uuid::Uuid,
@@ -342,48 +307,66 @@ async fn handle_transaction_completed(
         send_payment_confirmation_email(state, user_id, transaction_id).await?;
     }
 
-    if let Some(prepaid_purchase) = extract_prepaid_credit_purchase_metadata(&payload.data) {
-        let already_credited: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM credit_ledger WHERE paddle_transaction_id = $1)",
-        )
-        .bind(transaction_id)
-        .fetch_one(&state.pool)
-        .await?;
+    // Credit prepaid purchases only against a server-authoritative intent row
+    // recorded by the API when the transaction was created. The credited amount
+    // comes from that row, never from client-controlled custom_data. A missing
+    // row means we cannot trust the amount, so we refuse and leave it for manual
+    // reconciliation rather than minting an attacker-declared value.
+    let intent = sqlx::query(
+        "SELECT organization_id, user_id, credit_cents FROM credit_purchase_intents WHERE paddle_transaction_id = $1",
+    )
+    .bind(transaction_id)
+    .fetch_optional(&state.pool)
+    .await?;
 
-        if already_credited {
-            tracing::info!(
-                "Prepaid credit purchase {} already credited, skipping",
+    if let Some(intent) = intent {
+        let intent_org_id: uuid::Uuid = intent.get("organization_id");
+        let intent_user_id: uuid::Uuid = intent.get("user_id");
+        let credit_cents: i64 = intent.get("credit_cents");
+
+        if intent_org_id != org_id {
+            tracing::error!(
+                "Credit purchase intent org {} does not match resolved org {} for txn {}; refusing to credit",
+                intent_org_id,
+                org_id,
                 transaction_id
             );
             return Ok(());
         }
 
-        let mut tx = state.pool.begin().await?;
-
-        sqlx::query(
-            "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, paddle_transaction_id)
-             VALUES ($1, $2, 'purchase', $3, $4)"
-        )
-        .bind(org_id)
-        .bind(prepaid_purchase.credit_cents)
-        .bind(&prepaid_purchase.description)
-        .bind(transaction_id)
-        .execute(&mut *tx)
-        .await?;
-
-        let new_balance = get_ledger_balance_cents(&mut *tx, org_id).await?;
-
-        tx.commit().await?;
-
-        tracing::info!(
-            "Prepaid credit purchase credited: org={}, txn={}, +{}c, new_balance={}",
+        // The UNIQUE(paddle_transaction_id) constraint is the durable
+        // one-payment-to-one-grant gate; a redundant webhook/callback is a no-op.
+        match credit_ledger_once(
+            &state.pool,
             org_id,
+            Some(intent_user_id),
+            credit_cents,
+            "purchase",
+            &format!(
+                "Prepaid credit purchase: ${:.2}",
+                credit_cents as f64 / 100.0
+            ),
             transaction_id,
-            prepaid_purchase.credit_cents,
-            new_balance
-        );
-
-        clear_credit_suspension_if_needed(state, org_id, new_balance).await?;
+        )
+        .await?
+        {
+            CreditOutcome::AlreadyCredited => {
+                tracing::info!(
+                    "Prepaid credit purchase {} already credited, skipping",
+                    transaction_id
+                );
+            }
+            CreditOutcome::Credited { new_balance } => {
+                tracing::info!(
+                    "Prepaid credit purchase credited: org={}, txn={}, +{}c, new_balance={}",
+                    org_id,
+                    transaction_id,
+                    credit_cents,
+                    new_balance
+                );
+                clear_credit_suspension_if_needed(state, org_id, new_balance).await?;
+            }
+        }
         return Ok(());
     }
 
@@ -863,37 +846,5 @@ mod tests {
         let payload: PaddleWebhookPayload = serde_json::from_value(json).unwrap();
         assert_eq!(payload.event_type, "subscription.activated");
         // Should parse without error — unknown events are simply ignored
-    }
-
-    #[test]
-    fn extracts_prepaid_credit_purchase_metadata_from_custom_data() {
-        let json = serde_json::json!({
-            "custom_data": {
-                "caution_credit_purchase": true,
-                "caution_credit_purchase_credit_cents": 12345,
-                "caution_credit_purchase_description": "Credit purchase: $123.45 → $123.45 credits (no bonus)"
-            }
-        });
-
-        let metadata = extract_prepaid_credit_purchase_metadata(&json)
-            .expect("expected prepaid credit purchase metadata");
-
-        assert_eq!(metadata.credit_cents, 12_345);
-        assert_eq!(
-            metadata.description,
-            "Credit purchase: $123.45 → $123.45 credits (no bonus)"
-        );
-    }
-
-    #[test]
-    fn ignores_non_credit_purchase_custom_data() {
-        let json = serde_json::json!({
-            "custom_data": {
-                "caution_credit_purchase": false,
-                "caution_credit_purchase_credit_cents": 5000
-            }
-        });
-
-        assert!(extract_prepaid_credit_purchase_metadata(&json).is_none());
     }
 }
