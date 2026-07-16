@@ -1225,7 +1225,8 @@ pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>)> {
     .await
     .context("Failed to create e2e user")?;
 
-    // Insert a dummy credential row so session validation joins work
+    // Insert a dummy credential row so session validation joins work.
+    const E2E_CREDENTIAL_PUBLIC_KEY: &[u8] = br#"{"cred":{"cred_id":"7ySFchbdsv8y8B5oR-1cxOlY5Trjo1auESH25Co0nTI","cred":{"type_":"ES256","key":{"EC_EC2":{"curve":"SECP256R1","x":"SveqzIeBhZDl0phwAvHY0rAIEdeTphQu4ReAuCzq8bs","y":"6mm9arrmm2MqgpwkdTvN0-X-cduiZd4zAQdvDuEDO7M"}}},"counter":0,"transports":null,"user_verified":false,"backup_eligible":false,"backup_state":false,"registration_policy":"preferred","extensions":{"cred_protect":"Ignored","hmac_create_secret":"NotRequested","appid":"NotRequested","cred_props":"Ignored"},"attestation":{"data":"Self_","metadata":"None"},"attestation_format":"packed"}}"#;
     sqlx::query(
         "INSERT INTO fido2_credentials (
             credential_id, user_id, public_key, name, attestation_type,
@@ -1234,7 +1235,7 @@ pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>)> {
     )
     .bind(&credential_id_vec)
     .bind(user_id)
-    .bind(b"e2e-dummy-key" as &[u8])
+    .bind(E2E_CREDENTIAL_PUBLIC_KEY)
     .execute(pool)
     .await
     .context("Failed to create e2e credential")?;
