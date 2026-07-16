@@ -7,7 +7,6 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use reqwest::Client;
 use std::net::SocketAddr;
 
 use crate::request_id::RequestId;
@@ -15,13 +14,41 @@ use crate::types::{AppState, AuthenticatedUserId};
 
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB
 
+#[derive(Debug, thiserror::Error)]
+#[error("failed to construct backend URL")]
+pub struct BuildTargetUrlError(#[from] url::ParseError);
+
+fn build_api_target_url(
+    api_service_url: &str,
+    path: &str,
+    query: Option<&str>,
+) -> Result<reqwest::Url, BuildTargetUrlError> {
+    let query = query.map(|q| format!("?{q}")).unwrap_or_default();
+    Ok(reqwest::Url::parse(&format!(
+        "{api_service_url}{path}{query}"
+    ))?)
+}
+
+fn is_internal_api_target(target_url: &reqwest::Url) -> bool {
+    // Segment-aware and case-insensitive: a plain prefix check misses paths
+    // like "//internal/..." or "/INTERNAL/...", which pass through today only
+    // because the API router happens to be strict — any slash-collapsing or
+    // case-folding intermediary would turn them into live bypasses.
+    target_url
+        .path_segments()
+        .into_iter()
+        .flatten()
+        .find(|segment| !segment.is_empty())
+        .is_some_and(|segment| segment.eq_ignore_ascii_case("internal"))
+}
+
 /// Proxy webhooks to the metering service (no auth — verified by signature)
 pub async fn metering_proxy_handler(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     req: Request,
 ) -> Result<Response, Response> {
-    let client = Client::new();
+    let client = &state.http_client;
 
     let path = req.uri().path();
     let target_url = format!("{}{}", state.metering_service_url, path);
@@ -87,17 +114,12 @@ pub async fn proxy_handler(
     State(state): State<AppState>,
     req: Request,
 ) -> Result<Response, Response> {
-    let client = Client::new();
-
     let path = req.uri().path();
-    let query = req
-        .uri()
-        .query()
-        .map(|q| format!("?{}", q))
-        .unwrap_or_default();
-    let target_url = format!("{}{}{}", state.api_service_url, path, query);
-
-    tracing::debug!("Proxying request to: {}", target_url);
+    let target_url = build_api_target_url(&state.api_service_url, path, req.uri().query())
+        .map_err(|e| {
+            tracing::error!(raw_path = %path, error = ?e, "Failed to construct backend URL");
+            (StatusCode::BAD_GATEWAY, "Backend service unavailable").into_response()
+        })?;
 
     let session_id_header = req.headers().get("X-Session-ID").cloned();
     let content_type_header = req.headers().get("Content-Type").cloned();
@@ -107,7 +129,22 @@ pub async fn proxy_handler(
     let request_id = req.extensions().get::<RequestId>().cloned();
 
     let method = req.method().clone();
-    let mut proxy_req = client.request(method, &target_url);
+
+    if is_internal_api_target(&target_url) {
+        tracing::warn!(
+            method = %method,
+            raw_path = %path,
+            canonical_path = %target_url.path(),
+            user_id = ?authenticated_user.as_ref().map(|AuthenticatedUserId(id)| id),
+            request_id = ?request_id.as_ref().map(|RequestId(id)| id),
+            "Blocked public request to internal API route"
+        );
+        return Err(StatusCode::NOT_FOUND.into_response());
+    }
+
+    tracing::debug!("Proxying request to: {}", target_url);
+
+    let mut proxy_req = state.http_client.request(method, target_url);
 
     if let Some(session_id) = session_id_header {
         proxy_req = proxy_req.header("X-Session-ID", session_id);
@@ -180,4 +217,71 @@ pub async fn proxy_handler(
         )
             .into_response()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_api_target_url, is_internal_api_target};
+
+    const API_SERVICE_URL: &str = "http://api:8080";
+
+    fn target(path: &str) -> reqwest::Url {
+        build_api_target_url(API_SERVICE_URL, path, None).expect("target URL should parse")
+    }
+
+    #[test]
+    fn blocks_canonical_internal_paths() {
+        for path in [
+            "/internal",
+            "/internal/",
+            "/internal/legal-notices/send",
+            "/foo/../internal/org/00000000-0000-0000-0000-000000000000/suspend",
+            "/foo/%2e%2e/internal/legal-notices/send",
+            "/foo/%2E%2E/internal/legal-notices/send",
+            "/foo\\..\\internal\\legal-notices\\send",
+            "//internal/legal-notices/send",
+            "///internal/legal-notices/send",
+            "/INTERNAL/legal-notices/send",
+            "/Internal/org/00000000-0000-0000-0000-000000000000/suspend",
+        ] {
+            let target_url = target(path);
+            assert!(
+                is_internal_api_target(&target_url),
+                "expected {path:?} to canonicalize to a blocked target, got {:?}",
+                target_url.path()
+            );
+        }
+    }
+
+    #[test]
+    fn allows_non_internal_paths_and_lookalikes() {
+        for path in [
+            "/internalized",
+            "/internals",
+            "/foo/internal",
+            "/foo//internal",
+            "/user/status",
+            "/legal/active-documents",
+        ] {
+            let target_url = target(path);
+            assert!(
+                !is_internal_api_target(&target_url),
+                "expected {path:?} to remain allowed, got {:?}",
+                target_url.path()
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_internal_text_in_query_values() {
+        let target_url = build_api_target_url(
+            API_SERVICE_URL,
+            "/user/status",
+            Some("next=/internal/legal-notices/send"),
+        )
+        .expect("target URL should parse");
+
+        assert_eq!(target_url.path(), "/user/status");
+        assert!(!is_internal_api_target(&target_url));
+    }
 }

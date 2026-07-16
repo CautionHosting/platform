@@ -165,6 +165,7 @@ async fn main() -> Result<()> {
         relying_party_id: config.rp_id.clone(),
         api_service_url: config.api_service_url.clone(),
         metering_service_url: config.metering_service_url.clone(),
+        http_client: reqwest::Client::new(),
         reg_states: Arc::new(RwLock::new(HashMap::new())),
         passkey_reg_states: Arc::new(RwLock::new(HashMap::new())),
         auth_states: Arc::new(RwLock::new(HashMap::new())),

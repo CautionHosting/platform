@@ -23,6 +23,9 @@
 #      signup consent notice would use
 #  14. A 'notice_shown'-only event does not satisfy a document (only
 #      accepted/acknowledged count)
+#  15. Internal API routes are unreachable through the authenticated gateway
+#      proxy, including normalized dot-segment, double-slash, and
+#      case-variant bypass attempts
 #
 # Steps 9-10 exercise utils/admin and utils/add-legal-doc-from-website.sh,
 # which connect via LOCAL psql (DB_HOST/DB_PORT). The test postgres
@@ -741,6 +744,73 @@ else
     else
         step_fail "Non-affirmative event bypass: requires_action=$DPA_ACTION14 http=$BLOCKED14_CODE"
     fi
+fi
+
+# ── Step 15: Internal API routes stay private ─────────────────
+
+STEP_NUM=15
+log "Testing gateway isolation for internal API routes..."
+
+NONEXISTENT_ORG_ID="ffffffff-ffff-ffff-ffff-ffffffffffff"
+
+NORMAL_API_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+    "$GATEWAY_URL/api/user/status" \
+    -H "X-Session-ID: $SESSION_ID")
+UNAUTHENTICATED_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    "$GATEWAY_URL/api/internal/legal-notices/send" \
+    -H "Content-Type: application/json" \
+    -d '{"dry_run": true}')
+LEGAL_GATEWAY_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    "$GATEWAY_URL/api/internal/legal-notices/send" \
+    -H "X-Session-ID: $SESSION_ID" \
+    -H "Content-Type: application/json" \
+    -d '{"dry_run": true}')
+SUSPEND_GATEWAY_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    "$GATEWAY_URL/api/internal/org/$NONEXISTENT_ORG_ID/suspend" \
+    -H "X-Session-ID: $SESSION_ID")
+RAW_DOT_SEGMENT_CODE=$(curl --path-as-is -s -o /dev/null -w '%{http_code}' -X POST \
+    "$GATEWAY_URL/api/proxy/../internal/legal-notices/send" \
+    -H "X-Session-ID: $SESSION_ID" \
+    -H "Content-Type: application/json" \
+    -d '{"dry_run": true}')
+ENCODED_DOT_SEGMENT_CODE=$(curl --path-as-is -s -o /dev/null -w '%{http_code}' -X POST \
+    "$GATEWAY_URL/api/proxy/%2e%2e/internal/legal-notices/send" \
+    -H "X-Session-ID: $SESSION_ID" \
+    -H "Content-Type: application/json" \
+    -d '{"dry_run": true}')
+DOUBLE_SLASH_CODE=$(curl --path-as-is -s -o /dev/null -w '%{http_code}' -X POST \
+    "$GATEWAY_URL/api//internal/legal-notices/send" \
+    -H "X-Session-ID: $SESSION_ID" \
+    -H "Content-Type: application/json" \
+    -d '{"dry_run": true}')
+CASE_VARIANT_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    "$GATEWAY_URL/api/INTERNAL/legal-notices/send" \
+    -H "X-Session-ID: $SESSION_ID" \
+    -H "Content-Type: application/json" \
+    -d '{"dry_run": true}')
+
+DIRECT_LEGAL_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    "$API_URL/internal/legal-notices/send" \
+    -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET" \
+    -H "Content-Type: application/json" \
+    -d '{"dry_run": true}')
+DIRECT_SUSPEND_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    "$API_URL/internal/org/$NONEXISTENT_ORG_ID/suspend" \
+    -H "X-Internal-Service-Secret: $INTERNAL_SERVICE_SECRET")
+
+if [[ "$NORMAL_API_CODE" == "200" && \
+      "$UNAUTHENTICATED_CODE" == "401" && \
+      "$LEGAL_GATEWAY_CODE" == "404" && \
+      "$SUSPEND_GATEWAY_CODE" == "404" && \
+      "$RAW_DOT_SEGMENT_CODE" == "404" && \
+      "$ENCODED_DOT_SEGMENT_CODE" == "404" && \
+      "$DOUBLE_SLASH_CODE" == "404" && \
+      "$CASE_VARIANT_CODE" == "404" && \
+      "$DIRECT_LEGAL_CODE" == "200" && \
+      "$DIRECT_SUSPEND_CODE" == "200" ]]; then
+    step_pass "Internal routes blocked at gateway; direct service-auth calls remain available"
+else
+    step_fail "Internal route isolation: normal=$NORMAL_API_CODE unauthenticated=$UNAUTHENTICATED_CODE legal=$LEGAL_GATEWAY_CODE suspend=$SUSPEND_GATEWAY_CODE raw_dot=$RAW_DOT_SEGMENT_CODE encoded_dot=$ENCODED_DOT_SEGMENT_CODE double_slash=$DOUBLE_SLASH_CODE case_variant=$CASE_VARIANT_CODE direct_legal=$DIRECT_LEGAL_CODE direct_suspend=$DIRECT_SUSPEND_CODE"
 fi
 
 log "All legal tracking tests complete."

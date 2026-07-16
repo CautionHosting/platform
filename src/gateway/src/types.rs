@@ -87,6 +87,9 @@ pub struct AppState {
     pub relying_party_id: String,
     pub api_service_url: String,
     pub metering_service_url: String,
+    /// Shared HTTP client so proxied requests reuse connections instead of
+    /// building a new pool per request.
+    pub http_client: reqwest::Client,
     pub reg_states: Arc<RwLock<HashMap<String, PendingRegistration>>>,
     pub passkey_reg_states: Arc<RwLock<HashMap<String, PendingPasskeyRegistration>>>,
     pub auth_states: Arc<RwLock<HashMap<String, PendingAuthentication>>>,
