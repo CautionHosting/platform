@@ -1,0 +1,22 @@
+{
+  "compute_margin_percent": 0,
+  "paddle_catalog": {
+    "version": 1,
+    "product_id": "pro_e2e_byoc",
+    "tax_category": "saas",
+    "currency_code": "USD",
+    "billing_cycle": { "interval": "month", "frequency": 1 }
+  },
+  "subscription_tiers": {
+    "1_enclave": { "monthly_cents": 25000, "enclaves": 1, "paddle_price_id": "pri_e2e_1" },
+    "2_enclaves": { "monthly_cents": 37500, "enclaves": 2, "paddle_price_id": "pri_e2e_2" },
+    "3_enclaves": { "monthly_cents": 50000, "enclaves": 3, "paddle_price_id": "pri_e2e_3" },
+    "4_enclaves": { "monthly_cents": 62500, "enclaves": 4, "paddle_price_id": "pri_e2e_4" },
+    "5_enclaves": { "monthly_cents": 75000, "enclaves": 5, "paddle_price_id": "pri_e2e_5" }
+  },
+  "credit_packages": {
+    "1000": { "bonus_percent": 2.5 },
+    "5000": { "bonus_percent": 5 },
+    "10000": { "bonus_percent": 10 }
+  }
+}
