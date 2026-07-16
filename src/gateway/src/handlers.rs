@@ -839,14 +839,14 @@ pub async fn begin_register_handler(
     State(state): State<AppState>,
     Json(req): Json<crate::types::RegisterBeginRequest>,
 ) -> Result<Json<RegisterBeginResponse>, RegisterError> {
-    tracing::debug!("Registration started with alpha code");
+    tracing::debug!("Registration started with access code");
 
-    let alpha_code_id = db::validate_alpha_code(&state.db, &req.alpha_code)
+    let access_code_id = db::validate_access_code(&state.db, &req.access_code)
         .await
         .map_err(|e| RegisterError::Internal(e))?
         .ok_or(RegisterError::InvalidAccessCode)?;
 
-    tracing::debug!("Alpha code validated: id={}", alpha_code_id);
+    tracing::debug!("Access code validated: id={}", access_code_id);
 
     let username = req.username.trim().to_lowercase();
     crate::validation::validate_username(&username)
@@ -855,7 +855,7 @@ pub async fn begin_register_handler(
     begin_registration_challenge(
         &state,
         username,
-        PendingRegistrationKind::AlphaCode { alpha_code_id },
+        PendingRegistrationKind::AccessCode { access_code_id },
     )
     .await
 }
@@ -1076,11 +1076,11 @@ pub async fn finish_register_handler(
     };
 
     let user_id = match pending.kind {
-        PendingRegistrationKind::AlphaCode { alpha_code_id } => {
+        PendingRegistrationKind::AccessCode { access_code_id } => {
             let user_id = db::create_user(
                 &state.db,
                 &user_unique_id.as_bytes()[..],
-                alpha_code_id,
+                access_code_id,
                 &pending.username,
                 &legal,
             )
@@ -1093,13 +1093,13 @@ pub async fn finish_register_handler(
                 }
             })?;
 
-            db::redeem_alpha_code(&state.db, alpha_code_id)
+            db::redeem_access_code(&state.db, access_code_id)
                 .await
                 .map_err(|e| {
-                    RegisterError::Internal(anyhow::anyhow!("Failed to redeem alpha code: {}", e))
+                    RegisterError::Internal(anyhow::anyhow!("Failed to redeem access code: {}", e))
                 })?;
 
-            tracing::debug!("User registered and alpha code redeemed");
+            tracing::debug!("User registered and access code redeemed");
             user_id
         }
         PendingRegistrationKind::OrganizationInvite {

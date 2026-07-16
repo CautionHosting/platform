@@ -12,7 +12,7 @@
 // discoverable-only path (resident key + userHandle) is out of scope — SoftPasskey
 // can't mint resident credentials.
 //
-// Env: GATEWAY_URL, RP_ORIGIN (must be an allowed origin), ALPHA_CODE (required,
+// Env: GATEWAY_URL, RP_ORIGIN (must be an allowed origin), ACCESS_CODE (required,
 // an unredeemed beta_codes.code), USERNAME.
 
 use anyhow::{bail, Context, Result};
@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     let base = env_or("GATEWAY_URL", "http://localhost:8000");
     let origin = Url::parse(&env_or("RP_ORIGIN", "http://localhost:8000"))
         .context("RP_ORIGIN is not a valid URL")?;
-    let alpha_code = std::env::var("ALPHA_CODE").context("ALPHA_CODE env var required")?;
+    let access_code = std::env::var("ACCESS_CODE").context("ACCESS_CODE env var required")?;
     let username = env_or("USERNAME", "softauth");
 
     let http = reqwest::blocking::Client::new();
@@ -44,10 +44,10 @@ fn main() -> Result<()> {
     // begin -> { publicKey: {...creation options...}, session: "<uuid>" }
     let begin: Value = http
         .post(format!("{base}/auth/register/begin"))
-        .json(&json!({ "alpha_code": alpha_code, "username": username }))
+        .json(&json!({ "access_code": access_code, "username": username }))
         .send()?
         .error_for_status()
-        .context("register/begin (bad alpha code or duplicate username?)")?
+        .context("register/begin (bad access code or duplicate username?)")?
         .json()?;
     let reg_session = begin["session"]
         .as_str()

@@ -367,14 +367,14 @@ export function useWebAuthn() {
     }
   }
 
-  async function handleRegister(alphaCode, username) {
-    if (!alphaCode || !alphaCode.trim() || !username || !username.trim()) {
+  async function handleRegister(accessCode, username) {
+    if (!accessCode || !accessCode.trim() || !username || !username.trim()) {
       return { success: false, validationError: true };
     }
 
     return registerWithPasskey({
       beginUrl: "/auth/register/begin",
-      beginBody: { alpha_code: alphaCode.trim(), username: username.trim() },
+      beginBody: { access_code: accessCode.trim(), username: username.trim() },
       finishUrl: "/auth/register/finish",
       validatingStatus: "Validating access code...",
     });

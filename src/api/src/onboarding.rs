@@ -112,14 +112,14 @@ pub async fn get_user_status(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let (email_verified_at, payment_method_added_at, alpha_code_id) =
+    let (email_verified_at, payment_method_added_at, access_code_id) =
         result.ok_or(StatusCode::NOT_FOUND)?;
 
-    // Alpha users skip email verification AND payment
-    let is_alpha_user = alpha_code_id.is_some();
-    let email_verified = is_alpha_user || email_verified_at.is_some();
+    // Access-code users skip email verification AND payment
+    let is_access_code_user = access_code_id.is_some();
+    let email_verified = is_access_code_user || email_verified_at.is_some();
 
-    let payment_method_added = is_alpha_user || payment_method_added_at.is_some();
+    let payment_method_added = is_access_code_user || payment_method_added_at.is_some();
     let onboarding_complete = email_verified && payment_method_added;
 
     // Legal status is best-effort in the status endpoint — if the legal_documents

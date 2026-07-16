@@ -134,7 +134,7 @@ pub async fn get_username_status(pool: &PgPool, user_id: Uuid) -> Result<(String
 pub async fn create_user(
     pool: &PgPool,
     fido2_user_handle: &[u8],
-    alpha_code_id: Uuid,
+    access_code_id: Uuid,
     username: &str,
     legal: &SignupLegalContext,
 ) -> Result<Uuid> {
@@ -145,7 +145,7 @@ pub async fn create_user(
         CreateUserInput {
             fido2_user_handle,
             email: None,
-            beta_code_id: Some(alpha_code_id),
+            beta_code_id: Some(access_code_id),
             email_verified: false,
             payment_onboarding_complete: false,
             username: Some(username),
@@ -153,7 +153,7 @@ pub async fn create_user(
         legal,
     )
     .await
-    .context("Failed to insert alpha user")?;
+    .context("Failed to insert user")?;
 
     tx.commit()
         .await
@@ -380,7 +380,7 @@ pub async fn accept_invitation_and_create_user(
     Ok(user_id)
 }
 
-pub async fn validate_alpha_code(pool: &PgPool, code: &str) -> Result<Option<Uuid>> {
+pub async fn validate_access_code(pool: &PgPool, code: &str) -> Result<Option<Uuid>> {
     let code_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM beta_codes
          WHERE code = $1
@@ -390,12 +390,12 @@ pub async fn validate_alpha_code(pool: &PgPool, code: &str) -> Result<Option<Uui
     .bind(code)
     .fetch_optional(pool)
     .await
-    .context("Failed to validate alpha code")?;
+    .context("Failed to validate access code")?;
 
     Ok(code_id)
 }
 
-pub async fn redeem_alpha_code(pool: &PgPool, code_id: Uuid) -> Result<bool> {
+pub async fn redeem_access_code(pool: &PgPool, code_id: Uuid) -> Result<bool> {
     let result = sqlx::query(
         "UPDATE beta_codes
          SET used_at = NOW()
@@ -405,7 +405,7 @@ pub async fn redeem_alpha_code(pool: &PgPool, code_id: Uuid) -> Result<bool> {
     .bind(code_id)
     .execute(pool)
     .await
-    .context("Failed to redeem alpha code")?;
+    .context("Failed to redeem access code")?;
 
     Ok(result.rows_affected() > 0)
 }

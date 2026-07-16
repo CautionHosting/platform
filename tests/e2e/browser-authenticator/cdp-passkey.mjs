@@ -13,17 +13,17 @@
 //
 // Env:
 //   BASE_URL   - gateway origin (default http://localhost:8000)
-//   ALPHA_CODE - unredeemed beta code to register with (required)
+//   ACCESS_CODE - unredeemed access code to register with (required)
 //   USERNAME   - username to register (default "cdpuser")
 
 import puppeteer from 'puppeteer';
 
 const BASE_URL = process.env.BASE_URL || 'http://localhost:8000';
 const USERNAME = process.env.USERNAME || 'cdpuser';
-const ALPHA_CODE = process.env.ALPHA_CODE;
+const ACCESS_CODE = process.env.ACCESS_CODE;
 
-if (!ALPHA_CODE) {
-  throw new Error('ALPHA_CODE env var is required');
+if (!ACCESS_CODE) {
+  throw new Error('ACCESS_CODE env var is required');
 }
 
 // allowCredentials may be omitted entirely or sent as an empty array — both mean
@@ -55,7 +55,7 @@ async function registerResidentCredential(page, client, authenticatorId) {
   await page.waitForSelector('[data-testid="register-username"]');
 
   await page.type('[data-testid="register-username"]', USERNAME);
-  await page.type('[data-testid="register-code"]', ALPHA_CODE);
+  await page.type('[data-testid="register-code"]', ACCESS_CODE);
 
   const finishResp = page.waitForResponse((r) => r.url().includes('/auth/register/finish'));
   await page.click('[data-testid="register-submit"]');

@@ -13,7 +13,7 @@
 #   1. Wait for gateway health
 #   2. Flip the gateway to LOGIN_ALLOW_BROADCAST=false (discoverable path) and
 #      restore the default on exit
-#   3. Seed a fresh unredeemed alpha code (beta_codes) + unique username
+#   3. Seed a fresh unredeemed access code (beta_codes) + unique username
 #   4. Install Puppeteer (npm ci)
 #   5. Run the CDP register + discoverable login test
 #
@@ -55,12 +55,12 @@ for i in $(seq 1 30); do
 done
 log "gateway healthy (discoverable mode)"
 
-# ── Step 3: seed a fresh alpha code + username ───────────────────────
+# ── Step 3: seed a fresh access code + username ──────────────────────
 STAMP="$(date +%s)-$RANDOM"
-ALPHA_CODE="e2e-cdp-$STAMP"
+ACCESS_CODE="e2e-cdp-$STAMP"
 USERNAME="cdp$RANDOM$RANDOM"
-psql_q "INSERT INTO beta_codes (code) VALUES ('$ALPHA_CODE');" >/dev/null
-log "seeded alpha code=$ALPHA_CODE username=$USERNAME"
+psql_q "INSERT INTO beta_codes (code) VALUES ('$ACCESS_CODE');" >/dev/null
+log "seeded access code=$ACCESS_CODE username=$USERNAME"
 
 # ── Step 4: install Puppeteer ────────────────────────────────────────
 log "installing puppeteer (npm ci)…"
@@ -68,7 +68,7 @@ log "installing puppeteer (npm ci)…"
 
 # ── Step 5: run the CDP register + discoverable login test ──────────
 log "running CDP register + discoverable login…"
-BASE_URL="$GATEWAY_URL" ALPHA_CODE="$ALPHA_CODE" USERNAME="$USERNAME" \
+BASE_URL="$GATEWAY_URL" ACCESS_CODE="$ACCESS_CODE" USERNAME="$USERNAME" \
     node "$BIN_DIR/cdp-passkey.mjs" || fail "browser round-trip failed"
 
 log "✓ PASS"

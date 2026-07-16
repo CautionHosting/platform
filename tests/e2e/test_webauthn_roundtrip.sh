@@ -10,7 +10,7 @@
 #
 # Flow:
 #   1. Wait for gateway health
-#   2. Seed a fresh unredeemed alpha code (beta_codes) + unique username
+#   2. Seed a fresh unredeemed access code (beta_codes) + unique username
 #   3. cargo build the standalone soft-authenticator helper
 #   4. Run it: register/begin+finish then login/begin+finish, then assert the
 #      issued session authenticates on GET /passkeys
@@ -36,12 +36,12 @@ for i in $(seq 1 30); do
 done
 log "gateway healthy"
 
-# ── Step 2: seed a fresh alpha code + username ───────────────────────
+# ── Step 2: seed a fresh access code + username ──────────────────────
 STAMP=$(date +%s)
-ALPHA_CODE="e2e-softauth-$STAMP"
+ACCESS_CODE="e2e-softauth-$STAMP"
 USERNAME="softauth$STAMP"
-psql_q "INSERT INTO beta_codes (code) VALUES ('$ALPHA_CODE');" >/dev/null
-log "seeded alpha code=$ALPHA_CODE username=$USERNAME"
+psql_q "INSERT INTO beta_codes (code) VALUES ('$ACCESS_CODE');" >/dev/null
+log "seeded access code=$ACCESS_CODE username=$USERNAME"
 
 # ── Step 3: build the software authenticator ─────────────────────────
 log "building soft-authenticator (cargo)…"
@@ -52,7 +52,7 @@ cargo build --quiet --manifest-path "$BIN_DIR/Cargo.toml" \
 log "running register + login round-trip…"
 GATEWAY_URL="$GATEWAY_URL" \
 RP_ORIGIN="${RP_ORIGIN:-$GATEWAY_URL}" \
-ALPHA_CODE="$ALPHA_CODE" \
+ACCESS_CODE="$ACCESS_CODE" \
 USERNAME="$USERNAME" \
     "$BIN_DIR/target/debug/soft-authenticator" || fail "round-trip failed"
 

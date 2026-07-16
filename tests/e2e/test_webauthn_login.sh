@@ -260,7 +260,7 @@ STEP_NUM=11
 # extractor (422), never silently accepted. If this regresses, `caution
 # register` (which now sends the field) would be the only thing keeping it honest.
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/auth/register/begin" \
-    -H 'Content-Type: application/json' -d '{"alpha_code":"nonexistent-code"}')
+    -H 'Content-Type: application/json' -d '{"access_code":"nonexistent-code"}')
 [ "$CODE" = 422 ] || step_fail "register/begin without username returned HTTP $CODE (want 422 — username is required)"
 step_pass "register/begin without username -> 422 (username is a required field)"
 

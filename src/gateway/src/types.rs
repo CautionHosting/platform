@@ -17,8 +17,8 @@ pub struct AuthenticatedUserId(pub Uuid);
 /// Registration state for account creation.
 #[derive(Clone)]
 pub enum PendingRegistrationKind {
-    AlphaCode {
-        alpha_code_id: Uuid,
+    AccessCode {
+        access_code_id: Uuid,
     },
     OrganizationInvite {
         invitation_id: Uuid,
@@ -202,7 +202,7 @@ pub struct LoginFinishResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterBeginRequest {
-    pub alpha_code: String,
+    pub access_code: String,
     pub username: String,
 }
 

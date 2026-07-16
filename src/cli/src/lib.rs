@@ -814,8 +814,9 @@ struct Cli {
 enum Commands {
     #[command(about = "Register a new account")]
     Register {
-        #[arg(long)]
-        alpha_code: String,
+        // `alpha-code` is a hidden deprecated alias for backward compatibility.
+        #[arg(long, alias = "alpha-code")]
+        access_code: String,
         #[arg(
             long,
             help = "Username to register with (prompted interactively if omitted)"
@@ -2802,7 +2803,7 @@ enclave "default" {{
         ])
     }
 
-    async fn register(&self, alpha_code: &str, username: &str) -> Result<()> {
+    async fn register(&self, access_code: &str, username: &str) -> Result<()> {
         log_verbose(self.verbose, "Starting FIDO2 registration...");
         log_verbose(self.verbose, &format!("Target URL: {}", self.base_url));
 
@@ -2813,11 +2814,11 @@ enclave "default" {{
 
         log_verbose(
             self.verbose,
-            "Sending registration begin request with alpha code...",
+            "Sending registration begin request with access code...",
         );
         let response = client
             .post(format!("{}/auth/register/begin", self.base_url))
-            .json(&serde_json::json!({ "alpha_code": alpha_code, "username": username }))
+            .json(&serde_json::json!({ "access_code": access_code, "username": username }))
             .send()
             .await
             .context("Failed to send registration begin request")?;
@@ -2879,9 +2880,9 @@ enclave "default" {{
             self.save_config(session_id.clone(), finish_resp.expires_at.clone())?;
 
             println!("\n=======================================================");
-            println!("ALPHA ACCESS GRANTED");
+            println!("ACCESS GRANTED");
             println!("=======================================================");
-            println!("\nYou're registered as an alpha user. You can now:");
+            println!("\nYou're registered. You can now:");
             println!("  • Create apps with 'caution init'");
             println!("  • Deploy with 'git push caution main'");
             println!("\nDashboard: {}/dashboard", self.frontend_url());
@@ -8448,7 +8449,7 @@ pub async fn run() -> Result<(), RunError> {
 
     match cli.command {
         Commands::Register {
-            alpha_code,
+            access_code,
             username,
         } => {
             let username = resolve_register_username(
@@ -8459,7 +8460,7 @@ pub async fn run() -> Result<(), RunError> {
             .context("Failed to read username")
             .map_err(RunError::CommandDispatch)?;
             client
-                .register(&alpha_code, &username)
+                .register(&access_code, &username)
                 .await
                 .map_err(RunError::CommandDispatch)?;
         }
@@ -9273,7 +9274,7 @@ containerfile: Missing.Containerfile\n",
     #[test]
     fn register_rejects_qr_flag() {
         let cli =
-            Cli::try_parse_from(["caution", "register", "--qr", "--alpha-code", "abc"]).unwrap();
+            Cli::try_parse_from(["caution", "register", "--qr", "--access-code", "abc"]).unwrap();
         let err = validate_global_qr(&cli.command, cli.qr)
             .expect_err("register --qr must be rejected, not silently fall back to a local key");
         assert!(matches!(err, RunError::ArgValidation(_)));
@@ -9281,8 +9282,17 @@ containerfile: Missing.Containerfile\n",
 
     #[test]
     fn register_without_qr_is_allowed() {
-        let cli = Cli::try_parse_from(["caution", "register", "--alpha-code", "abc"]).unwrap();
+        let cli = Cli::try_parse_from(["caution", "register", "--access-code", "abc"]).unwrap();
         assert!(validate_global_qr(&cli.command, cli.qr).is_ok());
+    }
+
+    #[test]
+    fn register_accepts_deprecated_alpha_code_alias() {
+        let cli = Cli::try_parse_from(["caution", "register", "--alpha-code", "abc"]).unwrap();
+        match cli.command {
+            Commands::Register { access_code, .. } => assert_eq!(access_code, "abc"),
+            other => panic!("expected Commands::Register, got {:?}", other),
+        }
     }
 
     #[test]

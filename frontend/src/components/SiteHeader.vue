@@ -141,7 +141,7 @@
             <div class="mobile-menu-section__content" :class="{ 'is-expanded': platformAccordionOpen }">
               <div class="mobile-menu-section__inner">
                 <a href="https://caution.co/platform-tour.html" class="mobile-menu-link">Platform demo</a>
-                <a href="https://dashboard.caution.co/" class="mobile-menu-link">Early access</a>
+                <a href="https://dashboard.caution.co/" class="mobile-menu-link">Dashboard</a>
               </div>
             </div>
           </div>

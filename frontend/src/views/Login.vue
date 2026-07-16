@@ -9,7 +9,7 @@
     <template #access-text>
       Email
       <a
-        href="mailto:info@caution.co?subject=Caution%20Early%20Access%20Inquiry&body=Hi%20Caution%20Team%2C%0A%0AI%20am%20interested%20in%20getting%20early%20access%20to%20Caution's%20managed%20services..."
+        href="mailto:info@caution.co?subject=Caution%20Access%20Code%20Request"
         >info@caution.co</a
       > to request an access code.
     </template>
@@ -36,7 +36,7 @@
 
           <div class="register-field" :class="{ 'register-field--error': validationError && !status && !error }">
             <input
-              v-model="alphaCode"
+              v-model="accessCode"
               type="text"
               placeholder="Enter code"
               class="register-input"
@@ -151,7 +151,7 @@ export default {
     session: String,
   },
   setup(props) {
-    const alphaCode = ref("");
+    const accessCode = ref("");
     const username = ref("");
     const validationError = ref(false);
     const isLoginMode = ref(false);
@@ -191,7 +191,7 @@ export default {
     });
 
     async function onRegister() {
-      const result = await handleRegister(alphaCode.value, username.value);
+      const result = await handleRegister(accessCode.value, username.value);
       if (result.validationError) {
         validationError.value = true;
       } else {
@@ -218,7 +218,7 @@ export default {
       loginLoading,
       error,
       status,
-      alphaCode,
+      accessCode,
       username,
       validationError,
       isLoginMode,
