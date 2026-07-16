@@ -24,7 +24,7 @@
             <a href="https://caution.co/privacy.html" target="_blank" rel="noopener noreferrer">privacy notice</a>.
           </p>
 
-          <div class="register-field" :class="{ 'register-field--error': validationError && !status && !error }">
+          <div class="register-field" :class="{ 'register-field--error': validationError }">
             <input
               v-model="username"
               type="text"
@@ -55,7 +55,7 @@
 
         <div class="messages-container">
           <div
-            v-if="validationError && !status && !error"
+            v-if="validationError"
             class="validation-message"
           >
             Please enter a username to continue.
