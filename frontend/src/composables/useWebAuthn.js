@@ -28,8 +28,14 @@ export function getCsrfToken() {
   return match ? match[1] : null;
 }
 
-// Helper for authenticated API calls with CSRF protection
-export function authFetch(url, options = {}) {
+// Helper for authenticated API calls with CSRF protection.
+//
+// `options.suppressGateRedirect` opts a call out of the automatic
+// username_required redirect below. Background/polling calls (e.g. the 30s
+// balance poll) set it so they don't hijack navigation out from under a user
+// who is mid-action on another tab; only user-initiated fetches should route
+// to the claim screen.
+export async function authFetch(url, options = {}) {
   const headers = options.headers || {};
 
   // Add CSRF token for state-changing requests
@@ -40,11 +46,28 @@ export function authFetch(url, options = {}) {
     }
   }
 
-  return fetch(url, {
+  const response = await fetch(url, {
     ...options,
     headers,
     credentials: 'include',
   });
+
+  // Handle username_required gate: if 403 with username_required error, redirect to dashboard
+  if (response.status === 403 && !options.suppressGateRedirect) {
+    try {
+      const data = await response.clone().json();
+      if (data.error === 'username_required') {
+        // Redirect to dashboard with account tab active (for username claim)
+        window.location.href = '/#account';
+        // Return a rejected promise to prevent further processing
+        return Promise.reject(new Error('username_required'));
+      }
+    } catch (e) {
+      // If response is not JSON, continue normal error handling
+    }
+  }
+
+  return response;
 }
 
 export function useWebAuthn() {
@@ -85,9 +108,13 @@ export function useWebAuthn() {
     }
   }
 
-  async function handleLogin(e) {
-    if (e && e.preventDefault) {
-      e.preventDefault();
+  async function handleLogin(loginUsername) {
+    // Handle both event and username parameter
+    let username = "";
+    if (typeof loginUsername === "string") {
+      username = loginUsername;
+    } else if (loginUsername && loginUsername.preventDefault) {
+      loginUsername.preventDefault();
     }
 
     // Prevent double invocation
@@ -103,10 +130,19 @@ export function useWebAuthn() {
     try {
       // Step 1: Begin login
       status.value = "Starting login...";
-      const beginResponse = await fetch("/auth/login/begin", {
+
+      const fetchOptions = {
         method: "POST",
         credentials: "include",
-      });
+      };
+
+      // Send username in JSON body if provided and non-empty
+      if (username && username.trim()) {
+        fetchOptions.headers = { "Content-Type": "application/json" };
+        fetchOptions.body = JSON.stringify({ username: username.trim() });
+      }
+
+      const beginResponse = await fetch("/auth/login/begin", fetchOptions);
 
       if (!beginResponse.ok) {
         const errorText = await beginResponse.text();
@@ -135,12 +171,20 @@ export function useWebAuthn() {
 
       let assertion;
       try {
+        // NOTE: modal (button-triggered) get. We deliberately do NOT forward
+        // the server's `mediation: "conditional"` here: conditional mediation
+        // shows no modal and silently waits for an autofill pick from an
+        // `autocomplete="... webauthn"` input, so passing it on a button click
+        // would hang with no UI. Real conditional-UI autofill (get() on mount,
+        // tied to the tagged input, with AbortController) is a separate feature.
         assertion = await navigator.credentials.get({ publicKey });
       } catch (credError) {
         console.error("WebAuthn error:", credError);
         if (credError.name === "NotAllowedError") {
           throw new Error(
-            "Login failed. No matching credential was found. Make sure you are using the same authenticator you registered with. If you don't have an account yet, register first."
+            username && username.trim()
+              ? "Login failed. No matching credential was found. Make sure you are using the same authenticator you registered with. If you don't have an account yet, register first."
+              : "Login failed. No matching credential was found. If your passkey isn't a synced/resident credential, enter your username above and try again. If you don't have an account yet, register first."
           );
         }
         throw credError;
@@ -204,23 +248,23 @@ export function useWebAuthn() {
     }
   }
 
-  async function handleRegister(alphaCode) {
-    if (!alphaCode || !alphaCode.trim()) {
-      return { success: false, validationError: true };
-    }
-
+  async function registerWithPasskey({
+    beginUrl,
+    beginBody,
+    finishUrl,
+    validatingStatus,
+  }) {
     error.value = null;
     status.value = null;
     loading.value = true;
 
     try {
-      // Step 1: Begin registration with alpha code
-      status.value = "Validating access code...";
-      const beginResponse = await fetch("/auth/register/begin", {
+      status.value = validatingStatus;
+      const beginResponse = await fetch(beginUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ alpha_code: alphaCode.trim() }),
+        body: JSON.stringify(beginBody),
       });
 
       if (!beginResponse.ok) {
@@ -230,14 +274,12 @@ export function useWebAuthn() {
 
       const beginData = await beginResponse.json();
 
-      // Step 2: Create credential with passkey
       status.value = "Use your passkey";
 
       const publicKey = beginData.publicKey;
       publicKey.challenge = base64urlToUint8Array(publicKey.challenge);
       publicKey.user.id = base64urlToUint8Array(publicKey.user.id);
 
-      // Convert excludeCredentials IDs from base64url to ArrayBuffer
       if (publicKey.excludeCredentials) {
         publicKey.excludeCredentials = publicKey.excludeCredentials.map((cred) => ({
           type: cred.type,
@@ -276,7 +318,6 @@ export function useWebAuthn() {
         throw new Error("No credential created");
       }
 
-      // Step 3: Finish registration
       status.value = "Completing registration...";
 
       const attestationObject = new Uint8Array(
@@ -284,7 +325,7 @@ export function useWebAuthn() {
       );
       const clientDataJSON = new Uint8Array(credential.response.clientDataJSON);
 
-      const finishResponse = await fetch("/auth/register/finish", {
+      const finishResponse = await fetch(finishUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -296,6 +337,7 @@ export function useWebAuthn() {
             attestationObject: uint8ArrayToBase64url(attestationObject),
             clientDataJSON: uint8ArrayToBase64url(clientDataJSON),
           },
+          clientExtensionResults: credential.getClientExtensionResults(),
           session: beginData.session,
         }),
       });
@@ -325,6 +367,19 @@ export function useWebAuthn() {
     }
   }
 
+  async function handleRegister(alphaCode, username) {
+    if (!alphaCode || !alphaCode.trim() || !username || !username.trim()) {
+      return { success: false, validationError: true };
+    }
+
+    return registerWithPasskey({
+      beginUrl: "/auth/register/begin",
+      beginBody: { alpha_code: alphaCode.trim(), username: username.trim() },
+      finishUrl: "/auth/register/finish",
+      validatingStatus: "Validating access code...",
+    });
+  }
+
   return {
     authenticated,
     loading,
@@ -335,5 +390,6 @@ export function useWebAuthn() {
     verifySession,
     handleLogin,
     handleRegister,
+    registerWithPasskey,
   };
 }

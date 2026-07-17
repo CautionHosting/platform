@@ -1474,6 +1474,7 @@ dependencies = [
  "serde_json",
  "shlex",
  "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]
@@ -4484,6 +4485,7 @@ dependencies = [
  "aws-sdk-cloudwatch",
  "aws-sdk-costexplorer",
  "axum",
+ "caution-config",
  "chrono",
  "dotenvy",
  "futures",

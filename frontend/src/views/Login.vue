@@ -4,7 +4,7 @@
 <template>
   <AuthLayout
     :login-loading="loginLoading"
-    @login="handleLogin"
+    @login="onHeaderLogin"
   >
     <template #access-text>
       Email
@@ -15,24 +15,41 @@
     </template>
 
     <template #right-panel>
-      <div v-if="!authenticated" class="form-container">
+      <!-- Registration Form -->
+      <div v-if="!authenticated && !isLoginMode" class="form-container">
         <h2 class="form-title">Create an account</h2>
 
         <div class="register-form">
+          <div class="register-field" :class="{ 'register-field--error': validationError && !status && !error }">
+            <input
+              v-model="username"
+              type="text"
+              placeholder="Username"
+              class="register-input"
+              autocomplete="username"
+              data-testid="register-username"
+              :disabled="loading"
+              @keyup.enter="onRegister"
+              @input="validationError = false"
+            />
+          </div>
+
           <div class="register-field" :class="{ 'register-field--error': validationError && !status && !error }">
             <input
               v-model="alphaCode"
               type="text"
               placeholder="Enter code"
               class="register-input"
+              data-testid="register-code"
               :disabled="loading"
               @keyup.enter="onRegister"
               @input="validationError = false"
             />
             <button
               @click="onRegister"
-              :disabled="loading"
+              :disabled="loading || !username.trim()"
               class="btn-dark btn register-submit"
+              data-testid="register-submit"
             >
               <svg class="btn-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
               {{ loading ? "Working..." : "Register with passkey" }}
@@ -49,7 +66,7 @@
           </p>
           <p class="register-prompt account-switch">
             Already have an account?
-            <a href="/login" @click.prevent="handleLogin" class="link-btn">Log in</a>.
+            <a href="/login" @click.prevent="isLoginMode = true" class="link-btn">Log in</a>.
           </p>
 
         </div>
@@ -59,9 +76,50 @@
             v-if="validationError && !status && !error"
             class="validation-message"
           >
-            Please enter a valid access code to continue.
+            Please enter both a username and access code to continue.
           </div>
 
+          <div v-if="status" class="status-message">
+            {{ status }}
+          </div>
+
+          <div v-if="error" class="error-message">{{ error }}</div>
+        </div>
+      </div>
+
+      <!-- Login Form -->
+      <div v-else-if="!authenticated && isLoginMode" class="form-container">
+        <h2 class="form-title">Log in</h2>
+
+        <div class="register-form">
+          <div class="register-field">
+            <input
+              v-model="loginUsername"
+              type="text"
+              placeholder="Username (optional)"
+              class="register-input"
+              autocomplete="username"
+              :disabled="loginLoading"
+              @keyup.enter="onLogin"
+            />
+          </div>
+
+          <button
+            @click="onLogin"
+            :disabled="loginLoading"
+            class="btn-dark btn register-submit"
+          >
+            <svg class="btn-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
+            {{ loginLoading ? "Working..." : "Log in with passkey" }}
+          </button>
+
+          <p class="register-prompt account-switch">
+            Don't have an account?
+            <a href="/register" @click.prevent="isLoginMode = false" class="link-btn">Register</a>.
+          </p>
+        </div>
+
+        <div class="messages-container">
           <div v-if="status" class="status-message">
             {{ status }}
           </div>
@@ -94,7 +152,10 @@ export default {
   },
   setup(props) {
     const alphaCode = ref("");
+    const username = ref("");
     const validationError = ref(false);
+    const isLoginMode = ref(false);
+    const loginUsername = ref("");
     const activeLegalDocuments = ref([]);
 
     const {
@@ -130,12 +191,25 @@ export default {
     });
 
     async function onRegister() {
-      const result = await handleRegister(alphaCode.value);
+      const result = await handleRegister(alphaCode.value, username.value);
       if (result.validationError) {
         validationError.value = true;
       } else {
         validationError.value = false;
       }
+    }
+
+    async function onLogin() {
+      await handleLogin(loginUsername.value.trim());
+    }
+
+    // The header/footer "Log in" link is reachable from the register form.
+    // Switch into login mode first so a failed attempt (e.g. a non-resident
+    // key with no username yet) renders its error in the login view instead
+    // of appearing to come from the register form the user was just on.
+    async function onHeaderLogin() {
+      isLoginMode.value = true;
+      await handleLogin();
     }
 
     return {
@@ -145,10 +219,15 @@ export default {
       error,
       status,
       alphaCode,
+      username,
       validationError,
+      isLoginMode,
+      loginUsername,
       activeLegalDocuments,
       handleLogin,
       onRegister,
+      onLogin,
+      onHeaderLogin,
     };
   },
 };

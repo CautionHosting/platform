@@ -303,6 +303,7 @@ async fn send_email_handler(
         "suspension_notice" => generate_suspension_notice_email(&req.data),
         "legal_notice" => generate_legal_notice_email(&req.data),
         "fully_managed_capacity_alert" => generate_fully_managed_capacity_alert_email(&req.data),
+        "organization_invite" => generate_organization_invite_email(&req.data),
         _ => {
             return Ok(Json(SendEmailResponse {
                 success: false,
@@ -544,6 +545,40 @@ fn generate_legal_notice_email(data: &serde_json::Value) -> (String, String, Str
          --\n\
          Caution Team",
         text_documents, action_text
+    );
+
+    (subject, html_body, text_body)
+}
+
+fn generate_organization_invite_email(data: &serde_json::Value) -> (String, String, String) {
+    let org_name_raw = data["organization_name"].as_str().unwrap_or("Caution");
+    let invite_url_raw = data["invite_url"]
+        .as_str()
+        .unwrap_or("https://dashboard.caution.co");
+    let inviter_raw = data["inviter_email"].as_str().unwrap_or("a Caution user");
+    let expires_at_raw = data["expires_at"].as_str().unwrap_or("soon");
+
+    let org_name = html_escape(org_name_raw);
+    let invite_url = html_escape(invite_url_raw);
+    let inviter = html_escape(inviter_raw);
+    let expires_at = html_escape(expires_at_raw);
+    let subject = format!("Join {} on Caution.co", org_name_raw);
+
+    let html_body = format!(
+        include_str!("../templates/organization_invite.html"),
+        org_name = org_name,
+        inviter = inviter,
+        invite_url = invite_url,
+        expires_at = expires_at,
+        footer = html_email_footer()
+    );
+
+    let text_body = format!(
+        include_str!("../templates/organization_invite.txt"),
+        org_name = org_name_raw,
+        inviter = inviter_raw,
+        invite_url = invite_url_raw,
+        expires_at = expires_at_raw
     );
 
     (subject, html_body, text_body)

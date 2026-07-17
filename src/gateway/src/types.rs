@@ -14,11 +14,24 @@ use webauthn_rs::prelude::*;
 #[derive(Clone)]
 pub struct AuthenticatedUserId(pub Uuid);
 
-/// Registration state that includes the alpha code ID for closed alpha
+/// Registration state for account creation.
+#[derive(Clone)]
+pub enum PendingRegistrationKind {
+    AlphaCode {
+        alpha_code_id: Uuid,
+    },
+    OrganizationInvite {
+        invitation_id: Uuid,
+        token_hash: String,
+    },
+}
+
+/// Registration state that records which signup path created the challenge.
 #[derive(Clone)]
 pub struct PendingRegistration {
     pub reg_state: SecurityKeyRegistration,
-    pub alpha_code_id: Uuid,
+    pub kind: PendingRegistrationKind,
+    pub username: String,
     pub expires_at: time::OffsetDateTime,
 }
 
@@ -31,10 +44,33 @@ pub struct PendingPasskeyRegistration {
     pub expires_at: time::OffsetDateTime,
 }
 
+/// Which webauthn-rs authentication ceremony a pending `/auth/login` challenge is
+/// running. `SecurityKey` covers both legacy broadcast and username-scoped login
+/// (both resolve the user from the asserted credential's `rawId`). `Discoverable`
+/// covers the username-less conditional-UI flow (resolves the user from the
+/// assertion's `userHandle` via `identify_discoverable_authentication`).
+///
+/// Sign flows (`PendingSignChallenge`) are already scoped to a single credential
+/// and are intentionally NOT part of this enum — they stay on
+/// `SecurityKeyAuthentication` per the Phase 1 design doc.
+#[derive(Clone)]
+pub enum AuthState {
+    SecurityKey(SecurityKeyAuthentication),
+    Discoverable {
+        auth_state: DiscoverableAuthentication,
+        /// Whether this challenge was scoped to a specific username, and if
+        /// so which user (or the decoy indicating none). See
+        /// `handlers::UsernameScope` / `handlers::check_username_scope`,
+        /// checked at finish time so a decoy challenge can't be completed by
+        /// authenticating as a different resident user.
+        scope: crate::handlers::UsernameScope,
+    },
+}
+
 /// Authentication state with expiration
 #[derive(Clone)]
 pub struct PendingAuthentication {
-    pub auth_state: SecurityKeyAuthentication,
+    pub auth_state: AuthState,
     pub expires_at: time::OffsetDateTime,
 }
 
@@ -51,6 +87,23 @@ pub struct AppState {
     pub session_timeout_hours: i64,
     pub internal_service_secret: Option<String>,
     pub csrf_secret: String,
+    /// Kill-switch for the legacy credential-broadcast login behavior
+    /// (`/auth/login/begin` and `/auth/qr-login/authenticate` with no username
+    /// returning every credential in the DB as `allowCredentials`). Defaults to
+    /// `true` so nothing regresses mid-migration; flip to `false` via the
+    /// `LOGIN_ALLOW_BROADCAST` env var once clients no longer depend on it.
+    /// Toggling requires setting the env var and restarting the gateway — it is
+    /// read once at startup, not re-read per request.
+    pub login_allow_broadcast: bool,
+    /// Per-IP budget on username-scoped `begin` requests, on top of the
+    /// blanket global limiter. In-memory/single-replica; see
+    /// `rate_limit.rs`. Exceeding it returns a hard 429 (safe: keyed by IP,
+    /// not username).
+    pub scoped_begin_limiter: crate::rate_limit::RateLimiter,
+    /// Per-username budget on scoped `begin` requests. In-memory/
+    /// single-replica; see `rate_limit.rs`. Exceeding it forces a decoy
+    /// response rather than a 429 (see `handlers::scoped_or_decoy_challenge`).
+    pub username_begin_limiter: crate::rate_limit::RateLimiter,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -114,6 +167,13 @@ pub struct LoginBeginResponse {
     pub session: String,
 }
 
+/// Optional body for `POST /auth/login/begin`. An absent/empty body is
+/// tolerated by the handler and treated identically to `{ "username": null }`.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct LoginBeginRequest {
+    pub username: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginFinishRequest {
     pub id: String,
@@ -143,6 +203,25 @@ pub struct LoginFinishResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterBeginRequest {
     pub alpha_code: String,
+    pub username: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InvitePreviewQuery {
+    pub token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InviteRegisterBeginRequest {
+    pub token: String,
+    pub username: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InvitePreviewResponse {
+    pub email: String,
+    pub organization_name: String,
+    pub expires_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -210,6 +289,16 @@ pub struct QrLoginBeginResponse {
     pub expires_at: String,
 }
 
+/// Optional username to scope the eventual `allowCredentials` list by, for
+/// non-resident/legacy keys that can't respond to a discoverable challenge.
+/// Never encoded in the QR URL — chosen desktop-side, stored server-side on
+/// the token row, and only consumed when the phone/browser later hits
+/// `/auth/qr-login/authenticate`.
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct QrLoginBeginRequest {
+    pub username: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QrLoginStatusResponse {
     pub status: QrStatus,
@@ -251,6 +340,7 @@ pub struct DbQrLoginToken {
     pub session_id: Option<String>,
     pub expires_at: time::OffsetDateTime,
     pub created_at: time::OffsetDateTime,
+    pub username: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

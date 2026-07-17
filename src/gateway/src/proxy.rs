@@ -3,11 +3,12 @@
 
 use axum::{
     body::Body,
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use reqwest::Client;
+use std::net::SocketAddr;
 
 use crate::request_id::RequestId;
 use crate::types::{AppState, AuthenticatedUserId};
@@ -17,6 +18,7 @@ const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB
 /// Proxy webhooks to the metering service (no auth — verified by signature)
 pub async fn metering_proxy_handler(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     req: Request,
 ) -> Result<Response, Response> {
     let client = Client::new();
@@ -46,6 +48,11 @@ pub async fn metering_proxy_handler(
             proxy_req = proxy_req.header(key, value);
         }
     }
+    // Set the real peer IP ourselves rather than forwarding any client-supplied
+    // x-forwarded-for — metering's webhook rate limiter keys on this header, and
+    // trusting a client-controlled value would let one bucket be shared (or
+    // spoofed) across callers.
+    proxy_req = proxy_req.header("x-forwarded-for", addr.ip().to_string());
     if !body_bytes.is_empty() {
         proxy_req = proxy_req.body(body_bytes.to_vec());
     }

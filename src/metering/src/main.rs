@@ -3,15 +3,15 @@
 
 use anyhow::{Context, Result};
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
-use sqlx::postgres::PgPoolOptions;
 use sqlx::Row;
+use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -38,6 +38,7 @@ pub struct AppState {
     pub pool: sqlx::PgPool,
     pub paddle: paddle::PaddleClient,
     pub calculator: calculator::CostCalculator,
+    pub pricing: caution_config::pricing::PricingConfig,
     pub cloudwatch: aws_sdk_cloudwatch::Client,
     pub internal_service_secret: String,
 }
@@ -85,7 +86,9 @@ async fn main() -> Result<()> {
     let paddle_webhook_secret = std::env::var("PADDLE_WEBHOOK_SECRET").unwrap_or_default();
 
     if !paddle_api_key.is_empty() && paddle_api_url.is_empty() {
-        anyhow::bail!("PADDLE_API_KEY is set but PADDLE_API_URL is not — set PADDLE_API_URL to the Paddle API base URL (e.g. https://sandbox-api.paddle.com or https://api.paddle.com)");
+        anyhow::bail!(
+            "PADDLE_API_KEY is set but PADDLE_API_URL is not — set PADDLE_API_URL to the Paddle API base URL (e.g. https://sandbox-api.paddle.com or https://api.paddle.com)"
+        );
     }
 
     let pool = PgPoolOptions::new()
@@ -99,6 +102,15 @@ async fn main() -> Result<()> {
     let internal_service_secret = load_internal_service_secret()?;
 
     let paddle = paddle::PaddleClient::new(paddle_api_url, paddle_api_key, paddle_webhook_secret);
+    let pricing_contents = std::fs::read_to_string("prices.json")
+        .context("prices.json not found. Configure explicit pricing before starting metering.")?;
+    let paddle_subscriptions_enabled = std::env::var("BYOC_PADDLE_SUBSCRIPTIONS_ENABLED")
+        .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
+    let pricing = caution_config::pricing::PricingConfig::parse(
+        &pricing_contents,
+        paddle_subscriptions_enabled,
+    )
+    .context("Failed to parse prices.json for Paddle subscription processing")?;
     let calculator = calculator::CostCalculator::new(calculator::PricingRules::load()?);
 
     let aws_config = aws_config::load_from_env().await;
@@ -108,6 +120,7 @@ async fn main() -> Result<()> {
         pool,
         paddle,
         calculator,
+        pricing,
         cloudwatch,
         internal_service_secret,
     });
@@ -169,7 +182,9 @@ async fn main() -> Result<()> {
     if enable_test_endpoints {
         let env = std::env::var("ENVIRONMENT").unwrap_or_default();
         if env == "production" {
-            eprintln!("FATAL: ENABLE_TEST_ENDPOINTS is set in a production environment. Refusing to start.");
+            eprintln!(
+                "FATAL: ENABLE_TEST_ENDPOINTS is set in a production environment. Refusing to start."
+            );
             std::process::exit(1);
         }
     }
@@ -293,6 +308,13 @@ impl RateLimiter {
 }
 
 /// Rate-limiting middleware for webhook routes.
+///
+/// `x-forwarded-for` is trustworthy here because metering is not reachable
+/// directly from the internet — the gateway is the only caller and it
+/// overwrites this header with the real peer IP (see
+/// `gateway::proxy::metering_proxy_handler`), discarding whatever the original
+/// client sent. Without that, this header would be client-controlled and every
+/// caller could collapse into the same rate-limit bucket.
 async fn webhook_rate_limit_middleware(
     State(limiter): State<RateLimiter>,
     req: axum::http::Request<axum::body::Body>,
@@ -363,9 +385,10 @@ mod tests {
             std::env::remove_var("INTERNAL_SERVICE_SECRET");
         }
         let err = load_internal_service_secret().expect_err("missing secret should fail");
-        assert!(err
-            .to_string()
-            .contains("INTERNAL_SERVICE_SECRET must be set"));
+        assert!(
+            err.to_string()
+                .contains("INTERNAL_SERVICE_SECRET must be set")
+        );
     }
 
     #[test]
@@ -375,9 +398,10 @@ mod tests {
             std::env::set_var("INTERNAL_SERVICE_SECRET", "   ");
         }
         let err = load_internal_service_secret().expect_err("empty secret should fail");
-        assert!(err
-            .to_string()
-            .contains("INTERNAL_SERVICE_SECRET must be set"));
+        assert!(
+            err.to_string()
+                .contains("INTERNAL_SERVICE_SECRET must be set")
+        );
     }
 
     #[test]
@@ -531,16 +555,15 @@ async fn get_user_usage(
 ) -> impl IntoResponse {
     let result = sqlx::query(
         r#"
-        SELECT DISTINCT
+        SELECT
             provider,
             resource_type,
-            quantity,
-            base_unit_cost_usd,
-            margin_percent,
+            quantity::float8           AS quantity,
+            base_unit_cost_usd::float8 AS base_unit_cost_usd,
+            margin_percent::float8     AS margin_percent
         FROM usage_ledger
         WHERE user_id = $1
         AND recorded_at >= NOW() - INTERVAL '30 days'
-	GROUP BY provider, resource_type
         "#,
     )
     .bind(user_id)
@@ -707,6 +730,8 @@ struct TestSimulatePaddleTransactionRequest {
     event_type: Option<String>, // transaction.completed, transaction.billed, transaction.payment_failed
     #[serde(default)]
     transaction_id: Option<String>, // reuse a specific transaction ID (e.g. from a prior billed event)
+    #[serde(default)]
+    custom_data: Option<serde_json::Value>, // optional transaction custom_data (e.g. to exercise credit-purchase paths)
 }
 
 /// Simulate a Paddle transaction webhook for testing email and billing flow
@@ -764,7 +789,8 @@ async fn test_simulate_paddle_transaction(
                     "total": req.amount_cents.to_string(),
                     "tax": "0"
                 }
-            }
+            },
+            "custom_data": req.custom_data.clone().unwrap_or(serde_json::Value::Null)
         }),
     };
 

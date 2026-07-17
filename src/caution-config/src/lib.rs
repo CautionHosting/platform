@@ -2,6 +2,8 @@ use hcl::expr::Expression;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod pricing;
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 pub enum OneOrMany<T> {
@@ -211,8 +213,7 @@ impl UnitConfig {
             if !is_valid_env_key(name) {
                 break;
             }
-            let quoted =
-                shlex::try_quote(value).map_err(|_| FromStrError::UnquotableCommand)?;
+            let quoted = shlex::try_quote(value).map_err(|_| FromStrError::UnquotableCommand)?;
             parts.push(format!("{name}={quoted}"));
             argv.next();
         }
@@ -311,9 +312,7 @@ pub enum FromStrError {
     )]
     InvalidEnvExpression(String),
 
-    #[error(
-        "Invalid env key '{0}'; keys must match [A-Za-z_][A-Za-z0-9_]* to be safely exported"
-    )]
+    #[error("Invalid env key '{0}'; keys must match [A-Za-z_][A-Za-z0-9_]* to be safely exported")]
     InvalidEnvKey(String),
 
     #[error("Command contains characters that cannot be shell-quoted (e.g. NUL byte)")]
@@ -793,9 +792,7 @@ impl ConfigurationFile {
                                         unit_name, key
                                     )));
                                 }
-                                if matches!(expr, Expression::String(_))
-                                    && !is_valid_env_key(key)
-                                {
+                                if matches!(expr, Expression::String(_)) && !is_valid_env_key(key) {
                                     return Err(FromStrError::InvalidEnvKey(format!(
                                         "{}.{}",
                                         unit_name, key
@@ -818,9 +815,9 @@ impl ConfigurationFile {
             enclaves.values().any(|enclave| {
                 enclave.unit.as_ref().is_some_and(|units| {
                     units.values().any(|unit| {
-                        unit.env.as_ref().is_some_and(|env| {
-                            env.values().any(is_vault_funccall)
-                        })
+                        unit.env
+                            .as_ref()
+                            .is_some_and(|env| env.values().any(is_vault_funccall))
                     })
                 })
             })
@@ -1583,8 +1580,7 @@ enclave "main" {
     const DEMO_HELLO_WORLD_HCL: &str =
         include_str!("../tests/data/demo-hello-world-enclave/caution.hcl");
 
-    const DEMO_AI_INFERENCE_HCL: &str =
-        include_str!("../tests/data/demo-ai-inference/caution.hcl");
+    const DEMO_AI_INFERENCE_HCL: &str = include_str!("../tests/data/demo-ai-inference/caution.hcl");
 
     const LOCKSMITH_HCL: &str = include_str!("../tests/data/locksmith/caution.hcl");
 
@@ -1762,7 +1758,10 @@ enclave "main" {
         assert_eq!(build.cache, Some(false));
 
         assert_eq!(network.ingress.len(), 1);
-        assert_eq!(network.ingress[0].port_spec, Some(PortSpec::Exact { port: 80 }));
+        assert_eq!(
+            network.ingress[0].port_spec,
+            Some(PortSpec::Exact { port: 80 })
+        );
     }
 
     #[test]
@@ -1933,10 +1932,10 @@ caution {
         // must be rejected by the provider validator. (Embedded quotes/newlines
         // are separately caught by the HCL parser before this point.)
         for (field, value) in [
-            ("vpc_id", "vpc-$(id)"),           // shell command substitution
-            ("vpc_id", "vpc-123"),             // too short to be a real id
-            ("vpc_id", "vpc-0A1B2C3D"),        // uppercase is not a valid id
-            ("subnet_ids", "subnet-zzzzzzzz"), // non-hex
+            ("vpc_id", "vpc-$(id)"),            // shell command substitution
+            ("vpc_id", "vpc-123"),              // too short to be a real id
+            ("vpc_id", "vpc-0A1B2C3D"),         // uppercase is not a valid id
+            ("subnet_ids", "subnet-zzzzzzzz"),  // non-hex
             ("security_group_id", "sg-../etc"), // path traversal characters
         ] {
             let line = if field == "subnet_ids" {
@@ -2154,7 +2153,10 @@ enclave "main" {
 }
 "#,
         );
-        assert_eq!(unit.run_command_string().unwrap(), "/app/server --port 8080");
+        assert_eq!(
+            unit.run_command_string().unwrap(),
+            "/app/server --port 8080"
+        );
     }
 
     #[test]
@@ -2315,10 +2317,7 @@ enclave "main" {
 "#,
         );
         // Vault entry is resolved by locksmith at runtime, not exported here.
-        assert_eq!(
-            unit.run_command_string().unwrap(),
-            "export PLAIN=x\n/app"
-        );
+        assert_eq!(unit.run_command_string().unwrap(), "export PLAIN=x\n/app");
     }
 
     #[test]
@@ -2392,7 +2391,14 @@ enclave "main" {
 }
 "#;
         let cfg: ConfigurationFile = hcl::from_str(hcl).expect("parse HCL");
-        let net = cfg.enclave.unwrap().get("main").unwrap().network.clone().unwrap();
+        let net = cfg
+            .enclave
+            .unwrap()
+            .get("main")
+            .unwrap()
+            .network
+            .clone()
+            .unwrap();
         assert!(net.egress_enabled());
 
         let hcl_empty = r#"
@@ -2407,7 +2413,14 @@ enclave "main" {
 }
 "#;
         let cfg2: ConfigurationFile = hcl::from_str(hcl_empty).expect("parse HCL");
-        let net2 = cfg2.enclave.unwrap().get("main").unwrap().network.clone().unwrap();
+        let net2 = cfg2
+            .enclave
+            .unwrap()
+            .get("main")
+            .unwrap()
+            .network
+            .clone()
+            .unwrap();
         assert!(!net2.egress_enabled());
     }
 
@@ -2512,7 +2525,9 @@ enclave "test" {
 unknown_top_block { }
 "#;
         let err = hcl::from_str::<ConfigurationFile>(hcl).unwrap_err();
-        assert!(err.to_string().contains("unknown_top_block") || err.to_string().contains("unknown"));
+        assert!(
+            err.to_string().contains("unknown_top_block") || err.to_string().contains("unknown")
+        );
     }
 
     #[test]
@@ -2585,8 +2600,7 @@ enclave "main" {
   }
 }
 "#;
-        let cfg = ConfigurationFile::from_str(hcl)
-            .expect("should accept http without domain");
+        let cfg = ConfigurationFile::from_str(hcl).expect("should accept http without domain");
         let enclave = cfg.enclave.unwrap();
         let main = enclave.get("main").unwrap();
         let http = main.network.as_ref().unwrap().http.as_ref().unwrap();
@@ -2614,8 +2628,7 @@ enclave "main" {
   }
 }
 "#;
-        let cfg = ConfigurationFile::from_str(hcl)
-            .expect("should accept http with domain");
+        let cfg = ConfigurationFile::from_str(hcl).expect("should accept http with domain");
         let enclave = cfg.enclave.unwrap();
         let main = enclave.get("main").unwrap();
         let http = main.network.as_ref().unwrap().http.as_ref().unwrap();

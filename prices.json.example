@@ -1,22 +1,21 @@
 {
   "compute_margin_percent": 0,
-  "subscription_tiers": {
-    "1_enclave": {
-      "annual_cents": 300000,
-      "enclaves": 1
-    },
-    "3_enclaves": {
-      "annual_cents": 600000,
-      "enclaves": 3
-    },
-    "5_enclaves": {
-      "annual_cents": 900000,
-      "enclaves": 5
-    },
-    "10_enclaves": {
-      "annual_cents": 1500000,
-      "enclaves": 10
+  "paddle_catalog": {
+    "version": 1,
+    "product_id": null,
+    "tax_category": "saas",
+    "currency_code": "USD",
+    "billing_cycle": {
+      "interval": "month",
+      "frequency": 1
     }
+  },
+  "subscription_tiers": {
+    "1_enclave": { "monthly_cents": 25000, "enclaves": 1, "paddle_price_id": null },
+    "2_enclaves": { "monthly_cents": 37500, "enclaves": 2, "paddle_price_id": null },
+    "3_enclaves": { "monthly_cents": 50000, "enclaves": 3, "paddle_price_id": null },
+    "4_enclaves": { "monthly_cents": 62500, "enclaves": 4, "paddle_price_id": null },
+    "5_enclaves": { "monthly_cents": 75000, "enclaves": 5, "paddle_price_id": null }
   },
   "credit_packages": {
     "1000":  { "bonus_percent": 2.5 },

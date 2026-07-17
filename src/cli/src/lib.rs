@@ -494,6 +494,134 @@ fn prompt_for_pin() -> Result<Option<String>> {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum PromptLineError {
+    #[error("failed to read input from stdin: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Prints `prompt`, reads a single non-empty trimmed line from stdin, and
+/// keeps re-prompting with `retry_message` until the user provides one.
+fn prompt_line(prompt: &str, retry_message: &str) -> Result<String, PromptLineError> {
+    prompt_line_from(&mut io::stdin().lock(), prompt, retry_message)
+}
+
+/// Testable core of [`prompt_line`]: reads non-empty trimmed lines from any
+/// `BufRead` instead of always going to real stdin.
+fn prompt_line_from<R: std::io::BufRead>(
+    reader: &mut R,
+    prompt: &str,
+    retry_message: &str,
+) -> Result<String, PromptLineError> {
+    loop {
+        print!("{}", prompt);
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        if reader.read_line(&mut input)? == 0 {
+            // EOF: nothing left to read, stop looping.
+            return Ok(String::new());
+        }
+        let trimmed = input.trim();
+
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+
+        println!("{}", retry_message);
+    }
+}
+
+/// Prompts for the username to log in with when `--username` was not passed.
+/// Unlike [`prompt_for_claimed_username`], an empty line here is valid input
+/// (not just EOF): leaving it blank opts into the discoverable/broadcast
+/// login path for accounts that don't have a username yet.
+const LOGIN_USERNAME_PROMPT: &str = "Username (leave blank if you don't have one): ";
+
+#[derive(Debug, thiserror::Error)]
+enum LoginUsernameError {
+    #[error(
+        "Session expired and no username was provided. \
+         Re-authenticate with `caution login --username <name>`."
+    )]
+    NonInteractive,
+    #[error(transparent)]
+    Prompt(#[from] PromptLineError),
+}
+
+/// Resolves the username used for login. Returns the explicitly provided
+/// username as-is; otherwise prompts (reading from `reader`) only when a human
+/// terminal is attached. Non-interactive callers with no username — e.g. an
+/// `ensure_authenticated` auto-relogin fired from a CI/cron invocation — get a
+/// fail-fast error instead of a blocking stdin read that would hang forever.
+fn resolve_login_username<R: std::io::BufRead>(
+    provided: Option<String>,
+    is_terminal: bool,
+    reader: &mut R,
+) -> Result<String, LoginUsernameError> {
+    match provided {
+        Some(username) => Ok(username),
+        None if is_terminal => Ok(prompt_optional_line_from(reader, LOGIN_USERNAME_PROMPT)?),
+        None => Err(LoginUsernameError::NonInteractive),
+    }
+}
+
+/// Reads a single trimmed line from `reader`, returning it as-is (including
+/// empty). No retry loop: an empty line is a valid answer here.
+fn prompt_optional_line_from<R: std::io::BufRead>(
+    reader: &mut R,
+    prompt: &str,
+) -> Result<String, PromptLineError> {
+    print!("{}", prompt);
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    reader.read_line(&mut input)?;
+    Ok(input.trim().to_string())
+}
+
+/// Prompts for a new username when claiming one is required post-login
+/// (the `username_required` gate).
+fn prompt_for_claimed_username() -> Result<String, PromptLineError> {
+    prompt_line(
+        "Choose a username: ",
+        "Username cannot be empty, please try again.",
+    )
+}
+
+#[derive(Debug, thiserror::Error)]
+enum RegisterUsernameError {
+    #[error(
+        "No username was provided and stdin is not interactive. \
+         Re-run with `caution register --username <name>`."
+    )]
+    NonInteractive,
+    #[error(transparent)]
+    Prompt(#[from] PromptLineError),
+}
+
+/// Resolves the username used for `register`. Returns the explicitly
+/// provided username as-is (blank/whitespace-only treated as not provided);
+/// otherwise prompts (reading from `reader`, re-prompting on empty input)
+/// only when a human terminal is attached. Non-interactive callers with no
+/// username get a fail-fast error instead of silently registering with an
+/// empty username (mirrors `resolve_login_username`'s guard).
+fn resolve_register_username<R: std::io::BufRead>(
+    provided: Option<String>,
+    is_terminal: bool,
+    reader: &mut R,
+) -> Result<String, RegisterUsernameError> {
+    match provided {
+        Some(username) if !username.trim().is_empty() => Ok(username),
+        _ if is_terminal => Ok(prompt_line_from(
+            reader,
+            "Choose a username: ",
+            "Username cannot be empty, please try again.",
+        )?),
+        _ => Err(RegisterUsernameError::NonInteractive),
+    }
+}
+
 /// Wrapper that zeroizes the PIN string on drop.
 struct ZeroizePin(String);
 
@@ -688,6 +816,11 @@ enum Commands {
     Register {
         #[arg(long)]
         alpha_code: String,
+        #[arg(
+            long,
+            help = "Username to register with (prompted interactively if omitted)"
+        )]
+        username: Option<String>,
     },
     #[command(about = "Login to your Caution account")]
     Login {
@@ -696,6 +829,11 @@ enum Commands {
             help = "Use QR code for cross-device authentication (no local security key needed)"
         )]
         qr: bool,
+        #[arg(
+            long,
+            help = "Username to log in with (prompted interactively if omitted; --qr uses discoverable credentials by default and skips this prompt)"
+        )]
+        username: Option<String>,
     },
     #[command(about = "Logout and clear local session")]
     Logout,
@@ -1129,6 +1267,15 @@ struct LoginBeginResponse {
     session: String,
 }
 
+/// JSON body for `POST /auth/login/begin`. The CLI drives USB security keys
+/// directly (no conditional UI), so it always sends this field — but `username`
+/// may be an empty string (the user left the login prompt blank), which the
+/// server's `normalize_login_username` treats as absent, falling back to the
+/// broadcast/discoverable no-username path rather than a scoped `allowCredentials`.
+fn login_begin_request_body(username: &str) -> serde_json::Value {
+    serde_json::json!({ "username": username })
+}
+
 #[derive(Deserialize)]
 struct Fido2SignResponse {
     #[serde(rename = "publicKey")]
@@ -1292,6 +1439,14 @@ struct LegalAcceptanceRequiredError {
     code: String,
     document_type: String,
     message: Option<String>,
+}
+
+/// Body of the username-claim gate: `{"error":"username_required"}`, returned
+/// by any protected endpoint (except username status/claim and logout) while
+/// the authenticated user still has a placeholder username.
+#[derive(Debug, Deserialize)]
+struct UsernameRequiredError {
+    error: String,
 }
 
 struct StagedSource {
@@ -1711,9 +1866,12 @@ impl ApiClient {
     async fn api_error_message(&self, response: reqwest::Response) -> String {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        self.format_api_error(status, &body)
+    }
 
+    fn format_api_error(&self, status: reqwest::StatusCode, body: &str) -> String {
         if status == reqwest::StatusCode::FORBIDDEN {
-            if let Ok(payload) = serde_json::from_str::<LegalAcceptanceRequiredError>(&body) {
+            if let Ok(payload) = serde_json::from_str::<LegalAcceptanceRequiredError>(body) {
                 if payload.code == "legal_acceptance_required" {
                     let mut message = self.legal_acceptance_message(&payload.document_type);
                     if let Some(server_message) = payload.message {
@@ -1730,7 +1888,121 @@ impl ApiClient {
         if body.trim().is_empty() {
             format!("HTTP {}", status)
         } else {
-            body
+            body.to_string()
+        }
+    }
+
+    /// Whether `body` is the username-claim gate response
+    /// (`{"error":"username_required"}`) returned with HTTP 403.
+    fn is_username_required(status: reqwest::StatusCode, body: &str) -> bool {
+        status == reqwest::StatusCode::FORBIDDEN
+            && serde_json::from_str::<UsernameRequiredError>(body)
+                .map(|e| e.error == "username_required")
+                .unwrap_or(false)
+    }
+
+    /// Prompts for a username and claims it via `POST /user/username`
+    /// (a FIDO2-signed protected mutation), reprompting on 409 (taken).
+    async fn claim_username_interactively(&self, session_id: &str) -> Result<()> {
+        // This prompts on stdin in a loop; without a terminal a non-interactive
+        // caller (CI/cron reaching a placeholder account) would block forever on
+        // the read, or hit EOF and spin on empty input. Fail fast instead — the
+        // same guard `resolve_login_username` applies to the login prompt.
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            bail!(
+                "This account needs a username set before continuing, but stdin \
+                 is not interactive. Re-run this command from a terminal to choose one."
+            );
+        }
+
+        loop {
+            let username = prompt_for_claimed_username()?;
+            let body = serde_json::json!({ "username": username });
+
+            let response = self
+                .signed_post(session_id, "/user/username", &body)
+                .await?;
+
+            if response.status().is_success() {
+                println!("Username '{}' claimed.", username);
+                return Ok(());
+            }
+
+            if response.status() == reqwest::StatusCode::CONFLICT {
+                let error = self.api_error_message(response).await;
+                // The gateway returns 409 for two distinct cases with the
+                // same status code: the chosen name is taken (retry with a
+                // different name), or the account already has a real
+                // username (e.g. a concurrent claim raced this one). Only
+                // the former is worth re-prompting for; looping on the
+                // latter would spin forever since no name would ever work.
+                // Match on the handler's `#[error(...)]` Display text
+                // (see UsernameClaimError in gateway/src/handlers.rs).
+                if error.contains("already set your username") {
+                    bail!(
+                        "Your account already has a username set: {}. Re-run the command that required a username.",
+                        error
+                    );
+                }
+
+                println!(
+                    "Username '{}' is already taken. Please choose another.",
+                    username
+                );
+                continue;
+            }
+
+            // A 400 is a validation failure (too short/long, illegal chars):
+            // user-fixable, so surface the server's message and reprompt rather
+            // than aborting the whole command over a typo.
+            if response.status() == reqwest::StatusCode::BAD_REQUEST {
+                let error = self.api_error_message(response).await;
+                println!("{}", error);
+                continue;
+            }
+
+            let error = self.api_error_message(response).await;
+            bail!("Failed to claim username: {}", error);
+        }
+    }
+
+    /// GETs `path` with the session header, transparently handling the
+    /// username-claim gate: on 403 `username_required`, prompts for and
+    /// claims a username, then retries the request once.
+    async fn get_protected_json<T: serde::de::DeserializeOwned>(
+        &self,
+        session_id: &str,
+        path: &str,
+        failure_context: &str,
+    ) -> Result<T> {
+        let mut gate_claimed = false;
+
+        loop {
+            let response = self
+                .client
+                .get(format!("{}{}", self.base_url, path))
+                .header("X-Session-ID", session_id)
+                .send()
+                .await?;
+
+            let status = response.status();
+            let body = response.text().await?;
+
+            if status.is_success() {
+                return Ok(serde_json::from_str(&body)?);
+            }
+
+            if !gate_claimed && Self::is_username_required(status, &body) {
+                gate_claimed = true;
+                self.claim_username_interactively(session_id).await?;
+                continue;
+            }
+
+            bail!(
+                "{}: {}",
+                failure_context,
+                self.format_api_error(status, &body)
+            );
         }
     }
 
@@ -1796,9 +2068,9 @@ impl ApiClient {
             }
             _ => {
                 if self.qr {
-                    self.login_qr().await?;
+                    self.login_qr(None).await?;
                 } else {
-                    self.login().await?;
+                    self.login(None).await?;
                 }
                 self.load_config()
             }
@@ -2530,7 +2802,7 @@ enclave "default" {{
         ])
     }
 
-    async fn register(&self, alpha_code: &str) -> Result<()> {
+    async fn register(&self, alpha_code: &str, username: &str) -> Result<()> {
         log_verbose(self.verbose, "Starting FIDO2 registration...");
         log_verbose(self.verbose, &format!("Target URL: {}", self.base_url));
 
@@ -2545,7 +2817,7 @@ enclave "default" {{
         );
         let response = client
             .post(format!("{}/auth/register/begin", self.base_url))
-            .json(&serde_json::json!({ "alpha_code": alpha_code }))
+            .json(&serde_json::json!({ "alpha_code": alpha_code, "username": username }))
             .send()
             .await
             .context("Failed to send registration begin request")?;
@@ -2622,10 +2894,16 @@ enclave "default" {{
         }
     }
 
-    async fn login(&self) -> Result<()> {
+    async fn login(&self, username: Option<String>) -> Result<()> {
         log_verbose(self.verbose, "Starting FIDO2 login...");
 
-        let (session_id, _expires_at) = self.perform_login().await?;
+        let username = resolve_login_username(
+            username,
+            std::io::IsTerminal::is_terminal(&std::io::stdin()),
+            &mut std::io::stdin().lock(),
+        )?;
+
+        let (session_id, _expires_at) = self.perform_login(&username).await?;
         println!("Login successful");
 
         match self.check_onboarding_status(&session_id).await {
@@ -2680,13 +2958,17 @@ enclave "default" {{
         Ok(())
     }
 
-    async fn login_qr(&self) -> Result<()> {
+    async fn login_qr(&self, username: Option<&str>) -> Result<()> {
         log_verbose(self.verbose, "Starting QR code cross-device login...");
 
-        // Step 1: Request a QR login token from the gateway
+        // Step 1: Request a QR login token from the gateway. An optional
+        // username scopes the eventual allowCredentials to that user's own
+        // credentials, needed for non-resident/legacy keys the scanning
+        // device can't otherwise offer via a discoverable challenge.
         let response = self
             .client
             .post(format!("{}/auth/qr-login/begin", self.base_url))
+            .json(&serde_json::json!({ "username": username }))
             .send()
             .await?;
 
@@ -2819,36 +3101,19 @@ enclave "default" {{
     }
 
     async fn check_onboarding_status(&self, session_id: &str) -> Result<UserStatus> {
-        let response = self
-            .client
-            .get(format!("{}/api/user/status", self.base_url))
-            .header("X-Session-ID", session_id)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error = self.api_error_message(response).await;
-            bail!("Failed to get user status: {}", error);
-        }
-
-        let status: UserStatus = response.json().await?;
-        Ok(status)
+        self.get_protected_json(session_id, "/api/user/status", "Failed to get user status")
+            .await
     }
 
     async fn primary_organization_id(&self, session_id: &str) -> Result<String> {
-        let orgs_response = self
-            .client
-            .get(format!("{}/api/organizations", self.base_url))
-            .header("X-Session-ID", session_id)
-            .send()
+        let orgs: Vec<Organization> = self
+            .get_protected_json(
+                session_id,
+                "/api/organizations",
+                "Failed to get organizations",
+            )
             .await?;
 
-        if !orgs_response.status().is_success() {
-            let error = self.api_error_message(orgs_response).await;
-            bail!("Failed to get organizations: {}", error);
-        }
-
-        let orgs: Vec<Organization> = orgs_response.json().await?;
         if orgs.is_empty() {
             bail!("No organizations found");
         }
@@ -2866,24 +3131,12 @@ enclave "default" {{
     async fn check_org_security_settings(&self, session_id: &str) -> Result<OrgSettings> {
         let org_id = self.primary_organization_id(session_id).await?;
 
-        // Get the first org's settings
-        let settings_response = self
-            .client
-            .get(format!(
-                "{}/api/organizations/{}/settings",
-                self.base_url, org_id
-            ))
-            .header("X-Session-ID", session_id)
-            .send()
-            .await?;
-
-        if !settings_response.status().is_success() {
-            let error = self.api_error_message(settings_response).await;
-            bail!("Failed to get security settings: {}", error);
-        }
-
-        let settings: OrgSettings = settings_response.json().await?;
-        Ok(settings)
+        self.get_protected_json(
+            session_id,
+            &format!("/api/organizations/{}/settings", org_id),
+            "Failed to get security settings",
+        )
+        .await
     }
 
     fn make_credential(
@@ -3155,15 +3408,20 @@ enclave "default" {{
         }
     }
 
-    async fn perform_login(&self) -> Result<(String, String)> {
+    async fn perform_login(&self, username: &str) -> Result<(String, String)> {
         let cookie_store = reqwest::cookie::Jar::default();
         let client = reqwest::Client::builder()
             .cookie_provider(std::sync::Arc::new(cookie_store))
             .build()?;
 
         log_verbose(self.verbose, "Sending login begin request...");
+        // The CLI drives USB security keys directly and has no conditional UI,
+        // so it always sends this field — but an empty `username` (blank login
+        // prompt, see prompt_for_login_username) opts into the no-username
+        // broadcast/discoverable path instead of a scoped allow-list.
         let response = client
             .post(format!("{}/auth/login/begin", self.base_url))
+            .json(&login_begin_request_body(username))
             .send()
             .await?;
 
@@ -3736,47 +3994,41 @@ enclave "default" {{
     async fn list_apps(&self) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
-        let response = self
-            .client
-            .get(format!("{}/api/resources", self.base_url))
-            .header("X-Session-ID", config.session_id)
-            .send()
+        let apps: Vec<App> = self
+            .get_protected_json(
+                &config.session_id,
+                "/api/resources",
+                "Failed to list apps"
+            )
             .await?;
 
-        if response.status().is_success() {
-            let apps: Vec<App> = response.json().await?;
+        if apps.is_empty() {
+            println!("No deployed apps found.");
+        } else {
+            println!("Apps:");
+            for app in apps {
+                let name = app.resource_name.as_deref().unwrap_or("unnamed");
+                let mut details = vec![app.state.clone()];
 
-            if apps.is_empty() {
-                println!("No deployed apps found.");
-            } else {
-                println!("Apps:");
-                for app in apps {
-                    let name = app.resource_name.as_deref().unwrap_or("unnamed");
-                    let mut details = vec![app.state.clone()];
-
-                    if let Some(config) = &app.configuration {
-                        if let Some(enclave_config) = config.get("enclave_config") {
-                            if let (Some(mem), Some(cpus)) = (
-                                enclave_config.get("memory_mb").and_then(|v| v.as_u64()),
-                                enclave_config.get("cpus").and_then(|v| v.as_u64()),
-                            ) {
-                                details.push(format!("{}MB/{}cpu", mem, cpus));
-                            }
+                if let Some(config) = &app.configuration {
+                    if let Some(enclave_config) = config.get("enclave_config") {
+                        if let (Some(mem), Some(cpus)) = (
+                            enclave_config.get("memory_mb").and_then(|v| v.as_u64()),
+                            enclave_config.get("cpus").and_then(|v| v.as_u64()),
+                        ) {
+                            details.push(format!("{}MB/{}cpu", mem, cpus));
                         }
                     }
-
-                    if let Some(ip) = &app.public_ip {
-                        details.push(ip.clone());
-                    }
-
-                    println!("  {} - {} ({})", app.id, name, details.join(", "));
                 }
+
+                if let Some(ip) = &app.public_ip {
+                    details.push(ip.clone());
+                }
+
+                println!("  {} - {} ({})", app.id, name, details.join(", "));
             }
-            Ok(())
-        } else {
-            let error = self.api_error_message(response).await;
-            bail!("Failed to list apps: {}", error)
         }
+        Ok(())
     }
 
     async fn join_capacity_waitlist(&self, email: &str, vcpus: Option<u32>) -> Result<()> {
@@ -3841,20 +4093,12 @@ enclave "default" {{
     async fn fetch_app(&self, id: &str) -> Result<App> {
         let config = self.ensure_authenticated().await?;
 
-        let response = self
-            .client
-            .get(format!("{}/api/resources/{}", self.base_url, id))
-            .header("X-Session-ID", config.session_id)
-            .send()
-            .await?;
-
-        if response.status().is_success() {
-            let app: App = response.json().await?;
-            Ok(app)
-        } else {
-            let error = self.api_error_message(response).await;
-            bail!("Failed to get app: {}", error)
-        }
+        self.get_protected_json(
+            &config.session_id,
+            &format!("/api/resources/{}", id),
+            "Failed to get app"
+        )
+        .await
     }
 
     async fn get_current_app(&self) -> Result<App> {
@@ -3989,15 +4233,29 @@ enclave "default" {{
             Ok(())
         } else {
             let config = self.ensure_authenticated().await?;
-            let url = if force_delete {
+            
+            // We can't use get_protected_json here since DELETE returns no body.
+            // Instead, we check if username_required error appears during the call.
+            let path = if force_delete {
                 format!("{}/api/resources/{}?force=true", self.base_url, app.id)
             } else {
                 format!("{}/api/resources/{}", self.base_url, app.id)
             };
-
+            
+            // First check: try a protected GET to ensure username is claimed
+            // This will prompt for username if needed, then proceed with DELETE
+            let _: serde_json::Value = self
+                .get_protected_json(
+                    &config.session_id,
+                    &format!("/api/resources/{}", app.id),
+                    "Failed to get app status"
+                )
+                .await?;
+            
+            // If we got here, username claim is handled. Now perform the DELETE.
             let response = self
                 .client
-                .delete(&url)
+                .delete(&path)
                 .header("X-Session-ID", config.session_id)
                 .send()
                 .await?;
@@ -4031,6 +4289,9 @@ enclave "default" {{
             "name": new_name
         });
 
+        // Note: This is a PATCH mutation. get_protected_json only handles GETs,
+        // so we still use the raw client call here since it's not idempotent.
+        // The username_required check happens during fetch_app above.
         let response = self
             .client
             .patch(format!("{}/api/resources/{}", self.base_url, app.id))
@@ -6832,18 +7093,10 @@ enclave "default" {{
     }
 
     async fn fetch_existing_ssh_keys(&self, session_id: &str) -> Result<Vec<(String, String)>> {
-        let response = self
-            .client
-            .get(format!("{}/ssh-keys", self.base_url))
-            .header("X-Session-ID", session_id)
-            .send()
+        let response_data: serde_json::Value = self
+            .get_protected_json(session_id, "/ssh-keys", "Failed to fetch existing SSH keys")
             .await?;
-
-        if !response.status().is_success() {
-            bail!("Failed to fetch existing SSH keys: {}", response.status());
-        }
-
-        let response_data: serde_json::Value = response.json().await?;
+        
         let keys = response_data["keys"]
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
@@ -7013,6 +7266,9 @@ enclave "default" {{
     async fn remove_ssh_key(&self, fingerprint: &str) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
+        // Note: This is a DELETE mutation. get_protected_json only handles GETs.
+        // Username claim gate check relies on the server returning username_required error
+        // which we don't handle here - mutations would need a separate delete_protected helper.
         let response = self
             .client
             .delete(format!("{}/ssh-keys/{}", self.base_url, fingerprint))
@@ -7048,34 +7304,30 @@ enclave "default" {{
     async fn list_ssh_keys(&self) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
-        let response = self
-            .client
-            .get(format!("{}/ssh-keys", self.base_url))
-            .header("X-Session-ID", config.session_id)
-            .send()
+        let response_data: serde_json::Value = self
+            .get_protected_json(
+                &config.session_id,
+                "/ssh-keys",
+                "Failed to list SSH keys"
+            )
             .await?;
+        
+        let keys = response_data["keys"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
 
-        if response.status().is_success() {
-            let response_data: serde_json::Value = response.json().await?;
-            let keys = response_data["keys"]
-                .as_array()
-                .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
-
-            if keys.is_empty() {
-                println!("No SSH keys found. Add one with 'caution ssh-keys add'");
-            } else {
-                println!("SSH Keys:");
-                for key in keys {
-                    let name = key["name"].as_str().unwrap_or("untitled");
-                    let public_key = key["public_key"].as_str().unwrap_or("");
-                    let fingerprint = ssh_fingerprint(public_key);
-                    println!("  {} ({})", name, fingerprint);
-                }
-            }
-            Ok(())
+        if keys.is_empty() {
+            println!("No SSH keys found. Add one with 'caution ssh-keys add'");
         } else {
-            bail!("Failed to list SSH keys: {}", response.status())
+            println!("SSH Keys:");
+            for key in keys {
+                let name = key["name"].as_str().unwrap_or("untitled");
+                let public_key = key["public_key"].as_str().unwrap_or("");
+                let fingerprint = ssh_fingerprint(public_key);
+                println!("  {} ({})", name, fingerprint);
+            }
         }
+        Ok(())
     }
 
     fn get_cache_dir(&self) -> Result<PathBuf> {
@@ -7416,46 +7668,40 @@ enclave "default" {{
     async fn list_credentials(&self) -> Result<()> {
         let config = self.ensure_authenticated().await?;
 
-        let response = self
-            .client
-            .get(format!("{}/credentials", self.base_url))
-            .header("X-Session-ID", &config.session_id)
-            .send()
+        let credentials: Vec<serde_json::Value> = self
+            .get_protected_json(
+                &config.session_id,
+                "/credentials",
+                "Failed to list credentials"
+            )
             .await?;
 
-        if response.status().is_success() {
-            let credentials: Vec<serde_json::Value> = response.json().await?;
-
-            if credentials.is_empty() {
-                println!(
-                    "No cloud credentials found. Add one with 'caution credentials add <platform> <name>'"
-                );
-            } else {
-                println!("Cloud Credentials:");
-                println!();
-                for cred in credentials {
-                    let id = cred["id"].as_str().unwrap_or("unknown");
-                    let name = cred["name"].as_str().unwrap_or("untitled");
-                    let platform = cred["platform"].as_str().unwrap_or("unknown");
-                    let identifier = cred["identifier"].as_str().unwrap_or("");
-                    let is_default = cred["is_default"].as_bool().unwrap_or(false);
-                    let region = cred["default_region"].as_str();
-
-                    let default_marker = if is_default { " (default)" } else { "" };
-                    let region_str = region.map(|r| format!(" [{}]", r)).unwrap_or_default();
-
-                    println!(
-                        "  [{}] {} - {}{}{}",
-                        id, name, platform, default_marker, region_str
-                    );
-                    println!("       Identifier: {}", identifier);
-                }
-            }
-            Ok(())
+        if credentials.is_empty() {
+            println!(
+                "No cloud credentials found. Add one with 'caution credentials add <platform> <name>'"
+            );
         } else {
-            let error = self.api_error_message(response).await;
-            bail!("Failed to list credentials: {}", error)
+            println!("Cloud Credentials:");
+            println!();
+            for cred in credentials {
+                let id = cred["id"].as_str().unwrap_or("unknown");
+                let name = cred["name"].as_str().unwrap_or("untitled");
+                let platform = cred["platform"].as_str().unwrap_or("unknown");
+                let identifier = cred["identifier"].as_str().unwrap_or("");
+                let is_default = cred["is_default"].as_bool().unwrap_or(false);
+                let region = cred["default_region"].as_str();
+
+                let default_marker = if is_default { " (default)" } else { "" };
+                let region_str = region.map(|r| format!(" [{}]", r)).unwrap_or_default();
+
+                println!(
+                    "  [{}] {} - {}{}{}",
+                    id, name, platform, default_marker, region_str
+                );
+                println!("       Identifier: {}", identifier);
+            }
         }
+        Ok(())
     }
 
     async fn remove_credential(&self, id: &str, force: bool) -> Result<()> {
@@ -7464,22 +7710,14 @@ enclave "default" {{
         let credential_id =
             uuid::Uuid::parse_str(id).context("Invalid credential ID - must be a valid UUID")?;
 
-        let response = self
-            .client
-            .get(format!("{}/credentials/{}", self.base_url, credential_id))
-            .header("X-Session-ID", &config.session_id)
-            .send()
+        let cred: serde_json::Value = self
+            .get_protected_json(
+                &config.session_id,
+                &format!("/credentials/{}", credential_id),
+                "Failed to fetch credential"
+            )
             .await?;
 
-        if !response.status().is_success() {
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                bail!("Credential '{}' not found", id);
-            }
-            let error = self.api_error_message(response).await;
-            bail!("Failed to fetch credential '{}': {}", id, error);
-        }
-
-        let cred: serde_json::Value = response.json().await?;
         let name = cred["name"].as_str().unwrap_or("unknown");
         let platform = cred["platform"].as_str().unwrap_or("unknown");
 
@@ -7838,21 +8076,14 @@ enclave "default" {{
         let config = self.ensure_authenticated().await?;
 
         // Get current bundle to read existing labels
-        let response = self
-            .client
-            .get(format!("{}/api/quorum-bundles/{}", self.base_url, id))
-            .header("X-Session-ID", &config.session_id)
-            .send()
-            .await
-            .context("Failed to connect to server")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error = self.api_error_message(response).await;
-            bail!("Failed to fetch quorum bundle ({}): {}", status, error);
-        }
-
-        let bundle: serde_json::Value = response.json().await?;
+        let bundle: serde_json::Value = self
+            .get_protected_json(
+                &config.session_id,
+                &format!("/api/quorum-bundles/{}", id),
+                "Failed to fetch quorum bundle"
+            )
+            .await?;
+        
         let mut current_labels = bundle
             .get("labels")
             .and_then(|l| l.as_object().cloned())
@@ -7892,21 +8123,14 @@ enclave "default" {{
         let config = self.ensure_authenticated().await?;
 
         // Get current bundle to read existing labels
-        let response = self
-            .client
-            .get(format!("{}/api/quorum-bundles/{}", self.base_url, id))
-            .header("X-Session-ID", &config.session_id)
-            .send()
-            .await
-            .context("Failed to connect to server")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error = self.api_error_message(response).await;
-            bail!("Failed to fetch quorum bundle ({}): {}", status, error);
-        }
-
-        let bundle: serde_json::Value = response.json().await?;
+        let bundle: serde_json::Value = self
+            .get_protected_json(
+                &config.session_id,
+                &format!("/api/quorum-bundles/{}", id),
+                "Failed to fetch quorum bundle"
+            )
+            .await?;
+        
         let mut current_labels = bundle
             .get("labels")
             .and_then(|l| l.as_object().cloned())
@@ -7971,24 +8195,14 @@ enclave "default" {{
                 // Try to pull from Caution API
                 eprintln!("No local bundle found, checking Caution...");
                 let config = self.ensure_authenticated().await?;
-                let response = self
-                    .client
-                    .get(format!("{}/api/quorum-bundles", self.base_url))
-                    .header("X-Session-ID", &config.session_id)
-                    .send()
-                    .await
-                    .context("Failed to fetch quorum bundles from Caution")?;
-
-                if !response.status().is_success() {
-                    bail!(
-                        "No bundle found locally or on Caution. Create one with: caution secret new <keyring>"
-                    );
-                }
-
-                let bundles: Vec<serde_json::Value> = response
-                    .json()
-                    .await
-                    .context("Failed to parse bundles response")?;
+                
+                let bundles: Vec<serde_json::Value> = self
+                    .get_protected_json(
+                        &config.session_id,
+                        "/api/quorum-bundles",
+                        "Failed to fetch quorum bundles from Caution"
+                    )
+                    .await?;
 
                 if bundles.is_empty() {
                     bail!(
@@ -8191,12 +8405,26 @@ struct AssertionResult {
     response_json: Vec<u8>,
 }
 
+/// `--qr` is global, so it parses on every subcommand. It only means something
+/// for flows that authenticate an existing credential (signing, login);
+/// registration creates one and has no cross-device path.
+fn validate_global_qr(command: &Commands, qr: bool) -> Result<(), RunError> {
+    if qr && matches!(command, Commands::Register { .. }) {
+        return Err(RunError::ArgValidation(
+            "--qr is not supported for register: creating a credential requires a local authenticator. Register on this device, then use --qr for login and deploys.",
+        ));
+    }
+    Ok(())
+}
+
 pub async fn run() -> Result<(), RunError> {
     let cli = Cli::parse();
 
     log_verbose(cli.verbose, "API CLI v0.1.0");
     log_verbose(cli.verbose, &format!("Gateway URL: {}", cli.url));
     log_verbose(cli.verbose, &format!("Command: {:?}", cli.command));
+
+    validate_global_qr(&cli.command, cli.qr)?;
 
     if let Err(e) = check_dependencies(cli.verbose) {
         eprintln!("Dependency check failed: {}", e);
@@ -8219,14 +8447,33 @@ pub async fn run() -> Result<(), RunError> {
     log_verbose(cli.verbose, "API client ready");
 
     match cli.command {
-        Commands::Register { alpha_code } => {
-            client.register(&alpha_code).await.map_err(RunError::CommandDispatch)?;
+        Commands::Register {
+            alpha_code,
+            username,
+        } => {
+            let username = resolve_register_username(
+                username,
+                std::io::IsTerminal::is_terminal(&std::io::stdin()),
+                &mut std::io::stdin().lock(),
+            )
+            .context("Failed to read username")
+            .map_err(RunError::CommandDispatch)?;
+            client
+                .register(&alpha_code, &username)
+                .await
+                .map_err(RunError::CommandDispatch)?;
         }
-        Commands::Login { qr } => {
+        Commands::Login { qr, username } => {
             if qr {
-                client.login_qr().await.map_err(RunError::CommandDispatch)?;
+                client
+                    .login_qr(username.as_deref())
+                    .await
+                    .map_err(RunError::CommandDispatch)?;
             } else {
-                client.login().await.map_err(RunError::CommandDispatch)?;
+                client
+                    .login(username)
+                    .await
+                    .map_err(RunError::CommandDispatch)?;
             }
         }
         Commands::Logout => {
@@ -8465,10 +8712,12 @@ pub async fn run() -> Result<(), RunError> {
 mod tests {
     use super::openpgp;
     use super::{
-        AccountCommands, ApiClient, Cli, Commands, encrypt_env_file, encrypt_secret_value,
-        keymaker_cert_eligibility, load_recipient_cert, normalize_keyring, parse_env_assignments,
-        resolve_local_build_command_from_dir, resolve_procfile_build_command,
-        resolve_quorum_parameters,
+        AccountCommands, ApiClient, Cli, Commands, LoginUsernameError, RegisterUsernameError,
+        RunError, encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility,
+        load_recipient_cert, login_begin_request_body, normalize_keyring, parse_env_assignments,
+        prompt_line_from, prompt_optional_line_from, resolve_local_build_command_from_dir,
+        resolve_login_username, resolve_procfile_build_command, resolve_quorum_parameters,
+        resolve_register_username, validate_global_qr,
     };
     use caution_config::ConfigurationFile;
     use clap::Parser;
@@ -8477,6 +8726,7 @@ mod tests {
     use openpgp::parse::Parse;
     use openpgp::serialize::SerializeInto;
     use std::collections::HashMap;
+    use std::io::Cursor;
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -8979,6 +9229,187 @@ containerfile: Missing.Containerfile\n",
         let result =
             ApiClient::classify_app_source_refs(LS_REMOTE, "1111111", Some(""));
         assert_eq!(result, Err("".to_string()));
+    }
+
+    // --- WebAuthn phase 1: `caution login --username` -------------------
+
+    #[test]
+    fn login_parses_username_flag() {
+        let cli = Cli::try_parse_from(["caution", "login", "--username", "alice"]).unwrap();
+        match cli.command {
+            Commands::Login { qr, username } => {
+                assert!(!qr);
+                assert_eq!(username.as_deref(), Some("alice"));
+            }
+            other => panic!("expected Commands::Login, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn login_without_username_flag_leaves_it_unset_for_interactive_prompt() {
+        let cli = Cli::try_parse_from(["caution", "login"]).unwrap();
+        match cli.command {
+            Commands::Login { qr, username } => {
+                assert!(!qr);
+                // `login()` falls back to `prompt_for_login_username()` when this is `None`.
+                assert_eq!(username, None);
+            }
+            other => panic!("expected Commands::Login, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn login_username_flag_combines_with_qr() {
+        let cli = Cli::try_parse_from(["caution", "login", "--qr", "--username", "bob"]).unwrap();
+        match cli.command {
+            Commands::Login { qr, username } => {
+                assert!(qr);
+                assert_eq!(username.as_deref(), Some("bob"));
+            }
+            other => panic!("expected Commands::Login, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn register_rejects_qr_flag() {
+        let cli =
+            Cli::try_parse_from(["caution", "register", "--qr", "--alpha-code", "abc"]).unwrap();
+        let err = validate_global_qr(&cli.command, cli.qr)
+            .expect_err("register --qr must be rejected, not silently fall back to a local key");
+        assert!(matches!(err, RunError::ArgValidation(_)));
+    }
+
+    #[test]
+    fn register_without_qr_is_allowed() {
+        let cli = Cli::try_parse_from(["caution", "register", "--alpha-code", "abc"]).unwrap();
+        assert!(validate_global_qr(&cli.command, cli.qr).is_ok());
+    }
+
+    #[test]
+    fn global_qr_is_allowed_for_non_register_commands() {
+        let cli = Cli::try_parse_from(["caution", "login", "--qr"]).unwrap();
+        assert!(validate_global_qr(&cli.command, cli.qr).is_ok());
+    }
+
+    #[test]
+    fn prompt_line_from_returns_typed_line() {
+        let mut input = Cursor::new(b"carol\n".to_vec());
+        let username = prompt_line_from(&mut input, "Username: ", "cannot be empty").unwrap();
+        assert_eq!(username, "carol");
+    }
+
+    #[test]
+    fn prompt_line_from_trims_whitespace() {
+        let mut input = Cursor::new(b"  dave  \n".to_vec());
+        let username = prompt_line_from(&mut input, "Username: ", "cannot be empty").unwrap();
+        assert_eq!(username, "dave");
+    }
+
+    #[test]
+    fn prompt_line_from_reprompts_on_blank_lines() {
+        // Two blank lines, then a real answer: simulates the user hitting
+        // Enter accidentally before typing a username.
+        let mut input = Cursor::new(b"\n\nerin\n".to_vec());
+        let username = prompt_line_from(&mut input, "Username: ", "cannot be empty").unwrap();
+        assert_eq!(username, "erin");
+    }
+
+    #[test]
+    fn prompt_optional_line_from_returns_typed_line() {
+        let mut input = Cursor::new(b"frank\n".to_vec());
+        let username = prompt_optional_line_from(&mut input, "Username: ").unwrap();
+        assert_eq!(username, "frank");
+    }
+
+    #[test]
+    fn prompt_optional_line_from_accepts_blank_line_on_first_try() {
+        // A plain Enter keypress (not just EOF) must resolve to an empty
+        // string immediately — this is the legacy/no-username login path,
+        // and it must not loop asking the user to try again.
+        let mut input = Cursor::new(b"\n".to_vec());
+        let username = prompt_optional_line_from(&mut input, "Username: ").unwrap();
+        assert_eq!(username, "");
+    }
+
+    #[test]
+    fn prompt_optional_line_from_accepts_immediate_eof() {
+        let mut input = Cursor::new(b"".to_vec());
+        let username = prompt_optional_line_from(&mut input, "Username: ").unwrap();
+        assert_eq!(username, "");
+    }
+
+    #[test]
+    fn resolve_login_username_returns_provided_username_without_prompting() {
+        // An explicit --username wins regardless of terminal state; the reader
+        // must never be touched (empty input would otherwise yield "").
+        let mut input = Cursor::new(b"".to_vec());
+        let username =
+            resolve_login_username(Some("alice".to_string()), false, &mut input).unwrap();
+        assert_eq!(username, "alice");
+    }
+
+    #[test]
+    fn resolve_login_username_prompts_when_interactive() {
+        let mut input = Cursor::new(b"bob\n".to_vec());
+        let username = resolve_login_username(None, true, &mut input).unwrap();
+        assert_eq!(username, "bob");
+    }
+
+    #[test]
+    fn resolve_login_username_errors_non_interactive_instead_of_hanging() {
+        // The #3 regression guard: a headless auto-relogin (no username, no TTY)
+        // must fail fast rather than block on a stdin read that never returns.
+        let mut input = Cursor::new(b"".to_vec());
+        let err = resolve_login_username(None, false, &mut input).unwrap_err();
+        assert!(matches!(err, LoginUsernameError::NonInteractive));
+    }
+
+    #[test]
+    fn resolve_register_username_returns_provided_username_without_prompting() {
+        let mut input = Cursor::new(b"".to_vec());
+        let username =
+            resolve_register_username(Some("alice".to_string()), false, &mut input).unwrap();
+        assert_eq!(username, "alice");
+    }
+
+    #[test]
+    fn resolve_register_username_prompts_when_interactive() {
+        let mut input = Cursor::new(b"bob\n".to_vec());
+        let username = resolve_register_username(None, true, &mut input).unwrap();
+        assert_eq!(username, "bob");
+    }
+
+    #[test]
+    fn resolve_register_username_errors_non_interactive_instead_of_hanging() {
+        // Finding 4: register lacked the noninteractive guard that login has
+        // (`resolve_login_username_errors_non_interactive_instead_of_hanging`
+        // above) — a noninteractive caller with no --username must fail fast
+        // instead of getting an empty username silently sent to the server.
+        let mut input = Cursor::new(b"".to_vec());
+        let err = resolve_register_username(None, false, &mut input).unwrap_err();
+        assert!(matches!(err, RegisterUsernameError::NonInteractive));
+    }
+
+    #[test]
+    fn resolve_register_username_treats_blank_provided_as_absent() {
+        let mut input = Cursor::new(b"bob\n".to_vec());
+        let username =
+            resolve_register_username(Some("   ".to_string()), true, &mut input).unwrap();
+        assert_eq!(username, "bob");
+    }
+
+    #[test]
+    fn login_begin_request_body_carries_username() {
+        let body = login_begin_request_body("frank");
+        assert_eq!(body, serde_json::json!({ "username": "frank" }));
+    }
+
+    #[test]
+    fn login_begin_request_body_does_not_leak_other_fields() {
+        let body = login_begin_request_body("grace");
+        let obj = body.as_object().unwrap();
+        assert_eq!(obj.len(), 1);
+        assert_eq!(obj.get("username").and_then(|v| v.as_str()), Some("grace"));
     }
 
     #[test]

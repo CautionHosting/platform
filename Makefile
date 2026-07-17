@@ -3,7 +3,7 @@
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-ssh-units test-e2e-platform-ports test-e2e-legal test-e2e-byoc test-e2e-billing-gates test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-ssh-units test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -488,7 +488,7 @@ run-api: network postgres
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
 		--env-file $(HOME)/.config/caution/.env \
-		-v $(HOME)/.config/caution/prices.json:/app/prices.json:ro \
+		-v "$(PRICES_FILE):/app/prices.json:ro" \
 		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
@@ -527,7 +527,7 @@ run-metering: network postgres
 		--name metering \
 		--network $(NETWORK) \
 		--env-file $(HOME)/.config/caution/.env \
-		-v $(HOME)/.config/caution/prices.json:/app/prices.json:ro \
+		-v "$(PRICES_FILE):/app/prices.json:ro" \
 		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		-e METERING_INTERVAL_SECS=60 \
 		caution-metering
@@ -609,6 +609,7 @@ TEST_DB_NAME := caution_test
 TEST_DB_VOLUME := caution-test-postgres-data
 TEST_DB_HOST := postgres-test
 TEST_DATABASE_URL := postgresql://postgres:postgres@$(TEST_DB_HOST):5432/$(TEST_DB_NAME)
+PRICES_FILE ?= $(HOME)/.config/caution/prices.json
 E2E_LOCK_FILE ?= /tmp/caution-platform-e2e.lock
 ONPREM_PROVISIONER_DIR ?= ../bring-your-own-compute-setup
 ONPREM_PROVISIONER_IMAGE ?= codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest
@@ -661,11 +662,12 @@ run-api-test: network
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
+		-e BYOC_PADDLE_SUBSCRIPTIONS_ENABLED \
 		-e GIT_HOSTNAME=localhost \
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
-		-v $(HOME)/.config/caution/prices.json:/app/prices.json:ro \
+		-v "$(PRICES_FILE):/app/prices.json:ro" \
 		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		caution-api
 	@echo "API service started in test mode"
@@ -681,6 +683,7 @@ run-gateway-test: network
 		--env-file $(HOME)/.config/caution/.env \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
+		$(GATEWAY_EXTRA_ENV) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		caution-gateway
 	@echo "Gateway started on 127.0.0.1:8000 (HTTP) and 127.0.0.1:2222 (SSH)"
@@ -704,7 +707,7 @@ run-metering-test: network
 		--network $(NETWORK) \
 		-p 127.0.0.1:8083:8083 \
 		--env-file $(HOME)/.config/caution/.env \
-		-v $(HOME)/.config/caution/prices.json:/app/prices.json:ro \
+		-v "$(PRICES_FILE):/app/prices.json:ro" \
 		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
 		-e METERING_INTERVAL_SECS=9999 \
@@ -808,6 +811,36 @@ test-e2e-platform-ports:
 	$(MAKE) down-test; \
 	exit $$status
 
+test-e2e-webauthn:
+	@$(MAKE) up-test
+	@echo "Running WebAuthn login e2e tests..."
+	@TEST_DB_HOST=$(TEST_DB_HOST) \
+	TEST_DB_NAME=$(TEST_DB_NAME) \
+	bash tests/e2e/test_webauthn_login.sh; \
+	status=$$?; \
+	$(MAKE) down-test; \
+	exit $$status
+
+test-e2e-webauthn-roundtrip:
+	@$(MAKE) up-test
+	@echo "Running WebAuthn software-passkey round-trip e2e test..."
+	@TEST_DB_HOST=$(TEST_DB_HOST) \
+	TEST_DB_NAME=$(TEST_DB_NAME) \
+	bash tests/e2e/test_webauthn_roundtrip.sh; \
+	status=$$?; \
+	$(MAKE) down-test; \
+	exit $$status
+
+test-e2e-webauthn-browser:
+	@$(MAKE) up-test
+	@echo "Running WebAuthn CDP resident-passkey browser e2e test..."
+	@TEST_DB_HOST=$(TEST_DB_HOST) \
+	TEST_DB_NAME=$(TEST_DB_NAME) \
+	bash tests/e2e/test_webauthn_browser.sh; \
+	status=$$?; \
+	$(MAKE) down-test; \
+	exit $$status
+
 test-e2e-legal:
 	@$(MAKE) up-test
 	@echo "Running legal tracking e2e tests..."
@@ -859,6 +892,20 @@ test-e2e-billing-gates:
 	status=$$?; \
 	$(MAKE) down-test-billing; \
 	exit $$status
+
+test-e2e-paddle-subscriptions:
+	@flock "$(E2E_LOCK_FILE)" bash -c ' \
+		set -euo pipefail; \
+		cleanup() { $(MAKE) down-test-billing >/dev/null; }; \
+		trap cleanup EXIT; \
+		trap "exit 130" INT; \
+		trap "exit 143" TERM; \
+		PRICES_FILE="$(PWD)/tests/e2e/fixtures/prices-paddle-subscriptions.json" \
+		BYOC_PADDLE_SUBSCRIPTIONS_ENABLED=true \
+		$(MAKE) up-test-billing; \
+		echo "Running Paddle subscription projection e2e tests..."; \
+		bash tests/e2e/test_paddle_subscriptions.sh \
+	'
 
 setup-builder:
 	@echo "Bootstrapping dedicated builder infrastructure via infra-bootstrap..."

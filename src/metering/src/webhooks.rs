@@ -7,17 +7,19 @@
 //! so we no longer need charge_payment_method() or cached balance logic.
 
 use axum::{
+    Json,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    Json,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::sync::Arc;
+use uuid::Uuid;
 
-use crate::credits::get_ledger_balance_cents;
 use crate::AppState;
+use crate::credits::{credit_ledger_once, CreditOutcome};
 
 /// Paddle webhook payload
 #[derive(Debug, Deserialize, Serialize)]
@@ -26,12 +28,6 @@ pub struct PaddleWebhookPayload {
     pub event_type: String,
     pub occurred_at: String,
     pub data: serde_json::Value,
-}
-
-#[derive(Debug)]
-struct PrepaidCreditPurchaseMetadata {
-    credit_cents: i64,
-    description: String,
 }
 
 /// Handle incoming Paddle webhooks
@@ -142,21 +138,21 @@ pub async fn paddle_webhook_handler(
         Ok(_) => {} // rows_affected=1, new event — proceed
     }
 
-    // Commit the idempotency record and release the advisory lock before dispatching.
-    // The lock serialization ensures only one handler runs; the committed row prevents retries.
-    if let Err(e) = tx.commit().await {
-        tracing::error!("Failed to commit idempotency record: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "internal error"})),
-        );
-    }
+    // Keep the claim transaction and advisory lock open while applying the business
+    // effect. A crash rolls the claim back, and concurrent deliveries wait until
+    // the first delivery has either completed or failed.
 
     // Dispatch by event type
     let result = match payload.event_type.as_str() {
         "transaction.completed" => handle_transaction_completed(&state, &payload).await,
         "transaction.billed" => handle_transaction_billed(&state, &payload).await,
         "transaction.payment_failed" => handle_payment_failed(&state, &payload).await,
+        "subscription.created"
+        | "subscription.updated"
+        | "subscription.activated"
+        | "subscription.resumed"
+        | "subscription.paused"
+        | "subscription.canceled" => handle_subscription_event(&state, &payload).await,
         _ => {
             tracing::debug!("Ignoring Paddle event type: {}", payload.event_type);
             Ok(())
@@ -169,9 +165,19 @@ pub async fn paddle_webhook_handler(
             payload.event_type,
             e
         );
+        // Dropping the open claim transaction rolls back the event row, so a
+        // Paddle retry can process it again.
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
+            Json(serde_json::json!({"error": "webhook processing failed"})),
+        );
+    }
+
+    if let Err(e) = tx.commit().await {
+        tracing::error!("Failed to commit Paddle webhook claim: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
         );
     }
 
@@ -181,34 +187,298 @@ pub async fn paddle_webhook_handler(
     )
 }
 
-fn extract_prepaid_credit_purchase_metadata(
-    data: &serde_json::Value,
-) -> Option<PrepaidCreditPurchaseMetadata> {
-    let custom_data = data["custom_data"].as_object()?;
+async fn handle_subscription_event(
+    state: &AppState,
+    payload: &PaddleWebhookPayload,
+) -> anyhow::Result<()> {
+    let data = &payload.data;
+    let paddle_subscription_id = data["id"]
+        .as_str()
+        .filter(|id| id.starts_with("sub_"))
+        .ok_or_else(|| anyhow::anyhow!("subscription event is missing a valid subscription id"))?;
+    let paddle_customer_id = data["customer_id"]
+        .as_str()
+        .filter(|id| id.starts_with("ctm_"))
+        .ok_or_else(|| anyhow::anyhow!("subscription event is missing a valid customer id"))?;
+    let occurred_at = DateTime::parse_from_rfc3339(&payload.occurred_at)
+        .map_err(|_| anyhow::anyhow!("subscription event has an invalid occurred_at"))?
+        .with_timezone(&Utc);
 
-    if custom_data
-        .get("caution_credit_purchase")
-        .and_then(|value| value.as_bool())
-        != Some(true)
-    {
-        return None;
+    let provider_status = data["status"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("subscription event is missing status"))?;
+    let status = match provider_status {
+        "active" | "trialing" => "active",
+        "past_due" => "past_due",
+        "paused" => "paused",
+        "canceled" => "canceled",
+        _ => return Err(anyhow::anyhow!("unsupported Paddle subscription status")),
+    };
+
+    let price_ids: Vec<&str> = data["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["price"]["id"].as_str())
+        .collect();
+    let matched_tiers: Vec<_> = state
+        .pricing
+        .subscription_tiers
+        .iter()
+        .filter(|(_, tier)| {
+            tier.paddle_price_id
+                .as_deref()
+                .is_some_and(|price_id| price_ids.contains(&price_id))
+        })
+        .collect();
+    let (tier_id, tier) = match matched_tiers.as_slice() {
+        [(tier_id, tier)] if price_ids.len() == 1 => ((*tier_id).clone(), *tier),
+        _ => {
+            return Err(anyhow::anyhow!(
+                "subscription event does not contain exactly one configured tier price"
+            ));
+        }
+    };
+
+    let period_start = data["current_billing_period"]["starts_at"]
+        .as_str()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc));
+    let period_end = data["current_billing_period"]["ends_at"]
+        .as_str()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc));
+    if status != "canceled" && (period_start.is_none() || period_end.is_none()) {
+        return Err(anyhow::anyhow!(
+            "active subscription event is missing its billing period"
+        ));
+    }
+    let cancel_at_period_end = data["scheduled_change"]["action"].as_str() == Some("cancel");
+
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(paddle_subscription_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let existing = sqlx::query(
+        "SELECT id, organization_id, user_id, current_period_start, current_period_end
+         FROM subscriptions WHERE paddle_subscription_id = $1 FOR UPDATE",
+    )
+    .bind(paddle_subscription_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let (subscription_id, organization_id, user_id, effective_start, effective_end) =
+        if let Some(row) = existing {
+            let current_start: DateTime<Utc> = row.get("current_period_start");
+            let current_end: DateTime<Utc> = row.get("current_period_end");
+            (
+                row.get::<Uuid, _>("id"),
+                row.get::<Uuid, _>("organization_id"),
+                row.get::<Uuid, _>("user_id"),
+                period_start.unwrap_or(current_start),
+                period_end.unwrap_or(current_end),
+            )
+        } else {
+            let custom_data = data["custom_data"]
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("new subscription is missing custom_data"))?;
+            let organization_id = custom_data
+                .get("caution_organization_id")
+                .and_then(|value| value.as_str())
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("new subscription is missing organization mapping")
+                })?;
+            let intent_id = custom_data
+                .get("caution_checkout_intent_id")
+                .and_then(|value| value.as_str())
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .ok_or_else(|| anyhow::anyhow!("new subscription is missing checkout intent"))?;
+            let intent = sqlx::query(
+                "SELECT requested_by_user_id, new_tier, new_limit
+                 FROM subscription_intents
+                 WHERE id = $1 AND organization_id = $2
+                   AND operation = 'subscribe'
+                   AND status IN ('pending', 'provider_pending')
+                 FOR UPDATE",
+            )
+            .bind(intent_id)
+            .bind(organization_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("new subscription checkout intent is not valid"))?;
+            if intent.get::<Option<String>, _>("new_tier").as_deref() != Some(tier_id.as_str())
+                || intent.get::<Option<i32>, _>("new_limit") != Some(tier.enclaves)
+            {
+                return Err(anyhow::anyhow!(
+                    "new subscription does not match its checkout intent"
+                ));
+            }
+            let conflicting_source: Option<String> = sqlx::query_scalar(
+                "SELECT billing_source FROM subscriptions
+                 WHERE organization_id = $1 AND status <> 'canceled' FOR UPDATE",
+            )
+            .bind(organization_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if conflicting_source.is_some() {
+                return Err(anyhow::anyhow!(
+                    "organization already has a non-canceled subscription"
+                ));
+            }
+            (
+                Uuid::new_v4(),
+                organization_id,
+                intent.get::<Uuid, _>("requested_by_user_id"),
+                period_start
+                    .ok_or_else(|| anyhow::anyhow!("new subscription is missing period start"))?,
+                period_end
+                    .ok_or_else(|| anyhow::anyhow!("new subscription is missing period end"))?,
+            )
+        };
+
+    let catalog_version = i32::try_from(
+        state
+            .pricing
+            .paddle_catalog
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Paddle catalog is not configured"))?
+            .version,
+    )
+    .map_err(|_| anyhow::anyhow!("Paddle catalog version is too large"))?;
+    let projection = sqlx::query(
+        "INSERT INTO subscriptions
+         (id, user_id, organization_id, tier, max_vcpus, max_apps,
+          price_cents_per_cycle, status, billing_source, paddle_customer_id,
+          paddle_subscription_id, paddle_price_id, catalog_version, catalog_valid,
+          current_period_start, current_period_end, next_billing_at,
+          cancel_at_period_end, canceled_at, provider_occurred_at)
+         VALUES ($1, $2, $3, $4, 0, $5, $6, $7, 'paddle', $8, $9, $10,
+                 $11, true, $12, $13, $13, $14,
+                 CASE WHEN $7 = 'canceled' THEN $15 ELSE NULL END, $15)
+         ON CONFLICT (paddle_subscription_id) WHERE paddle_subscription_id IS NOT NULL
+         DO UPDATE SET tier = EXCLUDED.tier,
+                       max_apps = EXCLUDED.max_apps,
+                       price_cents_per_cycle = EXCLUDED.price_cents_per_cycle,
+                       status = EXCLUDED.status,
+                       paddle_customer_id = EXCLUDED.paddle_customer_id,
+                       paddle_price_id = EXCLUDED.paddle_price_id,
+                       catalog_version = EXCLUDED.catalog_version,
+                       catalog_valid = EXCLUDED.catalog_valid,
+                       current_period_start = EXCLUDED.current_period_start,
+                       current_period_end = EXCLUDED.current_period_end,
+                       next_billing_at = EXCLUDED.next_billing_at,
+                       cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+                       canceled_at = EXCLUDED.canceled_at,
+                       provider_occurred_at = EXCLUDED.provider_occurred_at,
+                       updated_at = NOW()
+         WHERE subscriptions.provider_occurred_at IS NULL
+            OR subscriptions.provider_occurred_at < EXCLUDED.provider_occurred_at
+            OR (
+                subscriptions.provider_occurred_at = EXCLUDED.provider_occurred_at
+                AND CASE EXCLUDED.status
+                    WHEN 'canceled' THEN 4
+                    WHEN 'paused' THEN 3
+                    WHEN 'past_due' THEN 2
+                    WHEN 'active' THEN 1
+                    ELSE 0
+                END > CASE subscriptions.status
+                    WHEN 'canceled' THEN 4
+                    WHEN 'paused' THEN 3
+                    WHEN 'past_due' THEN 2
+                    WHEN 'active' THEN 1
+                    ELSE 0
+                END
+            )",
+    )
+    .bind(subscription_id)
+    .bind(user_id)
+    .bind(organization_id)
+    .bind(&tier_id)
+    .bind(tier.enclaves)
+    .bind(tier.monthly_cents())
+    .bind(status)
+    .bind(paddle_customer_id)
+    .bind(paddle_subscription_id)
+    .bind(tier.paddle_price_id.as_deref())
+    .bind(catalog_version)
+    .bind(effective_start)
+    .bind(effective_end)
+    .bind(cancel_at_period_end)
+    .bind(occurred_at)
+    .execute(&mut *tx)
+    .await?;
+    if projection.rows_affected() == 0 {
+        return Ok(());
     }
 
-    let credit_cents = custom_data
-        .get("caution_credit_purchase_credit_cents")
-        .and_then(|value| value.as_i64())?;
-
-    let description = custom_data
-        .get("caution_credit_purchase_description")
-        .and_then(|value| value.as_str())
-        .unwrap_or("Prepaid credit purchase")
-        .to_string();
-
-    Some(PrepaidCreditPurchaseMetadata {
-        credit_cents,
-        description,
-    })
+    if let Some(intent_id) = data["custom_data"]["caution_checkout_intent_id"]
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok())
+    {
+        sqlx::query(
+            "UPDATE subscription_intents
+             SET status = 'applied', applied_at = NOW(), paddle_subscription_id = $1, updated_at = NOW()
+             WHERE id = $2 AND organization_id = $3 AND operation = 'subscribe'
+               AND status IN ('pending', 'provider_pending')",
+        )
+        .bind(paddle_subscription_id)
+        .bind(intent_id)
+        .bind(organization_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if let Some(intent_id) = data["custom_data"]["caution_change_intent_id"]
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok())
+    {
+        let applied = sqlx::query(
+            "UPDATE subscription_intents SET status = 'applied', applied_at = NOW(), updated_at = NOW()
+             WHERE id = $1 AND organization_id = $2 AND subscription_id = $3
+               AND operation IN ('upgrade', 'downgrade') AND status = 'provider_pending'",
+        )
+        .bind(intent_id)
+        .bind(organization_id)
+        .bind(subscription_id)
+        .execute(&mut *tx)
+        .await?;
+        if applied.rows_affected() == 1 {
+            sqlx::query(
+                "UPDATE subscriptions SET pending_tier = NULL, pending_max_apps = NULL, updated_at = NOW()
+                 WHERE id = $1",
+            )
+            .bind(subscription_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    if cancel_at_period_end || status == "canceled" {
+        sqlx::query(
+            "UPDATE subscription_intents SET status = 'applied', applied_at = NOW(), updated_at = NOW()
+             WHERE organization_id = $1 AND paddle_subscription_id = $2
+               AND operation = 'cancel' AND status = 'provider_pending'",
+        )
+        .bind(organization_id)
+        .bind(paddle_subscription_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO billing_config (organization_id, paddle_customer_id, updated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (organization_id) DO UPDATE
+         SET paddle_customer_id = EXCLUDED.paddle_customer_id, updated_at = NOW()",
+    )
+    .bind(organization_id)
+    .bind(paddle_customer_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
+
 
 async fn clear_credit_suspension_if_needed(
     state: &AppState,
@@ -342,48 +612,66 @@ async fn handle_transaction_completed(
         send_payment_confirmation_email(state, user_id, transaction_id).await?;
     }
 
-    if let Some(prepaid_purchase) = extract_prepaid_credit_purchase_metadata(&payload.data) {
-        let already_credited: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM credit_ledger WHERE paddle_transaction_id = $1)",
-        )
-        .bind(transaction_id)
-        .fetch_one(&state.pool)
-        .await?;
+    // Credit prepaid purchases only against a server-authoritative intent row
+    // recorded by the API when the transaction was created. The credited amount
+    // comes from that row, never from client-controlled custom_data. A missing
+    // row means we cannot trust the amount, so we refuse and leave it for manual
+    // reconciliation rather than minting an attacker-declared value.
+    let intent = sqlx::query(
+        "SELECT organization_id, user_id, credit_cents FROM credit_purchase_intents WHERE paddle_transaction_id = $1",
+    )
+    .bind(transaction_id)
+    .fetch_optional(&state.pool)
+    .await?;
 
-        if already_credited {
-            tracing::info!(
-                "Prepaid credit purchase {} already credited, skipping",
+    if let Some(intent) = intent {
+        let intent_org_id: uuid::Uuid = intent.get("organization_id");
+        let intent_user_id: uuid::Uuid = intent.get("user_id");
+        let credit_cents: i64 = intent.get("credit_cents");
+
+        if intent_org_id != org_id {
+            tracing::error!(
+                "Credit purchase intent org {} does not match resolved org {} for txn {}; refusing to credit",
+                intent_org_id,
+                org_id,
                 transaction_id
             );
             return Ok(());
         }
 
-        let mut tx = state.pool.begin().await?;
-
-        sqlx::query(
-            "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, paddle_transaction_id)
-             VALUES ($1, $2, 'purchase', $3, $4)"
-        )
-        .bind(org_id)
-        .bind(prepaid_purchase.credit_cents)
-        .bind(&prepaid_purchase.description)
-        .bind(transaction_id)
-        .execute(&mut *tx)
-        .await?;
-
-        let new_balance = get_ledger_balance_cents(&mut *tx, org_id).await?;
-
-        tx.commit().await?;
-
-        tracing::info!(
-            "Prepaid credit purchase credited: org={}, txn={}, +{}c, new_balance={}",
+        // The UNIQUE(paddle_transaction_id) constraint is the durable
+        // one-payment-to-one-grant gate; a redundant webhook/callback is a no-op.
+        match credit_ledger_once(
+            &state.pool,
             org_id,
+            Some(intent_user_id),
+            credit_cents,
+            "purchase",
+            &format!(
+                "Prepaid credit purchase: ${:.2}",
+                credit_cents as f64 / 100.0
+            ),
             transaction_id,
-            prepaid_purchase.credit_cents,
-            new_balance
-        );
-
-        clear_credit_suspension_if_needed(state, org_id, new_balance).await?;
+        )
+        .await?
+        {
+            CreditOutcome::AlreadyCredited => {
+                tracing::info!(
+                    "Prepaid credit purchase {} already credited, skipping",
+                    transaction_id
+                );
+            }
+            CreditOutcome::Credited { new_balance } => {
+                tracing::info!(
+                    "Prepaid credit purchase credited: org={}, txn={}, +{}c, new_balance={}",
+                    org_id,
+                    transaction_id,
+                    credit_cents,
+                    new_balance
+                );
+                clear_credit_suspension_if_needed(state, org_id, new_balance).await?;
+            }
+        }
         return Ok(());
     }
 
@@ -863,37 +1151,5 @@ mod tests {
         let payload: PaddleWebhookPayload = serde_json::from_value(json).unwrap();
         assert_eq!(payload.event_type, "subscription.activated");
         // Should parse without error — unknown events are simply ignored
-    }
-
-    #[test]
-    fn extracts_prepaid_credit_purchase_metadata_from_custom_data() {
-        let json = serde_json::json!({
-            "custom_data": {
-                "caution_credit_purchase": true,
-                "caution_credit_purchase_credit_cents": 12345,
-                "caution_credit_purchase_description": "Credit purchase: $123.45 → $123.45 credits (no bonus)"
-            }
-        });
-
-        let metadata = extract_prepaid_credit_purchase_metadata(&json)
-            .expect("expected prepaid credit purchase metadata");
-
-        assert_eq!(metadata.credit_cents, 12_345);
-        assert_eq!(
-            metadata.description,
-            "Credit purchase: $123.45 → $123.45 credits (no bonus)"
-        );
-    }
-
-    #[test]
-    fn ignores_non_credit_purchase_custom_data() {
-        let json = serde_json::json!({
-            "custom_data": {
-                "caution_credit_purchase": false,
-                "caution_credit_purchase_credit_cents": 5000
-            }
-        });
-
-        assert!(extract_prepaid_credit_purchase_metadata(&json).is_none());
     }
 }

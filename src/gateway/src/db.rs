@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use anyhow::{Context, Result};
-use base64::Engine;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::Rng;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -31,35 +32,192 @@ pub struct SignupLegalContext {
     pub user_agent: Option<String>,
 }
 
+pub struct CreateUserInput<'a> {
+    pub fido2_user_handle: &'a [u8],
+    pub email: Option<&'a str>,
+    pub beta_code_id: Option<Uuid>,
+    pub email_verified: bool,
+    pub payment_onboarding_complete: bool,
+    pub username: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct OrganizationInvitation {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub organization_name: String,
+    pub email: String,
+    pub role: String,
+    pub invited_by: Option<Uuid>,
+    pub expires_at: OffsetDateTime,
+}
+
+const LEGACY_DEFAULT_ORG_PREFIX: &str = "Organization for user ";
+
+fn public_organization_name(name: &str) -> String {
+    let trimmed = name.trim();
+    if let Some(user_id) = trimmed.strip_prefix(LEGACY_DEFAULT_ORG_PREFIX) {
+        if Uuid::parse_str(user_id).is_ok() {
+            return "your organization".to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 /// Creates a user and records legal consent events in a single transaction.
 /// If either the user creation or legal event recording fails, the entire
 /// transaction rolls back — no account exists without consent records.
+/// Sentinel error message signalling a unique-constraint violation on
+/// `users.username` (Postgres error code 23505). We can't return a typed
+/// error here without restructuring this fn's `Result<Uuid>` signature (it's
+/// wrapped in a transaction and shares error handling with the legal-event
+/// inserts below), so callers that need to distinguish "username taken" from
+/// other failures should match on this exact anyhow message via
+/// `is_username_taken_error`.
+const USERNAME_TAKEN_ERROR: &str = "USERNAME_TAKEN";
+
+/// Returns true if `err` (as produced by `create_user`) indicates the
+/// username was already taken, so callers can map it to a 409 response.
+pub fn is_username_taken_error(err: &anyhow::Error) -> bool {
+    err.to_string().contains(USERNAME_TAKEN_ERROR)
+}
+
+/// Attempts the one-time username claim for a placeholder account. The
+/// `UPDATE` only matches rows still marked as a placeholder, so a second
+/// concurrent or later claim attempt affects zero rows instead of silently
+/// overwriting an already-chosen username.
+///
+/// Returns `Ok(true)` if the claim succeeded, `Ok(false)` if the user had
+/// already claimed a username (no row matched `username_is_placeholder =
+/// true`). A unique-constraint violation on `users.username` is surfaced as
+/// the same `USERNAME_TAKEN_ERROR` sentinel used by `create_user`, so
+/// callers should check `is_username_taken_error` on the returned error.
+pub async fn claim_username(pool: &PgPool, user_id: Uuid, username: &str) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE users
+         SET username = $1, username_is_placeholder = false
+         WHERE id = $2 AND username_is_placeholder = true",
+    )
+    .bind(username)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        if let sqlx::Error::Database(ref db_err) = e {
+            if db_err.code().as_deref() == Some("23505")
+                && db_err.constraint().is_some_and(|c| c.contains("username"))
+            {
+                tracing::warn!("Username already taken on claim: {}", username);
+                return anyhow::anyhow!(USERNAME_TAKEN_ERROR);
+            }
+        }
+        tracing::error!("Database error claiming username: {:?}", e);
+        anyhow::anyhow!("Failed to claim username: {}", e)
+    })?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Returns `(username, username_is_placeholder)` for the given user.
+pub async fn get_username_status(pool: &PgPool, user_id: Uuid) -> Result<(String, bool)> {
+    let row: (String, bool) = sqlx::query_as(
+        "SELECT username, username_is_placeholder FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to fetch username status")?;
+
+    Ok(row)
+}
+
 pub async fn create_user(
     pool: &PgPool,
     fido2_user_handle: &[u8],
     alpha_code_id: Uuid,
+    username: &str,
     legal: &SignupLegalContext,
 ) -> Result<Uuid> {
-    let username = generate_user_identifier();
-
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
+    let user_id = insert_user_with_legal_events(
+        &mut tx,
+        CreateUserInput {
+            fido2_user_handle,
+            email: None,
+            beta_code_id: Some(alpha_code_id),
+            email_verified: false,
+            payment_onboarding_complete: false,
+            username: Some(username),
+        },
+        legal,
+    )
+    .await
+    .context("Failed to insert alpha user")?;
+
+    tx.commit()
+        .await
+        .context("Failed to commit user creation transaction")?;
+
+    Ok(user_id)
+}
+
+async fn insert_user_with_legal_events(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: CreateUserInput<'_>,
+    legal: &SignupLegalContext,
+) -> Result<Uuid> {
+    let username = input
+        .username
+        .map(|s| s.to_string())
+        .unwrap_or_else(generate_user_identifier);
+
+    let is_placeholder = input.username.is_none();
+
     let user_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (fido2_user_handle, username, email, beta_code_id)
-         VALUES ($1, $2, NULL, $3)
+        "INSERT INTO users (
+             fido2_user_handle,
+             username,
+             email,
+             beta_code_id,
+             email_verified_at,
+             payment_method_added_at,
+             username_is_placeholder
+         )
+         VALUES (
+             $1,
+             $2,
+             $3,
+             $4,
+             CASE WHEN $5 THEN NOW() ELSE NULL END,
+             CASE WHEN $6 THEN NOW() ELSE NULL END,
+             $7
+         )
          RETURNING id",
     )
-    .bind(fido2_user_handle)
+    .bind(input.fido2_user_handle)
     .bind(&username)
-    .bind(alpha_code_id)
-    .fetch_one(&mut *tx)
+    .bind(input.email)
+    .bind(input.beta_code_id)
+    .bind(input.email_verified)
+    .bind(input.payment_onboarding_complete)
+    .bind(is_placeholder)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|e| {
+        if let sqlx::Error::Database(ref db_err) = e {
+            if db_err.code().as_deref() == Some("23505")
+                && db_err.constraint().is_some_and(|c| c.contains("username"))
+            {
+                tracing::warn!("Username already taken: {}", username);
+                return anyhow::anyhow!(USERNAME_TAKEN_ERROR);
+            }
+        }
         tracing::error!("Database error creating user: {:?}", e);
         tracing::error!("Username attempted: {}", username);
         tracing::error!(
             "fido2_user_handle (hex): {}",
-            hex::encode(fido2_user_handle)
+            hex::encode(input.fido2_user_handle)
         );
         anyhow::anyhow!("Failed to create user: {}", e)
     })?;
@@ -74,7 +232,7 @@ pub async fn create_user(
          FROM legal_documents
          WHERE is_active = true",
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .context("Failed to query active legal documents")?;
 
@@ -84,6 +242,7 @@ pub async fn create_user(
         } else {
             "acknowledged"
         };
+
 
         sqlx::query(
             "INSERT INTO user_legal_events (
@@ -99,14 +258,125 @@ pub async fn create_user(
         .bind(event_type)
         .bind(&legal.ip_address)
         .bind(&legal.user_agent)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context(format!("Failed to record {} legal event", doc_type))?;
     }
 
+    Ok(user_id)
+}
+
+pub fn hash_invitation_token(token: &str) -> Option<String> {
+    let token_bytes = URL_SAFE_NO_PAD.decode(token).ok()?;
+    Some(hex::encode(Sha256::digest(token_bytes)))
+}
+
+pub async fn get_valid_invitation(
+    pool: &PgPool,
+    token_hash: &str,
+) -> Result<Option<OrganizationInvitation>> {
+    let mut invitation = sqlx::query_as::<_, OrganizationInvitation>(
+        "SELECT oi.id,
+                oi.organization_id,
+                o.name as organization_name,
+                oi.email,
+                oi.role::text as role,
+                oi.invited_by,
+                oi.expires_at
+         FROM organization_invitations oi
+         INNER JOIN organizations o ON o.id = oi.organization_id
+         WHERE oi.token_hash = $1
+           AND oi.accepted_at IS NULL
+           AND oi.revoked_at IS NULL
+           AND oi.expires_at > NOW()",
+    )
+    .bind(token_hash)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to load organization invitation")?;
+
+    if let Some(invitation) = invitation.as_mut() {
+        invitation.organization_name = public_organization_name(&invitation.organization_name);
+    }
+
+    Ok(invitation)
+}
+
+pub async fn accept_invitation_and_create_user(
+    pool: &PgPool,
+    invitation_id: Uuid,
+    token_hash: &str,
+    fido2_user_handle: &[u8],
+    username: &str,
+    legal: &SignupLegalContext,
+) -> Result<Uuid> {
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+
+    let invitation: OrganizationInvitation = sqlx::query_as(
+        "SELECT oi.id,
+                oi.organization_id,
+                o.name as organization_name,
+                oi.email,
+                oi.role::text as role,
+                oi.invited_by,
+                oi.expires_at
+         FROM organization_invitations oi
+         INNER JOIN organizations o ON o.id = oi.organization_id
+         WHERE oi.id = $1
+           AND oi.token_hash = $2
+           AND oi.accepted_at IS NULL
+           AND oi.revoked_at IS NULL
+           AND oi.expires_at > NOW()
+         FOR UPDATE OF oi",
+    )
+    .bind(invitation_id)
+    .bind(token_hash)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to lock organization invitation")?
+    .ok_or_else(|| anyhow::anyhow!("Invitation is invalid or already used"))?;
+
+    let user_id = insert_user_with_legal_events(
+        &mut tx,
+        CreateUserInput {
+            fido2_user_handle,
+            email: Some(&invitation.email),
+            beta_code_id: None,
+            email_verified: true,
+            payment_onboarding_complete: true,
+            username: Some(username),
+        },
+        legal,
+    )
+    .await
+    .context("Failed to create invited user")?;
+
+    sqlx::query(
+        "INSERT INTO organization_members (organization_id, user_id, role, invited_by)
+         VALUES ($1, $2, $3::user_role, $4)",
+    )
+    .bind(invitation.organization_id)
+    .bind(user_id)
+    .bind(&invitation.role)
+    .bind(invitation.invited_by)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to add invited user to organization")?;
+
+    sqlx::query(
+        "UPDATE organization_invitations
+         SET accepted_by = $1, accepted_at = NOW()
+         WHERE id = $2",
+    )
+    .bind(user_id)
+    .bind(invitation_id)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to mark invitation accepted")?;
+
     tx.commit()
         .await
-        .context("Failed to commit user creation transaction")?;
+        .context("Failed to commit invitation acceptance")?;
 
     Ok(user_id)
 }
@@ -169,6 +439,7 @@ fn generate_user_identifier() -> String {
     format!("u_{}", encoded)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn save_fido2_credential(
     pool: &PgPool,
     credential_id: &[u8],
@@ -180,6 +451,7 @@ pub async fn save_fido2_credential(
     sign_count: u32,
     transport: Option<serde_json::Value>,
     flags: Option<serde_json::Value>,
+    resident: Option<bool>,
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO fido2_credentials (
@@ -192,9 +464,10 @@ pub async fn save_fido2_credential(
             sign_count,
             transport,
             flags,
+            resident,
             created_at,
             updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())",
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())",
     )
     .bind(credential_id)
     .bind(user_id)
@@ -205,6 +478,7 @@ pub async fn save_fido2_credential(
     .bind(sign_count as i64)
     .bind(transport)
     .bind(flags)
+    .bind(resident)
     .execute(pool)
     .await
     .context("Failed to save credential")?;
@@ -285,6 +559,54 @@ pub async fn get_credential_ids_by_user_id(pool: &PgPool, user_id: Uuid) -> Resu
     .context("Failed to query credentials")?;
 
     Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+/// Look up a user by their (normalized) username. Returns `None` rather than
+/// an error when not found — callers must NOT translate a `None` here into a
+/// distinct HTTP response for unauthenticated login flows, or they'll create a
+/// username-enumeration oracle (see `begin_login_handler`).
+pub async fn get_user_id_by_username(pool: &PgPool, username: &str) -> Result<Option<Uuid>> {
+    let user_id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(username)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to get user ID by username")?;
+
+    Ok(user_id)
+}
+
+/// Fetch the serialized `SecurityKey` public keys for every credential
+/// belonging to a user, for building a username-scoped `allowCredentials` list.
+pub async fn get_credential_public_keys_by_user_id(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Vec<Vec<u8>>> {
+    let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
+        "SELECT public_key FROM fido2_credentials WHERE user_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .context("Failed to query credential public keys by user")?;
+
+    Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+/// Opportunistically mark a credential as resident (discoverable) after it was
+/// successfully used in a discoverable (username-less) login assertion. Only
+/// touches rows where residency is still unknown (`NULL`) — never overwrites
+/// an explicit `false` recorded from a registration-time `credProps` reading.
+pub async fn mark_credential_resident_if_unknown(pool: &PgPool, credential_id: &[u8]) -> Result<()> {
+    sqlx::query(
+        "UPDATE fido2_credentials SET resident = true, updated_at = NOW()
+         WHERE credential_id = $1 AND resident IS NULL",
+    )
+    .bind(credential_id)
+    .execute(pool)
+    .await
+    .context("Failed to backfill credential resident flag")?;
+
+    Ok(())
 }
 
 pub async fn list_user_credentials(
@@ -488,8 +810,6 @@ pub fn generate_session_id() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes)
 }
 
-use sha2::{Digest, Sha256};
-
 pub async fn add_ssh_key(
     pool: &PgPool,
     user_id: Uuid,
@@ -659,15 +979,17 @@ pub async fn create_qr_login_token(
     requestee_token: &str,
     ip_address: Option<&str>,
     expires_at: OffsetDateTime,
+    username: Option<&str>,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO qr_login_tokens (token, requestee_token, status, ip_address, expires_at)
-         VALUES ($1, $2, 'pending', $3, $4)",
+        "INSERT INTO qr_login_tokens (token, requestee_token, status, ip_address, expires_at, username)
+         VALUES ($1, $2, 'pending', $3, $4, $5)",
     )
     .bind(token)
     .bind(requestee_token)
     .bind(ip_address)
     .bind(expires_at)
+    .bind(username)
     .execute(pool)
     .await
     .context("Failed to create QR login token")?;
@@ -680,7 +1002,7 @@ pub async fn get_qr_login_token(
     token: &str,
 ) -> Result<Option<crate::types::DbQrLoginToken>> {
     let row: Option<crate::types::DbQrLoginToken> = sqlx::query_as(
-        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at
+        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at, username
          FROM qr_login_tokens
          WHERE token = $1"
     )
@@ -697,7 +1019,7 @@ pub async fn get_qr_login_token_by_requestee_token(
     requestee_token: &str,
 ) -> Result<Option<crate::types::DbQrLoginToken>> {
     let row: Option<crate::types::DbQrLoginToken> = sqlx::query_as(
-        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at
+        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at, username
          FROM qr_login_tokens
          WHERE requestee_token = $1"
     )
@@ -888,9 +1210,14 @@ pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>)> {
     let credential_id: [u8; 16] = rand::thread_rng().gen();
     let credential_id_vec = credential_id.to_vec();
 
+    // Mark e2e users as non-placeholder so the username-claim gate
+    // (`username_claim_gate_middleware`) doesn't 403 every e2e session on
+    // protected/`/api` routes. Real registrations already set this false;
+    // only the placeholder gate test flips a user back to placeholder on
+    // purpose.
     let user_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (fido2_user_handle, username, email, beta_code_id)
-         VALUES ($1, $2, NULL, NULL)
+        "INSERT INTO users (fido2_user_handle, username, email, beta_code_id, username_is_placeholder)
+         VALUES ($1, $2, NULL, NULL, false)
          RETURNING id",
     )
     .bind(&user_handle[..])
@@ -899,7 +1226,8 @@ pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>)> {
     .await
     .context("Failed to create e2e user")?;
 
-    // Insert a dummy credential row so session validation joins work
+    // Insert a dummy credential row so session validation joins work.
+    const E2E_CREDENTIAL_PUBLIC_KEY: &[u8] = br#"{"cred":{"cred_id":"7ySFchbdsv8y8B5oR-1cxOlY5Trjo1auESH25Co0nTI","cred":{"type_":"ES256","key":{"EC_EC2":{"curve":"SECP256R1","x":"SveqzIeBhZDl0phwAvHY0rAIEdeTphQu4ReAuCzq8bs","y":"6mm9arrmm2MqgpwkdTvN0-X-cduiZd4zAQdvDuEDO7M"}}},"counter":0,"transports":null,"user_verified":false,"backup_eligible":false,"backup_state":false,"registration_policy":"preferred","extensions":{"cred_protect":"Ignored","hmac_create_secret":"NotRequested","appid":"NotRequested","cred_props":"Ignored"},"attestation":{"data":"Self_","metadata":"None"},"attestation_format":"packed"}}"#;
     sqlx::query(
         "INSERT INTO fido2_credentials (
             credential_id, user_id, public_key, name, attestation_type,
@@ -908,7 +1236,7 @@ pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>)> {
     )
     .bind(&credential_id_vec)
     .bind(user_id)
-    .bind(b"e2e-dummy-key" as &[u8])
+    .bind(E2E_CREDENTIAL_PUBLIC_KEY)
     .execute(pool)
     .await
     .context("Failed to create e2e credential")?;
@@ -939,7 +1267,7 @@ pub async fn user_requires_pin(pool: &PgPool, user_id: Uuid) -> Result<bool, sql
 
 #[cfg(test)]
 mod tests {
-    use super::generate_ssh_fingerprint;
+    use super::{generate_ssh_fingerprint, hash_invitation_token};
 
     // Golden vector cross-checked with `ssh-keygen -lf`:
     //   ssh-keygen -t ed25519 ...  ->  SHA256:vO7cKxkbEOoI4Qix7nsJMasdWsJHDFVfgXsKQrA0DhM
@@ -975,5 +1303,21 @@ mod tests {
     #[test]
     fn fingerprint_rejects_invalid_base64() {
         assert!(generate_ssh_fingerprint("ssh-ed25519 not_base64!!!").is_err());
+    }
+
+    #[test]
+    fn invitation_token_hashes_decoded_token_bytes() {
+        // URL-safe base64 without padding for bytes [0, 1, 2, 3]. The invitation
+        // table stores a hash of the decoded random token bytes, not a hash of
+        // the transport encoding shown in the emailed URL.
+        assert_eq!(
+            hash_invitation_token("AAECAw").unwrap(),
+            "054edec1d0211f624fed0cbca9d4f9400b0e491c43742af2c5b0abebf0c990d8"
+        );
+    }
+
+    #[test]
+    fn invitation_token_hash_rejects_invalid_base64() {
+        assert!(hash_invitation_token("not base64!!!").is_none());
     }
 }
