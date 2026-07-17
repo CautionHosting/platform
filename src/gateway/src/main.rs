@@ -165,7 +165,14 @@ async fn main() -> Result<()> {
         relying_party_id: config.rp_id.clone(),
         api_service_url: config.api_service_url.clone(),
         metering_service_url: config.metering_service_url.clone(),
-        http_client: reqwest::Client::new(),
+        // Disable redirect-following on the proxy client: proxied API requests
+        // carry X-Internal-Service-Secret, and reqwest preserves custom headers
+        // across redirects. A backend 3xx (attacker-influenced or not) would
+        // otherwise leak the internal secret/body to the redirect target.
+        // Backend 3xx responses are relayed to the caller instead.
+        http_client: reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?,
         reg_states: Arc::new(RwLock::new(HashMap::new())),
         passkey_reg_states: Arc::new(RwLock::new(HashMap::new())),
         auth_states: Arc::new(RwLock::new(HashMap::new())),
