@@ -7228,23 +7228,9 @@ enclave "default" {{
     }
 
     async fn fetch_pgp_keys(&self, session_id: &str) -> Result<Vec<PgpKeyInfo>> {
-        let response = self
-            .client
-            .get(format!("{}/pgp-keys", self.base_url))
-            .header("X-Session-ID", session_id)
-            .send()
-            .await
-            .context("Failed to fetch PGP public keys")?;
-
-        if !response.status().is_success() {
-            let error = self.api_error_message(response).await;
-            bail!("Failed to fetch PGP public keys: {}", error);
-        }
-
-        let response: ListPgpKeysResponse = response
-            .json()
-            .await
-            .context("Failed to parse PGP public key list")?;
+        let response: ListPgpKeysResponse = self
+            .get_protected_json(session_id, "/pgp-keys", "Failed to fetch PGP public keys")
+            .await?;
         Ok(response.keys)
     }
 

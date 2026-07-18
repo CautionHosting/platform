@@ -1392,7 +1392,10 @@ make build-cli
           <div class="account-settings-row">
             <div class="account-settings-label">
               <p class="account-settings-description">
-                Set the organization name shown in the dashboard and invitation emails.
+                {{ usernameIsPlaceholder
+                  ? "Set your username below before choosing an organization name."
+                  : "Set the organization name shown in the dashboard and invitation emails."
+                }}
               </p>
             </div>
             <div class="account-settings-content">
@@ -1405,12 +1408,12 @@ make build-cli
                     type="text"
                     placeholder="Organization name"
                     class="email-input"
-                    :disabled="savingOrgName"
+                    :disabled="savingOrgName || usernameIsPlaceholder"
                     @keyup.enter="saveOrganizationName"
                   />
                   <button
                     @click="saveOrganizationName"
-                    :disabled="savingOrgName || !orgNameInput.trim()"
+                    :disabled="savingOrgName || usernameIsPlaceholder || !orgNameInput.trim()"
                     class="btn-primary email-action-button"
                   >
                     {{ savingOrgName ? "Saving..." : "Save" }}

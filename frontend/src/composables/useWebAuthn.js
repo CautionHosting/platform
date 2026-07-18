@@ -60,7 +60,9 @@ export async function authFetch(url, options = {}) {
         // Redirect to dashboard with account tab active (for username claim)
         window.location.href = '/#account';
         // Return a rejected promise to prevent further processing
-        return Promise.reject(new Error('username_required'));
+        const error = new Error('Set a username before continuing.');
+        error.code = 'username_required';
+        return Promise.reject(error);
       }
     } catch (e) {
       // If response is not JSON, continue normal error handling
