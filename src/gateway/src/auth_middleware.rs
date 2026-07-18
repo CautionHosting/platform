@@ -17,7 +17,7 @@ use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
 use crate::db;
-use crate::types::{AppState, AuthenticatedUserId};
+use crate::types::{AppState, AuthenticatedUserId, VerifiedSignedRequestId};
 
 const SSH_SIGNING_NAMESPACE: &str = "caution-api";
 const SSH_SIGNATURE_WINDOW_SECS: i64 = 300;
@@ -877,6 +877,17 @@ fn incomplete_ssh_headers_error(req: &Request) -> VerifySshSignedRequestError {
     )
 }
 
+fn requires_fido2_signature(method: &Method, path: &str) -> bool {
+    (path.contains("/organizations/")
+        && path.ends_with("/settings")
+        && matches!(*method, Method::PATCH | Method::PUT))
+        || (path.starts_with("/ssh-keys") && matches!(*method, Method::POST | Method::DELETE))
+        || (path == "/pgp-keys" && *method == Method::POST)
+        || (path.starts_with("/pgp-keys/") && *method == Method::DELETE)
+        || (path == "/passkeys/register/begin" && *method == Method::POST)
+        || (path.starts_with("/passkeys/") && *method == Method::DELETE)
+}
+
 pub async fn fido2_sign_middleware(
     State(state): State<AppState>,
     mut req: Request,
@@ -916,12 +927,7 @@ pub async fn fido2_sign_middleware(
     #[allow(unreachable_code)]
     let path = req.uri().path();
     let method = req.method();
-    let requires_signature = (path.contains("/organizations/")
-        && path.ends_with("/settings")
-        && (method == "PATCH" || method == "PUT"))
-        || (path.starts_with("/ssh-keys") && (method == "POST" || method == "DELETE"))
-        || (path == "/passkeys/register/begin" && method == "POST")
-        || (path.starts_with("/passkeys/") && method == "DELETE");
+    let requires_signature = requires_fido2_signature(method, path);
 
     let challenge_id = match req.headers().get("X-Fido2-Challenge-Id") {
         Some(h) => h
@@ -1051,11 +1057,55 @@ pub async fn fido2_sign_middleware(
             (StatusCode::UNAUTHORIZED, "Invalid signature").into_response()
         })?;
 
+    let authentication_state = serde_json::to_vec(&pending.auth_state).map_err(|source| {
+        tracing::error!(
+            challenge_id = %pending.challenge_id,
+            user_id = %pending.user_id,
+            ?source,
+            "Failed to serialize verified WebAuthn authentication state"
+        );
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to record signed request",
+        )
+            .into_response()
+    })?;
+
+    // The body length is bounded by the 10 MiB read above, so this conversion
+    // cannot exceed PostgreSQL's BIGINT range.
+    let request_body_size_bytes = body_bytes.len() as i64;
+    let audit_id = db::record_signed_request_audit(
+        &state.db,
+        &db::NewSignedRequestAudit {
+            user_id: pending.user_id,
+            credential_id: &credential_id_bytes,
+            credential_public_key: &cred_bytes,
+            relying_party_id: &state.relying_party_id,
+            request_method: &pending.method,
+            request_path: &pending.path,
+            request_body_sha256: &body_hash,
+            request_body_size_bytes,
+            challenge_id: pending.challenge_id,
+            authentication_state: &authentication_state,
+            assertion: &auth_response_json,
+            authorization_flow: pending.flow.as_str(),
+        },
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(?error, "Failed to persist verified signed request");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to record signed request",
+        )
+            .into_response()
+    })?;
+
     tracing::info!(
-        "FIDO2-signed request verified - user: {}, credential: {}, path: {}",
-        pending.user_id,
-        hex::encode(&credential_id_bytes),
-        pending.path
+        audit_id = %audit_id,
+        user_id = %pending.user_id,
+        path = %pending.path,
+        "WebAuthn-signed request verified and recorded"
     );
 
     let mut req = Request::from_parts(parts, Body::from(body_bytes));
@@ -1067,8 +1117,21 @@ pub async fn fido2_sign_middleware(
         .insert("X-Fido2-Signed", HeaderValue::from_static("true"));
     req.extensions_mut()
         .insert(AuthenticatedUserId(pending.user_id));
+    req.extensions_mut()
+        .insert(VerifiedSignedRequestId(audit_id));
 
-    Ok(next.run(req).await)
+    let response = next.run(req).await;
+    let response_status = response.status().as_u16();
+    if let Err(error) =
+        db::complete_signed_request_audit(&state.db, audit_id, response_status).await
+    {
+        // The authorization proof was durably inserted before the handler ran.
+        // Preserve the handler's actual response if only outcome completion fails;
+        // the NULL outcome makes the incomplete record visible for reconciliation.
+        tracing::error!(?error, "Failed to complete signed request audit outcome");
+    }
+
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -1159,6 +1222,28 @@ mod tests {
         assert!(!is_ssh_signed_resource_request(
             &Method::GET,
             &format!("{resource_path}/logs")
+        ));
+    }
+
+    #[test]
+    fn pgp_key_changes_require_fido2_signature() {
+        assert!(requires_fido2_signature(&Method::POST, "/pgp-keys"));
+        assert!(requires_fido2_signature(
+            &Method::DELETE,
+            "/pgp-keys/550e8400-e29b-41d4-a716-446655440000"
+        ));
+        assert!(requires_fido2_signature(
+            &Method::DELETE,
+            "/pgp-keys/unexpected/nested"
+        ));
+        assert!(!requires_fido2_signature(&Method::GET, "/pgp-keys"));
+        assert!(!requires_fido2_signature(
+            &Method::GET,
+            "/pgp-keys/550e8400-e29b-41d4-a716-446655440000"
+        ));
+        assert!(!requires_fido2_signature(
+            &Method::POST,
+            "/pgp-keys/unexpected"
         ));
     }
 

@@ -26,6 +26,12 @@ pub enum PendingRegistrationKind {
     },
 }
 
+/// Audit record created by the signing middleware for the verified request.
+/// Downstream handlers use this extension to link the resulting state change
+/// to the exact WebAuthn authorization that permitted it.
+#[derive(Clone, Copy, Debug)]
+pub struct VerifiedSignedRequestId(pub Uuid);
+
 /// Registration state that records which signup path created the challenge.
 #[derive(Clone)]
 pub struct PendingRegistration {
@@ -78,6 +84,7 @@ pub struct PendingAuthentication {
 pub struct AppState {
     pub db: sqlx::PgPool,
     pub webauthn: Webauthn,
+    pub relying_party_id: String,
     pub api_service_url: String,
     pub metering_service_url: String,
     pub reg_states: Arc<RwLock<HashMap<String, PendingRegistration>>>,
@@ -230,13 +237,30 @@ pub struct SessionData {
     pub user_id: Uuid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignedRequestFlow {
+    Direct,
+    CrossDeviceQr,
+}
+
+impl SignedRequestFlow {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::CrossDeviceQr => "cross_device_qr",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PendingSignChallenge {
+    pub challenge_id: Uuid,
     pub auth_state: SecurityKeyAuthentication,
     pub user_id: Uuid,
     pub method: String,
     pub path: String,
     pub body_hash: String,
+    pub flow: SignedRequestFlow,
     pub expires_at: time::OffsetDateTime,
 }
 

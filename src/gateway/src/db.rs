@@ -79,7 +79,11 @@ const USERNAME_TAKEN_ERROR: &str = "USERNAME_TAKEN";
 /// Returns true if `err` (as produced by `create_user`) indicates the
 /// username was already taken, so callers can map it to a 409 response.
 pub fn is_username_taken_error(err: &anyhow::Error) -> bool {
-    err.to_string().contains(USERNAME_TAKEN_ERROR)
+    // Walk the full cause chain: callers such as `create_user` wrap the
+    // sentinel with `.context(...)`, and anyhow's `Display` only renders the
+    // outermost context, so a top-level `to_string()` would miss it.
+    err.chain()
+        .any(|cause| cause.to_string().contains(USERNAME_TAKEN_ERROR))
 }
 
 /// Attempts the one-time username claim for a placeholder account. The
@@ -971,6 +975,221 @@ pub struct SshKeyInfo {
     pub last_used_at: Option<time::OffsetDateTime>,
 }
 
+pub struct NewSignedRequestAudit<'a> {
+    pub user_id: Uuid,
+    pub credential_id: &'a [u8],
+    pub credential_public_key: &'a [u8],
+    pub relying_party_id: &'a str,
+    pub request_method: &'a str,
+    pub request_path: &'a str,
+    pub request_body_sha256: &'a str,
+    pub request_body_size_bytes: i64,
+    pub challenge_id: Uuid,
+    pub authentication_state: &'a [u8],
+    pub assertion: &'a [u8],
+    pub authorization_flow: &'a str,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Unable to record verified signed request {challenge_id} for user {user_id}")]
+pub struct RecordSignedRequestAuditError {
+    user_id: Uuid,
+    challenge_id: Uuid,
+
+    #[source]
+    source: sqlx::Error,
+}
+
+impl RecordSignedRequestAuditError {
+    fn new(user_id: Uuid, challenge_id: Uuid, source: sqlx::Error) -> Self {
+        Self {
+            user_id,
+            challenge_id,
+            source,
+        }
+    }
+}
+
+pub async fn record_signed_request_audit(
+    pool: &PgPool,
+    audit: &NewSignedRequestAudit<'_>,
+) -> Result<Uuid, RecordSignedRequestAuditError> {
+    sqlx::query_scalar(
+        "INSERT INTO signed_request_audit (
+            user_id, credential_id, credential_public_key, relying_party_id,
+            request_method, request_path, request_body_sha256,
+            request_body_size_bytes, challenge_id, authentication_state,
+            assertion, authorization_flow
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         RETURNING id",
+    )
+    .bind(audit.user_id)
+    .bind(audit.credential_id)
+    .bind(audit.credential_public_key)
+    .bind(audit.relying_party_id)
+    .bind(audit.request_method)
+    .bind(audit.request_path)
+    .bind(audit.request_body_sha256)
+    .bind(audit.request_body_size_bytes)
+    .bind(audit.challenge_id)
+    .bind(audit.authentication_state)
+    .bind(audit.assertion)
+    .bind(audit.authorization_flow)
+    .fetch_one(pool)
+    .await
+    .map_err(|source| RecordSignedRequestAuditError::new(audit.user_id, audit.challenge_id, source))
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum CompleteSignedRequestAuditErrorKind {
+    Database,
+    AuditNotPending,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Unable to complete signed request audit {audit_id} with HTTP status {response_status}: {kind:?}"
+)]
+pub struct CompleteSignedRequestAuditError {
+    kind: CompleteSignedRequestAuditErrorKind,
+    audit_id: Uuid,
+    response_status: u16,
+
+    #[source]
+    source: Option<sqlx::Error>,
+}
+
+impl CompleteSignedRequestAuditError {
+    fn database(audit_id: Uuid, response_status: u16, source: sqlx::Error) -> Self {
+        Self {
+            kind: CompleteSignedRequestAuditErrorKind::Database,
+            audit_id,
+            response_status,
+            source: Some(source),
+        }
+    }
+
+    fn audit_not_pending(audit_id: Uuid, response_status: u16) -> Self {
+        Self {
+            kind: CompleteSignedRequestAuditErrorKind::AuditNotPending,
+            audit_id,
+            response_status,
+            source: None,
+        }
+    }
+}
+
+pub async fn complete_signed_request_audit(
+    pool: &PgPool,
+    audit_id: Uuid,
+    response_status: u16,
+) -> Result<(), CompleteSignedRequestAuditError> {
+    let result = sqlx::query(
+        "UPDATE signed_request_audit
+         SET response_status = $2, completed_at = NOW()
+         WHERE id = $1 AND completed_at IS NULL",
+    )
+    .bind(audit_id)
+    .bind(i32::from(response_status))
+    .execute(pool)
+    .await
+    .map_err(|source| {
+        CompleteSignedRequestAuditError::database(audit_id, response_status, source)
+    })?;
+
+    if result.rows_affected() != 1 {
+        return Err(CompleteSignedRequestAuditError::audit_not_pending(
+            audit_id,
+            response_status,
+        ));
+    }
+
+    Ok(())
+}
+
+pub async fn add_pgp_key(
+    pool: &PgPool,
+    user_id: Uuid,
+    public_key: &str,
+    fingerprint: &str,
+    name: Option<&str>,
+    signed_request_id: Option<Uuid>,
+) -> Result<Uuid, sqlx::Error> {
+    sqlx::query_scalar(
+        "INSERT INTO pgp_keys (
+            user_id, public_key, fingerprint, name, added_by_signed_request_id
+         ) VALUES ($1, $2, $3, $4, $5)
+         RETURNING id",
+    )
+    .bind(user_id)
+    .bind(public_key)
+    .bind(fingerprint)
+    .bind(name)
+    .bind(signed_request_id)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn list_pgp_keys(pool: &PgPool, user_id: Uuid) -> Result<Vec<PgpKeyInfo>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, fingerprint, name, created_at
+         FROM pgp_keys
+         WHERE user_id = $1 AND removed_at IS NULL
+         ORDER BY created_at DESC, id DESC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct PgpKeyInfo {
+    pub id: Uuid,
+    pub fingerprint: String,
+    pub name: Option<String>,
+    pub created_at: time::OffsetDateTime,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Unable to remove PGP public key {key_id} for user {user_id}")]
+pub struct RemovePgpKeyError {
+    user_id: Uuid,
+    key_id: Uuid,
+
+    #[source]
+    source: sqlx::Error,
+}
+
+impl RemovePgpKeyError {
+    fn new(user_id: Uuid, key_id: Uuid, source: sqlx::Error) -> Self {
+        Self {
+            user_id,
+            key_id,
+            source,
+        }
+    }
+}
+
+pub async fn remove_pgp_key(
+    pool: &PgPool,
+    user_id: Uuid,
+    key_id: Uuid,
+    signed_request_id: Option<Uuid>,
+) -> Result<Option<String>, RemovePgpKeyError> {
+    sqlx::query_scalar(
+        "UPDATE pgp_keys
+         SET removed_at = NOW(), removed_by_signed_request_id = $3
+         WHERE id = $1 AND user_id = $2 AND removed_at IS NULL
+         RETURNING fingerprint",
+    )
+    .bind(key_id)
+    .bind(user_id)
+    .bind(signed_request_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|source| RemovePgpKeyError::new(user_id, key_id, source))
+}
+
 // QR Login token functions
 
 pub async fn create_qr_login_token(
@@ -1267,7 +1486,11 @@ pub async fn user_requires_pin(pool: &PgPool, user_id: Uuid) -> Result<bool, sql
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_ssh_fingerprint, hash_invitation_token};
+    use super::{
+        generate_ssh_fingerprint, hash_invitation_token, is_username_taken_error,
+        USERNAME_TAKEN_ERROR,
+    };
+    use anyhow::Context as _;
 
     // Golden vector cross-checked with `ssh-keygen -lf`:
     //   ssh-keygen -t ed25519 ...  ->  SHA256:vO7cKxkbEOoI4Qix7nsJMasdWsJHDFVfgXsKQrA0DhM
@@ -1277,6 +1500,24 @@ mod tests {
         AAAAC3NzaC1lZDI1NTE5AAAAIMBnPZP2DQ1v1MC9AQKLsNo0M649c6MVmz9O+P9UiBrT \
         test@example.com";
     const EXPECTED_FINGERPRINT: &str = "vO7cKxkbEOoI4Qix7nsJMasdWsJHDFVfgXsKQrA0DhM";
+
+    #[test]
+    fn username_taken_error_detected_through_context_wrapping() {
+        // Bare sentinel (as returned by claim_username).
+        let bare = anyhow::anyhow!(USERNAME_TAKEN_ERROR);
+        assert!(is_username_taken_error(&bare));
+
+        // Sentinel wrapped in .context(), as create_user does. anyhow's Display
+        // only shows the outermost context, so detection must walk the chain.
+        let wrapped = Result::<(), _>::Err(anyhow::anyhow!(USERNAME_TAKEN_ERROR))
+            .context("Failed to insert alpha user")
+            .unwrap_err();
+        assert!(is_username_taken_error(&wrapped));
+
+        // An unrelated error must not be misclassified.
+        let other = anyhow::anyhow!("some other database failure");
+        assert!(!is_username_taken_error(&other));
+    }
 
     #[test]
     fn fingerprint_matches_openssh_for_known_key() {

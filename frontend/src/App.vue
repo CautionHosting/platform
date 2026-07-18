@@ -123,6 +123,11 @@ export default {
         description: 'Manage SSH keys for Caution CLI access.',
         path: '/'
       },
+      pgp: {
+        title: 'PGP keys • Caution',
+        description: 'Manage OpenPGP public keys associated with your Caution account.',
+        path: '/'
+      },
       keys: {
         title: 'Secrets • Caution',
         description: 'Manage Caution secrets and quorum bundles.',

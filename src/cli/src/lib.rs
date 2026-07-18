@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::panic::Location;
@@ -67,6 +67,11 @@ unencrypted file on disk. That is unsafe for real shard holders: anyone who can 
 submit that holder's shard. Prefer a smart card containing the OpenPGP key. Keyfork supports \
 offline OpenPGP key derivation and smart-card-oriented workflows: https://git.distrust.co/public/keyfork";
 const SSH_SIGNING_NAMESPACE: &str = "caution-api";
+const PGP_PUBLIC_KEY_MAX_BYTES: usize = 64 * 1024;
+const PGP_KEY_NAME_MAX_CHARS: usize = 255;
+const PGP_PUBLIC_KEY_ARMOR_BEGIN: &str = "-----BEGIN PGP PUBLIC KEY BLOCK-----";
+const PGP_PUBLIC_KEY_ARMOR_END: &str = "-----END PGP PUBLIC KEY BLOCK-----";
+const PGP_PRIVATE_KEY_ARMOR_BEGIN: &str = "-----BEGIN PGP PRIVATE KEY BLOCK-----";
 
 #[derive(Debug)]
 enum SshSignedRequestErrorKind {
@@ -330,6 +335,65 @@ fn parse_quorum_bundle_public_key(bundle_text: &str) -> Result<String> {
 fn load_recipient_cert(public_key: &str) -> Result<openpgp::Cert> {
     openpgp::Cert::from_reader(public_key.as_bytes())
         .context("Failed to parse recipient public key")
+}
+
+fn prepare_pgp_public_key_for_upload(public_key: &str) -> Result<(String, String)> {
+    let public_key = public_key.trim();
+    anyhow::ensure!(!public_key.is_empty(), "PGP public key is empty");
+    anyhow::ensure!(
+        public_key.len() <= PGP_PUBLIC_KEY_MAX_BYTES,
+        "PGP public key is too large (maximum {} bytes)",
+        PGP_PUBLIC_KEY_MAX_BYTES
+    );
+    anyhow::ensure!(
+        !public_key.starts_with(PGP_PRIVATE_KEY_ARMOR_BEGIN),
+        "PGP input contains private key material; export and submit only the public certificate"
+    );
+    anyhow::ensure!(
+        public_key.starts_with(PGP_PUBLIC_KEY_ARMOR_BEGIN)
+            && public_key.ends_with(PGP_PUBLIC_KEY_ARMOR_END),
+        "PGP public key must be an ASCII-armored public certificate"
+    );
+
+    let cert_parser =
+        CertParser::from_bytes(public_key.as_bytes()).context("Failed to parse PGP public key")?;
+    let certs = cert_parser
+        .collect::<openpgp::Result<Vec<_>>>()
+        .context("Failed to parse PGP public key")?;
+    anyhow::ensure!(
+        certs.len() == 1,
+        "PGP input must contain exactly one public certificate (got {})",
+        certs.len()
+    );
+
+    let cert = certs
+        .into_iter()
+        .next()
+        .context("PGP input did not contain a public certificate")?;
+    anyhow::ensure!(
+        !cert.is_tsk(),
+        "PGP input contains private key material; export and submit only the public certificate"
+    );
+    cert.with_policy(&OpenPgpPolicy::new(), None)
+        .context("PGP public certificate is not valid under the standard OpenPGP policy")?;
+
+    let fingerprint = cert.fingerprint().to_string();
+    let mut serialized = Vec::new();
+    cert.armored()
+        .serialize(&mut serialized)
+        .context("Failed to normalize PGP public certificate")?;
+    let mut armored = String::from_utf8(serialized)
+        .context("Normalized PGP public certificate is not valid UTF-8")?;
+    if !armored.ends_with('\n') {
+        armored.push('\n');
+    }
+    anyhow::ensure!(
+        armored.len() <= PGP_PUBLIC_KEY_MAX_BYTES,
+        "Normalized PGP public key is too large (maximum {} bytes)",
+        PGP_PUBLIC_KEY_MAX_BYTES
+    );
+
+    Ok((armored, fingerprint))
 }
 
 fn encrypt_secret_value(recipient: &openpgp::Cert, plaintext: &str) -> Result<String> {
@@ -936,6 +1000,11 @@ enum Commands {
         #[command(subcommand)]
         command: SshKeyCommands,
     },
+    #[command(about = "Manage OpenPGP public keys for your account")]
+    PgpKeys {
+        #[command(subcommand)]
+        command: PgpKeyCommands,
+    },
     #[command(about = "Manage local cache")]
     Cache {
         #[command(subcommand)]
@@ -1034,6 +1103,24 @@ enum SshKeyCommands {
     #[command(about = "Remove an SSH key")]
     Remove {
         #[arg(help = "Key fingerprint")]
+        fingerprint: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PgpKeyCommands {
+    #[command(about = "Add an armored OpenPGP public key")]
+    Add {
+        #[arg(help = "Path to an armored OpenPGP public key file")]
+        key_file: PathBuf,
+        #[arg(long, help = "Name for the key")]
+        name: Option<String>,
+    },
+    #[command(about = "List all OpenPGP public keys")]
+    List,
+    #[command(about = "Remove an OpenPGP public key")]
+    Remove {
+        #[arg(help = "Full key fingerprint")]
         fingerprint: String,
     },
 }
@@ -1351,6 +1438,23 @@ struct QrSignStatusResponse {
     status: String,
     fido2_response: Option<String>,
     challenge_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AddPgpKeyResponse {
+    fingerprint: String,
+}
+
+#[derive(Deserialize)]
+struct PgpKeyInfo {
+    id: uuid::Uuid,
+    fingerprint: String,
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ListPgpKeysResponse {
+    keys: Vec<PgpKeyInfo>,
 }
 
 /// Extract session ID from Set-Cookie header
@@ -3489,23 +3593,55 @@ enclave "default" {{
         path: &str,
         body: &T,
     ) -> Result<reqwest::Response> {
-        if self.qr {
-            return self.signed_post_qr(session_id, path, body).await;
+        let body_json = serde_json::to_vec(body)?;
+
+        if !self.qr {
+            println!("\nData to be signed:");
+            println!("{}", serde_json::to_string_pretty(body)?);
         }
 
-        let body_json = serde_json::to_vec(body)?;
+        self.signed_request(session_id, path, reqwest::Method::POST, body_json)
+            .await
+    }
+
+    async fn signed_delete(&self, session_id: &str, path: &str) -> Result<reqwest::Response> {
+        if !self.qr {
+            println!("\nRequest to be signed:");
+            println!("DELETE {}", path);
+        }
+
+        self.signed_request(session_id, path, reqwest::Method::DELETE, Vec::new())
+            .await
+    }
+
+    async fn signed_request(
+        &self,
+        session_id: &str,
+        path: &str,
+        method: reqwest::Method,
+        body: Vec<u8>,
+    ) -> Result<reqwest::Response> {
+        if self.qr {
+            return self.signed_request_qr(session_id, path, method, body).await;
+        }
+
+        let body_json = body;
         let body_hash = hex::encode(Sha256::digest(&body_json));
+        let method_name = method.as_str();
 
         // The gateway nests /api routes, so the sign middleware sees paths with /api stripped
         let challenge_path = path.strip_prefix("/api").unwrap_or(path);
 
         log_verbose(
             self.verbose,
-            &format!("Requesting FIDO2 sign challenge for POST {}", path),
+            &format!(
+                "Requesting FIDO2 sign challenge for {} {}",
+                method_name, path
+            ),
         );
 
         let sign_req = serde_json::json!({
-            "method": "POST",
+            "method": method_name,
             "path": challenge_path,
             "body_hash": body_hash,
         });
@@ -3531,8 +3667,6 @@ enclave "default" {{
             session: sign_resp.challenge_id.clone(),
         };
 
-        println!("\nData to be signed:");
-        println!("{}", serde_json::to_string_pretty(body)?);
         println!("\nTap your security key to sign the request.");
         let assertion = self.get_assertion(&login_resp, &self.base_url)?;
 
@@ -3542,7 +3676,7 @@ enclave "default" {{
 
         let response = self
             .client
-            .post(format!("{}{}", self.base_url, path))
+            .request(method, format!("{}{}", self.base_url, path))
             .header("X-Fido2-Challenge-Id", &sign_resp.challenge_id)
             .header("X-Fido2-Response", &fido_response_b64)
             .header("Content-Type", "application/json")
@@ -3553,14 +3687,15 @@ enclave "default" {{
         Ok(response)
     }
 
-    async fn signed_post_qr<T: serde::Serialize>(
+    async fn signed_request_qr(
         &self,
         session_id: &str,
         path: &str,
-        body: &T,
+        method: reqwest::Method,
+        body_json: Vec<u8>,
     ) -> Result<reqwest::Response> {
-        let body_json = serde_json::to_vec(body)?;
         let body_hash = hex::encode(Sha256::digest(&body_json));
+        let method_name = method.as_str();
 
         // The gateway nests /api routes, so the sign middleware sees paths with /api stripped
         let challenge_path = path.strip_prefix("/api").unwrap_or(path);
@@ -3570,7 +3705,7 @@ enclave "default" {{
         // Step 1: Request a QR sign token from the gateway
         let body_str = String::from_utf8_lossy(&body_json);
         let sign_req = serde_json::json!({
-            "method": "POST",
+            "method": method_name,
             "path": challenge_path,
             "body": body_str,
             "body_hash": body_hash,
@@ -3660,7 +3795,7 @@ enclave "default" {{
         // Step 4: Send the actual request with the FIDO2 assertion from the phone
         let response = self
             .client
-            .post(format!("{}{}", self.base_url, path))
+            .request(method, format!("{}{}", self.base_url, path))
             .header("X-Fido2-Challenge-Id", &challenge_id)
             .header("X-Fido2-Response", &fido2_response)
             .header("Content-Type", "application/json")
@@ -7092,6 +7227,142 @@ enclave "default" {{
         bail!("No source URLs available and no git fallback configured")
     }
 
+    async fn fetch_pgp_keys(&self, session_id: &str) -> Result<Vec<PgpKeyInfo>> {
+        let response: ListPgpKeysResponse = self
+            .get_protected_json(session_id, "/pgp-keys", "Failed to fetch PGP public keys")
+            .await?;
+        Ok(response.keys)
+    }
+
+    async fn add_pgp_key(&self, key_file: PathBuf, name: Option<String>) -> Result<()> {
+        let key_file_handle = fs::File::open(&key_file).with_context(|| {
+            format!("Failed to open PGP public key file: {}", key_file.display())
+        })?;
+        let mut key_bytes = Vec::new();
+        key_file_handle
+            .take((PGP_PUBLIC_KEY_MAX_BYTES + 1) as u64)
+            .read_to_end(&mut key_bytes)
+            .with_context(|| {
+                format!("Failed to read PGP public key file: {}", key_file.display())
+            })?;
+        anyhow::ensure!(
+            key_bytes.len() <= PGP_PUBLIC_KEY_MAX_BYTES,
+            "PGP public key is too large (maximum {} bytes)",
+            PGP_PUBLIC_KEY_MAX_BYTES
+        );
+        let key_text = String::from_utf8(key_bytes)
+            .context("PGP public key file must contain UTF-8 armored text")?;
+        let (public_key, fingerprint) = prepare_pgp_public_key_for_upload(&key_text)?;
+
+        let name = name.unwrap_or_else(|| {
+            key_file
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("PGP key")
+                .to_string()
+        });
+        anyhow::ensure!(
+            name.chars().count() <= PGP_KEY_NAME_MAX_CHARS,
+            "PGP key name must be at most {} characters",
+            PGP_KEY_NAME_MAX_CHARS
+        );
+        anyhow::ensure!(
+            !name.chars().any(char::is_control),
+            "PGP key name cannot contain control characters"
+        );
+        let name = name.trim();
+        anyhow::ensure!(!name.is_empty(), "PGP key name cannot be empty");
+
+        let config = self.ensure_authenticated().await?;
+        let existing_keys = self.fetch_pgp_keys(&config.session_id).await?;
+        if existing_keys
+            .iter()
+            .any(|key| key.fingerprint == fingerprint)
+        {
+            bail!("This PGP public key is already registered to your account");
+        }
+
+        let body = serde_json::json!({
+            "public_key": public_key,
+            "name": name,
+        });
+        let response = self
+            .signed_post(&config.session_id, "/pgp-keys", &body)
+            .await?;
+
+        if !response.status().is_success() {
+            let error = self.api_error_message(response).await;
+            bail!("Failed to add PGP public key: {}", error);
+        }
+
+        let added: AddPgpKeyResponse = response
+            .json()
+            .await
+            .context("Failed to parse add PGP public key response")?;
+        println!("Added PGP key: {} ({})", name, added.fingerprint);
+        Ok(())
+    }
+
+    async fn list_pgp_keys(&self) -> Result<()> {
+        let config = self.ensure_authenticated().await?;
+        let keys = self.fetch_pgp_keys(&config.session_id).await?;
+
+        if keys.is_empty() {
+            println!("No PGP keys found. Add one with 'caution pgp-keys add <key-file>'");
+            return Ok(());
+        }
+
+        println!("PGP Keys:");
+        for key in keys {
+            println!(
+                "  {} ({})",
+                key.name.as_deref().unwrap_or("untitled"),
+                key.fingerprint
+            );
+        }
+        Ok(())
+    }
+
+    async fn remove_pgp_key(&self, fingerprint: &str) -> Result<()> {
+        let normalized_fingerprint: String = fingerprint
+            .chars()
+            .filter(|character| !character.is_ascii_whitespace())
+            .map(|character| character.to_ascii_uppercase())
+            .collect();
+        anyhow::ensure!(
+            matches!(normalized_fingerprint.len(), 40 | 64)
+                && normalized_fingerprint
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit()),
+            "PGP key fingerprint must contain 40 or 64 hexadecimal characters"
+        );
+
+        let config = self.ensure_authenticated().await?;
+        let keys = self.fetch_pgp_keys(&config.session_id).await?;
+        let key = keys
+            .iter()
+            .find(|key| {
+                key.fingerprint
+                    .eq_ignore_ascii_case(&normalized_fingerprint)
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No active PGP public key matches fingerprint {}",
+                    normalized_fingerprint
+                )
+            })?;
+
+        let path = format!("/pgp-keys/{}", key.id);
+        let response = self.signed_delete(&config.session_id, &path).await?;
+        if !response.status().is_success() {
+            let error = self.api_error_message(response).await;
+            bail!("Failed to remove PGP public key: {}", error);
+        }
+
+        println!("Removed PGP key: {}", key.fingerprint);
+        Ok(())
+    }
+
     async fn fetch_existing_ssh_keys(&self, session_id: &str) -> Result<Vec<(String, String)>> {
         let response_data: serde_json::Value = self
             .get_protected_json(session_id, "/ssh-keys", "Failed to fetch existing SSH keys")
@@ -8602,6 +8873,26 @@ pub async fn run() -> Result<(), RunError> {
                 client.remove_ssh_key(&fingerprint).await.map_err(RunError::CommandDispatch)?;
             }
         },
+        Commands::PgpKeys { command } => match command {
+            PgpKeyCommands::Add { key_file, name } => {
+                client
+                    .add_pgp_key(key_file, name)
+                    .await
+                    .map_err(RunError::CommandDispatch)?;
+            }
+            PgpKeyCommands::List => {
+                client
+                    .list_pgp_keys()
+                    .await
+                    .map_err(RunError::CommandDispatch)?;
+            }
+            PgpKeyCommands::Remove { fingerprint } => {
+                client
+                    .remove_pgp_key(&fingerprint)
+                    .await
+                    .map_err(RunError::CommandDispatch)?;
+            }
+        },
         Commands::Cache { command } => match command {
             CacheCommands::Path => {
                 client.cache_path().map_err(RunError::CommandDispatch)?;
@@ -8712,9 +9003,10 @@ pub async fn run() -> Result<(), RunError> {
 mod tests {
     use super::openpgp;
     use super::{
-        AccountCommands, ApiClient, Cli, Commands, LoginUsernameError, RegisterUsernameError,
-        RunError, encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility,
-        load_recipient_cert, login_begin_request_body, normalize_keyring, parse_env_assignments,
+        AccountCommands, ApiClient, Cli, Commands, LoginUsernameError, PgpKeyCommands,
+        RegisterUsernameError, RunError, encrypt_env_file, encrypt_secret_value,
+        keymaker_cert_eligibility, load_recipient_cert, login_begin_request_body,
+        normalize_keyring, parse_env_assignments, prepare_pgp_public_key_for_upload,
         prompt_line_from, prompt_optional_line_from, resolve_local_build_command_from_dir,
         resolve_login_username, resolve_procfile_build_command, resolve_quorum_parameters,
         resolve_register_username, validate_global_qr,
@@ -8754,6 +9046,47 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn cli_parses_pgp_key_add_command() {
+        let cli = Cli::try_parse_from([
+            "caution",
+            "pgp-keys",
+            "add",
+            "public-key.asc",
+            "--name",
+            "Work key",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::PgpKeys {
+                command: PgpKeyCommands::Add {
+                    key_file,
+                    name: Some(name),
+                }
+            } if key_file.as_path() == std::path::Path::new("public-key.asc") && name == "Work key"
+        ));
+    }
+
+    #[test]
+    fn cli_parses_pgp_key_remove_command() {
+        let cli = Cli::try_parse_from([
+            "caution",
+            "pgp-keys",
+            "remove",
+            "0123456789ABCDEF0123456789ABCDEF01234567",
+        ])
+        .unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::PgpKeys {
+                command: PgpKeyCommands::Remove { fingerprint }
+            } if fingerprint == "0123456789ABCDEF0123456789ABCDEF01234567"
+        ));
+    }
+
     fn test_public_key() -> String {
         let (cert, _revocation) = CertBuilder::new()
             .add_userid("test@example.org")
@@ -8762,6 +9095,19 @@ mod tests {
             .unwrap();
 
         String::from_utf8(cert.armored().to_vec().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn pgp_key_upload_preparation_rejects_private_material() {
+        let (cert, _revocation) = CertBuilder::new()
+            .add_userid("private@example.org")
+            .add_signing_subkey()
+            .generate()
+            .unwrap();
+        let private_key = String::from_utf8(cert.as_tsk().armored().to_vec().unwrap()).unwrap();
+
+        let error = prepare_pgp_public_key_for_upload(&private_key).unwrap_err();
+        assert!(error.to_string().contains("private key material"));
     }
 
     #[test]
