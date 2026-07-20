@@ -244,6 +244,10 @@ async fn main() -> Result<()> {
             get(handlers::qr_login_status_handler),
         )
         .route(
+            "/auth/qr-login/context",
+            post(handlers::qr_login_context_handler),
+        )
+        .route(
             "/auth/qr-login/authenticate",
             post(handlers::qr_login_authenticate_handler),
         )

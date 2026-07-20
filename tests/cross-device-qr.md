@@ -28,10 +28,13 @@ caution login --qr
 4. The URL is also printed below the QR code (for manual entry)
 5. CLI shows "Waiting for authentication..." with a spinner
 6. **On your phone:** scan the QR code or open the URL in a browser
-7. The browser opens the gateway's QR login page
-8. Tap "Authenticate" and complete the FIDO2 ceremony (Face ID, fingerprint, PIN, etc.)
-9. The phone shows "Authentication successful"
-10. CLI detects completion, stores session, prints "Login successful"
+7. The browser opens the gateway's QR login page and loads the CLI-login context
+8. Verify the displayed code and request time make sense, then explicitly check **"I started this CLI login myself"**
+9. Tap "Authenticate with security key" and complete the FIDO2 ceremony (Face ID, fingerprint, PIN, etc.)
+10. The phone shows "Authentication successful"
+11. CLI detects completion, stores session, prints "Login successful"
+
+The code is context to help you notice an unexpected QR-login request; it is **not** a cryptographic match proof. The page does not use IP address or geolocation to decide whether the login is yours. If you did not just start this CLI login, stop instead of confirming it.
 
 ### Failure cases to test
 
@@ -40,6 +43,8 @@ caution login --qr
 | Let the QR code expire (3 min timeout) | CLI prints "QR login timed out. Please try again." |
 | Close the phone browser without authenticating | CLI keeps polling until timeout |
 | Use an unregistered device | Phone shows FIDO2 error, CLI keeps polling |
+| Open a QR URL you did not just create | Warning is shown first; leave the checkbox unchecked and stop |
+| QR login context cannot be loaded (invalid, expired, or server error) | Browser exposes no authenticate action (fail closed) |
 | Ctrl+C during polling | CLI exits cleanly |
 | Poll the requestee token (the one in the QR URL) at `GET /auth/qr-login/status?token=<requestee>` | Returns `not_found` — only the CLI's requester token can read the session |
 | After a successful login, replay the same `GET /auth/qr-login/status` poll again | First poll returns the `session_id`; the second returns `completed` with `session_id: null` (one-shot consume) |

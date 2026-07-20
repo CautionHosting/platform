@@ -2,16 +2,18 @@
 # SPDX-FileCopyrightText: 2025 Caution SEZC
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 #
-# E2E test for QR login token handling (issue #336 — split requester/requestee
-# tokens + one-shot session consumption).
+# E2E test for QR login token handling (issues #336 and #366 — split
+# requester/requestee tokens, consent context, and one-shot session consumption).
 # Requires: make up-test (gateway on :8000, postgres-test on caution_test).
 #
 # Exercises the gateway HTTP surface directly (no authenticator needed):
 #   1. begin issues distinct requester/requestee tokens; URL carries requestee
-#   2. authenticate rejects the requester token (split boundary)
-#   3. status: a completed token is returned once, then consumed (one-shot)
-#   4. status: the requestee token cannot poll the session
-#   5. retry-safety: a failed session fetch does NOT consume the session id
+#   2. context exposes only consent data and handles each token state
+#   3. authenticate requires explicit confirmation without mutating the token
+#   4. authenticate rejects the requester token (split boundary)
+#   5. status: a completed token is returned once, then consumed (one-shot)
+#   6. status: the requestee token cannot poll the session
+#   7. retry-safety: a failed session fetch does NOT consume the session id
 
 set -uo pipefail
 
@@ -48,16 +50,73 @@ BEGIN=$(curl -s -X POST "$GATEWAY_URL/auth/qr-login/begin")
 REQUESTER=$(echo "$BEGIN" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
 URL=$(echo "$BEGIN" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
 REQUESTEE=$(echo "$URL" | sed -n 's/.*token=\([^"&]*\).*/\1/p')
+VERIFICATION_CODE=$(echo "$BEGIN" | sed -n 's/.*"verification_code":"\([0-9][0-9]*\)".*/\1/p')
 
-if [ -n "$REQUESTER" ] && [ -n "$REQUESTEE" ] && [ "$REQUESTER" != "$REQUESTEE" ]; then
+if [ -n "$REQUESTER" ] && [ -n "$REQUESTEE" ] && [ "$REQUESTER" != "$REQUESTEE" ] \
+    && echo "$VERIFICATION_CODE" | grep -Eq '^[0-9]{6}$'; then
     pass "begin issues distinct requester and requestee tokens"
 else
-    fail "begin tokens: requester='$REQUESTER' requestee='$REQUESTEE'"
+    fail "begin response missing valid tokens/code: $BEGIN"
 fi
 
-# ── 2. authenticate rejects the requester token (split boundary) ─────
-CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/authenticate" \
+# ── 2. context: public consent-only data and token states ─────────────
+CONTEXT_BEFORE=$(psql_c "SELECT status || '|' || COALESCE(auth_challenge_key,'<null>') || '|' || COALESCE(browser_ip_address,'<null>') FROM qr_login_tokens WHERE token='$REQUESTER';")
+CONTEXT=$(curl -s -X POST "$GATEWAY_URL/auth/qr-login/context" \
+    -H 'Content-Type: application/json' -d "{\"token\":\"$REQUESTEE\"}")
+CONTEXT_AFTER=$(psql_c "SELECT status || '|' || COALESCE(auth_challenge_key,'<null>') || '|' || COALESCE(browser_ip_address,'<null>') FROM qr_login_tokens WHERE token='$REQUESTER';")
+if echo "$CONTEXT" | grep -q "\"verification_code\":\"$VERIFICATION_CODE\"" \
+    && echo "$CONTEXT" | grep -q '"created_at":"' \
+    && echo "$CONTEXT" | grep -q '"expires_at":"' \
+    && ! echo "$CONTEXT" | grep -Eq '"(token|url|username|session_id|ip_address|browser_ip_address|auth_challenge_key)"' \
+    && [ "$CONTEXT_BEFORE" = "$CONTEXT_AFTER" ]; then
+    pass "context returns only the pending consent data"
+else
+    fail "unexpected/mutating context response: $CONTEXT"
+fi
+
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/context" \
+    -H 'Content-Type: application/json' -d '{"token":"unknown"}')
+[ "$CODE" = "404" ] && pass "context returns 404 for an unknown token" \
+                    || fail "unknown context returned $CODE, expected 404"
+
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/context" \
     -H 'Content-Type: application/json' -d "{\"token\":\"$REQUESTER\"}")
+[ "$CODE" = "404" ] && pass "requester token cannot read requestee context" \
+                    || fail "requester context returned $CODE, expected 404"
+
+for STATE in authenticated completed; do
+    psql_c "UPDATE qr_login_tokens SET status='$STATE' WHERE token='$REQUESTER';" >/dev/null
+    CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/context" \
+        -H 'Content-Type: application/json' -d "{\"token\":\"$REQUESTEE\"}")
+    [ "$CODE" = "409" ] && pass "context returns 409 for $STATE token" \
+                        || fail "$STATE context returned $CODE, expected 409"
+done
+psql_c "UPDATE qr_login_tokens SET status='pending', verification_code=NULL WHERE token='$REQUESTER';" >/dev/null
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/context" \
+    -H 'Content-Type: application/json' -d "{\"token\":\"$REQUESTEE\"}")
+[ "$CODE" = "409" ] && pass "context returns 409 when the code is unavailable" \
+                    || fail "null-code context returned $CODE, expected 409"
+psql_c "UPDATE qr_login_tokens SET verification_code='$VERIFICATION_CODE', expires_at=NOW() - INTERVAL '1 second' WHERE token='$REQUESTER';" >/dev/null
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/context" \
+    -H 'Content-Type: application/json' -d "{\"token\":\"$REQUESTEE\"}")
+[ "$CODE" = "410" ] && pass "context returns 410 for an expired token" \
+                    || fail "expired context returned $CODE, expected 410"
+psql_c "UPDATE qr_login_tokens SET expires_at=NOW() + INTERVAL '3 minutes' WHERE token='$REQUESTER';" >/dev/null
+
+# ── 3. authenticate must be explicitly confirmed and read-only otherwise ─
+BEFORE=$(psql_c "SELECT status || '|' || COALESCE(auth_challenge_key,'<null>') || '|' || COALESCE(browser_ip_address,'<null>') FROM qr_login_tokens WHERE token='$REQUESTER';")
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/authenticate" \
+    -H 'Content-Type: application/json' -d "{\"token\":\"$REQUESTEE\"}")
+AFTER=$(psql_c "SELECT status || '|' || COALESCE(auth_challenge_key,'<null>') || '|' || COALESCE(browser_ip_address,'<null>') FROM qr_login_tokens WHERE token='$REQUESTER';")
+if [ "$CODE" = "400" ] && [ "$BEFORE" = "$AFTER" ]; then
+    pass "unconfirmed authenticate returns 400 without mutating the token"
+else
+    fail "unconfirmed authenticate: http=$CODE before='$BEFORE' after='$AFTER'"
+fi
+
+# ── 4. authenticate rejects the requester token (split boundary) ─────
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/authenticate" \
+    -H 'Content-Type: application/json' -d "{\"token\":\"$REQUESTER\",\"confirmed\":true}")
 if [ "$CODE" = "404" ]; then
     pass "authenticate rejects requester token (404)"
 else
@@ -81,7 +140,7 @@ fi
 psql_c "INSERT INTO qr_login_tokens (token, requestee_token, status, session_id, expires_at)
         VALUES ('$REQ','$REE','completed','$SID', NOW() + INTERVAL '1 hour');" >/dev/null
 
-# ── 3. status: session returned once, then consumed (one-shot) ───────
+# ── 5. status: session returned once, then consumed (one-shot) ───────
 POLL1=$(curl -s "$GATEWAY_URL/auth/qr-login/status?token=$REQ")
 if echo "$POLL1" | grep -q "\"session_id\":\"$SID\""; then
     pass "first status poll returns the session id"
@@ -102,7 +161,7 @@ DB_SID=$(psql_c "SELECT COALESCE(session_id,'<null>') FROM qr_login_tokens WHERE
 [ "$DB_SID" = "<null>" ] && pass "session id nulled in db after consume" \
                          || fail "session id not nulled in db: '$DB_SID'"
 
-# ── 4. status: requestee token cannot poll the session ───────────────
+# ── 6. status: requestee token cannot poll the session ───────────────
 POLL_REE=$(curl -s "$GATEWAY_URL/auth/qr-login/status?token=$REE")
 if echo "$POLL_REE" | grep -q '"status":"not_found"'; then
     pass "requestee token cannot poll status (not_found)"
@@ -110,7 +169,7 @@ else
     fail "requestee token poll should be not_found: $POLL_REE"
 fi
 
-# ── 5. retry-safety: a failed session fetch must NOT consume ─────────
+# ── 7. retry-safety: a failed session fetch must NOT consume ─────────
 psql_c "UPDATE qr_login_tokens SET status='completed', session_id='$SID' WHERE token='$REQ';" >/dev/null
 psql_c "ALTER TABLE auth_sessions RENAME TO auth_sessions_e2ebak;" >/dev/null
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "$GATEWAY_URL/auth/qr-login/status?token=$REQ")

@@ -310,6 +310,7 @@ impl QrStatus {
 pub struct QrLoginBeginResponse {
     pub token: String,
     pub url: String,
+    pub verification_code: String,
     pub expires_at: String,
 }
 
@@ -335,6 +336,22 @@ pub struct QrLoginStatusResponse {
 #[derive(Debug, Deserialize)]
 pub struct QrLoginAuthenticateRequest {
     pub token: String,
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QrLoginContextRequest {
+    pub token: String,
+}
+
+/// Deliberately limited QR-login context exposed to the device that scanned
+/// the QR code. Do not add requester/session/user/IP fields here.
+#[derive(Debug, Serialize)]
+pub struct QrLoginContextResponse {
+    pub verification_code: String,
+    pub created_at: String,
+    pub expires_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -365,6 +382,7 @@ pub struct DbQrLoginToken {
     pub expires_at: time::OffsetDateTime,
     pub created_at: time::OffsetDateTime,
     pub username: Option<String>,
+    pub verification_code: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

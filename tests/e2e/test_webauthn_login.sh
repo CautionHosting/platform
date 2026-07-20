@@ -216,7 +216,7 @@ QR_REQUESTEE=$(echo "$JSON" | jq -r '.url' | sed 's/.*[?&]token=//;s/&.*//')
 
 BODY=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/authenticate" \
     -H 'Content-Type: application/json' \
-    -d "{\"token\":\"$QR_REQUESTEE\"}")
+    -d "{\"token\":\"$QR_REQUESTEE\",\"confirmed\":true}")
 CODE=$(echo "$BODY" | tail -1)
 JSON=$(echo "$BODY" | sed '$d')
 [ "$CODE" = 200 ] || step_fail "qr-login/authenticate (known username) returned HTTP $CODE (want 200)"
@@ -236,7 +236,7 @@ QR_REQUESTEE=$(echo "$JSON" | jq -r '.url' | sed 's/.*[?&]token=//;s/&.*//')
 
 BODY=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/authenticate" \
     -H 'Content-Type: application/json' \
-    -d "{\"token\":\"$QR_REQUESTEE\"}")
+    -d "{\"token\":\"$QR_REQUESTEE\",\"confirmed\":true}")
 CODE=$(echo "$BODY" | tail -1)
 JSON=$(echo "$BODY" | sed '$d')
 [ "$CODE" = 200 ] || step_fail "qr-login/authenticate (unknown username) returned HTTP $CODE (want 200 — a distinct shape would be an enumeration oracle)"

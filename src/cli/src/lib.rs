@@ -1413,6 +1413,7 @@ struct LoginFinishResponse {
 struct QrLoginBeginResponse {
     token: String,
     url: String,
+    verification_code: Option<String>,
     #[allow(dead_code)]
     expires_at: String,
 }
@@ -3092,6 +3093,18 @@ enclave "default" {{
         println!("Scan the QR code with your phone, or open this URL:");
         println!("  {}", begin_resp.url);
         println!();
+
+        match begin_resp.verification_code.as_deref() {
+            Some(code) => {
+                eprintln!("Login context code: {code}");
+                eprintln!("Continue on your phone only if you initiated this CLI login.");
+                eprintln!("A code supplied by someone else does not make a login safe.");
+            }
+            None => {
+                eprintln!("WARNING: The server does not provide verification context.");
+                eprintln!("Continue on your phone only if you initiated this CLI login.");
+            }
+        }
 
         // Step 3: Poll for completion
         let mut loader = Loader::new("Waiting for authentication...", LoaderStyle::Processing);

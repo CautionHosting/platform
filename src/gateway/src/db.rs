@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use rand::rngs::OsRng;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -814,6 +815,28 @@ pub fn generate_session_id() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes)
 }
 
+/// Returns a uniformly random, zero-padded six-digit confirmation code.
+/// OsRng makes this independent of application-level PRNG state.
+pub fn generate_qr_login_verification_code() -> String {
+    let mut rng = OsRng;
+    format!("{:06}", rng.gen_range(0..1_000_000))
+}
+
+#[cfg(test)]
+mod qr_login_verification_code_tests {
+    use super::generate_qr_login_verification_code;
+
+    #[test]
+    fn qr_login_verification_code_is_six_decimal_digits() {
+        for _ in 0..1_000 {
+            let code = generate_qr_login_verification_code();
+
+            assert_eq!(code.len(), 6);
+            assert!(code.bytes().all(|byte| byte.is_ascii_digit()));
+        }
+    }
+}
+
 pub async fn add_ssh_key(
     pool: &PgPool,
     user_id: Uuid,
@@ -1199,16 +1222,18 @@ pub async fn create_qr_login_token(
     ip_address: Option<&str>,
     expires_at: OffsetDateTime,
     username: Option<&str>,
+    verification_code: &str,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO qr_login_tokens (token, requestee_token, status, ip_address, expires_at, username)
-         VALUES ($1, $2, 'pending', $3, $4, $5)",
+        "INSERT INTO qr_login_tokens (token, requestee_token, status, ip_address, expires_at, username, verification_code)
+         VALUES ($1, $2, 'pending', $3, $4, $5, $6)",
     )
     .bind(token)
     .bind(requestee_token)
     .bind(ip_address)
     .bind(expires_at)
     .bind(username)
+    .bind(verification_code)
     .execute(pool)
     .await
     .context("Failed to create QR login token")?;
@@ -1221,7 +1246,7 @@ pub async fn get_qr_login_token(
     token: &str,
 ) -> Result<Option<crate::types::DbQrLoginToken>> {
     let row: Option<crate::types::DbQrLoginToken> = sqlx::query_as(
-        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at, username
+        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at, username, verification_code
          FROM qr_login_tokens
          WHERE token = $1"
     )
@@ -1238,7 +1263,7 @@ pub async fn get_qr_login_token_by_requestee_token(
     requestee_token: &str,
 ) -> Result<Option<crate::types::DbQrLoginToken>> {
     let row: Option<crate::types::DbQrLoginToken> = sqlx::query_as(
-        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at, username
+        "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at, username, verification_code
          FROM qr_login_tokens
          WHERE requestee_token = $1"
     )

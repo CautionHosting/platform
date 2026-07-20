@@ -9,7 +9,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use serde::{Deserialize, Serialize};
-use time::Duration;
+use time::{format_description::well_known::Rfc3339, Duration};
 use uuid::Uuid;
 use webauthn_rs::prelude::*;
 use webauthn_rs_proto::{ResidentKeyRequirement, UserVerificationPolicy};
@@ -238,6 +238,8 @@ impl IntoResponse for LoginError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum QrLoginError {
+    #[error("QR login confirmation is required")]
+    ConfirmationRequired,
     #[error("QR login token not found")]
     TokenNotFound,
     #[error("QR login token has expired")]
@@ -266,6 +268,11 @@ pub enum QrLoginError {
         #[source]
         source: anyhow::Error,
     },
+    #[error("could not format QR login timestamp")]
+    FormatTimestamp {
+        #[source]
+        source: time::error::Format,
+    },
     #[error("could not fetch credentials")]
     DbGetCredentials {
         #[source]
@@ -293,6 +300,7 @@ pub enum QrLoginError {
 impl IntoResponse for QrLoginError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
+            Self::ConfirmationRequired => (StatusCode::BAD_REQUEST, self.to_string()),
             Self::TokenNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::TokenExpired => (StatusCode::GONE, self.to_string()),
             Self::UnexpectedState(_) | Self::AlreadyClaimed => {
@@ -2332,6 +2340,7 @@ pub async fn qr_login_begin_handler(
 
     let token = db::generate_session_id();
     let requestee_token = db::generate_session_id();
+    let verification_code = db::generate_qr_login_verification_code();
     let expires_at = time::OffsetDateTime::now_utc() + Duration::minutes(3);
     let ip_address = connect_info.0.ip().to_string();
 
@@ -2344,6 +2353,7 @@ pub async fn qr_login_begin_handler(
         Some(&ip_address),
         expires_at,
         username.as_deref(),
+        &verification_code,
     )
     .await
     .map_err(|source| QrLoginError::DbCreateToken { source })?;
@@ -2351,7 +2361,44 @@ pub async fn qr_login_begin_handler(
     Ok(Json(crate::types::QrLoginBeginResponse {
         token,
         url,
+        verification_code,
         expires_at: expires_at.to_string(),
+    }))
+}
+
+pub async fn qr_login_context_handler(
+    State(state): State<AppState>,
+    Json(req): Json<crate::types::QrLoginContextRequest>,
+) -> Result<Json<crate::types::QrLoginContextResponse>, QrLoginError> {
+    let row = db::get_qr_login_token_by_requestee_token(&state.db, &req.token)
+        .await
+        .map_err(|source| QrLoginError::DbGetToken { source })?
+        .ok_or(QrLoginError::TokenNotFound)?;
+
+    if time::OffsetDateTime::now_utc() > row.expires_at {
+        return Err(QrLoginError::TokenExpired);
+    }
+
+    if !matches!(QrStatus::from_db(&row.status), Some(QrStatus::Pending)) {
+        return Err(QrLoginError::AlreadyClaimed);
+    }
+
+    let verification_code = row.verification_code.ok_or_else(|| {
+        QrLoginError::UnexpectedState("QR login token has no verification code".to_string())
+    })?;
+    let created_at = row
+        .created_at
+        .format(&Rfc3339)
+        .map_err(|source| QrLoginError::FormatTimestamp { source })?;
+    let expires_at = row
+        .expires_at
+        .format(&Rfc3339)
+        .map_err(|source| QrLoginError::FormatTimestamp { source })?;
+
+    Ok(Json(crate::types::QrLoginContextResponse {
+        verification_code,
+        created_at,
+        expires_at,
     }))
 }
 
@@ -2440,6 +2487,11 @@ pub async fn qr_login_authenticate_handler(
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
     Json(req): Json<crate::types::QrLoginAuthenticateRequest>,
 ) -> Result<Json<crate::types::QrLoginAuthenticateResponse>, QrLoginError> {
+    // A scan alone must never allocate a WebAuthn challenge or claim the token.
+    if !req.confirmed {
+        return Err(QrLoginError::ConfirmationRequired);
+    }
+
     // Verify requestee token exists and is pending
     let row = db::get_qr_login_token_by_requestee_token(&state.db, &req.token)
         .await
@@ -3259,6 +3311,7 @@ mod login_begin_tests {
         AppState {
             db,
             webauthn,
+            relying_party_id: "example.com".to_string(),
             api_service_url: String::new(),
             metering_service_url: String::new(),
             reg_states: Arc::new(RwLock::new(HashMap::new())),

@@ -85,6 +85,14 @@ async function logOut(client) {
   await client.send('Network.clearBrowserCookies');
 }
 
+async function requestJson(path, options = {}) {
+  const response = await fetch(`${BASE_URL}${path}`, options);
+  if (!response.ok) {
+    throw new Error(`${path} returned ${response.status}: ${await response.text()}`);
+  }
+  return response.json();
+}
+
 async function loginDiscoverable(page) {
   await page.goto(`${BASE_URL}/login`, { waitUntil: 'networkidle0' });
   await page.waitForSelector('[data-testid="login-username"]');
@@ -115,6 +123,90 @@ async function loginDiscoverable(page) {
   console.log('✓ discoverable login assertion verified (resolved by userHandle)');
 }
 
+async function qrLoginWithConsent(page) {
+  const begin = await requestJson('/auth/qr-login/begin', { method: 'POST' });
+  if (!begin.token || !begin.url || !/^\d{6}$/.test(begin.verification_code)) {
+    throw new Error(`qr-login/begin returned an incomplete response: ${JSON.stringify(begin)}`);
+  }
+
+  const requesteeUrl = new URL(begin.url);
+  const requesteeToken = requesteeUrl.searchParams.get('token');
+  if (!requesteeToken || requesteeToken === begin.token) {
+    throw new Error('qr-login/begin did not issue a distinct requestee token');
+  }
+  const context = await requestJson('/auth/qr-login/context', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: requesteeToken }),
+  });
+  if (context.verification_code !== begin.verification_code) {
+    throw new Error('qr-login context code does not match the begin response');
+  }
+
+  let authenticateRequests = 0;
+  const authenticateBodies = [];
+  const countAuthenticate = (request) => {
+    if (new URL(request.url()).pathname === '/auth/qr-login/authenticate') {
+      authenticateRequests += 1;
+      authenticateBodies.push(request.postData());
+    }
+  };
+  page.on('request', countAuthenticate);
+  try {
+    await page.goto(begin.url, { waitUntil: 'networkidle0' });
+    await page.waitForSelector('[data-testid="qr-login-submit"]');
+
+    const displayedCode = await page.$eval('[data-testid="qr-login-code"]', (el) => el.textContent.trim());
+    if (displayedCode !== begin.verification_code) {
+      throw new Error(`QR page displayed ${displayedCode}, expected begin code ${begin.verification_code}`);
+    }
+    const disabled = await page.$eval('[data-testid="qr-login-submit"]', (el) => el.disabled);
+    if (!disabled || authenticateRequests !== 0) {
+      throw new Error(`QR login authenticated before consent (disabled=${disabled}, requests=${authenticateRequests})`);
+    }
+    console.log('✓ QR page displays the matching context code and requires explicit consent');
+
+    const authenticate = page.waitForResponse((r) => r.url().includes('/auth/qr-login/authenticate') &&
+      !r.url().includes('/finish'));
+    const finish = page.waitForResponse((r) => r.url().includes('/auth/qr-login/authenticate/finish'));
+    await page.click('[data-testid="qr-login-confirm"]');
+    await page.click('[data-testid="qr-login-submit"]');
+
+    const authenticateResponse = await authenticate;
+    if (authenticateResponse.status() !== 200) {
+      throw new Error(`qr-login/authenticate returned ${authenticateResponse.status()}: ${await authenticateResponse.text()}`);
+    }
+    if (!authenticateBodies.some((body) => JSON.parse(body).confirmed === true)) {
+      throw new Error('QR login authenticate request did not include confirmed: true');
+    }
+    const finishResponse = await finish;
+    if (finishResponse.status() !== 200) {
+      throw new Error(`qr-login/authenticate/finish returned ${finishResponse.status()}: ${await finishResponse.text()}`);
+    }
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const status = await requestJson(`/auth/qr-login/status?token=${encodeURIComponent(begin.token)}`);
+      if (status.session_id) {
+        console.log('✓ QR login completed and requester received its session');
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error('requester did not receive a QR-login session after authentication');
+  } finally {
+    page.off('request', countAuthenticate);
+  }
+}
+
+async function qrLoginContextFailureFailsClosed(page) {
+  await page.goto(`${BASE_URL}/qr-login?token=not-a-valid-qr-login-token`, { waitUntil: 'networkidle0' });
+  await page.waitForSelector('.qr-error');
+  if (await page.$('[data-testid="qr-login-submit"]')) {
+    throw new Error('QR login context failure exposed an authenticate action');
+  }
+  console.log('✓ QR login context failure fails closed');
+}
+
 async function main() {
   const browser = await puppeteer.launch({
     headless: true,
@@ -131,8 +223,11 @@ async function main() {
     await registerResidentCredential(page, client, authenticatorId);
     await logOut(client);
     await loginDiscoverable(page);
+    await logOut(client);
+    await qrLoginWithConsent(page);
+    await qrLoginContextFailureFailsClosed(page);
 
-    console.log('\nPASS: CDP resident-passkey register + discoverable login');
+    console.log('\nPASS: CDP resident-passkey register + discoverable + QR-consent login');
   } finally {
     await browser.close();
   }
