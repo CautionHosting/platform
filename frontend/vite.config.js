@@ -17,7 +17,7 @@ export default defineConfig(({ mode }) => {
     cookieDomainRewrite: ''
   }
   const proxy = Object.fromEntries(
-    ['/api', '/auth', '/ssh-keys', '/passkeys', '/health', '/.well-known'].map((path) => [
+    ['/api', '/auth', '/ssh-keys', '/pgp-keys', '/passkeys', '/health', '/.well-known'].map((path) => [
       path,
       { ...proxyOptions },
     ]),

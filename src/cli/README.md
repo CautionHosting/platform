@@ -98,6 +98,26 @@ the normal login flow. If `CAUTION_SSH_SIGNING_KEY` is unset, the CLI checks
 `GIT_SSH_COMMAND`, `git config core.sshCommand`, and then default `~/.ssh/id_*`
 keys when a `caution` git remote exists.
 
+### Account PGP Keys
+
+Export an armored OpenPGP public certificate and associate it with your Caution
+account:
+
+```sh
+gpg --armor --export <fingerprint> > public-key.asc
+caution pgp-keys add public-key.asc --name "Work key"
+caution pgp-keys list
+caution pgp-keys remove <fingerprint>
+```
+
+Adding or removing a key requires WebAuthn approval. Pass `--qr` to approve with
+a passkey on another device. Removal hides the key from the active list but
+retains its public certificate and linked add/remove authorization records for
+audit history. The CLI rejects private key material locally, and the gateway
+parses, normalizes, and fingerprints the public certificate again before storing
+it. Each file must contain exactly one public certificate and be no larger than
+64 KiB.
+
 ### Encrypt Env Secrets
 
 After generating a quorum bundle with Keymaker, encrypt local `.env` values into

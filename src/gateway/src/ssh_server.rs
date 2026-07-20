@@ -1037,7 +1037,7 @@ async fn handle_git_push(
         };
 
         let success_msg = format!(
-            "\nApplication: {}\nAttestation: {}{}\n\nRun 'caution verify' to verify the application attestation.\n\n",
+            "\nApplication: {}\nAttestation: {}{}\n\nRun 'caution verify --from-local' to verify the application attestation against this checkout.\n\n",
             deploy_result.url, attestation_url, dns_note
         );
         let _ = session_handle

@@ -24,6 +24,7 @@ mod csrf;
 mod db;
 mod decoy;
 mod handlers;
+mod pgp;
 mod proxy;
 mod rate_limit;
 mod request_id;
@@ -161,6 +162,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         db: pool.clone(),
         webauthn,
+        relying_party_id: config.rp_id.clone(),
         api_service_url: config.api_service_url.clone(),
         metering_service_url: config.metering_service_url.clone(),
         reg_states: Arc::new(RwLock::new(HashMap::new())),
@@ -308,6 +310,9 @@ async fn main() -> Result<()> {
             get(handlers::get_username_status_handler),
         )
         .route("/user/username", post(handlers::claim_username_handler))
+        .route("/pgp-keys", post(handlers::add_pgp_key_handler))
+        .route("/pgp-keys", get(handlers::list_pgp_keys_handler))
+        .route("/pgp-keys/{id}", delete(handlers::remove_pgp_key_handler))
         // Added before (so innermost relative to) fido2_auth_middleware, so
         // it runs AFTER auth has resolved AuthenticatedUserId — order of
         // execution for an incoming request is sign -> auth -> gate -> handler.
