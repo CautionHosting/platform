@@ -1202,9 +1202,9 @@ enum SecretCommands {
     },
     #[command(about = "Generate a new cryptographic quorum")]
     New {
-        #[arg(help = "Path to armored PGP keyring file")]
-        keyring: PathBuf,
-        #[arg(long, requires = "max", help = "Minimum shares needed to reconstruct")]
+        #[arg(help = "Path to armored PGP keyring file (omit when using --from-org-users)")]
+        keyring: Option<PathBuf>,
+        #[arg(long, help = "Minimum shares needed to reconstruct")]
         threshold: Option<u8>,
         #[arg(
             long,
@@ -1222,6 +1222,20 @@ enum SecretCommands {
             value_name = "KEY=VALUE"
         )]
         labels: Vec<String>,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            value_name = "USER_ID[,USER_ID...]",
+            conflicts_with = "keyring",
+            help = "Generate from organization users instead of a local keyring"
+        )]
+        from_org_users: Vec<uuid::Uuid>,
+        #[arg(
+            long,
+            requires = "from_org_users",
+            help = "Use Caution-backed public certificates for all --from-org-users participants"
+        )]
+        caution_backed: bool,
     },
     #[command(about = "Encrypt env file values into .caution/secrets/*.asc")]
     Encrypt {
@@ -1657,6 +1671,66 @@ fn normalize_keyring(armored_keyring: &str) -> Result<String> {
             }
             keyring
         })
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct OrgUserQuorumParticipant {
+    user_id: uuid::Uuid,
+    key_source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pgp_key_id: Option<uuid::Uuid>,
+}
+
+fn org_user_quorum_request_body(
+    users: &[uuid::Uuid],
+    threshold: Option<u8>,
+    caution_backed: bool,
+    name: Option<String>,
+    labels: &[String],
+) -> Result<serde_json::Value> {
+    anyhow::ensure!(
+        !users.is_empty(),
+        "--from-org-users requires at least one organization user ID"
+    );
+    anyhow::ensure!(
+        caution_backed,
+        "--from-org-users currently requires --caution-backed until existing PGP user selection is implemented"
+    );
+
+    let threshold = threshold.unwrap_or(1);
+    anyhow::ensure!(threshold > 0, "--threshold must be at least 1");
+    anyhow::ensure!(
+        usize::from(threshold) <= users.len(),
+        "--threshold cannot exceed selected organization user count"
+    );
+
+    let mut seen = HashSet::with_capacity(users.len());
+    for user in users {
+        anyhow::ensure!(seen.insert(*user), "duplicate organization user selected: {user}");
+    }
+
+    let label_map: serde_json::Map<String, serde_json::Value> = labels
+        .iter()
+        .filter_map(|label| label.split_once('='))
+        .map(|(key, value)| (key.to_string(), serde_json::Value::String(value.to_string())))
+        .collect();
+    let participants: Vec<OrgUserQuorumParticipant> = users
+        .iter()
+        .copied()
+        .map(|user_id| OrgUserQuorumParticipant {
+            user_id,
+            key_source: "caution_backed_pgp",
+            pgp_key_id: None,
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "name": name,
+        "threshold": threshold,
+        "participants": participants,
+        "allow_caution_backed_keys": true,
+        "labels": label_map,
+    }))
 }
 
 fn resolve_quorum_parameters(
@@ -8054,13 +8128,74 @@ enclave "default" {{
 
     async fn secret_new(
         &self,
-        keyring: PathBuf,
+        keyring: Option<PathBuf>,
         threshold: Option<u8>,
         max: Option<u8>,
         upload: bool,
         name: Option<String>,
         labels: Vec<String>,
+        from_org_users: Vec<uuid::Uuid>,
+        caution_backed: bool,
     ) -> Result<()> {
+        if !from_org_users.is_empty() {
+            anyhow::ensure!(
+                max.is_none(),
+                "--max is inferred from selected organization users when using --from-org-users"
+            );
+            anyhow::ensure!(
+                upload,
+                "--no-upload is not supported with --from-org-users because the API generates and stores the bundle"
+            );
+            let request_body = org_user_quorum_request_body(
+                &from_org_users,
+                threshold,
+                caution_backed,
+                name,
+                &labels,
+            )?;
+            let config = self.ensure_authenticated().await?;
+            eprintln!(
+                "Generating Caution-backed organization quorum (threshold={}, participants={})...",
+                request_body.get("threshold").and_then(|value| value.as_u64()).unwrap_or(1),
+                from_org_users.len()
+            );
+            let response = self
+                .signed_post(&config.session_id, "/api/quorum-bundles/from-org-users", &request_body)
+                .await?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let error = self.api_error_message(response).await;
+                bail!("Failed to generate organization quorum bundle ({status}): {error}");
+            }
+
+            let result: serde_json::Value = response.json().await?;
+            if let Some(id) = result.get("id") {
+                eprintln!("Quorum bundle stored successfully (bundle ID: {id})");
+            } else {
+                eprintln!("Quorum bundle stored successfully.");
+            }
+
+            let in_caution_repo = PathBuf::from("Procfile").exists()
+                || PathBuf::from(".caution/deployment.json").exists();
+            if in_caution_repo {
+                if let Some(data) = result.get("data") {
+                    let secret_path = PathBuf::from(".caution/quorum-bundle.json");
+                    fs::create_dir_all(".caution")?;
+                    fs::write(&secret_path, serde_json::to_string_pretty(data)?)
+                        .with_context(|| format!("Failed to write secret to {}", secret_path.display()))?;
+                    eprintln!("Saved to: {}", secret_path.display());
+                }
+            }
+
+            return Ok(());
+        }
+
+        anyhow::ensure!(
+            !caution_backed,
+            "--caution-backed requires --from-org-users"
+        );
+        let keyring = keyring.context("keyring path is required unless --from-org-users is used")?;
         let keymaker_url = std::env::var("KEYMAKER_URL")
             .context("KEYMAKER_URL environment variable is required")?;
 
@@ -8960,9 +9095,20 @@ pub async fn run() -> Result<(), RunError> {
                 no_upload,
                 name,
                 labels,
+                from_org_users,
+                caution_backed,
             } => {
                 client
-                    .secret_new(keyring, threshold, max, !no_upload, name, labels)
+                    .secret_new(
+                        keyring,
+                        threshold,
+                        max,
+                        !no_upload,
+                        name,
+                        labels,
+                        from_org_users,
+                        caution_backed,
+                    )
                     .await
                     .map_err(RunError::CommandDispatch)?;
             }
@@ -9006,8 +9152,9 @@ mod tests {
         AccountCommands, ApiClient, Cli, Commands, LoginUsernameError, PgpKeyCommands,
         RegisterUsernameError, RunError, encrypt_env_file, encrypt_secret_value,
         keymaker_cert_eligibility, load_recipient_cert, login_begin_request_body,
-        normalize_keyring, parse_env_assignments, prepare_pgp_public_key_for_upload,
-        prompt_line_from, prompt_optional_line_from, resolve_local_build_command_from_dir,
+        normalize_keyring, org_user_quorum_request_body, parse_env_assignments,
+        prepare_pgp_public_key_for_upload, prompt_line_from, prompt_optional_line_from,
+        resolve_local_build_command_from_dir,
         resolve_login_username, resolve_procfile_build_command, resolve_quorum_parameters,
         resolve_register_username, validate_global_qr,
     };
@@ -9224,6 +9371,87 @@ UNREQUESTED=nope\n",
         );
         assert!(!secrets_dir.join("EMPTY.asc").exists());
         assert!(!secrets_dir.join("UNREQUESTED.asc").exists());
+    }
+
+    #[test]
+    fn org_user_quorum_request_body_uses_caution_backed_source_and_labels() {
+        let user_a = uuid::Uuid::from_u128(1);
+        let user_b = uuid::Uuid::from_u128(2);
+        let body = org_user_quorum_request_body(
+            &[user_a, user_b],
+            Some(2),
+            true,
+            Some("prod".to_string()),
+            &["env=prod".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(body["name"], "prod");
+        assert_eq!(body["threshold"], 2);
+        assert_eq!(body["allow_caution_backed_keys"], true);
+        assert_eq!(body["labels"]["env"], "prod");
+        assert_eq!(body["participants"].as_array().unwrap().len(), 2);
+        assert_eq!(body["participants"][0]["user_id"], user_a.to_string());
+        assert_eq!(body["participants"][0]["key_source"], "caution_backed_pgp");
+    }
+
+    #[test]
+    fn org_user_quorum_request_body_requires_explicit_caution_backed_flag() {
+        let err = org_user_quorum_request_body(
+            &[uuid::Uuid::from_u128(1)],
+            Some(1),
+            false,
+            None,
+            &[],
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("requires --caution-backed"));
+    }
+
+    #[test]
+    fn cli_parses_secret_new_from_org_users_without_keyring() {
+        let user_a = uuid::Uuid::from_u128(1);
+        let user_b = uuid::Uuid::from_u128(2);
+        let users = format!("{user_a},{user_b}");
+        let cli = Cli::try_parse_from([
+            "caution",
+            "secret",
+            "new",
+            "--from-org-users",
+            users.as_str(),
+            "--caution-backed",
+            "--threshold",
+            "2",
+            "--name",
+            "prod",
+            "--label",
+            "env=prod",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Secret {
+                command:
+                    super::SecretCommands::New {
+                        keyring,
+                        threshold,
+                        from_org_users,
+                        caution_backed,
+                        name,
+                        labels,
+                        ..
+                    },
+            } => {
+                assert!(keyring.is_none());
+                assert_eq!(threshold, Some(2));
+                assert_eq!(from_org_users, vec![user_a, user_b]);
+                assert!(caution_backed);
+                assert_eq!(name.as_deref(), Some("prod"));
+                assert_eq!(labels, vec!["env=prod"]);
+            }
+            _ => panic!("expected secret new command"),
+        }
     }
 
     #[test]
