@@ -4,9 +4,83 @@
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use uuid::Uuid;
+
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Proofed<T> {
+    data: T,
+    necroproof: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "version")]
+enum PublicCertificateBundle {
+    V1(PublicCertificateBundleV1),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PublicCertificateBundleV1 {
+    organization_id: [u8; 16],
+    bundle_id: [u8; 16],
+    certificates: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "version")]
+enum PublicCertificateRequest {
+    V1(PublicCertificateRequestV1),
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct PublicCertificateRequestV1 {
+    organization_id: [u8; 16],
+    certificate_count: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "version")]
+enum GenerateQuorumBundle {
+    V1(GenerateQuorumBundleV1),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GenerateQuorumBundleV1 {
+    bundle_id: [u8; 16],
+    label: HashMap<String, String>,
+    keyring: Vec<KeymakerKey>,
+    shardfile: String,
+    public_key: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "version")]
+enum GenerateQuorumRequest {
+    V1(GenerateQuorumRequestV1),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GenerateQuorumRequestV1 {
+    bundle_id: [u8; 16],
+    label: HashMap<String, String>,
+    threshold: u8,
+    max: u8,
+    keyring: Vec<KeymakerKey>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum KeymakerKey {
+    OpenPGP { cert: String },
+}
+
+type PublicCertificateResponse = Proofed<PublicCertificateBundle>;
+type GenerateQuorumResponse = Proofed<GenerateQuorumBundle>;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -189,18 +263,14 @@ pub async fn generate_org_quorum_bundle(
     validate_org_quorum_request(&request).map_err(ValidateOrgQuorumRequestError::into_api_error)?;
     let _key_service_endpoints =
         key_service_endpoints_from_env().map_err(KeyServiceEndpointConfigError::into_api_error)?;
-    verify_request_membership_and_keys(pool, org_id, &request).await?;
-
-    // PR 1 records the user-facing API/CLI contract and validates organization
-    // participants. The follow-up service-integration slice will replace this
-    // contract-shaped payload with Keymaker v1 output from caution/locksmith#15.
-    let data = serde_json::json!({
-        "format": "caution.org_user_quorum.v1.requested",
-        "locksmith_interface": "GenerateQuorumRequest::V1",
-        "source": "organization_users",
-        "threshold": request.threshold,
-        "participants": request.participants,
-    });
+    let existing_keys = verify_request_membership_and_keys(pool, org_id, &request).await?;
+    let keymaker_response = generate_keymaker_bundle(&request, org_id, &_key_service_endpoints, existing_keys).await?;
+    let data = serde_json::to_value(keymaker_response).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to serialize keymaker quorum response: {e}"),
+        )
+    })?;
 
     crate::cryptographic_bundles::create_quorum_bundle(
         pool,
@@ -219,7 +289,9 @@ async fn verify_request_membership_and_keys(
     pool: &PgPool,
     org_id: Uuid,
     request: &GenerateOrgQuorumBundleRequest,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<HashMap<Uuid, String>, (StatusCode, String)> {
+    let mut existing_keys = HashMap::new();
+
     for participant in &request.participants {
         let member_exists: bool = sqlx::query_scalar(
             "SELECT EXISTS (
@@ -252,27 +324,26 @@ async fn verify_request_membership_and_keys(
                     }
                     .into_api_error()
                 })?;
-                let key_exists: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (
-                        SELECT 1 FROM pgp_keys
-                        WHERE id = $1 AND user_id = $2
-                    )",
+                let public_key: Option<String> = sqlx::query_scalar(
+                    "SELECT public_key FROM pgp_keys
+                     WHERE id = $1 AND user_id = $2 AND removed_at IS NULL",
                 )
                 .bind(pgp_key_id)
                 .bind(participant.user_id)
-                .fetch_one(pool)
+                .fetch_optional(pool)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-                if !key_exists {
-                    return Err((
+                let public_key = public_key.ok_or_else(|| {
+                    (
                         StatusCode::BAD_REQUEST,
                         format!(
-                            "PGP key {} does not belong to organization user {}",
+                            "PGP key {} does not belong to active organization user {}",
                             pgp_key_id, participant.user_id
                         ),
-                    ));
-                }
+                    )
+                })?;
+                existing_keys.insert(participant.user_id, public_key);
             }
             OrgQuorumKeySource::CautionBackedPgp => {
                 // The public certificate service derives the final certificate in the next
@@ -282,7 +353,183 @@ async fn verify_request_membership_and_keys(
         }
     }
 
-    Ok(())
+    Ok(existing_keys)
+}
+
+fn labels_to_map(labels: &serde_json::Value, name: Option<&str>) -> HashMap<String, String> {
+    let mut label = HashMap::new();
+    if let Some(name) = name {
+        label.insert("name".to_string(), name.to_string());
+    }
+    if let Some(labels) = labels.as_object() {
+        for (key, value) in labels {
+            match value {
+                serde_json::Value::String(value) => {
+                    label.insert(key.clone(), value.clone());
+                }
+                other => {
+                    label.insert(key.clone(), other.to_string());
+                }
+            }
+        }
+    }
+    label
+}
+
+fn keymaker_url(base_url: &str) -> Result<String, (StatusCode, String)> {
+    Ok(format!("{}/generate_quorum", base_url.trim_end_matches('/')))
+}
+
+fn public_certificate_url(base_url: &str) -> Result<String, (StatusCode, String)> {
+    Ok(format!(
+        "{}/v1/public-certificates",
+        base_url.trim_end_matches('/')
+    ))
+}
+
+fn keymaker_request_from_certificates(
+    request: &GenerateOrgQuorumBundleRequest,
+    bundle_id: Uuid,
+    certificates: Vec<String>,
+) -> Result<GenerateQuorumRequest, (StatusCode, String)> {
+    let max = u8::try_from(certificates.len()).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "selected participant count cannot exceed 255".to_string(),
+        )
+    })?;
+    let keyring = certificates
+        .into_iter()
+        .map(|cert| KeymakerKey::OpenPGP { cert })
+        .collect();
+
+    Ok(GenerateQuorumRequest::V1(GenerateQuorumRequestV1 {
+        bundle_id: *bundle_id.as_bytes(),
+        label: labels_to_map(&request.labels, request.name.as_deref()),
+        threshold: request.threshold,
+        max,
+        keyring,
+    }))
+}
+
+async fn derive_caution_backed_certificates(
+    client: &reqwest::Client,
+    endpoints: &KeyServiceEndpoints,
+    org_id: Uuid,
+    count: u8,
+) -> Result<Vec<String>, (StatusCode, String)> {
+    let request = PublicCertificateRequest::V1(PublicCertificateRequestV1 {
+        organization_id: *org_id.as_bytes(),
+        certificate_count: count,
+    });
+    let response = client
+        .post(public_certificate_url(&endpoints.public_certificate_url)?)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("public certificate service request failed: {e}")))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_else(|_| "<unreadable body>".to_string());
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("public certificate service returned {status}: {body}"),
+        ));
+    }
+    let response: PublicCertificateResponse = response.json().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("public certificate service returned invalid response: {e}"),
+        )
+    })?;
+    let PublicCertificateBundle::V1(bundle) = response.data;
+    if bundle.organization_id != *org_id.as_bytes() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "public certificate service returned a bundle for the wrong organization".to_string(),
+        ));
+    }
+    if bundle.certificates.len() != usize::from(count) {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "public certificate service returned {} certificates, expected {count}",
+                bundle.certificates.len()
+            ),
+        ));
+    }
+    Ok(bundle.certificates)
+}
+
+async fn generate_keymaker_bundle(
+    request: &GenerateOrgQuorumBundleRequest,
+    org_id: Uuid,
+    endpoints: &KeyServiceEndpoints,
+    existing_keys: HashMap<Uuid, String>,
+) -> Result<GenerateQuorumResponse, (StatusCode, String)> {
+    let client = reqwest::Client::new();
+    let caution_backed_count = request
+        .participants
+        .iter()
+        .filter(|participant| participant.key_source == OrgQuorumKeySource::CautionBackedPgp)
+        .count();
+    let caution_backed_count = u8::try_from(caution_backed_count).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "selected Caution-backed participant count cannot exceed 255".to_string(),
+        )
+    })?;
+    let caution_backed_certs = if caution_backed_count > 0 {
+        derive_caution_backed_certificates(&client, endpoints, org_id, caution_backed_count).await?
+    } else {
+        Vec::new()
+    };
+    let mut caution_backed_certs = caution_backed_certs.into_iter();
+    let mut certificates = Vec::with_capacity(request.participants.len());
+    for participant in &request.participants {
+        match participant.key_source {
+            OrgQuorumKeySource::ExistingPgp => {
+                let cert = existing_keys.get(&participant.user_id).ok_or_else(|| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("missing verified PGP key for user {}", participant.user_id),
+                    )
+                })?;
+                certificates.push(cert.clone());
+            }
+            OrgQuorumKeySource::CautionBackedPgp => {
+                let cert = caution_backed_certs.next().ok_or_else(|| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        "public certificate service returned too few certificates".to_string(),
+                    )
+                })?;
+                certificates.push(cert);
+            }
+        }
+    }
+
+    let keymaker_request = keymaker_request_from_certificates(request, Uuid::new_v4(), certificates)?;
+    let response = client
+        .post(keymaker_url(&endpoints.keymaker_url)?)
+        .json(&keymaker_request)
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("keymaker request failed: {e}")))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_else(|_| "<unreadable body>".to_string());
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("keymaker returned {status}: {body}"),
+        ));
+    }
+    response.json().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("keymaker returned invalid response: {e}"),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -307,6 +554,43 @@ mod tests {
             key_source: OrgQuorumKeySource::CautionBackedPgp,
             pgp_key_id: None,
         }
+    }
+
+    #[test]
+    fn builds_keymaker_v1_request_from_selected_certificates() {
+        let request = GenerateOrgQuorumBundleRequest {
+            name: Some("prod".to_string()),
+            threshold: 2,
+            participants: vec![caution_backed(uuid(1)), caution_backed(uuid(2))],
+            allow_caution_backed_keys: true,
+            labels: serde_json::json!({"env": "prod"}),
+        };
+        let bundle_id = uuid(9);
+
+        let keymaker_request = keymaker_request_from_certificates(
+            &request,
+            bundle_id,
+            vec!["cert-a".to_string(), "cert-b".to_string()],
+        )
+        .unwrap();
+
+        let GenerateQuorumRequest::V1(request) = keymaker_request;
+        assert_eq!(request.bundle_id, *bundle_id.as_bytes());
+        assert_eq!(request.threshold, 2);
+        assert_eq!(request.max, 2);
+        assert_eq!(request.label.get("name").unwrap(), "prod");
+        assert_eq!(request.label.get("env").unwrap(), "prod");
+        assert_eq!(
+            request.keyring,
+            vec![
+                KeymakerKey::OpenPGP {
+                    cert: "cert-a".to_string(),
+                },
+                KeymakerKey::OpenPGP {
+                    cert: "cert-b".to_string(),
+                },
+            ]
+        );
     }
 
     #[test]
