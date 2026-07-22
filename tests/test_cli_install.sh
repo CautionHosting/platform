@@ -36,6 +36,15 @@ assert_make_target() {
         fail "expected make target $expected, got $(tail -n 1 "$log")"
 }
 
+assert_installer_target() {
+    local target="$1" expected_mode="$2" recipe
+    recipe="$(awk -v target="$target:" '$0 == target { getline; print; exit }' "$REPO_ROOT/Makefile")"
+    case "$recipe" in
+        *"./scripts/install-cli.sh $expected_mode"*) ;;
+        *) fail "expected $target to invoke installer mode $expected_mode" ;;
+    esac
+}
+
 create_case() {
     local name="$1"
     CASE_DIR="$TEST_ROOT/$name"
@@ -184,8 +193,11 @@ assert_contains "$CASE_LOG" "unsupported platform Linux/arm64"
 [ ! -e "$MAKE_LOG" ] || fail "unsupported platform started a build"
 
 announce "Makefile installer target wiring"
-assert_contains "$REPO_ROOT/Makefile" "./scripts/install-cli.sh auto"
-assert_contains "$REPO_ROOT/Makefile" "./scripts/install-cli.sh stagex"
-assert_contains "$REPO_ROOT/Makefile" "./scripts/install-cli.sh host"
+assert_installer_target install-cli auto
+assert_installer_target install-cli-stagex stagex
+assert_installer_target install-cli-host host
+if grep -q '^install:' "$REPO_ROOT/Makefile"; then
+    fail "generic install target should not exist"
+fi
 
 echo "CLI installer tests passed"

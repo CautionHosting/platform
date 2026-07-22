@@ -43,7 +43,7 @@ select_build() {
             ;;
         stagex)
             [ "$HOST_OS:$HOST_ARCH" = "linux:x86_64" ] || \
-                die "the StageX CLI can only be installed on Linux/x86_64; detected $HOST_OS/$HOST_ARCH. Use 'make install' to select the supported build automatically."
+                die "the StageX CLI can only be installed on Linux/x86_64; detected $HOST_OS/$HOST_ARCH. Use 'make install-cli' to select the supported build automatically."
             SELECTED_BUILD="stagex"
             ;;
         host)

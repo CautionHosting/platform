@@ -45,7 +45,7 @@ architecture, then selects the StageX build on Linux/x86_64 or the
 host-toolchain build on macOS/arm64:
 
 ```bash
-make install
+make install-cli
 ```
 
 If you need local PC/SC support for locksmith shard submission, use the

@@ -3,7 +3,7 @@
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install install-cli install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-cli-install test-e2e test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install-cli install-cli-stagex install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-cli-install test-e2e test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -390,10 +390,10 @@ reproduce-cli:
 	@diff -q $(CLI_OUT_DIR)/manifest.txt dist/cli/manifest.txt
 	@echo "Reproduction successful - manifests match"
 
-install:
+install-cli:
 	+@MAKE="$(MAKE)" CLI_OUT_DIR="$(CLI_OUT_DIR)" CLI_INSTALL_DIR="$(CLI_INSTALL_DIR)" ./scripts/install-cli.sh auto
 
-install-cli:
+install-cli-stagex:
 	+@MAKE="$(MAKE)" CLI_OUT_DIR="$(CLI_OUT_DIR)" CLI_INSTALL_DIR="$(CLI_INSTALL_DIR)" ./scripts/install-cli.sh stagex
 
 install-cli-host:

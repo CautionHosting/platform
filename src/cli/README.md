@@ -26,9 +26,9 @@ and C dependencies listed in the `make install-cli-host` error messages.
 
 ### Build Compatibility
 
-The `make build-cli` and `make install-cli` targets use the StageX-based
-reproducible build. The automatic `make install` command selects this build on
-Linux/x86_64 and the host-toolchain build on macOS/arm64.
+The `make build-cli` and `make install-cli-stagex` targets use the StageX-based
+reproducible build. The automatic `make install-cli` command selects this build
+on Linux/x86_64 and the host-toolchain build on macOS/arm64.
 
 The locksmith shard-sending flow, `caution secret send-shard`, currently only
 works with the host-toolchain build:
@@ -66,7 +66,7 @@ selects the supported build, and installs it to a writable binary directory:
 ```sh
 git clone https://codeberg.org/caution/platform
 cd platform
-make install
+make install-cli
 ```
 
 If you need to send locksmith shards with `caution secret send-shard`, use the
