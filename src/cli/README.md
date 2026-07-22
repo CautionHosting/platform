@@ -14,35 +14,36 @@ Please choose the installation method that's appropriate for your threat model a
 
 ### Prerequisites
 
-The Makefile assumes the presence of a few basic tools:
+Every installation path requires:
 
 - `make`
 - `bash`
-- `Docker` with BuildKit and the containerd image store enabled
 
-The default installation path is Linux/x86_64-oriented because it runs the
-StageX container build. The untrusted host-toolchain build also requires the
-native Rust and C dependencies listed in the `make install-cli-untrusted` error
-messages.
+On Linux/x86_64, the automatic installer selects the StageX build, which
+requires Docker with BuildKit and the containerd image store enabled. On
+macOS/arm64, it selects the host-toolchain build, which requires the native Rust
+and C dependencies listed in the `make install-cli-host` error messages.
 
 ### Build Compatibility
 
-The default `make build-cli` and `make install-cli` path uses the StageX-based
-reproducible build. That binary works for CLI workflows that do not send
-locksmith shards.
+The `make build-cli` and `make install-cli` targets use the StageX-based
+reproducible build. The automatic `make install` command selects this build on
+Linux/x86_64 and the host-toolchain build on macOS/arm64.
 
 The locksmith shard-sending flow, `caution secret send-shard`, currently only
-works with the host-toolchain untrusted build:
+works with the host-toolchain build:
 
 ```sh
-make install-cli-untrusted
+make install-cli-host
 ```
 
 The current StageX build is statically linked with musl, and this path can fail
 when `pcscdaemon` or the PC/SC stack tries to load
 `libpcsclite_real.so.1`, with an error like `Dynamic loading not supported`.
-The untrusted build links against the host's native C library (glibc on most
-Linux distributions) and PC/SC stack, which avoids this issue.
+The host build links against the host's native C library (glibc on most Linux
+distributions) and PC/SC stack, which avoids this issue. It is not built through
+the StageX reproducible pipeline, so bit-for-bit reproducibility is not
+guaranteed or verified.
 
 ### Blind Trust
 
@@ -59,24 +60,24 @@ anti-pattern when it comes to good security practices.
 
 #### From Source
 
-This is the quickest install path. It builds the release-style StageX CLI in
-Docker and installs it to `$HOME/.local/bin/caution`.
+This is the quickest install path. The installer detects the host platform,
+selects the supported build, and installs it to a writable binary directory:
 
 ```sh
 git clone https://codeberg.org/caution/platform
 cd platform
-make install-cli
+make install
 ```
 
 If you need to send locksmith shards with `caution secret send-shard`, use the
 host-toolchain build instead. That path links against the host PC/SC stack and
-installs to a writable binary directory, defaulting to `$HOME/.local/bin`:
+requires a one-time acknowledgement that it is not built through StageX:
 
 ```sh
-make install-cli-untrusted
+make install-cli-host
 ```
 
-On Linux, the untrusted build needs development packages for clang/libclang,
+On Linux, the host build needs development packages for clang/libclang,
 pkg-config, nettle, GMP, OpenSSL, libudev, and PC/SC. On macOS, it checks for
 Homebrew or MacPorts equivalents and prints install hints when packages are
 missing.

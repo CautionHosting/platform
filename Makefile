@@ -3,7 +3,7 @@
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install install-cli install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-cli-install test-e2e test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -85,34 +85,12 @@ build-frontend-dist:
 # CLI release variables
 CLI_VERSION := $(shell grep '^version' src/cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
 CLI_BINARY := caution-linux-x86_64
-CLI_UNTRUSTED_OS := $(shell uname -s | sed -e 's/^Darwin$$/macos/' -e 's/^Linux$$/linux/' -e 's/^FreeBSD$$/freebsd/' -e 's/^OpenBSD$$/openbsd/' -e 's/^NetBSD$$/netbsd/' -e 's/^MINGW.*/windows/' -e 's/^MSYS.*/windows/' -e 's/^CYGWIN.*/windows/' | tr '[:upper:]' '[:lower:]')
-CLI_UNTRUSTED_ARCH := $(shell uname -m | sed -e 's/^aarch64$$/arm64/' -e 's/^amd64$$/x86_64/')
-CLI_UNTRUSTED_EXE_SUFFIX := $(shell uname -s | sed -n -e 's/^MINGW.*/.exe/p' -e 's/^MSYS.*/.exe/p' -e 's/^CYGWIN.*/.exe/p')
-CLI_UNTRUSTED_BINARY := caution-$(CLI_UNTRUSTED_OS)-$(CLI_UNTRUSTED_ARCH)-untrusted$(CLI_UNTRUSTED_EXE_SUFFIX)
+CLI_HOST_OS := $(shell uname -s | sed -e 's/^Darwin$$/macos/' -e 's/^Linux$$/linux/' -e 's/^FreeBSD$$/freebsd/' -e 's/^OpenBSD$$/openbsd/' -e 's/^NetBSD$$/netbsd/' -e 's/^MINGW.*/windows/' -e 's/^MSYS.*/windows/' -e 's/^CYGWIN.*/windows/' | tr '[:upper:]' '[:lower:]')
+CLI_HOST_ARCH := $(shell uname -m | sed -e 's/^aarch64$$/arm64/' -e 's/^amd64$$/x86_64/')
+CLI_HOST_EXE_SUFFIX := $(shell uname -s | sed -n -e 's/^MINGW.*/.exe/p' -e 's/^MSYS.*/.exe/p' -e 's/^CYGWIN.*/.exe/p')
+CLI_HOST_BINARY := caution-$(CLI_HOST_OS)-$(CLI_HOST_ARCH)-host$(CLI_HOST_EXE_SUFFIX)
 CLI_OUT_DIR := $(OUT_DIR)/cli
-CLI_UNTRUSTED_INSTALL_DIR ?= $(shell \
-	if [ "$(CLI_UNTRUSTED_OS)" = "macos" ]; then \
-		caution_path=$$(command -v caution 2>/dev/null || true); \
-		if [ -n "$$caution_path" ] && [ -f "$$caution_path" ]; then \
-			caution_dir=$$(dirname "$$caution_path"); \
-			if [ -d "$$caution_dir" ] && [ -w "$$caution_dir" ]; then \
-				printf '%s\n' "$$caution_dir"; \
-				exit 0; \
-			fi; \
-		fi; \
-		for dir in "$$HOME/.local/bin" "/opt/homebrew/bin" "/usr/local/bin"; do \
-			parent_dir=$$(dirname "$$dir"); \
-			if [ -d "$$dir" ] && [ -w "$$dir" ]; then \
-				printf '%s\n' "$$dir"; \
-				exit 0; \
-			fi; \
-			if [ ! -e "$$dir" ] && [ -d "$$parent_dir" ] && [ -w "$$parent_dir" ]; then \
-				printf '%s\n' "$$dir"; \
-				exit 0; \
-			fi; \
-		done; \
-	fi; \
-	printf '%s\n' "$$HOME/.local/bin")
+CLI_INSTALL_DIR ?=
 GIT_REF := $(shell git log -1 --format=%H)
 GIT_AUTHOR := $(shell git log -1 --format=%an)
 GIT_PUBKEY := $(shell git log -1 --format=%GK)
@@ -149,8 +127,8 @@ build-cli:
 	@docker rm cli-extract
 	@echo "CLI binary available at $(CLI_OUT_DIR)/$(CLI_BINARY)"
 
-build-cli-untrusted:
-	@echo "Building untrusted CLI binary with the local host toolchain..."
+build-cli-host:
+	@echo "Building CLI binary with the local host toolchain..."
 	@set -e; \
 	if ! command -v cargo >/dev/null 2>&1; then \
 		echo "Missing cargo."; \
@@ -311,8 +289,8 @@ build-cli-untrusted:
 	OPENSSL_NO_VENDOR=1 \
 	CARGO_NET_GIT_FETCH_WITH_CLI=true \
 	cargo build --release --locked -p cli; \
-	install -m 0755 target/release/caution$(CLI_UNTRUSTED_EXE_SUFFIX) $(CLI_OUT_DIR)/$(CLI_UNTRUSTED_BINARY)
-	@echo "Untrusted CLI binary available at $(CLI_OUT_DIR)/$(CLI_UNTRUSTED_BINARY)"
+	install -m 0755 target/release/caution$(CLI_HOST_EXE_SUFFIX) $(CLI_OUT_DIR)/$(CLI_HOST_BINARY)
+	@echo "Host-toolchain CLI binary available at $(CLI_OUT_DIR)/$(CLI_HOST_BINARY)"
 
 release-cli:
 	@$(MAKE) build-cli NOCACHE=1
@@ -412,37 +390,14 @@ reproduce-cli:
 	@diff -q $(CLI_OUT_DIR)/manifest.txt dist/cli/manifest.txt
 	@echo "Reproduction successful - manifests match"
 
-install-cli: build-cli
-	@install -D -m 0755 $(CLI_OUT_DIR)/$(CLI_BINARY) $(HOME)/.local/bin/caution
-	@echo "Installed caution to $(HOME)/.local/bin/caution"
+install:
+	+@MAKE="$(MAKE)" CLI_OUT_DIR="$(CLI_OUT_DIR)" CLI_INSTALL_DIR="$(CLI_INSTALL_DIR)" ./scripts/install-cli.sh auto
 
-install-cli-untrusted: build-cli-untrusted
-	@DEST_DIR="$(CLI_UNTRUSTED_INSTALL_DIR)"; \
-	mkdir -p "$$DEST_DIR"; \
-	if [ ! -d "$$DEST_DIR" ]; then \
-		echo "Error: $$DEST_DIR does not exist."; \
-		exit 1; \
-	fi; \
-	if [ ! -w "$$DEST_DIR" ]; then \
-		echo "Error: $$DEST_DIR is not writable."; \
-		exit 1; \
-	fi; \
-	install -m 0755 $(CLI_OUT_DIR)/$(CLI_UNTRUSTED_BINARY) "$$DEST_DIR/caution"; \
-	echo "Installed untrusted caution to $$DEST_DIR/caution"; \
-	if [ "$(CLI_UNTRUSTED_OS)" = "macos" ]; then \
-		resolved_caution=$$(command -v caution 2>/dev/null || true); \
-		if [ "$$resolved_caution" != "$$DEST_DIR/caution" ]; then \
-			echo ""; \
-			if [ -n "$$resolved_caution" ]; then \
-				echo "caution resolves to $$resolved_caution, not $$DEST_DIR/caution."; \
-			else \
-				echo "$$DEST_DIR is not on your PATH."; \
-			fi; \
-			echo "Use it in the current shell with:"; \
-			echo "  export PATH=\"$$DEST_DIR:\$$PATH\""; \
-			echo "To persist it, add that line to ~/.zshrc or your shell config and reload your shell."; \
-		fi; \
-	fi
+install-cli:
+	+@MAKE="$(MAKE)" CLI_OUT_DIR="$(CLI_OUT_DIR)" CLI_INSTALL_DIR="$(CLI_INSTALL_DIR)" ./scripts/install-cli.sh stagex
+
+install-cli-host:
+	+@MAKE="$(MAKE)" CLI_OUT_DIR="$(CLI_OUT_DIR)" CLI_INSTALL_DIR="$(CLI_INSTALL_DIR)" ./scripts/install-cli.sh host
 
 build-all: build-gateway build-api build-email build-metering build-cli
 
@@ -767,6 +722,9 @@ prepare-byoc-provisioner:
 test-unit:
 	cargo test --workspace
 
+test-cli-install:
+	@bash tests/test_cli_install.sh
+
 test-e2e:
 	@$(MAKE) build-cli
 	@$(MAKE) up-test
@@ -989,4 +947,4 @@ test-paddle-sandbox:
 	@echo "Uses PADDLE_API_KEY and PADDLE_API_URL from .env"
 	cargo test --package metering -- sandbox --nocapture
 
-test: test-unit
+test: test-unit test-cli-install
