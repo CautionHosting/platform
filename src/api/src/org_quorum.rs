@@ -8,7 +8,6 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use uuid::Uuid;
 
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Proofed<T> {
@@ -58,13 +57,13 @@ struct GenerateQuorumBundleV1 {
     public_key: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "version")]
 enum GenerateQuorumRequest {
     V1(GenerateQuorumRequestV1),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct GenerateQuorumRequestV1 {
     bundle_id: [u8; 16],
@@ -264,7 +263,8 @@ pub async fn generate_org_quorum_bundle(
     let _key_service_endpoints =
         key_service_endpoints_from_env().map_err(KeyServiceEndpointConfigError::into_api_error)?;
     let existing_keys = verify_request_membership_and_keys(pool, org_id, &request).await?;
-    let keymaker_response = generate_keymaker_bundle(&request, org_id, &_key_service_endpoints, existing_keys).await?;
+    let keymaker_response =
+        generate_keymaker_bundle(&request, org_id, &_key_service_endpoints, existing_keys).await?;
     let data = serde_json::to_value(keymaker_response).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -346,9 +346,8 @@ async fn verify_request_membership_and_keys(
                 existing_keys.insert(participant.user_id, public_key);
             }
             OrgQuorumKeySource::CautionBackedPgp => {
-                // The public certificate service derives the final certificate in the next
-                // service-integration slice. For PR 1 the API only accepts this source with
-                // explicit opt-in and active org membership.
+                // Membership was already verified above; certificates for these participants are
+                // derived by the configured public certificate service in request order.
             }
         }
     }
@@ -376,15 +375,12 @@ fn labels_to_map(labels: &serde_json::Value, name: Option<&str>) -> HashMap<Stri
     label
 }
 
-fn keymaker_url(base_url: &str) -> Result<String, (StatusCode, String)> {
-    Ok(format!("{}/generate_quorum", base_url.trim_end_matches('/')))
+fn keymaker_url(base_url: &str) -> String {
+    format!("{}/generate_quorum", base_url.trim_end_matches('/'))
 }
 
-fn public_certificate_url(base_url: &str) -> Result<String, (StatusCode, String)> {
-    Ok(format!(
-        "{}/v1/public-certificates",
-        base_url.trim_end_matches('/')
-    ))
+fn public_certificate_url(base_url: &str) -> String {
+    format!("{}/v1/public-certificates", base_url.trim_end_matches('/'))
 }
 
 fn keymaker_request_from_certificates(
@@ -423,14 +419,22 @@ async fn derive_caution_backed_certificates(
         certificate_count: count,
     });
     let response = client
-        .post(public_certificate_url(&endpoints.public_certificate_url)?)
+        .post(public_certificate_url(&endpoints.public_certificate_url))
         .json(&request)
         .send()
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("public certificate service request failed: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("public certificate service request failed: {e}"),
+            )
+        })?;
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_else(|_| "<unreadable body>".to_string());
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable body>".to_string());
         return Err((
             StatusCode::BAD_GATEWAY,
             format!("public certificate service returned {status}: {body}"),
@@ -509,16 +513,25 @@ async fn generate_keymaker_bundle(
         }
     }
 
-    let keymaker_request = keymaker_request_from_certificates(request, Uuid::new_v4(), certificates)?;
+    let keymaker_request =
+        keymaker_request_from_certificates(request, Uuid::new_v4(), certificates)?;
     let response = client
-        .post(keymaker_url(&endpoints.keymaker_url)?)
+        .post(keymaker_url(&endpoints.keymaker_url))
         .json(&keymaker_request)
         .send()
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("keymaker request failed: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("keymaker request failed: {e}"),
+            )
+        })?;
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_else(|_| "<unreadable body>".to_string());
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable body>".to_string());
         return Err((
             StatusCode::BAD_GATEWAY,
             format!("keymaker returned {status}: {body}"),
@@ -535,6 +548,10 @@ async fn generate_keymaker_bundle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Json, Router, extract::State, routing::post};
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
 
     fn uuid(n: u128) -> Uuid {
         Uuid::from_u128(n)
@@ -591,6 +608,120 @@ mod tests {
                 },
             ]
         );
+    }
+
+    async fn spawn_json_mock<F>(handler: F) -> String
+    where
+        F: Fn(serde_json::Value) -> serde_json::Value + Send + Sync + 'static,
+    {
+        let handler = Arc::new(handler);
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                post(
+                    |State(handler): State<
+                        Arc<dyn Fn(serde_json::Value) -> serde_json::Value + Send + Sync>,
+                    >,
+                     Json(body): Json<serde_json::Value>| async move {
+                        Json(handler(body))
+                    },
+                ),
+            )
+            .with_state(
+                handler as Arc<dyn Fn(serde_json::Value) -> serde_json::Value + Send + Sync>,
+            );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn org_quorum_service_contract_calls_public_cert_then_keymaker_v1() {
+        let org_id = uuid(42);
+        let public_cert_requests = Arc::new(Mutex::new(Vec::new()));
+        let keymaker_requests = Arc::new(Mutex::new(Vec::new()));
+
+        let public_cert_requests_for_handler = Arc::clone(&public_cert_requests);
+        let public_cert_url = spawn_json_mock(move |body| {
+            public_cert_requests_for_handler.lock().unwrap().push(body);
+            serde_json::json!({
+                "data": {
+                    "version": "V1",
+                    "organization_id": org_id.as_bytes(),
+                    "bundle_id": uuid(100).as_bytes(),
+                    "certificates": ["cert-a", "cert-b"]
+                },
+                "necroproof": [1, 2, 3]
+            })
+        })
+        .await;
+
+        let keymaker_requests_for_handler = Arc::clone(&keymaker_requests);
+        let keymaker_url = spawn_json_mock(move |body| {
+            keymaker_requests_for_handler
+                .lock()
+                .unwrap()
+                .push(body.clone());
+            assert_eq!(body["version"], "V1");
+            serde_json::json!({
+                "data": {
+                    "version": "V1",
+                    "bundle_id": body["bundle_id"],
+                    "label": body["label"],
+                    "keyring": body["keyring"],
+                    "shardfile": "mock-shardfile",
+                    "public_key": "mock-public-key"
+                },
+                "necroproof": [9, 8, 7]
+            })
+        })
+        .await;
+
+        let request = GenerateOrgQuorumBundleRequest {
+            name: Some("prod".to_string()),
+            threshold: 2,
+            participants: vec![caution_backed(uuid(1)), caution_backed(uuid(2))],
+            allow_caution_backed_keys: true,
+            labels: serde_json::json!({"env": "prod"}),
+        };
+        let endpoints = KeyServiceEndpoints {
+            keymaker_url,
+            public_certificate_url: public_cert_url,
+        };
+
+        let response = generate_keymaker_bundle(&request, org_id, &endpoints, HashMap::new())
+            .await
+            .unwrap();
+
+        assert_eq!(response.necroproof, vec![9, 8, 7]);
+        let GenerateQuorumBundle::V1(bundle) = response.data;
+        assert_eq!(bundle.label.get("name").unwrap(), "prod");
+        assert_eq!(bundle.label.get("env").unwrap(), "prod");
+        assert_eq!(bundle.shardfile, "mock-shardfile");
+        assert_eq!(bundle.public_key, "mock-public-key");
+
+        let public_cert_requests = public_cert_requests.lock().unwrap();
+        assert_eq!(public_cert_requests.len(), 1);
+        assert_eq!(public_cert_requests[0]["version"], "V1");
+        assert_eq!(
+            public_cert_requests[0]["organization_id"],
+            serde_json::json!(org_id.as_bytes())
+        );
+        assert_eq!(public_cert_requests[0]["certificate_count"], 2);
+
+        let keymaker_requests = keymaker_requests.lock().unwrap();
+        assert_eq!(keymaker_requests.len(), 1);
+        let keymaker_v1 = &keymaker_requests[0];
+        assert_eq!(keymaker_v1["version"], "V1");
+        assert_eq!(keymaker_v1["threshold"], 2);
+        assert_eq!(keymaker_v1["max"], 2);
+        assert_eq!(keymaker_v1["label"]["name"], "prod");
+        assert_eq!(keymaker_v1["label"]["env"], "prod");
+        assert_eq!(keymaker_v1["keyring"][0]["OpenPGP"]["cert"], "cert-a");
+        assert_eq!(keymaker_v1["keyring"][1]["OpenPGP"]["cert"], "cert-b");
     }
 
     #[test]

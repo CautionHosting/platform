@@ -3172,6 +3172,18 @@ enclave "default" {{
         }
 
         let body_json = body;
+
+        if std::env::var_os("CAUTION_E2E_UNSIGNED_REQUESTS").is_some() {
+            return self
+                .client
+                .request(method, format!("{}{}", self.base_url, path))
+                .header("X-Session-ID", session_id)
+                .header("Content-Type", "application/json")
+                .body(body_json)
+                .send()
+                .await
+                .context("failed to send e2e unsigned request");
+        }
         let body_hash = hex::encode(Sha256::digest(&body_json));
         let method_name = method.as_str();
 
