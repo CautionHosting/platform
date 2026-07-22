@@ -38,6 +38,7 @@ mod managed_dns;
 mod metering;
 mod middleware;
 mod onboarding;
+mod org_quorum;
 mod organizations;
 mod provisioning;
 mod resources;
@@ -1197,6 +1198,20 @@ async fn create_quorum_bundle(
     let bundle = cryptographic_bundles::create_quorum_bundle(&state.db, org_id, auth.user_id, req)
         .await
         .with_context(Ctx::create())?;
+    Ok(Json(bundle))
+}
+
+async fn create_org_user_quorum_bundle(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<org_quorum::GenerateOrgQuorumBundleRequest>,
+) -> Result<Json<cryptographic_bundles::QuorumBundle>, (StatusCode, String)> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+
+    let bundle =
+        org_quorum::generate_org_quorum_bundle(&state.db, org_id, auth.user_id, req).await?;
     Ok(Json(bundle))
 }
 
@@ -5180,6 +5195,10 @@ async fn main() -> Result<(), MainError> {
         )
         .route("/quorum-bundles", get(list_quorum_bundles))
         .route("/quorum-bundles", post(create_quorum_bundle))
+        .route(
+            "/quorum-bundles/from-org-users",
+            post(create_org_user_quorum_bundle),
+        )
         .route("/quorum-bundles/{id}", get(get_quorum_bundle))
         .route("/quorum-bundles/{id}", patch(update_quorum_bundle))
         .route("/quorum-bundles/{id}", delete(delete_quorum_bundle))

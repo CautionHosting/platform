@@ -738,9 +738,9 @@ enum SecretCommands {
     },
     #[command(about = "Generate a new cryptographic quorum")]
     New {
-        #[arg(help = "Path to armored PGP keyring file")]
-        keyring: PathBuf,
-        #[arg(long, requires = "max", help = "Minimum shares needed to reconstruct")]
+        #[arg(help = "Path to armored PGP keyring file (omit when using --from-org-users)")]
+        keyring: Option<PathBuf>,
+        #[arg(long, help = "Minimum shares needed to reconstruct")]
         threshold: Option<u8>,
         #[arg(
             long,
@@ -758,6 +758,20 @@ enum SecretCommands {
             value_name = "KEY=VALUE"
         )]
         labels: Vec<String>,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            value_name = "USER_ID[,USER_ID...]",
+            conflicts_with = "keyring",
+            help = "Generate from organization users instead of a local keyring"
+        )]
+        from_org_users: Vec<uuid::Uuid>,
+        #[arg(
+            long,
+            requires = "from_org_users",
+            help = "Use Caution-backed public certificates for all --from-org-users participants"
+        )]
+        caution_backed: bool,
     },
     #[command(about = "Encrypt env file values into .caution/secrets/*.asc")]
     Encrypt {
@@ -3166,6 +3180,18 @@ enclave "default" {{
         }
 
         let body_json = body;
+
+        if std::env::var_os("CAUTION_E2E_UNSIGNED_REQUESTS").is_some() {
+            return self
+                .client
+                .request(method, format!("{}{}", self.base_url, path))
+                .header("X-Session-ID", session_id)
+                .header("Content-Type", "application/json")
+                .body(body_json)
+                .send()
+                .await
+                .context("failed to send e2e unsigned request");
+        }
         let body_hash = hex::encode(Sha256::digest(&body_json));
         let method_name = method.as_str();
 
@@ -3830,6 +3856,8 @@ pub async fn run() -> Result<(), RunError> {
                 no_upload,
                 name,
                 labels,
+                from_org_users,
+                caution_backed,
             } => {
                 secrets::new(&client, keyring, threshold, max, !no_upload, name, labels)
                     .await
