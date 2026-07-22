@@ -3,7 +3,7 @@
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: admin build-admin build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install-cli install-cli-stagex install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-live-caddy-nitro test-cli-install test-e2e test-e2e-admin test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-reset test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e build-drift-detector run-drift-detector
+.PHONY: admin build-admin build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install-cli install-cli-stagex install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-live-caddy-nitro test-cli-install test-e2e test-e2e-admin test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-reset test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-org-user-quorum test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e build-drift-detector run-drift-detector
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -477,6 +477,7 @@ migrate: postgres
 run-api: guard-direct-api network postgres
 	@docker rm -f api 2>/dev/null || true
 	@mkdir -p $(CAUTION_DATA_DIR)/git-repos $(CAUTION_DATA_DIR)/build $(CAUTION_DATA_DIR)/terraform
+	@mkdir -p "$(KEYMAKER_POLICY_DIR)"
 	@docker run -d \
 		--name api \
 		--network $(NETWORK) \
@@ -487,6 +488,7 @@ run-api: guard-direct-api network postgres
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
 		--env-file $(HOME)/.config/caution/.env \
+		-v "$(KEYMAKER_POLICY_DIR):/run/config:ro" \
 		-v "$(PRICES_FILE):/app/prices.json:ro" \
 		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		-v $(PWD)/terraform:/app/terraform:ro \
@@ -647,6 +649,7 @@ TEST_DB_VOLUME := caution-test-postgres-data
 TEST_DB_HOST := postgres-test
 TEST_DATABASE_URL := postgresql://postgres:postgres@$(TEST_DB_HOST):5432/$(TEST_DB_NAME)
 PRICES_FILE ?= $(HOME)/.config/caution/prices.json
+KEYMAKER_POLICY_DIR ?= $(HOME)/.config/caution/policies
 E2E_LOCK_FILE ?= /tmp/caution-platform-e2e.lock
 ONPREM_PROVISIONER_DIR ?= ../bring-your-own-compute-setup
 ONPREM_PROVISIONER_IMAGE ?= codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest
@@ -687,6 +690,7 @@ migrate-test: postgres-test
 run-api-test: network
 	@docker rm -f api 2>/dev/null || true
 	@mkdir -p $(CAUTION_DATA_DIR)/git-repos $(CAUTION_DATA_DIR)/build $(CAUTION_DATA_DIR)/terraform
+	@mkdir -p "$(KEYMAKER_POLICY_DIR)"
 	@docker run -d \
 		--name api \
 		--network $(NETWORK) \
@@ -700,11 +704,14 @@ run-api-test: network
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
+		-e KEYMAKER_URL \
+		-e PUBLIC_CERTIFICATE_SERVICE_URL \
 		-e BYOC_PADDLE_SUBSCRIPTIONS_ENABLED \
 		-e GIT_HOSTNAME=localhost \
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
+		-v "$(KEYMAKER_POLICY_DIR):/run/config:ro" \
 		-v "$(PRICES_FILE):/app/prices.json:ro" \
 		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		caution-api
@@ -917,6 +924,30 @@ test-e2e-webauthn-browser:
 	status=$$?; \
 	$(MAKE) down-test; \
 	exit $$status
+
+.PHONY: test-quorum-mock
+test-quorum-mock:
+	@bash tests/e2e/test_quorum_mock.sh
+
+.PHONY: test-quorum-db
+test-quorum-db:
+	@bash tests/e2e/test_org_quorum_db.sh
+
+test-e2e-org-user-quorum:
+	@flock "$(E2E_LOCK_FILE)" /bin/bash -lc '\
+		set -euo pipefail; \
+		cleanup() { $(MAKE) down-test >/dev/null; }; \
+		trap cleanup EXIT; \
+		trap "exit 130" INT; \
+		trap "exit 143" TERM; \
+		$(MAKE) down-test; \
+		$(MAKE) migrate-test; \
+		$(MAKE) build-api-e2e build-email-dev build-gateway-e2e; \
+		$(MAKE) run-email-test run-api-test; \
+		$(MAKE) run-gateway-test; \
+		export RUN_ORG_USER_QUORUM_E2E=1; \
+		bash tests/e2e/test_org_user_quorum.sh \
+	'
 
 test-e2e-legal:
 	@$(MAKE) up-test

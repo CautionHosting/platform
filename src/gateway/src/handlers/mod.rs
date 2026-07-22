@@ -13,7 +13,7 @@ mod qr_auth;
 mod user_profile;
 mod webauthn;
 
-pub(crate) use proxy::{metering_proxy_handler, proxy_handler};
+pub(crate) use proxy::{build_api_target_url, metering_proxy_handler, proxy_handler};
 pub(crate) use webauthn::reset as reset_webauthn;
 
 #[cfg(feature = "e2e-testing-unsafe")]

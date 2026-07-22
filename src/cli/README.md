@@ -144,14 +144,21 @@ parses, normalizes, and fingerprints the public certificate again before storing
 it. Each file must contain exactly one public certificate and be no larger than
 64 KiB.
 
+### Quorum initialization
+
+`caution secret init` creates a hosted v1 quorum; `new` remains an alias.
+Use `--keymaker-url` for direct PGP-only creation. WebAuthn and mixed quorums
+require Platform mediation and are currently blocked on upstream certificate-proof
+verification. See [selection, trust policies and dependency limits](../../docs/org-user-quorums.md).
+
 ### Encrypt Env Secrets
 
 After generating a quorum bundle with Keymaker, encrypt local `.env` values into
 the layout consumed by Caution deployments:
 
 ```sh
-export KEYMAKER_URL=http://35.163.164.207
-caution secret new keyring.asc --threshold 2 --max 4 --no-upload
+caution secret init keyring.asc --threshold 2 --max 4 \
+  --keymaker-pcr-policy keymaker-policy.json
 caution secrets encrypt
 ```
 
