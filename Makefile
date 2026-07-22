@@ -91,6 +91,7 @@ CLI_HOST_EXE_SUFFIX := $(shell uname -s | sed -n -e 's/^MINGW.*/.exe/p' -e 's/^M
 CLI_HOST_BINARY := caution-$(CLI_HOST_OS)-$(CLI_HOST_ARCH)-host$(CLI_HOST_EXE_SUFFIX)
 CLI_OUT_DIR := $(OUT_DIR)/cli
 CLI_INSTALL_DIR ?=
+CLI_MAKE := $(MAKE)
 GIT_REF := $(shell git log -1 --format=%H)
 GIT_AUTHOR := $(shell git log -1 --format=%an)
 GIT_PUBKEY := $(shell git log -1 --format=%GK)
@@ -391,13 +392,13 @@ reproduce-cli:
 	@echo "Reproduction successful - manifests match"
 
 install-cli:
-	+@MAKE="$(MAKE)" CLI_OUT_DIR="$(CLI_OUT_DIR)" CLI_INSTALL_DIR="$(CLI_INSTALL_DIR)" ./scripts/install-cli.sh auto
+	@MAKE="$(CLI_MAKE)" CLI_OUT_DIR="$(CLI_OUT_DIR)" CLI_INSTALL_DIR="$(CLI_INSTALL_DIR)" ./scripts/install-cli.sh auto
 
 install-cli-stagex:
-	+@MAKE="$(MAKE)" CLI_OUT_DIR="$(CLI_OUT_DIR)" CLI_INSTALL_DIR="$(CLI_INSTALL_DIR)" ./scripts/install-cli.sh stagex
+	@MAKE="$(CLI_MAKE)" CLI_OUT_DIR="$(CLI_OUT_DIR)" CLI_INSTALL_DIR="$(CLI_INSTALL_DIR)" ./scripts/install-cli.sh stagex
 
 install-cli-host:
-	+@MAKE="$(MAKE)" CLI_OUT_DIR="$(CLI_OUT_DIR)" CLI_INSTALL_DIR="$(CLI_INSTALL_DIR)" ./scripts/install-cli.sh host
+	@MAKE="$(CLI_MAKE)" CLI_OUT_DIR="$(CLI_OUT_DIR)" CLI_INSTALL_DIR="$(CLI_INSTALL_DIR)" ./scripts/install-cli.sh host
 
 build-all: build-gateway build-api build-email build-metering build-cli
 

@@ -8,6 +8,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALLER="$REPO_ROOT/scripts/install-cli.sh"
 TEST_ROOT="$(mktemp -d)"
 SYSTEM_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+SYSTEM_MAKE="$(command -v make)"
 
 cleanup() {
     rm -rf "$TEST_ROOT"
@@ -43,6 +44,36 @@ assert_installer_target() {
         *"./scripts/install-cli.sh $expected_mode"*) ;;
         *) fail "expected $target to invoke installer mode $expected_mode" ;;
     esac
+}
+
+assert_make_dry_run() {
+    local target="$1" expected_mode="$2" dry_run_status
+    local dry_run_log="$CASE_DIR/$target-dry-run.log"
+
+    set +e
+    (
+        cd "$REPO_ROOT"
+        env \
+            "PATH=$MOCK_BIN:$SYSTEM_PATH" \
+            "HOME=$CASE_HOME" \
+            "CAUTION_CLI_CONFIG_DIR=$CASE_DIR/config" \
+            "CAUTION_ACCEPT_HOST_BUILD_RISK=1" \
+            "MOCK_MAKE_LOG=$MAKE_LOG" \
+            "MOCK_UNAME_S=Darwin" \
+            "MOCK_UNAME_M=arm64" \
+            "$SYSTEM_MAKE" -n "$target" \
+                "CLI_MAKE=$MOCK_BIN/make" \
+                "CLI_OUT_DIR=$CASE_OUT" \
+                "CLI_INSTALL_DIR=$CASE_INSTALL"
+    ) > "$dry_run_log" 2>&1
+    dry_run_status=$?
+    set -e
+
+    [ "$dry_run_status" -eq 0 ] || fail "make -n $target failed"
+    assert_contains "$dry_run_log" "./scripts/install-cli.sh $expected_mode"
+    [ ! -e "$MAKE_LOG" ] || fail "make -n $target started a build"
+    [ ! -e "$CASE_INSTALL/caution" ] || fail "make -n $target installed the CLI"
+    [ ! -e "$CASE_DIR/config" ] || fail "make -n $target persisted an acknowledgement"
 }
 
 create_case() {
@@ -199,5 +230,11 @@ assert_installer_target install-cli-host host
 if grep -q '^install:' "$REPO_ROOT/Makefile"; then
     fail "generic install target should not exist"
 fi
+
+announce "Make dry-run behavior"
+create_case make_dry_run
+assert_make_dry_run install-cli auto
+assert_make_dry_run install-cli-stagex stagex
+assert_make_dry_run install-cli-host host
 
 echo "CLI installer tests passed"
