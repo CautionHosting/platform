@@ -949,6 +949,22 @@ p.info a:hover,
   color: var(--color-pink);
 }
 
+.cli-hint {
+  text-align: center;
+  font-size: clamp(0.85rem, 1.3vw, 0.95rem);
+  line-height: 1.5;
+  color: oklch(44.4% 0.04 256.788);
+  margin: 12px auto 0 auto;
+  max-width: 375px;
+}
+
+.cli-hint code {
+  font-weight: 500;
+  background: oklch(96% 0.005 256.788);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
 .link-btn {
   color: oklch(44.4% 0.04 256.788);
   font-weight: 400;
