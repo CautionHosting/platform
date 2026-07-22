@@ -4,6 +4,7 @@
 <template>
   <AuthLayout
     :login-loading="loginLoading"
+    @login="onHeaderLogin"
   >
     <template #access-text>
       Email
@@ -207,6 +208,10 @@ export default {
       await handleLogin(loginUsername.value.trim());
     }
 
+    function onHeaderLogin() {
+      isLoginMode.value = true;
+    }
+
     return {
       authenticated,
       loading,
@@ -222,6 +227,7 @@ export default {
       handleLogin,
       onRegister,
       onLogin,
+      onHeaderLogin,
     };
   },
 };
