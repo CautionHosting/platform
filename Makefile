@@ -3,7 +3,7 @@
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-untrusted install-cli install-cli-untrusted release-cli sign-cli verify-cli reproduce-cli test test-unit test-e2e test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-org-user-quorum test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -662,6 +662,8 @@ run-api-test: network
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
+		-e KEYMAKER_URL \
+		-e PUBLIC_CERTIFICATE_SERVICE_URL \
 		-e BYOC_PADDLE_SUBSCRIPTIONS_ENABLED \
 		-e GIT_HOSTNAME=localhost \
 		-v $(PWD)/terraform:/app/terraform:ro \
@@ -862,6 +864,27 @@ test-e2e-webauthn-browser:
 	status=$$?; \
 	$(MAKE) down-test; \
 	exit $$status
+
+test-e2e-org-user-quorum:
+	@flock "$(E2E_LOCK_FILE)" /bin/bash -lc '\
+		set -euo pipefail; \
+		cleanup() { docker rm -f keymaker-mock public-cert-mock >/dev/null 2>&1 || true; $(MAKE) down-test >/dev/null; }; \
+		trap cleanup EXIT; \
+		trap "exit 130" INT; \
+		trap "exit 143" TERM; \
+		$(MAKE) down-test; \
+		$(MAKE) build-cli; \
+		$(MAKE) migrate-test; \
+		$(MAKE) build-api-e2e build-email-dev build-gateway-e2e; \
+		docker rm -f keymaker-mock public-cert-mock >/dev/null 2>&1 || true; \
+		docker run -d --name public-cert-mock --network $(NETWORK) -e MOCK_SERVICE=public-cert -e PORT=8080 -v "$(PWD)/tests/e2e/mock_org_quorum_services.py:/mock.py:ro" python:3-alpine python /mock.py >/dev/null; \
+		docker run -d --name keymaker-mock --network $(NETWORK) -e MOCK_SERVICE=keymaker -e PORT=8080 -v "$(PWD)/tests/e2e/mock_org_quorum_services.py:/mock.py:ro" python:3-alpine python /mock.py >/dev/null; \
+		KEYMAKER_URL=http://keymaker-mock:8080 PUBLIC_CERTIFICATE_SERVICE_URL=http://public-cert-mock:8080 $(MAKE) run-email-test run-api-test; \
+		$(MAKE) run-gateway-test; \
+		export CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)"; \
+		export RUN_ORG_USER_QUORUM_E2E=1; \
+		bash tests/e2e/test_org_user_quorum.sh \
+	'
 
 test-e2e-legal:
 	@$(MAKE) up-test

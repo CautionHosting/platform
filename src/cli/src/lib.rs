@@ -3700,6 +3700,18 @@ enclave "default" {{
         }
 
         let body_json = body;
+
+        if std::env::var_os("CAUTION_E2E_UNSIGNED_REQUESTS").is_some() {
+            return self
+                .client
+                .request(method, format!("{}{}", self.base_url, path))
+                .header("X-Session-ID", session_id)
+                .header("Content-Type", "application/json")
+                .body(body_json)
+                .send()
+                .await
+                .context("failed to send e2e unsigned request");
+        }
         let body_hash = hex::encode(Sha256::digest(&body_json));
         let method_name = method.as_str();
 
@@ -8176,13 +8188,15 @@ enclave "default" {{
                 eprintln!("Quorum bundle stored successfully.");
             }
 
-            let in_caution_repo = PathBuf::from("Procfile").exists()
+            let in_caution_repo = PathBuf::from("caution.hcl").exists()
+                || PathBuf::from("Procfile").exists()
                 || PathBuf::from(".caution/deployment.json").exists();
             if in_caution_repo {
                 if let Some(data) = result.get("data") {
+                    let bundle_data = data.get("data").unwrap_or(data);
                     let secret_path = PathBuf::from(".caution/quorum-bundle.json");
                     fs::create_dir_all(".caution")?;
-                    fs::write(&secret_path, serde_json::to_string_pretty(data)?)
+                    fs::write(&secret_path, serde_json::to_string_pretty(bundle_data)?)
                         .with_context(|| format!("Failed to write secret to {}", secret_path.display()))?;
                     eprintln!("Saved to: {}", secret_path.display());
                 }
@@ -8618,6 +8632,7 @@ enclave "default" {{
 
                 // Use the first bundle's data
                 let bundle_data = bundles[0].get("data").context("Bundle has no data field")?;
+                let bundle_data = bundle_data.get("data").unwrap_or(bundle_data);
 
                 let secrets_dir = PathBuf::from(".caution/secrets");
                 fs::create_dir_all(&secrets_dir).context("Failed to create .caution/secrets/")?;
