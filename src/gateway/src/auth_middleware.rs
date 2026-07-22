@@ -970,9 +970,12 @@ fn incomplete_ssh_headers_error(req: &Request) -> VerifySshSignedRequestError {
 }
 
 fn requires_fido2_signature(method: &Method, path: &str) -> bool {
-    (path.contains("/organizations/")
-        && path.ends_with("/settings")
-        && matches!(*method, Method::PATCH | Method::PUT))
+    (matches!(*method, Method::PATCH | Method::DELETE) && path.starts_with("/quorum-bundles/"))
+        || (matches!(path, "/quorum-bundles" | "/quorum-bundles/from-org-users")
+            && *method == Method::POST)
+        || (path.contains("/organizations/")
+            && path.ends_with("/settings")
+            && matches!(*method, Method::PATCH | Method::PUT))
         || (path.starts_with("/ssh-keys") && matches!(*method, Method::POST | Method::DELETE))
         || (path == "/pgp-keys" && *method == Method::POST)
         || (path.starts_with("/pgp-keys/") && *method == Method::DELETE)
@@ -993,6 +996,20 @@ pub enum Fido2SignError {
         #[location]
         location: &'static Location<'static>,
         source: VerifySshSignedRequestError,
+    },
+
+    #[error("invalid request path [{location}]")]
+    InvalidRequestPath {
+        #[location]
+        location: &'static Location<'static>,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+
+    #[error("noncanonical request path [{location}]")]
+    NoncanonicalRequestPath {
+        #[location]
+        location: &'static Location<'static>,
     },
 
     #[error("invalid challenge ID header [{location}]")]
@@ -1106,6 +1123,14 @@ impl IntoResponse for Fido2SignError {
     fn into_response(self) -> Response {
         match self {
             Self::SshSigned { source, .. } => ssh_signed_request_error_response(source),
+            Self::InvalidRequestPath { .. } => {
+                tracing::debug!(?self, "Signed request: invalid request path");
+                (StatusCode::BAD_REQUEST, "Invalid request path").into_response()
+            }
+            Self::NoncanonicalRequestPath { .. } => {
+                tracing::debug!(?self, "Signed request: noncanonical request path");
+                (StatusCode::BAD_REQUEST, "Noncanonical request path").into_response()
+            }
             Self::InvalidChallengeId { .. } => {
                 tracing::debug!(?self, "Signed request: invalid challenge ID header");
                 (StatusCode::BAD_REQUEST, "Invalid challenge ID header").into_response()
@@ -1178,12 +1203,27 @@ pub async fn fido2_sign_middleware(
     next: Next,
 ) -> Result<Response, Fido2SignError> {
     use Fido2SignError as E;
+    use Fido2SignErrorCtx as Ctx;
 
     // SECURITY: Strip headers to prevent bypass attacks from external requests.
     // These headers are only set internally by this middleware after verification.
     req.headers_mut().remove("X-Authenticated-User-ID");
     req.headers_mut().remove("X-Fido2-Signed");
     req.headers_mut().remove(SSH_AUTHENTICATED_HEADER);
+
+    // Apply authorization only to paths that the backend will receive unchanged.
+    // In particular, URL parsing removes literal and percent-encoded dot segments.
+    let target = crate::handlers::build_api_target_url(
+        &state.api_service_url,
+        req.uri().path(),
+        req.uri().query(),
+    )
+    .with_context(Ctx::invalid_request_path())?;
+    if target.path() != req.uri().path() {
+        return Err(E::NoncanonicalRequestPath {
+            location: std::panic::Location::caller(),
+        });
+    }
 
     if is_ssh_signed_resource_request(req.method(), req.uri().path()) {
         return match ssh_signature_header_state(&req) {
@@ -1217,12 +1257,15 @@ async fn fido2_sign_flow(
     use Fido2SignError as E;
     use Fido2SignErrorCtx as Ctx;
 
-    // In e2e test mode, skip all FIDO2 signing requirements.
-    // Requests will still be authenticated by fido2_auth_middleware (session check).
+    // Keep quorum writes signed even in E2E mode so tests exercise this boundary.
+    // Other E2E routes retain their existing session-only behavior.
     #[cfg(feature = "e2e-testing-unsafe")]
     {
-        let _ = &state;
-        return Ok(next.run(req).await);
+        if !(req.uri().path().starts_with("/quorum-bundles")
+            && matches!(*req.method(), Method::POST | Method::PATCH | Method::DELETE))
+        {
+            return Ok(next.run(req).await);
+        }
     }
 
     // Paths that require signature for write operations
@@ -1488,6 +1531,18 @@ mod tests {
 
     #[test]
     fn pgp_key_changes_require_fido2_signature() {
+        assert!(requires_fido2_signature(
+            &Method::DELETE,
+            "/quorum-bundles/bundle-id"
+        ));
+        assert!(requires_fido2_signature(
+            &Method::PATCH,
+            "/quorum-bundles/bundle-id"
+        ));
+        for path in ["/quorum-bundles", "/quorum-bundles/from-org-users"] {
+            assert!(requires_fido2_signature(&Method::POST, path));
+            assert!(!requires_fido2_signature(&Method::GET, path));
+        }
         assert!(requires_fido2_signature(&Method::POST, "/pgp-keys"));
         assert!(requires_fido2_signature(
             &Method::DELETE,

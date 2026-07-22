@@ -4431,7 +4431,10 @@ export default {
       deletingBundle.value = id;
 
       try {
-        const response = await authFetch(`/api/quorum-bundles/${id}`, {
+        const path = `/quorum-bundles/${id}`;
+        const headers = await buildSignedHeaders("DELETE", path, "");
+        const response = await authFetch(`/api${path}`, {
+          headers,
           method: "DELETE",
         });
 
@@ -4443,7 +4446,7 @@ export default {
           showToast(data.error || "Failed to delete quorum bundle", 'error');
         }
       } catch (err) {
-        showToast("Failed to connect to server", 'error');
+        showToast(err.message || "Failed to delete quorum bundle", 'error');
       } finally {
         deletingBundle.value = null;
       }
@@ -4472,10 +4475,12 @@ export default {
 
     const saveBundleName = async (bundleId) => {
       try {
+        const body = JSON.stringify({ name: editBundleNameValue.value });
+        const signedHeaders = await buildSignedHeaders("PATCH", `/quorum-bundles/${bundleId}`, body);
         const response = await authFetch(`/api/quorum-bundles/${bundleId}`, {
           method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: editBundleNameValue.value }),
+          headers: { "Content-Type": "application/json", ...signedHeaders },
+          body,
         });
 
         if (response.ok) {
@@ -4487,7 +4492,7 @@ export default {
           showToast(data.error || "Failed to rename bundle", 'error');
         }
       } catch (err) {
-        showToast("Failed to connect to server", 'error');
+        showToast(err.message || "Failed to rename bundle", 'error');
       }
     };
 
@@ -4516,10 +4521,12 @@ export default {
       const labels = { ...(bundle.labels || {}), [newLabelKey.value.trim()]: newLabelValue.value.trim() };
 
       try {
+        const body = JSON.stringify({ labels });
+        const signedHeaders = await buildSignedHeaders("PATCH", `/quorum-bundles/${bundleId}`, body);
         const response = await authFetch(`/api/quorum-bundles/${bundleId}`, {
           method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ labels }),
+          headers: { "Content-Type": "application/json", ...signedHeaders },
+          body,
         });
 
         if (response.ok) {
@@ -4531,7 +4538,7 @@ export default {
           showToast(data.error || "Failed to add label", 'error');
         }
       } catch (err) {
-        showToast("Failed to connect to server", 'error');
+        showToast(err.message || "Failed to add label", 'error');
       }
     };
 
@@ -4543,10 +4550,12 @@ export default {
       delete labels[key];
 
       try {
+        const body = JSON.stringify({ labels });
+        const signedHeaders = await buildSignedHeaders("PATCH", `/quorum-bundles/${bundleId}`, body);
         const response = await authFetch(`/api/quorum-bundles/${bundleId}`, {
           method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ labels }),
+          headers: { "Content-Type": "application/json", ...signedHeaders },
+          body,
         });
 
         if (response.ok) {
@@ -4557,7 +4566,7 @@ export default {
           showToast(data.error || "Failed to remove label", 'error');
         }
       } catch (err) {
-        showToast("Failed to connect to server", 'error');
+        showToast(err.message || "Failed to remove label", 'error');
       }
     };
 

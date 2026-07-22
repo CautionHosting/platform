@@ -24,6 +24,8 @@ use webauthn_rs_proto::{
     RequestChallengeResponse,
 };
 
+mod quorum;
+
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -90,7 +92,7 @@ fn main() -> Result<()> {
         .context("login/begin body is not a RequestChallengeResponse")?;
 
     let auth_cred: PublicKeyCredential = authenticator
-        .do_authentication(origin, rcr)
+        .do_authentication(origin.clone(), rcr)
         .map_err(|e| anyhow::anyhow!("SoftPasskey do_authentication failed: {e:?}"))?;
 
     let mut auth_body = serde_json::to_value(&auth_cred)?;
@@ -133,6 +135,13 @@ fn main() -> Result<()> {
         .and_then(|v| v.as_array().map(|a| a.len()))
         .unwrap_or(0);
     println!("✓ authenticated session lists {count} passkey(s)");
+
+    if let Some(work) = std::env::var_os("QUORUM_E2E_DIR") {
+        quorum::run(
+            &http, &mut authenticator, &origin, &base, &session_id,
+            std::path::Path::new(&work),
+        )?;
+    }
 
     println!("\nPASS: software-passkey register + login round-trip");
     Ok(())
