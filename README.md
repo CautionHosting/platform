@@ -25,7 +25,7 @@ An enclave is **verifiable** when you can independently confirm that the code ru
 - Docker with <a href="https://docs.docker.com/engine/storage/containerd/#enable-containerd-image-store-on-docker-engine" target="_blank">containerd</a> enabled
 - GNU Make
 - Bash
-- x86_64 based system (Mac support coming soon)
+- x86_64 system for running the platform services; the CLI also supports macOS on Apple silicon
 
 ### 1. Bootstrap AWS infrastructure
 
@@ -40,22 +40,22 @@ cp env.example $HOME/.config/caution/.env
 # Edit .env with your AWS credentials and bucket names from bootstrapping
 ```
 
-Install the CLI. The default target builds the release-style StageX CLI in
-Docker and installs it to `$HOME/.local/bin/caution`:
+Install the CLI with the local host toolchain. This is the default on every
+supported platform and supports local PC/SC for Locksmith shard submission:
 
 ```bash
 make install-cli
 ```
 
-If you need local PC/SC support for locksmith shard submission, use the
-host-toolchain build instead:
+To explicitly build and install the reproducible StageX CLI on Linux/x86_64:
 
 ```bash
-make install-cli-untrusted
+make install-cli-stagex
 ```
 
 See [src/cli/README.md](src/cli/README.md) for additional installation options,
-signature verification, and reproducible builds.
+native dependencies, signature verification, and the current StageX PC/SC
+limitation.
 
 Start the platform services:
 
