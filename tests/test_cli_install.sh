@@ -168,16 +168,24 @@ run_installer() {
     set -e
 }
 
-announce "automatic StageX selection on Linux/x86_64"
-create_case linux_auto
+announce "host-build acknowledgement requirement on Linux/x86_64"
+create_case linux_requires_ack
 run_installer auto Linux x86_64
-[ "$RUN_STATUS" -eq 0 ] || fail "Linux automatic install failed"
-assert_make_target "$MAKE_LOG" build-cli
+[ "$RUN_STATUS" -ne 0 ] || fail "non-interactive Linux install succeeded without acknowledgement"
+assert_contains "$CASE_LOG" "CAUTION_ACCEPT_HOST_BUILD_RISK=1"
+[ ! -e "$MAKE_LOG" ] || fail "host build started before acknowledgement"
+
+announce "automatic host build and acknowledgement persistence on Linux/x86_64"
+create_case linux_auto
+run_installer auto Linux x86_64 1
+[ "$RUN_STATUS" -eq 0 ] || fail "acknowledged Linux automatic install failed"
+assert_make_target "$MAKE_LOG" build-cli-host
 [ -x "$CASE_INSTALL/caution" ] || fail "Linux CLI was not installed"
-assert_contains "$CASE_LOG" "Selected CLI build: stagex"
+assert_contains "$CASE_LOG" "Selected CLI build: host"
 assert_contains "$CASE_LOG" "$CASE_INSTALL is not on your PATH."
-[ ! -e "$CASE_HOME/.config/caution-cli/acknowledgements/host-build-v1" ] || \
-    fail "StageX install unexpectedly persisted a host acknowledgement"
+ACK_FILE="$CASE_HOME/.config/caution-cli/acknowledgements/host-build-v1"
+[ -f "$ACK_FILE" ] || fail "Linux acknowledgement was not persisted"
+assert_contains "$ACK_FILE" "method=environment"
 
 announce "host-build acknowledgement requirement on macOS/arm64"
 create_case mac_requires_ack
@@ -208,6 +216,16 @@ run_installer host Linux x86_64 1
 [ "$RUN_STATUS" -eq 0 ] || fail "explicit Linux host install failed"
 assert_make_target "$MAKE_LOG" build-cli-host
 [ -f "$CASE_OUT/caution-linux-x86_64-host" ] || fail "host artifact name is incorrect"
+
+announce "explicit StageX build on Linux/x86_64"
+create_case linux_stagex
+run_installer stagex Linux x86_64
+[ "$RUN_STATUS" -eq 0 ] || fail "explicit Linux StageX install failed"
+assert_make_target "$MAKE_LOG" build-cli
+[ -x "$CASE_INSTALL/caution" ] || fail "StageX CLI was not installed"
+assert_contains "$CASE_LOG" "Selected CLI build: stagex"
+[ ! -e "$CASE_HOME/.config/caution-cli/acknowledgements/host-build-v1" ] || \
+    fail "StageX install unexpectedly persisted a host acknowledgement"
 
 announce "rejection of an explicit StageX install on macOS/arm64"
 create_case mac_forced_stagex

@@ -23,12 +23,10 @@ normalize_platform() {
         Linux:x86_64|Linux:amd64)
             HOST_OS="linux"
             HOST_ARCH="x86_64"
-            AUTO_BUILD="stagex"
             ;;
         Darwin:arm64)
             HOST_OS="macos"
             HOST_ARCH="arm64"
-            AUTO_BUILD="host"
             ;;
         *)
             die "unsupported platform $os/$arch. Supported platforms are Linux/x86_64 and macOS/arm64."
@@ -38,16 +36,13 @@ normalize_platform() {
 
 select_build() {
     case "$REQUESTED_BUILD" in
-        auto)
-            SELECTED_BUILD="$AUTO_BUILD"
+        auto|host)
+            SELECTED_BUILD="host"
             ;;
         stagex)
             [ "$HOST_OS:$HOST_ARCH" = "linux:x86_64" ] || \
                 die "the StageX CLI can only be installed on Linux/x86_64; detected $HOST_OS/$HOST_ARCH. Use 'make install-cli' to select the supported build automatically."
             SELECTED_BUILD="stagex"
-            ;;
-        host)
-            SELECTED_BUILD="host"
             ;;
         *)
             die "unknown build selection '$REQUESTED_BUILD'; expected auto, stagex, or host."
