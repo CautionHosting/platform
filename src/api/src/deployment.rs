@@ -1560,19 +1560,77 @@ async fn provision_managed_onprem(
     Ok(result)
 }
 
-fn select_instance_type(cpu_count: u32, memory_mb: u32) -> &'static str {
-    let total_vcpus_needed = cpu_count + 2;
-    let total_memory_gb_needed = (memory_mb / 1024) + 2;
+const PARENT_VCPU_RESERVE: u32 = 2;
+const PARENT_MEMORY_RESERVE_MIB: u32 = 2 * 1024;
 
-    if total_vcpus_needed <= 4 && total_memory_gb_needed <= 16 {
-        "m5.xlarge"
-    } else if total_vcpus_needed <= 8 && total_memory_gb_needed <= 32 {
-        "m5.2xlarge"
-    } else if total_vcpus_needed <= 16 && total_memory_gb_needed <= 64 {
-        "m5.4xlarge"
-    } else {
-        "m5.8xlarge"
+// AWS documents Nitro Enclaves support for these virtual M5 and R6i sizes.
+// Entries are (instance type, vCPUs, memory MiB), ordered by capacity.
+const NITRO_INSTANCE_SPECS: &[(&str, u32, u32)] = &[
+    ("m5.xlarge", 4, 16 * 1024),
+    ("r6i.xlarge", 4, 32 * 1024),
+    ("m5.2xlarge", 8, 32 * 1024),
+    ("r6i.2xlarge", 8, 64 * 1024),
+    ("m5.4xlarge", 16, 64 * 1024),
+    ("r6i.4xlarge", 16, 128 * 1024),
+    ("m5.8xlarge", 32, 128 * 1024),
+    ("r6i.8xlarge", 32, 256 * 1024),
+    ("r6i.12xlarge", 48, 384 * 1024),
+];
+
+pub(crate) struct EnclaveSizing {
+    pub(crate) cpu_count: u32,
+    pub(crate) instance_type: &'static str,
+    pub(crate) host_vcpus: u32,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum EnclaveSizingError {
+    #[error("Enclave vCPU count must be at least 1")]
+    ZeroCpu,
+    #[error("Enclave memory_mb must be at least 1")]
+    ZeroMemory,
+    #[error("Enclave resource request is too large")]
+    Overflow,
+    #[error(
+        "Requested enclave resources ({cpu_count} vCPUs, {memory_mb} MiB) exceed the supported r6i.12xlarge host capacity"
+    )]
+    NoSupportedInstance { cpu_count: u32, memory_mb: u32 },
+}
+
+pub(crate) fn enclave_sizing(
+    cpu_count: u32,
+    memory_mb: u32,
+) -> std::result::Result<EnclaveSizing, EnclaveSizingError> {
+    if cpu_count == 0 {
+        return Err(EnclaveSizingError::ZeroCpu);
     }
+    if memory_mb == 0 {
+        return Err(EnclaveSizingError::ZeroMemory);
+    }
+
+    let cpu_count_rounded = cpu_count
+        .checked_add(cpu_count % 2)
+        .ok_or(EnclaveSizingError::Overflow)?;
+    let total_vcpus_needed = cpu_count_rounded
+        .checked_add(PARENT_VCPU_RESERVE)
+        .ok_or(EnclaveSizingError::Overflow)?;
+    let total_memory_mib_needed = memory_mb
+        .checked_add(PARENT_MEMORY_RESERVE_MIB)
+        .ok_or(EnclaveSizingError::Overflow)?;
+
+    let (instance_type, host_vcpus, _) = *NITRO_INSTANCE_SPECS
+        .iter()
+        .find(|spec| spec.1 >= total_vcpus_needed && spec.2 >= total_memory_mib_needed)
+        .ok_or(EnclaveSizingError::NoSupportedInstance {
+            cpu_count,
+            memory_mb,
+        })?;
+
+    Ok(EnclaveSizing {
+        cpu_count: cpu_count_rounded,
+        instance_type,
+        host_vcpus,
+    })
 }
 
 pub(crate) fn host_vcpus_for_instance_type(instance_type: &str) -> Option<u32> {
@@ -1591,46 +1649,29 @@ pub(crate) fn host_vcpus_for_instance_type(instance_type: &str) -> Option<u32> {
     }
 }
 
-pub(crate) fn host_instance_type_for_enclave(
-    cpu_count: u32,
-    memory_mb: u32,
-) -> (&'static str, u32) {
-    let cpu_count_rounded = if cpu_count % 2 == 0 {
-        cpu_count
-    } else {
-        cpu_count + 1
-    };
-    let instance_type = select_instance_type(cpu_count_rounded, memory_mb);
-    let host_vcpus = host_vcpus_for_instance_type(instance_type).unwrap_or(cpu_count_rounded + 2);
-    (instance_type, host_vcpus)
-}
+fn compute_enclave_sizing(
+    request: &NitroDeploymentRequest,
+) -> std::result::Result<(u32, &'static str), EnclaveSizingError> {
+    let sizing = enclave_sizing(request.cpu_count, request.memory_mb)?;
 
-fn compute_enclave_sizing(request: &NitroDeploymentRequest) -> (u32, &'static str) {
-    let cpu_count_rounded = if request.cpu_count % 2 == 0 {
-        request.cpu_count
-    } else {
-        request.cpu_count + 1
-    };
-
-    if cpu_count_rounded != request.cpu_count {
+    if sizing.cpu_count != request.cpu_count {
         tracing::warn!(
             "Rounded CPU count from {} to {} (Nitro Enclaves requires even numbers)",
             request.cpu_count,
-            cpu_count_rounded
+            sizing.cpu_count
         );
     }
 
-    let (instance_type, _) = host_instance_type_for_enclave(request.cpu_count, request.memory_mb);
     tracing::info!(
         "Selected instance type {} for {} CPUs and {} MB memory (total needed: {} vCPUs, {} GB)",
-        instance_type,
-        cpu_count_rounded,
+        sizing.instance_type,
+        sizing.cpu_count,
         request.memory_mb,
-        cpu_count_rounded + 2,
+        sizing.cpu_count + 2,
         (request.memory_mb / 1024) + 2
     );
 
-    (cpu_count_rounded, instance_type)
+    Ok((sizing.cpu_count, sizing.instance_type))
 }
 
 fn platform_internal_ingress(e2e: bool, locksmith: bool) -> String {
@@ -1685,7 +1726,7 @@ async fn generate_nitro_deployment_main_tf(
         .context("Deployment region is required")?;
     let ssh_key_name = std::env::var("SSH_KEY_NAME").ok();
 
-    let (cpu_count_rounded, instance_type) = compute_enclave_sizing(request);
+    let (cpu_count_rounded, instance_type) = compute_enclave_sizing(request)?;
 
     let provider_block = if request.credentials.is_some() {
         format!(
@@ -1758,6 +1799,21 @@ provider "aws" {{
 # Data source for availability zones
 data "aws_availability_zones" "available" {{
   state = "available"
+}}
+
+# Restrict the subnet to an Availability Zone that offers the selected host.
+data "aws_ec2_instance_type_offerings" "enclave" {{
+  location_type = "availability-zone"
+
+  filter {{
+    name   = "instance-type"
+    values = ["{instance_type}"]
+  }}
+
+  filter {{
+    name   = "location"
+    values = data.aws_availability_zones.available.names
+  }}
 }}
 
 # Data source for latest Amazon Linux 2023 AMI
@@ -1863,7 +1919,7 @@ resource "aws_subnet" "enclave" {{
   vpc_id                  = aws_vpc.enclave.id
   cidr_block              = "10.0.1.0/24"
   map_public_ip_on_launch = true
-  availability_zone       = data.aws_availability_zones.available.names[0]
+  availability_zone       = sort(data.aws_ec2_instance_type_offerings.enclave.locations)[0]
 
   tags = {{
     Name         = "subnet-{resource_id}"
@@ -2088,7 +2144,7 @@ async fn generate_managed_onprem_deployment_tf(
         .map(|c| c.region.clone())
         .unwrap_or_else(|| std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()));
 
-    let (cpu_count_rounded, instance_type) = compute_enclave_sizing(request);
+    let (cpu_count_rounded, instance_type) = compute_enclave_sizing(request)?;
 
     let main_tf_content = format!(
         r#"terraform {{

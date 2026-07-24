@@ -2374,6 +2374,10 @@ async fn deploy_logic(
         ));
     }
 
+    let deployment_requirements =
+        fully_managed_capacity::DeploymentRequirements::for_enclave(cpu_count, memory_mb)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+
     let managed_onprem_credential = if let Some(credential) = cred
         .as_ref()
         .filter(|credential| credential.managed_on_prem)
@@ -2658,8 +2662,6 @@ async fn deploy_logic(
     }
 
     let capacity_reservation = if managed_onprem_config.is_none() {
-        let requirements =
-            fully_managed_capacity::DeploymentRequirements::for_enclave(cpu_count, memory_mb);
         let _ = tx
             .send(Ok(milestone("Checking fully managed capacity...")))
             .await;
@@ -2668,7 +2670,7 @@ async fn deploy_logic(
             req.org_id,
             auth.user_id,
             resource_id,
-            &requirements,
+            &deployment_requirements,
         )
         .await
         {

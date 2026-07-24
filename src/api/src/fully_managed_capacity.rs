@@ -20,7 +20,7 @@ const CAPACITY_LOCK_ID: i64 = 7_650_001;
 const STANDARD_ON_DEMAND_VCPU_QUOTA_CODE: &str = "L-1216C47A";
 const ELASTIC_IP_QUOTA_CODE: &str = "L-0263D0A3";
 const VPC_QUOTA_CODE: &str = "L-F678F1CE";
-pub(crate) const MAX_FULLY_MANAGED_ENCLAVE_VCPUS: u32 = 16;
+pub(crate) const MAX_FULLY_MANAGED_ENCLAVE_VCPUS: u32 = 46;
 const CAPACITY_WAITLIST_PROMPT: &str = "No fully managed capacity is available right now. Please wait while Caution provisions additional resources. To be notified when capacity is available, run: caution capacity waitlist --email <email>";
 const CAPACITY_ALREADY_WAITLISTED_MESSAGE: &str = "No fully managed capacity is available right now. Please wait while Caution provisions additional resources. You are already on the capacity waitlist.";
 
@@ -33,15 +33,17 @@ pub(crate) struct DeploymentRequirements {
 }
 
 impl DeploymentRequirements {
-    pub(crate) fn for_enclave(cpus: u32, memory_mb: u32) -> Self {
-        let (instance_type, host_vcpus) =
-            deployment::host_instance_type_for_enclave(cpus, memory_mb);
-        Self {
-            instance_type: instance_type.to_string(),
-            host_vcpus,
+    pub(crate) fn for_enclave(
+        cpus: u32,
+        memory_mb: u32,
+    ) -> Result<Self, deployment::EnclaveSizingError> {
+        let sizing = deployment::enclave_sizing(cpus, memory_mb)?;
+        Ok(Self {
+            instance_type: sizing.instance_type.to_string(),
+            host_vcpus: sizing.host_vcpus,
             vpcs: 1,
             eips: 1,
-        }
+        })
     }
 }
 
@@ -473,7 +475,7 @@ pub(crate) async fn join_waitlist(
     if let Some(cpus) = payload.requested_enclave_vcpus {
         if cpus == 0 || cpus > MAX_FULLY_MANAGED_ENCLAVE_VCPUS {
             return Err(JoinWaitlistError::InvalidVCpus(
-                "requested_enclave_vcpus must be between 1 and 16; contact support for larger requests"
+                "requested_enclave_vcpus must be between 1 and 46; contact support for larger requests"
                     .to_string(),
             ));
         }
@@ -481,7 +483,12 @@ pub(crate) async fn join_waitlist(
 
     let required_host_vcpus = payload
         .requested_enclave_vcpus
-        .map(|cpus| DeploymentRequirements::for_enclave(cpus, 512).host_vcpus as i32);
+        .map(|cpus| {
+            DeploymentRequirements::for_enclave(cpus, 512)
+                .map(|requirements| requirements.host_vcpus as i32)
+        })
+        .transpose()
+        .map_err(|error| JoinWaitlistError::InvalidVCpus(error.to_string()))?;
 
     let inserted: Option<bool> = sqlx::query_scalar(
         "INSERT INTO fully_managed_capacity_waitlist
