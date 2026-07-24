@@ -3362,6 +3362,11 @@ export default {
       const baseRates = {
         'm5.xlarge': 0.192,
         'm5.2xlarge': 0.384,
+        'r6i.xlarge': 0.252,
+        'r6i.2xlarge': 0.504,
+        'r6i.4xlarge': 1.008,
+        'r6i.8xlarge': 2.016,
+        'r6i.12xlarge': 3.024,
         'c5.xlarge': 0.17,
         'c6i.xlarge': 0.17,
         'c6a.xlarge': 0.153,

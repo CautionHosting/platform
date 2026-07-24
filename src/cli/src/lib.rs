@@ -1175,7 +1175,7 @@ enum CapacityCommands {
     Waitlist {
         #[arg(long, help = "Email address to notify when capacity is available")]
         email: String,
-        #[arg(long, help = "Requested enclave vCPUs, up to 16")]
+        #[arg(long, help = "Requested enclave vCPUs, up to 46")]
         vcpus: Option<u32>,
     },
 }
@@ -4177,8 +4177,8 @@ enclave "default" {{
 
         if let Some(vcpus) = vcpus {
             anyhow::ensure!(
-                (1..=16).contains(&vcpus),
-                "--vcpus must be between 1 and 16; contact support for larger requests"
+                (1..=46).contains(&vcpus),
+                "--vcpus must be between 1 and 46; contact support for larger requests"
             );
         }
 
