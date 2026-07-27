@@ -108,6 +108,24 @@ impl E2eMode {
 }
 
 /// The `e2e_encryption { }` block inside HTTP config.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeyExchange {
+    #[default]
+    #[serde(rename = "x25519")]
+    X25519,
+    #[serde(rename = "xwing-draft10")]
+    XwingDraft10,
+}
+
+impl KeyExchange {
+    pub const fn steve_env_value(self) -> &'static str {
+        match self {
+            Self::X25519 => "X25519",
+            Self::XwingDraft10 => "XWING-DRAFT10",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct E2eEncryption {
@@ -116,6 +134,13 @@ pub struct E2eEncryption {
     pub enabled: Option<bool>,
     pub mode: Option<E2eMode>,
     pub cors_origins: Option<Vec<String>>,
+    pub key_exchange: Option<KeyExchange>,
+}
+
+impl E2eEncryption {
+    pub fn key_exchange(&self) -> KeyExchange {
+        self.key_exchange.unwrap_or_default()
+    }
 }
 
 impl E2eEncryption {
@@ -664,6 +689,7 @@ impl ConfigurationFile {
             enabled: Some(enabled),
             mode: None,
             cors_origins: None,
+            key_exchange: None,
         });
 
         validate_domain(domain.as_deref()).map_err(FromProcfileError::InvalidDomain)?;
@@ -924,6 +950,7 @@ mod tests {
                                 enabled: Some(true),
                                 mode: None,
                                 cors_origins: Some(vec!["*".into()]),
+                                key_exchange: Some(KeyExchange::X25519),
                             }),
                         }),
                     }),
@@ -2546,6 +2573,22 @@ caution {
         let hcl = r#"enabled = true unknown = false"#;
         let err = hcl::from_str::<E2eEncryption>(hcl).unwrap_err();
         assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn e2e_key_exchange_defaults_to_x25519_and_rejects_unknown_values() {
+        let default = hcl::from_str::<E2eEncryption>("enabled = true").unwrap();
+        assert_eq!(default.key_exchange(), KeyExchange::X25519);
+
+        let xwing =
+            hcl::from_str::<E2eEncryption>("enabled = true\nkey_exchange = \"xwing-draft10\"")
+                .unwrap();
+        assert_eq!(xwing.key_exchange().steve_env_value(), "XWING-DRAFT10");
+
+        assert!(
+            hcl::from_str::<E2eEncryption>("enabled = true\nkey_exchange = \"unsupported\"",)
+                .is_err()
+        );
     }
 
     #[test]

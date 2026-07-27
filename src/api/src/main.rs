@@ -2375,6 +2375,9 @@ async fn deploy_logic(
     let e2e_mode = e2e_config.and_then(|e| e.effective_mode());
     let e2e = e2e_mode == Some(config::E2eMode::Steve);
     let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
+    let e2e_key_exchange = e2e_config
+        .map(|e| e.key_exchange().steve_env_value())
+        .unwrap_or(caution_config::KeyExchange::X25519.steve_env_value());
     let platform_git_sha = std::env::var("PLATFORM_GIT_SHA").ok();
     let framework_commit =
         builder::framework_commit_for_mode(e2e_mode_value, platform_git_sha.as_deref()).map_err(
@@ -2491,6 +2494,7 @@ async fn deploy_logic(
             &enclaveos_commit,
             &config_content,
             e2e,
+            e2e_key_exchange,
             config_file.has_vault_env(), // auto-enable locksmith when env::vault is used
             e2e_config
                 .as_ref()
@@ -2612,6 +2616,7 @@ async fn deploy_logic(
                 http_port: ec_network.and_then(|n| n.http.as_ref()).map(|h| h.port),
                 e2e,
                 e2e_mode: e2e_mode_value.to_string(),
+                e2e_key_exchange: e2e_key_exchange.to_string(),
                 domain: ec_network
                     .and_then(|n| n.http.as_ref())
                     .and_then(|h| h.domain.clone()),

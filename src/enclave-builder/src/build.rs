@@ -122,6 +122,7 @@ pub async fn stage_eif_components(
     http_port: Option<u16>,
     e2e: bool,
     e2e_mode: &str,
+    e2e_key_exchange: &str,
     domain: Option<&str>,
     http_upstream_protocol: &str,
     locksmith: bool,
@@ -228,6 +229,7 @@ pub async fn stage_eif_components(
         http_port,
         e2e,
         e2e_mode,
+        e2e_key_exchange,
         domain,
         http_upstream_protocol,
         locksmith,
@@ -304,6 +306,7 @@ async fn render_run_sh_template(
     http_port: Option<u16>,
     e2e: bool,
     e2e_mode: &str,
+    e2e_key_exchange: &str,
     domain: Option<&str>,
     http_upstream_protocol: &str,
     locksmith: bool,
@@ -431,6 +434,7 @@ async fn render_run_sh_template(
         .replace("{{USER_CMD}}", &user_cmd)
         .replace("{{STEVE_APP_PORT}}", &steve_app_port)
         .replace("{{CADDY_UPSTREAM}}", &caddy_upstream)
+        .replace("{{STEVE_KEY_EXCHANGE}}", e2e_key_exchange)
         .replace("{{CADDY_DOMAIN}}", caddy_domain)
         .replace("{{CUSTOM_PORT_SECTION}}", &custom_port_section)
         .replace("{{STEVE_CORS_ORIGINS_ENV}}", &cors_env);
@@ -483,6 +487,7 @@ pub async fn build_eif_from_filesystems(
     no_cache: bool,
     e2e: bool,
     e2e_mode: &str,
+    e2e_key_exchange: &str,
     domain: Option<&str>,
     http_upstream_protocol: &str,
     locksmith: bool,
@@ -506,6 +511,7 @@ pub async fn build_eif_from_filesystems(
         http_port,
         e2e,
         e2e_mode,
+        e2e_key_exchange,
         domain,
         http_upstream_protocol,
         locksmith,
@@ -720,7 +726,7 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         write!(
             file,
-            "#!/bin/sh\n# {{STEVE\necho steve\nSTEVE_APP_UPSTREAM=\"http://127.0.0.1:{{{{STEVE_APP_PORT}}}}\"\n# }}STEVE\n{{{{CUSTOM_PORT_SECTION}}}}\n{{{{USER_CMD}}}}\n"
+            "#!/bin/sh\n# {{STEVE\necho steve\nSTEVE_APP_UPSTREAM=\"http://127.0.0.1:{{{{STEVE_APP_PORT}}}}\"\nSTEVE_KEY_EXCHANGE={{{{STEVE_KEY_EXCHANGE}}}}\n# }}STEVE\n{{{{CUSTOM_PORT_SECTION}}}}\n{{{{USER_CMD}}}}\n"
         )
         .unwrap();
         file
@@ -859,6 +865,7 @@ mod tests {
             None,
             false,
             "disabled",
+            "X25519",
             None,
             "http",
             true,
@@ -884,6 +891,7 @@ mod tests {
             Some(3000),
             true,
             "steve",
+            "XWING-DRAFT10",
             None,
             "http",
             false,
@@ -894,6 +902,7 @@ mod tests {
         .unwrap();
 
         assert!(result.contains("STEVE_APP_UPSTREAM=\"http://127.0.0.1:3000\""));
+        assert!(result.contains("STEVE_KEY_EXCHANGE=XWING-DRAFT10"));
     }
 
     #[tokio::test]
@@ -906,6 +915,7 @@ mod tests {
             None,
             true,
             "steve",
+            "X25519",
             None,
             "http",
             false,
@@ -916,6 +926,7 @@ mod tests {
         .unwrap();
 
         assert!(result.contains("STEVE_APP_UPSTREAM=\"http://127.0.0.1:8080\""));
+        assert!(result.contains("STEVE_KEY_EXCHANGE=X25519"));
     }
 
     #[tokio::test]
@@ -928,6 +939,7 @@ mod tests {
             None,
             true,
             "steve",
+            "X25519",
             None,
             "http",
             false,
@@ -952,6 +964,7 @@ mod tests {
             Some(8080),
             false,
             "tls",
+            "X25519",
             Some("app.example.com"),
             "h2c",
             false,
@@ -985,6 +998,7 @@ mod tests {
             None,
             false,
             "tls",
+            "X25519",
             Some("app.example.com"),
             "http",
             false,
@@ -1008,6 +1022,7 @@ mod tests {
             Some(8080),
             false,
             "tls",
+            "X25519",
             None,
             "http",
             false,
@@ -1027,6 +1042,7 @@ mod tests {
             Some(8080),
             false,
             "tls",
+            "X25519",
             Some("app.example.com"),
             "http",
             false,
@@ -1091,6 +1107,7 @@ mod tests {
             None,
             false,
             "disabled",
+            "X25519",
             None,
             "http",
             false,
@@ -1113,6 +1130,7 @@ mod tests {
             None,
             false,
             "disabled",
+            "X25519",
             None,
             "http",
             false,

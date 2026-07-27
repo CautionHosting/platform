@@ -2769,6 +2769,7 @@ enclave "default" {{
     #   e2e_encryption {{
     #     enabled      = true
     #     cors_origins = ["*"]
+    #     key_exchange = "x25519"
     #   }}
     # }}
   }}
@@ -5521,6 +5522,9 @@ enclave "default" {{
         let e2e_mode = e2e_config.and_then(|config| config.effective_mode());
         let e2e = e2e_mode == Some(caution_config::E2eMode::Steve);
         let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
+        let e2e_key_exchange = e2e_config
+            .map(|ee| ee.key_exchange().steve_env_value())
+            .unwrap_or(caution_config::KeyExchange::X25519.steve_env_value());
         output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = cfg.has_vault_env();
@@ -5560,6 +5564,7 @@ enclave "default" {{
                 http_port,
                 e2e,
                 e2e_mode_value,
+                e2e_key_exchange,
                 domain.as_deref(),
                 http_upstream_protocol,
                 locksmith,
@@ -5950,6 +5955,10 @@ enclave "default" {{
         let e2e_mode = resolve_reproduction_e2e_mode(e2e_config.as_ref(), manifest_has_steve);
         let e2e = e2e_mode == Some(caution_config::E2eMode::Steve);
         let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
+        let e2e_key_exchange = e2e_config
+            .as_ref()
+            .map(|e2e| e2e.key_exchange().steve_env_value())
+            .unwrap_or(caution_config::KeyExchange::X25519.steve_env_value());
         output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = if let Some(ref app_dir) = app_source_dir {
@@ -6016,6 +6025,7 @@ enclave "default" {{
                     http_port,
                     e2e,
                     e2e_mode_value,
+                    e2e_key_exchange,
                     domain.as_deref(),
                     http_upstream_protocol,
                     locksmith,
@@ -6039,6 +6049,7 @@ enclave "default" {{
                     http_port,
                     e2e,
                     e2e_mode_value,
+                    e2e_key_exchange,
                     domain.as_deref(),
                     http_upstream_protocol,
                     locksmith,
@@ -8998,6 +9009,7 @@ mod tests {
             enabled,
             mode,
             cors_origins: None,
+            key_exchange: None,
         };
         let disabled = config(Some(false), None);
         let steve = config(Some(true), None);
@@ -9396,6 +9408,7 @@ containerfile: Missing.Containerfile\n",
                 "generated HCL should parse for byoc={byoc}: {:?}",
                 config.err()
             );
+            assert!(hcl.contains("key_exchange = \"x25519\""));
         }
     }
 

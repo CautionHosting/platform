@@ -151,6 +151,7 @@ pub struct BuildRequest {
     pub http_port: Option<u16>,
     pub e2e: bool,
     pub e2e_mode: String,
+    pub e2e_key_exchange: String,
     pub domain: Option<String>,
     pub http_upstream_protocol: String,
     pub framework_commit: Option<String>,
@@ -261,6 +262,7 @@ pub fn compute_cache_key(
     enclaveos_commit: &str,
     procfile_content: &str,
     e2e: bool,
+    e2e_key_exchange: &str,
     locksmith: bool,
     e2e_cors_origins: &[String],
     framework_commit: Option<&str>,
@@ -273,6 +275,8 @@ pub fn compute_cache_key(
     hasher.update(procfile_content.as_bytes());
     hasher.update(b"|");
     hasher.update(if e2e { "e2e" } else { "no-e2e" }.as_bytes());
+    hasher.update(b"|");
+    hasher.update(e2e_key_exchange.as_bytes());
     hasher.update(b"|");
     hasher.update(
         if locksmith {
@@ -905,6 +909,7 @@ fn generate_builder_userdata(
     let locksmith_commit = enclave_builder::build::resolve_locksmith_commit();
 
     let e2e_flag = if request.e2e { "true" } else { "false" };
+    let key_exchange = &request.e2e_key_exchange;
     let locksmith_flag = if request.locksmith { "true" } else { "false" };
     let egress_flag = if request.egress { "true" } else { "false" };
     let cors_origins_value = request.e2e_cors_origins.as_deref().unwrap_or("");
@@ -970,6 +975,7 @@ PORTS="{ports_csv}"
 HTTP_PORT="{http_port}"
 E2E="{e2e_flag}"
 E2E_MODE="{e2e_mode}"
+KEY_EXCHANGE="{key_exchange}"
 DOMAIN="{domain}"
 HTTP_UPSTREAM_PROTOCOL="{http_upstream_protocol}"
 LOCKSMITH="{locksmith_flag}"
@@ -1071,6 +1077,7 @@ CAUTION_E2E="$E2E" \
 CAUTION_E2E_MODE="$E2E_MODE" \
 CAUTION_DOMAIN="$DOMAIN" \
 CAUTION_HTTP_UPSTREAM_PROTOCOL="$HTTP_UPSTREAM_PROTOCOL" \
+CAUTION_KEY_EXCHANGE="$KEY_EXCHANGE" \
 CAUTION_LOCKSMITH="$LOCKSMITH" \
 CAUTION_EGRESS="$EGRESS" \
 CAUTION_CORS_ORIGINS="$CORS_ORIGINS" \
@@ -1290,6 +1297,7 @@ mod tests {
         enclaveos: &str,
         procfile: &str,
         e2e: bool,
+        e2e_key_exchange: &str,
         locksmith: bool,
         framework_commit: Option<&str>,
     ) -> String {
@@ -1298,6 +1306,7 @@ mod tests {
             enclaveos,
             procfile,
             e2e,
+            e2e_key_exchange,
             locksmith,
             &[],
             framework_commit,
@@ -1306,44 +1315,44 @@ mod tests {
 
     #[test]
     fn test_cache_key_deterministic() {
-        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
-        let key2 = cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
+        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", false, None);
+        let key2 = cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", false, None);
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 64); // SHA256 hex
     }
 
     #[test]
     fn test_cache_key_changes_with_commit() {
-        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
-        let key2 = cache_key("def456", "enclave-v1", "run: /app", false, false, None);
+        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", false, None);
+        let key2 = cache_key("def456", "enclave-v1", "run: /app", false, "X25519", false, None);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_enclaveos() {
-        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
-        let key2 = cache_key("abc123", "enclave-v2", "run: /app", false, false, None);
+        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", false, None);
+        let key2 = cache_key("abc123", "enclave-v2", "run: /app", false, "X25519", false, None);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_procfile() {
-        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
-        let key2 = cache_key("abc123", "enclave-v1", "run: /other", false, false, None);
+        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", false, None);
+        let key2 = cache_key("abc123", "enclave-v1", "run: /other", false, "X25519", false, None);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_e2e() {
-        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
-        let key2 = cache_key("abc123", "enclave-v1", "run: /app", true, false, None);
+        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", false, None);
+        let key2 = cache_key("abc123", "enclave-v1", "run: /app", true, "X25519", false, None);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_locksmith() {
-        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
-        let key2 = cache_key("abc123", "enclave-v1", "run: /app", false, true, None);
+        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", false, None);
+        let key2 = cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", true, None);
         assert_ne!(key1, key2);
     }
 
@@ -1354,6 +1363,7 @@ mod tests {
             "enclave-v1",
             "run: /app",
             false,
+            "X25519",
             false,
             Some("1111111111111111111111111111111111111111"),
         );
@@ -1362,10 +1372,26 @@ mod tests {
             "enclave-v1",
             "run: /app",
             false,
+            "X25519",
             false,
             Some("2222222222222222222222222222222222222222"),
         );
         assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_cache_key_changes_with_key_exchange() {
+        let x25519 = cache_key("abc123", "enclave-v1", "run: /app", true, "X25519", false, None);
+        let xwing = cache_key(
+            "abc123",
+            "enclave-v1",
+            "run: /app",
+            true,
+            "XWING-DRAFT10",
+            false,
+            None,
+        );
+        assert_ne!(x25519, xwing);
     }
 
     #[test]
@@ -1589,6 +1615,7 @@ mod tests {
             http_port: None,
             e2e: false,
             e2e_mode: "disabled".to_string(),
+            e2e_key_exchange: "X25519".to_string(),
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: None,
@@ -1740,6 +1767,7 @@ mod tests {
             http_port: None,
             e2e: false,
             e2e_mode: "disabled".to_string(),
+            e2e_key_exchange: "X25519".to_string(),
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: None,
@@ -1797,6 +1825,7 @@ mod tests {
             http_port: None,
             e2e: false,
             e2e_mode: "disabled".to_string(),
+            e2e_key_exchange: "X25519".to_string(),
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: None,
@@ -1853,6 +1882,7 @@ mod tests {
             http_port: None,
             e2e: false,
             e2e_mode: "disabled".to_string(),
+            e2e_key_exchange: "X25519".to_string(),
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: None,
@@ -1917,6 +1947,7 @@ mod tests {
             http_port: None,
             e2e: false,
             e2e_mode: "disabled".to_string(),
+            e2e_key_exchange: "X25519".to_string(),
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: None,
@@ -1977,6 +2008,7 @@ mod tests {
             http_port: None,
             e2e: false,
             e2e_mode: "disabled".to_string(),
+            e2e_key_exchange: "X25519".to_string(),
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: None,
@@ -2034,6 +2066,7 @@ mod tests {
             http_port: None,
             e2e: false,
             e2e_mode: "disabled".to_string(),
+            e2e_key_exchange: "X25519".to_string(),
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: None,
