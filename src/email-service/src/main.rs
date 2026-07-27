@@ -20,7 +20,7 @@ use tower_http::trace::TraceLayer;
 use tracing::{error, info};
 use uuid::Uuid;
 
-const BILLING_URL: &str = "https://caution.dev/#billing";
+const BILLING_URL: &str = "https://dashboard.caution.co/#billing";
 
 struct AppError(anyhow::Error);
 
@@ -815,7 +815,7 @@ fn generate_insufficient_balance_email(data: &serde_json::Value) -> (String, Str
     let topup_url_raw = data["add_credits_url"]
         .as_str()
         .or_else(|| data["topup_url"].as_str())
-        .unwrap_or("https://caution.dev/#billing");
+        .unwrap_or("https://dashboard.caution.co/#billing");
 
     let balance = html_escape(balance_raw);
     let topup_url = html_escape(topup_url_raw);
@@ -1210,10 +1210,10 @@ mod tests {
         assert_eq!(subject, "Action Required: Your services will be suspended");
         assert!(html.contains("$25.00"));
         assert!(html.contains("4 days"));
-        assert!(html.contains("https://caution.dev/#billing"));
+        assert!(html.contains("https://dashboard.caution.co/#billing"));
         assert!(text.contains("$25.00"));
         assert!(text.contains("4 days"));
-        assert!(text.contains("https://caution.dev/#billing"));
+        assert!(text.contains("https://dashboard.caution.co/#billing"));
     }
 
     #[test]
@@ -1255,7 +1255,7 @@ mod tests {
         assert!(html.contains("$42.50"));
         assert!(html.contains("<strong>3</strong> running deployment(s)"));
         assert!(html.contains("has <strong>not</strong> been deleted"));
-        assert!(html.contains("https://caution.dev/#billing"));
+        assert!(html.contains("https://dashboard.caution.co/#billing"));
         assert!(text.contains("$42.50"));
         assert!(text.contains("3 running deployment(s)"));
         assert!(text.contains("has NOT been deleted"));
@@ -1292,7 +1292,7 @@ mod tests {
         let data = serde_json::json!({
             "balance": "$12.34",
             "amount": "$12.34",
-            "add_credits_url": "https://caution.dev/#billing",
+            "add_credits_url": "https://dashboard.caution.co/#billing",
         });
 
         let (subject, html, text) = generate_insufficient_balance_email(&data);
@@ -1300,8 +1300,8 @@ mod tests {
         assert_eq!(subject, "Low credit balance on your Caution account");
         assert!(html.contains("$12.34"));
         assert!(text.contains("Current balance: $12.34"));
-        assert!(html.contains("https://caution.dev/#billing"));
-        assert!(text.contains("https://caution.dev/#billing"));
+        assert!(html.contains("https://dashboard.caution.co/#billing"));
+        assert!(text.contains("https://dashboard.caution.co/#billing"));
         assert!(!subject.contains("Invoice"));
     }
 

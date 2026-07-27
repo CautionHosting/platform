@@ -21,14 +21,14 @@ use uuid::Uuid;
 
 static BILLING_URL: LazyLock<String> = LazyLock::new(|| {
     let caution_domain =
-        std::env::var("CAUTION_DOMAIN").unwrap_or_else(|_| "caution.dev".to_string());
+        std::env::var("CAUTION_DOMAIN").unwrap_or_else(|_| "dashboard.caution.co".to_string());
     billing_url_for_domain(&caution_domain)
 });
 
 fn billing_url_for_domain(caution_domain: &str) -> String {
     let caution_domain = caution_domain.trim().trim_end_matches('/');
     let caution_domain = if caution_domain.is_empty() {
-        "caution.dev"
+        "dashboard.caution.co"
     } else {
         caution_domain
     };
@@ -1828,8 +1828,8 @@ mod billing_url_tests {
     #[test]
     fn billing_url_points_to_dashboard_billing_hash() {
         assert_eq!(
-            billing_url_for_domain("caution.dev"),
-            "https://caution.dev/#billing"
+            billing_url_for_domain("dashboard.caution.co"),
+            "https://dashboard.caution.co/#billing"
         );
     }
 
@@ -2059,7 +2059,7 @@ async fn deploy_logic(
         )) = sub
         else {
             return Err((StatusCode::PAYMENT_REQUIRED,
-                "Managed on-premises deployment requires an active subscription. Choose a plan in Settings at https://caution.dev".to_string()));
+                "Managed on-premises deployment requires an active subscription. Choose a plan in Settings at https://dashboard.caution.co".to_string()));
         };
 
         let status_permits_deploy = match billing_source.as_str() {
@@ -2113,7 +2113,7 @@ async fn deploy_logic(
             return Err((
                 StatusCode::PAYMENT_REQUIRED,
                 format!(
-                    "App limit reached ({}/{}). Upgrade your plan in Settings at https://caution.dev",
+                    "App limit reached ({}/{}). Upgrade your plan in Settings at https://dashboard.caution.co",
                     current_apps + 1,
                     max_apps
                 ),
