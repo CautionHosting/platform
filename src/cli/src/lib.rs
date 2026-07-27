@@ -7772,26 +7772,24 @@ enclave "default" {{
                 output::status(format!("Adding bare metal credentials for '{}'", name));
                 let host = prompt::text("Host address: ")?;
 
-                let port_str = prompt::text("SSH Port [22]: ")?;
-                let port: u16 = port_str.parse().unwrap_or(22);
+                let port = prompt::text_or_default("SSH Port [22]: ", 22)?;
 
                 let username = prompt::text("Username: ")?;
 
-                let auth_type = prompt::text("Use SSH key (k) or password (p)? [k]: ")?.to_lowercase();
+                let auth_type = prompt::text_or_default("Use SSH key (k) or password (p)? [k]: ", "k".to_string())?.to_lowercase();
 
                 let (ssh_private_key, ssh_password) = if auth_type == "p" {
                     let password = prompt::password("SSH Password: ")?;
                     (None, Some(password))
                 } else {
-                    let key_path = prompt::text("Path to SSH private key [~/.ssh/id_ed25519]: ")?;
-                    let key_path = if key_path.is_empty() {
-                        dirs::home_dir()
-                            .map(|h| h.join(".ssh/id_ed25519"))
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "~/.ssh/id_ed25519".to_string())
-                    } else {
-                        key_path.to_string()
-                    };
+                    let default_key_path = dirs::home_dir()
+                        .map(|h| h.join(".ssh/id_ed25519"))
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "~/.ssh/id_ed25519".to_string());
+                    let key_path = prompt::text_or_default(
+                        "Path to SSH private key [~/.ssh/id_ed25519]: ",
+                        default_key_path,
+                    )?;
 
                     let key_content = fs::read_to_string(&key_path)
                         .context(format!("Failed to read SSH key from {}", key_path))?;
