@@ -21,6 +21,10 @@ pub const BOOTPROOF_REPO: &str = "https://git.distrust.co/public/bootproof.git";
 pub const STEVE_REPO: &str = "https://git.distrust.co/public/steve.git";
 pub const LOCKSMITH_REPO: &str = "https://codeberg.org/caution/locksmith.git";
 
+/// STEVE's built-in default key exchange. Must match
+/// `caution_config::KeyExchange::X25519.steve_env_value()`.
+pub const DEFAULT_KEY_EXCHANGE: &str = "X25519";
+
 const RESERVED_INTERNAL_PORT_START: u16 = 49_500;
 const RESERVED_INTERNAL_PORT_END: u16 = 49_600;
 
@@ -422,6 +426,15 @@ async fn render_run_sh_template(
         )
     };
 
+    // Only emit the variable for non-default key exchanges: STEVE defaults to
+    // X25519, so omitting it keeps run.sh (and therefore the PCRs) byte-identical
+    // to deployments made before key exchange was selectable.
+    let key_exchange_env = if e2e_key_exchange == DEFAULT_KEY_EXCHANGE {
+        String::new()
+    } else {
+        format!("STEVE_KEY_EXCHANGE={} ", e2e_key_exchange)
+    };
+
     let cors_env = match e2e_cors_origins {
         Some(origins) => format!(
             "STEVE_CORS_ORIGINS='{}'",
@@ -434,7 +447,7 @@ async fn render_run_sh_template(
         .replace("{{USER_CMD}}", &user_cmd)
         .replace("{{STEVE_APP_PORT}}", &steve_app_port)
         .replace("{{CADDY_UPSTREAM}}", &caddy_upstream)
-        .replace("{{STEVE_KEY_EXCHANGE}}", e2e_key_exchange)
+        .replace("{{STEVE_KEY_EXCHANGE_ENV}}", &key_exchange_env)
         .replace("{{CADDY_DOMAIN}}", caddy_domain)
         .replace("{{CUSTOM_PORT_SECTION}}", &custom_port_section)
         .replace("{{STEVE_CORS_ORIGINS_ENV}}", &cors_env);
@@ -726,7 +739,7 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         write!(
             file,
-            "#!/bin/sh\n# {{STEVE\necho steve\nSTEVE_APP_UPSTREAM=\"http://127.0.0.1:{{{{STEVE_APP_PORT}}}}\"\nSTEVE_KEY_EXCHANGE={{{{STEVE_KEY_EXCHANGE}}}}\n# }}STEVE\n{{{{CUSTOM_PORT_SECTION}}}}\n{{{{USER_CMD}}}}\n"
+            "#!/bin/sh\n# {{STEVE\necho steve\nSTEVE_APP_UPSTREAM=\"http://127.0.0.1:{{{{STEVE_APP_PORT}}}}\" {{{{STEVE_KEY_EXCHANGE_ENV}}}}/steve\n# }}STEVE\n{{{{CUSTOM_PORT_SECTION}}}}\n{{{{USER_CMD}}}}\n"
         )
         .unwrap();
         file
@@ -926,7 +939,9 @@ mod tests {
         .unwrap();
 
         assert!(result.contains("STEVE_APP_UPSTREAM=\"http://127.0.0.1:8080\""));
-        assert!(result.contains("STEVE_KEY_EXCHANGE=X25519"));
+        // The default key exchange is left implicit so run.sh stays byte-identical
+        // to pre-key-exchange deployments (and their PCRs).
+        assert!(!result.contains("STEVE_KEY_EXCHANGE"));
     }
 
     #[tokio::test]

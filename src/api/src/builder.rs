@@ -276,7 +276,11 @@ pub fn compute_cache_key(
     hasher.update(b"|");
     hasher.update(if e2e { "e2e" } else { "no-e2e" }.as_bytes());
     hasher.update(b"|");
-    hasher.update(e2e_key_exchange.as_bytes());
+    // Only a non-default key exchange reaches run.sh, so hashing it otherwise
+    // would invalidate cached builds whose output is byte-identical.
+    if e2e && e2e_key_exchange != enclave_builder::build::DEFAULT_KEY_EXCHANGE {
+        hasher.update(e2e_key_exchange.as_bytes());
+    }
     hasher.update(b"|");
     hasher.update(
         if locksmith {
@@ -947,6 +951,9 @@ fn generate_builder_userdata(
     manifest.bootproof_commit = Some(bootproof_commit);
     if request.e2e {
         manifest.steve_commit = Some(steve_commit);
+        if request.e2e_key_exchange != enclave_builder::build::DEFAULT_KEY_EXCHANGE {
+            manifest.steve_key_exchange = Some(request.e2e_key_exchange.clone());
+        }
     }
     if request.locksmith {
         manifest.locksmith = true;

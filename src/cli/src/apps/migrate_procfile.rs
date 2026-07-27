@@ -294,13 +294,11 @@ fn build_network_block(network: &caution_config::NetworkConfig) -> Option<hcl::B
                 e2e_builder = e2e_builder.add_attribute(("cors_origins", exprs));
             }
 
-            e2e_builder = e2e_builder.add_attribute((
-                "key_exchange",
-                match e2e.key_exchange() {
-                    caution_config::KeyExchange::X25519 => "x25519",
-                    caution_config::KeyExchange::XwingDraft10 => "xwing-draft10",
-                },
-            ));
+            // Emit only an explicit non-default selection, matching this
+            // migration's minimal-output convention.
+            if let Some(caution_config::KeyExchange::XwingDraft10) = e2e.key_exchange {
+                e2e_builder = e2e_builder.add_attribute(("key_exchange", "xwing-draft10"));
+            }
 
             http_builder = http_builder.add_block(e2e_builder.build());
         }
@@ -488,7 +486,7 @@ e2e: true
         assert!(output.contains("http {"), "http block");
         assert!(output.contains("resources {"), "resources block");
         assert!(output.contains("unit \"default\""), "unit with label");
-        assert!(output.contains("key_exchange = \"x25519\""));
+        assert!(!output.contains("key_exchange"), "default key exchange stays implicit");
         assert!(!output.contains("= null"), "no null values");
     }
 

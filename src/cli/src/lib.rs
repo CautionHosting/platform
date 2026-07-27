@@ -5705,14 +5705,19 @@ enclave "default" {{
         // For local inputs, include the normalized configuration in the cache
         // identity. Remote manifest reproduction already keys on the immutable
         // app commit plus manifest hash; its config is fetched from that commit.
-        let cache_key = if let Some(source) = local_source {
-            let cfg = self.read_config_from_dir(&source.path)?;
-            measured_build_cache_key(&source_cache_key, &cfg)?
+        // A missing or unparseable config is not fatal here: every other config
+        // read on this path tolerates it and falls back to manifest-derived
+        // values, so the cache key just stays source-only.
+        let measured_config = if let Some(source) = local_source {
+            self.read_config_from_dir(&source.path).ok()
         } else if external_manifest.is_none() {
-            let cfg = self.read_config().map_err(anyhow::Error::from)?;
-            measured_build_cache_key(&source_cache_key, &cfg)?
+            self.read_config().ok()
         } else {
-            source_cache_key
+            None
+        };
+        let cache_key = match measured_config {
+            Some(cfg) => measured_build_cache_key(&source_cache_key, &cfg)?,
+            None => source_cache_key,
         };
 
         let builder = enclave_builder::EnclaveBuilder::new_with_cache(
@@ -5957,8 +5962,17 @@ enclave "default" {{
         let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
         let e2e_key_exchange = e2e_config
             .as_ref()
-            .map(|e2e| e2e.key_exchange().steve_env_value())
-            .unwrap_or(caution_config::KeyExchange::X25519.steve_env_value());
+            .map(|e2e| e2e.key_exchange().steve_env_value().to_string())
+            .unwrap_or_else(|| {
+                // No readable config: fall back to what the deployment recorded,
+                // otherwise reproduction would silently rebuild with X25519.
+                external_manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.steve_key_exchange.clone())
+                    .unwrap_or_else(|| {
+                        caution_config::KeyExchange::X25519.steve_env_value().to_string()
+                    })
+            });
         output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = if let Some(ref app_dir) = app_source_dir {
@@ -6025,7 +6039,7 @@ enclave "default" {{
                     http_port,
                     e2e,
                     e2e_mode_value,
-                    e2e_key_exchange,
+                    &e2e_key_exchange,
                     domain.as_deref(),
                     http_upstream_protocol,
                     locksmith,
@@ -6049,7 +6063,7 @@ enclave "default" {{
                     http_port,
                     e2e,
                     e2e_mode_value,
-                    e2e_key_exchange,
+                    &e2e_key_exchange,
                     domain.as_deref(),
                     http_upstream_protocol,
                     locksmith,
