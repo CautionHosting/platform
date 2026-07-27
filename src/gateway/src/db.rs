@@ -75,6 +75,7 @@ fn public_organization_name(name: &str) -> String {
 /// other failures should match on this exact anyhow message via
 /// `is_username_taken_error`.
 const USERNAME_TAKEN_ERROR: &str = "USERNAME_TAKEN";
+const ALPHA_CODE_UNAVAILABLE_ERROR: &str = "ALPHA_CODE_UNAVAILABLE";
 
 /// Returns true if `err` (as produced by `create_user`) indicates the
 /// username was already taken, so callers can map it to a 409 response.
@@ -84,6 +85,11 @@ pub fn is_username_taken_error(err: &anyhow::Error) -> bool {
     // outermost context, so a top-level `to_string()` would miss it.
     err.chain()
         .any(|cause| cause.to_string().contains(USERNAME_TAKEN_ERROR))
+}
+
+pub fn is_alpha_code_unavailable_error(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.to_string().contains(ALPHA_CODE_UNAVAILABLE_ERROR))
 }
 
 /// Attempts the one-time username claim for a placeholder account. The
@@ -143,6 +149,22 @@ pub async fn create_user(
     legal: &SignupLegalContext,
 ) -> Result<Uuid> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+
+    let redemption = sqlx::query(
+        "UPDATE beta_codes
+         SET used_at = NOW()
+         WHERE id = $1
+           AND used_at IS NULL
+           AND (expires_at IS NULL OR expires_at > NOW())",
+    )
+    .bind(alpha_code_id)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to redeem alpha code")?;
+
+    if redemption.rows_affected() != 1 {
+        return Err(anyhow::anyhow!(ALPHA_CODE_UNAVAILABLE_ERROR));
+    }
 
     let user_id = insert_user_with_legal_events(
         &mut tx,
@@ -400,20 +422,6 @@ pub async fn validate_alpha_code(pool: &PgPool, code: &str) -> Result<Option<Uui
     Ok(code_id)
 }
 
-pub async fn redeem_alpha_code(pool: &PgPool, code_id: Uuid) -> Result<bool> {
-    let result = sqlx::query(
-        "UPDATE beta_codes
-         SET used_at = NOW()
-         WHERE id = $1
-           AND used_at IS NULL",
-    )
-    .bind(code_id)
-    .execute(pool)
-    .await
-    .context("Failed to redeem alpha code")?;
-
-    Ok(result.rows_affected() > 0)
-}
 
 pub async fn get_user_id_by_fido2_handle(pool: &PgPool, fido2_user_handle: &[u8]) -> Result<Uuid> {
     let user_id: Option<Uuid> =

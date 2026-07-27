@@ -1098,16 +1098,12 @@ pub async fn finish_register_handler(
             .map_err(|e| {
                 if db::is_username_taken_error(&e) {
                     RegisterError::UsernameTaken
+                } else if db::is_alpha_code_unavailable_error(&e) {
+                    RegisterError::InvalidAccessCode
                 } else {
                     RegisterError::Internal(anyhow::anyhow!("Failed to create user: {}", e))
                 }
             })?;
-
-            db::redeem_alpha_code(&state.db, alpha_code_id)
-                .await
-                .map_err(|e| {
-                    RegisterError::Internal(anyhow::anyhow!("Failed to redeem alpha code: {}", e))
-                })?;
 
             tracing::debug!("User registered and alpha code redeemed");
             user_id
