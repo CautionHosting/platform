@@ -14,15 +14,15 @@ fn print_heuristics() {
     caution_environment_heuristics::collapse_heuristics(&mut run_heuristics);
 
     if !build_heuristics.is_empty() || !run_heuristics.is_empty() {
-        eprintln!("Potentially unsafe environment:");
+        cli::output::warning("Potentially unsafe environment:");
     }
 
     for heuristic in build_heuristics {
-        eprintln!("[BUILD] {heuristic}");
+        cli::output::warning(format!("[BUILD] {heuristic}"));
     }
 
     for heuristic in run_heuristics {
-        eprintln!("  [RUN] {heuristic}");
+        cli::output::warning(format!("  [RUN] {heuristic}"));
     }
 }
 
@@ -31,11 +31,11 @@ async fn main() {
     print_heuristics();
 
     if let Err(e) = cli::run().await {
-        eprintln!("\nError: {e}");
+        cli::output::error(format!("\nError: {e}"));
 
         let mut source = e.source();
         while let Some(err) = source {
-            eprintln!("Caused by: {err}");
+            cli::output::error(format!("Caused by: {err}"));
             source = err.source();
         }
 

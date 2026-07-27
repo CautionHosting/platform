@@ -49,9 +49,10 @@ use openpgp::{
     serialize::Serialize as _,
 };
 
-mod loader;
-use loader::{Loader, LoaderStyle};
+pub mod output;
+pub mod prompt;
 
+use output::{Spinner, SpinnerStyle};
 mod apps;
 mod attestation;
 
@@ -528,7 +529,7 @@ fn encrypt_env_file(
         }
 
         if assignment.value.is_empty() {
-            eprintln!("skipping empty value for {}", assignment.key);
+            output::status(format!("skipping empty value for {}", assignment.key));
             continue;
         }
 
@@ -537,17 +538,17 @@ fn encrypt_env_file(
         let output = secrets_dir.join(format!("{}.asc", assignment.key));
         write_secret_file_atomically(&output, &encrypted)?;
 
-        eprintln!("encrypted {} -> {}", assignment.key, output.display());
+        output::status(format!("encrypted {} -> {}", assignment.key, output.display()));
         count += 1;
     }
 
-    eprintln!("encrypted {} secret(s)", count);
+    output::success(format!("encrypted {} secret(s)", count));
 
     Ok(count)
 }
 
 fn prompt_for_pin() -> Result<Option<String>> {
-    let pin = rpassword::prompt_password(
+    let pin = prompt::password(
         "Enter your security key PIN (or press Enter if no PIN is set): ",
     )?;
 
@@ -578,8 +579,8 @@ fn prompt_line_from<R: std::io::BufRead>(
     retry_message: &str,
 ) -> Result<String, PromptLineError> {
     loop {
-        print!("{}", prompt);
-        io::stdout().flush()?;
+        eprint!("{}", prompt);
+        io::stderr().flush()?;
 
         let mut input = String::new();
         if reader.read_line(&mut input)? == 0 {
@@ -592,7 +593,7 @@ fn prompt_line_from<R: std::io::BufRead>(
             return Ok(trimmed.to_string());
         }
 
-        println!("{}", retry_message);
+        output::status(retry_message);
     }
 }
 
@@ -636,8 +637,8 @@ fn prompt_optional_line_from<R: std::io::BufRead>(
     reader: &mut R,
     prompt: &str,
 ) -> Result<String, PromptLineError> {
-    print!("{}", prompt);
-    io::stdout().flush()?;
+    eprint!("{}", prompt);
+    io::stderr().flush()?;
 
     let mut input = String::new();
     reader.read_line(&mut input)?;
@@ -706,12 +707,6 @@ fn is_pin_related_error(error: &anyhow::Error) -> bool {
         || error_msg.contains("pininvalid")
 }
 
-fn log_verbose(verbose: bool, msg: &str) {
-    if verbose {
-        eprintln!("[VERBOSE] {}", msg);
-    }
-}
-
 /// Egress is enabled iff the (single) enclave's network block declares >=1 egress rule.
 /// Derived solely from the parsed HCL config — never from a manifest.
 fn config_egress_enabled(cfg: &caution_config::ConfigurationFile) -> bool {
@@ -738,6 +733,12 @@ fn ssh_fingerprint(key: &str) -> String {
 }
 
 fn render_qr_code(url: &str) -> Result<()> {
+    // When not attached to a terminal, skip QR art and print only the URL
+    if !output::is_tty_stdout() {
+        output::status(&format!("QR URL: {url}"));
+        return Ok(());
+    }
+
     use qrcode::{EcLevel, QrCode};
 
     let code = QrCode::with_error_correction_level(url.as_bytes(), EcLevel::L)
@@ -788,25 +789,25 @@ fn render_qr_code(url: &str) -> Result<()> {
 }
 
 fn check_dependencies(verbose: bool) -> Result<()> {
-    log_verbose(verbose, "Checking dependencies...");
+    output::verbose(verbose, "Checking dependencies...");
 
     let usb_dev_path = std::path::Path::new("/dev/bus/usb");
     if !usb_dev_path.exists() {
-        log_verbose(
+        output::verbose(
             verbose,
             "Warning: /dev/bus/usb not found - USB access may not work",
         );
     } else {
-        log_verbose(verbose, "USB device access available");
+        output::verbose(verbose, "USB device access available");
     }
 
-    log_verbose(verbose, "FIDO2 authenticator library loaded");
+    output::verbose(verbose, "FIDO2 authenticator library loaded");
 
     Ok(())
 }
 
 async fn check_gateway_connectivity(url: &str, verbose: bool) -> Result<()> {
-    log_verbose(
+    output::verbose(
         verbose,
         &format!("Testing connectivity to gateway: {}", url),
     );
@@ -816,19 +817,19 @@ async fn check_gateway_connectivity(url: &str, verbose: bool) -> Result<()> {
         .build()?;
 
     // Just verify we can reach the gateway base URL
-    log_verbose(verbose, &format!("HEAD {}", url));
+    output::verbose(verbose, &format!("HEAD {}", url));
 
     match client.head(url).send().await {
         Ok(resp) => {
-            log_verbose(
+            output::verbose(
                 verbose,
                 &format!("Gateway reachable (status: {})", resp.status()),
             );
             Ok(())
         }
         Err(e) => {
-            log_verbose(verbose, &format!("HEAD request failed (this is ok): {}", e));
-            log_verbose(
+            output::verbose(verbose, &format!("HEAD request failed (this is ok): {}", e));
+            output::verbose(
                 verbose,
                 "Skipping connectivity check, will test during auth",
             );
@@ -1876,7 +1877,7 @@ struct ApiClient {
 
 impl ApiClient {
     fn new(base_url: &str, verbose: bool, qr: bool, workdir: Option<PathBuf>) -> Result<Self> {
-        log_verbose(verbose, "Initializing API client...");
+        output::verbose(verbose, "Initializing API client...");
 
         let base_config = dirs::config_dir().context("Could not find config directory")?;
         let legacy_dir = base_config.join("api-cli");
@@ -1885,12 +1886,12 @@ impl ApiClient {
         // Migrate from the old api-cli directory name if present
         if legacy_dir.exists() && !config_dir.exists() {
             if let Err(e) = fs::rename(&legacy_dir, &config_dir) {
-                eprintln!("Warning: could not migrate config from {} to {}: {e}. You may need to log in again.",
-                    legacy_dir.display(), config_dir.display());
+                output::warning(format!("Warning: could not migrate config from {} to {}: {e}. You may need to log in again.",
+                    legacy_dir.display(), config_dir.display()));
             }
         }
 
-        log_verbose(verbose, &format!("Config directory: {:?}", config_dir));
+        output::verbose(verbose, &format!("Config directory: {:?}", config_dir));
 
         fs::create_dir_all(&config_dir).context("Failed to create config directory")?;
         let config_path = config_dir.join("config.json");
@@ -1903,12 +1904,12 @@ impl ApiClient {
             caution_dir.join("deployment.json")
         });
 
-        log_verbose(verbose, &format!("Config file: {:?}", config_path));
-        log_verbose(verbose, &format!("Deployment file: {:?}", deployment_path));
+        output::verbose(verbose, &format!("Config file: {:?}", config_path));
+        output::verbose(verbose, &format!("Deployment file: {:?}", deployment_path));
         if let Some(ref wd) = workdir {
-            log_verbose(verbose, &format!("Working directory: {:?}", wd));
+            output::verbose(verbose, &format!("Working directory: {:?}", wd));
         }
-        log_verbose(verbose, "API client initialized");
+        output::verbose(verbose, "API client initialized");
 
         Ok(Self {
             base_url: base_url.to_string(),
@@ -2028,7 +2029,7 @@ impl ApiClient {
                 .await?;
 
             if response.status().is_success() {
-                println!("Username '{}' claimed.", username);
+                output::success(format!("Username '{}' claimed.", username));
                 return Ok(());
             }
 
@@ -2049,10 +2050,10 @@ impl ApiClient {
                     );
                 }
 
-                println!(
+                output::status(format!(
                     "Username '{}' is already taken. Please choose another.",
                     username
-                );
+                ));
                 continue;
             }
 
@@ -2061,7 +2062,7 @@ impl ApiClient {
             // than aborting the whole command over a typo.
             if response.status() == reqwest::StatusCode::BAD_REQUEST {
                 let error = self.api_error_message(response).await;
-                println!("{}", error);
+                output::status(error);
                 continue;
             }
 
@@ -2206,7 +2207,7 @@ impl ApiClient {
         };
         let json = serde_json::to_string_pretty(&deployment_info)?;
         fs::write(deployment_path, json)?;
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!("Saved deployment info to {:?}", deployment_path),
         );
@@ -2546,7 +2547,7 @@ impl ApiClient {
             )
         })?;
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!("Sending SSH-signed HTTPS request for {}", path),
         );
@@ -2680,14 +2681,14 @@ impl ApiClient {
                 .output()
                 .context("Failed to update git remote 'caution'")?;
 
-            println!("Updated git remote 'caution' to: {}", git_url);
+            output::success(format!("Updated git remote 'caution' to: {}", git_url));
         } else {
             Command::new("git")
                 .args(&["remote", "add", "caution", git_url])
                 .output()
                 .context("Failed to add git remote 'caution'")?;
 
-            println!("Added git remote 'caution': {}", git_url);
+            output::success(format!("Added git remote 'caution': {}", git_url));
         }
 
         Ok(())
@@ -2770,7 +2771,7 @@ enclave "default" {{
         let config_path = dir.join("caution.hcl");
 
         if config_path.exists() {
-            log_verbose(
+            output::verbose(
                 self.verbose,
                 "caution.hcl already exists, skipping creation",
             );
@@ -2785,13 +2786,13 @@ enclave "default" {{
 
         fs::write(&config_path, hcl_content).context("Failed to create caution.hcl")?;
 
-        println!("\nCreated caution.hcl in current directory");
-        println!("Edit the unit \"default\" command to match your application");
-        println!("Build file precedence: containerfile: -> repo-root Containerfile -> Dockerfile");
+        output::success("\nCreated caution.hcl in current directory");
+        output::status("Edit the unit \"default\" command to match your application");
+        output::status("Build file precedence: containerfile: -> repo-root Containerfile -> Dockerfile");
         if byoc {
-            println!("Configure AWS deployment settings in the BYOC section");
+            output::status("Configure AWS deployment settings in the BYOC section");
         }
-        println!("Learn more: https://docs.caution.co/reference/caution-hcl/");
+        output::status("Learn more: https://docs.caution.co/reference/caution-hcl/");
 
         Ok(())
     }
@@ -2907,15 +2908,15 @@ enclave "default" {{
     }
 
     async fn register(&self, alpha_code: &str, username: &str) -> Result<()> {
-        log_verbose(self.verbose, "Starting FIDO2 registration...");
-        log_verbose(self.verbose, &format!("Target URL: {}", self.base_url));
+        output::verbose(self.verbose, "Starting FIDO2 registration...");
+        output::verbose(self.verbose, &format!("Target URL: {}", self.base_url));
 
         let cookie_store = reqwest::cookie::Jar::default();
         let client = reqwest::Client::builder()
             .cookie_provider(std::sync::Arc::new(cookie_store))
             .build()?;
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             "Sending registration begin request with alpha code...",
         );
@@ -2926,7 +2927,7 @@ enclave "default" {{
             .await
             .context("Failed to send registration begin request")?;
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!("Response status: {}", response.status()),
         );
@@ -2940,23 +2941,23 @@ enclave "default" {{
             .json()
             .await
             .context("Failed to parse registration begin response")?;
-        log_verbose(self.verbose, "Registration challenge received");
-        log_verbose(
+        output::verbose(self.verbose, "Registration challenge received");
+        output::verbose(
             self.verbose,
             &format!("Challenge: {}", begin_resp.public_key.challenge),
         );
 
-        log_verbose(self.verbose, "Creating credential on security key...");
+        output::verbose(self.verbose, "Creating credential on security key...");
 
         let mut attestation = self.make_credential(&begin_resp, &self.base_url)?;
 
-        println!("Credential created on device");
+        output::success("Credential created on device");
 
         if let Some(obj) = attestation.as_object_mut() {
             obj.insert("session".to_string(), serde_json::json!(begin_resp.session));
         }
 
-        log_verbose(self.verbose, "Sending registration finish request...");
+        output::verbose(self.verbose, "Sending registration finish request...");
         let response = client
             .post(format!("{}/auth/register/finish", self.base_url))
             .json(&attestation)
@@ -2964,7 +2965,7 @@ enclave "default" {{
             .await
             .context("Failed to send registration finish request")?;
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!("Response status: {}", response.status()),
         );
@@ -2976,20 +2977,16 @@ enclave "default" {{
 
             let finish_resp: RegisterFinishResponse = response.json().await?;
 
-            println!("\nFIDO2 registration successful!");
-            println!("\nYou are now logged in:");
-            println!("Expires: {}", finish_resp.expires_at);
+            output::success("FIDO2 registration successful");
+            output::success(&format!("Logged in. Account expires: {}", finish_resp.expires_at));
 
             self.save_config(session_id.clone(), finish_resp.expires_at.clone())?;
 
-            println!("\n=======================================================");
-            println!("ALPHA ACCESS GRANTED");
-            println!("=======================================================");
-            println!("\nYou're registered as an alpha user. You can now:");
-            println!("  • Create apps with 'caution init'");
-            println!("  • Deploy with 'git push caution main'");
-            println!("\nDashboard: {}/dashboard", self.frontend_url());
-            println!("=======================================================\n");
+            output::success("\nALPHA ACCESS GRANTED");
+            output::status("You're registered as an alpha user. You can now:");
+            output::status("  • Create apps with 'caution init'");
+            output::status("  • Deploy with 'git push caution main'");
+            output::status(&format!("Dashboard: {}/dashboard", self.frontend_url()));
 
             Ok(())
         } else {
@@ -2999,7 +2996,7 @@ enclave "default" {{
     }
 
     async fn login(&self, username: Option<String>) -> Result<()> {
-        log_verbose(self.verbose, "Starting FIDO2 login...");
+        output::verbose(self.verbose, "Starting FIDO2 login...");
 
         let username = resolve_login_username(
             username,
@@ -3008,35 +3005,35 @@ enclave "default" {{
         )?;
 
         let (session_id, _expires_at) = self.perform_login(&username).await?;
-        println!("Login successful");
+        output::success("Login successful");
 
         match self.check_onboarding_status(&session_id).await {
             Ok(status) => {
                 if !status.onboarding_complete {
-                    println!("\n=======================================================");
-                    println!("COMPLETE YOUR ONBOARDING");
-                    println!("=======================================================");
-                    println!("\nYou need to complete onboarding to use this service:");
-                    println!(
+                    output::warning("=======================================================");
+                    output::warning("COMPLETE YOUR ONBOARDING");
+                    output::warning("=======================================================");
+                    output::warning("You need to complete onboarding to use this service:");
+                    output::warning(format!(
                         "  1. Verify your email address {}",
                         if status.email_verified { "✓" } else { "✗" }
-                    );
-                    println!(
+                    ));
+                    output::warning(format!(
                         "  2. Add payment information {}",
                         if status.payment_method_added {
                             "✓"
                         } else {
                             "✗"
                         }
-                    );
-                    println!("\nOnboarding URL:");
-                    println!("  {}/onboarding", self.frontend_url());
-                    println!("\nYou must complete onboarding before you can create apps.");
-                    println!("=======================================================\n");
+                    ));
+                    output::warning("Onboarding URL:");
+                    output::warning(format!("  {}/onboarding", self.frontend_url()));
+                    output::warning("You must complete onboarding before you can create apps.");
+                    output::warning("=======================================================");
                 }
             }
             Err(e) => {
-                log_verbose(
+                output::verbose(
                     self.verbose,
                     &format!("Could not check onboarding status: {}", e),
                 );
@@ -3047,12 +3044,12 @@ enclave "default" {{
         match self.check_org_security_settings(&session_id).await {
             Ok(settings) => {
                 if !settings.require_pin {
-                    println!("\n⚠️  WARNING: PIN verification is disabled for your organization.");
-                    println!("   For production use, enable PIN requirement.");
+                    output::warning("⚠️  WARNING: PIN verification is disabled for your organization.");
+                    output::warning("   For production use, enable PIN requirement.");
                 }
             }
             Err(e) => {
-                log_verbose(
+                output::verbose(
                     self.verbose,
                     &format!("Could not check security settings: {}", e),
                 );
@@ -3063,7 +3060,7 @@ enclave "default" {{
     }
 
     async fn login_qr(&self, username: Option<&str>) -> Result<()> {
-        log_verbose(self.verbose, "Starting QR code cross-device login...");
+        output::verbose(self.verbose, "Starting QR code cross-device login...");
 
         // Step 1: Request a QR login token from the gateway. An optional
         // username scopes the eventual allowCredentials to that user's own
@@ -3082,19 +3079,18 @@ enclave "default" {{
         }
 
         let begin_resp: QrLoginBeginResponse = response.json().await?;
-        log_verbose(self.verbose, &format!("QR token: {}", begin_resp.token));
-        log_verbose(self.verbose, &format!("QR URL: {}", begin_resp.url));
+        output::verbose(self.verbose, &format!("QR token: {}", begin_resp.token));
+        output::verbose(self.verbose, &format!("QR URL: {}", begin_resp.url));
 
         // Step 2: Render the QR code in the terminal
-        println!();
+        output::status("");
         render_qr_code(&begin_resp.url)?;
-        println!();
-        println!("Scan the QR code with your phone, or open this URL:");
-        println!("  {}", begin_resp.url);
-        println!();
+        output::status("");
+        output::status("Scan the QR code with your phone, or open this URL:");
+        output::status(&format!("  {}", begin_resp.url));
 
         // Step 3: Poll for completion
-        let mut loader = Loader::new("Waiting for authentication...", LoaderStyle::Processing);
+        let loader = Spinner::new("Waiting for authentication...", SpinnerStyle::Processing);
 
         let poll_result = async {
             let timeout = Duration::from_secs(180); // 3 minutes
@@ -3115,12 +3111,12 @@ enclave "default" {{
                     .await?;
 
                 if !status_resp.status().is_success() {
-                    log_verbose(self.verbose, "Status poll failed, retrying...");
+                    output::verbose(self.verbose, "Status poll failed, retrying...");
                     continue;
                 }
 
                 let status: QrLoginStatusResponse = status_resp.json().await?;
-                log_verbose(self.verbose, &format!("Poll status: {}", status.status));
+                output::verbose(self.verbose, &format!("Poll status: {}", status.status));
 
                 match status.status.as_str() {
                     "completed" => {
@@ -3144,20 +3140,20 @@ enclave "default" {{
         }
         .await;
 
-        loader.stop();
+        loader.finish();
 
         let session_id = poll_result?;
-        println!("Login successful");
+        output::success("Login successful");
 
         match self.check_org_security_settings(&session_id).await {
             Ok(settings) => {
                 if !settings.require_pin {
-                    println!("\n⚠️  WARNING: PIN verification is disabled for your organization.");
-                    println!("   For production use, enable PIN requirement.");
+                    output::warning("\nWARNING: PIN verification is disabled for your organization.");
+                    output::warning("For production use, enable PIN requirement.");
                 }
             }
             Err(e) => {
-                log_verbose(
+                output::verbose(
                     self.verbose,
                     &format!("Could not check security settings: {}", e),
                 );
@@ -3170,7 +3166,7 @@ enclave "default" {{
     async fn logout(&self) -> Result<()> {
         // Try to invalidate session on server if we have a config
         if let Ok(config) = self.load_config() {
-            log_verbose(self.verbose, "Invalidating session on server...");
+            output::verbose(self.verbose, "Invalidating session on server...");
             match self
                 .client
                 .post(format!("{}/auth/logout", self.base_url))
@@ -3179,16 +3175,16 @@ enclave "default" {{
                 .await
             {
                 Ok(response) if response.status().is_success() => {
-                    log_verbose(self.verbose, "Session invalidated on server");
+                    output::verbose(self.verbose, "Session invalidated on server");
                 }
                 Ok(response) => {
-                    log_verbose(
+                    output::verbose(
                         self.verbose,
                         &format!("Server returned {}", response.status()),
                     );
                 }
                 Err(e) => {
-                    log_verbose(self.verbose, &format!("Could not reach server: {}", e));
+                    output::verbose(self.verbose, &format!("Could not reach server: {}", e));
                 }
             }
         }
@@ -3196,9 +3192,9 @@ enclave "default" {{
         // Delete local config
         if self.config_path.exists() {
             std::fs::remove_file(&self.config_path)?;
-            println!("Logged out successfully");
+            output::success("Logged out successfully");
         } else {
-            println!("Not logged in");
+            output::status("Not logged in");
         }
 
         Ok(())
@@ -3228,7 +3224,7 @@ enclave "default" {{
     async fn print_account_id(&self) -> Result<()> {
         let config = self.require_existing_authenticated_config()?;
         let account_id = self.primary_organization_id(config.session_id()).await?;
-        println!("{}", account_id);
+        output::data_ln(account_id)?;
         Ok(())
     }
 
@@ -3248,34 +3244,34 @@ enclave "default" {{
         options: &RegisterBeginResponse,
         base_url: &str,
     ) -> Result<serde_json::Value> {
-        log_verbose(self.verbose, "Attempting registration without PIN first...");
+        output::verbose(self.verbose, "Attempting registration without PIN first...");
         match self.try_make_credential(options, base_url, None) {
             Ok(result) => {
-                log_verbose(self.verbose, "Registration succeeded without PIN");
+                output::verbose(self.verbose, "Registration succeeded without PIN");
                 Ok(result)
             }
             Err(e) => {
-                log_verbose(self.verbose, &format!("First attempt failed: {:?}", e));
-                log_verbose(self.verbose, &format!("Full error details: {:#?}", e));
+                output::verbose(self.verbose, &format!("First attempt failed: {:?}", e));
+                output::verbose(self.verbose, &format!("Full error details: {:#?}", e));
 
                 // Only ask for PIN if the error is PIN-related
                 if is_pin_related_error(&e) {
-                    println!("Your security key requires a PIN.");
+                    output::status("Your security key requires a PIN.");
                     match prompt_for_pin()? {
                         Some(pin_string) => {
                             let pin_string = ZeroizePin(pin_string);
                             let pin = Pin::new(&pin_string.0);
-                            log_verbose(self.verbose, "Retrying registration with PIN...");
+                            output::verbose(self.verbose, "Retrying registration with PIN...");
                             self.try_make_credential(options, base_url, Some(pin))
                         }
                         None => {
-                            log_verbose(self.verbose, "No PIN provided, returning original error");
+                            output::verbose(self.verbose, "No PIN provided, returning original error");
                             Err(e)
                         }
                     }
                 } else {
                     // Not a PIN error, return the original error
-                    log_verbose(
+                    output::verbose(
                         self.verbose,
                         "Error is not PIN-related, not prompting for PIN",
                     );
@@ -3293,7 +3289,7 @@ enclave "default" {{
     ) -> Result<serde_json::Value> {
         let opts = &options.public_key;
 
-        log_verbose(self.verbose, "Creating FIDO2 credential...");
+        output::verbose(self.verbose, "Creating FIDO2 credential...");
 
         let user_id = general_purpose::URL_SAFE_NO_PAD
             .decode(&opts.user.id)
@@ -3303,9 +3299,9 @@ enclave "default" {{
             .decode(&opts.challenge)
             .context("Failed to decode challenge")?;
 
-        log_verbose(self.verbose, &format!("user_id bytes: {:?}", user_id));
-        log_verbose(self.verbose, &format!("challenge bytes: {:?}", challenge));
-        log_verbose(self.verbose, &format!("rpId: {}", opts.rp.id));
+        output::verbose(self.verbose, &format!("user_id bytes: {:?}", user_id));
+        output::verbose(self.verbose, &format!("challenge bytes: {:?}", challenge));
+        output::verbose(self.verbose, &format!("rpId: {}", opts.rp.id));
 
         let user = PublicKeyCredentialUserEntity {
             id: user_id.clone(),
@@ -3332,11 +3328,11 @@ enclave "default" {{
             })
             .collect();
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!("pub_key_params count: {}", pub_key_params.len()),
         );
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!("timeout from server: {} ms", opts.timeout),
         );
@@ -3373,64 +3369,62 @@ enclave "default" {{
             use_ctap1_fallback: false,
         };
 
-        log_verbose(self.verbose, "Sending register request to authenticator...");
+        output::verbose(self.verbose, "Sending register request to authenticator...");
         manager
             .register(opts.timeout, args, status_tx, callback)
             .context("Failed to start registration")?;
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             "Waiting for callback result (up to 60 seconds)...",
         );
 
-        let mut loader = Loader::new("Tap your security key to continue", LoaderStyle::KeyTap);
+        let mut loader = Spinner::new("Tap your security key to continue", SpinnerStyle::KeyTap);
 
         loop {
             // Check for status updates
             while let Ok(status) = status_rx.try_recv() {
                 match status {
                     StatusUpdate::SelectResultNotice(sender, users) => {
-                        loader.stop();
-                        println!("Multiple credentials found. Please select one:");
+                        loader.abandon();
+                        output::status("Multiple credentials found. Please select one:");
                         for (idx, user) in users.iter().enumerate() {
                             let display = user
                                 .display_name
                                 .as_deref()
                                 .or(user.name.as_deref())
                                 .unwrap_or("Unknown");
-                            println!("[{}] {}", idx, display);
+                            output::status(format!("[{}] {}", idx, display));
                         }
 
-                        use std::io::{self, Write};
-                        print!("Enter selection (0-{}): ", users.len() - 1);
-                        io::stdout().flush()?;
-
-                        let mut input = String::new();
-                        io::stdin().read_line(&mut input)?;
-                        let selection: usize = input.trim().parse().context("Invalid selection")?;
+                        let selection = crate::prompt::select(&format!(
+                            "Enter selection (0-{}): ",
+                            users.len() - 1
+                        ))
+                        .map_err(|e| anyhow::anyhow!(e))?;
 
                         if selection >= users.len() {
                             bail!("Selection out of range");
                         }
 
-                        println!(
+                        output::status(format!(
                             "Selected: {}",
                             users[selection].name.as_deref().unwrap_or("Unknown")
-                        );
+                        ));
                         sender
                             .send(Some(selection))
                             .context("Failed to send selection")?;
                     }
                     StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender)) => {
-                        loader.stop();
-                        log_verbose(self.verbose, "PIN required by authenticator");
+                        loader.abandon();
+                        output::verbose(self.verbose, "PIN required by authenticator");
                         match prompt_for_pin()? {
                             Some(pin_string) => {
                                 let pin = Pin::new(&pin_string);
                                 sender.send(pin).context("Failed to send PIN")?;
-                                loader = Loader::new(
+                                loader = Spinner::new(
                                     "Tap your security key to continue",
-                                    LoaderStyle::KeyTap,
+                                    SpinnerStyle::KeyTap,
                                 );
                             }
                             None => {
@@ -3439,19 +3433,19 @@ enclave "default" {{
                         }
                     }
                     StatusUpdate::PinUvError(e) => {
-                        loader.stop();
-                        log_verbose(self.verbose, &format!("PIN/UV error: {:?}", e));
+                        loader.abandon();
+                        output::verbose(self.verbose, &format!("PIN/UV error: {:?}", e));
                         bail!("PIN/UV error: {:?}", e);
                     }
                     _ => {
-                        log_verbose(self.verbose, &format!("Authenticator status: {:?}", status));
+                        output::verbose(self.verbose, &format!("Authenticator status: {:?}", status));
                     }
                 }
             }
 
             if let Ok(result) = callback_rx.try_recv() {
-                loader.stop();
-                log_verbose(self.verbose, "Got registration result");
+                loader.finish();
+                output::verbose(self.verbose, "Got registration result");
                 let register_result = result.context("Registration failed")?;
 
                 let att_obj = &register_result.att_obj;
@@ -3484,11 +3478,11 @@ enclave "default" {{
 
                 let credential_id = &auth_data_bytes[credential_id_start..credential_id_end];
 
-                log_verbose(
+                output::verbose(
                     self.verbose,
                     &format!("credential_id len: {}", credential_id.len()),
                 );
-                log_verbose(
+                output::verbose(
                     self.verbose,
                     &format!("credential_id: {}", hex::encode(credential_id)),
                 );
@@ -3518,7 +3512,7 @@ enclave "default" {{
             .cookie_provider(std::sync::Arc::new(cookie_store))
             .build()?;
 
-        log_verbose(self.verbose, "Sending login begin request...");
+        output::verbose(self.verbose, "Sending login begin request...");
         // The CLI drives USB security keys directly and has no conditional UI,
         // so it always sends this field — but an empty `username` (blank login
         // prompt, see prompt_for_login_username) opts into the no-username
@@ -3535,30 +3529,30 @@ enclave "default" {{
         }
 
         let begin_resp: LoginBeginResponse = response.json().await?;
-        log_verbose(self.verbose, "Login challenge received");
-        log_verbose(
+        output::verbose(self.verbose, "Login challenge received");
+        output::verbose(
             self.verbose,
             &format!("Session from server: {:?}", begin_resp.session),
         );
 
         let assertion = self.get_assertion(&begin_resp, &self.base_url)?;
 
-        println!("Assertion created");
+        output::status("Assertion created");
 
         let mut credential: serde_json::Value = serde_json::from_slice(&assertion.response_json)?;
 
-        log_verbose(self.verbose, "Credential before adding session:");
-        log_verbose(self.verbose, &serde_json::to_string_pretty(&credential)?);
+        output::verbose(self.verbose, "Credential before adding session:");
+        output::verbose(self.verbose, &serde_json::to_string_pretty(&credential)?);
 
         if let Some(obj) = credential.as_object_mut() {
             obj.insert("session".to_string(), serde_json::json!(begin_resp.session));
         }
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             "Final payload being sent to /auth/login/finish:",
         );
-        log_verbose(self.verbose, &serde_json::to_string_pretty(&credential)?);
+        output::verbose(self.verbose, &serde_json::to_string_pretty(&credential)?);
 
         let response = client
             .post(format!("{}/auth/login/finish", self.base_url))
@@ -3579,7 +3573,7 @@ enclave "default" {{
         } else {
             let status = response.status();
             let error = response.text().await?;
-            log_verbose(
+            output::verbose(
                 self.verbose,
                 &format!("Server error response (status {}): {}", status, error),
             );
@@ -3596,8 +3590,8 @@ enclave "default" {{
         let body_json = serde_json::to_vec(body)?;
 
         if !self.qr {
-            println!("\nData to be signed:");
-            println!("{}", serde_json::to_string_pretty(body)?);
+            output::status("\nData to be signed:");
+            output::status(format!("{}", serde_json::to_string_pretty(body)?));
         }
 
         self.signed_request(session_id, path, reqwest::Method::POST, body_json)
@@ -3606,8 +3600,8 @@ enclave "default" {{
 
     async fn signed_delete(&self, session_id: &str, path: &str) -> Result<reqwest::Response> {
         if !self.qr {
-            println!("\nRequest to be signed:");
-            println!("DELETE {}", path);
+            output::status("\nRequest to be signed:");
+            output::status(format!("DELETE {}", path));
         }
 
         self.signed_request(session_id, path, reqwest::Method::DELETE, Vec::new())
@@ -3632,7 +3626,7 @@ enclave "default" {{
         // The gateway nests /api routes, so the sign middleware sees paths with /api stripped
         let challenge_path = path.strip_prefix("/api").unwrap_or(path);
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!(
                 "Requesting FIDO2 sign challenge for {} {}",
@@ -3660,19 +3654,19 @@ enclave "default" {{
         }
 
         let sign_resp: Fido2SignResponse = response.json().await?;
-        log_verbose(self.verbose, "Got FIDO2 sign challenge");
+        output::verbose(self.verbose, "Got FIDO2 sign challenge");
 
         let login_resp = LoginBeginResponse {
             public_key: sign_resp.public_key,
             session: sign_resp.challenge_id.clone(),
         };
 
-        println!("\nTap your security key to sign the request.");
+        output::status("\nTap your security key to sign the request.");
         let assertion = self.get_assertion(&login_resp, &self.base_url)?;
 
         let fido_response_b64 = general_purpose::URL_SAFE_NO_PAD.encode(&assertion.response_json);
 
-        log_verbose(self.verbose, "Sending FIDO2-signed request");
+        output::verbose(self.verbose, "Sending FIDO2-signed request");
 
         let response = self
             .client
@@ -3700,7 +3694,7 @@ enclave "default" {{
         // The gateway nests /api routes, so the sign middleware sees paths with /api stripped
         let challenge_path = path.strip_prefix("/api").unwrap_or(path);
 
-        log_verbose(self.verbose, "Starting QR code cross-device signing...");
+        output::verbose(self.verbose, "Starting QR code cross-device signing...");
 
         // Step 1: Request a QR sign token from the gateway
         let body_str = String::from_utf8_lossy(&body_json);
@@ -3725,21 +3719,21 @@ enclave "default" {{
         }
 
         let begin_resp: QrSignBeginResponse = response.json().await?;
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!("QR sign token: {}", begin_resp.token),
         );
 
         // Step 2: Render QR code
-        println!();
+        output::status("");
         render_qr_code(&begin_resp.url)?;
-        println!();
-        println!("Scan the QR code with your phone to approve the operation, or open:");
-        println!("  {}", begin_resp.url);
-        println!();
+        output::status("");
+        output::status("Scan the QR code with your phone to approve the operation, or open:");
+        output::status(format!("  {}", begin_resp.url));
+        output::status("");
 
         // Step 3: Poll for completion
-        let mut loader = Loader::new("Waiting for approval...", LoaderStyle::Processing);
+        let loader = Spinner::new("Waiting for approval...", SpinnerStyle::Processing);
 
         let poll_result = async {
             let timeout = Duration::from_secs(180);
@@ -3760,12 +3754,12 @@ enclave "default" {{
                     .await?;
 
                 if !status_resp.status().is_success() {
-                    log_verbose(self.verbose, "Status poll failed, retrying...");
+                    output::verbose(self.verbose, "Status poll failed, retrying...");
                     continue;
                 }
 
                 let status: QrSignStatusResponse = status_resp.json().await?;
-                log_verbose(self.verbose, &format!("Poll status: {}", status.status));
+                output::verbose(self.verbose, &format!("Poll status: {}", status.status));
 
                 match status.status.as_str() {
                     "completed" => {
@@ -3787,10 +3781,10 @@ enclave "default" {{
         }
         .await;
 
-        loader.stop();
+        loader.finish();
 
         let (fido2_response, challenge_id) = poll_result?;
-        log_verbose(self.verbose, "Sending QR-signed request");
+        output::verbose(self.verbose, "Sending QR-signed request");
 
         // Step 4: Send the actual request with the FIDO2 assertion from the phone
         let response = self
@@ -3811,34 +3805,34 @@ enclave "default" {{
         options: &LoginBeginResponse,
         base_url: &str,
     ) -> Result<AssertionResult> {
-        log_verbose(self.verbose, "Attempting assertion without PIN first...");
+        output::verbose(self.verbose, "Attempting assertion without PIN first...");
         match self.try_get_assertion(options, base_url, None) {
             Ok(result) => {
-                log_verbose(self.verbose, "Assertion succeeded without PIN");
+                output::verbose(self.verbose, "Assertion succeeded without PIN");
                 Ok(result)
             }
             Err(e) => {
-                log_verbose(self.verbose, &format!("First attempt failed: {:?}", e));
-                log_verbose(self.verbose, &format!("Full error details: {:#?}", e));
+                output::verbose(self.verbose, &format!("First attempt failed: {:?}", e));
+                output::verbose(self.verbose, &format!("Full error details: {:#?}", e));
 
                 // Only ask for PIN if the error is PIN-related
                 if is_pin_related_error(&e) {
-                    println!("Your security key requires a PIN.");
+                    output::status("Your security key requires a PIN.");
                     match prompt_for_pin()? {
                         Some(pin_string) => {
                             let pin_string = ZeroizePin(pin_string);
                             let pin = Pin::new(&pin_string.0);
-                            log_verbose(self.verbose, "Retrying assertion with PIN...");
+                            output::verbose(self.verbose, "Retrying assertion with PIN...");
                             self.try_get_assertion(options, base_url, Some(pin))
                         }
                         None => {
-                            log_verbose(self.verbose, "No PIN provided, returning original error");
+                            output::verbose(self.verbose, "No PIN provided, returning original error");
                             Err(e)
                         }
                     }
                 } else {
                     // Not a PIN error, return the original error
-                    log_verbose(
+                    output::verbose(
                         self.verbose,
                         "Error is not PIN-related, not prompting for PIN",
                     );
@@ -3856,14 +3850,14 @@ enclave "default" {{
     ) -> Result<AssertionResult> {
         let opts = &options.public_key;
 
-        log_verbose(self.verbose, "Getting assertion from authenticator...");
+        output::verbose(self.verbose, "Getting assertion from authenticator...");
 
         let challenge = general_purpose::URL_SAFE_NO_PAD
             .decode(&opts.challenge)
             .context("Failed to decode challenge")?;
 
-        log_verbose(self.verbose, &format!("challenge bytes: {:?}", challenge));
-        log_verbose(self.verbose, &format!("rpId: {}", opts.rp_id));
+        output::verbose(self.verbose, &format!("challenge bytes: {:?}", challenge));
+        output::verbose(self.verbose, &format!("rpId: {}", opts.rp_id));
 
         let mut manager =
             AuthenticatorService::new().context("Failed to create authenticator service")?;
@@ -3891,7 +3885,7 @@ enclave "default" {{
             })
             .collect();
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!("Allow list has {} credentials", allow_list.len()),
         );
@@ -3914,64 +3908,62 @@ enclave "default" {{
             use_ctap1_fallback: false,
         };
 
-        log_verbose(self.verbose, "Sending sign request to authenticator...");
+        output::verbose(self.verbose, "Sending sign request to authenticator...");
         manager
             .sign(opts.timeout, args, status_tx, callback)
             .context("Failed to start assertion")?;
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             "Waiting for callback result (up to 60 seconds)...",
         );
 
-        let mut loader = Loader::new("Tap your security key to continue", LoaderStyle::KeyTap);
+        let mut loader = Spinner::new("Tap your security key to continue", SpinnerStyle::KeyTap);
 
         loop {
             // Check for status updates
             while let Ok(status) = status_rx.try_recv() {
                 match status {
                     StatusUpdate::SelectResultNotice(sender, users) => {
-                        loader.stop();
-                        println!("Multiple credentials found. Please select one:");
+                        loader.abandon();
+                        output::status("Multiple credentials found. Please select one:");
                         for (idx, user) in users.iter().enumerate() {
                             let display = user
                                 .display_name
                                 .as_deref()
                                 .or(user.name.as_deref())
                                 .unwrap_or("Unknown");
-                            println!("[{}] {}", idx, display);
+                            output::status(format!("[{}] {}", idx, display));
                         }
 
-                        use std::io::{self, Write};
-                        print!("Enter selection (0-{}): ", users.len() - 1);
-                        io::stdout().flush()?;
-
-                        let mut input = String::new();
-                        io::stdin().read_line(&mut input)?;
-                        let selection: usize = input.trim().parse().context("Invalid selection")?;
+                        let selection = crate::prompt::select(&format!(
+                            "Enter selection (0-{}): ",
+                            users.len() - 1
+                        ))
+                        .map_err(|e| anyhow::anyhow!(e))?;
 
                         if selection >= users.len() {
                             bail!("Selection out of range");
                         }
 
-                        println!(
+                        output::status(format!(
                             "Selected: {}",
                             users[selection].name.as_deref().unwrap_or("Unknown")
-                        );
+                        ));
                         sender
                             .send(Some(selection))
                             .context("Failed to send selection")?;
                     }
                     StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender)) => {
-                        loader.stop();
-                        log_verbose(self.verbose, "PIN required by authenticator");
+                        loader.abandon();
+                        output::verbose(self.verbose, "PIN required by authenticator");
                         match prompt_for_pin()? {
                             Some(pin_string) => {
                                 let pin = Pin::new(&pin_string);
                                 sender.send(pin).context("Failed to send PIN")?;
-                                loader = Loader::new(
+                                loader = Spinner::new(
                                     "Tap your security key to continue",
-                                    LoaderStyle::KeyTap,
+                                    SpinnerStyle::KeyTap,
                                 );
                             }
                             None => {
@@ -3980,19 +3972,19 @@ enclave "default" {{
                         }
                     }
                     StatusUpdate::PinUvError(e) => {
-                        loader.stop();
-                        log_verbose(self.verbose, &format!("PIN/UV error: {:?}", e));
+                        loader.abandon();
+                        output::verbose(self.verbose, &format!("PIN/UV error: {:?}", e));
                         bail!("PIN/UV error: {:?}", e);
                     }
                     _ => {
-                        log_verbose(self.verbose, &format!("Authenticator status: {:?}", status));
+                        output::verbose(self.verbose, &format!("Authenticator status: {:?}", status));
                     }
                 }
             }
 
             if let Ok(result) = callback_rx.try_recv() {
-                loader.stop();
-                log_verbose(self.verbose, "Got assertion result");
+                loader.finish();
+                output::verbose(self.verbose, "Got assertion result");
                 let sign_result = result.map_err(|e| {
                     let msg = format!("{:?}", e);
                     if msg.contains("NoCredentials") {
@@ -4034,8 +4026,8 @@ enclave "default" {{
                     "type": "public-key"
                 });
 
-                log_verbose(self.verbose, "Response JSON structure:");
-                log_verbose(self.verbose, &serde_json::to_string_pretty(&response_json)?);
+                output::verbose(self.verbose, "Response JSON structure:");
+                output::verbose(self.verbose, &serde_json::to_string_pretty(&response_json)?);
 
                 return Ok(AssertionResult {
                     response_json: serde_json::to_vec(&response_json)?,
@@ -4047,26 +4039,26 @@ enclave "default" {{
     }
 
     async fn create_app(&self) -> Result<()> {
-        println!("Creating new app...");
+        output::status("Creating new app...");
 
-        log_verbose(self.verbose, "Checking git repository...");
+        output::verbose(self.verbose, "Checking git repository...");
         self.check_git_repo()?;
-        println!("Git repository found");
+        output::success("Git repository found");
 
-        log_verbose(self.verbose, "Reading configuration...");
+        output::verbose(self.verbose, "Reading configuration...");
         let _config_file = self.read_config()?;
         let cmd = resolve_local_build_command_from_dir(Path::new("."), false)?;
-        println!("Configuration found");
-        println!("Build command: {}", cmd);
+        output::success("Configuration found");
+        output::status(&format!("Build command: {}", cmd));
 
         let config = self.ensure_authenticated().await?;
 
-        log_verbose(self.verbose, "Creating app on server...");
+        output::verbose(self.verbose, "Creating app on server...");
         let body = serde_json::json!({
             "cmd": cmd
         });
 
-        let mut loader = Loader::new("Setting up your app", LoaderStyle::Processing);
+        let loader = Spinner::new("Setting up your app", SpinnerStyle::Processing);
 
         let response = self
             .client
@@ -4080,22 +4072,22 @@ enclave "default" {{
         if !response.status().is_success() {
             let status = response.status();
             let error = self.api_error_message(response).await;
-            loader.stop();
+            loader.finish();
 
             if error.contains("initialize")
                 || error.contains("provisioning")
                 || error.contains("AWS account")
             {
-                eprintln!("\n❌ Failed to initialize your AWS account");
-                eprintln!("\nThis is your first time using Caution. We attempted to provision");
-                eprintln!(
+                output::error("\n❌ Failed to initialize your AWS account");
+                output::error("\nThis is your first time using Caution. We attempted to provision");
+                output::error(
                     "a dedicated AWS account for your organization, but encountered an error:"
                 );
-                eprintln!("\n{}", error);
-                eprintln!("\nPlease check:");
-                eprintln!("  • AWS Organizations is enabled in your main account");
-                eprintln!("  • Your IAM user has organizations:CreateAccount permission");
-                eprintln!("  • Run: aws organizations create-organization --feature-set ALL");
+                output::error(format!("\n{}", error));
+                output::warning("\nPlease check:");
+                output::warning("  • AWS Organizations is enabled in your main account");
+                output::warning("  • Your IAM user has organizations:CreateAccount permission");
+                output::warning("  • Run: aws organizations create-organization --feature-set ALL");
                 bail!("Account initialization failed");
             }
 
@@ -4107,21 +4099,21 @@ enclave "default" {{
             .await
             .context("Failed to parse create app response")?;
 
-        loader.stop();
+        loader.finish();
 
-        println!("App created!");
-        println!("ID: {}", create_response.id);
-        println!("Name: {}", create_response.resource_name);
-        println!("State: {}", create_response.state);
-        println!("Git URL: {}", create_response.git_url);
+        output::success("App created!");
+        output::status(format!("ID: {}", create_response.id));
+        output::status(format!("Name: {}", create_response.resource_name));
+        output::status(format!("State: {}", create_response.state));
+        output::status(format!("Git URL: {}", create_response.git_url));
 
-        log_verbose(self.verbose, "Setting git remote...");
+        output::verbose(self.verbose, "Setting git remote...");
         self.set_git_remote(&create_response.git_url)?;
 
         self.create_config_file_if_needed(false)?;
 
-        println!("\nYou can now push to 'caution' remote:");
-        println!("  git push caution main");
+        output::status(format!("\nYou can now push to 'caution' remote:"));
+        output::status(format!("  git push caution main"));
 
         Ok(())
     }
@@ -4138,9 +4130,9 @@ enclave "default" {{
             .await?;
 
         if apps.is_empty() {
-            println!("No deployed apps found.");
+            output::status("No deployed apps found.");
         } else {
-            println!("Apps:");
+            output::data_header("Apps:");
             for app in apps {
                 let name = app.resource_name.as_deref().unwrap_or("unnamed");
                 let mut details = vec![app.state.clone()];
@@ -4160,7 +4152,7 @@ enclave "default" {{
                     details.push(ip.clone());
                 }
 
-                println!("  {} - {} ({})", app.id, name, details.join(", "));
+                output::status(format!("  {} - {} ({})", app.id, name, details.join(", ")));
             }
         }
         Ok(())
@@ -4211,15 +4203,15 @@ enclave "default" {{
             .context("Failed to parse capacity waitlist response")?;
 
         if waitlist_response.status == "already_waiting" {
-            println!(
+            output::status(format!(
                 "{} is already on the fully managed capacity waitlist.",
                 email
-            );
+            ));
         } else {
-            println!(
+            output::success(format!(
                 "{} has been added to the fully managed capacity waitlist.",
                 email
-            );
+            ));
         }
 
         Ok(())
@@ -4256,26 +4248,26 @@ enclave "default" {{
         };
         let name = app.resource_name.as_deref().unwrap_or("unnamed");
 
-        println!("App Details:");
-        println!("  ID: {}", app.id);
-        println!("  Name: {}", name);
-        println!("  State: {}", app.state);
+        output::data_header("App Details:");
+        output::status(format!("  ID: {}", app.id));
+        output::status(format!("  Name: {}", name));
+        output::status(format!("  State: {}", app.state));
 
         if let Some(domain) = &app.domain {
-            println!("  Domain: {}", domain);
+            output::status(format!("  Domain: {}", domain));
         }
 
         if let Some(config) = &app.configuration {
             if let Some(enclave_config) = config.get("enclave_config") {
                 if let Some(memory) = enclave_config.get("memory_mb").and_then(|v| v.as_u64()) {
-                    println!("  Memory: {} MB", memory);
+                    output::status(format!("  Memory: {} MB", memory));
                 }
                 if let Some(cpus) = enclave_config.get("cpus").and_then(|v| v.as_u64()) {
-                    println!("  CPUs: {}", cpus);
+                    output::status(format!("  CPUs: {}", cpus));
                 }
                 if let Some(debug) = enclave_config.get("debug").and_then(|v| v.as_bool()) {
                     if debug {
-                        println!("  Debug Mode: enabled");
+                        output::status("  Debug Mode: enabled");
                     }
                 }
                 if let Some(ports) = enclave_config.get("ports").and_then(|v| v.as_array()) {
@@ -4284,21 +4276,21 @@ enclave "default" {{
                             .iter()
                             .filter_map(|p| p.as_u64().map(|n| n.to_string()))
                             .collect();
-                        println!("  Ports: {}", ports_str.join(", "));
+                        output::status(format!("  Ports: {}", ports_str.join(", ")));
                     }
                 }
                 if let Some(http_port) = enclave_config.get("http_port").and_then(|v| v.as_u64()) {
                     if http_port > 0 {
-                        println!("  HTTP Port: {}", http_port);
+                        output::status(format!("  HTTP Port: {}", http_port));
                     }
                 }
             }
         }
 
         if let Some(ip) = &app.public_ip {
-            println!("  Public IP: {}", ip);
-            println!("  URL: http://{}", app.domain.as_deref().unwrap_or(ip));
-            println!("  Attestation: http://{}/attestation", ip);
+            output::status(format!("  Public IP: {}", ip));
+            output::status(format!("  URL: http://{}", app.domain.as_deref().unwrap_or(ip)));
+            output::status(format!("  Attestation: http://{}/attestation", ip));
         }
 
         Ok(())
@@ -4327,35 +4319,30 @@ enclave "default" {{
         let name = app.resource_name.as_deref().unwrap_or("unnamed");
 
         if !force {
-            println!("About to destroy app:");
-            println!("  ID: {}", app.id);
-            println!("  Name: {}", name);
-            println!("  State: {}", app.state);
+            output::status("About to destroy app:");
+            output::status(format!("  ID: {}", app.id));
+            output::status(format!("  Name: {}", name));
+            output::status(format!("  State: {}", app.state));
             if let Some(ip) = &app.public_ip {
-                println!("  Public IP: {}", ip);
+                output::status(format!("  Public IP: {}", ip));
             }
             if force_delete {
-                println!();
-                println!(
+                output::status("");
+                output::warning(
                     "  WARNING: --force-delete will remove from database even if cloud cleanup fails!"
                 );
             }
-            println!();
-            print!("Are you sure you want to destroy this app? [y/N] ");
-            std::io::stdout().flush()?;
-
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-
-            if !input.trim().eq_ignore_ascii_case("y") {
-                println!("Aborted.");
+            output::status("");
+            let confirmed = prompt::confirm("Are you sure you want to destroy this app? [y/N] ")?;
+            if !confirmed {
+                output::status("Aborted.");
                 return Ok(());
             }
         }
 
-        let mut loader = Loader::new(
+        let loader = Spinner::new(
             &format!("Destroying app {} ({})", name, app.id),
-            LoaderStyle::Processing,
+            SpinnerStyle::Processing,
         );
 
         if allow_ci_ssh
@@ -4363,8 +4350,8 @@ enclave "default" {{
                 .destroy_app_via_ssh_https(&app.id, force_delete)
                 .await?
         {
-            loader.stop();
-            println!("App {} ({}) destroyed", name, app.id);
+            loader.finish();
+            output::success(format!("App {} ({}) destroyed", name, app.id));
             Ok(())
         } else {
             let config = self.ensure_authenticated().await?;
@@ -4396,13 +4383,13 @@ enclave "default" {{
                 .await?;
 
             if response.status().is_success() {
-                loader.stop();
-                println!("App {} ({}) destroyed", name, app.id);
+                loader.finish();
+                output::success(format!("App {} ({}) destroyed", name, app.id));
                 Ok(())
             } else {
                 let status = response.status();
                 let error = self.api_error_message(response).await;
-                loader.stop();
+                loader.finish();
                 bail!("Failed to destroy app (status {}): {}", status, error)
             }
         }
@@ -4416,7 +4403,7 @@ enclave "default" {{
 
         let old_name = app.resource_name.as_deref().unwrap_or("unnamed");
 
-        println!("Renaming app '{}' to '{}'...", old_name, new_name);
+        output::status(format!("Renaming app '{}' to '{}'...", old_name, new_name));
 
         let config = self.ensure_authenticated().await?;
 
@@ -4439,7 +4426,7 @@ enclave "default" {{
         if response.status().is_success() {
             let updated_app: App = response.json().await?;
             let updated_name = updated_app.resource_name.as_deref().unwrap_or("unnamed");
-            println!("App renamed successfully: {} -> {}", old_name, updated_name);
+            output::success(&format!("App renamed: {} -> {}", old_name, updated_name));
 
             Ok(())
         } else {
@@ -4463,11 +4450,11 @@ enclave "default" {{
             return self.init_byoc_interactive(name, region, local).await;
         }
 
-        println!("Initializing new deployment...");
+        output::status("Initializing new deployment...");
 
-        log_verbose(self.verbose, "Checking git repository...");
+        output::verbose(self.verbose, "Checking git repository...");
         self.check_git_repo()?;
-        println!("Git repository found");
+        output::success("Git repository found");
 
         if let Some(ref path) = config_path {
             return self.init_byoc(path).await;
@@ -4475,17 +4462,17 @@ enclave "default" {{
 
         self.create_config_file_if_needed(bring_your_own_cloud)?;
 
-        log_verbose(self.verbose, "Reading configuration...");
+        output::verbose(self.verbose, "Reading configuration...");
         let _config = self.read_config()?;
         let cmd = resolve_local_build_command_from_dir(Path::new("."), false)?;
-        println!("Configuration found");
-        println!("Build command: {}", cmd);
+        output::success("Configuration found");
+        output::status(&format!("Build command: {}", cmd));
 
         let config = self.ensure_authenticated().await?;
 
         // Check if there's an existing deployment with a resource ID
         if let Ok(deployment) = self.load_deployment() {
-            log_verbose(
+            output::verbose(
                 self.verbose,
                 &format!(
                     "Found existing deployment with ID: {}",
@@ -4495,22 +4482,22 @@ enclave "default" {{
 
             if let Ok(app) = self.fetch_app(&deployment.resource_id).await {
                 let name = app.resource_name.as_deref().unwrap_or("unnamed");
-                println!("App already exists!");
-                println!("ID: {}", app.id);
-                println!("Name: {}", name);
-                println!("State: {}", app.state);
-                println!("Git URL: {}", app.git_url);
+                output::status("App already exists!");
+                output::status(format!("ID: {}", app.id));
+                output::status(format!("Name: {}", name));
+                output::status(format!("State: {}", app.state));
+                output::status(format!("Git URL: {}", app.git_url));
 
                 self.save_deployment(&app.id)?;
 
-                log_verbose(self.verbose, "Updating git remote...");
+                output::verbose(self.verbose, "Updating git remote...");
                 self.set_git_remote(&app.git_url)?;
 
-                println!("\nYou can now push to 'caution' remote:");
-                println!("  git push caution main");
+                output::status("\nYou can now push to 'caution' remote:");
+                output::status("  git push caution main");
                 return Ok(());
             } else {
-                log_verbose(
+                output::verbose(
                     self.verbose,
                     "Previous resource no longer exists, creating new one...",
                 );
@@ -4530,13 +4517,13 @@ enclave "default" {{
                 .unwrap_or_else(|| "app".to_string())
         });
 
-        log_verbose(self.verbose, "Creating app on server...");
+        output::verbose(self.verbose, "Creating app on server...");
         let body = serde_json::json!({
             "cmd": cmd,
             "name": app_name
         });
 
-        let mut loader = Loader::new("Setting up your app", LoaderStyle::Processing);
+        let loader = Spinner::new("Setting up your app", SpinnerStyle::Processing);
 
         let response = self
             .client
@@ -4550,22 +4537,22 @@ enclave "default" {{
         if !response.status().is_success() {
             let status = response.status();
             let error = self.api_error_message(response).await;
-            loader.stop();
+            loader.finish();
 
             if error.contains("initialize")
                 || error.contains("provisioning")
                 || error.contains("AWS account")
             {
-                eprintln!("\n❌ Failed to initialize your AWS account");
-                eprintln!("\nThis is your first time using Caution. We attempted to provision");
-                eprintln!(
+                output::error("\n❌ Failed to initialize your AWS account");
+                output::error("\nThis is your first time using Caution. We attempted to provision");
+                output::error(
                     "a dedicated AWS account for your organization, but encountered an error:"
                 );
-                eprintln!("\n{}", error);
-                eprintln!("\nPlease check:");
-                eprintln!("  • AWS Organizations is enabled in your main account");
-                eprintln!("  • Your IAM user has organizations:CreateAccount permission");
-                eprintln!("  • Run: aws organizations create-organization --feature-set ALL");
+                output::error(format!("\n{}", error));
+                output::error("\nPlease check:");
+                output::error("  • AWS Organizations is enabled in your main account");
+                output::error("  • Your IAM user has organizations:CreateAccount permission");
+                output::error("  • Run: aws organizations create-organization --feature-set ALL");
                 bail!("Account initialization failed");
             }
 
@@ -4577,39 +4564,39 @@ enclave "default" {{
             .await
             .context("Failed to parse create app response")?;
 
-        loader.stop();
+        loader.finish();
 
-        println!("App created!");
-        println!("ID: {}", create_response.id);
-        println!("Name: {}", create_response.resource_name);
-        println!("State: {}", create_response.state);
-        println!("Git URL: {}", create_response.git_url);
+        output::success("App created!");
+        output::status(format!("ID: {}", create_response.id));
+        output::status(format!("Name: {}", create_response.resource_name));
+        output::status(format!("State: {}", create_response.state));
+        output::status(format!("Git URL: {}", create_response.git_url));
 
-        log_verbose(self.verbose, "Saving deployment info...");
+        output::verbose(self.verbose, "Saving deployment info...");
         self.save_deployment(&create_response.id)?;
-        log_verbose(self.verbose, "Saved deployment info");
+        output::verbose(self.verbose, "Saved deployment info");
 
-        log_verbose(self.verbose, "Setting git remote...");
+        output::verbose(self.verbose, "Setting git remote...");
         self.set_git_remote(&create_response.git_url)?;
 
         self.create_config_file_if_needed(false)?;
 
-        println!("\nYou can now push to 'caution' remote:");
-        println!("  git push caution main");
-        println!("\nAfter pushing, check your app status:");
-        println!("  caution apps list");
-        println!("\nVerify attestation:");
-        println!("  caution verify");
+        output::status("\nYou can now push to 'caution' remote:");
+        output::status("  git push caution main");
+        output::status("\nAfter pushing, check your app status:");
+        output::status("  caution apps list");
+        output::status("\nVerify attestation:");
+        output::status("  caution verify");
 
         Ok(())
     }
 
     async fn init_byoc(&self, config_path: &PathBuf) -> Result<()> {
-        println!("Initializing bring-your-own-compute deployment...");
+        output::status("Initializing bring-your-own-compute deployment...");
 
         let auth_config = self.require_existing_authenticated_config()?;
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!("Reading config from {:?}", config_path),
         );
@@ -4626,16 +4613,16 @@ enclave "default" {{
         let is_gpg_encrypted = has_gpg_extension || has_gpg_header;
 
         let request_body = if is_gpg_encrypted {
-            log_verbose(
+            output::verbose(
                 self.verbose,
                 "Config file is GPG-encrypted (will be decrypted server-side)",
             );
-            println!("Detected GPG-encrypted config file");
+            output::status("Detected GPG-encrypted config file");
 
             let existing_resource_id = self.load_deployment().ok().map(|d| d.resource_id);
             if let Some(ref id) = existing_resource_id {
-                println!("Found existing deployment: {}", id);
-                println!(
+                output::status(format!("Found existing deployment: {}", id));
+                output::status(
                     "Note: For updates with encrypted config, ensure resource_id is in the decrypted JSON"
                 );
             }
@@ -4647,8 +4634,8 @@ enclave "default" {{
 
             let existing_resource_id = self.load_deployment().ok().map(|d| d.resource_id);
             if let Some(ref id) = existing_resource_id {
-                println!("Found existing deployment: {}", id);
-                println!("Updating existing resource with new configuration...");
+                output::status(format!("Found existing deployment: {}", id));
+                output::status("Updating existing resource with new configuration...");
                 config_json["resource_id"] = serde_json::json!(id);
             }
 
@@ -4693,15 +4680,15 @@ enclave "default" {{
                 }
             }
 
-            log_verbose(self.verbose, "Config file validated");
+            output::verbose(self.verbose, "Config file validated");
             serde_json::to_string(&config_json)?
         };
 
         self.create_config_file_if_needed(true)?;
 
-        log_verbose(self.verbose, "Reading configuration...");
+        output::verbose(self.verbose, "Reading configuration...");
         let _config = self.read_config()?;
-        println!("Configuration found");
+        output::success("Configuration found");
 
         let existing_resource_id = self.load_deployment().ok().map(|d| d.resource_id);
         let is_update = existing_resource_id.is_some();
@@ -4710,7 +4697,7 @@ enclave "default" {{
         } else {
             "Creating bring-your-own-compute resource"
         };
-        let mut loader = Loader::new(loader_msg, LoaderStyle::Processing);
+        let loader = Spinner::new(loader_msg, SpinnerStyle::Processing);
 
         let response = self
             .client
@@ -4725,7 +4712,7 @@ enclave "default" {{
         if !response.status().is_success() {
             let status = response.status();
             let error = response.text().await?;
-            loader.stop();
+            loader.finish();
             let action = if is_update { "update" } else { "create" };
             bail!(
                 "Failed to {} bring-your-own-compute resource (status {}): {}",
@@ -4738,7 +4725,7 @@ enclave "default" {{
         let create_response: serde_json::Value =
             response.json().await.context("Failed to parse response")?;
 
-        loader.stop();
+        loader.finish();
 
         let id = create_response["id"].as_str().unwrap_or("unknown");
         let resource_name = create_response["resource_name"]
@@ -4748,28 +4735,28 @@ enclave "default" {{
         let state = create_response["state"].as_str().unwrap_or("unknown");
 
         if is_update {
-            println!("Bring-your-own-compute resource updated!");
+            output::success("Bring-your-own-compute resource updated");
         } else {
-            println!("Bring-your-own-compute resource created!");
+            output::success("Bring-your-own-compute resource created");
         }
-        println!("ID: {}", id);
-        println!("Name: {}", resource_name);
-        println!("State: {}", state);
-        println!("Git URL: {}", git_url);
+        output::status(&format!("ID: {}", id));
+        output::status(&format!("Name: {}", resource_name));
+        output::status(&format!("State: {}", state));
+        output::status(&format!("Git URL: {}", git_url));
 
-        log_verbose(self.verbose, "Saving deployment info...");
+        output::verbose(self.verbose, "Saving deployment info...");
         self.save_deployment(id)?;
-        log_verbose(self.verbose, "Saved deployment info");
+        output::verbose(self.verbose, "Saved deployment info");
 
         if !git_url.is_empty() {
-            log_verbose(self.verbose, "Setting git remote...");
+            output::verbose(self.verbose, "Setting git remote...");
             self.set_git_remote(git_url)?;
         }
 
-        println!("\nYou can now push to 'caution' remote to deploy:");
-        println!("  git push caution main");
-        println!("\nAfter pushing, check your app status:");
-        println!("  caution apps list");
+        output::success("\nYou can now push to 'caution' remote to deploy:");
+        output::status("  git push caution main");
+        output::success("\nAfter pushing, check your app status:");
+        output::status("  caution apps list");
 
         Ok(())
     }
@@ -4888,11 +4875,10 @@ enclave "default" {{
         region: Option<String>,
         local: bool,
     ) -> Result<()> {
-        use std::io::{self, Write};
 
-        println!("\n╔══════════════════════════════════════════════════════════════════╗");
-        println!("║          Bring-Your-Own-Compute Deployment Setup (AWS)           ║");
-        println!("╚══════════════════════════════════════════════════════════════════╝\n");
+        output::status("\n╔══════════════════════════════════════════════════════════════════╗");
+        output::status("║          Bring-Your-Own-Compute Deployment Setup (AWS)           ║");
+        output::status("╚══════════════════════════════════════════════════════════════════╝\n");
 
         // Check for Docker
         let docker_check = Command::new("docker").arg("--version").output();
@@ -4920,7 +4906,7 @@ enclave "default" {{
             bail!("App name must contain only alphanumeric characters, hyphens, and underscores");
         }
 
-        println!("App name: {}", app_name);
+        output::status(format!("App name: {}", app_name));
 
         // Check AWS credentials
         let aws_profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".to_string());
@@ -4953,37 +4939,34 @@ enclave "default" {{
             .unwrap_or_else(|| "us-west-2".to_string());
 
         if std::env::var("AWS_ACCESS_KEY_ID").is_ok() {
-            println!("AWS credentials detected (from environment)");
+            output::status("AWS credentials detected (from environment)");
         } else if aws_profile == "default" {
-            println!("AWS credentials detected (from ~/.aws/credentials)");
+            output::status("AWS credentials detected (from ~/.aws/credentials)");
         } else {
-            println!("AWS credentials detected (profile: {})", aws_profile);
+            output::status(format!("AWS credentials detected (profile: {})", aws_profile));
         }
-        println!("Region: {}", aws_region);
+        output::status(format!("Region: {}", aws_region));
 
         // Display what will be created
-        println!("\nThis will create the following AWS resources:");
-        println!("  • VPC with 3 subnets across availability zones");
-        println!("  • S3 bucket for enclave images");
-        println!("  • EC2 Auto Scaling Group and Launch Template");
-        println!("  • IAM user with scoped permissions");
-        println!("  • IAM role and instance profile for EC2");
-        println!("\nAll resources will be tagged for easy identification and cleanup.\n");
+        output::status("\nThis will create the following AWS resources:");
+        output::status("  • VPC with 3 subnets across availability zones");
+        output::status("  • S3 bucket for enclave images");
+        output::status("  • EC2 Auto Scaling Group and Launch Template");
+        output::status("  • IAM user with scoped permissions");
+        output::status("  • IAM role and instance profile for EC2");
+        output::status("\nAll resources will be tagged for easy identification and cleanup.\n");
 
-        print!("Do you want to proceed? [y/N]: ");
-        io::stdout().flush()?;
-        let mut confirm = String::new();
-        io::stdin().read_line(&mut confirm)?;
-        if !confirm.trim().eq_ignore_ascii_case("y") {
-            println!("Aborted.");
+        let confirmed = prompt::confirm("Do you want to proceed? [y/N]: ")?;
+        if !confirmed {
+            output::status("Aborted.");
             return Ok(());
         }
 
         // Pull the provisioner image (unless --local is set)
         if local {
-            println!("\nUsing local provisioner image (--local)...");
+            output::status("\nUsing local provisioner image (--local)...");
         } else {
-            println!("\nPulling provisioner image...");
+            output::status("\nPulling provisioner image...");
             let pull_output = Command::new("docker")
                 .args(&["pull", BYOC_PROVISIONER_IMAGE])
                 .output()
@@ -4996,8 +4979,8 @@ enclave "default" {{
         }
 
         // Run the provisioner
-        println!("Provisioning AWS resources (this may take a few minutes)...");
-        println!("---");
+        output::status("Provisioning AWS resources (this may take a few minutes)...");
+        output::status("---");
 
         let mut docker_args = vec![
             "run".to_string(),
@@ -5031,7 +5014,7 @@ enclave "default" {{
             eprint!("{}", stderr);
         }
 
-        println!("---");
+        output::status("---");
 
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -5069,8 +5052,8 @@ enclave "default" {{
         let create_cmd = resolve_local_build_command_from_dir(Path::new("."), true)?;
 
         // Create app on Caution
-        println!("\nCreating app on Caution...");
-        let mut loader = Loader::new("Creating app", LoaderStyle::Processing);
+        output::status("\nCreating app on Caution...");
+        let loader = Spinner::new("Creating app", SpinnerStyle::Processing);
 
         // Create the app first
         let create_body = serde_json::json!({
@@ -5088,7 +5071,7 @@ enclave "default" {{
             .context("Failed to create app")?;
 
         if !create_response.status().is_success() {
-            loader.stop();
+            loader.finish();
             let status = create_response.status();
             let error = create_response.text().await?;
             bail!("Failed to create app (status {}): {}", status, error);
@@ -5102,12 +5085,12 @@ enclave "default" {{
         let resource_id = app_data["id"].as_str().unwrap_or("");
         let git_url = app_data["git_url"].as_str().unwrap_or("");
 
-        loader.stop();
-        println!("App created: {}", app_name);
+        loader.finish();
+        output::success(format!("App created: {}", app_name));
 
         // Now register the BYOC credentials
-        println!("Registering bring-your-own-compute configuration...");
-        let mut loader = Loader::new("Registering credentials", LoaderStyle::Processing);
+        output::status("Registering bring-your-own-compute configuration...");
+        let loader = Spinner::new("Registering credentials", SpinnerStyle::Processing);
 
         // Add resource_id to credentials
         let mut creds_with_resource = credentials_json.clone();
@@ -5124,7 +5107,7 @@ enclave "default" {{
             .context("Failed to register BYOC credentials")?;
 
         if !register_response.status().is_success() {
-            loader.stop();
+            loader.finish();
             let status = register_response.status();
             let error = register_response.text().await?;
             bail!(
@@ -5134,7 +5117,7 @@ enclave "default" {{
             );
         }
 
-        loader.stop();
+        loader.finish();
 
         // Save local state
         let caution_dir = dirs::home_dir()
@@ -5166,33 +5149,32 @@ enclave "default" {{
             self.set_git_remote(git_url)?;
         }
 
-        println!("\n╔══════════════════════════════════════════════════════════════════╗");
-        println!("║                    Setup Complete!                               ║");
-        println!("╚══════════════════════════════════════════════════════════════════╝");
-        println!("\nApp: {}", app_name);
-        println!("Resource ID: {}", resource_id);
-        println!("Deployment ID: {}", deployment_id);
-        println!("Git URL: {}", git_url);
-        println!("\nState saved to: {}", caution_dir.display());
-        println!("\nNext steps:");
-        println!("  1. Create your Procfile with 'run:' and optional 'containerfile:'");
-        println!(
+        output::status("\n╔══════════════════════════════════════════════════════════════════╗");
+        output::success("║                    Setup Complete!                               ║");
+        output::status("╚══════════════════════════════════════════════════════════════════╝");
+        output::status(format!("\nApp: {}", app_name));
+        output::status(format!("Resource ID: {}", resource_id));
+        output::status(format!("Deployment ID: {}", deployment_id));
+        output::status(format!("Git URL: {}", git_url));
+        output::status(format!("\nState saved to: {}", caution_dir.display()));
+        output::status("\nNext steps:");
+        output::status("  1. Create your Procfile with 'run:' and optional 'containerfile:'");
+        output::status(
             "     If containerfile is absent, Caution auto-detects a repo-root Containerfile before Dockerfile"
         );
-        println!("  2. Push to deploy: git push caution main");
-        println!("\nTo tear down this deployment:");
-        println!("  caution teardown --byoc");
+        output::status("  2. Push to deploy: git push caution main");
+        output::status("\nTo tear down this deployment:");
+        output::status("  caution teardown --byoc");
 
         Ok(())
     }
 
     /// Tear down bring-your-own-compute deployment
     async fn teardown_byoc(&self, force: bool, local: bool) -> Result<()> {
-        use std::io::{self, Write};
 
-        println!("\n╔══════════════════════════════════════════════════════════════════╗");
-        println!("║          Bring-Your-Own-Compute Teardown (AWS)                   ║");
-        println!("╚══════════════════════════════════════════════════════════════════╝\n");
+        output::status("\n╔══════════════════════════════════════════════════════════════════╗");
+        output::status("║          Bring-Your-Own-Compute Teardown (AWS)                   ║");
+        output::status("╚══════════════════════════════════════════════════════════════════╝\n");
 
         // Try to find local state
         let deployment = self.load_deployment().ok();
@@ -5242,25 +5224,22 @@ enclave "default" {{
             }
         };
 
-        println!("Found bring-your-own-compute deployment:");
-        println!("  App: {}", app_name);
-        println!("  Deployment ID: {}", deployment_id);
-        println!("  Region: {}", aws_region);
+        output::status("Found bring-your-own-compute deployment:");
+        output::status(format!("  App: {}", app_name));
+        output::status(format!("  Deployment ID: {}", deployment_id));
+        output::status(format!("  Region: {}", aws_region));
 
         if !force {
-            println!("\n⚠️  WARNING: This will permanently destroy:");
-            println!("    • The Caution app and all deployment data");
-            println!("    • AWS VPC and all associated resources");
-            println!("    • S3 bucket and all stored images");
-            println!("    • IAM user, role, and policies");
-            println!("\n    This action cannot be undone!\n");
+            output::warning("\n⚠️  WARNING: This will permanently destroy:");
+            output::warning("    • The Caution app and all deployment data");
+            output::warning("    • AWS VPC and all associated resources");
+            output::warning("    • S3 bucket and all stored images");
+            output::warning("    • IAM user, role, and policies");
+            output::warning("\n    This action cannot be undone!\n");
 
-            print!("Type the app name to confirm deletion [{}]: ", app_name);
-            io::stdout().flush()?;
-            let mut confirm = String::new();
-            io::stdin().read_line(&mut confirm)?;
-            if confirm.trim() != app_name {
-                println!("Aborted.");
+            let confirm = prompt::text(&format!("Type the app name to confirm deletion [{}]: ", app_name))?;
+            if confirm != app_name {
+                output::status("Aborted.");
                 return Ok(());
             }
         }
@@ -5276,8 +5255,8 @@ enclave "default" {{
 
         // Destroy Caution resource first
         if let Some(ref rid) = resource_id {
-            println!("\nDestroying Caution app...");
-            let mut loader = Loader::new("Destroying app", LoaderStyle::Processing);
+            output::status("\nDestroying Caution app...");
+            let loader = Spinner::new("Destroying app", SpinnerStyle::Processing);
 
             let auth_config = self.ensure_authenticated().await?;
             let response = self
@@ -5288,29 +5267,29 @@ enclave "default" {{
                 .send()
                 .await;
 
-            loader.stop();
+            loader.finish();
 
             match response {
                 Ok(resp) if resp.status().is_success() => {
-                    println!("Caution app destroyed");
+                    output::success("Caution app destroyed");
                 }
                 Ok(resp) => {
                     let error = resp.text().await.unwrap_or_default();
-                    eprintln!("Warning: Failed to destroy Caution app: {}", error);
+                    output::warning(format!("Warning: Failed to destroy Caution app: {}", error));
                 }
                 Err(e) => {
-                    eprintln!("Warning: Failed to destroy Caution app: {}", e);
+                    output::warning(format!("Warning: Failed to destroy Caution app: {}", e));
                 }
             }
         }
 
         // Run teardown container
-        println!("\nDestroying AWS infrastructure...");
-        let mut loader = Loader::new("Running teardown", LoaderStyle::Processing);
+        output::status("\nDestroying AWS infrastructure...");
+        let loader = Spinner::new("Running teardown", SpinnerStyle::Processing);
 
         let provisioner_image = BYOC_PROVISIONER_IMAGE;
         if local {
-            println!("Using local provisioner image (--local)...");
+            output::status("Using local provisioner image (--local)...");
         } else {
             let _ = Command::new("docker")
                 .args(&["pull", provisioner_image])
@@ -5345,22 +5324,22 @@ enclave "default" {{
             .output()
             .context("Failed to run teardown")?;
 
-        loader.stop();
+        loader.finish();
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("Warning: AWS teardown may have failed: {}", stderr);
-            eprintln!("You may need to manually clean up resources in AWS console.");
+            output::warning(format!("Warning: AWS teardown may have failed: {}", stderr));
+            output::warning("You may need to manually clean up resources in AWS console.");
         } else {
-            println!("AWS infrastructure destroyed");
+            output::success("AWS infrastructure destroyed");
         }
 
         // Clean up local state
         if let Some(path) = byoc_state_dir {
             if let Err(e) = fs::remove_dir_all(&path) {
-                eprintln!("Warning: Failed to remove local state: {}", e);
+                output::warning(format!("Warning: Failed to remove local state: {}", e));
             } else {
-                println!("Local state cleaned up");
+                output::success("Local state cleaned up");
             }
         }
 
@@ -5370,10 +5349,10 @@ enclave "default" {{
             let _ = fs::remove_file(&deployment_file);
         }
 
-        println!("\n╔══════════════════════════════════════════════════════════════════╗");
-        println!("║                    Teardown Complete                             ║");
-        println!("╚══════════════════════════════════════════════════════════════════╝");
-        println!("\nAll bring-your-own-compute resources have been destroyed.");
+        output::status("\n╔══════════════════════════════════════════════════════════════════╗");
+        output::success("║                    Teardown Complete                             ║");
+        output::status("╚══════════════════════════════════════════════════════════════════╝");
+        output::status("\nAll bring-your-own-compute resources have been destroyed.");
 
         Ok(())
     }
@@ -5395,7 +5374,7 @@ enclave "default" {{
     }
 
     async fn build_local(&self, no_cache: bool) -> Result<(), BuildLocalError> {
-        println!("Building EIF locally for inspection...\n");
+        output::status("Building EIF locally for inspection...");
 
         let app_commit = Command::new("git")
             .args(&["rev-parse", "HEAD"])
@@ -5433,10 +5412,10 @@ enclave "default" {{
             .unwrap_or(false);
         let no_cache = no_cache || config_no_cache;
 
-        let mut loader = Loader::new("Building application image", LoaderStyle::Processing);
+        let loader = Spinner::new("Building application image", SpinnerStyle::Processing);
         let image_ref = self.build_local_docker_image(no_cache).await.map_err(BuildLocalError::BuildDockerImage)?;
-        loader.stop();
-        println!("✓ Application image built: {}\n", image_ref);
+        loader.finish();
+        output::success(format!("✓ Application image built: {}", image_ref));
 
         let cache_dir = self.get_cache_dir().map_err(BuildLocalError::CacheDir)?;
         let builder = enclave_builder::EnclaveBuilder::new_with_cache(
@@ -5486,7 +5465,7 @@ enclave "default" {{
             .and_then(|config| config.network.as_ref())
             .and_then(|network| network.http.as_ref())
             .map(|http| http.port);
-        log_verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
+        output::verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
 
         let e2e_config = default_enclave
             .and_then(|e| e.network.as_ref())
@@ -5496,20 +5475,20 @@ enclave "default" {{
         let e2e = e2e_config
             .and_then(|ee| ee.enabled)
             .unwrap_or(false);
-        log_verbose(self.verbose, &format!("E2E encryption: {}", e2e));
+        output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = cfg.has_vault_env();
-        log_verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
+        output::verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
 
         let egress = config_egress_enabled(&cfg);
-        log_verbose(self.verbose, &format!("Egress: {}", egress));
+        output::verbose(self.verbose, &format!("Egress: {}", egress));
 
         let e2e_cors_origins = e2e_config
             .and_then(|e2e| e2e.cors_origins.as_ref())
             .map(|origins| origins.join(","));
 
-        let mut loader = Loader::new("Building enclave image", LoaderStyle::Processing);
-        log_verbose(self.verbose, "Using build_enclave");
+        let loader = Spinner::new("Building enclave image", SpinnerStyle::Processing);
+        output::verbose(self.verbose, "Using build_enclave");
         let deployment = builder
             .build_enclave(
                 &user_image,
@@ -5529,32 +5508,32 @@ enclave "default" {{
             )
             .await
         .map_err(BuildLocalError::BuildEnclave)?;
-        loader.stop();
+        loader.finish();
 
-        println!("✓ Enclave built successfully!\n");
+        output::success("✓ Enclave built successfully!");
 
         let stage_dir = work_dir.join("eif-stage");
-        println!("=== Build Artifacts ===");
-        println!("EIF file: {}", deployment.eif.path.display());
-        println!("Size: {} bytes", deployment.eif.size);
-        println!("SHA256: {}\n", deployment.eif.sha256);
+        output::status("=== Build Artifacts ===");
+        output::status(format!("EIF file: {}", deployment.eif.path.display()));
+        output::status(format!("Size: {} bytes", deployment.eif.size));
+        output::status(format!("SHA256: {}", deployment.eif.sha256));
 
-        println!("=== PCR Values ===");
-        println!("PCR0 (Enclave image): {}", deployment.pcrs.pcr0);
-        println!("PCR1 (Kernel/boot): {}", deployment.pcrs.pcr1);
-        println!("PCR2 (Application): {}\n", deployment.pcrs.pcr2);
+        output::status("=== PCR Values ===");
+        output::status(format!("PCR0 (Enclave image): {}", deployment.pcrs.pcr0));
+        output::status(format!("PCR1 (Kernel/boot): {}", deployment.pcrs.pcr1));
+        output::status(format!("PCR2 (Application): {}", deployment.pcrs.pcr2));
 
-        println!("=== Build Directory ===");
-        println!("Location: {}\n", stage_dir.display());
-        println!("You can inspect the exact build process:");
-        println!("  Containerfile.eif - Shows exactly how the EIF is built");
-        println!("  app/ - Your application files");
-        println!("  enclave/ - Enclave source code");
-        println!("  kernel/ - Kernel files");
-        println!("  output/ - Final EIF and PCRs files\n");
+        output::status("=== Build Directory ===");
+        output::status(format!("Location: {}", stage_dir.display()));
+        output::status("You can inspect the exact build process:");
+        output::status("  Containerfile.eif - Shows exactly how the EIF is built");
+        output::status("  app/ - Your application files");
+        output::status("  enclave/ - Enclave source code");
+        output::status("  kernel/ - Kernel files");
+        output::status("  output/ - Final EIF and PCRs files");
 
-        println!("To verify your deployed enclave matches this build:");
-        println!("  caution verify\n");
+        output::status("To verify your deployed enclave matches this build:");
+        output::status("  caution verify");
 
         Ok(())
     }
@@ -5604,7 +5583,7 @@ enclave "default" {{
             let source = enclave_builder::enclave_source_url(
                 &enclave_builder::build::resolve_enclaveos_commit(),
             );
-            log_verbose(
+            output::verbose(
                 self.verbose,
                 &format!("Using default enclave source: {}", source),
             );
@@ -5670,8 +5649,8 @@ enclave "default" {{
         )?;
 
         if let Some(cached) = builder.get_cached_eif() {
-            println!("Using cached reproduction build");
-            println!("Cache key: {}", cache_key);
+            output::status("Using cached reproduction build");
+            output::status(format!("Cache key: {}", cache_key));
             return Ok(cached.pcrs);
         }
 
@@ -5687,9 +5666,9 @@ enclave "default" {{
                 .await?;
         }
 
-        log_verbose(self.verbose, "Building Docker image locally...");
+        output::verbose(self.verbose, "Building Docker image locally...");
 
-        let mut loader = Loader::new("Reproducing enclave image", LoaderStyle::Processing);
+        let loader = Spinner::new("Reproducing enclave image", SpinnerStyle::Processing);
         let mut app_source_dir: Option<PathBuf> = None;
         let image_ref = if let Some(source) = local_source {
             let image_ref = self
@@ -5743,7 +5722,7 @@ enclave "default" {{
             self.build_local_docker_image(no_cache).await?
         };
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             "Building EIF locally to calculate expected PCRs...",
         );
@@ -5761,17 +5740,17 @@ enclave "default" {{
                 let branch = manifest.app_source.as_ref().and_then(|s| s.branch.clone());
                 let commit = manifest.app_source.as_ref().map(|s| s.commit.clone());
 
-                log_verbose(self.verbose, &format!("Binary from manifest: {:?}", binary));
-                log_verbose(
+                output::verbose(self.verbose, &format!("Binary from manifest: {:?}", binary));
+                output::verbose(
                     self.verbose,
                     &format!("Run command from manifest: {:?}", run_cmd),
                 );
-                log_verbose(
+                output::verbose(
                     self.verbose,
                     &format!("App source URLs from manifest: {:?}", source_urls),
                 );
-                log_verbose(self.verbose, &format!("Branch from manifest: {:?}", branch));
-                log_verbose(self.verbose, &format!("Commit from manifest: {:?}", commit));
+                output::verbose(self.verbose, &format!("Branch from manifest: {:?}", branch));
+                output::verbose(self.verbose, &format!("Commit from manifest: {:?}", commit));
 
                 (
                     binary,
@@ -5826,16 +5805,16 @@ enclave "default" {{
                         }
                     });
 
-                log_verbose(
+                output::verbose(
                     self.verbose,
                     &format!("Run command from config: {:?}", run_cmd),
                 );
-                log_verbose(
+                output::verbose(
                     self.verbose,
                     &format!("Source URLs from config: {:?}", source_urls),
                 );
-                log_verbose(self.verbose, &format!("Git branch: {:?}", branch));
-                log_verbose(self.verbose, &format!("Git commit: {:?}", commit));
+                output::verbose(self.verbose, &format!("Git branch: {:?}", branch));
+                output::verbose(self.verbose, &format!("Git commit: {:?}", commit));
 
                 (binary, run_cmd, source_urls, branch, commit, None)
             };
@@ -5860,7 +5839,7 @@ enclave "default" {{
                 })
                 .unwrap_or_default()
         };
-        log_verbose(self.verbose, &format!("Ports: {:?}", ports));
+        output::verbose(self.verbose, &format!("Ports: {:?}", ports));
 
         let http_port = {
             let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
@@ -5874,7 +5853,7 @@ enclave "default" {{
                 .and_then(|network| network.http)
                 .map(|http| http.port)
         };
-        log_verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
+        output::verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
 
         let e2e_config = {
             let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
@@ -5900,7 +5879,7 @@ enclave "default" {{
                         .is_some()
                 })
         };
-        log_verbose(self.verbose, &format!("E2E encryption: {}", e2e));
+        output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = if let Some(ref app_dir) = app_source_dir {
             self.read_config_from_dir(app_dir)
@@ -5920,7 +5899,7 @@ enclave "default" {{
                 .map(|cfg| cfg.has_vault_env())
                 .unwrap_or(false)
         };
-        log_verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
+        output::verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
 
         let egress = if let Some(ref app_dir) = app_source_dir {
             self.read_config_from_dir(app_dir)
@@ -5936,7 +5915,7 @@ enclave "default" {{
                 .map(|cfg| config_egress_enabled(&cfg))
                 .unwrap_or(false)
         };
-        log_verbose(self.verbose, &format!("Egress: {}", egress));
+        output::verbose(self.verbose, &format!("Egress: {}", egress));
 
         let e2e_cors_origins = if e2e {
             e2e_config
@@ -5948,7 +5927,7 @@ enclave "default" {{
         };
 
         let deployment = if let Some(ref bin_path) = binary_path {
-            log_verbose(
+            output::verbose(
                 self.verbose,
                 &format!("Using build_enclave_auto with binary: {}", bin_path),
             );
@@ -5971,7 +5950,7 @@ enclave "default" {{
                 )
                 .await
         } else {
-            log_verbose(self.verbose, "Using build_enclave (no binary specified)");
+            output::verbose(self.verbose, "Using build_enclave (no binary specified)");
             builder
                 .build_enclave(
                     &user_image,
@@ -5992,19 +5971,19 @@ enclave "default" {{
                 .await
         }
         .context("Failed to build enclave locally")?;
-        loader.stop();
+        loader.finish();
 
         if let Some(work_dir) = deployment.eif.path.parent() {
             let stage_dir = work_dir.join("eif-stage");
             if stage_dir.exists() {
-                println!();
-                println!("Build artifacts available at: {}", stage_dir.display());
-                println!("You can review everything that went into building this enclave:");
-                println!("  • Containerfile.eif - The complete build recipe");
-                println!("  • app/ - Your application files");
-                println!("  • enclave/ - EnclaveOS source (attestation-service, init)");
-                println!("  • run.sh - Generated startup script");
-                println!("  • manifest.json - Build provenance information");
+                output::status("");
+                output::status(format!("Build artifacts available at: {}", stage_dir.display()));
+                output::status("You can review everything that went into building this enclave:");
+                output::status("  • Containerfile.eif - The complete build recipe");
+                output::status("  • app/ - Your application files");
+                output::status("  • enclave/ - EnclaveOS source (attestation-service, init)");
+                output::status("  • run.sh - Generated startup script");
+                output::status("  • manifest.json - Build provenance information");
             }
         }
 
@@ -6063,8 +6042,8 @@ enclave "default" {{
         no_cache: bool,
         save_pcrs: bool,
     ) -> Result<()> {
-        println!("Verifying enclave attestation...");
-        println!("Learn more: https://docs.caution.co/concepts/attestation/");
+        output::status("Verifying enclave attestation...");
+        output::status("Learn more: https://docs.caution.co/concepts/attestation/");
 
         let attestation_url = if let Some(u) = attestation_url_opt {
             u
@@ -6079,13 +6058,13 @@ enclave "default" {{
             nonce
         };
 
-        println!("\nChallenge nonce (sent): {}", hex::encode(&nonce));
+        output::status(format!("\nChallenge nonce (sent): {}", hex::encode(&nonce)));
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!("Requesting attestation from: {}", attestation_url),
         );
-        println!("Requesting attestation...");
+        output::status("Requesting attestation...");
 
         // Bound the challenge/response: a reachable-but-unresponsive enclave must
         // not hang verify indefinitely. The connect phase is already bounded by
@@ -6120,7 +6099,7 @@ enclave "default" {{
                         .map(|o| o.keys().collect::<Vec<_>>())
                 )
             })?;
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!("Received attestation: {} bytes", attestation_b64.len()),
         );
@@ -6128,21 +6107,21 @@ enclave "default" {{
             .decode(attestation_b64)
             .context("Failed to decode attestation document")?;
 
-        println!("\nExtracting remote PCR values...");
+        output::status("\nExtracting remote PCR values...");
         let remote_pcrs = attestation::extract_pcrs(&attestation_bytes)
             .context("Failed to extract PCRs from attestation document")?;
 
-        println!("\nRemote PCR values (from deployed enclave):");
-        println!("  PCR0: {}", remote_pcrs.pcr0);
-        println!("  PCR1: {}", remote_pcrs.pcr1);
-        println!("  PCR2: {}", remote_pcrs.pcr2);
+        output::status("\nRemote PCR values (from deployed enclave):");
+        output::status(format!("  PCR0: {}", remote_pcrs.pcr0));
+        output::status(format!("  PCR1: {}", remote_pcrs.pcr1));
+        output::status(format!("  PCR2: {}", remote_pcrs.pcr2));
 
         let manifest: Option<enclave_builder::EnclaveManifest> =
             if let Some(manifest_val) = attest_resp.get("manifest").cloned() {
                 match serde_json::from_value(manifest_val) {
                     Ok(m) => Some(m),
                     Err(e) => {
-                        log_verbose(self.verbose, &format!("Failed to parse manifest: {}", e));
+                        output::verbose(self.verbose, &format!("Failed to parse manifest: {}", e));
                         None
                     }
                 }
@@ -6151,41 +6130,35 @@ enclave "default" {{
             };
 
         if let Some(ref m) = manifest {
-            println!("\nManifest information:");
+            output::status("\nManifest information:");
             if let Some(ref app_src) = m.app_source {
                 if app_src.urls.len() == 1 {
-                    print!("  App source: {}", app_src.urls[0]);
+                    output::status(format!("  App source: {} commit: {}", app_src.urls[0], app_src.commit));
                 } else {
-                    print!("  App source: ({} URLs)", app_src.urls.len());
+                    output::status(format!("  App source: ({} URLs) commit: {}", app_src.urls.len(), app_src.commit));
                 }
-                print!(" commit: {}", app_src.commit);
                 if let Some(ref b) = app_src.branch {
-                    print!(" branch: {}", b);
+                    output::status(format!("    branch: {}", b));
                 }
-                println!();
                 if app_src.urls.len() > 1 {
                     for (i, url) in app_src.urls.iter().enumerate() {
-                        println!("    [{}] {}", i + 1, url);
+                        output::status(format!("    [{}] {}", i + 1, url));
                     }
                 }
             } else {
-                println!("  App source: (none - private code)");
+                output::status("  App source: (none - private code)");
             }
 
             match &m.enclave_source {
                 enclave_builder::EnclaveSource::GitArchive { urls, commit } => {
                     if urls.len() == 1 {
-                        print!("  Enclave source: {}", urls[0]);
+                        output::status(format!("  Enclave source: {}{}", urls[0], commit.as_ref().map(|c| format!(" commit: {}", c)).unwrap_or_default()));
                     } else {
-                        print!("  Enclave source: ({} URLs)", urls.len());
+                        output::status(format!("  Enclave source: ({} URLs){}", urls.len(), commit.as_ref().map(|c| format!(" commit: {}", c)).unwrap_or_default()));
                     }
-                    if let Some(c) = commit {
-                        print!(" commit: {}", c);
-                    }
-                    println!();
                     if urls.len() > 1 {
                         for (i, url) in urls.iter().enumerate() {
-                            println!("    [{}] {}", i + 1, url);
+                            output::status(format!("    [{}] {}", i + 1, url));
                         }
                     }
                 }
@@ -6194,32 +6167,24 @@ enclave "default" {{
                     branch,
                     commit,
                 } => {
-                    print!("  Enclave source: {}", url);
-                    if let Some(c) = commit {
-                        print!(" commit: {}", c);
-                    }
-                    println!(" branch: {}", branch);
+                    output::status(format!("  Enclave source: {}{} branch: {}", url, commit.as_ref().map(|c| format!(" commit: {}", c)).unwrap_or_default(), branch));
                 }
                 enclave_builder::EnclaveSource::Local { path } => {
-                    println!("  Enclave source: {} (local)", path);
+                    output::status(format!("  Enclave source: {} (local)", path));
                 }
             }
             match &m.framework_source {
                 enclave_builder::FrameworkSource::GitArchive { url, commit } => {
-                    print!("  Framework source: {}", url);
-                    if let Some(c) = commit {
-                        print!(" commit: {}", c);
-                    }
-                    println!();
+                    output::status(format!("  Framework source: {}{}", url, commit.as_ref().map(|c| format!(" commit: {}", c)).unwrap_or_default()));
                 }
             }
             if let Some(ref metadata) = m.metadata {
-                println!("  Metadata: {}", metadata);
+                output::status(format!("  Metadata: {}", metadata));
             }
         }
 
         let expected_pcrs = if let Some(pcrs_path) = pcrs_file {
-            println!("\nReading expected PCRs from file: {}", pcrs_path);
+            output::status(format!("\nReading expected PCRs from file: {}", pcrs_path));
             self.read_pcrs_from_file(&pcrs_path)?
         } else if from_local {
             let manifest_app_commit = manifest
@@ -6228,20 +6193,20 @@ enclave "default" {{
                 .map(|app_source| app_source.commit.as_str());
             match manifest_app_commit {
                 Some(commit) => {
-                    println!("\nBuilding from local Git commit from manifest: {commit}")
+                    output::status(format!("\nBuilding from local Git commit from manifest: {commit}"))
                 }
-                None => println!("\nBuilding from local Git HEAD archive..."),
+                None => output::status("\nBuilding from local Git HEAD archive..."),
             }
             let source = self.stage_git_source(manifest_app_commit).await?;
             self.build_and_get_pcrs(manifest.clone(), no_cache, Some(&source))
                 .await?
         } else if let Some(ref tarball_path) = from_tarball {
-            println!("\nBuilding from source tarball: {}", tarball_path.display());
+            output::status(format!("\nBuilding from source tarball: {}", tarball_path.display()));
             let source = self.stage_tarball_source(tarball_path)?;
             self.build_and_get_pcrs(manifest.clone(), no_cache, Some(&source))
                 .await?
         } else if let Some(ref source_url) = app_source_url {
-            println!("\nBuilding from provided source URL: {}", source_url);
+            output::status(format!("\nBuilding from provided source URL: {}", source_url));
             if let Some(ref m) = manifest {
                 let mut modified_manifest = m.clone();
                 let commit = m
@@ -6257,68 +6222,63 @@ enclave "default" {{
                 self.build_and_get_pcrs(Some(modified_manifest), no_cache, None)
                     .await?
             } else {
-                println!("\n⚠️  Remote attestation does not include a manifest");
-                println!("Cannot determine commit hash without manifest.");
-                println!();
-                println!("Options:");
-                println!("  1. Build from local directory: caution verify --from-local");
-                println!("  2. Use a PCRs file: caution verify --pcrs pcrs.txt");
-                println!();
+                output::warning("⚠️  Remote attestation does not include a manifest");
+                output::status("Cannot determine commit hash without manifest.");
+                output::status("");
+                output::status("Options:");
+                output::status("  1. Build from local directory: caution verify --from-local");
+                output::status("  2. Use a PCRs file: caution verify --pcrs pcrs.txt");
                 bail!("Manifest required when using --app-source-url");
             }
         } else {
             if let Some(ref m) = manifest {
                 if m.app_source.is_none() {
-                    println!("\n⚠️  Cannot reproduce build - no application source code available");
-                    println!();
-                    println!("The remote manifest indicates this deployment uses private code.");
-                    println!("You cannot reproduce this build from remote manifest.");
-                    println!();
-                    println!("Options:");
-                    println!(
+                    output::warning("⚠️  Cannot reproduce build - no application source code available");
+                    output::status("The remote manifest indicates this deployment uses private code.");
+                    output::status("You cannot reproduce this build from remote manifest.");
+                    output::status("");
+                    output::status("Options:");
+                    output::status(
                         "  1. Provide the source URL: caution verify --app-source-url git@codeberg.org:org/repo.git"
                     );
-                    println!("  2. Build from local directory: caution verify --from-local");
-                    println!("  3. Use a PCRs file: caution verify --pcrs pcrs.txt");
-                    println!();
+                    output::status("  2. Build from local directory: caution verify --from-local");
+                    output::status("  3. Use a PCRs file: caution verify --pcrs pcrs.txt");
                     bail!("Cannot reproduce private code deployment");
                 }
-                println!("\nReproducing build from remote manifest...");
+                output::status("\nReproducing build from remote manifest...");
                 self.build_and_get_pcrs(manifest.clone(), no_cache, None)
                     .await?
             } else {
-                println!("\n⚠️  Remote attestation does not include a manifest");
-                println!();
-                println!("The remote deployment was built without manifest support.");
-                println!();
-                println!("Options:");
-                println!("  1. Build from local directory: caution verify --from-local");
-                println!("  2. Use a PCRs file: caution verify --pcrs pcrs.txt");
-                println!("  3. Redeploy your app to enable manifest support");
-                println!();
+                output::warning("⚠️  Remote attestation does not include a manifest");
+                output::status("The remote deployment was built without manifest support.");
+                output::status("");
+                output::status("Options:");
+                output::status("  1. Build from local directory: caution verify --from-local");
+                output::status("  2. Use a PCRs file: caution verify --pcrs pcrs.txt");
+                output::status("  3. Redeploy your app to enable manifest support");
                 bail!("Manifest not available from remote");
             }
         };
 
-        println!("\nExpected PCR values:");
-        println!("  PCR0: {}", expected_pcrs.pcr0);
-        println!("  PCR1: {}", expected_pcrs.pcr1);
-        println!("  PCR2: {}", expected_pcrs.pcr2);
+        output::status("\nExpected PCR values:");
+        output::status(format!("  PCR0: {}", expected_pcrs.pcr0));
+        output::status(format!("  PCR1: {}", expected_pcrs.pcr1));
+        output::status(format!("  PCR2: {}", expected_pcrs.pcr2));
 
         let is_debug = remote_pcrs.pcr0.chars().all(|c| c == '0')
             || remote_pcrs.pcr1.chars().all(|c| c == '0')
             || remote_pcrs.pcr2.chars().all(|c| c == '0');
 
         if is_debug {
-            println!("\n⚠ WARNING: The remote enclave is running in DEBUG MODE");
-            println!("In debug mode, AWS Nitro Enclaves zero out PCR values.");
-            println!("This means attestation cannot be verified.");
-            println!("\nDebug mode should ONLY be used for development/testing.");
-            println!("For production, the enclave must run in production mode.");
+            output::warning("\n⚠ WARNING: The remote enclave is running in DEBUG MODE");
+            output::warning("In debug mode, AWS Nitro Enclaves zero out PCR values.");
+            output::warning("This means attestation cannot be verified.");
+            output::warning("\nDebug mode should ONLY be used for development/testing.");
+            output::warning("For production, the enclave must run in production mode.");
             bail!("Cannot verify attestation: enclave is in debug mode");
         }
 
-        println!("\nVerifying attestation with bootproof-sdk...");
+        output::status("\nVerifying attestation with bootproof-sdk...");
         let expected_nitro_pcrs: NitroPcrs = [
             (
                 0u8,
@@ -6342,32 +6302,31 @@ enclave "default" {{
             .context("could not get time since epoch")?;
         match nitro.verify(duration_since_epoch, &nonce) {
             Ok(payload) => {
-                println!("✓ Certificate chain verified against AWS Nitro root CA");
-                println!("✓ All certificates are within validity period");
-                println!("✓ COSE signature verified");
-                println!("✓ Nonce verified (prevents replay attacks)");
-                println!("✓ PCR values match expected");
+                output::success("✓ Certificate chain verified against AWS Nitro root CA");
+                output::success("✓ All certificates are within validity period");
+                output::success("✓ COSE signature verified");
+                output::success("✓ Nonce verified (prevents replay attacks)");
+                output::success("✓ PCR values match expected");
 
                 if let serde_cbor::Value::Map(map) = &payload {
                     if let Some(serde_cbor::Value::Bytes(user_data)) =
                         map.get(&serde_cbor::Value::Text("user_data".to_string()))
                     {
-                        println!();
                         match str::from_utf8(user_data) {
                             Ok(user_data) => {
-                                println!("User data: {user_data}");
+                                output::status(format!("User data: {user_data}"));
                             }
                             Err(_) => {
-                                println!("User data: {user_data:?}");
+                                output::status(format!("User data: {user_data:?}"));
                             }
                         }
                     }
                 }
 
-                println!("\n✓ Attestation verification PASSED");
-                println!("The deployed enclave matches the expected PCRs.");
-                println!("This means the code running in the enclave is exactly what you expect.");
-                println!("\nPowered by: Caution (https://caution.co)");
+                output::success("\n✓ Attestation verification PASSED");
+                output::success("The deployed enclave matches the expected PCRs.");
+                output::success("This means the code running in the enclave is exactly what you expect.");
+                output::success("\nPowered by: Caution (https://caution.co)");
 
                 if save_pcrs {
                     let trusted = serde_json::json!({
@@ -6380,35 +6339,35 @@ enclave "default" {{
                     fs::write(&hashes_path, serde_json::to_string_pretty(&trusted)?).with_context(
                         || format!("Failed to save trusted hashes to {}", hashes_path.display()),
                     )?;
-                    println!("Trusted hashes saved to {}", hashes_path.display());
+                    output::status(format!("Trusted hashes saved to {}", hashes_path.display()));
                 }
 
                 Ok(())
             }
             Err(e) => {
-                println!("\n✗ Attestation verification FAILED");
-                println!("Error: {e}");
-                println!("\nPCR comparison:");
+                output::error("\n✗ Attestation verification FAILED");
+                output::error(format!("Error: {e}"));
+                output::status("\nPCR comparison:");
                 if expected_pcrs.pcr0 != remote_pcrs.pcr0 {
-                    println!("  PCR0: MISMATCH");
-                    println!("    expected: {}", expected_pcrs.pcr0);
-                    println!("    remote:   {}", remote_pcrs.pcr0);
+                    output::error("  PCR0: MISMATCH");
+                    output::status(format!("    expected: {}", expected_pcrs.pcr0));
+                    output::status(format!("    remote:   {}", remote_pcrs.pcr0));
                 } else {
-                    println!("  PCR0: match");
+                    output::status("  PCR0: match");
                 }
                 if expected_pcrs.pcr1 != remote_pcrs.pcr1 {
-                    println!("  PCR1: MISMATCH");
-                    println!("    expected: {}", expected_pcrs.pcr1);
-                    println!("    remote:   {}", remote_pcrs.pcr1);
+                    output::error("  PCR1: MISMATCH");
+                    output::status(format!("    expected: {}", expected_pcrs.pcr1));
+                    output::status(format!("    remote:   {}", remote_pcrs.pcr1));
                 } else {
-                    println!("  PCR1: match");
+                    output::status("  PCR1: match");
                 }
                 if expected_pcrs.pcr2 != remote_pcrs.pcr2 {
-                    println!("  PCR2: MISMATCH");
-                    println!("    expected: {}", expected_pcrs.pcr2);
-                    println!("    remote:   {}", remote_pcrs.pcr2);
+                    output::error("  PCR2: MISMATCH");
+                    output::status(format!("    expected: {}", expected_pcrs.pcr2));
+                    output::status(format!("    remote:   {}", remote_pcrs.pcr2));
                 } else {
-                    println!("  PCR2: match");
+                    output::status("  PCR2: match");
                 }
                 bail!("Attestation verification failed - {e}");
             }
@@ -6485,7 +6444,7 @@ enclave "default" {{
         let temp_dir = tempfile::TempDir::new().context("Failed to create temp source dir")?;
         Self::extract_tarball_bytes_to_dir(&archive_output.stdout, temp_dir.path())?;
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!(
                 "Staged local Git commit {} from {} into {}",
@@ -6511,7 +6470,7 @@ enclave "default" {{
 
         Self::extract_tarball_bytes_to_dir(&archive_bytes, temp_dir.path())?;
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!(
                 "Staged source tarball {} into {}",
@@ -6598,17 +6557,17 @@ enclave "default" {{
                 .context("Failed to inspect docker image")?;
 
             if inspect.status.success() {
-                log_verbose(self.verbose, &format!("Using cached Docker image: {}", tag));
+                output::verbose(self.verbose, &format!("Using cached Docker image: {}", tag));
                 return Ok(tag);
             }
         } else {
-            log_verbose(
+            output::verbose(
                 self.verbose,
                 "--no-cache specified, rebuilding Docker image...",
             );
         }
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!("Building Docker image with tag: {}", tag),
         );
@@ -6659,12 +6618,12 @@ enclave "default" {{
             }
         };
 
-        log_verbose(self.verbose, &format!("work_dir = {:?}", work_dir));
-        log_verbose(self.verbose, &format!("BuildConfig = {:?}", config));
+        output::verbose(self.verbose, &format!("work_dir = {:?}", work_dir));
+        output::verbose(self.verbose, &format!("BuildConfig = {:?}", config));
 
         build_user_image(work_dir, &tag, &config).await?;
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!("Docker image built successfully: {}", tag),
         );
@@ -6693,14 +6652,14 @@ enclave "default" {{
                 .map(|mut d| d.next().is_some())
                 .unwrap_or(false)
         {
-            log_verbose(
+            output::verbose(
                 self.verbose,
                 &format!("Using cached app source: {}", extract_dir.display()),
             );
             return Ok(extract_dir);
         }
 
-        log_verbose(self.verbose, &format!("Downloading app source: {}", url));
+        output::verbose(self.verbose, &format!("Downloading app source: {}", url));
 
         // Clean up any partial extraction
         if extract_dir.exists() {
@@ -6729,14 +6688,14 @@ enclave "default" {{
             .await
             .context("Failed to read archive bytes")?;
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!("Downloaded {} bytes, extracting...", archive_bytes.len()),
         );
 
         Self::extract_tarball_bytes_to_dir(&archive_bytes, &extract_dir)?;
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!("App source extracted to: {}", extract_dir.display()),
         );
@@ -6756,7 +6715,7 @@ enclave "default" {{
 
         for (i, url) in urls.iter().enumerate() {
             if i > 0 {
-                log_verbose(
+                output::verbose(
                     self.verbose,
                     &format!("Trying fallback URL ({}/{}): {}", i + 1, urls.len(), url),
                 );
@@ -6765,7 +6724,7 @@ enclave "default" {{
             match self.download_and_extract_app_source(url).await {
                 Ok(path) => return Ok(path),
                 Err(e) => {
-                    log_verbose(
+                    output::verbose(
                         self.verbose,
                         &format!("Failed to download from {}: {}", url, e),
                     );
@@ -6837,7 +6796,7 @@ enclave "default" {{
             return Ok(());
         }
 
-        println!("\nChecking {} is reachable on remote...", label.to_lowercase());
+        output::status(format!("\nChecking {} is reachable on remote...", label.to_lowercase()));
         let response = match self
             .client
             .head(url)
@@ -6847,7 +6806,7 @@ enclave "default" {{
         {
             Ok(response) => response,
             Err(e) => {
-                log_verbose(
+                output::verbose(
                     self.verbose,
                     &format!("{} preflight inconclusive ({})", label, e),
                 );
@@ -6870,11 +6829,11 @@ enclave "default" {{
             );
         }
 
-        log_verbose(
+        output::verbose(
             self.verbose,
             &format!("{} reachable (HTTP {})", label, status.as_u16()),
         );
-        println!("  {} reachable ✓", label);
+        output::status(format!("  {} reachable ✓", label));
         Ok(())
     }
 
@@ -6908,11 +6867,11 @@ enclave "default" {{
             return Ok(());
         }
 
-        println!("\nChecking app source is reachable on remote...");
+        output::status("\nChecking app source is reachable on remote...");
         let output = match Self::git_command(&["ls-remote", git_url]).output() {
             Ok(output) => output,
             Err(e) => {
-                log_verbose(
+                output::verbose(
                     self.verbose,
                     &format!("App source preflight skipped (ls-remote could not run): {}", e),
                 );
@@ -6923,7 +6882,7 @@ enclave "default" {{
         if !output.status.success() {
             // Likely auth/network rather than a missing ref; don't hard-block.
             let stderr = String::from_utf8_lossy(&output.stderr);
-            log_verbose(
+            output::verbose(
                 self.verbose,
                 &format!(
                     "App source preflight inconclusive (ls-remote failed): {}",
@@ -6936,12 +6895,12 @@ enclave "default" {{
         let listing = String::from_utf8_lossy(&output.stdout);
         match Self::classify_app_source_refs(&listing, commit, branch) {
             Ok(true) => {
-                println!("  App source reachable ✓");
+                output::status("  App source reachable ✓");
             }
             Ok(false) => {
                 // No branch hint and the commit is not a current ref tip. It may
                 // still live in history; only warn and let the fetch resolve it.
-                log_verbose(
+                output::verbose(
                     self.verbose,
                     &format!(
                         "App source commit {} is not a current ref tip; relying on fetch to resolve",
@@ -7030,13 +6989,13 @@ enclave "default" {{
             {
                 Ok(path) => return Ok(path),
                 Err(e) => {
-                    log_verbose(self.verbose, &format!("Archive download failed: {}", e));
+                    output::verbose(self.verbose, &format!("Archive download failed: {}", e));
                 }
             }
         }
 
         if let Some((git_url, commit, branch)) = git_fallback {
-            log_verbose(self.verbose, "Archive download failed. Trying git clone...");
+            output::verbose(self.verbose, "Archive download failed. Trying git clone...");
 
             let temp_dir = tempfile::TempDir::new().context("Failed to create temp directory")?;
             let clone_path = temp_dir.path().join("repo");
@@ -7044,7 +7003,7 @@ enclave "default" {{
             // If we have a branch, clone by branch first (works with Forgejo/Codeberg)
             // then checkout the specific commit
             if let Some(branch_name) = branch {
-                log_verbose(
+                output::verbose(
                     self.verbose,
                     &format!(
                         "Cloning branch '{}' then checking out commit '{}'",
@@ -7067,7 +7026,7 @@ enclave "default" {{
 
                 if !clone_output.status.success() {
                     let stderr = String::from_utf8_lossy(&clone_output.stderr);
-                    log_verbose(self.verbose, &format!("Branch clone failed: {}", stderr));
+                    output::verbose(self.verbose, &format!("Branch clone failed: {}", stderr));
                     // Fall through to try commit-based fetch
                 } else {
                     // Checkout the specific commit
@@ -7078,14 +7037,14 @@ enclave "default" {{
 
                     if checkout_output.status.success() {
                         let extract_dir = temp_dir.keep().join("repo");
-                        log_verbose(
+                        output::verbose(
                             self.verbose,
                             &format!("Git clone successful: {}", extract_dir.display()),
                         );
                         return Ok(extract_dir);
                     } else {
                         let stderr = String::from_utf8_lossy(&checkout_output.stderr);
-                        log_verbose(
+                        output::verbose(
                             self.verbose,
                             &format!("Commit checkout failed: {}, will try deeper clone", stderr),
                         );
@@ -7102,7 +7061,7 @@ enclave "default" {{
 
                         if checkout_retry.status.success() {
                             let extract_dir = temp_dir.keep().join("repo");
-                            log_verbose(
+                            output::verbose(
                                 self.verbose,
                                 &format!(
                                     "Git clone successful after unshallow: {}",
@@ -7153,7 +7112,7 @@ enclave "default" {{
 
                     if checkout_output.status.success() {
                         let extract_dir = temp_dir.keep().join("repo");
-                        log_verbose(
+                        output::verbose(
                             self.verbose,
                             &format!("Git fetch successful: {}", extract_dir.display()),
                         );
@@ -7217,7 +7176,7 @@ enclave "default" {{
             }
 
             let extract_dir = temp_dir.keep().join("repo");
-            log_verbose(
+            output::verbose(
                 self.verbose,
                 &format!("Git clone successful: {}", extract_dir.display()),
             );
@@ -7299,7 +7258,7 @@ enclave "default" {{
             .json()
             .await
             .context("Failed to parse add PGP public key response")?;
-        println!("Added PGP key: {} ({})", name, added.fingerprint);
+        output::success(format!("Added PGP key: {} ({})", name, added.fingerprint));
         Ok(())
     }
 
@@ -7308,17 +7267,17 @@ enclave "default" {{
         let keys = self.fetch_pgp_keys(&config.session_id).await?;
 
         if keys.is_empty() {
-            println!("No PGP keys found. Add one with 'caution pgp-keys add <key-file>'");
+            output::status("No PGP keys found. Add one with 'caution pgp-keys add <key-file>'");
             return Ok(());
         }
 
-        println!("PGP Keys:");
+        output::data_header("PGP Keys:");
         for key in keys {
-            println!(
+            output::status(format!(
                 "  {} ({})",
                 key.name.as_deref().unwrap_or("untitled"),
                 key.fingerprint
-            );
+            ));
         }
         Ok(())
     }
@@ -7359,7 +7318,7 @@ enclave "default" {{
             bail!("Failed to remove PGP public key: {}", error);
         }
 
-        println!("Removed PGP key: {}", key.fingerprint);
+        output::success(format!("Removed PGP key: {}", key.fingerprint));
         Ok(())
     }
 
@@ -7404,16 +7363,12 @@ enclave "default" {{
                 for (i, (k, comment)) in keys.iter().enumerate() {
                     let key_name = name.clone().unwrap_or_else(|| comment.clone());
                     let fingerprint = ssh_fingerprint(k);
-                    println!("{}. [{}], [{}]", i + 1, key_name, fingerprint);
+                    output::status(format!("{}. [{}], [{}]", i + 1, key_name, fingerprint));
                 }
 
-                print!("Which key would you like to add? (1-{}): ", keys.len());
-                io::stdout().flush().unwrap();
+                let selection = prompt::text(&format!("Which key would you like to add? (1-{}): ", keys.len()))?;
 
-                let mut input = String::new();
-                io::stdin().read_line(&mut input).unwrap();
-
-                match input.trim().parse::<usize>() {
+                match selection.parse::<usize>() {
                     Ok(n) if n >= 1 && n <= keys.len() => n - 1,
                     _ => bail!(
                         "Invalid number, please select a number between 1 and {}",
@@ -7424,7 +7379,7 @@ enclave "default" {{
                 let (k, comment) = &keys[0];
                 let key_name = name.clone().unwrap_or(comment.clone());
                 let fingerprint = ssh_fingerprint(k);
-                println!("Adding SSH key: {} ({})", key_name, fingerprint);
+                output::status(format!("Adding SSH key: {} ({})", key_name, fingerprint));
                 0
             };
 
@@ -7448,7 +7403,7 @@ enclave "default" {{
 
             self.add_single_key(&config.session_id, &key_name, k)
                 .await?;
-            println!("Added SSH key: [{}] [{}]", key_name, fingerprint);
+            output::success(format!("Added SSH key: [{}] [{}]", key_name, fingerprint));
         } else if let Some(key_str) = key {
             let key_content = key_str.trim();
             if !key_content.starts_with("ssh-") {
@@ -7472,8 +7427,8 @@ enclave "default" {{
 
             self.add_single_key(&config.session_id, &key_name, key_content)
                 .await?;
-            println!("Added: {}", key_name);
-            println!("  {}", key_content);
+            output::success(format!("Added: {}", key_name));
+            output::status(format!("  {}", key_content));
         } else if let Some(path) = key_file {
             let key_content = fs::read_to_string(&path)
                 .context("Failed to read SSH key file")?
@@ -7507,8 +7462,8 @@ enclave "default" {{
 
             self.add_single_key(&config.session_id, &key_name, &key_content)
                 .await?;
-            println!("Added: {}", key_name);
-            println!("  {}", key_content);
+            output::success(format!("Added: {}", key_name));
+            output::status(format!("  {}", key_content));
         } else {
             bail!("Provide a key file, --key, or --from-agent");
         }
@@ -7552,7 +7507,7 @@ enclave "default" {{
             bail!("Failed to remove key: {}", error);
         }
 
-        println!("Key removed.");
+        output::success("Key removed.");
         Ok(())
     }
 
@@ -7588,14 +7543,14 @@ enclave "default" {{
             .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
 
         if keys.is_empty() {
-            println!("No SSH keys found. Add one with 'caution ssh-keys add'");
+            output::status("No SSH keys found. Add one with 'caution ssh-keys add'");
         } else {
-            println!("SSH Keys:");
+            output::data_header("SSH Keys:");
             for key in keys {
                 let name = key["name"].as_str().unwrap_or("untitled");
                 let public_key = key["public_key"].as_str().unwrap_or("");
                 let fingerprint = ssh_fingerprint(public_key);
-                println!("  {} ({})", name, fingerprint);
+                output::status(format!("  {} ({})", name, fingerprint));
             }
         }
         Ok(())
@@ -7613,7 +7568,7 @@ enclave "default" {{
 
     fn cache_path(&self) -> Result<()> {
         let cache_dir = self.get_cache_dir()?;
-        println!("{}", cache_dir.display());
+        output::status(format!("{}", cache_dir.display()));
         Ok(())
     }
 
@@ -7621,12 +7576,12 @@ enclave "default" {{
         let cache_dir = self.get_cache_dir()?;
 
         if !cache_dir.exists() {
-            println!("Cache is empty (0 bytes)");
+            output::status("Cache is empty (0 bytes)");
             return Ok(());
         }
 
         let total_size = self.dir_size(&cache_dir)?;
-        println!("{}", self.format_size(total_size));
+        output::status(format!("{}", self.format_size(total_size)));
 
         Ok(())
     }
@@ -7635,17 +7590,17 @@ enclave "default" {{
         let cache_dir = self.get_cache_dir()?;
 
         if !cache_dir.exists() {
-            println!("Cache is empty");
+            output::status("Cache is empty");
             return Ok(());
         }
 
         let downloads_dir = cache_dir.join("downloads");
         if downloads_dir.exists() {
-            println!("Downloads:");
+            output::data_header("Downloads:");
             if let Ok(entries) = fs::read_dir(&downloads_dir) {
                 let mut items: Vec<_> = entries.filter_map(|e| e.ok()).collect();
                 if items.is_empty() {
-                    println!("  (empty)");
+                    output::status("  (empty)");
                 } else {
                     items.sort_by_key(|e| e.path());
                     for entry in items {
@@ -7655,12 +7610,12 @@ enclave "default" {{
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| "unknown".to_string());
-                        println!("  {} ({})", name, self.format_size(size));
+                        output::status(format!("  {} ({})", name, self.format_size(size)));
                     }
                 }
             }
         } else {
-            println!("Cache is empty");
+            output::status("Cache is empty");
         }
 
         Ok(())
@@ -7670,32 +7625,27 @@ enclave "default" {{
         let cache_dir = self.get_cache_dir()?;
 
         if !cache_dir.exists() {
-            println!("Cache is already empty");
+            output::status("Cache is already empty");
             return Ok(());
         }
 
         let total_size = self.dir_size(&cache_dir)?;
 
         if !force {
-            println!("About to delete cache:");
-            println!("  Path: {}", cache_dir.display());
-            println!("  Size: {}", self.format_size(total_size));
-            println!();
-            print!("Are you sure you want to delete the cache? [y/N] ");
-            std::io::stdout().flush()?;
-
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-
-            if !input.trim().eq_ignore_ascii_case("y") {
-                println!("Aborted.");
+            output::status("About to delete cache:");
+            output::status(format!("  Path: {}", cache_dir.display()));
+            output::status(format!("  Size: {}", self.format_size(total_size)));
+            output::status("");
+            let confirmed = prompt::confirm("Are you sure you want to delete the cache? [y/N] ")?;
+            if !confirmed {
+                output::status("Aborted.");
                 return Ok(());
             }
         }
 
         fs::remove_dir_all(&cache_dir).context("Failed to remove cache directory")?;
 
-        println!("Cache cleared ({} freed)", self.format_size(total_size));
+        output::success(format!("Cache cleared ({} freed)", self.format_size(total_size)));
         Ok(())
     }
 
@@ -7745,17 +7695,11 @@ enclave "default" {{
 
         let request_body = match platform {
             CredentialPlatform::Aws => {
-                println!("Adding AWS credentials for '{}'", name);
-                print!("AWS Access Key ID: ");
-                std::io::stdout().flush()?;
-                let mut access_key_id = String::new();
-                std::io::stdin().read_line(&mut access_key_id)?;
-                let access_key_id = access_key_id.trim().to_string();
+                output::status(format!("Adding AWS credentials for '{}'", name));
+                let access_key_id = prompt::text("AWS Access Key ID: ")?;
 
-                print!("AWS Secret Access Key: ");
-                std::io::stdout().flush()?;
                 let secret_access_key =
-                    rpassword::read_password().context("Failed to read secret access key")?;
+                    prompt::password("AWS Secret Access Key: ")?;
 
                 serde_json::json!({
                     "platform": "aws",
@@ -7771,10 +7715,8 @@ enclave "default" {{
             | CredentialPlatform::Linode
             | CredentialPlatform::Vultr
             | CredentialPlatform::Ovh => {
-                println!("Adding {} credentials for '{}'", platform, name);
-                print!("API Token: ");
-                std::io::stdout().flush()?;
-                let api_token = rpassword::read_password().context("Failed to read API token")?;
+                output::status(format!("Adding {} credentials for '{}'", platform, name));
+                let api_token = prompt::password("API Token: ")?;
 
                 serde_json::json!({
                     "platform": platform.to_string(),
@@ -7785,20 +7727,12 @@ enclave "default" {{
                 })
             }
             CredentialPlatform::Gcp => {
-                println!("Adding GCP credentials for '{}'", name);
-                print!("Service Account Email: ");
-                std::io::stdout().flush()?;
-                let mut email = String::new();
-                std::io::stdin().read_line(&mut email)?;
-                let email = email.trim().to_string();
+                output::status(format!("Adding GCP credentials for '{}'", name));
+                let email = prompt::text("Service Account Email: ")?;
 
-                print!("Path to service account JSON key file: ");
-                std::io::stdout().flush()?;
-                let mut key_path = String::new();
-                std::io::stdin().read_line(&mut key_path)?;
-                let key_path = key_path.trim();
+                let key_path = prompt::text("Path to service account JSON key file: ")?;
 
-                let key_content = fs::read_to_string(key_path)
+                let key_content = fs::read_to_string(&key_path)
                     .context("Failed to read service account key file")?;
                 let key_json: serde_json::Value = serde_json::from_str(&key_content)
                     .context("Invalid JSON in service account key file")?;
@@ -7813,29 +7747,15 @@ enclave "default" {{
                 })
             }
             CredentialPlatform::Azure => {
-                println!("Adding Azure credentials for '{}'", name);
-                print!("Tenant ID: ");
-                std::io::stdout().flush()?;
-                let mut tenant_id = String::new();
-                std::io::stdin().read_line(&mut tenant_id)?;
-                let tenant_id = tenant_id.trim().to_string();
+                output::status(format!("Adding Azure credentials for '{}'", name));
+                let tenant_id = prompt::text("Tenant ID: ")?;
 
-                print!("Client ID: ");
-                std::io::stdout().flush()?;
-                let mut client_id = String::new();
-                std::io::stdin().read_line(&mut client_id)?;
-                let client_id = client_id.trim().to_string();
+                let client_id = prompt::text("Client ID: ")?;
 
-                print!("Client Secret: ");
-                std::io::stdout().flush()?;
                 let client_secret =
-                    rpassword::read_password().context("Failed to read client secret")?;
+                    prompt::password("Client Secret: ")?;
 
-                print!("Subscription ID: ");
-                std::io::stdout().flush()?;
-                let mut subscription_id = String::new();
-                std::io::stdin().read_line(&mut subscription_id)?;
-                let subscription_id = subscription_id.trim().to_string();
+                let subscription_id = prompt::text("Subscription ID: ")?;
 
                 serde_json::json!({
                     "platform": "azure",
@@ -7849,50 +7769,27 @@ enclave "default" {{
                 })
             }
             CredentialPlatform::Baremetal => {
-                println!("Adding bare metal credentials for '{}'", name);
-                print!("Host address: ");
-                std::io::stdout().flush()?;
-                let mut host = String::new();
-                std::io::stdin().read_line(&mut host)?;
-                let host = host.trim().to_string();
+                output::status(format!("Adding bare metal credentials for '{}'", name));
+                let host = prompt::text("Host address: ")?;
 
-                print!("SSH Port [22]: ");
-                std::io::stdout().flush()?;
-                let mut port_str = String::new();
-                std::io::stdin().read_line(&mut port_str)?;
-                let port: u16 = port_str.trim().parse().unwrap_or(22);
+                let port = prompt::text_or_default("SSH Port [22]: ", 22)?;
 
-                print!("Username: ");
-                std::io::stdout().flush()?;
-                let mut username = String::new();
-                std::io::stdin().read_line(&mut username)?;
-                let username = username.trim().to_string();
+                let username = prompt::text("Username: ")?;
 
-                print!("Use SSH key (k) or password (p)? [k]: ");
-                std::io::stdout().flush()?;
-                let mut auth_type = String::new();
-                std::io::stdin().read_line(&mut auth_type)?;
-                let auth_type = auth_type.trim().to_lowercase();
+                let auth_type = prompt::text_or_default("Use SSH key (k) or password (p)? [k]: ", "k".to_string())?.to_lowercase();
 
                 let (ssh_private_key, ssh_password) = if auth_type == "p" {
-                    print!("SSH Password: ");
-                    std::io::stdout().flush()?;
-                    let password = rpassword::read_password().context("Failed to read password")?;
+                    let password = prompt::password("SSH Password: ")?;
                     (None, Some(password))
                 } else {
-                    print!("Path to SSH private key [~/.ssh/id_ed25519]: ");
-                    std::io::stdout().flush()?;
-                    let mut key_path = String::new();
-                    std::io::stdin().read_line(&mut key_path)?;
-                    let key_path = key_path.trim();
-                    let key_path = if key_path.is_empty() {
-                        dirs::home_dir()
-                            .map(|h| h.join(".ssh/id_ed25519"))
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "~/.ssh/id_ed25519".to_string())
-                    } else {
-                        key_path.to_string()
-                    };
+                    let default_key_path = dirs::home_dir()
+                        .map(|h| h.join(".ssh/id_ed25519"))
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "~/.ssh/id_ed25519".to_string());
+                    let key_path = prompt::text_or_default(
+                        "Path to SSH private key [~/.ssh/id_ed25519]: ",
+                        default_key_path,
+                    )?;
 
                     let key_content = fs::read_to_string(&key_path)
                         .context(format!("Failed to read SSH key from {}", key_path))?;
@@ -7922,12 +7819,12 @@ enclave "default" {{
 
         if response.status().is_success() {
             let cred: serde_json::Value = response.json().await?;
-            println!(
+            output::success(format!(
                 "Credential '{}' added successfully (ID: {})",
                 name, cred["id"]
-            );
+            ));
             if is_default {
-                println!("Set as default for {}", platform);
+                output::status(format!("Set as default for {}", platform));
             }
             Ok(())
         } else {
@@ -7948,12 +7845,12 @@ enclave "default" {{
             .await?;
 
         if credentials.is_empty() {
-            println!(
-                "No cloud credentials found. Add one with 'caution credentials add <platform> <name>'"
+            output::status(
+                "No cloud credentials found. Add one with 'caution credentials add <platform> <name>'",
             );
         } else {
-            println!("Cloud Credentials:");
-            println!();
+            output::data_header("Cloud Credentials:");
+            output::status("");
             for cred in credentials {
                 let id = cred["id"].as_str().unwrap_or("unknown");
                 let name = cred["name"].as_str().unwrap_or("untitled");
@@ -7965,11 +7862,11 @@ enclave "default" {{
                 let default_marker = if is_default { " (default)" } else { "" };
                 let region_str = region.map(|r| format!(" [{}]", r)).unwrap_or_default();
 
-                println!(
+                output::status(format!(
                     "  [{}] {} - {}{}{}",
                     id, name, platform, default_marker, region_str
-                );
-                println!("       Identifier: {}", identifier);
+                ));
+                output::status(format!("       Identifier: {}", identifier));
             }
         }
         Ok(())
@@ -7993,18 +7890,13 @@ enclave "default" {{
         let platform = cred["platform"].as_str().unwrap_or("unknown");
 
         if !force {
-            println!("About to delete credential:");
-            println!("  Name: {}", name);
-            println!("  Platform: {}", platform);
-            println!();
-            print!("Are you sure? [y/N] ");
-            std::io::stdout().flush()?;
-
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-
-            if !input.trim().eq_ignore_ascii_case("y") {
-                println!("Aborted.");
+            output::status("About to delete credential:");
+            output::status(format!("  Name: {}", name));
+            output::status(format!("  Platform: {}", platform));
+            output::status("");
+            let confirmed = prompt::confirm("Are you sure? [y/N] ")?;
+            if !confirmed {
+                output::status("Aborted.");
                 return Ok(());
             }
         }
@@ -8017,7 +7909,7 @@ enclave "default" {{
             .await?;
 
         if response.status().is_success() {
-            println!("Credential '{}' removed", name);
+            output::success(format!("Credential '{}' removed", name));
             Ok(())
         } else {
             let error = self.api_error_message(response).await;
@@ -8042,7 +7934,7 @@ enclave "default" {{
             .await?;
 
         if response.status().is_success() {
-            println!("Credential set as default");
+            output::success("Credential set as default");
             Ok(())
         } else if response.status() == reqwest::StatusCode::NOT_FOUND {
             bail!("Credential '{}' not found", id)
@@ -8072,19 +7964,19 @@ enclave "default" {{
         let eligible_certs = eligibility.iter().filter(|cert| cert.is_eligible()).count();
 
         if eligible_certs == 0 {
-            eprintln!(
+            output::warning(
                 "Keyring has no Keymaker-eligible certificates (each needs signing + \
                  authentication + storage-encryption subkeys):"
             );
             if eligibility.is_empty() {
-                eprintln!("  (no certificates found in keyring)");
+                output::warning("  (no certificates found in keyring)");
             }
             for cert in &eligibility {
-                eprintln!(
+                output::warning(format!(
                     "  - {} — missing: {}",
                     cert.user_id,
                     cert.missing().join(", ")
-                );
+                ));
             }
             bail!(
                 "No Keymaker-eligible certificates in {}. Fix: generate a compatible key with \
@@ -8100,17 +7992,17 @@ enclave "default" {{
             .filter(|cert| !cert.is_eligible())
             .collect();
         if !ineligible.is_empty() {
-            eprintln!(
+            output::warning(format!(
                 "Warning: {} certificate(s) in the keyring lack required subkeys and will be \
                  excluded from the quorum:",
                 ineligible.len()
-            );
+            ));
             for cert in ineligible {
-                eprintln!(
+                output::warning(format!(
                     "  - {} — missing: {}",
                     cert.user_id,
                     cert.missing().join(", ")
-                );
+                ));
             }
         }
 
@@ -8126,10 +8018,10 @@ enclave "default" {{
             "label": {},
         });
 
-        eprintln!(
+        output::status(format!(
             "Generating quorum (threshold={}, max={})...",
             threshold, max
-        );
+        ));
 
         let response = self
             .client
@@ -8161,32 +8053,32 @@ enclave "default" {{
             let secret_path = PathBuf::from(".caution/quorum-bundle.json");
             fs::write(&secret_path, &json)
                 .with_context(|| format!("Failed to write secret to {}", secret_path.display()))?;
-            eprintln!("Saved to: {}", secret_path.display());
+            output::status(format!("Saved to: {}", secret_path.display()));
         }
 
         // When not uploading (no QR, not in caution repo), output to stdout
         if !self.qr && (!is_tty || !in_caution_repo) {
             if !in_caution_repo {
-                eprintln!("Warning: not in a Caution repository, outputting bundle to stdout");
+                output::warning("Warning: not in a Caution repository, outputting bundle to stdout");
             }
-            print!("{}", json);
+            output::data(&json)?;
             return Ok(());
         }
 
         if upload || self.qr {
             if self.qr {
-                eprintln!(
+                output::status(
                     "\nUploading public key material bundle to Caution via QR code signing..."
                 );
             } else {
-                eprintln!("\nTo back up public key material bundle to Caution, tap your key.");
+                output::status("\nTo back up public key material bundle to Caution, tap your key.");
             }
             if in_caution_repo {
-                eprintln!(
+                output::status(
                     "The key material bundle is also accessible at .caution/quorum-bundle.json"
                 );
             }
-            eprintln!("Press Ctrl+C to cancel.");
+            output::status("Press Ctrl+C to cancel.");
 
             let config = self.ensure_authenticated().await?;
 
@@ -8209,9 +8101,9 @@ enclave "default" {{
             if response.status().is_success() {
                 let result: serde_json::Value = response.json().await?;
                 if let Some(id) = result.get("id") {
-                    eprintln!("\nQuorum bundle stored successfully (bundle ID: {})", id);
+                    output::success(format!("\nQuorum bundle stored successfully (bundle ID: {})", id));
                 } else {
-                    eprintln!("\nQuorum bundle stored successfully.");
+                    output::success("\nQuorum bundle stored successfully.");
                 }
             } else {
                 let status = response.status();
@@ -8273,7 +8165,7 @@ enclave "default" {{
         }
 
         let user_id = format!("{name} <{email}>");
-        eprintln!("Generating OpenPGP key for {user_id}...");
+        output::status(format!("Generating OpenPGP key for {user_id}..."));
 
         let cert = keymaker_cert(user_id)?;
         let fingerprint = cert.fingerprint();
@@ -8292,14 +8184,14 @@ enclave "default" {{
         write_keyring(&output, &public_keyring, force, false)?;
         write_keyring(&private_keyring, &private_keyring_contents, force, true)?;
 
-        eprintln!("Wrote public keyring to {}", output.display());
-        eprintln!("Fingerprint: {}", fingerprint);
-        eprintln!("Wrote private keyring to {}", private_keyring.display());
-        eprintln!("{}", PLAINTEXT_KEYGEN_WARNING);
-        eprintln!(
+        output::success(format!("Wrote public keyring to {}", output.display()));
+        output::status(format!("Fingerprint: {}", fingerprint));
+        output::success(format!("Wrote private keyring to {}", private_keyring.display()));
+        output::warning(PLAINTEXT_KEYGEN_WARNING);
+        output::warning(format!(
             "Use the private keyring with: caution secret send-shard --keyring {}",
             private_keyring.display()
-        );
+        ));
 
         Ok(())
     }
@@ -8333,7 +8225,7 @@ enclave "default" {{
             .context("Failed to connect to server")?;
 
         if response.status().is_success() {
-            eprintln!("Quorum bundle renamed to \"{}\"", name);
+            output::success(format!("Quorum bundle renamed to \"{}\"", name));
         } else {
             let status = response.status();
             let error = self.api_error_message(response).await;
@@ -8380,7 +8272,7 @@ enclave "default" {{
             .context("Failed to connect to server")?;
 
         if response.status().is_success() {
-            eprintln!("Labels updated successfully");
+            output::success("Labels updated successfully");
         } else {
             let status = response.status();
             let error = self.api_error_message(response).await;
@@ -8423,7 +8315,7 @@ enclave "default" {{
             .context("Failed to connect to server")?;
 
         if response.status().is_success() {
-            eprintln!("Labels removed successfully");
+            output::success("Labels removed successfully");
         } else {
             let status = response.status();
             let error = self.api_error_message(response).await;
@@ -8464,7 +8356,7 @@ enclave "default" {{
                 path.clone()
             } else {
                 // Try to pull from Caution API
-                eprintln!("No local bundle found, checking Caution...");
+                output::status("No local bundle found, checking Caution...");
                 let config = self.ensure_authenticated().await?;
                 
                 let bundles: Vec<serde_json::Value> = self
@@ -8490,7 +8382,7 @@ enclave "default" {{
                 let json = serde_json::to_string_pretty(bundle_data)?;
                 fs::write(&path, &json)
                     .with_context(|| format!("Failed to write bundle to {}", path.display()))?;
-                eprintln!("Bundle saved to {}", path.display());
+                output::status(format!("Bundle saved to {}", path.display()));
                 path
             }
         };
@@ -8528,7 +8420,7 @@ enclave "default" {{
         ]);
 
         if let Some(verified_at) = hashes["verified_at"].as_str() {
-            eprintln!("Using trusted hashes from {}", verified_at);
+            output::status(format!("Using trusted hashes from {}", verified_at));
         }
 
         // Parse the quorum bundle
@@ -8538,7 +8430,7 @@ enclave "default" {{
             serde_json::from_str(&bundle_text).context("Failed to parse bundle JSON")?;
 
         let address_str = format!("{}:49504", public_ip);
-        eprintln!("Sending shard to enclave at {}...", address_str);
+        output::status(format!("Sending shard to enclave at {}...", address_str));
         let address: std::net::SocketAddr = address_str.parse().context("Invalid address")?;
 
         let status = locksmith::client::send_shard(address, pcrs, &bundle, private_keyring)
@@ -8547,10 +8439,10 @@ enclave "default" {{
 
         match status {
             locksmith::models::SendSignedEncryptedShardResponse::Accepted { remaining } => {
-                eprintln!(
+                output::success(format!(
                     "Shard accepted, {} remaining shards until reconstitution",
                     remaining
-                );
+                ));
             }
             locksmith::models::SendSignedEncryptedShardResponse::Rejected { reason } => {
                 bail!("Shard rejected by enclave: {}", reason);
@@ -8691,31 +8583,31 @@ fn validate_global_qr(command: &Commands, qr: bool) -> Result<(), RunError> {
 pub async fn run() -> Result<(), RunError> {
     let cli = Cli::parse();
 
-    log_verbose(cli.verbose, "API CLI v0.1.0");
-    log_verbose(cli.verbose, &format!("Gateway URL: {}", cli.url));
-    log_verbose(cli.verbose, &format!("Command: {:?}", cli.command));
+    output::verbose(cli.verbose, "API CLI v0.1.0");
+    output::verbose(cli.verbose, &format!("Gateway URL: {}", cli.url));
+    output::verbose(cli.verbose, &format!("Command: {:?}", cli.command));
 
     validate_global_qr(&cli.command, cli.qr)?;
 
     if let Err(e) = check_dependencies(cli.verbose) {
-        eprintln!("Dependency check failed: {}", e);
+        output::error(format!("Dependency check failed: {}", e));
         return Err(RunError::DependencyCheck(e));
     }
 
     match &cli.command {
         Commands::Register { .. } | Commands::Login { .. } => {
             if let Err(e) = check_gateway_connectivity(&cli.url, cli.verbose).await {
-                eprintln!("Pre-flight check failed");
+                output::error("Pre-flight check failed");
                 return Err(RunError::GatewayConnectivity(e));
             }
         }
         _ => {}
     }
 
-    log_verbose(cli.verbose, "Initializing API client...");
+    output::verbose(cli.verbose, "Initializing API client...");
     let client = ApiClient::new(&cli.url, cli.verbose, cli.qr, cli.workdir.clone())
         .map_err(RunError::ApiClientInit)?;
-    log_verbose(cli.verbose, "API client ready");
+    output::verbose(cli.verbose, "API client ready");
 
     match cli.command {
         Commands::Register {
