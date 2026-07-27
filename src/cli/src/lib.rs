@@ -730,6 +730,22 @@ fn config_egress_enabled(cfg: &caution_config::ConfigurationFile) -> bool {
         .unwrap_or(false)
 }
 
+/// Add the normalized deployment configuration to a local EIF cache key.
+///
+/// Git identity alone is insufficient because local builds may consume an
+/// uncommitted `caution.hcl`. The generated, measured `run.sh` depends on this
+/// configuration, so configuration changes
+/// must never reuse an EIF/PCR produced from another configuration.
+fn measured_build_cache_key(
+    source_key: &str,
+    cfg: &caution_config::ConfigurationFile,
+) -> Result<String> {
+    let config_json =
+        serde_json::to_vec(cfg).context("Failed to serialize deployment config for cache key")?;
+    let config_hash = hex::encode(Sha256::digest(&config_json));
+    Ok(format!("{}-config-{}", source_key, config_hash))
+}
+
 fn ssh_fingerprint(key: &str) -> String {
     let parts: Vec<&str> = key.split_whitespace().collect();
     parts
@@ -1804,6 +1820,9 @@ pub(crate) enum BuildLocalError {
 
     #[error("failed to resolve cache directory")]
     CacheDir(#[source] anyhow::Error),
+
+    #[error("failed to derive measured build cache key")]
+    CacheKey(#[source] anyhow::Error),
 
     #[error("failed to initialize enclave builder")]
     InitBuilder(#[source] anyhow::Error),
@@ -5418,11 +5437,13 @@ enclave "default" {{
                     None
                 }
             });
-        let commit_sha = app_commit
+        let source_cache_key = app_commit
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let cfg = self.read_config().map_err(|e| BuildLocalError::ReadConfig(e.into()))?;
+        let cache_key =
+            measured_build_cache_key(&source_cache_key, &cfg).map_err(BuildLocalError::CacheKey)?;
         let default_enclave = cfg.enclave.as_ref().and_then(|e| e.get("default"));
 
         let config_no_cache = default_enclave
@@ -5443,7 +5464,7 @@ enclave "default" {{
             "unused",
             enclave_builder::FRAMEWORK_SOURCE,
             "local",
-            &commit_sha,
+            &cache_key,
             enclave_builder::CacheType::Build,
             no_cache,
             &cache_dir,
@@ -5643,7 +5664,7 @@ enclave "default" {{
             enclave_builder::FRAMEWORK_SOURCE.to_string()
         };
 
-        let cache_key = if let Some(source) = local_source {
+        let source_cache_key = if let Some(source) = local_source {
             if let Some(ref manifest) = external_manifest {
                 let manifest_json = serde_json::to_vec(manifest)
                     .context("Failed to serialize manifest for cache key")?;
@@ -5674,6 +5695,19 @@ enclave "default" {{
                     }
                 })
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+        };
+
+        // For local inputs, include the normalized configuration in the cache
+        // identity. Remote manifest reproduction already keys on the immutable
+        // app commit plus manifest hash; its config is fetched from that commit.
+        let cache_key = if let Some(source) = local_source {
+            let cfg = self.read_config_from_dir(&source.path)?;
+            measured_build_cache_key(&source_cache_key, &cfg)?
+        } else if external_manifest.is_none() {
+            let cfg = self.read_config().map_err(anyhow::Error::from)?;
+            measured_build_cache_key(&source_cache_key, &cfg)?
+        } else {
+            source_cache_key
         };
 
         let builder = enclave_builder::EnclaveBuilder::new_with_cache(
@@ -8941,6 +8975,7 @@ mod tests {
         AccountCommands, ApiClient, Cli, Commands, LoginUsernameError, PgpKeyCommands,
         RegisterUsernameError, RunError, encrypt_env_file, encrypt_secret_value,
         keymaker_cert_eligibility, load_recipient_cert, login_begin_request_body,
+        measured_build_cache_key,
         normalize_keyring, parse_env_assignments, prepare_pgp_public_key_for_upload,
         prompt_line_from, prompt_optional_line_from, resolve_local_build_command_from_dir,
         resolve_login_username, resolve_procfile_build_command, resolve_quorum_parameters,
@@ -9362,6 +9397,52 @@ containerfile: Missing.Containerfile\n",
                 config.err()
             );
         }
+    }
+
+    #[test]
+    fn measured_build_cache_key_changes_with_configuration() {
+        let e2e_enabled = ConfigurationFile::from_str(
+            r#"
+enclave "default" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }
+    http {
+      port = 8080
+      e2e_encryption {
+        enabled = true
+      }
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+        let e2e_disabled = ConfigurationFile::from_str(
+            r#"
+enclave "default" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }
+    http {
+      port = 8080
+      e2e_encryption {
+        enabled = false
+      }
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let e2e_enabled_key = measured_build_cache_key("deadbeef", &e2e_enabled).unwrap();
+        let e2e_disabled_key = measured_build_cache_key("deadbeef", &e2e_disabled).unwrap();
+        assert_ne!(e2e_enabled_key, e2e_disabled_key);
     }
 
     #[test]
