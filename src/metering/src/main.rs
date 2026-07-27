@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-const BILLING_URL: &str = "https://caution.dev/#billing";
+const BILLING_URL: &str = "https://dashboard.caution.co/#billing";
 
 mod calculator;
 mod cost_explorer;
@@ -64,7 +64,7 @@ mod billing_url_tests {
 
     #[test]
     fn billing_url_points_to_dashboard_billing_hash() {
-        assert_eq!(BILLING_URL, "https://caution.dev/#billing");
+        assert_eq!(BILLING_URL, "https://dashboard.caution.co/#billing");
     }
 }
 
