@@ -3051,6 +3051,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac 0.12.1",
+ "percent-encoding",
  "rand 0.10.1",
  "rand 0.8.5",
  "regex",

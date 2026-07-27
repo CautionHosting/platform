@@ -3261,6 +3261,7 @@ mod login_begin_tests {
             webauthn,
             api_service_url: String::new(),
             metering_service_url: String::new(),
+            http_client: reqwest::Client::new(),
             reg_states: Arc::new(RwLock::new(HashMap::new())),
             passkey_reg_states: Arc::new(RwLock::new(HashMap::new())),
             auth_states: Arc::new(RwLock::new(HashMap::new())),

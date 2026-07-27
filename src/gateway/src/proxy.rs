@@ -7,7 +7,6 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use reqwest::Client;
 use std::net::SocketAddr;
 
 use crate::request_id::RequestId;
@@ -15,13 +14,76 @@ use crate::types::{AppState, AuthenticatedUserId};
 
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB
 
+#[derive(Debug, thiserror::Error)]
+#[error("failed to construct backend URL")]
+pub struct BuildTargetUrlError(#[from] url::ParseError);
+
+fn build_api_target_url(
+    api_service_url: &str,
+    path: &str,
+    query: Option<&str>,
+) -> Result<reqwest::Url, BuildTargetUrlError> {
+    let query = query.map(|q| format!("?{q}")).unwrap_or_default();
+    Ok(reqwest::Url::parse(&format!(
+        "{api_service_url}{path}{query}"
+    ))?)
+}
+
+fn is_internal_api_target(target_url: &reqwest::Url) -> bool {
+    let path = target_url.path();
+
+    // Canonical, segment-aware, case-insensitive check on the parsed path.
+    // Catches "//internal/...", "/INTERNAL/...", and ".."-normalized forms
+    // that reqwest::Url already collapses.
+    let canonical_first_segment_internal = target_url
+        .path_segments()
+        .into_iter()
+        .flatten()
+        .find(|segment| !segment.is_empty())
+        .is_some_and(|segment| segment.eq_ignore_ascii_case("internal"));
+
+    // Do not rely on the backend router (axum/matchit) staying non-decoding as
+    // the safety net for encoded lookalikes like "/%2finternal", "/%69nternal",
+    // or "/internal;matrix". Fold percent-encoding and backslashes here the way
+    // a decoding intermediary or a future router change might. Preserve the
+    // conservative folded-root check, then also resolve dot segments with a
+    // root-clamped stack before checking the normalized root. This can only ever
+    // add blocking, so it is independent of downstream routing behavior.
+    let decoded = percent_encoding::percent_decode_str(path).decode_utf8_lossy();
+    let mut decoded_segments = Vec::new();
+    let mut first_folded_segment = None;
+
+    for raw_segment in decoded.split(['/', '\\']) {
+        let segment = raw_segment.split(';').next().unwrap_or(raw_segment);
+        if first_folded_segment.is_none() && !segment.is_empty() {
+            first_folded_segment = Some(segment);
+        }
+
+        match segment {
+            "" | "." => {}
+            ".." => {
+                decoded_segments.pop();
+            }
+            _ => decoded_segments.push(segment),
+        }
+    }
+
+    let decoded_first_segment_internal = first_folded_segment
+        .is_some_and(|segment| segment.eq_ignore_ascii_case("internal"))
+        || decoded_segments
+            .first()
+            .is_some_and(|segment| segment.eq_ignore_ascii_case("internal"));
+
+    canonical_first_segment_internal || decoded_first_segment_internal
+}
+
 /// Proxy webhooks to the metering service (no auth — verified by signature)
 pub async fn metering_proxy_handler(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     req: Request,
 ) -> Result<Response, Response> {
-    let client = Client::new();
+    let client = &state.http_client;
 
     let path = req.uri().path();
     let target_url = format!("{}{}", state.metering_service_url, path);
@@ -87,17 +149,12 @@ pub async fn proxy_handler(
     State(state): State<AppState>,
     req: Request,
 ) -> Result<Response, Response> {
-    let client = Client::new();
-
     let path = req.uri().path();
-    let query = req
-        .uri()
-        .query()
-        .map(|q| format!("?{}", q))
-        .unwrap_or_default();
-    let target_url = format!("{}{}{}", state.api_service_url, path, query);
-
-    tracing::debug!("Proxying request to: {}", target_url);
+    let target_url = build_api_target_url(&state.api_service_url, path, req.uri().query())
+        .map_err(|e| {
+            tracing::error!(raw_path = %path, error = ?e, "Failed to construct backend URL");
+            (StatusCode::BAD_GATEWAY, "Backend service unavailable").into_response()
+        })?;
 
     let session_id_header = req.headers().get("X-Session-ID").cloned();
     let content_type_header = req.headers().get("Content-Type").cloned();
@@ -107,7 +164,33 @@ pub async fn proxy_handler(
     let request_id = req.extensions().get::<RequestId>().cloned();
 
     let method = req.method().clone();
-    let mut proxy_req = client.request(method, &target_url);
+
+    // This block deliberately runs inside proxy_handler, i.e. AFTER the /api
+    // sign/auth/username-gate middleware, not before it. Every unauthenticated
+    // /api/* request is already rejected with 401 by fido2_auth_middleware
+    // before it reaches here, so an internal path returns the same 401 as any
+    // other unauth /api path — internal routes are not singled out to an
+    // unauthenticated prober. Rejecting internal paths pre-auth would instead
+    // make them the one /api surface answering 404 while everything else
+    // answers 401, which *acknowledges* them more, against the "public gateway
+    // never reveals internal paths" invariant. The 404 here matters only once a
+    // request is authenticated (unavoidably distinguishable), as a defense-in-
+    // depth backstop should the API ever be exposed without the auth layer.
+    if is_internal_api_target(&target_url) {
+        tracing::warn!(
+            method = %method,
+            raw_path = %path,
+            canonical_path = %target_url.path(),
+            user_id = ?authenticated_user.as_ref().map(|AuthenticatedUserId(id)| id),
+            request_id = ?request_id.as_ref().map(|RequestId(id)| id),
+            "Blocked public request to internal API route"
+        );
+        return Err(StatusCode::NOT_FOUND.into_response());
+    }
+
+    tracing::debug!("Proxying request to: {}", target_url);
+
+    let mut proxy_req = state.http_client.request(method, target_url);
 
     if let Some(session_id) = session_id_header {
         proxy_req = proxy_req.header("X-Session-ID", session_id);
@@ -164,6 +247,9 @@ pub async fn proxy_handler(
         "last-modified",
         "vary",
         "x-request-id",
+        // The proxy client does not follow redirects (would leak the internal
+        // secret). Relay Location so the caller follows any 3xx itself.
+        "location",
     ];
 
     for (key, value) in headers.iter() {
@@ -180,4 +266,123 @@ pub async fn proxy_handler(
         )
             .into_response()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_api_target_url, is_internal_api_target};
+
+    const API_SERVICE_URL: &str = "http://api:8080";
+
+    fn target(path: &str) -> reqwest::Url {
+        build_api_target_url(API_SERVICE_URL, path, None).expect("target URL should parse")
+    }
+
+    #[test]
+    fn blocks_canonical_internal_paths() {
+        for path in [
+            "/internal",
+            "/internal/",
+            "/internal/legal-notices/send",
+            "/foo/../internal/org/00000000-0000-0000-0000-000000000000/suspend",
+            "/foo/%2e%2e/internal/legal-notices/send",
+            "/foo/%2E%2E/internal/legal-notices/send",
+            "/foo\\..\\internal\\legal-notices\\send",
+            "//internal/legal-notices/send",
+            "///internal/legal-notices/send",
+            "/INTERNAL/legal-notices/send",
+            "/Internal/org/00000000-0000-0000-0000-000000000000/suspend",
+        ] {
+            let target_url = target(path);
+            assert!(
+                is_internal_api_target(&target_url),
+                "expected {path:?} to canonicalize to a blocked target, got {:?}",
+                target_url.path()
+            );
+        }
+    }
+
+    #[test]
+    fn allows_non_internal_paths_and_lookalikes() {
+        for path in [
+            "/internalized",
+            "/internals",
+            "/foo/internal",
+            "/foo//internal",
+            "/user/status",
+            "/legal/active-documents",
+        ] {
+            let target_url = target(path);
+            assert!(
+                !is_internal_api_target(&target_url),
+                "expected {path:?} to remain allowed, got {:?}",
+                target_url.path()
+            );
+        }
+    }
+
+    // Percent-/matrix-encoded lookalikes are blocked conservatively at the
+    // gateway (folded like a decoding intermediary would), so the guarantee
+    // does not depend on the backend router staying non-decoding.
+    #[test]
+    fn blocks_encoded_and_matrix_lookalikes() {
+        for path in [
+            "/%69nternal/legal-notices/send",  // %69 = 'i'
+            "/%49nternal/legal-notices/send",  // %49 = 'I'
+            "/%2finternal/legal-notices/send", // %2f = '/'
+            "/%2Finternal/legal-notices/send",
+            "/%5Cinternal/legal-notices/send", // %5c = '\'
+            "/internal%2f../legal-notices/send",
+            "/internal;param/legal-notices/send", // matrix param
+            "/foo%2f..%2f%69nternal/legal-notices/send",
+            "/foo%2f%2e%2e%2f%69nternal/legal-notices/send",
+            "/foo%5c..%5c%49nternal/legal-notices/send",
+            "/foo/..;param/%69nternal/legal-notices/send",
+        ] {
+            let target_url = target(path);
+            assert!(
+                is_internal_api_target(&target_url),
+                "expected encoded lookalike {path:?} to be blocked, got canonical {:?}",
+                target_url.path()
+            );
+        }
+    }
+
+    // Double-encoding is the conservative stopping point: a single decode of
+    // "/%2569nternal" yields "/%69nternal", still not literally "internal", so
+    // it is forwarded. Reaching an internal handler this way would require a
+    // downstream layer to decode twice, which nothing here does.
+    #[test]
+    fn does_not_recursively_decode() {
+        let target_url = target("/%2569nternal/send"); // %25='%', so -> "%69nternal"
+        assert!(!is_internal_api_target(&target_url));
+    }
+
+    #[test]
+    fn allows_encoded_internal_segments_that_are_not_at_normalized_root() {
+        for path in [
+            "/foo%2f%69nternal/legal-notices/send",
+            "/foo%2f..%2finternalized/legal-notices/send",
+        ] {
+            let target_url = target(path);
+            assert!(
+                !is_internal_api_target(&target_url),
+                "expected {path:?} to remain allowed, got {:?}",
+                target_url.path()
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_internal_text_in_query_values() {
+        let target_url = build_api_target_url(
+            API_SERVICE_URL,
+            "/user/status",
+            Some("next=/internal/legal-notices/send"),
+        )
+        .expect("target URL should parse");
+
+        assert_eq!(target_url.path(), "/user/status");
+        assert!(!is_internal_api_target(&target_url));
+    }
 }

@@ -29,8 +29,13 @@ impl Config {
             "postgresql://apiuser:apipass@localhost:5432/apidb?sslmode=disable".to_string()
         });
 
-        let api_service_url =
-            env::var("API_SERVICE_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
+        // Trailing slashes would produce "//"-prefixed backend paths when the
+        // request path is appended, defeating the gateway's internal-route
+        // check — normalize them away before validating.
+        let api_service_url = env::var("API_SERVICE_URL")
+            .unwrap_or_else(|_| "http://localhost:8080".to_string())
+            .trim_end_matches('/')
+            .to_string();
 
         // Validate API service URL
         Url::parse(&api_service_url).context("Invalid API_SERVICE_URL")?;
