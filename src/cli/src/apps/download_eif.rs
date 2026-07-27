@@ -8,6 +8,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::output;
 use crate::ApiClient;
 
 #[derive(Args, Debug)]
@@ -233,7 +234,7 @@ pub(crate) async fn download_eif(
         format!("{} B", file_size)
     };
 
-    println!("Downloaded {} ({size_str})", output_path.display(),);
+    output::success(format!("Downloaded {} ({size_str})", output_path.display()));
 
     Ok(())
 }

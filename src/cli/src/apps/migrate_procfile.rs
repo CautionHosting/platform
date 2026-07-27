@@ -5,6 +5,7 @@ use clap::Args;
 use std::fs;
 use std::path::PathBuf;
 
+use crate::output;
 use crate::ApiClient;
 
 #[derive(Args, Debug)]
@@ -79,11 +80,11 @@ pub(crate) async fn migrate_procfile(
         }
     })?;
 
-    println!(
+    output::success(format!(
         "✓ Migrated {} → {}",
         procfile_path.display(),
         output_path.display()
-    );
+    ));
 
     Ok(())
 }
