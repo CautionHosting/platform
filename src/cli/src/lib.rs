@@ -734,15 +734,21 @@ fn config_egress_enabled(cfg: &caution_config::ConfigurationFile) -> bool {
 ///
 /// Git identity alone is insufficient because local builds may consume an
 /// uncommitted `caution.hcl`. The generated, measured `run.sh` depends on this
-/// configuration, so configuration changes
-/// must never reuse an EIF/PCR produced from another configuration.
+/// configuration and, for E2E builds, the effective STEVE commit.
 fn measured_build_cache_key(
     source_key: &str,
     cfg: &caution_config::ConfigurationFile,
+    steve_commit: Option<&str>,
 ) -> Result<String> {
     let config_json =
         serde_json::to_vec(cfg).context("Failed to serialize deployment config for cache key")?;
-    let config_hash = hex::encode(Sha256::digest(&config_json));
+    let mut hasher = Sha256::new();
+    hasher.update(&config_json);
+    if let Some(steve_commit) = steve_commit {
+        hasher.update(b"|steve|");
+        hasher.update(steve_commit.as_bytes());
+    }
+    let config_hash = hex::encode(hasher.finalize());
     Ok(format!("{}-config-{}", source_key, config_hash))
 }
 
@@ -5443,9 +5449,17 @@ enclave "default" {{
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let cfg = self.read_config().map_err(|e| BuildLocalError::ReadConfig(e.into()))?;
-        let cache_key =
-            measured_build_cache_key(&source_cache_key, &cfg).map_err(BuildLocalError::CacheKey)?;
         let default_enclave = cfg.enclave.as_ref().and_then(|e| e.get("default"));
+        let e2e_config = default_enclave
+            .and_then(|e| e.network.as_ref())
+            .and_then(|n| n.http.as_ref())
+            .and_then(|h| h.e2e_encryption.as_ref());
+        let e2e_mode = e2e_config.and_then(|config| config.effective_mode());
+        let e2e = e2e_mode == Some(caution_config::E2eMode::Steve);
+        let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
+        let steve_commit = e2e.then(enclave_builder::build::resolve_steve_commit);
+        let cache_key = measured_build_cache_key(&source_cache_key, &cfg, steve_commit.as_deref())
+            .map_err(BuildLocalError::CacheKey)?;
 
         let config_no_cache = default_enclave
             .and_then(|e| e.build.as_ref())
@@ -5514,14 +5528,6 @@ enclave "default" {{
             .and_then(|network| network.http.as_ref())
             .and_then(|http| http.domain.clone());
 
-        let e2e_config = default_enclave
-            .and_then(|e| e.network.as_ref())
-            .and_then(|n| n.http.as_ref())
-            .and_then(|h| h.e2e_encryption.as_ref());
-
-        let e2e_mode = e2e_config.and_then(|config| config.effective_mode());
-        let e2e = e2e_mode == Some(caution_config::E2eMode::Steve);
-        let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
         let e2e_key_exchange = e2e_config
             .map(|ee| ee.key_exchange().steve_env_value())
             .unwrap_or(caution_config::KeyExchange::X25519.steve_env_value());
@@ -5716,7 +5722,31 @@ enclave "default" {{
             None
         };
         let cache_key = match measured_config {
-            Some(cfg) => measured_build_cache_key(&source_cache_key, &cfg)?,
+            Some(cfg) => {
+                let e2e = cfg
+                    .enclave
+                    .as_ref()
+                    .and_then(|e| e.values().next())
+                    .and_then(|enc| enc.network.as_ref())
+                    .and_then(|network| network.http.as_ref())
+                    .and_then(|http| http.e2e_encryption.as_ref())
+                    .and_then(|e2e| e2e.enabled)
+                    .unwrap_or_else(|| {
+                        external_manifest
+                            .as_ref()
+                            .and_then(|manifest| manifest.steve_commit.as_ref())
+                            .is_some()
+                    });
+                let steve_commit = e2e.then(|| {
+                    external_manifest
+                        .as_ref()
+                        .and_then(|manifest| manifest.steve_commit.clone())
+                        .unwrap_or_else(enclave_builder::build::resolve_steve_commit)
+                });
+                measured_build_cache_key(&source_cache_key, &cfg, steve_commit.as_deref())?
+            }
+            // Manifest reproductions already hash the full manifest, including
+            // steve_commit, into source_cache_key.
             None => source_cache_key,
         };
 
@@ -9012,6 +9042,7 @@ mod tests {
     use openpgp::cert::prelude::*;
     use openpgp::parse::Parse;
     use openpgp::serialize::SerializeInto;
+    use sha2::Digest;
     use std::collections::HashMap;
     use std::io::Cursor;
     use std::path::PathBuf;
@@ -9467,9 +9498,49 @@ enclave "default" {
         )
         .unwrap();
 
-        let e2e_enabled_key = measured_build_cache_key("deadbeef", &e2e_enabled).unwrap();
-        let e2e_disabled_key = measured_build_cache_key("deadbeef", &e2e_disabled).unwrap();
+        let e2e_enabled_key =
+            measured_build_cache_key("deadbeef", &e2e_enabled, Some("steve-v1")).unwrap();
+        let e2e_disabled_key = measured_build_cache_key("deadbeef", &e2e_disabled, None).unwrap();
         assert_ne!(e2e_enabled_key, e2e_disabled_key);
+    }
+
+    #[test]
+    fn local_cache_keys_bind_steve_only_for_e2e() {
+        let e2e_config = ConfigurationFile::from_str(
+            r#"
+enclave "default" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }
+    http {
+      port = 8080
+      e2e_encryption {
+        enabled = true
+      }
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let e2e_v1 =
+            measured_build_cache_key("deadbeef", &e2e_config, Some("steve-v1")).unwrap();
+        let e2e_v2 =
+            measured_build_cache_key("deadbeef", &e2e_config, Some("steve-v2")).unwrap();
+        assert_ne!(e2e_v1, e2e_v2);
+
+        let plain = measured_build_cache_key("deadbeef", &e2e_config, None).unwrap();
+        let config_json = serde_json::to_vec(&e2e_config).unwrap();
+        assert_eq!(
+            plain,
+            format!(
+                "deadbeef-config-{}",
+                hex::encode(sha2::Sha256::digest(&config_json))
+            )
+        );
     }
 
     #[test]

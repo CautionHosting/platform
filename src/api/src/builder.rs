@@ -160,6 +160,7 @@ pub struct BuildRequest {
     pub e2e_cors_origins: Option<String>,
     pub no_cache: bool,
     pub enclaveos_commit: String,
+    pub steve_commit: String,
     pub builder_size: String,
     pub builder_instance_type: String,
     pub app_sources: Vec<String>,
@@ -260,6 +261,7 @@ pub async fn resolve_managed_onprem_builder_config(
 pub fn compute_cache_key(
     commit_sha: &str,
     enclaveos_commit: &str,
+    steve_commit: &str,
     procfile_content: &str,
     e2e: bool,
     e2e_key_exchange: &str,
@@ -276,6 +278,10 @@ pub fn compute_cache_key(
     hasher.update(b"|");
     hasher.update(if e2e { "e2e" } else { "no-e2e" }.as_bytes());
     hasher.update(b"|");
+    if e2e {
+        hasher.update(steve_commit.as_bytes());
+        hasher.update(b"|");
+    }
     // Only a non-default key exchange reaches run.sh, so hashing it otherwise
     // would invalidate cached builds whose output is byte-identical.
     if e2e && e2e_key_exchange != enclave_builder::build::DEFAULT_KEY_EXCHANGE {
@@ -906,10 +912,9 @@ fn generate_builder_userdata(
 
     let containerfile = validate_remote_containerfile_path(&request.containerfile)?;
 
-    // Single source of truth shared with the local build path and the public
-    // build-inputs endpoint: env var on the API/builder host, else pinned default.
+    // STEVE is resolved before the cache lookup and carried on BuildRequest, so
+    // the cache key, manifest, and actual EIF build all use the same commit.
     let bootproof_commit = enclave_builder::build::resolve_bootproof_commit();
-    let steve_commit = enclave_builder::build::resolve_steve_commit();
     let locksmith_commit = enclave_builder::build::resolve_locksmith_commit();
 
     let e2e_flag = if request.e2e { "true" } else { "false" };
@@ -950,7 +955,7 @@ fn generate_builder_userdata(
     manifest.enclaveos_commit = Some(request.enclaveos_commit.clone());
     manifest.bootproof_commit = Some(bootproof_commit);
     if request.e2e {
-        manifest.steve_commit = Some(steve_commit);
+        manifest.steve_commit = Some(request.steve_commit.clone());
         if request.e2e_key_exchange != enclave_builder::build::DEFAULT_KEY_EXCHANGE {
             manifest.steve_key_exchange = Some(request.e2e_key_exchange.clone());
         }
@@ -1311,6 +1316,7 @@ mod tests {
         compute_cache_key(
             commit,
             enclaveos,
+            "steve-v1",
             procfile,
             e2e,
             e2e_key_exchange,
@@ -1384,6 +1390,57 @@ mod tests {
             Some("2222222222222222222222222222222222222222"),
         );
         assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_cache_key_changes_with_steve_commit_only_for_e2e() {
+        let e2e_v1 = compute_cache_key(
+            "abc123",
+            "enclave-v1",
+            "steve-v1",
+            "run: /app",
+            true,
+            "X25519",
+            false,
+            &[],
+            None,
+        );
+        let e2e_v2 = compute_cache_key(
+            "abc123",
+            "enclave-v1",
+            "steve-v2",
+            "run: /app",
+            true,
+            "X25519",
+            false,
+            &[],
+            None,
+        );
+        assert_ne!(e2e_v1, e2e_v2);
+
+        let plain_v1 = compute_cache_key(
+            "abc123",
+            "enclave-v1",
+            "steve-v1",
+            "run: /app",
+            false,
+            "X25519",
+            false,
+            &[],
+            None,
+        );
+        let plain_v2 = compute_cache_key(
+            "abc123",
+            "enclave-v1",
+            "steve-v2",
+            "run: /app",
+            false,
+            "X25519",
+            false,
+            &[],
+            None,
+        );
+        assert_eq!(plain_v1, plain_v2);
     }
 
     #[test]
@@ -1620,8 +1677,8 @@ mod tests {
             containerfile: "Dockerfile".to_string(),
             ports: vec![],
             http_port: None,
-            e2e: false,
-            e2e_mode: "disabled".to_string(),
+            e2e: true,
+            e2e_mode: "steve".to_string(),
             e2e_key_exchange: "X25519".to_string(),
             domain: None,
             http_upstream_protocol: "http".to_string(),
@@ -1631,6 +1688,7 @@ mod tests {
             e2e_cors_origins: None,
             no_cache: true,
             enclaveos_commit: "enclave-abc".to_string(),
+            steve_commit: "steve-from-cache-key".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
             app_sources: vec![],
@@ -1707,7 +1765,7 @@ mod tests {
             "should pass manifest to helper"
         );
         assert!(
-            userdata.contains("E2E_MODE=\"disabled\"")
+            userdata.contains("E2E_MODE=\"steve\"")
                 && userdata.contains("CAUTION_E2E_MODE=\"$E2E_MODE\""),
             "should pass e2e mode to helper"
         );
@@ -1719,6 +1777,10 @@ mod tests {
             userdata.contains("NO_CACHE=\"true\"")
                 && userdata.contains("CAUTION_NO_CACHE=\"$NO_CACHE\""),
             "should pass no_cache to helper"
+        );
+        assert!(
+            userdata.contains("\"steve_commit\":\"steve-from-cache-key\""),
+            "manifest should use the STEVE commit resolved before cache lookup"
         );
 
         // Should upload EIF to S3
@@ -1783,6 +1845,7 @@ mod tests {
             e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
+            steve_commit: "steve-test".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
             app_sources: vec![],
@@ -1841,6 +1904,7 @@ mod tests {
             e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
+            steve_commit: "steve-test".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
             app_sources: vec![],
@@ -1898,6 +1962,7 @@ mod tests {
             e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
+            steve_commit: "steve-test".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
             app_sources: vec![],
@@ -1963,6 +2028,7 @@ mod tests {
             e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
+            steve_commit: "steve-test".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
             app_sources: vec![],
@@ -2024,6 +2090,7 @@ mod tests {
             e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
+            steve_commit: "steve-test".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
             app_sources: vec![],
@@ -2082,6 +2149,7 @@ mod tests {
             e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
+            steve_commit: "steve-test".to_string(),
             builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
             app_sources: vec![],

@@ -2489,9 +2489,11 @@ async fn deploy_logic(
     .await?;
     let builder_eif_s3_key = {
         let enclaveos_commit = enclave_builder::build::resolve_enclaveos_commit();
+        let steve_commit = enclave_builder::build::resolve_steve_commit();
         let cache_key = builder::compute_cache_key(
             &commit_sha,
             &enclaveos_commit,
+            &steve_commit,
             &config_content,
             e2e,
             e2e_key_exchange,
@@ -2630,6 +2632,7 @@ async fn deploy_logic(
                     .map(|origins| origins.join(",")),
                 no_cache,
                 enclaveos_commit,
+                steve_commit,
                 builder_size: resolved_size.id.clone(),
                 builder_instance_type: resolved_size.instance_type.clone(),
                 app_sources,
