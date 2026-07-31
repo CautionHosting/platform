@@ -47,11 +47,11 @@ fn http_port_from_env() -> Option<u16> {
 }
 
 fn key_exchange_from_env() -> Result<String> {
-    match std::env::var("CAUTION_KEY_EXCHANGE").ok().as_deref() {
-        None | Some("X25519") => Ok("X25519".to_string()),
-        Some("XWING-DRAFT10") => Ok("XWING-DRAFT10".to_string()),
-        Some(value) => bail!("unsupported CAUTION_KEY_EXCHANGE: {value}"),
-    }
+    let value = std::env::var("CAUTION_KEY_EXCHANGE")
+        .unwrap_or_else(|_| enclave_builder::build::DEFAULT_KEY_EXCHANGE.to_string());
+    enclave_builder::build::validate_key_exchange(&value)
+        .with_context(|| format!("unsupported CAUTION_KEY_EXCHANGE: {value}"))?;
+    Ok(value)
 }
 
 fn enclave_source_from_manifest(manifest: &EnclaveManifest) -> Result<(String, String)> {
