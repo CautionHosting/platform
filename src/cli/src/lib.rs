@@ -3379,8 +3379,9 @@ enclave "default" {{
     #   port   = 8080
     #   e2e_encryption {{
     #     enabled      = true
-    #     cors_origins = ["*"]
+    #     cors_origins = ["https://app.example.com"]
     #     key_exchange = "x25519"
+    #     allow_plaintext_fallback = false
     #   }}
     # }}
   }}
@@ -6143,6 +6144,9 @@ enclave "default" {{
         let e2e_key_exchange = e2e_config
             .map(|ee| ee.key_exchange().steve_env_value())
             .unwrap_or(caution_config::KeyExchange::X25519.steve_env_value());
+        let allow_plaintext_fallback = e2e_config
+            .map(|ee| ee.allow_plaintext_fallback())
+            .unwrap_or(false);
         output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = cfg.has_vault_env();
@@ -6183,6 +6187,7 @@ enclave "default" {{
                 e2e,
                 e2e_mode_value,
                 e2e_key_exchange,
+                allow_plaintext_fallback,
                 domain.as_deref(),
                 http_upstream_protocol,
                 locksmith,
@@ -6627,6 +6632,15 @@ enclave "default" {{
                         caution_config::KeyExchange::X25519.steve_env_value().to_string()
                     })
             });
+        let allow_plaintext_fallback = e2e_config
+            .as_ref()
+            .map(|e2e| e2e.allow_plaintext_fallback())
+            .unwrap_or_else(|| {
+                external_manifest
+                    .as_ref()
+                    .map(|manifest| manifest.steve_allow_plaintext_fallback)
+                    .unwrap_or(false)
+            });
         output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = if let Some(ref app_dir) = app_source_dir {
@@ -6694,6 +6708,7 @@ enclave "default" {{
                     e2e,
                     e2e_mode_value,
                     &e2e_key_exchange,
+                    allow_plaintext_fallback,
                     domain.as_deref(),
                     http_upstream_protocol,
                     locksmith,
@@ -6718,6 +6733,7 @@ enclave "default" {{
                     e2e,
                     e2e_mode_value,
                     &e2e_key_exchange,
+                    allow_plaintext_fallback,
                     domain.as_deref(),
                     http_upstream_protocol,
                     locksmith,
@@ -9831,6 +9847,7 @@ mod tests {
             mode,
             cors_origins: None,
             key_exchange: None,
+            allow_plaintext_fallback: None,
         };
         let disabled = config(Some(false), None);
         let legacy_steve = config(Some(true), None);
@@ -10281,6 +10298,7 @@ enclave "main" {{
             mode,
             cors_origins: None,
             key_exchange: None,
+            allow_plaintext_fallback: None,
         };
         let disabled = config(Some(false), None);
         let legacy_steve = config(Some(true), None);

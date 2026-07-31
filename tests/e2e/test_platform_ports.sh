@@ -11,9 +11,9 @@
 #   3. Add SSH key
 #   4. Clone demo app and enable STEVE v2 with X-Wing
 #   5. Deploy app
-#   6. Assert AWS security group exposes only the expected platform port
-#   7. Assert STEVE v2 is reachable on 49500
-#   8. Assert current plaintext routing and Caddy E2P v2 parity
+#   6. Assert AWS and host routing expose no application-port bypass
+#   7. Assert E2P v2 is reachable on 49500
+#   8. Assert health, attestation, fail-closed routing, and Caddy E2P parity
 
 set -euo pipefail
 
@@ -332,7 +332,25 @@ for port in 49501 49502 49503 49504; do
     log "Port $port is not publicly allowed"
 done
 
-step_pass "Security group platform port rules"
+if public_port_open "$SG_JSON" 8083; then
+    step_fail "Application HTTP port 8083 is publicly reachable"
+fi
+log "Application HTTP port 8083 is not publicly allowed"
+
+HOST_USER_DATA="$WORK_DIR/host-user-data.sh"
+aws ec2 describe-instance-attribute \
+    --region "$AWS_REGION_RESOLVED" \
+    --instance-id "$INSTANCE_ID" \
+    --attribute userData \
+    --query 'UserData.Value' \
+    --output text | base64 --decode > "$HOST_USER_DATA"
+
+if grep -Eq 'vsock-proxy-http\.service|TCP-LISTEN:8083' "$HOST_USER_DATA"; then
+    step_fail "Rendered host configuration contains an application HTTP proxy"
+fi
+log "Rendered host configuration has no application HTTP proxy"
+
+step_pass "Security group and host routing rules"
 
 # ── Step 7: Assert STEVE Reachability ────────────────────────────────
 
@@ -372,19 +390,54 @@ step_pass "STEVE E2P v2 endpoint reachable on 49500"
 # ── Step 8: Assert Caddy E2P Routing ─────────────────────────────────
 
 STEP_NUM=8
-log "Checking Caddy routes E2P v2 requests to STEVE..."
+log "Checking health, attestation, fail-closed routing, and Caddy E2P parity..."
 
-APP_ROOT_STATUS=$(curl -sS --connect-timeout 5 --max-time 10 \
-    -o /dev/null -w "%{http_code}" \
-    "http://$APP_IP/" || true)
+HEALTH_STATUS=$(curl -sS --connect-timeout 5 --max-time 10 \
+    -o "$WORK_DIR/health.txt" -w "%{http_code}" \
+    "http://$APP_IP/.well-known/caution/health" || true)
 
-if [ "$APP_ROOT_STATUS" != "200" ]; then
-    step_fail "App root remains routed to app upstream (HTTP $APP_ROOT_STATUS)"
+if [ "$HEALTH_STATUS" != "200" ]; then
+    step_fail "Platform health endpoint (HTTP $HEALTH_STATUS)"
 fi
 
-DIRECT_STEVE_STATUS="$STEVE_STATUS"
-DIRECT_STEVE_RESPONSE="$STEVE_RESPONSE"
+ATTESTATION_RESPONSE="$WORK_DIR/attestation.json"
+ATTESTATION_STATUS=$(curl -sS --connect-timeout 5 --max-time 30 \
+    -o "$ATTESTATION_RESPONSE" -w "%{http_code}" \
+    -H "Content-Type: application/json" \
+    -d '{"nonce":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}' \
+    "http://$APP_IP/attestation" || true)
+
+if [ "$ATTESTATION_STATUS" != "200" ] ||
+    ! jq -e '.attestation_document | type == "string" and length > 0' \
+        "$ATTESTATION_RESPONSE" >/dev/null 2>&1; then
+    step_fail "Platform attestation endpoint returns Nitro evidence"
+fi
+
+PLAINTEXT_BODY="$WORK_DIR/plaintext-body.json"
+PLAINTEXT_HEADERS="$WORK_DIR/plaintext-headers.txt"
+PLAINTEXT_STATUS=$(curl -sS --connect-timeout 5 --max-time 10 \
+    -D "$PLAINTEXT_HEADERS" -o "$PLAINTEXT_BODY" -w "%{http_code}" \
+    "http://$APP_IP/?fail_closed=1" || true)
+
+if [ "$PLAINTEXT_STATUS" != "403" ] ||
+    [ "$(tr -d '\r\n' < "$PLAINTEXT_BODY")" != '{"error":"e2e_required"}' ] ||
+    ! tr -d '\r' < "$PLAINTEXT_HEADERS" |
+        grep -Eqi '^cache-control:[[:space:]]*no-store$'; then
+    step_fail "Plain application traffic is denied with the fixed response"
+fi
+
+DIRECT_STEVE_RESPONSE="$WORK_DIR/direct-steve-invalid.txt"
 CADDY_E2P_RESPONSE="$WORK_DIR/caddy-e2p-invalid.txt"
+
+DIRECT_STEVE_STATUS=$(curl -sS --connect-timeout 5 --max-time 10 \
+    -o "$DIRECT_STEVE_RESPONSE" -w "%{http_code}" \
+    -H "Content-Type: application/cbor" \
+    --data-binary "@$INVALID_E2P_BODY" \
+    "http://$APP_IP:49500/e2p/v2/session" || true)
+
+if [ -z "$DIRECT_STEVE_STATUS" ] || [ "$DIRECT_STEVE_STATUS" = "000" ]; then
+    step_fail "Direct STEVE invalid encrypted request"
+fi
 
 CADDY_E2P_READY=false
 for i in $(seq 1 30); do
@@ -416,4 +469,4 @@ if ! $CADDY_E2P_READY; then
     step_fail "Caddy E2P v2 route"
 fi
 
-step_pass "Caddy E2P v2 route"
+step_pass "Health, attestation, fail-closed routing, and Caddy E2P parity"

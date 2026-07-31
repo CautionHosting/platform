@@ -36,6 +36,8 @@ pub struct EnclaveManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steve_key_exchange: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
+    pub steve_allow_plaintext_fallback: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub locksmith: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locksmith_commit: Option<String>,
@@ -100,6 +102,7 @@ impl EnclaveManifest {
             bootproof_commit: None,
             steve_commit: None,
             steve_key_exchange: None,
+            steve_allow_plaintext_fallback: false,
             locksmith: false,
             locksmith_commit: None,
             extra: Map::new(),
@@ -194,6 +197,19 @@ mod tests {
         assert!(!json.contains("binary"));
         assert!(!json.contains("run_command"));
         assert!(!json.contains("metadata"));
+        assert!(!json.contains("steve_allow_plaintext_fallback"));
+    }
+
+    #[test]
+    fn test_manifest_plaintext_fallback_round_trip() {
+        let mut manifest = make_manifest(None, None, None, None);
+        manifest.steve_allow_plaintext_fallback = true;
+
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(json.contains("\"steve_allow_plaintext_fallback\":true"));
+
+        let deserialized: EnclaveManifest = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.steve_allow_plaintext_fallback);
     }
 
     #[test]

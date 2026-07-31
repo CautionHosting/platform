@@ -2402,6 +2402,9 @@ async fn deploy_logic(
     let e2e_key_exchange = e2e_config
         .map(|e| e.key_exchange().steve_env_value())
         .unwrap_or(caution_config::KeyExchange::X25519.steve_env_value());
+    let allow_plaintext_fallback = e2e_config
+        .map(|e| e.allow_plaintext_fallback())
+        .unwrap_or(false);
 
     let no_cache = ec_build
         .and_then(|b| b.cache)
@@ -2513,6 +2516,7 @@ async fn deploy_logic(
             &config_content,
             e2e,
             e2e_key_exchange,
+            allow_plaintext_fallback,
             config_file.has_vault_env(), // auto-enable locksmith when env::vault is used
             e2e_config
                 .as_ref()
@@ -2635,6 +2639,7 @@ async fn deploy_logic(
                 e2e,
                 e2e_mode: e2e_mode_value.to_string(),
                 e2e_key_exchange: e2e_key_exchange.to_string(),
+                allow_plaintext_fallback,
                 domain: ec_network
                     .and_then(|n| n.http.as_ref())
                     .and_then(|h| h.domain.clone()),

@@ -12,7 +12,7 @@ use crate::EifFile;
 
 const DEFAULT_ENCLAVEOS_COMMIT: &str = "9582e25239430070667fdd0a6b64d887f1c308df";
 const DEFAULT_BOOTPROOF_COMMIT: &str = "64dae0628e58b9f898b89f9b7a404b37e2f0ca9f";
-const DEFAULT_STEVE_COMMIT: &str = "36b414e9bf49ba206bb18f89dd74996c21c1e6f8";
+const DEFAULT_STEVE_COMMIT: &str = "16db8fbb9918fd290b4cd84a38576fe9c539974c";
 const DEFAULT_LOCKSMITH_COMMIT: &str = "d16b74c6b3fd1d1006a5b00e4d9e21a4613947a9";
 
 // Kept in sync with the git clone URLs in templates/Containerfile.eif.
@@ -136,6 +136,7 @@ pub async fn stage_eif_components(
     e2e: bool,
     e2e_mode: &str,
     e2e_key_exchange: &str,
+    allow_plaintext_fallback: bool,
     domain: Option<&str>,
     http_upstream_protocol: &str,
     locksmith: bool,
@@ -193,6 +194,7 @@ pub async fn stage_eif_components(
             .get_or_insert(bootproof_commit.clone());
         if e2e {
             manifest.steve_commit.get_or_insert(steve_commit.clone());
+            manifest.steve_allow_plaintext_fallback = allow_plaintext_fallback;
         }
         manifest.steve_key_exchange =
             (e2e && e2e_key_exchange != DEFAULT_KEY_EXCHANGE).then(|| e2e_key_exchange.to_string());
@@ -247,6 +249,7 @@ pub async fn stage_eif_components(
         e2e,
         e2e_mode,
         e2e_key_exchange,
+        allow_plaintext_fallback,
         domain,
         http_upstream_protocol,
         locksmith,
@@ -324,6 +327,7 @@ async fn render_run_sh_template(
     e2e: bool,
     e2e_mode: &str,
     e2e_key_exchange: &str,
+    allow_plaintext_fallback: bool,
     domain: Option<&str>,
     http_upstream_protocol: &str,
     locksmith: bool,
@@ -385,9 +389,9 @@ async fn render_run_sh_template(
             anyhow::bail!("http_port {} must also be listed in ports", port);
         }
 
-        port.to_string()
+        Some(port)
     } else {
-        String::new()
+        None
     };
 
     let caddy_upstream = if e2e_mode == "tls" {
@@ -419,7 +423,9 @@ async fn render_run_sh_template(
     let custom_port_proxies: String = ports
         .iter()
         .filter(|&&port| {
-            !is_reserved_internal_port(port) && !(e2e_mode == "tls" && http_port == Some(port))
+            !is_reserved_internal_port(port)
+                && steve_app_port != Some(port)
+                && !(e2e_mode == "tls" && http_port == Some(port))
         })
         .map(|port| {
             format!(
@@ -449,18 +455,27 @@ async fn render_run_sh_template(
     };
 
     let cors_env = match e2e_cors_origins {
-        Some(origins) => format!(
-            "STEVE_CORS_ORIGINS='{}'",
-            origins.replace('\'', "'\\''")
-        ),
+        Some(origins) => format!("STEVE_CORS_ORIGINS='{}'", origins.replace('\'', "'\\''")),
         None => String::new(),
+    };
+
+    let plaintext_fallback_env = if allow_plaintext_fallback {
+        "STEVE_ALLOW_PLAINTEXT_FALLBACK=true "
+    } else {
+        ""
     };
 
     let result = processed
         .replace("{{USER_CMD}}", &user_cmd)
-        .replace("{{STEVE_APP_PORT}}", &steve_app_port)
+        .replace(
+            "{{STEVE_APP_PORT}}",
+            &steve_app_port
+                .map(|port| port.to_string())
+                .unwrap_or_default(),
+        )
         .replace("{{CADDY_UPSTREAM}}", &caddy_upstream)
         .replace("{{STEVE_KEY_EXCHANGE_ENV}}", &key_exchange_env)
+        .replace("{{STEVE_PLAINTEXT_FALLBACK_ENV}}", plaintext_fallback_env)
         .replace("{{CADDY_DOMAIN}}", caddy_domain)
         .replace("{{CUSTOM_PORT_SECTION}}", &custom_port_section)
         .replace("{{STEVE_CORS_ORIGINS_ENV}}", &cors_env);
@@ -514,6 +529,7 @@ pub async fn build_eif_from_filesystems(
     e2e: bool,
     e2e_mode: &str,
     e2e_key_exchange: &str,
+    allow_plaintext_fallback: bool,
     domain: Option<&str>,
     http_upstream_protocol: &str,
     locksmith: bool,
@@ -538,6 +554,7 @@ pub async fn build_eif_from_filesystems(
         e2e,
         e2e_mode,
         e2e_key_exchange,
+        allow_plaintext_fallback,
         domain,
         http_upstream_protocol,
         locksmith,
@@ -782,6 +799,7 @@ mod tests {
             true,
             "steve",
             key_exchange,
+            false,
             None,
             "http",
             false,
@@ -798,7 +816,7 @@ mod tests {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         write!(
             file,
-            "#!/bin/sh\n# {{STEVE\necho steve\nSTEVE_APP_UPSTREAM=\"http://127.0.0.1:{{{{STEVE_APP_PORT}}}}\" {{{{STEVE_KEY_EXCHANGE_ENV}}}}/steve\n# }}STEVE\n{{{{CUSTOM_PORT_SECTION}}}}\n{{{{USER_CMD}}}}\n"
+            "#!/bin/sh\n# {{STEVE\necho steve\nSTEVE_APP_UPSTREAM=\"http://127.0.0.1:{{{{STEVE_APP_PORT}}}}\" {{{{STEVE_KEY_EXCHANGE_ENV}}}}{{{{STEVE_PLAINTEXT_FALLBACK_ENV}}}}/steve\n# }}STEVE\n{{{{CUSTOM_PORT_SECTION}}}}\n{{{{USER_CMD}}}}\n"
         )
         .unwrap();
         file
@@ -880,6 +898,7 @@ mod tests {
             true,
             "steve",
             "XWING-DRAFT10; touch /tmp/injected",
+            false,
             None,
             "http",
             false,
@@ -990,6 +1009,7 @@ mod tests {
             false,
             "disabled",
             "X25519",
+            false,
             None,
             "http",
             true,
@@ -1016,6 +1036,7 @@ mod tests {
             true,
             "steve",
             "XWING-DRAFT10",
+            false,
             None,
             "http",
             false,
@@ -1027,6 +1048,8 @@ mod tests {
 
         assert!(result.contains("STEVE_APP_UPSTREAM=\"http://127.0.0.1:3000\""));
         assert!(result.contains("STEVE_KEY_EXCHANGE=XWING-DRAFT10"));
+        assert!(!result.contains("VSOCK-LISTEN:3000"));
+        assert!(result.contains("VSOCK-LISTEN:9000"));
     }
 
     #[tokio::test]
@@ -1040,6 +1063,7 @@ mod tests {
             true,
             "steve",
             "X25519",
+            false,
             None,
             "http",
             false,
@@ -1053,6 +1077,32 @@ mod tests {
         // The default key exchange is left implicit so run.sh stays byte-identical
         // to pre-key-exchange deployments (and their PCRs).
         assert!(!result.contains("STEVE_KEY_EXCHANGE"));
+        assert!(!result.contains("STEVE_ALLOW_PLAINTEXT_FALLBACK"));
+        assert!(!result.contains("VSOCK-LISTEN:8080"));
+    }
+
+    #[tokio::test]
+    async fn test_render_run_sh_emits_explicit_plaintext_fallback() {
+        let template = run_template_file();
+        let result = render_run_sh_template(
+            template.path(),
+            Some("/app/server".to_string()),
+            &[8080],
+            Some(8080),
+            true,
+            "steve",
+            "X25519",
+            true,
+            None,
+            false,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.contains("STEVE_ALLOW_PLAINTEXT_FALLBACK=true /steve"));
+        assert!(!result.contains("VSOCK-LISTEN:8080"));
     }
 
     #[tokio::test]
@@ -1066,6 +1116,7 @@ mod tests {
             true,
             "steve",
             "X25519",
+            false,
             None,
             "http",
             false,
@@ -1091,6 +1142,7 @@ mod tests {
             false,
             "tls",
             "X25519",
+            false,
             Some("app.example.com"),
             "h2c",
             false,
@@ -1125,6 +1177,7 @@ mod tests {
             false,
             "tls",
             "X25519",
+            false,
             Some("app.example.com"),
             "http",
             false,
@@ -1149,6 +1202,7 @@ mod tests {
             false,
             "tls",
             "X25519",
+            false,
             None,
             "http",
             false,
@@ -1169,6 +1223,7 @@ mod tests {
             false,
             "tls",
             "X25519",
+            false,
             Some("app.example.com"),
             "http",
             false,
@@ -1234,6 +1289,7 @@ mod tests {
             false,
             "disabled",
             "X25519",
+            false,
             None,
             "http",
             false,
@@ -1257,6 +1313,7 @@ mod tests {
             false,
             "disabled",
             "X25519",
+            false,
             None,
             "http",
             false,
