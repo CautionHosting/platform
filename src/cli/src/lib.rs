@@ -86,6 +86,14 @@ fn resolve_reproduction_e2e_mode(
     }
 }
 
+fn reproduction_uses_steve(
+    config: Option<&caution_config::E2eEncryption>,
+    manifest_has_steve: bool,
+) -> bool {
+    resolve_reproduction_e2e_mode(config, manifest_has_steve)
+        == Some(caution_config::E2eMode::Steve)
+}
+
 #[derive(Debug)]
 enum SshSignedRequestErrorKind {
     PublicKeyForIdentity,
@@ -5723,24 +5731,20 @@ enclave "default" {{
         };
         let cache_key = match measured_config {
             Some(cfg) => {
-                let e2e = cfg
+                let e2e_config = cfg
                     .enclave
                     .as_ref()
                     .and_then(|e| e.values().next())
                     .and_then(|enc| enc.network.as_ref())
                     .and_then(|network| network.http.as_ref())
-                    .and_then(|http| http.e2e_encryption.as_ref())
-                    .and_then(|e2e| e2e.enabled)
-                    .unwrap_or_else(|| {
-                        external_manifest
-                            .as_ref()
-                            .and_then(|manifest| manifest.steve_commit.as_ref())
-                            .is_some()
-                    });
+                    .and_then(|http| http.e2e_encryption.as_ref());
+                let manifest_steve_commit = external_manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.steve_commit.as_ref());
+                let e2e = reproduction_uses_steve(e2e_config, manifest_steve_commit.is_some());
                 let steve_commit = e2e.then(|| {
-                    external_manifest
-                        .as_ref()
-                        .and_then(|manifest| manifest.steve_commit.clone())
+                    manifest_steve_commit
+                        .cloned()
                         .unwrap_or_else(enclave_builder::build::resolve_steve_commit)
                 });
                 measured_build_cache_key(&source_cache_key, &cfg, steve_commit.as_deref())?
@@ -9034,7 +9038,8 @@ mod tests {
         normalize_keyring, parse_env_assignments, prepare_pgp_public_key_for_upload,
         prompt_line_from, prompt_optional_line_from, resolve_local_build_command_from_dir,
         resolve_login_username, resolve_procfile_build_command, resolve_quorum_parameters,
-        resolve_register_username, resolve_reproduction_e2e_mode, validate_global_qr,
+        resolve_register_username, resolve_reproduction_e2e_mode, reproduction_uses_steve,
+        validate_global_qr,
     };
     use caution_config::{ConfigurationFile, E2eEncryption, E2eMode};
     use clap::Parser;
@@ -9057,11 +9062,17 @@ mod tests {
             key_exchange: None,
         };
         let disabled = config(Some(false), None);
-        let steve = config(Some(true), None);
-        let caddy = config(Some(false), Some(E2eMode::Caddy));
+        let legacy_steve = config(Some(true), None);
+        let steve = config(None, Some(E2eMode::Steve));
+        let caddy = config(None, Some(E2eMode::Caddy));
+        let unspecified = config(None, None);
 
         assert_eq!(
             resolve_reproduction_e2e_mode(None, true),
+            Some(E2eMode::Steve)
+        );
+        assert_eq!(
+            resolve_reproduction_e2e_mode(Some(&unspecified), true),
             Some(E2eMode::Steve)
         );
         assert_eq!(resolve_reproduction_e2e_mode(Some(&disabled), true), None);
@@ -9070,9 +9081,34 @@ mod tests {
             Some(E2eMode::Steve)
         );
         assert_eq!(
+            resolve_reproduction_e2e_mode(Some(&legacy_steve), false),
+            Some(E2eMode::Steve)
+        );
+        assert_eq!(
             resolve_reproduction_e2e_mode(Some(&caddy), true),
             Some(E2eMode::Caddy)
         );
+    }
+
+    #[test]
+    fn reproduction_steve_cache_binding_follows_effective_mode() {
+        let config = |enabled, mode| E2eEncryption {
+            enabled,
+            mode,
+            cors_origins: None,
+            key_exchange: None,
+        };
+        let disabled = config(Some(false), None);
+        let legacy_steve = config(Some(true), None);
+        let steve = config(None, Some(E2eMode::Steve));
+        let caddy = config(None, Some(E2eMode::Caddy));
+
+        assert!(reproduction_uses_steve(Some(&steve), false));
+        assert!(reproduction_uses_steve(Some(&legacy_steve), false));
+        assert!(!reproduction_uses_steve(Some(&caddy), true));
+        assert!(!reproduction_uses_steve(Some(&disabled), true));
+        assert!(reproduction_uses_steve(None, true));
+        assert!(!reproduction_uses_steve(None, false));
     }
 
     fn test_api_client() -> ApiClient {

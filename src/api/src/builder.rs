@@ -1770,6 +1770,15 @@ mod tests {
             "should pass e2e mode to helper"
         );
         assert!(
+            userdata.contains("KEY_EXCHANGE=\"X25519\"")
+                && userdata.contains("CAUTION_KEY_EXCHANGE=\"$KEY_EXCHANGE\""),
+            "should pass the default key exchange to helper"
+        );
+        assert!(
+            !userdata.contains("\"steve_key_exchange\""),
+            "default key exchange should stay implicit in the manifest"
+        );
+        assert!(
             userdata.contains("DOMAIN=\"\"") && userdata.contains("CAUTION_DOMAIN=\"$DOMAIN\""),
             "should pass HTTP domain to helper"
         );
@@ -2154,6 +2163,41 @@ mod tests {
             builder_instance_type: "c5.xlarge".to_string(),
             app_sources: vec![],
         }
+    }
+
+    #[test]
+    fn test_xwing_userdata_carries_suite_to_helper_and_manifest() {
+        let config = BuilderConfig {
+            ami_id: "ami-test".to_string(),
+            security_group_id: "sg-test".to_string(),
+            subnet_id: "subnet-test".to_string(),
+            instance_profile: "profile-test".to_string(),
+            region: "us-west-2".to_string(),
+            timeout_secs: 1200,
+            eif_s3_bucket: "test-bucket".to_string(),
+            git_hostname: "git.example.com".to_string(),
+            additional_instance_tags: Vec::new(),
+        };
+        let mut request = make_test_build_request_with_egress(false);
+        request.e2e = true;
+        request.e2e_mode = "steve".to_string();
+        request.e2e_key_exchange = "XWING-DRAFT10".to_string();
+
+        let userdata = generate_builder_userdata(
+            Uuid::new_v4(),
+            &config,
+            &request,
+            "eifs/test.eif",
+            "builds/test/remote-build-helper",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            None,
+        )
+        .unwrap();
+
+        assert!(userdata.contains("E2E_MODE=\"steve\""));
+        assert!(userdata.contains("KEY_EXCHANGE=\"XWING-DRAFT10\""));
+        assert!(userdata.contains("CAUTION_KEY_EXCHANGE=\"$KEY_EXCHANGE\""));
+        assert!(userdata.contains("\"steve_key_exchange\":\"XWING-DRAFT10\""));
     }
 
     #[test]
