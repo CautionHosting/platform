@@ -5144,6 +5144,8 @@ export default {
       updatingOrgSettings,
       orgSettingsError,
       toggleRequirePin,
+      currentOrgId,
+      currentOrganization,
       orgNameInput,
       savingOrgName,
       orgNameError,
