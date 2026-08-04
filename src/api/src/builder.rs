@@ -291,9 +291,8 @@ pub fn compute_cache_key(
     }
     hasher.update(b"|");
     if e2e && allow_plaintext_fallback {
-        hasher.update(b"allow-plaintext-fallback");
+        hasher.update(b"allow-plaintext-fallback|");
     }
-    hasher.update(b"|");
     hasher.update(
         if locksmith {
             "locksmith"
@@ -1503,6 +1502,10 @@ mod tests {
             TEST_FRAMEWORK_COMMIT,
         );
         assert_ne!(fail_closed, fallback);
+        assert_eq!(
+            fail_closed,
+            "3466c2a820bb04f305bb632ea37b16cccbb8f596979e09a3a45d6f497621396d"
+        );
 
         let plain_default = compute_cache_key(
             "abc123",
@@ -1529,6 +1532,10 @@ mod tests {
             TEST_FRAMEWORK_COMMIT,
         );
         assert_eq!(plain_default, plain_ignored);
+        assert_eq!(
+            plain_default,
+            "2787fa18ac0e412027bf3cb01cdb7eb3505e81c1e7a22790f6e43cbe45b90e9e"
+        );
     }
 
     #[test]

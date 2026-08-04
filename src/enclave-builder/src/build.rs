@@ -12,7 +12,7 @@ use crate::EifFile;
 
 const DEFAULT_ENCLAVEOS_COMMIT: &str = "9582e25239430070667fdd0a6b64d887f1c308df";
 const DEFAULT_BOOTPROOF_COMMIT: &str = "64dae0628e58b9f898b89f9b7a404b37e2f0ca9f";
-const DEFAULT_STEVE_COMMIT: &str = "16db8fbb9918fd290b4cd84a38576fe9c539974c";
+const DEFAULT_STEVE_COMMIT: &str = "c0b8d2d62e66108689745561242972048f6cfce5";
 const DEFAULT_LOCKSMITH_COMMIT: &str = "d16b74c6b3fd1d1006a5b00e4d9e21a4613947a9";
 
 // Kept in sync with the git clone URLs in templates/Containerfile.eif.

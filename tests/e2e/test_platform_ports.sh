@@ -408,7 +408,7 @@ ATTESTATION_STATUS=$(curl -sS --connect-timeout 5 --max-time 30 \
     "http://$APP_IP/attestation" || true)
 
 if [ "$ATTESTATION_STATUS" != "200" ] ||
-    ! jq -e '.attestation_document | type == "string" and length > 0' \
+    ! jq -e '(.document // .attestation_document) | type == "string" and length > 0' \
         "$ATTESTATION_RESPONSE" >/dev/null 2>&1; then
     step_fail "Platform attestation endpoint returns Nitro evidence"
 fi
