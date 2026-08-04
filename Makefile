@@ -3,7 +3,7 @@
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install-cli install-cli-stagex install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-cli-install test-e2e test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install-cli install-cli-stagex install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-live-caddy-nitro test-cli-install test-e2e test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -722,6 +722,10 @@ prepare-byoc-provisioner:
 
 test-unit:
 	cargo test --workspace
+
+test-live-caddy-nitro:
+	@test -n "$(CADDY_E2E_URL)" || { echo "CADDY_E2E_URL is required"; exit 1; }
+	CADDY_E2E_URL="$(CADDY_E2E_URL)" cargo test -p enclave-builder --test caddy_nitro_live -- --ignored --nocapture
 
 test-cli-install:
 	@bash tests/test_cli_install.sh

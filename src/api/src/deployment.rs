@@ -176,6 +176,21 @@ pub struct DeploymentResult {
     pub instance_type: Option<String>,
 }
 
+pub const E2E_MODE_DISABLED: &str = "disabled";
+pub const E2E_MODE_STEVE: &str = "steve";
+
+fn default_e2e_mode() -> String {
+    E2E_MODE_DISABLED.to_string()
+}
+
+fn effective_e2e_mode(e2e: bool, e2e_mode: &str) -> &str {
+    match e2e_mode {
+        "" | E2E_MODE_DISABLED if e2e => E2E_MODE_STEVE,
+        "" => E2E_MODE_DISABLED,
+        other => other,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NitroDeploymentRequest {
     pub org_id: Uuid,
@@ -195,6 +210,8 @@ pub struct NitroDeploymentRequest {
     pub http_port: Option<u16>,
     #[serde(default)]
     pub e2e: bool,
+    #[serde(default = "default_e2e_mode")]
+    pub e2e_mode: String,
     #[serde(default)]
     pub locksmith: bool,
     #[serde(default)]
@@ -469,6 +486,7 @@ mod tests {
             ports: vec![],
             http_port: None,
             e2e: false,
+            e2e_mode: E2E_MODE_DISABLED.to_string(),
             locksmith: false,
             egress: false,
             ssh_keys: vec![],
@@ -660,8 +678,38 @@ mod tests {
         )
         .unwrap();
 
-        assert!(user_data.contains(r#"%{ if e2e == "true" ~}"#));
+        assert!(user_data.contains(r#"%{ if e2e_mode == "steve" ~}"#));
         assert!(user_data.contains(r#"CADDY_DEFAULT_UPSTREAM="reverse_proxy localhost:49500""#));
+    }
+
+    #[test]
+    fn test_user_data_caddy_mode_forwards_tls_to_enclave() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let user_data = std::fs::read_to_string(
+            manifest_dir.join("../../terraform/modules/aws/nitro-enclave/user-data.sh"),
+        )
+        .unwrap();
+
+        assert!(user_data.contains(r#"%{ if e2e_mode == "caddy" ~}"#));
+        assert!(user_data.contains(r#"standard_ports="$standard_ports 443""#));
+        assert!(user_data.contains(
+            r#"%{ if http_port != 0 && e2e_mode != "caddy" ~}"#
+        ));
+        assert!(user_data.contains("TLS :443 is forwarded into the enclave"));
+        assert!(user_data.contains("respond \"OK\" 200"));
+        assert!(user_data.contains("redir https://${domain}{uri} 308"));
+        let redir_pos = user_data
+            .find("redir https://${domain}{uri} 308")
+            .unwrap();
+        let http_site_pos = user_data[..redir_pos].rfind(":80 {").unwrap();
+        let caddy_mode_http_site = &user_data[http_site_pos..redir_pos];
+        assert!(caddy_mode_http_site.contains("handle /attestation"));
+        assert!(caddy_mode_http_site.contains("reverse_proxy localhost:49502"));
+        assert!(!user_data.contains("reverse_proxy https://127.0.0.1:443"));
+        assert!(!user_data.contains("header_up Host ${domain}"));
+        assert!(!user_data.contains("tls_server_name ${domain}"));
+        assert!(!user_data.contains("tls_insecure_skip_verify"));
+        assert!(!user_data.contains("reverse_proxy http://localhost:443"));
     }
 
     #[test]
@@ -672,7 +720,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(user_data.contains(r#"%{ if http_port != 0 ~}"#));
+        assert!(user_data.contains(
+            r#"%{ if http_port != 0 && e2e_mode != "caddy" ~}"#
+        ));
         assert!(user_data.contains(
             "ExecStart=/usr/bin/socat TCP-LISTEN:${http_port},bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:16:${http_port}"
         ));
@@ -2047,6 +2097,7 @@ resource "aws_instance" "enclave" {{
     ports       = var.ports
     http_port   = var.http_port
     e2e         = "{e2e}"
+    e2e_mode    = "{e2e_mode}"
     locksmith   = "{locksmith}"
     egress      = "{egress}"
     ssh_keys    = {ssh_keys_json}
@@ -2111,6 +2162,7 @@ output "instance_type" {{
         },
         platform_internal_ingress = platform_internal_ingress(request.e2e, request.locksmith),
         e2e = if request.e2e { "true" } else { "false" },
+        e2e_mode = effective_e2e_mode(request.e2e, &request.e2e_mode),
         locksmith = if request.locksmith { "true" } else { "false" },
         egress = if request.egress { "true" } else { "false" },
         domain = request.domain.as_deref().unwrap_or(""),
@@ -2318,6 +2370,7 @@ resource "aws_launch_template" "enclave" {{
     ports       = var.ports
     http_port   = var.http_port
     e2e         = "{e2e}"
+    e2e_mode    = "{e2e_mode}"
     locksmith   = "{locksmith}"
     egress      = "{egress}"
     ssh_keys    = {ssh_keys_json}
@@ -2408,6 +2461,7 @@ output "instance_type" {{
         },
         platform_internal_ingress = platform_internal_ingress(request.e2e, request.locksmith),
         e2e = if request.e2e { "true" } else { "false" },
+        e2e_mode = effective_e2e_mode(request.e2e, &request.e2e_mode),
         locksmith = if request.locksmith { "true" } else { "false" },
         egress = if request.egress { "true" } else { "false" },
         domain = request.domain.as_deref().unwrap_or(""),

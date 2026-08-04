@@ -97,6 +97,45 @@ make up
    git push caution main
    ```
 
+#### Enclave-terminated HTTPS (Caddy POC)
+
+To terminate standard HTTPS inside the enclave without changing clients, select
+Caddy mode on the HTTP ingress:
+
+```hcl
+network {
+  ingress {
+    cidr_ipv4   = "0.0.0.0/0"
+    port        = 8080
+    ip_protocol = "tcp"
+  }
+  egress { cidr_ipv4 = "0.0.0.0/0" }
+
+  http {
+    domain = "app.example.com"
+    port   = 8080
+    e2e_encryption { mode = "caddy" }
+  }
+}
+```
+
+The domain must resolve directly to the deployed host, the HTTP port must have
+an ingress rule, and outbound egress is required for Let's Encrypt. Disable any
+CDN or proxy TLS termination. Caddy publishes the verified leaf certificate
+SHA-256 fingerprint in signed Nitro `user_data`; an external verifier must
+compare it with the live certificate and enforce the expected enclave PCRs.
+Certificate changes can take up to 60 seconds to appear in new attestations.
+
+Run the opt-in live binding test against any production-mode Caddy deployment:
+
+```bash
+make CADDY_E2E_URL=https://app.example.com test-live-caddy-nitro
+```
+
+This checks HTTPS, redirects, health, Nitro authenticity, and the signed
+certificate binding. It does not establish workload identity; use
+`caution verify` with independently trusted source or PCRs for that.
+
 ### 4. Verify a deployed app
 
 You can verify an enclave's attestation in two ways:

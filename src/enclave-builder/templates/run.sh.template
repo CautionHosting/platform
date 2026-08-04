@@ -101,8 +101,36 @@ echo "Starting STEVE (Secure Transport Encryption Via Enclave)..."
 STEVE_LISTEN_ADDR="0.0.0.0:${INTERNAL_E2P_PORT}" STEVE_APP_UPSTREAM="http://127.0.0.1:{{STEVE_APP_PORT}}" {{STEVE_CORS_ORIGINS_ENV}} /steve &
 # }STEVE
 
+# {CADDY
+echo "Starting enclave Caddy TLS ingress..."
+mkdir -p /etc/caddy /var/lib/caddy /var/log/caddy
+cat > /etc/caddy/Caddyfile <<'CADDYFILE'
+{{CADDY_DOMAIN}} {
+    handle /.well-known/caution/health {
+        respond "OK" 200
+    }
+
+    handle /attestation {
+        reverse_proxy 127.0.0.1:49502
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:{{CADDY_APP_PORT}}
+    }
+}
+CADDYFILE
+HOME=/var/lib/caddy \
+XDG_CONFIG_HOME=/etc \
+XDG_DATA_HOME=/var/lib \
+/caddy run --config /etc/caddy/Caddyfile &
+CADDY_DOMAIN="{{CADDY_DOMAIN}}" /caddy-certfp.sh &
+# }CADDY
+
 echo "Starting VSOCK-to-TCP proxies..."
 # Internal service proxies use high ports so application ports like 8080 are available.
+# {CADDY
+/bin/socat VSOCK-LISTEN:443,reuseaddr,fork TCP:127.0.0.1:443 &
+# }CADDY
 /bin/socat VSOCK-LISTEN:${INTERNAL_E2P_PORT},reuseaddr,fork TCP:localhost:${INTERNAL_E2P_PORT} &
 /bin/socat VSOCK-LISTEN:${INTERNAL_AUX_PORT},reuseaddr,fork TCP:localhost:${INTERNAL_AUX_PORT} &
 /bin/socat VSOCK-LISTEN:${INTERNAL_BOOTPROOFD_PORT},reuseaddr,fork TCP:localhost:${INTERNAL_BOOTPROOFD_PORT} &

@@ -121,6 +121,8 @@ pub async fn stage_eif_components(
     ports: &[u16],
     http_port: Option<u16>,
     e2e: bool,
+    e2e_mode: &str,
+    domain: Option<&str>,
     locksmith: bool,
     e2e_cors_origins: Option<String>,
     egress: bool,
@@ -209,12 +211,23 @@ pub async fn stage_eif_components(
         containerfile_template.display()
     );
 
+    let caddy_certfp_template = templates_dir.join("caddy-certfp.sh");
+    if e2e_mode == "caddy" {
+        anyhow::ensure!(
+            caddy_certfp_template.exists(),
+            "caddy-certfp.sh not found at {}",
+            caddy_certfp_template.display()
+        );
+    }
+
     let run_sh_content = render_run_sh_template(
         &run_sh_template,
         run_command,
         ports,
         http_port,
         e2e,
+        e2e_mode,
+        domain,
         locksmith,
         e2e_cors_origins.as_deref(),
         egress,
@@ -223,6 +236,7 @@ pub async fn stage_eif_components(
     let containerfile_content = render_containerfile_template(
         &containerfile_template,
         e2e,
+        e2e_mode == "caddy",
         locksmith,
         &bootproof_commit,
         &steve_commit,
@@ -240,6 +254,10 @@ pub async fn stage_eif_components(
         "Generated Containerfile.eif at: {}",
         containerfile_path.display()
     );
+
+    if e2e_mode == "caddy" {
+        fs::copy(&caddy_certfp_template, stage_dir.join("caddy-certfp.sh")).await?;
+    }
 
     tracing::info!(
         "EIF components staged successfully in: {}",
@@ -283,6 +301,8 @@ async fn render_run_sh_template(
     ports: &[u16],
     http_port: Option<u16>,
     e2e: bool,
+    e2e_mode: &str,
+    domain: Option<&str>,
     locksmith: bool,
     e2e_cors_origins: Option<&str>,
     egress: bool,
@@ -294,6 +314,9 @@ async fn render_run_sh_template(
     let mut enabled_blocks: Vec<&str> = vec![];
     if e2e {
         enabled_blocks.push("STEVE");
+    }
+    if e2e_mode == "caddy" {
+        enabled_blocks.push("CADDY");
     }
     if locksmith {
         enabled_blocks.push("LOCKSMITH");
@@ -344,9 +367,33 @@ async fn render_run_sh_template(
         String::new()
     };
 
+    let caddy_app_port = if e2e_mode == "caddy" {
+        if !egress {
+            anyhow::bail!("caddy mode requires egress for ACME certificate issuance");
+        }
+        let port = http_port
+            .context("caddy mode requires http_port so enclave Caddy can reach the app")?;
+        if !ports.contains(&port) {
+            anyhow::bail!("http_port {} must also be listed in ports", port);
+        }
+        port.to_string()
+    } else {
+        String::new()
+    };
+
+    let caddy_domain = if e2e_mode == "caddy" {
+        domain
+            .filter(|domain| !domain.is_empty())
+            .context("caddy mode requires a domain for trusted TLS")?
+    } else {
+        ""
+    };
+
     let custom_port_proxies: String = ports
         .iter()
-        .filter(|&&port| !is_reserved_internal_port(port))
+        .filter(|&&port| {
+            !is_reserved_internal_port(port) && !(e2e_mode == "caddy" && http_port == Some(port))
+        })
         .map(|port| {
             format!(
                 "/bin/socat VSOCK-LISTEN:{},reuseaddr,fork TCP:localhost:{} &",
@@ -376,6 +423,8 @@ async fn render_run_sh_template(
     let result = processed
         .replace("{{USER_CMD}}", &user_cmd)
         .replace("{{STEVE_APP_PORT}}", &steve_app_port)
+        .replace("{{CADDY_APP_PORT}}", &caddy_app_port)
+        .replace("{{CADDY_DOMAIN}}", caddy_domain)
         .replace("{{CUSTOM_PORT_SECTION}}", &custom_port_section)
         .replace("{{STEVE_CORS_ORIGINS_ENV}}", &cors_env);
 
@@ -385,6 +434,7 @@ async fn render_run_sh_template(
 async fn render_containerfile_template(
     template_path: &Path,
     e2e: bool,
+    caddy: bool,
     locksmith: bool,
     bootproof_commit: &str,
     steve_commit: &str,
@@ -397,6 +447,9 @@ async fn render_containerfile_template(
     let mut enabled_blocks: Vec<&str> = vec![];
     if e2e {
         enabled_blocks.push("STEVE");
+    }
+    if caddy {
+        enabled_blocks.push("CADDY");
     }
     if locksmith {
         enabled_blocks.push("LOCKSMITH");
@@ -422,6 +475,8 @@ pub async fn build_eif_from_filesystems(
     http_port: Option<u16>,
     no_cache: bool,
     e2e: bool,
+    e2e_mode: &str,
+    domain: Option<&str>,
     locksmith: bool,
     e2e_cors_origins: Option<String>,
     egress: bool,
@@ -442,6 +497,8 @@ pub async fn build_eif_from_filesystems(
         ports,
         http_port,
         e2e,
+        e2e_mode,
+        domain,
         locksmith,
         e2e_cors_origins,
         egress,
@@ -786,10 +843,20 @@ mod tests {
     #[tokio::test]
     async fn test_render_run_sh_uses_reserved_locksmith_port() {
         let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
-        let rendered =
-            render_run_sh_template(&template, Some("/app".to_string()), &[], None, false, true, None, false)
-                .await
-                .unwrap();
+        let rendered = render_run_sh_template(
+            &template,
+            Some("/app".to_string()),
+            &[],
+            None,
+            false,
+            "disabled",
+            None,
+            true,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
 
         assert!(rendered.contains("INTERNAL_LOCKSMITH_PORT=49504"));
         assert!(rendered.contains(
@@ -806,6 +873,8 @@ mod tests {
             &[3000, 9000],
             Some(3000),
             true,
+            "steve",
+            None,
             false,
             None,
             true,
@@ -825,6 +894,8 @@ mod tests {
             &[8080],
             None,
             true,
+            "steve",
+            None,
             false,
             None,
             true,
@@ -844,6 +915,8 @@ mod tests {
             &[3000, 9000],
             None,
             true,
+            "steve",
+            None,
             false,
             None,
             true,
@@ -857,10 +930,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_render_run_sh_caddy_mode_terminates_tls_in_enclave() {
+        let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
+        let rendered = render_run_sh_template(
+            &template,
+            Some("/app/server".to_string()),
+            &[8080, 9000],
+            Some(8080),
+            false,
+            "caddy",
+            Some("app.example.com"),
+            false,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(rendered.contains("Starting enclave Caddy TLS ingress"));
+        assert!(rendered.contains("app.example.com {"));
+        assert!(rendered.contains("reverse_proxy 127.0.0.1:8080"));
+        assert!(rendered.contains(
+            "HOME=/var/lib/caddy \\\nXDG_CONFIG_HOME=/etc \\\nXDG_DATA_HOME=/var/lib \\\n/caddy run --config /etc/caddy/Caddyfile &"
+        ));
+        assert!(rendered.contains("CADDY_DOMAIN=\"app.example.com\" /caddy-certfp.sh &"));
+        assert!(rendered.contains("VSOCK-LISTEN:443,reuseaddr,fork TCP:127.0.0.1:443"));
+        assert!(rendered.contains("VSOCK-LISTEN:9000,reuseaddr,fork TCP:localhost:9000"));
+        assert!(!rendered.contains("VSOCK-LISTEN:8080"));
+        assert!(!rendered.contains("on_demand"));
+        assert!(!rendered.contains("Starting STEVE"));
+    }
+
+    #[tokio::test]
+    async fn test_render_run_sh_caddy_mode_requires_http_port() {
+        let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
+        let err = render_run_sh_template(
+            &template,
+            Some("/app/server".to_string()),
+            &[8080],
+            None,
+            false,
+            "caddy",
+            Some("app.example.com"),
+            false,
+            None,
+            true,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("caddy mode requires http_port"));
+    }
+
+    #[tokio::test]
+    async fn test_render_run_sh_caddy_mode_requires_domain_and_egress() {
+        let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
+
+        let missing_domain = render_run_sh_template(
+            &template,
+            Some("/app/server".to_string()),
+            &[8080],
+            Some(8080),
+            false,
+            "caddy",
+            None,
+            false,
+            None,
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(missing_domain
+            .to_string()
+            .contains("caddy mode requires a domain"));
+
+        let missing_egress = render_run_sh_template(
+            &template,
+            Some("/app/server".to_string()),
+            &[8080],
+            Some(8080),
+            false,
+            "caddy",
+            Some("app.example.com"),
+            false,
+            None,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(missing_egress
+            .to_string()
+            .contains("caddy mode requires egress"));
+    }
+
+    #[tokio::test]
+    async fn test_render_containerfile_caddy_runtime_smoke() {
+        let template =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/Containerfile.eif");
+        let rendered = render_containerfile_template(
+            &template,
+            false,
+            true,
+            false,
+            "bootproof-commit",
+            "steve-commit",
+            "locksmith-commit",
+        )
+        .await
+        .unwrap();
+
+        assert!(rendered.contains("COPY caddy-certfp.sh /build/caddy-certfp.sh"));
+        assert!(rendered.contains("FROM stagex/user-caddy@sha256:"));
+        assert!(rendered.contains("cp /usr/lib/libssl.so.3"));
+        assert!(rendered.contains("cp /usr/lib/libcrypto.so.3"));
+        assert!(rendered.contains("chroot /build/initramfs /caddy version"));
+        assert!(rendered.contains("chroot /build/initramfs /usr/bin/openssl version"));
+        assert!(!rendered.contains("COPY --from=steve-builder"));
+    }
+
+    #[test]
+    fn test_render_containerfile_non_caddy_excludes_caddy_artifacts() {
+        let template = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/Containerfile.eif"),
+        )
+        .unwrap();
+
+        for enabled_blocks in [&[][..], &["STEVE"][..]] {
+            let rendered = process_template_blocks(&template, enabled_blocks);
+            assert!(!rendered.contains("FROM stagex/user-caddy@sha256:"));
+            for applet in ["cut", "tr", "mv", "rm"] {
+                assert!(!rendered.contains(&format!("ln -sf busybox {applet}")));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_render_run_sh_egress_enabled_includes_tunnel() {
         let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
         let rendered = render_run_sh_template(
-            &template, Some("/app".to_string()), &[], None, false, false, None, true,
+            &template,
+            Some("/app".to_string()),
+            &[],
+            None,
+            false,
+            "disabled",
+            None,
+            false,
+            None,
+            true,
         )
         .await
         .unwrap();
@@ -872,12 +1089,25 @@ mod tests {
     async fn test_render_run_sh_egress_disabled_is_hermetic() {
         let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
         let rendered = render_run_sh_template(
-            &template, Some("/app".to_string()), &[], None, false, false, None, false,
+            &template,
+            Some("/app".to_string()),
+            &[],
+            None,
+            false,
+            "disabled",
+            None,
+            false,
+            None,
+            false,
         )
         .await
         .unwrap();
         assert!(!rendered.contains("VSOCK-CONNECT:3:3"));
         assert!(!rendered.contains("udhcpc"));
         assert!(rendered.contains("nameserver 127.0.0.1"));
+        assert!(rendered.contains(
+            "# Internal service proxies use high ports so application ports like 8080 are available."
+        ));
+        assert!(!rendered.contains("VSOCK-LISTEN:443"));
     }
 }

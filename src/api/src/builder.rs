@@ -150,6 +150,9 @@ pub struct BuildRequest {
     pub ports: Vec<u16>,
     pub http_port: Option<u16>,
     pub e2e: bool,
+    pub e2e_mode: String,
+    pub domain: Option<String>,
+    pub framework_commit: Option<String>,
     pub locksmith: bool,
     pub egress: bool,
     pub e2e_cors_origins: Option<String>,
@@ -259,6 +262,7 @@ pub fn compute_cache_key(
     e2e: bool,
     locksmith: bool,
     e2e_cors_origins: &[String],
+    framework_commit: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(commit_sha.as_bytes());
@@ -281,7 +285,29 @@ pub fn compute_cache_key(
     for origin in e2e_cors_origins {
         hasher.update(origin.as_bytes());
     }
+    if let Some(commit) = framework_commit {
+        hasher.update(b"|framework|");
+        hasher.update(commit.as_bytes());
+    }
     format!("{:x}", hasher.finalize())
+}
+
+pub fn framework_commit_for_mode(
+    e2e_mode: &str,
+    platform_git_sha: Option<&str>,
+) -> Result<Option<String>> {
+    if e2e_mode != "caddy" {
+        return Ok(None);
+    }
+
+    let commit = platform_git_sha
+        .filter(|value| !value.is_empty())
+        .context("PLATFORM_GIT_SHA is required for caddy mode")?;
+    if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("PLATFORM_GIT_SHA must be a 40-character Git commit SHA for caddy mode");
+    }
+
+    Ok(Some(commit.to_ascii_lowercase()))
 }
 
 /// Check if a completed build exists in the cache for this org + cache_key.
@@ -543,7 +569,10 @@ pub async fn execute_remote_build(
         upload_remote_builder_helper(s3, &config.eif_s3_bucket, build_id, request.org_id)
             .await
             .context("Failed to stage remote builder helper")?;
-    let framework_commit = resolve_framework_commit(enclave_builder::FRAMEWORK_SOURCE).await;
+    let framework_commit = match request.framework_commit.clone() {
+        Some(commit) => Some(commit),
+        None => resolve_framework_commit(enclave_builder::FRAMEWORK_SOURCE).await,
+    };
     let user_data = generate_builder_userdata(
         build_id,
         config,
@@ -848,6 +877,9 @@ fn generate_builder_userdata(
     helper_sha256: &str,
     framework_commit: Option<String>,
 ) -> anyhow::Result<String> {
+    if request.e2e_mode == "caddy" && framework_commit.is_none() {
+        bail!("caddy mode requires an exact Platform framework commit");
+    }
     let status_key = format!("builds/{}/status.json", build_id);
     let bucket = &config.eif_s3_bucket;
     let source_s3_key = &request.source_s3_key;
@@ -936,6 +968,8 @@ CONTAINERFILE="{containerfile}"
 PORTS="{ports_csv}"
 HTTP_PORT="{http_port}"
 E2E="{e2e_flag}"
+E2E_MODE="{e2e_mode}"
+DOMAIN="{domain}"
 LOCKSMITH="{locksmith_flag}"
 EGRESS="{egress_flag}"
 CORS_ORIGINS='{cors_origins_escaped}'
@@ -1032,6 +1066,8 @@ CAUTION_OUTPUT_PCRS="/build/output/enclave.pcrs" \
 CAUTION_PORTS="$PORTS" \
 CAUTION_HTTP_PORT="$HTTP_PORT" \
 CAUTION_E2E="$E2E" \
+CAUTION_E2E_MODE="$E2E_MODE" \
+CAUTION_DOMAIN="$DOMAIN" \
 CAUTION_LOCKSMITH="$LOCKSMITH" \
 CAUTION_EGRESS="$EGRESS" \
 CAUTION_CORS_ORIGINS="$CORS_ORIGINS" \
@@ -1086,6 +1122,8 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
         ports_csv = ports_csv,
         http_port = http_port,
         e2e_flag = e2e_flag,
+        e2e_mode = request.e2e_mode.as_str(),
+        domain = request.domain.as_deref().unwrap_or(""),
         locksmith_flag = locksmith_flag,
         egress_flag = egress_flag,
         cors_origins_escaped = cors_origins_escaped,
@@ -1243,47 +1281,101 @@ mod tests {
 
     // --- compute_cache_key ---
 
+    fn cache_key(
+        commit: &str,
+        enclaveos: &str,
+        procfile: &str,
+        e2e: bool,
+        locksmith: bool,
+        framework_commit: Option<&str>,
+    ) -> String {
+        compute_cache_key(
+            commit,
+            enclaveos,
+            procfile,
+            e2e,
+            locksmith,
+            &[],
+            framework_commit,
+        )
+    }
+
     #[test]
     fn test_cache_key_deterministic() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, &[]);
-        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, &[]);
+        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
+        let key2 = cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 64); // SHA256 hex
     }
 
     #[test]
     fn test_cache_key_changes_with_commit() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, &[]);
-        let key2 = compute_cache_key("def456", "enclave-v1", "run: /app", false, false, &[]);
+        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
+        let key2 = cache_key("def456", "enclave-v1", "run: /app", false, false, None);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_enclaveos() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, &[]);
-        let key2 = compute_cache_key("abc123", "enclave-v2", "run: /app", false, false, &[]);
+        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
+        let key2 = cache_key("abc123", "enclave-v2", "run: /app", false, false, None);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_procfile() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, &[]);
-        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /other", false, false, &[]);
+        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
+        let key2 = cache_key("abc123", "enclave-v1", "run: /other", false, false, None);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_e2e() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, &[]);
-        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", true, false, &[]);
+        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
+        let key2 = cache_key("abc123", "enclave-v1", "run: /app", true, false, None);
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_locksmith() {
-        let key1 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, false, &[]);
-        let key2 = compute_cache_key("abc123", "enclave-v1", "run: /app", false, true, &[]);
+        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, false, None);
+        let key2 = cache_key("abc123", "enclave-v1", "run: /app", false, true, None);
         assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_cache_key_changes_with_framework_commit() {
+        let key1 = cache_key(
+            "abc123",
+            "enclave-v1",
+            "run: /app",
+            false,
+            false,
+            Some("1111111111111111111111111111111111111111"),
+        );
+        let key2 = cache_key(
+            "abc123",
+            "enclave-v1",
+            "run: /app",
+            false,
+            false,
+            Some("2222222222222222222222222222222222222222"),
+        );
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_framework_commit_is_required_only_for_caddy_mode() {
+        assert_eq!(framework_commit_for_mode("steve", None).unwrap(), None);
+        assert_eq!(framework_commit_for_mode("disabled", None).unwrap(), None);
+
+        let commit = "ABCDEF0123456789ABCDEF0123456789ABCDEF01";
+        assert_eq!(
+            framework_commit_for_mode("caddy", Some(commit)).unwrap(),
+            Some(commit.to_ascii_lowercase())
+        );
+        assert!(framework_commit_for_mode("caddy", None).is_err());
+        assert!(framework_commit_for_mode("caddy", Some("test-sha")).is_err());
     }
 
     // --- BuilderSizesConfig ---
@@ -1492,6 +1584,9 @@ mod tests {
             ports: vec![],
             http_port: None,
             e2e: false,
+            e2e_mode: "disabled".to_string(),
+            domain: None,
+            framework_commit: None,
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -1573,6 +1668,15 @@ mod tests {
             "should pass manifest to helper"
         );
         assert!(
+            userdata.contains("E2E_MODE=\"disabled\"")
+                && userdata.contains("CAUTION_E2E_MODE=\"$E2E_MODE\""),
+            "should pass e2e mode to helper"
+        );
+        assert!(
+            userdata.contains("DOMAIN=\"\"") && userdata.contains("CAUTION_DOMAIN=\"$DOMAIN\""),
+            "should pass HTTP domain to helper"
+        );
+        assert!(
             userdata.contains("NO_CACHE=\"true\"")
                 && userdata.contains("CAUTION_NO_CACHE=\"$NO_CACHE\""),
             "should pass no_cache to helper"
@@ -1630,6 +1734,9 @@ mod tests {
             ports: vec![],
             http_port: None,
             e2e: false,
+            e2e_mode: "disabled".to_string(),
+            domain: None,
+            framework_commit: None,
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -1683,6 +1790,9 @@ mod tests {
             ports: vec![],
             http_port: None,
             e2e: false,
+            e2e_mode: "disabled".to_string(),
+            domain: None,
+            framework_commit: None,
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -1735,6 +1845,9 @@ mod tests {
             ports: vec![],
             http_port: None,
             e2e: false,
+            e2e_mode: "disabled".to_string(),
+            domain: None,
+            framework_commit: None,
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -1795,6 +1908,9 @@ mod tests {
             ports: vec![],
             http_port: None,
             e2e: false,
+            e2e_mode: "disabled".to_string(),
+            domain: None,
+            framework_commit: None,
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -1851,6 +1967,9 @@ mod tests {
             ports: vec![],
             http_port: None,
             e2e: false,
+            e2e_mode: "disabled".to_string(),
+            domain: None,
+            framework_commit: None,
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -1904,6 +2023,9 @@ mod tests {
             ports: vec![],
             http_port: None,
             e2e: false,
+            e2e_mode: "disabled".to_string(),
+            domain: None,
+            framework_commit: None,
             locksmith: false,
             egress,
             e2e_cors_origins: None,
@@ -1941,5 +2063,54 @@ mod tests {
         .unwrap();
         assert!(script.contains("EGRESS=\"true\""));
         assert!(script.contains("CAUTION_EGRESS=\"$EGRESS\""));
+    }
+
+    #[test]
+    fn test_caddy_userdata_pins_platform_commit_in_manifest() {
+        let config = BuilderConfig {
+            ami_id: "ami-test".to_string(),
+            security_group_id: "sg-test".to_string(),
+            subnet_id: "subnet-test".to_string(),
+            instance_profile: "profile-test".to_string(),
+            region: "us-west-2".to_string(),
+            timeout_secs: 1200,
+            eif_s3_bucket: "test-bucket".to_string(),
+            git_hostname: "git.example.com".to_string(),
+            additional_instance_tags: Vec::new(),
+        };
+        let platform_commit = "0123456789abcdef0123456789abcdef01234567";
+        let mut request = make_test_build_request_with_egress(true);
+        request.e2e_mode = "caddy".to_string();
+        request.domain = Some("app.example.com".to_string());
+        request.ports = vec![8080];
+        request.http_port = Some(8080);
+        request.framework_commit = Some(platform_commit.to_string());
+
+        let userdata = generate_builder_userdata(
+            Uuid::new_v4(),
+            &config,
+            &request,
+            "eifs/test.eif",
+            "builds/test/remote-build-helper",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            Some(platform_commit.to_string()),
+        )
+        .unwrap();
+
+        assert!(userdata.contains("E2E_MODE=\"caddy\""));
+        assert!(userdata.contains("DOMAIN=\"app.example.com\""));
+        assert!(userdata.contains(&format!("\"commit\":\"{platform_commit}\"")));
+        assert!(
+            generate_builder_userdata(
+                Uuid::new_v4(),
+                &config,
+                &request,
+                "eifs/test.eif",
+                "builds/test/remote-build-helper",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                None,
+            )
+            .is_err()
+        );
     }
 }

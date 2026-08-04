@@ -47,3 +47,8 @@ reqwest = { workspace = true }
 # CBOR for attestation parsing
 serde_cbor = "0.11"
 base64 = { workspace = true }
+
+[dev-dependencies]
+bootproof-sdk = { git = "https://git.distrust.co/public/bootproof.git" }
+coset = "0.3"
+rand = { workspace = true }

@@ -89,8 +89,20 @@ async fn main() -> Result<()> {
     let output_eif = PathBuf::from(env_required("CAUTION_OUTPUT_EIF")?);
     let output_pcrs = PathBuf::from(env_required("CAUTION_OUTPUT_PCRS")?);
     let e2e = env_flag("CAUTION_E2E");
+    let e2e_mode = std::env::var("CAUTION_E2E_MODE").unwrap_or_else(|_| {
+        if e2e {
+            "steve".to_string()
+        } else {
+            "disabled".to_string()
+        }
+    });
+    let domain = std::env::var("CAUTION_DOMAIN")
+        .ok()
+        .filter(|s| !s.is_empty());
     let locksmith = env_flag("CAUTION_LOCKSMITH");
-    let e2e_cors_origins = std::env::var("CAUTION_CORS_ORIGINS").ok().filter(|s| !s.is_empty());
+    let e2e_cors_origins = std::env::var("CAUTION_CORS_ORIGINS")
+        .ok()
+        .filter(|s| !s.is_empty());
     let egress = env_flag("CAUTION_EGRESS");
     let no_cache = env_flag("CAUTION_NO_CACHE");
     let ports = ports_from_env();
@@ -127,8 +139,9 @@ async fn main() -> Result<()> {
     let run_command = manifest.run_command.clone();
     let metadata = manifest.metadata.clone();
 
-    let builder = EnclaveBuilder::new(enclave_source, enclave_version, framework_source, &work_dir)?
-        .with_no_cache(no_cache);
+    let builder =
+        EnclaveBuilder::new(enclave_source, enclave_version, framework_source, &work_dir)?
+            .with_no_cache(no_cache);
 
     let user_image = UserImage {
         reference: image_ref,
@@ -147,6 +160,8 @@ async fn main() -> Result<()> {
                 &ports,
                 http_port,
                 e2e,
+                &e2e_mode,
+                domain.as_deref(),
                 locksmith,
                 e2e_cors_origins,
                 egress,
@@ -166,6 +181,8 @@ async fn main() -> Result<()> {
                 &ports,
                 http_port,
                 e2e,
+                &e2e_mode,
+                domain.as_deref(),
                 locksmith,
                 e2e_cors_origins,
                 egress,

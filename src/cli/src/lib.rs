@@ -74,6 +74,18 @@ const PGP_PUBLIC_KEY_ARMOR_BEGIN: &str = "-----BEGIN PGP PUBLIC KEY BLOCK-----";
 const PGP_PUBLIC_KEY_ARMOR_END: &str = "-----END PGP PUBLIC KEY BLOCK-----";
 const PGP_PRIVATE_KEY_ARMOR_BEGIN: &str = "-----BEGIN PGP PRIVATE KEY BLOCK-----";
 
+fn resolve_reproduction_e2e_mode(
+    config: Option<&caution_config::E2eEncryption>,
+    manifest_has_steve: bool,
+) -> Option<caution_config::E2eMode> {
+    match config {
+        Some(config) if config.mode.is_some() || config.enabled.is_some() => {
+            config.effective_mode()
+        }
+        _ => manifest_has_steve.then_some(caution_config::E2eMode::Steve),
+    }
+}
+
 #[derive(Debug)]
 enum SshSignedRequestErrorKind {
     PublicKeyForIdentity,
@@ -5467,14 +5479,19 @@ enclave "default" {{
             .map(|http| http.port);
         output::verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
 
+        let domain = default_enclave
+            .and_then(|config| config.network.as_ref())
+            .and_then(|network| network.http.as_ref())
+            .and_then(|http| http.domain.clone());
+
         let e2e_config = default_enclave
             .and_then(|e| e.network.as_ref())
             .and_then(|n| n.http.as_ref())
             .and_then(|h| h.e2e_encryption.as_ref());
 
-        let e2e = e2e_config
-            .and_then(|ee| ee.enabled)
-            .unwrap_or(false);
+        let e2e_mode = e2e_config.and_then(|config| config.effective_mode());
+        let e2e = e2e_mode == Some(caution_config::E2eMode::Steve);
+        let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
         output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = cfg.has_vault_env();
@@ -5502,6 +5519,8 @@ enclave "default" {{
                 &ports,
                 http_port,
                 e2e,
+                e2e_mode_value,
+                domain.as_deref(),
                 locksmith,
                 e2e_cors_origins,
                 egress,
@@ -5841,7 +5860,7 @@ enclave "default" {{
         };
         output::verbose(self.verbose, &format!("Ports: {:?}", ports));
 
-        let http_port = {
+        let http_config = {
             let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
             self.read_config_from_dir(config_dir)
                 .ok()
@@ -5851,34 +5870,22 @@ enclave "default" {{
                 })
                 .and_then(|config| config.network)
                 .and_then(|network| network.http)
-                .map(|http| http.port)
         };
+        let http_port = http_config.as_ref().map(|http| http.port);
         output::verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
 
-        let e2e_config = {
-            let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
-            self.read_config_from_dir(config_dir)
-                .ok()
-                .and_then(|cfg| {
-                    cfg.enclave
-                        .and_then(|e| e.into_iter().next().map(|(_, v)| v))
-                })
-                .and_then(|config| config.network)
-                .and_then(|network| network.http)
-                .and_then(|http| http.e2e_encryption)
-        };
+        let domain = http_config.as_ref().and_then(|http| http.domain.clone());
+        let e2e_config = http_config
+            .as_ref()
+            .and_then(|http| http.e2e_encryption.clone());
 
-        let e2e = {
-            e2e_config
-                .as_ref()
-                .and_then(|e2e| e2e.enabled)
-                .unwrap_or_else(|| {
-                    external_manifest
-                        .as_ref()
-                        .and_then(|manifest| manifest.steve_commit.as_ref())
-                        .is_some()
-                })
-        };
+        let manifest_has_steve = external_manifest
+            .as_ref()
+            .and_then(|manifest| manifest.steve_commit.as_ref())
+            .is_some();
+        let e2e_mode = resolve_reproduction_e2e_mode(e2e_config.as_ref(), manifest_has_steve);
+        let e2e = e2e_mode == Some(caution_config::E2eMode::Steve);
+        let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
         output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = if let Some(ref app_dir) = app_source_dir {
@@ -5944,6 +5951,8 @@ enclave "default" {{
                     &ports,
                     http_port,
                     e2e,
+                    e2e_mode_value,
+                    domain.as_deref(),
                     locksmith,
                     e2e_cors_origins,
                     egress,
@@ -5964,6 +5973,8 @@ enclave "default" {{
                     &ports,
                     http_port,
                     e2e,
+                    e2e_mode_value,
+                    domain.as_deref(),
                     locksmith,
                     e2e_cors_origins,
                     egress,
@@ -8901,9 +8912,9 @@ mod tests {
         normalize_keyring, parse_env_assignments, prepare_pgp_public_key_for_upload,
         prompt_line_from, prompt_optional_line_from, resolve_local_build_command_from_dir,
         resolve_login_username, resolve_procfile_build_command, resolve_quorum_parameters,
-        resolve_register_username, validate_global_qr,
+        resolve_register_username, resolve_reproduction_e2e_mode, validate_global_qr,
     };
-    use caution_config::ConfigurationFile;
+    use caution_config::{ConfigurationFile, E2eEncryption, E2eMode};
     use clap::Parser;
     use keymaker_models::generate_quorum::GenerateQuorumResponse;
     use openpgp::cert::prelude::*;
@@ -8913,6 +8924,32 @@ mod tests {
     use std::io::Cursor;
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    #[test]
+    fn reproduction_e2e_mode_preserves_explicit_config_and_manifest_fallback() {
+        let config = |enabled, mode| E2eEncryption {
+            enabled,
+            mode,
+            cors_origins: None,
+        };
+        let disabled = config(Some(false), None);
+        let steve = config(Some(true), None);
+        let caddy = config(Some(false), Some(E2eMode::Caddy));
+
+        assert_eq!(
+            resolve_reproduction_e2e_mode(None, true),
+            Some(E2eMode::Steve)
+        );
+        assert_eq!(resolve_reproduction_e2e_mode(Some(&disabled), true), None);
+        assert_eq!(
+            resolve_reproduction_e2e_mode(Some(&steve), false),
+            Some(E2eMode::Steve)
+        );
+        assert_eq!(
+            resolve_reproduction_e2e_mode(Some(&caddy), true),
+            Some(E2eMode::Caddy)
+        );
+    }
 
     fn test_api_client() -> ApiClient {
         ApiClient {

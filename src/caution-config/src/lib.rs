@@ -90,12 +90,41 @@ pub struct TrafficRule {
     pub ip_protocol: Option<String>,
 }
 
+/// The TLS/E2E ingress mode selected by `e2e_encryption { mode = ... }`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum E2eMode {
+    Steve,
+    Caddy,
+}
+
+impl E2eMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            E2eMode::Steve => "steve",
+            E2eMode::Caddy => "caddy",
+        }
+    }
+}
+
 /// The `e2e_encryption { }` block inside HTTP config.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct E2eEncryption {
+    /// Legacy boolean switch. If `mode` is omitted, `enabled = true` means
+    /// deprecated `mode = "steve"`; `enabled = false` means no E2E mode.
     pub enabled: Option<bool>,
+    pub mode: Option<E2eMode>,
     pub cors_origins: Option<Vec<String>>,
+}
+
+impl E2eEncryption {
+    pub fn effective_mode(&self) -> Option<E2eMode> {
+        self.mode.or_else(|| match self.enabled {
+            Some(true) => Some(E2eMode::Steve),
+            _ => None,
+        })
+    }
 }
 
 /// The `http { }` block inside network config.
@@ -614,6 +643,7 @@ impl ConfigurationFile {
 
         let e2e_encryption = procfile_e2e.map(|enabled| E2eEncryption {
             enabled: Some(enabled),
+            mode: None,
             cors_origins: None,
         });
 
@@ -871,6 +901,7 @@ mod tests {
                             port: 8000,
                             e2e_encryption: Some(E2eEncryption {
                                 enabled: Some(true),
+                                mode: None,
                                 cors_origins: Some(vec!["*".into()]),
                             }),
                         }),
@@ -2465,6 +2496,21 @@ caution {
         let hcl = r#"enabled = true unknown = 1"#;
         let err = hcl::from_str::<DebugConfig>(hcl).unwrap_err();
         assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn test_e2e_encryption_modes_and_legacy_enabled() {
+        let steve = hcl::from_str::<E2eEncryption>(r#"mode = "steve""#).unwrap();
+        assert_eq!(steve.effective_mode(), Some(E2eMode::Steve));
+
+        let caddy = hcl::from_str::<E2eEncryption>(r#"mode = "caddy""#).unwrap();
+        assert_eq!(caddy.effective_mode(), Some(E2eMode::Caddy));
+
+        let legacy_enabled = hcl::from_str::<E2eEncryption>(r#"enabled = true"#).unwrap();
+        assert_eq!(legacy_enabled.effective_mode(), Some(E2eMode::Steve));
+
+        let legacy_disabled = hcl::from_str::<E2eEncryption>(r#"enabled = false"#).unwrap();
+        assert_eq!(legacy_disabled.effective_mode(), None);
     }
 
     #[test]

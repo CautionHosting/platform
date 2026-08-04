@@ -18,6 +18,9 @@ FROM stagex/user-linux-nitro@sha256:aa1006d91a7265b33b86160031daad2fdf54ec2663ed
 FROM stagex/user-nit@sha256:60b6eef4534ea6ea78d9f29e4c7feb27407b615424f20ad8943d807191688be7 AS nit
 FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769ff3b37239f3d0 AS git
 FROM stagex/core-curl@sha256:bc8bab43d96a9167fbb85022ea773644a45ef335e7a9b747f203078973fa988e AS curl
+# {CADDY
+FROM stagex/user-caddy@sha256:c456c636b92d84d30b2f195a15c110909da0b27a73b65224a364631c09ea28c2 AS caddy
+# }CADDY
 
 # {STEVE
 FROM pallet-rust AS steve-builder
@@ -134,11 +137,17 @@ COPY --from=steve-builder /binaries/steve /build/binaries/steve
 COPY --from=locksmith-builder /binaries/locksmithd /build/binaries/locksmithd
 COPY --from=locksmith-builder /binaries/locksmith-oneshot /build/binaries/locksmith-oneshot
 # }LOCKSMITH
+# {CADDY
+COPY --from=caddy /usr/bin/caddy /build/binaries/caddy
+# }CADDY
 
 COPY --from=linux-nitro /bzImage /build/kernel/bzImage
 COPY --from=linux-nitro /linux.config /build/kernel/linux.config
 
 COPY run.sh /build/run.sh
+# {CADDY
+COPY caddy-certfp.sh /build/caddy-certfp.sh
+# }CADDY
 
 COPY enclave/rootfs/udhcpc-script.sh /build/udhcpc-script.sh
 
@@ -189,6 +198,17 @@ RUN mkdir -p /build/initramfs/usr/bin && \
     cp /build/binaries/locksmith-oneshot /build/initramfs/usr/bin/locksmith-oneshot && \
     chmod +x /build/initramfs/usr/bin/locksmith-oneshot
 # }LOCKSMITH
+# {CADDY
+RUN mkdir -p /build/initramfs/usr/bin /build/initramfs/usr/lib && \
+    cp /build/binaries/caddy /build/initramfs/caddy && \
+    chmod +x /build/initramfs/caddy && \
+    cp /usr/bin/openssl /build/initramfs/usr/bin/openssl && \
+    chmod +x /build/initramfs/usr/bin/openssl && \
+    cp /usr/lib/libssl.so.3 /build/initramfs/usr/lib/libssl.so.3 && \
+    cp /usr/lib/libcrypto.so.3 /build/initramfs/usr/lib/libcrypto.so.3 && \
+    cp /build/caddy-certfp.sh /build/initramfs/caddy-certfp.sh && \
+    chmod +x /build/initramfs/caddy-certfp.sh
+# }CADDY
 
 RUN if [ -f /build/manifest.json ]; then \
         cp /build/manifest.json /build/initramfs/manifest.json; \
@@ -207,6 +227,12 @@ RUN if [ -f /bin/busybox ]; then \
         ln -sf busybox chmod && \
         ln -sf busybox ip && \
         ln -sf busybox grep && \
+# {CADDY
+        ln -sf busybox cut && \
+        ln -sf busybox tr && \
+        ln -sf busybox mv && \
+        ln -sf busybox rm && \
+# }CADDY
         ln -sf busybox udhcpc; \
     fi
 
@@ -225,6 +251,11 @@ RUN if [ -f /lib/ld-musl-x86_64.so.1 ]; then \
 RUN if [ -f /etc/ssl/certs/ca-certificates.crt ]; then \
         cp /etc/ssl/certs/ca-certificates.crt /build/initramfs/etc/ssl/certs/ca-certificates.crt; \
     fi
+
+# {CADDY
+RUN /bin/busybox chroot /build/initramfs /caddy version && \
+    /bin/busybox chroot /build/initramfs /usr/bin/openssl version
+# }CADDY
 
 RUN find /build/initramfs -exec touch -hcd "@0" {} +
 
