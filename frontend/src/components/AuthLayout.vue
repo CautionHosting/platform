@@ -20,7 +20,10 @@
 
     <div class="auth-split">
       <!-- Left Panel - Dark -->
-      <div class="left-panel">
+      <div
+        class="left-panel"
+        :class="{ 'left-panel--centered': centerLeftPanel }"
+      >
         <div class="left-content">
           <slot name="left-panel">
             <h1 class="info-title">Enclaves you can verify</h1>
@@ -146,6 +149,10 @@ export default {
     InfoIcon,
   },
   props: {
+    centerLeftPanel: {
+      type: Boolean,
+      default: false,
+    },
     loginLoading: {
       type: Boolean,
       default: false,

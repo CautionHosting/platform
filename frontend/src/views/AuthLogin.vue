@@ -3,44 +3,49 @@
 
 <template>
   <AuthLayout
+    center-left-panel
     :login-loading="loginLoading"
     @login="handleLogin"
   >
-    <template #access-text>
-      Log in with your passkey on the right. New to Caution?
-      Create an account with an access code <a href="/">here</a>.
+    <template #left-panel>
+      <h1 class="info-title login-signup-prompt">
+        New here?<br />
+        <a href="/">Create an account</a>.
+      </h1>
     </template>
 
     <template #right-panel>
       <div v-if="!authenticated" class="login-container">
         <h2 class="login-title">Welcome back</h2>
 
-        <div class="register-field">
-          <input
-            v-model="username"
-            type="text"
-            placeholder="Username (optional)"
-            class="register-input"
-            autocomplete="username webauthn"
-            data-testid="login-username"
+        <div class="register-form register-form--compact">
+          <div class="register-field">
+            <input
+              v-model="username"
+              type="text"
+              placeholder="Enter your username (optional)"
+              class="register-input"
+              autocomplete="username webauthn"
+              data-testid="login-username"
+              :disabled="loading"
+              @keyup.enter="() => handleLogin(username)"
+            />
+          </div>
+
+          <button
+            @click="() => handleLogin(username)"
             :disabled="loading"
-            @keyup.enter="() => handleLogin(username)"
-          />
+            class="btn-dark btn register-submit register-submit--full"
+            data-testid="login-submit"
+          >
+            <svg class="btn-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
+            {{ loading ? "Authenticating..." : "Log in with passkey" }}
+          </button>
         </div>
 
-        <button
-          @click="() => handleLogin(username)"
-          :disabled="loading"
-          class="btn-dark btn login-btn"
-          data-testid="login-submit"
-        >
-          <svg class="btn-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
-          {{ loading ? "Authenticating..." : "Log in with passkey" }}
-        </button>
-
-        <p class="login-prompt">
-          New here?
-          <a href="/" class="link-btn">Create an account</a>.
+        <p class="legacy-login-hint">
+          No username yet? Run <code>caution login</code> in the Caution CLI to
+          add one and log in.
         </p>
 
         <div class="login-messages">

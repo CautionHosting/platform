@@ -230,8 +230,9 @@ body.mobile-menu-active {
   height: 100%;
 }
 
-/* Shared dark button styles */
-.btn-dark {
+/* Shared pill button styles */
+.btn-dark,
+.btn-light {
   display: inline-flex;
   align-items: center;
   text-align: center;
@@ -242,57 +243,101 @@ body.mobile-menu-active {
   font-size: clamp(.95rem, 2vw, 1.015rem);
   font-weight: 400;
   font-family: inherit;
-  color: white;
+  color: var(--button-color);
   letter-spacing: 0.02em;
   padding: 10px 26px;
   border-radius: 60px;
-  background: linear-gradient(
+  background: var(--button-background);
+  border: var(--button-border);
+  outline: var(--button-outline);
+  outline-offset: 0px;
+  box-shadow: var(--button-shadow);
+  transition: all 0.3s ease;
+}
+
+.btn-dark {
+  --button-color: white;
+  --button-background: linear-gradient(
     180deg,
     rgba(55, 55, 55, 1) 0%,
     rgba(35, 35, 35, 1) 40%,
     rgba(25, 25, 25, 1) 100%
   );
-  border: 1.5px solid rgba(80, 80, 80, 0.6);
-  outline: 1px solid rgba(0, 0, 0, 0.8);
-  outline-offset: 0px;
-  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.08),
+  --button-border: 1.5px solid rgba(80, 80, 80, 0.6);
+  --button-outline: 1px solid rgba(0, 0, 0, 0.8);
+  --button-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.08),
     inset 0 0 20px 0 rgba(255, 255, 255, 0.03);
-  transition: all 0.3s ease;
-}
-
-.btn-dark::before {
-  content: "";
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 100%;
-  background: radial-gradient(
+  --button-shadow-hover: inset 0 1px 0 0 rgba(255, 255, 255, 0.12),
+    inset 0 0 20px 0 rgba(255, 255, 255, 0.05);
+  --button-highlight: radial-gradient(
     ellipse 75% 35% at center bottom,
     rgba(255, 255, 255, 0.2) 0%,
     rgba(255, 255, 255, 0.08) 25%,
     rgba(255, 255, 255, 0.02) 50%,
     transparent 70%
   );
-  pointer-events: none;
-  border-radius: 60px;
-  transition: background 0.3s ease;
-}
-
-.btn-dark:hover {
-  color: var(--color-pink);
-  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.12),
-    inset 0 0 20px 0 rgba(255, 255, 255, 0.05);
-}
-
-.btn-dark:hover::before {
-  background: radial-gradient(
+  --button-highlight-hover: radial-gradient(
     ellipse 75% 40% at center bottom,
     rgba(255, 255, 255, 0.22) 0%,
     rgba(255, 255, 255, 0.14) 25%,
     rgba(255, 255, 255, 0.04) 50%,
     transparent 70%
   );
+}
+
+.btn-light {
+  --button-color: var(--color-dark);
+  --button-background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 1) 0%,
+    rgba(248, 248, 248, 1) 40%,
+    rgba(238, 238, 238, 1) 100%
+  );
+  --button-border: 1.5px solid rgba(210, 210, 210, 0.8);
+  --button-outline: none;
+  --button-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.9),
+    inset 0 0 20px 0 rgba(0, 0, 0, 0.025);
+  --button-shadow-hover: inset 0 1px 0 0 rgba(255, 255, 255, 1),
+    inset 0 0 20px 0 rgba(0, 0, 0, 0.045);
+  --button-highlight: radial-gradient(
+    ellipse 75% 35% at center bottom,
+    rgba(0, 0, 0, 0.08) 0%,
+    rgba(0, 0, 0, 0.035) 25%,
+    rgba(0, 0, 0, 0.01) 50%,
+    transparent 70%
+  );
+  --button-highlight-hover: radial-gradient(
+    ellipse 75% 40% at center bottom,
+    rgba(0, 0, 0, 0.1) 0%,
+    rgba(0, 0, 0, 0.05) 25%,
+    rgba(0, 0, 0, 0.015) 50%,
+    transparent 70%
+  );
+}
+
+.btn-dark::before,
+.btn-light::before {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 100%;
+  background: var(--button-highlight);
+  pointer-events: none;
+  border-radius: 60px;
+  transition: background 0.3s ease;
+}
+
+.btn-dark:hover,
+.btn-light:hover {
+  color: var(--color-pink);
+  box-shadow: var(--button-shadow-hover);
+}
+
+.btn-dark:hover::before,
+.btn-light:hover::before {
+  background: var(--button-highlight-hover);
 }
 
 /* Nav CTA specific overrides */
@@ -310,15 +355,6 @@ body.mobile-menu-active {
 
 .btn:hover {
   color: var(--color-pink);
-}
-
-/* Login button - larger CTA */
-.login-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  padding: 9px 36px 10px 36px;
-  font-size: clamp(1rem, 1.8vw, 1.035rem);
 }
 
 /* Mobile Menu Button */
@@ -580,6 +616,7 @@ body.mobile-menu-active {
 .auth-split {
   display: flex;
   width: 100%;
+  min-height: max(100vh, 900px);
   overflow: hidden;
 }
 
@@ -596,6 +633,30 @@ body.mobile-menu-active {
   justify-content: flex-end;
   background: var(--color-dark);
   padding: 16.5rem 0 14rem 48px;
+}
+
+@media (min-width: 961px) {
+  .left-panel {
+    flex: 0 0 46%;
+  }
+
+  .right-panel {
+    flex: 1;
+  }
+
+  .left-panel.left-panel--centered {
+    align-items: center;
+    justify-content: flex-start;
+    padding-top: 0;
+    padding-bottom: 0;
+    padding-left: max(0px, calc((100vw - 1400px) / 2));
+  }
+
+  .left-panel--centered .left-content {
+    max-width: 500px;
+    padding-right: 0;
+    margin-top: 0;
+  }
 }
 
 .right-panel {
@@ -643,7 +704,8 @@ p.info,
 
 .info-title {
   font-weight: 600;
-  line-height: 1.15;
+  line-height: 1.25;
+  opacity: 0.9;
 }
 
 h2.info {
@@ -677,6 +739,50 @@ p.info a,
 p.info a:hover,
 .feature-list a:hover {
   color: var(--color-pink);
+}
+
+.access-code-copy {
+  max-width: 440px;
+  margin-bottom: 32px;
+  font-size: clamp(0.95rem, 1.5vw, 1.05rem);
+}
+
+.login-signup-prompt {
+  margin: 0;
+}
+
+.login-signup-prompt a {
+  color: inherit;
+  text-decoration: underline dotted;
+  transition: color 0.3s ease;
+}
+
+.login-signup-prompt a:hover {
+  color: var(--color-pink);
+}
+
+.access-code-cta {
+  height: 55px;
+  gap: 8px;
+  padding: 10px 30px 10px 32px;
+  font-size: 0.975rem;
+  opacity: 0.9;
+}
+
+.access-code-cta svg {
+  flex-shrink: 0;
+  position: relative;
+  top: 1px;
+  transition: transform var(--transition-base);
+}
+
+.access-code-cta:hover svg {
+  transform: translateX(3px);
+}
+
+.access-code-cta:hover {
+  color: var(--color-dark);
+  opacity: 1;
 }
 
 .feature-list .external-link {
@@ -870,6 +976,18 @@ p.info a:hover,
   text-align: left;
 }
 
+.register-form--compact {
+  max-width: 350px;
+}
+
+.register-form--compact .register-field {
+  height: 60px;
+}
+
+.register-form--compact .register-submit--full {
+  height: 55px;
+}
+
 /* Register Input Field */
 .register-field {
   display: flex;
@@ -879,7 +997,7 @@ p.info a:hover,
   padding: 4px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
   border: 1px solid #0f0f0f;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
   transition: border-color 0.2s ease;
 }
 
@@ -891,7 +1009,7 @@ p.info a:hover,
   flex: 1;
   border: none;
   background: transparent;
-  padding: 12px 18px 10px 24px;
+  padding: 12px 18px 12px 24px;
   font-size: 0.975rem;
   font-family: inherit;
   outline: none;
@@ -920,6 +1038,11 @@ p.info a:hover,
   margin: 24px auto 0;
 }
 
+.register-form > .register-submit--full {
+  width: 100%;
+  margin-top: 0;
+}
+
 .register-field .register-submit {
   margin: 0;
 }
@@ -935,7 +1058,7 @@ p.info a:hover,
   font-size: clamp(0.95rem, 1.5vw, 1.05rem);
   line-height: 1.5;
   color: oklch(44.4% 0.04 256.788);
-  margin: 12px auto 0 auto;
+  margin: 14px auto 0 auto;
   max-width: 375px;
 }
 
@@ -949,20 +1072,22 @@ p.info a:hover,
   color: var(--color-pink);
 }
 
-.cli-hint {
-  text-align: center;
-  font-size: clamp(0.85rem, 1.3vw, 0.95rem);
-  line-height: 1.5;
-  color: oklch(44.4% 0.04 256.788);
-  margin: 12px auto 0 auto;
+.legacy-login-hint {
   max-width: 375px;
+  margin: 14px auto 0 auto;
+  color: oklch(44.4% 0.04 256.788);
+  font-size: clamp(0.95rem, 1.5vw, 1.05rem);
+  line-height: 1.5;
+  text-align: center;
 }
 
-.cli-hint code {
-  font-weight: 500;
-  background: oklch(96% 0.005 256.788);
-  padding: 1px 5px;
-  border-radius: 4px;
+.legacy-login-hint code {
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: 600;
 }
 
 .link-btn {
@@ -1240,6 +1365,10 @@ p.info a:hover,
     padding: 11rem 0 11rem 40px;
   }
 
+  .left-panel.left-panel--centered {
+    padding-left: 124px;
+  }
+
   .right-panel {
     padding: 0 40px 0 0;
   }
@@ -1282,6 +1411,10 @@ p.info a:hover,
     padding: 132px 0 132px 40px;
   }
 
+  .left-panel.left-panel--centered {
+    padding-left: 40px;
+  }
+
   .right-panel {
     padding: 0 40px 0 0;
   }
@@ -1306,7 +1439,7 @@ p.info a:hover,
 
   p.info,
   .feature-list li {
-    font-size: clamp(1rem, 1.5vw, 1.095rem);
+    font-size: clamp(1.1rem, 1vw, 1.175rem);
   }
 
   .register-prompt,
@@ -1348,6 +1481,10 @@ p.info a:hover,
 
   .left-panel {
     padding: 124px 0 124px 32px;
+  }
+
+  .left-panel.left-panel--centered {
+    padding-left: 32px;
   }
 
   .right-panel {
@@ -1438,7 +1575,8 @@ p.info a:hover,
   }
 
   .info-title {
-    font-size: clamp(1.75rem, 6vw, 2.75rem);
+    font-size: clamp(1.75rem, 7vw, 2.75rem);
+    font-weight: 500;
   }
 
   .auth-split {
@@ -1454,9 +1592,13 @@ p.info a:hover,
     justify-content: flex-start;
   }
 
+  .left-panel.left-panel--centered {
+    justify-content: center;
+  }
+
   .right-panel {
     order: 1;
-    padding: 120px 24px 80px 24px;
+    padding: 130px 24px 80px 24px;
     align-items: center;
     justify-content: center;
   }
@@ -1468,9 +1610,22 @@ p.info a:hover,
     text-align: start;
   }
 
+  .left-panel--centered .left-content {
+    text-align: center;
+  }
+
+  .access-code-copy {
+    max-width: 550px;
+  }
+
+  .left-panel--centered .access-code-copy {
+    margin-right: auto;
+    margin-left: auto;
+  }
+
   .right-content {
     padding: 0;
-    max-width: 600px;
+    max-width: 500px;
   }
 
   .feature-list {

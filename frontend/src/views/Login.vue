@@ -3,15 +3,44 @@
 
 <template>
   <AuthLayout
+    center-left-panel
     :login-loading="loginLoading"
     @login="onHeaderLogin"
   >
-    <template #access-text>
-      Email
-      <a
-        href="mailto:info@caution.co?subject=Caution%20Early%20Access%20Inquiry&body=Hi%20Caution%20Team%2C%0A%0AI%20am%20interested%20in%20getting%20early%20access%20to%20Caution's%20managed%20services..."
-        >info@caution.co</a
-      > to request an access code.
+    <template #left-panel>
+      <template v-if="!isLoginMode">
+        <h1 class="info-title">Need an access code?</h1>
+        <p class="info access-code-copy">
+          Book 20 minutes with an engineer to discuss your deployment. You’ll get
+          answers, an access code, and clear next steps.
+        </p>
+        <a
+          class="btn-light btn access-code-cta"
+          href="https://cal.com/caution/get-access"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Book a call
+          <svg
+            aria-hidden="true"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M5 12h14" />
+            <path d="m13 6 6 6-6 6" />
+          </svg>
+        </a>
+      </template>
+      <h1 v-else class="info-title login-signup-prompt">
+        New here?<br />
+        <a href="/" @click.prevent="isLoginMode = false">Create an account</a>.
+      </h1>
     </template>
 
     <template #right-panel>
@@ -19,12 +48,12 @@
       <div v-if="!authenticated && !isLoginMode" class="form-container">
         <h2 class="form-title">Create an account</h2>
 
-        <div class="register-form">
+        <div class="register-form register-form--compact">
           <div class="register-field" :class="{ 'register-field--error': validationError && !status && !error }">
             <input
               v-model="username"
               type="text"
-              placeholder="Username"
+              placeholder="Choose a username"
               class="register-input"
               autocomplete="username"
               data-testid="register-username"
@@ -38,23 +67,24 @@
             <input
               v-model="alphaCode"
               type="text"
-              placeholder="Enter code"
+              placeholder="Enter access code"
               class="register-input"
               data-testid="register-code"
               :disabled="loading"
               @keyup.enter="onRegister"
               @input="validationError = false"
             />
-            <button
-              @click="onRegister"
-              :disabled="loading || !username.trim()"
-              class="btn-dark btn register-submit"
-              data-testid="register-submit"
-            >
-              <svg class="btn-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
-              {{ loading ? "Working..." : "Register with passkey" }}
-            </button>
           </div>
+
+          <button
+            @click="onRegister"
+            :disabled="loading || !username.trim()"
+            class="btn-dark btn register-submit register-submit--full"
+            data-testid="register-submit"
+          >
+            <svg class="btn-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
+            {{ loading ? "Working..." : "Register with passkey" }}
+          </button>
 
           <p v-if="activeLegalDocuments.length" class="tos-notice">
             By creating an account, you agree to the Caution
@@ -88,15 +118,15 @@
       </div>
 
       <!-- Login Form -->
-      <div v-else-if="!authenticated && isLoginMode" class="form-container">
-        <h2 class="form-title">Log in</h2>
+      <div v-else-if="!authenticated && isLoginMode" class="login-container">
+        <h2 class="login-title">Welcome back</h2>
 
-        <div class="register-form">
+        <div class="register-form register-form--compact">
           <div class="register-field">
             <input
               v-model="loginUsername"
               type="text"
-              placeholder="Username"
+              placeholder="Enter your username"
               class="register-input"
               autocomplete="username"
               required
@@ -108,23 +138,19 @@
           <button
             @click="onLogin"
             :disabled="loginLoading || !loginUsername.trim()"
-            class="btn-dark btn register-submit"
+            class="btn-dark btn register-submit register-submit--full"
           >
             <svg class="btn-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>
             {{ loginLoading ? "Working..." : "Log in with passkey" }}
           </button>
-
-          <p class="cli-hint">
-            Don't have a username? Run <code>caution login</code> from the CLI to get started.
-          </p>
-
-          <p class="register-prompt account-switch">
-            Don't have an account?
-            <a href="/register" @click.prevent="isLoginMode = false" class="link-btn">Register</a>.
-          </p>
         </div>
 
-        <div class="messages-container">
+        <p class="legacy-login-hint">
+          No username yet? Run <code>caution login</code> in the Caution CLI to
+          add one and log in.
+        </p>
+
+        <div class="login-messages">
           <div v-if="status" class="status-message">
             {{ status }}
           </div>
@@ -146,6 +172,22 @@
 import { ref, onMounted } from "vue";
 import AuthLayout from "../components/AuthLayout.vue";
 import { useWebAuthn } from "../composables/useWebAuthn.js";
+
+// Keeps the complete registration layout visible when the Vite development
+// server is running without the API. Production always uses the API response
+// so the notice remains aligned with the documents recorded at signup.
+const developmentLegalDocuments = [
+  {
+    document_type: "privacy_notice",
+    title: "Privacy Notice",
+    url: "https://caution.co/privacy.html",
+  },
+  {
+    document_type: "terms_of_service",
+    title: "Terms Of Service",
+    url: "https://caution.co/terms.html",
+  },
+];
 
 export default {
   name: "Login",
@@ -186,12 +228,16 @@ export default {
       // them backed by the same source instead of hardcoding link text here.
       try {
         const response = await fetch("/api/legal/active-documents");
-        if (response.ok) {
-          activeLegalDocuments.value = await response.json();
+        if (!response.ok) {
+          throw new Error(`Failed to load legal documents: ${response.status}`);
         }
+
+        activeLegalDocuments.value = await response.json();
       } catch {
-        // Leave activeLegalDocuments empty; the notice paragraph just
-        // won't render rather than showing broken/stale links.
+        if (import.meta.env.DEV) {
+          activeLegalDocuments.value = developmentLegalDocuments;
+        }
+        // In production, leave the list empty rather than showing stale links.
       }
     });
 
