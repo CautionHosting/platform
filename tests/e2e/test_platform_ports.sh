@@ -417,7 +417,7 @@ PLAINTEXT_BODY="$WORK_DIR/plaintext-body.json"
 PLAINTEXT_HEADERS="$WORK_DIR/plaintext-headers.txt"
 PLAINTEXT_STATUS=$(curl -sS --connect-timeout 5 --max-time 10 \
     -D "$PLAINTEXT_HEADERS" -o "$PLAINTEXT_BODY" -w "%{http_code}" \
-    "http://$APP_IP/?fail_closed=1" || true)
+    "http://$APP_IP/plaintext-probe?fail_closed=1" || true)
 
 if [ "$PLAINTEXT_STATUS" != "403" ] ||
     [ "$(tr -d '\r\n' < "$PLAINTEXT_BODY")" != '{"error":"e2e_required"}' ] ||
@@ -466,7 +466,7 @@ if ! $CADDY_E2P_READY; then
     echo "${CADDY_E2P_STATUS:-}"
     cat "$CADDY_E2P_RESPONSE" 2>/dev/null || true
     echo ""
-    step_fail "Caddy E2P v2 route"
+    step_fail "Caddy E2P v2 parity"
 fi
 
 step_pass "Health, attestation, fail-closed routing, and Caddy E2P parity"

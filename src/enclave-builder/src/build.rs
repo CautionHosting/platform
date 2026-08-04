@@ -398,8 +398,8 @@ async fn render_run_sh_template(
         if !egress {
             anyhow::bail!("tls mode requires egress for ACME certificate issuance");
         }
-        let port = http_port
-            .context("tls mode requires http_port so enclave Caddy can reach the app")?;
+        let port =
+            http_port.context("tls mode requires http_port so enclave Caddy can reach the app")?;
         if !ports.contains(&port) {
             anyhow::bail!("http_port {} must also be listed in ports", port);
         }
@@ -1094,6 +1094,7 @@ mod tests {
             "X25519",
             true,
             None,
+            "http",
             false,
             None,
             false,

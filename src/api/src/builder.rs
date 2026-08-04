@@ -1504,7 +1504,7 @@ mod tests {
         assert_ne!(fail_closed, fallback);
         assert_eq!(
             fail_closed,
-            "3466c2a820bb04f305bb632ea37b16cccbb8f596979e09a3a45d6f497621396d"
+            "36ed62e47d1cde90321166fa213b60a55da0dfebd45728bb0f8599b582f905aa"
         );
 
         let plain_default = compute_cache_key(
@@ -1534,7 +1534,7 @@ mod tests {
         assert_eq!(plain_default, plain_ignored);
         assert_eq!(
             plain_default,
-            "2787fa18ac0e412027bf3cb01cdb7eb3505e81c1e7a22790f6e43cbe45b90e9e"
+            "f0b5c8c963ebbc0bba86733210780a95d0be45efbca04891ed08314b2bead71f"
         );
     }
 
