@@ -12,6 +12,36 @@ DB_VOLUME := caution-postgres-data
 CAUTION_DATA_DIR ?= $(PWD)/caution-cache
 CONTAINER_DATA_DIR := /var/cache/caution
 
+define refuse_mixed_service_management
+	@if command -v systemctl >/dev/null 2>&1; then \
+		active_services=""; \
+		for service in $(2); do \
+			if systemctl --user is-active --quiet "$$service"; then \
+				active_services="$$active_services $$service"; \
+			fi; \
+		done; \
+		if [ -n "$$active_services" ]; then \
+			echo "Error: refusing to replace containers managed by active systemd services:$$active_services"; \
+			echo "Rebuild the image, then run: systemctl --user restart caution-$(1).service"; \
+			exit 1; \
+		fi; \
+	fi
+endef
+
+.PHONY: guard-direct-api guard-direct-gateway guard-direct-email guard-direct-metering
+
+guard-direct-api:
+	$(call refuse_mixed_service_management,api,caution-api.service caution-gateway.service)
+
+guard-direct-gateway:
+	$(call refuse_mixed_service_management,gateway,caution-api.service caution-gateway.service)
+
+guard-direct-email:
+	$(call refuse_mixed_service_management,email,caution-email.service)
+
+guard-direct-metering:
+	$(call refuse_mixed_service_management,metering,caution-metering.service)
+
 
 
 ifdef NOCACHE
@@ -431,7 +461,7 @@ migrate: postgres
 	done
 	@echo "Migrations complete"
 
-run-api: network postgres
+run-api: guard-direct-api network postgres
 	@docker rm -f api 2>/dev/null || true
 	@mkdir -p $(CAUTION_DATA_DIR)/git-repos $(CAUTION_DATA_DIR)/build $(CAUTION_DATA_DIR)/terraform
 	@docker run -d \
@@ -452,7 +482,7 @@ run-api: network postgres
 		caution-api
 	@echo "API service started (internal port 8080)"
 
-run-gateway: network
+run-gateway: guard-direct-gateway network
 	@docker rm -f gateway 2>/dev/null || true
 	@mkdir -p $(CAUTION_DATA_DIR)/git-repos
 	@docker run -d \
@@ -466,7 +496,7 @@ run-gateway: network
 		caution-gateway
 	@echo "Gateway started on port 8000 (HTTP) and 2222 (SSH)"
 
-run-email: network
+run-email: guard-direct-email network
 	@docker rm -f email 2>/dev/null || true
 	@docker run -d \
 		--name email \
@@ -477,7 +507,7 @@ run-email: network
 		caution-email
 	@echo "Email service started on http://localhost:8082"
 
-run-metering: network postgres
+run-metering: guard-direct-metering network postgres
 	@docker rm -f metering 2>/dev/null || true
 	@docker run -d \
 		--name metering \
