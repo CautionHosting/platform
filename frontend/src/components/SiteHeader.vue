@@ -101,7 +101,9 @@
           <a href="/login" @click.prevent="$emit('login')" class="nav-link"
             >Log in</a
           >
-          <a href="/" class="btn-dark nav-cta"> Get started </a>
+          <a href="https://caution.co/contact.html" class="btn-dark nav-cta">
+            Talk to an Engineer
+          </a>
         </div>
       </nav>
 
@@ -150,7 +152,9 @@
           <a href="https://caution.co/pricing.html" class="mobile-menu-link">Pricing</a>
         </div>
         <div class="mobile-menu-footer">
-          <a href="/" class="mobile-menu-cta">Get started</a>
+          <a href="https://caution.co/contact.html" class="mobile-menu-cta">
+            Talk to an Engineer
+          </a>
           <a href="https://caution.co/platform-tour.html" class="cta-link">
             Watch demo
             <svg
