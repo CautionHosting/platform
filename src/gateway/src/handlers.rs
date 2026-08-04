@@ -3259,6 +3259,7 @@ mod login_begin_tests {
         AppState {
             db,
             webauthn,
+            relying_party_id: "example.com".to_string(),
             api_service_url: String::new(),
             metering_service_url: String::new(),
             http_client: reqwest::Client::new(),

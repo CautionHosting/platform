@@ -381,8 +381,11 @@ async fn wait_for_health(public_ip: &str, timeout_secs: u64) -> Result<(), Strin
         let result = client.get(&url).send().await;
 
         match result {
-            Ok(_resp) => {
+            Ok(resp) if resp.status().is_success() => {
                 return Ok(());
+            }
+            Ok(resp) => {
+                tracing::debug!("Health endpoint returned status {}", resp.status());
             }
             Err(e) => {
                 tracing::debug!("Health endpoint not ready: {}", e);
@@ -398,6 +401,37 @@ async fn wait_for_health(public_ip: &str, timeout_secs: u64) -> Result<(), Strin
 
         let delay = std::cmp::min(2u64.pow(attempt.min(4)), 30);
         tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+    }
+}
+
+#[cfg(test)]
+mod deployment_health_tests {
+    use super::wait_for_health;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn health_check_rejects_error_responses() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let error = wait_for_health(&address.to_string(), 0)
+            .await
+            .unwrap_err();
+        assert!(error.contains("did not become healthy"));
+        server.await.unwrap();
     }
 }
 
@@ -2333,7 +2367,17 @@ async fn deploy_logic(
     let e2e_config = ec_network
         .and_then(|n| n.http.as_ref())
         .and_then(|h| h.e2e_encryption.as_ref());
-    let e2e = e2e_config.and_then(|e| e.enabled).unwrap_or(false);
+    let e2e_mode = e2e_config.and_then(|e| e.effective_mode());
+    let e2e = e2e_mode == Some(config::E2eMode::Steve);
+    let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
+    let platform_git_sha = std::env::var("PLATFORM_GIT_SHA").ok();
+    let framework_commit =
+        builder::framework_commit_for_mode(e2e_mode_value, platform_git_sha.as_deref()).map_err(
+            |error| {
+                tracing::error!("Invalid Platform framework commit: {}", error);
+                (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+            },
+        )?;
 
     let no_cache = ec_build
         .and_then(|b| b.cache)
@@ -2447,6 +2491,7 @@ async fn deploy_logic(
                 .as_ref()
                 .and_then(|e2e| e2e.cors_origins.as_ref())
                 .unwrap_or(&vec![]),
+            framework_commit.as_deref(),
         );
         let s3_client = s3_client_for_credentials(&builder_target.aws_credentials).await;
 
@@ -2561,6 +2606,11 @@ async fn deploy_logic(
                 ports: ingress_ports.clone(),
                 http_port: ec_network.and_then(|n| n.http.as_ref()).map(|h| h.port),
                 e2e,
+                e2e_mode: e2e_mode_value.to_string(),
+                domain: ec_network
+                    .and_then(|n| n.http.as_ref())
+                    .and_then(|h| h.domain.clone()),
+                framework_commit: framework_commit.clone(),
                 locksmith: config_file.has_vault_env(),
                 egress,
                 e2e_cors_origins: e2e_config
@@ -2744,6 +2794,7 @@ async fn deploy_logic(
         ports: ingress_ports.clone(),
         http_port,
         e2e,
+        e2e_mode: e2e_mode_value.to_string(),
         locksmith: config_file.has_vault_env(),
         egress,
         ssh_keys,
