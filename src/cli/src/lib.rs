@@ -3109,9 +3109,17 @@ enclave "default" {{
             let start = std::time::Instant::now();
 
             loop {
-                if start.elapsed() > timeout {
+                let elapsed = start.elapsed();
+                if elapsed > timeout {
                     bail!("QR login timed out. Please try again.");
                 }
+
+                let remaining = timeout.saturating_sub(elapsed).as_secs();
+                loader.set_message(&format!(
+                    "Waiting for authentication... QR code expires in {}:{:02}",
+                    remaining / 60,
+                    remaining % 60
+                ));
 
                 tokio::time::sleep(Duration::from_secs(2)).await;
 
