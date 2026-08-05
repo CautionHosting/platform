@@ -5504,6 +5504,17 @@ enclave "default" {{
             .and_then(|e2e| e2e.cors_origins.as_ref())
             .map(|origins| origins.join(","));
 
+        let http_upstream_protocol = default_enclave
+            .and_then(|config| config.network.as_ref())
+            .and_then(|network| network.http.as_ref())
+            .and_then(|http| http.upstream_protocol)
+            .map(|protocol| protocol.as_str())
+            .unwrap_or("http");
+        output::verbose(
+            self.verbose,
+            &format!("HTTP upstream protocol: {}", http_upstream_protocol),
+        );
+
         let loader = Spinner::new("Building enclave image", SpinnerStyle::Processing);
         output::verbose(self.verbose, "Using build_enclave");
         let deployment = builder
@@ -5521,6 +5532,7 @@ enclave "default" {{
                 e2e,
                 e2e_mode_value,
                 domain.as_deref(),
+                http_upstream_protocol,
                 locksmith,
                 e2e_cors_origins,
                 egress,
@@ -5874,6 +5886,16 @@ enclave "default" {{
         let http_port = http_config.as_ref().map(|http| http.port);
         output::verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
 
+        let http_upstream_protocol = http_config
+            .as_ref()
+            .and_then(|http| http.upstream_protocol)
+            .map(|protocol| protocol.as_str())
+            .unwrap_or("http");
+        output::verbose(
+            self.verbose,
+            &format!("HTTP upstream protocol: {}", http_upstream_protocol),
+        );
+
         let domain = http_config.as_ref().and_then(|http| http.domain.clone());
         let e2e_config = http_config
             .as_ref()
@@ -5953,6 +5975,7 @@ enclave "default" {{
                     e2e,
                     e2e_mode_value,
                     domain.as_deref(),
+                    http_upstream_protocol,
                     locksmith,
                     e2e_cors_origins,
                     egress,
@@ -5975,6 +5998,7 @@ enclave "default" {{
                     e2e,
                     e2e_mode_value,
                     domain.as_deref(),
+                    http_upstream_protocol,
                     locksmith,
                     e2e_cors_origins,
                     egress,

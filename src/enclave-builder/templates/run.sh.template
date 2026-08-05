@@ -115,7 +115,7 @@ cat > /etc/caddy/Caddyfile <<'CADDYFILE'
     }
 
     handle {
-        reverse_proxy 127.0.0.1:{{CADDY_APP_PORT}}
+        reverse_proxy {{CADDY_UPSTREAM}}
     }
 }
 CADDYFILE

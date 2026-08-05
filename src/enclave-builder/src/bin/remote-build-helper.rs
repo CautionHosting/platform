@@ -99,6 +99,8 @@ async fn main() -> Result<()> {
     let domain = std::env::var("CAUTION_DOMAIN")
         .ok()
         .filter(|s| !s.is_empty());
+    let http_upstream_protocol = std::env::var("CAUTION_HTTP_UPSTREAM_PROTOCOL")
+        .unwrap_or_else(|_| "http".to_string());
     let locksmith = env_flag("CAUTION_LOCKSMITH");
     let e2e_cors_origins = std::env::var("CAUTION_CORS_ORIGINS")
         .ok()
@@ -162,6 +164,7 @@ async fn main() -> Result<()> {
                 e2e,
                 &e2e_mode,
                 domain.as_deref(),
+                &http_upstream_protocol,
                 locksmith,
                 e2e_cors_origins,
                 egress,
@@ -183,6 +186,7 @@ async fn main() -> Result<()> {
                 e2e,
                 &e2e_mode,
                 domain.as_deref(),
+                &http_upstream_protocol,
                 locksmith,
                 e2e_cors_origins,
                 egress,

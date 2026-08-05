@@ -2364,6 +2364,11 @@ async fn deploy_logic(
     let domain = ec_network
         .and_then(|n| n.http.as_ref())
         .and_then(|h| h.domain.clone());
+    let http_upstream_protocol = ec_network
+        .and_then(|n| n.http.as_ref())
+        .and_then(|h| h.upstream_protocol)
+        .map(|protocol| protocol.as_str())
+        .unwrap_or("http");
     let e2e_config = ec_network
         .and_then(|n| n.http.as_ref())
         .and_then(|h| h.e2e_encryption.as_ref());
@@ -2610,6 +2615,7 @@ async fn deploy_logic(
                 domain: ec_network
                     .and_then(|n| n.http.as_ref())
                     .and_then(|h| h.domain.clone()),
+                http_upstream_protocol: http_upstream_protocol.to_string(),
                 framework_commit: framework_commit.clone(),
                 locksmith: config_file.has_vault_env(),
                 egress,

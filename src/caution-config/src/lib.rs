@@ -95,14 +95,14 @@ pub struct TrafficRule {
 #[serde(rename_all = "lowercase")]
 pub enum E2eMode {
     Steve,
-    Caddy,
+    Tls,
 }
 
 impl E2eMode {
     pub fn as_str(self) -> &'static str {
         match self {
             E2eMode::Steve => "steve",
-            E2eMode::Caddy => "caddy",
+            E2eMode::Tls => "tls",
         }
     }
 }
@@ -127,6 +127,23 @@ impl E2eEncryption {
     }
 }
 
+/// The upstream protocol enclave Caddy should use when proxying to `http.port`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HttpUpstreamProtocol {
+    Http,
+    H2c,
+}
+
+impl HttpUpstreamProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HttpUpstreamProtocol::Http => "http",
+            HttpUpstreamProtocol::H2c => "h2c",
+        }
+    }
+}
+
 /// The `http { }` block inside network config.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -134,6 +151,8 @@ pub struct HttpConfig {
     #[serde(default)]
     pub domain: Option<String>,
     pub port: u16,
+    #[serde(default)]
+    pub upstream_protocol: Option<HttpUpstreamProtocol>,
     pub e2e_encryption: Option<E2eEncryption>,
 }
 
@@ -654,6 +673,7 @@ impl ConfigurationFile {
             Some(HttpConfig {
                 domain,
                 port,
+                upstream_protocol: None,
                 e2e_encryption: e2e_encryption.clone(),
             })
         } else {
@@ -899,6 +919,7 @@ mod tests {
                         http: Some(HttpConfig {
                             domain: Some("chat.caution.dev".into()),
                             port: 8000,
+                            upstream_protocol: None,
                             e2e_encryption: Some(E2eEncryption {
                                 enabled: Some(true),
                                 mode: None,
@@ -2503,8 +2524,15 @@ caution {
         let steve = hcl::from_str::<E2eEncryption>(r#"mode = "steve""#).unwrap();
         assert_eq!(steve.effective_mode(), Some(E2eMode::Steve));
 
-        let caddy = hcl::from_str::<E2eEncryption>(r#"mode = "caddy""#).unwrap();
-        assert_eq!(caddy.effective_mode(), Some(E2eMode::Caddy));
+        let tls = hcl::from_str::<E2eEncryption>(r#"mode = "tls""#).unwrap();
+        assert_eq!(tls.effective_mode(), Some(E2eMode::Tls));
+
+        let http = hcl::from_str::<HttpConfig>(r#"
+            domain = "app.example.com"
+            port = 8080
+            upstream_protocol = "h2c"
+        "#).unwrap();
+        assert_eq!(http.upstream_protocol, Some(HttpUpstreamProtocol::H2c));
 
         let legacy_enabled = hcl::from_str::<E2eEncryption>(r#"enabled = true"#).unwrap();
         assert_eq!(legacy_enabled.effective_mode(), Some(E2eMode::Steve));

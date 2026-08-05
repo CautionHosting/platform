@@ -123,6 +123,7 @@ pub async fn stage_eif_components(
     e2e: bool,
     e2e_mode: &str,
     domain: Option<&str>,
+    http_upstream_protocol: &str,
     locksmith: bool,
     e2e_cors_origins: Option<String>,
     egress: bool,
@@ -212,7 +213,7 @@ pub async fn stage_eif_components(
     );
 
     let caddy_certfp_template = templates_dir.join("caddy-certfp.sh");
-    if e2e_mode == "caddy" {
+    if e2e_mode == "tls" {
         anyhow::ensure!(
             caddy_certfp_template.exists(),
             "caddy-certfp.sh not found at {}",
@@ -228,6 +229,7 @@ pub async fn stage_eif_components(
         e2e,
         e2e_mode,
         domain,
+        http_upstream_protocol,
         locksmith,
         e2e_cors_origins.as_deref(),
         egress,
@@ -236,7 +238,7 @@ pub async fn stage_eif_components(
     let containerfile_content = render_containerfile_template(
         &containerfile_template,
         e2e,
-        e2e_mode == "caddy",
+        e2e_mode == "tls",
         locksmith,
         &bootproof_commit,
         &steve_commit,
@@ -255,7 +257,7 @@ pub async fn stage_eif_components(
         containerfile_path.display()
     );
 
-    if e2e_mode == "caddy" {
+    if e2e_mode == "tls" {
         fs::copy(&caddy_certfp_template, stage_dir.join("caddy-certfp.sh")).await?;
     }
 
@@ -303,6 +305,7 @@ async fn render_run_sh_template(
     e2e: bool,
     e2e_mode: &str,
     domain: Option<&str>,
+    http_upstream_protocol: &str,
     locksmith: bool,
     e2e_cors_origins: Option<&str>,
     egress: bool,
@@ -315,7 +318,7 @@ async fn render_run_sh_template(
     if e2e {
         enabled_blocks.push("STEVE");
     }
-    if e2e_mode == "caddy" {
+    if e2e_mode == "tls" {
         enabled_blocks.push("CADDY");
     }
     if locksmith {
@@ -367,24 +370,28 @@ async fn render_run_sh_template(
         String::new()
     };
 
-    let caddy_app_port = if e2e_mode == "caddy" {
+    let caddy_upstream = if e2e_mode == "tls" {
         if !egress {
-            anyhow::bail!("caddy mode requires egress for ACME certificate issuance");
+            anyhow::bail!("tls mode requires egress for ACME certificate issuance");
         }
         let port = http_port
-            .context("caddy mode requires http_port so enclave Caddy can reach the app")?;
+            .context("tls mode requires http_port so enclave Caddy can reach the app")?;
         if !ports.contains(&port) {
             anyhow::bail!("http_port {} must also be listed in ports", port);
         }
-        port.to_string()
+        match http_upstream_protocol {
+            "http" | "" => format!("http://127.0.0.1:{port}"),
+            "h2c" => format!("h2c://127.0.0.1:{port}"),
+            other => anyhow::bail!("unsupported HTTP upstream protocol {other:?}"),
+        }
     } else {
         String::new()
     };
 
-    let caddy_domain = if e2e_mode == "caddy" {
+    let caddy_domain = if e2e_mode == "tls" {
         domain
             .filter(|domain| !domain.is_empty())
-            .context("caddy mode requires a domain for trusted TLS")?
+            .context("tls mode requires a domain for trusted TLS")?
     } else {
         ""
     };
@@ -392,7 +399,7 @@ async fn render_run_sh_template(
     let custom_port_proxies: String = ports
         .iter()
         .filter(|&&port| {
-            !is_reserved_internal_port(port) && !(e2e_mode == "caddy" && http_port == Some(port))
+            !is_reserved_internal_port(port) && !(e2e_mode == "tls" && http_port == Some(port))
         })
         .map(|port| {
             format!(
@@ -423,7 +430,7 @@ async fn render_run_sh_template(
     let result = processed
         .replace("{{USER_CMD}}", &user_cmd)
         .replace("{{STEVE_APP_PORT}}", &steve_app_port)
-        .replace("{{CADDY_APP_PORT}}", &caddy_app_port)
+        .replace("{{CADDY_UPSTREAM}}", &caddy_upstream)
         .replace("{{CADDY_DOMAIN}}", caddy_domain)
         .replace("{{CUSTOM_PORT_SECTION}}", &custom_port_section)
         .replace("{{STEVE_CORS_ORIGINS_ENV}}", &cors_env);
@@ -477,6 +484,7 @@ pub async fn build_eif_from_filesystems(
     e2e: bool,
     e2e_mode: &str,
     domain: Option<&str>,
+    http_upstream_protocol: &str,
     locksmith: bool,
     e2e_cors_origins: Option<String>,
     egress: bool,
@@ -499,6 +507,7 @@ pub async fn build_eif_from_filesystems(
         e2e,
         e2e_mode,
         domain,
+        http_upstream_protocol,
         locksmith,
         e2e_cors_origins,
         egress,
@@ -851,6 +860,7 @@ mod tests {
             false,
             "disabled",
             None,
+            "http",
             true,
             None,
             false,
@@ -875,6 +885,7 @@ mod tests {
             true,
             "steve",
             None,
+            "http",
             false,
             None,
             true,
@@ -896,6 +907,7 @@ mod tests {
             true,
             "steve",
             None,
+            "http",
             false,
             None,
             true,
@@ -917,6 +929,7 @@ mod tests {
             true,
             "steve",
             None,
+            "http",
             false,
             None,
             true,
@@ -938,8 +951,9 @@ mod tests {
             &[8080, 9000],
             Some(8080),
             false,
-            "caddy",
+            "tls",
             Some("app.example.com"),
+            "h2c",
             false,
             None,
             true,
@@ -949,7 +963,7 @@ mod tests {
 
         assert!(rendered.contains("Starting enclave Caddy TLS ingress"));
         assert!(rendered.contains("app.example.com {"));
-        assert!(rendered.contains("reverse_proxy 127.0.0.1:8080"));
+        assert!(rendered.contains("reverse_proxy h2c://127.0.0.1:8080"));
         assert!(rendered.contains(
             "HOME=/var/lib/caddy \\\nXDG_CONFIG_HOME=/etc \\\nXDG_DATA_HOME=/var/lib \\\n/caddy run --config /etc/caddy/Caddyfile &"
         ));
@@ -970,8 +984,9 @@ mod tests {
             &[8080],
             None,
             false,
-            "caddy",
+            "tls",
             Some("app.example.com"),
+            "http",
             false,
             None,
             true,
@@ -979,7 +994,7 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(err.to_string().contains("caddy mode requires http_port"));
+        assert!(err.to_string().contains("tls mode requires http_port"));
     }
 
     #[tokio::test]
@@ -992,8 +1007,9 @@ mod tests {
             &[8080],
             Some(8080),
             false,
-            "caddy",
+            "tls",
             None,
+            "http",
             false,
             None,
             true,
@@ -1002,7 +1018,7 @@ mod tests {
         .unwrap_err();
         assert!(missing_domain
             .to_string()
-            .contains("caddy mode requires a domain"));
+            .contains("tls mode requires a domain"));
 
         let missing_egress = render_run_sh_template(
             &template,
@@ -1010,8 +1026,9 @@ mod tests {
             &[8080],
             Some(8080),
             false,
-            "caddy",
+            "tls",
             Some("app.example.com"),
+            "http",
             false,
             None,
             false,
@@ -1020,7 +1037,7 @@ mod tests {
         .unwrap_err();
         assert!(missing_egress
             .to_string()
-            .contains("caddy mode requires egress"));
+            .contains("tls mode requires egress"));
     }
 
     #[tokio::test]
@@ -1075,6 +1092,7 @@ mod tests {
             false,
             "disabled",
             None,
+            "http",
             false,
             None,
             true,
@@ -1096,6 +1114,7 @@ mod tests {
             false,
             "disabled",
             None,
+            "http",
             false,
             None,
             false,
