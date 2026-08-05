@@ -152,6 +152,7 @@ pub struct BuildRequest {
     pub e2e: bool,
     pub e2e_mode: String,
     pub domain: Option<String>,
+    pub http_upstream_protocol: String,
     pub framework_commit: Option<String>,
     pub locksmith: bool,
     pub egress: bool,
@@ -296,15 +297,15 @@ pub fn framework_commit_for_mode(
     e2e_mode: &str,
     platform_git_sha: Option<&str>,
 ) -> Result<Option<String>> {
-    if e2e_mode != "caddy" {
+    if e2e_mode != "tls" {
         return Ok(None);
     }
 
     let commit = platform_git_sha
         .filter(|value| !value.is_empty())
-        .context("PLATFORM_GIT_SHA is required for caddy mode")?;
+        .context("PLATFORM_GIT_SHA is required for tls mode")?;
     if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!("PLATFORM_GIT_SHA must be a 40-character Git commit SHA for caddy mode");
+        bail!("PLATFORM_GIT_SHA must be a 40-character Git commit SHA for tls mode");
     }
 
     Ok(Some(commit.to_ascii_lowercase()))
@@ -877,8 +878,8 @@ fn generate_builder_userdata(
     helper_sha256: &str,
     framework_commit: Option<String>,
 ) -> anyhow::Result<String> {
-    if request.e2e_mode == "caddy" && framework_commit.is_none() {
-        bail!("caddy mode requires an exact Platform framework commit");
+    if request.e2e_mode == "tls" && framework_commit.is_none() {
+        bail!("tls mode requires an exact Platform framework commit");
     }
     let status_key = format!("builds/{}/status.json", build_id);
     let bucket = &config.eif_s3_bucket;
@@ -970,6 +971,7 @@ HTTP_PORT="{http_port}"
 E2E="{e2e_flag}"
 E2E_MODE="{e2e_mode}"
 DOMAIN="{domain}"
+HTTP_UPSTREAM_PROTOCOL="{http_upstream_protocol}"
 LOCKSMITH="{locksmith_flag}"
 EGRESS="{egress_flag}"
 CORS_ORIGINS='{cors_origins_escaped}'
@@ -1068,6 +1070,7 @@ CAUTION_HTTP_PORT="$HTTP_PORT" \
 CAUTION_E2E="$E2E" \
 CAUTION_E2E_MODE="$E2E_MODE" \
 CAUTION_DOMAIN="$DOMAIN" \
+CAUTION_HTTP_UPSTREAM_PROTOCOL="$HTTP_UPSTREAM_PROTOCOL" \
 CAUTION_LOCKSMITH="$LOCKSMITH" \
 CAUTION_EGRESS="$EGRESS" \
 CAUTION_CORS_ORIGINS="$CORS_ORIGINS" \
@@ -1124,6 +1127,7 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
         e2e_flag = e2e_flag,
         e2e_mode = request.e2e_mode.as_str(),
         domain = request.domain.as_deref().unwrap_or(""),
+        http_upstream_protocol = request.http_upstream_protocol.as_str(),
         locksmith_flag = locksmith_flag,
         egress_flag = egress_flag,
         cors_origins_escaped = cors_origins_escaped,
@@ -1365,17 +1369,17 @@ mod tests {
     }
 
     #[test]
-    fn test_framework_commit_is_required_only_for_caddy_mode() {
+    fn test_framework_commit_is_required_only_for_tls_mode() {
         assert_eq!(framework_commit_for_mode("steve", None).unwrap(), None);
         assert_eq!(framework_commit_for_mode("disabled", None).unwrap(), None);
 
         let commit = "ABCDEF0123456789ABCDEF0123456789ABCDEF01";
         assert_eq!(
-            framework_commit_for_mode("caddy", Some(commit)).unwrap(),
+            framework_commit_for_mode("tls", Some(commit)).unwrap(),
             Some(commit.to_ascii_lowercase())
         );
-        assert!(framework_commit_for_mode("caddy", None).is_err());
-        assert!(framework_commit_for_mode("caddy", Some("test-sha")).is_err());
+        assert!(framework_commit_for_mode("tls", None).is_err());
+        assert!(framework_commit_for_mode("tls", Some("test-sha")).is_err());
     }
 
     // --- BuilderSizesConfig ---
@@ -1586,6 +1590,7 @@ mod tests {
             e2e: false,
             e2e_mode: "disabled".to_string(),
             domain: None,
+            http_upstream_protocol: "http1".to_string(),
             framework_commit: None,
             locksmith: false,
             egress: false,
@@ -1736,6 +1741,7 @@ mod tests {
             e2e: false,
             e2e_mode: "disabled".to_string(),
             domain: None,
+            http_upstream_protocol: "http1".to_string(),
             framework_commit: None,
             locksmith: false,
             egress: false,
@@ -1792,6 +1798,7 @@ mod tests {
             e2e: false,
             e2e_mode: "disabled".to_string(),
             domain: None,
+            http_upstream_protocol: "http1".to_string(),
             framework_commit: None,
             locksmith: false,
             egress: false,
@@ -1847,6 +1854,7 @@ mod tests {
             e2e: false,
             e2e_mode: "disabled".to_string(),
             domain: None,
+            http_upstream_protocol: "http1".to_string(),
             framework_commit: None,
             locksmith: false,
             egress: false,
@@ -1910,6 +1918,7 @@ mod tests {
             e2e: false,
             e2e_mode: "disabled".to_string(),
             domain: None,
+            http_upstream_protocol: "http1".to_string(),
             framework_commit: None,
             locksmith: false,
             egress: false,
@@ -1969,6 +1978,7 @@ mod tests {
             e2e: false,
             e2e_mode: "disabled".to_string(),
             domain: None,
+            http_upstream_protocol: "http1".to_string(),
             framework_commit: None,
             locksmith: false,
             egress: false,
@@ -2025,6 +2035,7 @@ mod tests {
             e2e: false,
             e2e_mode: "disabled".to_string(),
             domain: None,
+            http_upstream_protocol: "http1".to_string(),
             framework_commit: None,
             locksmith: false,
             egress,
@@ -2080,8 +2091,9 @@ mod tests {
         };
         let platform_commit = "0123456789abcdef0123456789abcdef01234567";
         let mut request = make_test_build_request_with_egress(true);
-        request.e2e_mode = "caddy".to_string();
+        request.e2e_mode = "tls".to_string();
         request.domain = Some("app.example.com".to_string());
+        request.http_upstream_protocol = "h2c".to_string();
         request.ports = vec![8080];
         request.http_port = Some(8080);
         request.framework_commit = Some(platform_commit.to_string());
@@ -2097,8 +2109,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(userdata.contains("E2E_MODE=\"caddy\""));
+        assert!(userdata.contains("E2E_MODE=\"tls\""));
         assert!(userdata.contains("DOMAIN=\"app.example.com\""));
+        assert!(userdata.contains("HTTP_UPSTREAM_PROTOCOL=\"h2c\""));
+        assert!(userdata.contains("CAUTION_HTTP_UPSTREAM_PROTOCOL=\"$HTTP_UPSTREAM_PROTOCOL\""));
         assert!(userdata.contains(&format!("\"commit\":\"{platform_commit}\"")));
         assert!(
             generate_builder_userdata(

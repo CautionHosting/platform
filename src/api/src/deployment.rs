@@ -690,10 +690,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(user_data.contains(r#"%{ if e2e_mode == "caddy" ~}"#));
+        assert!(user_data.contains(r#"%{ if e2e_mode == "tls" ~}"#));
         assert!(user_data.contains(r#"standard_ports="$standard_ports 443""#));
         assert!(user_data.contains(
-            r#"%{ if http_port != 0 && e2e_mode != "caddy" ~}"#
+            r#"%{ if http_port != 0 && e2e_mode != "tls" ~}"#
         ));
         assert!(user_data.contains("TLS :443 is forwarded into the enclave"));
         assert!(user_data.contains("respond \"OK\" 200"));
@@ -721,7 +721,7 @@ mod tests {
         .unwrap();
 
         assert!(user_data.contains(
-            r#"%{ if http_port != 0 && e2e_mode != "caddy" ~}"#
+            r#"%{ if http_port != 0 && e2e_mode != "tls" ~}"#
         ));
         assert!(user_data.contains(
             "ExecStart=/usr/bin/socat TCP-LISTEN:${http_port},bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:16:${http_port}"
