@@ -781,6 +781,17 @@ struct BuildStatus {
     error: Option<String>,
 }
 
+fn build_phase_milestone(phase: &str) -> Option<&str> {
+    match phase {
+        "starting" => Some("Builder ready, downloading source..."),
+        "docker_built" => Some("Docker image built, building EIF..."),
+        "eif_built" => Some("EIF built, uploading to S3..."),
+        "completed" => Some("Cleaning up builder..."),
+        "failed" => None,
+        _ => Some(phase),
+    }
+}
+
 /// Poll S3 for status.json until the build completes or times out.
 async fn poll_build_status(
     s3: &aws_sdk_s3::Client,
@@ -830,17 +841,11 @@ async fn poll_build_status(
 
                 // Send milestone if phase changed
                 if status.phase != last_phase {
-                    let msg = match status.phase.as_str() {
-                        "starting" => "Builder ready, downloading source...",
-                        "docker_built" => "Docker image built, building EIF...",
-                        "eif_built" => "EIF built, uploading to S3...",
-                        "completed" => "Cleaning up builder...",
-                        "failed" => "Build failed",
-                        _ => &status.phase,
-                    };
-                    let _ = tx
-                        .send(Ok(bytes::Bytes::from(format!("STEP:{}\n", msg))))
-                        .await;
+                    if let Some(msg) = build_phase_milestone(&status.phase) {
+                        let _ = tx
+                            .send(Ok(bytes::Bytes::from(format!("STEP:{}\n", msg))))
+                            .await;
+                    }
                     last_phase = status.phase.clone();
                 }
 
@@ -850,7 +855,7 @@ async fn poll_build_status(
                         let err = status
                             .error
                             .unwrap_or_else(|| "Unknown build error".to_string());
-                        bail!("Build failed: {}", err);
+                        bail!("{}", err);
                     }
                     _ => continue,
                 }
@@ -980,6 +985,8 @@ SOURCE_S3_KEY="{source_s3_key}"
 SOURCE_SHA256="{source_sha256}"
 HELPER_S3_KEY="{helper_s3_key}"
 HELPER_SHA256="{helper_sha256}"
+HELPER_LOG="/build/remote-build-helper.log"
+HELPER_LOG_KEY="builds/$BUILD_ID/remote-build-helper.log"
 COMMIT_SHA="{commit_sha}"
 ENCLAVEOS_COMMIT="{enclaveos_commit}"
 CONTAINERFILE="{containerfile}"
@@ -1037,13 +1044,15 @@ set_phase "starting"
 
 fail() {{
     local msg="$1"
+    if [ -f "$HELPER_LOG" ]; then
+        timeout 30 aws s3 cp "$HELPER_LOG" "s3://$S3_BUCKET/$HELPER_LOG_KEY" >/dev/null 2>&1 || true
+    fi
     set_template "$(jq -cn --arg error "$msg" '{{"error": $error}}')"
     set_phase "failed"
     exit 1
 }}
 
-trap 'fail "Builder script crashed at line $LINENO:
-$(tail -80 /build/remote-helper-work/eif-stage/build.log 2>/dev/null || tail -80 /var/log/cloud-init-output.log 2>/dev/null || echo unknown)"' ERR
+trap 'rc=$?; line=$LINENO; trap - ERR; fail "Builder command failed at line $line (exit $rc)"' ERR
 
 # Install dependencies
 echo "Installing Docker..."
@@ -1078,7 +1087,7 @@ MANIFEST_EOF
 
 echo "Building EIF via remote-build-helper..."
 mkdir -p /build/output
-CAUTION_IMAGE_REF="app-image" \
+if CAUTION_IMAGE_REF="app-image" \
 CAUTION_MANIFEST_PATH="/build/manifest.json" \
 CAUTION_WORK_DIR="/build/remote-helper-work" \
 CAUTION_OUTPUT_EIF="/build/output/enclave.eif" \
@@ -1094,7 +1103,12 @@ CAUTION_LOCKSMITH="$LOCKSMITH" \
 CAUTION_EGRESS="$EGRESS" \
 CAUTION_CORS_ORIGINS="$CORS_ORIGINS" \
 CAUTION_NO_CACHE="$NO_CACHE" \
-/usr/local/bin/remote-build-helper 2>&1
+/usr/local/bin/remote-build-helper 2>&1 | tee "$HELPER_LOG"; then
+    :
+else
+    fail "EIF build helper failed:
+$(tail -12 "$HELPER_LOG" 2>/dev/null | tail -c 4096 | tr -d '\000-\010\013-\037\177' || echo "No helper output available")"
+fi
 
 EIF_PATH="/build/output/enclave.eif"
 PCRS_PATH="/build/output/enclave.pcrs"
@@ -1301,6 +1315,15 @@ pub async fn reap_orphaned_builders(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_build_phase_is_not_a_progress_milestone() {
+        assert_eq!(build_phase_milestone("failed"), None);
+        assert_eq!(
+            build_phase_milestone("docker_built"),
+            Some("Docker image built, building EIF...")
+        );
+    }
 
     // --- compute_cache_key ---
 
@@ -1812,6 +1835,39 @@ mod tests {
         assert!(
             userdata.contains("builds/test-id/remote-build-helper"),
             "should download helper binary"
+        );
+        assert!(
+            userdata.contains("| tee \"$HELPER_LOG\""),
+            "should retain the complete helper log"
+        );
+        assert!(
+            userdata.contains(
+                "timeout 30 aws s3 cp \"$HELPER_LOG\" \"s3://$S3_BUCKET/$HELPER_LOG_KEY\""
+            ),
+            "should upload the private helper log on failure"
+        );
+        assert!(
+            userdata.contains("tail -12 \"$HELPER_LOG\"")
+                && userdata.contains("tail -c 4096")
+                && userdata.contains("tr -d"),
+            "public failure detail should be bounded"
+        );
+        assert!(
+            !userdata.contains("/var/log/cloud-init-output.log") && !userdata.contains("tail -80"),
+            "cloud-init output must not be returned to the Git client"
+        );
+
+        let script = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(script.path(), &userdata).unwrap();
+        let syntax = std::process::Command::new("bash")
+            .arg("-n")
+            .arg(script.path())
+            .output()
+            .unwrap();
+        assert!(
+            syntax.status.success(),
+            "generated userdata must be valid Bash: {}",
+            String::from_utf8_lossy(&syntax.stderr)
         );
     }
 

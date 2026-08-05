@@ -1020,6 +1020,23 @@ fn milestone_error(msg: &str) -> bytes::Bytes {
     bytes::Bytes::from(format!("error: {}\n", msg))
 }
 
+fn dedicated_builder_failure_message(build_id: Uuid, error: &str) -> String {
+    format!("Build {build_id} failed: {error}")
+}
+
+#[cfg(test)]
+#[test]
+fn dedicated_builder_failure_includes_one_prefix_and_build_id() {
+    let build_id = Uuid::parse_str("fa2805c7-f67a-42c6-b74c-0a42510981a9").unwrap();
+    let message = dedicated_builder_failure_message(build_id, "framework download timed out");
+
+    assert_eq!(
+        message,
+        "Build fa2805c7-f67a-42c6-b74c-0a42510981a9 failed: framework download timed out"
+    );
+    assert!(!message.contains("Build failed: Build failed:"));
+}
+
 async fn recover_deploy_failure(
     state: &Arc<AppState>,
     org_id: Uuid,
@@ -2651,7 +2668,8 @@ async fn deploy_logic(
             .await
             .map_err(|e| {
                 tracing::error!("Dedicated builder failed: {:?}", e);
-                if e.to_string() == builder::ACTIVE_BUILD_CONFLICT_MSG {
+                let error = e.to_string();
+                if error == builder::ACTIVE_BUILD_CONFLICT_MSG {
                     (
                         StatusCode::CONFLICT,
                         builder::ACTIVE_BUILD_CONFLICT_MSG.to_string(),
@@ -2659,7 +2677,7 @@ async fn deploy_logic(
                 } else {
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Build failed: {}", e),
+                        dedicated_builder_failure_message(build_id, &error),
                     )
                 }
             })?;
