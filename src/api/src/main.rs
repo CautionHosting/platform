@@ -2368,7 +2368,7 @@ async fn deploy_logic(
         .and_then(|n| n.http.as_ref())
         .and_then(|h| h.upstream_protocol)
         .map(|protocol| protocol.as_str())
-        .unwrap_or("http1");
+        .unwrap_or("http");
     let e2e_config = ec_network
         .and_then(|n| n.http.as_ref())
         .and_then(|h| h.e2e_encryption.as_ref());

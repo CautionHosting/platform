@@ -100,7 +100,7 @@ async fn main() -> Result<()> {
         .ok()
         .filter(|s| !s.is_empty());
     let http_upstream_protocol = std::env::var("CAUTION_HTTP_UPSTREAM_PROTOCOL")
-        .unwrap_or_else(|_| "http1".to_string());
+        .unwrap_or_else(|_| "http".to_string());
     let locksmith = env_flag("CAUTION_LOCKSMITH");
     let e2e_cors_origins = std::env::var("CAUTION_CORS_ORIGINS")
         .ok()

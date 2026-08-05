@@ -131,14 +131,14 @@ impl E2eEncryption {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HttpUpstreamProtocol {
-    Http1,
+    Http,
     H2c,
 }
 
 impl HttpUpstreamProtocol {
     pub fn as_str(self) -> &'static str {
         match self {
-            HttpUpstreamProtocol::Http1 => "http1",
+            HttpUpstreamProtocol::Http => "http",
             HttpUpstreamProtocol::H2c => "h2c",
         }
     }

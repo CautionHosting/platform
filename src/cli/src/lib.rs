@@ -5509,7 +5509,7 @@ enclave "default" {{
             .and_then(|network| network.http.as_ref())
             .and_then(|http| http.upstream_protocol)
             .map(|protocol| protocol.as_str())
-            .unwrap_or("http1");
+            .unwrap_or("http");
         output::verbose(
             self.verbose,
             &format!("HTTP upstream protocol: {}", http_upstream_protocol),
@@ -5890,7 +5890,7 @@ enclave "default" {{
             .as_ref()
             .and_then(|http| http.upstream_protocol)
             .map(|protocol| protocol.as_str())
-            .unwrap_or("http1");
+            .unwrap_or("http");
         output::verbose(
             self.verbose,
             &format!("HTTP upstream protocol: {}", http_upstream_protocol),
