@@ -2229,7 +2229,7 @@ mod tests {
     }
 
     #[test]
-    fn test_caddy_userdata_pins_platform_commit_in_manifest() {
+    fn test_tls_userdata_pins_platform_commit_in_manifest() {
         let config = BuilderConfig {
             ami_id: "ami-test".to_string(),
             security_group_id: "sg-test".to_string(),

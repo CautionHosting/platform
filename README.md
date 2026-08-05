@@ -97,10 +97,11 @@ make up
    git push caution main
    ```
 
-#### Enclave-terminated HTTPS (Caddy POC)
+#### Enclave-terminated HTTPS (TLS mode, implemented by Caddy)
 
 To terminate standard HTTPS inside the enclave without changing clients, select
-Caddy mode on the HTTP ingress:
+TLS mode on the HTTP ingress. The enclave currently implements this mode with
+Caddy:
 
 ```hcl
 network {
@@ -114,7 +115,7 @@ network {
   http {
     domain = "app.example.com"
     port   = 8080
-    e2e_encryption { mode = "caddy" }
+    e2e_encryption { mode = "tls" }
   }
 }
 ```

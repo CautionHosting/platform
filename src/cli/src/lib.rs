@@ -9064,7 +9064,7 @@ mod tests {
         let disabled = config(Some(false), None);
         let legacy_steve = config(Some(true), None);
         let steve = config(None, Some(E2eMode::Steve));
-        let caddy = config(None, Some(E2eMode::Caddy));
+        let tls = config(None, Some(E2eMode::Tls));
         let unspecified = config(None, None);
 
         assert_eq!(
@@ -9085,8 +9085,8 @@ mod tests {
             Some(E2eMode::Steve)
         );
         assert_eq!(
-            resolve_reproduction_e2e_mode(Some(&caddy), true),
-            Some(E2eMode::Caddy)
+            resolve_reproduction_e2e_mode(Some(&tls), true),
+            Some(E2eMode::Tls)
         );
     }
 
@@ -9101,11 +9101,11 @@ mod tests {
         let disabled = config(Some(false), None);
         let legacy_steve = config(Some(true), None);
         let steve = config(None, Some(E2eMode::Steve));
-        let caddy = config(None, Some(E2eMode::Caddy));
+        let tls = config(None, Some(E2eMode::Tls));
 
         assert!(reproduction_uses_steve(Some(&steve), false));
         assert!(reproduction_uses_steve(Some(&legacy_steve), false));
-        assert!(!reproduction_uses_steve(Some(&caddy), true));
+        assert!(!reproduction_uses_steve(Some(&tls), true));
         assert!(!reproduction_uses_steve(Some(&disabled), true));
         assert!(reproduction_uses_steve(None, true));
         assert!(!reproduction_uses_steve(None, false));

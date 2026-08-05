@@ -97,11 +97,11 @@ wait_for_fingerprint() {
     attempts=0
     while [ "${attempts}" -lt 12 ]; do
         if [ -f metadata.json ]; then
-            if ! grep -Eq '^\{"tls":\{"mode":"caddy","domain":"certfp\.test","certfp":"[a-f0-9]{64}"\}\}$' metadata.json; then
+            if ! grep -Eq '^\{"tls":\{"mode":"tls","domain":"certfp\.test","certfp":"[a-f0-9]{64}"\}\}$' metadata.json; then
                 echo "publisher exposed invalid or partial metadata" >&2
                 exit 1
             fi
-            if grep -Fqx "{\"tls\":{\"mode\":\"caddy\",\"domain\":\"${domain}\",\"certfp\":\"${expected}\"}}" metadata.json; then
+            if grep -Fqx "{\"tls\":{\"mode\":\"tls\",\"domain\":\"${domain}\",\"certfp\":\"${expected}\"}}" metadata.json; then
                 return 0
             fi
         fi

@@ -683,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn test_user_data_caddy_mode_forwards_tls_to_enclave() {
+    fn test_user_data_tls_mode_forwards_tls_to_enclave() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let user_data = std::fs::read_to_string(
             manifest_dir.join("../../terraform/modules/aws/nitro-enclave/user-data.sh"),
@@ -702,9 +702,9 @@ mod tests {
             .find("redir https://${domain}{uri} 308")
             .unwrap();
         let http_site_pos = user_data[..redir_pos].rfind(":80 {").unwrap();
-        let caddy_mode_http_site = &user_data[http_site_pos..redir_pos];
-        assert!(caddy_mode_http_site.contains("handle /attestation"));
-        assert!(caddy_mode_http_site.contains("reverse_proxy localhost:49502"));
+        let tls_mode_http_site = &user_data[http_site_pos..redir_pos];
+        assert!(tls_mode_http_site.contains("handle /attestation"));
+        assert!(tls_mode_http_site.contains("reverse_proxy localhost:49502"));
         assert!(!user_data.contains("reverse_proxy https://127.0.0.1:443"));
         assert!(!user_data.contains("header_up Host ${domain}"));
         assert!(!user_data.contains("tls_server_name ${domain}"));

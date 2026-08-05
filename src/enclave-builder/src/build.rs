@@ -783,6 +783,7 @@ mod tests {
             "steve",
             key_exchange,
             None,
+            "http",
             false,
             None,
             false,
@@ -880,6 +881,7 @@ mod tests {
             "steve",
             "XWING-DRAFT10; touch /tmp/injected",
             None,
+            "http",
             false,
             None,
             false,
@@ -1079,7 +1081,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_render_run_sh_caddy_mode_terminates_tls_in_enclave() {
+    async fn test_render_run_sh_tls_mode_terminates_tls_in_enclave() {
         let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
         let rendered = render_run_sh_template(
             &template,
@@ -1113,7 +1115,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_render_run_sh_caddy_mode_requires_http_port() {
+    async fn test_render_run_sh_tls_mode_requires_http_port() {
         let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
         let err = render_run_sh_template(
             &template,
@@ -1136,7 +1138,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_render_run_sh_caddy_mode_requires_domain_and_egress() {
+    async fn test_render_run_sh_tls_mode_requires_domain_and_egress() {
         let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
 
         let missing_domain = render_run_sh_template(

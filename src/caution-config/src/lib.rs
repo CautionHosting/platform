@@ -2634,7 +2634,7 @@ enclave "main" {{
             "enabled = true\nkey_exchange = \"xwing-draft10\"",
             // Explicit mode takes precedence over the legacy boolean.
             "mode = \"steve\"\nenabled = false\nkey_exchange = \"xwing-draft10\"",
-            r#"mode = "caddy""#,
+            r#"mode = "tls""#,
         ] {
             assert!(
                 parse_config_with_e2e(body).is_ok(),
@@ -2643,14 +2643,14 @@ enclave "main" {{
         }
 
         for body in [
-            "mode = \"caddy\"\nkey_exchange = \"x25519\"",
-            "mode = \"caddy\"\nkey_exchange = \"xwing-draft10\"",
+            "mode = \"tls\"\nkey_exchange = \"x25519\"",
+            "mode = \"tls\"\nkey_exchange = \"xwing-draft10\"",
             "enabled = false\nkey_exchange = \"x25519\"",
             "enabled = false\nkey_exchange = \"xwing-draft10\"",
             r#"key_exchange = "x25519""#,
             r#"key_exchange = "xwing-draft10""#,
             // Explicit mode takes precedence over the legacy boolean.
-            "mode = \"caddy\"\nenabled = true\nkey_exchange = \"xwing-draft10\"",
+            "mode = \"tls\"\nenabled = true\nkey_exchange = \"xwing-draft10\"",
         ] {
             assert!(
                 matches!(
@@ -2660,6 +2660,14 @@ enclave "main" {{
                 "expected key_exchange rejection: {body}"
             );
         }
+    }
+
+    #[test]
+    fn legacy_caddy_mode_is_rejected() {
+        assert!(matches!(
+            parse_config_with_e2e(r#"mode = "caddy""#),
+            Err(FromStrError::HclParse(_))
+        ));
     }
 
     #[test]
