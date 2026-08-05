@@ -820,7 +820,7 @@ async fn poll_build_status(
                         "starting" => "Builder ready, downloading source...",
                         "docker_built" => "Docker image built, building EIF...",
                         "eif_built" => "EIF built, uploading to S3...",
-                        "completed" => "Build complete",
+                        "completed" => "Cleaning up builder...",
                         "failed" => "Build failed",
                         _ => &status.phase,
                     };
