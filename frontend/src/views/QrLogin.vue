@@ -7,6 +7,9 @@
       <h2 class="qr-title">{{ title }}</h2>
 
       <div v-if="state === 'ready'">
+        <p v-if="!isSign" class="qr-warning">
+          Cross-device authentication increases phishing risk. Only continue if you personally started this CLI login from a device you control.
+        </p>
         <p class="qr-description">
           {{ description }}
         </p>
@@ -233,6 +236,14 @@ export default {
   font-size: var(--body-font-size);
   color: var(--color-grey);
   margin-bottom: var(--spacing4);
+  line-height: var(--body-line-height);
+}
+
+.qr-warning {
+  font-size: var(--body-font-size);
+  color: #8a3b00;
+  font-weight: 600;
+  margin-bottom: var(--spacing3);
   line-height: var(--body-line-height);
 }
 
