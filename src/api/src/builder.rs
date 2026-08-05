@@ -154,7 +154,7 @@ pub struct BuildRequest {
     pub e2e_key_exchange: String,
     pub domain: Option<String>,
     pub http_upstream_protocol: String,
-    pub framework_commit: Option<String>,
+    pub framework_commit: String,
     pub locksmith: bool,
     pub egress: bool,
     pub e2e_cors_origins: Option<String>,
@@ -267,7 +267,7 @@ pub fn compute_cache_key(
     e2e_key_exchange: &str,
     locksmith: bool,
     e2e_cors_origins: &[String],
-    framework_commit: Option<&str>,
+    framework_commit: &str,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(commit_sha.as_bytes());
@@ -300,29 +300,20 @@ pub fn compute_cache_key(
     for origin in e2e_cors_origins {
         hasher.update(origin.as_bytes());
     }
-    if let Some(commit) = framework_commit {
-        hasher.update(b"|framework|");
-        hasher.update(commit.as_bytes());
-    }
+    hasher.update(b"|framework|");
+    hasher.update(framework_commit.as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
-pub fn framework_commit_for_mode(
-    e2e_mode: &str,
-    platform_git_sha: Option<&str>,
-) -> Result<Option<String>> {
-    if e2e_mode != "tls" {
-        return Ok(None);
-    }
-
+pub fn require_platform_framework_commit(platform_git_sha: Option<&str>) -> Result<String> {
     let commit = platform_git_sha
         .filter(|value| !value.is_empty())
-        .context("PLATFORM_GIT_SHA is required for tls mode")?;
+        .context("PLATFORM_GIT_SHA is required for EIF builds")?;
     if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!("PLATFORM_GIT_SHA must be a 40-character Git commit SHA for tls mode");
+        bail!("PLATFORM_GIT_SHA must be a 40-character Git commit SHA");
     }
 
-    Ok(Some(commit.to_ascii_lowercase()))
+    Ok(commit.to_ascii_lowercase())
 }
 
 /// Check if a completed build exists in the cache for this org + cache_key.
@@ -584,10 +575,6 @@ pub async fn execute_remote_build(
         upload_remote_builder_helper(s3, &config.eif_s3_bucket, build_id, request.org_id)
             .await
             .context("Failed to stage remote builder helper")?;
-    let framework_commit = match request.framework_commit.clone() {
-        Some(commit) => Some(commit),
-        None => resolve_framework_commit(enclave_builder::FRAMEWORK_SOURCE).await,
-    };
     let user_data = generate_builder_userdata(
         build_id,
         config,
@@ -595,7 +582,6 @@ pub async fn execute_remote_build(
         &eif_s3_key,
         &helper_artifact.s3_key,
         &helper_artifact.sha256,
-        framework_commit,
     )?;
     let mut instance_tags = vec![
         (
@@ -874,20 +860,6 @@ async fn poll_build_status(
 }
 
 /// Generate the user-data shell script for the builder instance.
-async fn resolve_framework_commit(framework_source: &str) -> Option<String> {
-    let archive_pos = framework_source.find("/archive/")?;
-    let base_url = &framework_source[..archive_pos];
-    let git_url = format!("{}.git", base_url);
-    let after_archive = &framework_source[archive_pos + 9..];
-    let ref_name = after_archive
-        .trim_end_matches(".tar.gz")
-        .trim_end_matches(".tar");
-    if ref_name.is_empty() {
-        return None;
-    }
-    enclave_builder::resolve_ref_to_commit(&git_url, ref_name).await
-}
-
 fn generate_builder_userdata(
     build_id: Uuid,
     config: &BuilderConfig,
@@ -895,11 +867,7 @@ fn generate_builder_userdata(
     eif_s3_key: &str,
     helper_s3_key: &str,
     helper_sha256: &str,
-    framework_commit: Option<String>,
 ) -> anyhow::Result<String> {
-    if request.e2e_mode == "tls" && framework_commit.is_none() {
-        bail!("tls mode requires an exact Platform framework commit");
-    }
     let status_key = format!("builds/{}/status.json", build_id);
     let bucket = &config.eif_s3_bucket;
     let source_s3_key = &request.source_s3_key;
@@ -917,8 +885,8 @@ fn generate_builder_userdata(
 
     let containerfile = validate_remote_containerfile_path(&request.containerfile)?;
 
-    // STEVE is resolved before the cache lookup and carried on BuildRequest, so
-    // the cache key, manifest, and actual EIF build all use the same commit.
+    // STEVE and Platform are resolved before the cache lookup and carried on
+    // BuildRequest, so the cache key, manifest, and EIF build use the same commits.
     let bootproof_commit = enclave_builder::build::resolve_bootproof_commit();
     let locksmith_commit = enclave_builder::build::resolve_locksmith_commit();
 
@@ -951,7 +919,7 @@ fn generate_builder_userdata(
         },
         enclave_builder::FrameworkSource::GitArchive {
             url: enclave_builder::FRAMEWORK_SOURCE.to_string(),
-            commit: framework_commit,
+            commit: Some(request.framework_commit.clone()),
         },
         None,
         request.run_command.clone(),
@@ -1327,6 +1295,8 @@ mod tests {
 
     // --- compute_cache_key ---
 
+    const TEST_FRAMEWORK_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
     fn cache_key(
         commit: &str,
         enclaveos: &str,
@@ -1345,7 +1315,7 @@ mod tests {
             e2e_key_exchange,
             locksmith,
             &[],
-            framework_commit,
+            framework_commit.unwrap_or(TEST_FRAMEWORK_COMMIT),
         )
     }
 
@@ -1394,25 +1364,27 @@ mod tests {
 
     #[test]
     fn test_cache_key_changes_with_framework_commit() {
-        let key1 = cache_key(
-            "abc123",
-            "enclave-v1",
-            "run: /app",
-            false,
-            "X25519",
-            false,
-            Some("1111111111111111111111111111111111111111"),
-        );
-        let key2 = cache_key(
-            "abc123",
-            "enclave-v1",
-            "run: /app",
-            false,
-            "X25519",
-            false,
-            Some("2222222222222222222222222222222222222222"),
-        );
-        assert_ne!(key1, key2);
+        for e2e in [false, true] {
+            let key1 = cache_key(
+                "abc123",
+                "enclave-v1",
+                "run: /app",
+                e2e,
+                "X25519",
+                false,
+                Some("1111111111111111111111111111111111111111"),
+            );
+            let key2 = cache_key(
+                "abc123",
+                "enclave-v1",
+                "run: /app",
+                e2e,
+                "X25519",
+                false,
+                Some("2222222222222222222222222222222222222222"),
+            );
+            assert_ne!(key1, key2);
+        }
     }
 
     #[test]
@@ -1426,7 +1398,7 @@ mod tests {
             "X25519",
             false,
             &[],
-            None,
+            TEST_FRAMEWORK_COMMIT,
         );
         let e2e_v2 = compute_cache_key(
             "abc123",
@@ -1437,7 +1409,7 @@ mod tests {
             "X25519",
             false,
             &[],
-            None,
+            TEST_FRAMEWORK_COMMIT,
         );
         assert_ne!(e2e_v1, e2e_v2);
 
@@ -1450,7 +1422,7 @@ mod tests {
             "X25519",
             false,
             &[],
-            None,
+            TEST_FRAMEWORK_COMMIT,
         );
         let plain_v2 = compute_cache_key(
             "abc123",
@@ -1461,7 +1433,7 @@ mod tests {
             "X25519",
             false,
             &[],
-            None,
+            TEST_FRAMEWORK_COMMIT,
         );
         assert_eq!(plain_v1, plain_v2);
     }
@@ -1482,17 +1454,19 @@ mod tests {
     }
 
     #[test]
-    fn test_framework_commit_is_required_only_for_tls_mode() {
-        assert_eq!(framework_commit_for_mode("steve", None).unwrap(), None);
-        assert_eq!(framework_commit_for_mode("disabled", None).unwrap(), None);
-
+    fn test_platform_framework_commit_is_required_and_normalized() {
         let commit = "ABCDEF0123456789ABCDEF0123456789ABCDEF01";
         assert_eq!(
-            framework_commit_for_mode("tls", Some(commit)).unwrap(),
-            Some(commit.to_ascii_lowercase())
+            require_platform_framework_commit(Some(commit)).unwrap(),
+            commit.to_ascii_lowercase()
         );
-        assert!(framework_commit_for_mode("tls", None).is_err());
-        assert!(framework_commit_for_mode("tls", Some("test-sha")).is_err());
+        assert!(require_platform_framework_commit(None).is_err());
+        assert!(require_platform_framework_commit(Some("")).is_err());
+        assert!(require_platform_framework_commit(Some("test-sha")).is_err());
+        assert!(
+            require_platform_framework_commit(Some("gggggggggggggggggggggggggggggggggggggggg"))
+                .is_err()
+        );
     }
 
     // --- BuilderSizesConfig ---
@@ -1705,7 +1679,7 @@ mod tests {
             e2e_key_exchange: "X25519".to_string(),
             domain: None,
             http_upstream_protocol: "http".to_string(),
-            framework_commit: None,
+            framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -1725,7 +1699,6 @@ mod tests {
             "eifs/org/key.eif",
             "builds/test-id/remote-build-helper",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            None,
         )
         .unwrap();
 
@@ -1813,6 +1786,10 @@ mod tests {
         assert!(
             userdata.contains("\"steve_commit\":\"steve-from-cache-key\""),
             "manifest should use the STEVE commit resolved before cache lookup"
+        );
+        assert!(
+            userdata.contains(&format!("\"commit\":\"{TEST_FRAMEWORK_COMMIT}\"")),
+            "manifest should use the Platform commit resolved before cache lookup"
         );
 
         // Should upload EIF to S3
@@ -1904,7 +1881,7 @@ mod tests {
             e2e_key_exchange: "X25519".to_string(),
             domain: None,
             http_upstream_protocol: "http".to_string(),
-            framework_commit: None,
+            framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -1923,11 +1900,11 @@ mod tests {
             "eifs/test.eif",
             "builds/test/remote-build-helper",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            None,
         )
         .unwrap();
 
         assert!(userdata.contains("CONTAINERFILE=\"Containerfile\""));
+        assert!(userdata.contains(&format!("\"commit\":\"{TEST_FRAMEWORK_COMMIT}\"")));
     }
 
     #[test]
@@ -1963,7 +1940,7 @@ mod tests {
             e2e_key_exchange: "X25519".to_string(),
             domain: None,
             http_upstream_protocol: "http".to_string(),
-            framework_commit: None,
+            framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -1982,7 +1959,6 @@ mod tests {
             "eifs/test.eif",
             "builds/test/remote-build-helper",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            None,
         )
         .unwrap();
 
@@ -2021,7 +1997,7 @@ mod tests {
             e2e_key_exchange: "X25519".to_string(),
             domain: None,
             http_upstream_protocol: "http".to_string(),
-            framework_commit: None,
+            framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -2040,7 +2016,6 @@ mod tests {
             "eifs/test.eif",
             "builds/test/remote-build-helper",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            None,
         )
         .unwrap();
 
@@ -2087,7 +2062,7 @@ mod tests {
             e2e_key_exchange: "X25519".to_string(),
             domain: None,
             http_upstream_protocol: "http".to_string(),
-            framework_commit: None,
+            framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -2106,7 +2081,6 @@ mod tests {
             "eifs/test.eif",
             "builds/test/remote-build-helper",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            None,
         )
         .unwrap_err();
 
@@ -2149,7 +2123,7 @@ mod tests {
             e2e_key_exchange: "X25519".to_string(),
             domain: None,
             http_upstream_protocol: "http".to_string(),
-            framework_commit: None,
+            framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -2168,7 +2142,6 @@ mod tests {
             "eifs/test.eif",
             "builds/test/remote-build-helper",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            None,
         )
         .unwrap();
 
@@ -2208,7 +2181,7 @@ mod tests {
             e2e_key_exchange: "X25519".to_string(),
             domain: None,
             http_upstream_protocol: "http".to_string(),
-            framework_commit: None,
+            framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
             locksmith: false,
             egress,
             e2e_cors_origins: None,
@@ -2246,7 +2219,6 @@ mod tests {
             "eifs/test.eif",
             "builds/test/remote-build-helper",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            None,
         )
         .unwrap();
 
@@ -2254,6 +2226,7 @@ mod tests {
         assert!(userdata.contains("KEY_EXCHANGE=\"XWING-DRAFT10\""));
         assert!(userdata.contains("CAUTION_KEY_EXCHANGE=\"$KEY_EXCHANGE\""));
         assert!(userdata.contains("\"steve_key_exchange\":\"XWING-DRAFT10\""));
+        assert!(userdata.contains(&format!("\"commit\":\"{TEST_FRAMEWORK_COMMIT}\"")));
     }
 
     #[test]
@@ -2277,7 +2250,6 @@ mod tests {
             "eifs/test.eif",
             "builds/test/remote-build-helper",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            None,
         )
         .unwrap();
         assert!(script.contains("EGRESS=\"true\""));
@@ -2304,7 +2276,7 @@ mod tests {
         request.http_upstream_protocol = "h2c".to_string();
         request.ports = vec![8080];
         request.http_port = Some(8080);
-        request.framework_commit = Some(platform_commit.to_string());
+        request.framework_commit = platform_commit.to_string();
 
         let userdata = generate_builder_userdata(
             Uuid::new_v4(),
@@ -2313,7 +2285,6 @@ mod tests {
             "eifs/test.eif",
             "builds/test/remote-build-helper",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            Some(platform_commit.to_string()),
         )
         .unwrap();
 
@@ -2322,17 +2293,5 @@ mod tests {
         assert!(userdata.contains("HTTP_UPSTREAM_PROTOCOL=\"h2c\""));
         assert!(userdata.contains("CAUTION_HTTP_UPSTREAM_PROTOCOL=\"$HTTP_UPSTREAM_PROTOCOL\""));
         assert!(userdata.contains(&format!("\"commit\":\"{platform_commit}\"")));
-        assert!(
-            generate_builder_userdata(
-                Uuid::new_v4(),
-                &config,
-                &request,
-                "eifs/test.eif",
-                "builds/test/remote-build-helper",
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                None,
-            )
-            .is_err()
-        );
     }
 }

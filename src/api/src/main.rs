@@ -1906,6 +1906,13 @@ async fn deploy_logic(
         req.app_id
     );
 
+    let platform_git_sha = std::env::var("PLATFORM_GIT_SHA").ok();
+    let framework_commit = builder::require_platform_framework_commit(platform_git_sha.as_deref())
+        .map_err(|error| {
+            tracing::error!("Invalid Platform framework commit: {}", error);
+            (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        })?;
+
     let app_id_str = req.app_id.to_string();
 
     let user_in_org: Option<bool> = sqlx::query_scalar(
@@ -2395,14 +2402,6 @@ async fn deploy_logic(
     let e2e_key_exchange = e2e_config
         .map(|e| e.key_exchange().steve_env_value())
         .unwrap_or(caution_config::KeyExchange::X25519.steve_env_value());
-    let platform_git_sha = std::env::var("PLATFORM_GIT_SHA").ok();
-    let framework_commit =
-        builder::framework_commit_for_mode(e2e_mode_value, platform_git_sha.as_deref()).map_err(
-            |error| {
-                tracing::error!("Invalid Platform framework commit: {}", error);
-                (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-            },
-        )?;
 
     let no_cache = ec_build
         .and_then(|b| b.cache)
@@ -2519,7 +2518,7 @@ async fn deploy_logic(
                 .as_ref()
                 .and_then(|e2e| e2e.cors_origins.as_ref())
                 .unwrap_or(&vec![]),
-            framework_commit.as_deref(),
+            &framework_commit,
         );
         let s3_client = s3_client_for_credentials(&builder_target.aws_credentials).await;
 
