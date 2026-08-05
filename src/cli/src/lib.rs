@@ -6842,6 +6842,17 @@ enclave "default" {{
             Ok(payload) => {
                 output::success("\n✓ Base Nitro attestation and expected PCR0/1/2 verified");
 
+                if let Ok(Some(user_data)) = verified_user_data(&payload) {
+                    match std::str::from_utf8(user_data) {
+                        Ok(user_data) => {
+                            output::status(format!("User data: {}", user_data.escape_debug()))
+                        }
+                        Err(_) => {
+                            output::status(format!("User data (hex): {}", hex::encode(user_data)))
+                        }
+                    }
+                }
+
                 let tls = if pcr_only {
                     TlsVerification::PcrOnly
                 } else if let Some(ref expected) = expected_tls {
