@@ -95,14 +95,14 @@ pub struct TrafficRule {
 #[serde(rename_all = "lowercase")]
 pub enum E2eMode {
     Steve,
-    Caddy,
+    Tls,
 }
 
 impl E2eMode {
     pub fn as_str(self) -> &'static str {
         match self {
             E2eMode::Steve => "steve",
-            E2eMode::Caddy => "caddy",
+            E2eMode::Tls => "tls",
         }
     }
 }
@@ -2503,8 +2503,8 @@ caution {
         let steve = hcl::from_str::<E2eEncryption>(r#"mode = "steve""#).unwrap();
         assert_eq!(steve.effective_mode(), Some(E2eMode::Steve));
 
-        let caddy = hcl::from_str::<E2eEncryption>(r#"mode = "caddy""#).unwrap();
-        assert_eq!(caddy.effective_mode(), Some(E2eMode::Caddy));
+        let tls = hcl::from_str::<E2eEncryption>(r#"mode = "tls""#).unwrap();
+        assert_eq!(tls.effective_mode(), Some(E2eMode::Tls));
 
         let legacy_enabled = hcl::from_str::<E2eEncryption>(r#"enabled = true"#).unwrap();
         assert_eq!(legacy_enabled.effective_mode(), Some(E2eMode::Steve));

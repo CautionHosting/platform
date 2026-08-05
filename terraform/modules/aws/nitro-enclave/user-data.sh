@@ -195,7 +195,7 @@ standard_ports="49500 49501 49502"
 %{ if locksmith == "true" ~}
 standard_ports="$standard_ports 49504"
 %{ endif ~}
-%{ if e2e_mode == "caddy" ~}
+%{ if e2e_mode == "tls" ~}
 standard_ports="$standard_ports 443"
 %{ endif ~}
 for port in $standard_ports; do
@@ -218,7 +218,7 @@ done
 
 # Create a host-local vsock proxy for host-terminated HTTP ingress. Enclave
 # Caddy reaches the application directly and must not expose this plaintext path.
-%{ if http_port != 0 && e2e_mode != "caddy" ~}
+%{ if http_port != 0 && e2e_mode != "tls" ~}
 cat > /etc/systemd/system/vsock-proxy-http.service <<EOF
 [Unit]
 Description=VSock Proxy for HTTP Gateway Port ${http_port}
@@ -263,7 +263,7 @@ systemctl enable nitro-enclave-console.service
 for port in $standard_ports; do
 systemctl enable vsock-proxy-$port.service
 done
-%{ if http_port != 0 && e2e_mode != "caddy" ~}
+%{ if http_port != 0 && e2e_mode != "tls" ~}
 systemctl enable vsock-proxy-http.service
 %{ endif ~}
 %{ for port in ports ~}
@@ -281,7 +281,7 @@ sleep 15
 for port in $standard_ports; do
 systemctl start vsock-proxy-$port.service
 done
-%{ if http_port != 0 && e2e_mode != "caddy" ~}
+%{ if http_port != 0 && e2e_mode != "tls" ~}
 systemctl start vsock-proxy-http.service
 %{ endif ~}
 %{ for port in ports ~}
@@ -289,7 +289,7 @@ systemctl start vsock-proxy-${port}.service
 %{ endfor ~}
 
 # Install and configure host Caddy. In STEVE/default mode the host terminates TLS
-# and proxies to the app/STEVE. In caddy mode the host must not terminate TLS on
+# and proxies to the app/STEVE. In tls mode the host must not terminate TLS on
 # 443; it verifies enclave HTTPS for health checks and redirects other HTTP
 # traffic to the configured HTTPS domain.
 echo "Installing Caddy for HTTP ingress support..."
@@ -303,7 +303,7 @@ useradd --system --home /var/lib/caddy --shell /usr/sbin/nologin caddy || true
 mkdir -p /etc/caddy /var/lib/caddy /var/log/caddy
 chown caddy:caddy /var/lib/caddy /var/log/caddy
 
-%{ if e2e_mode == "caddy" ~}
+%{ if e2e_mode == "tls" ~}
 echo "Configuring host Caddy for caddy-mode HTTP health/proxy only"
 cat > /etc/caddy/Caddyfile <<EOF
 :80 {
@@ -488,7 +488,7 @@ CADDY_SERVICE
 systemctl daemon-reload
 systemctl enable caddy
 systemctl start caddy
-%{ if e2e_mode == "caddy" ~}
+%{ if e2e_mode == "tls" ~}
 echo "Host Caddy started for caddy-mode HTTP health/proxy; TLS :443 is forwarded into the enclave"
 %{ else ~}
 %{ if domain != "" ~}

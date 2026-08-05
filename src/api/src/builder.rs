@@ -296,15 +296,15 @@ pub fn framework_commit_for_mode(
     e2e_mode: &str,
     platform_git_sha: Option<&str>,
 ) -> Result<Option<String>> {
-    if e2e_mode != "caddy" {
+    if e2e_mode != "tls" {
         return Ok(None);
     }
 
     let commit = platform_git_sha
         .filter(|value| !value.is_empty())
-        .context("PLATFORM_GIT_SHA is required for caddy mode")?;
+        .context("PLATFORM_GIT_SHA is required for tls mode")?;
     if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!("PLATFORM_GIT_SHA must be a 40-character Git commit SHA for caddy mode");
+        bail!("PLATFORM_GIT_SHA must be a 40-character Git commit SHA for tls mode");
     }
 
     Ok(Some(commit.to_ascii_lowercase()))
@@ -877,8 +877,8 @@ fn generate_builder_userdata(
     helper_sha256: &str,
     framework_commit: Option<String>,
 ) -> anyhow::Result<String> {
-    if request.e2e_mode == "caddy" && framework_commit.is_none() {
-        bail!("caddy mode requires an exact Platform framework commit");
+    if request.e2e_mode == "tls" && framework_commit.is_none() {
+        bail!("tls mode requires an exact Platform framework commit");
     }
     let status_key = format!("builds/{}/status.json", build_id);
     let bucket = &config.eif_s3_bucket;
@@ -1365,17 +1365,17 @@ mod tests {
     }
 
     #[test]
-    fn test_framework_commit_is_required_only_for_caddy_mode() {
+    fn test_framework_commit_is_required_only_for_tls_mode() {
         assert_eq!(framework_commit_for_mode("steve", None).unwrap(), None);
         assert_eq!(framework_commit_for_mode("disabled", None).unwrap(), None);
 
         let commit = "ABCDEF0123456789ABCDEF0123456789ABCDEF01";
         assert_eq!(
-            framework_commit_for_mode("caddy", Some(commit)).unwrap(),
+            framework_commit_for_mode("tls", Some(commit)).unwrap(),
             Some(commit.to_ascii_lowercase())
         );
-        assert!(framework_commit_for_mode("caddy", None).is_err());
-        assert!(framework_commit_for_mode("caddy", Some("test-sha")).is_err());
+        assert!(framework_commit_for_mode("tls", None).is_err());
+        assert!(framework_commit_for_mode("tls", Some("test-sha")).is_err());
     }
 
     // --- BuilderSizesConfig ---
@@ -2080,7 +2080,7 @@ mod tests {
         };
         let platform_commit = "0123456789abcdef0123456789abcdef01234567";
         let mut request = make_test_build_request_with_egress(true);
-        request.e2e_mode = "caddy".to_string();
+        request.e2e_mode = "tls".to_string();
         request.domain = Some("app.example.com".to_string());
         request.ports = vec![8080];
         request.http_port = Some(8080);
@@ -2097,7 +2097,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(userdata.contains("E2E_MODE=\"caddy\""));
+        assert!(userdata.contains("E2E_MODE=\"tls\""));
         assert!(userdata.contains("DOMAIN=\"app.example.com\""));
         assert!(userdata.contains(&format!("\"commit\":\"{platform_commit}\"")));
         assert!(
