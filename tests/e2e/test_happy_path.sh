@@ -271,10 +271,10 @@ fi
 
 if [ -n "$APP_IP" ]; then
     log "  App IP: $APP_IP"
-    # Wait for app to respond (may take a moment after deployment reports running)
+    # This fixture has raw ingress only; reach the application on its declared port.
     APP_RESPONDED=false
     for i in $(seq 1 30); do
-        APP_BODY=$(curl -sk --connect-timeout 5 "https://$APP_IP/" 2>/dev/null || true)
+        APP_BODY=$(curl -s --connect-timeout 5 "http://$APP_IP:8083/" 2>/dev/null || true)
         if [ -n "$APP_BODY" ]; then
             APP_RESPONDED=true
             break
