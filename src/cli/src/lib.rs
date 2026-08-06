@@ -324,7 +324,7 @@ fn trusted_state_backup_path(path: &Path) -> Result<PathBuf> {
 }
 
 fn persist_trusted_hashes(path: &Path, trusted: &TrustedHashes<'_>) -> Result<Option<PathBuf>> {
-    persist_trusted_hashes_with_backup(path, trusted, |from, to| fs::hard_link(from, to))
+    persist_trusted_hashes_with_backup(path, trusted, |from, to| fs::copy(from, to).map(|_| ()))
 }
 
 fn persist_trusted_hashes_with_backup<F>(
