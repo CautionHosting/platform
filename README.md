@@ -155,9 +155,9 @@ caution verify --attestation-url <attestation-url>
 Local source is the default. If the deployment manifest has no app commit, the
 CLI uses the current checkout at `HEAD`.
 
-Source-archive preflights are bounded and advisory. If a preflight is
-inconclusive, verification attempts the actual download, which remains
-definitive and fails verification if the source is unavailable.
+Source-archive preflights use at most two five-second HEAD requests. If the
+remote remains unavailable, verification stops before starting the expensive
+reproduction build.
 
 **Option B: Verify against known PCR hashes**
 

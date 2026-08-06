@@ -76,9 +76,62 @@ const PGP_PUBLIC_KEY_ARMOR_BEGIN: &str = "-----BEGIN PGP PUBLIC KEY BLOCK-----";
 const PGP_PUBLIC_KEY_ARMOR_END: &str = "-----END PGP PUBLIC KEY BLOCK-----";
 const PGP_PRIVATE_KEY_ARMOR_BEGIN: &str = "-----BEGIN PGP PRIVATE KEY BLOCK-----";
 const ARCHIVE_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
+const ARCHIVE_PREFLIGHT_ATTEMPTS: usize = 2;
+const MAX_ATTESTATION_RESPONSE_BYTES: usize = 1024 * 1024;
 
-fn archive_preflight_is_missing(status: reqwest::StatusCode) -> bool {
-    status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE
+#[derive(Debug, PartialEq, Eq)]
+enum ArchivePreflightStatus {
+    Passed,
+    Missing,
+    Retry,
+    Failed,
+}
+
+fn classify_archive_preflight(
+    status: reqwest::StatusCode,
+    attempt: usize,
+) -> ArchivePreflightStatus {
+    if status.is_success() {
+        ArchivePreflightStatus::Passed
+    } else if matches!(
+        status,
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+    ) {
+        ArchivePreflightStatus::Missing
+    } else if attempt < ARCHIVE_PREFLIGHT_ATTEMPTS
+        && (matches!(
+            status,
+            reqwest::StatusCode::REQUEST_TIMEOUT | reqwest::StatusCode::TOO_MANY_REQUESTS
+        ) || status.is_server_error())
+    {
+        ArchivePreflightStatus::Retry
+    } else {
+        ArchivePreflightStatus::Failed
+    }
+}
+
+fn append_attestation_response_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> Result<()> {
+    anyhow::ensure!(
+        body.len() <= MAX_ATTESTATION_RESPONSE_BYTES
+            && chunk.len() <= MAX_ATTESTATION_RESPONSE_BYTES - body.len(),
+        "Attestation response exceeds 1 MiB limit"
+    );
+    body.extend_from_slice(chunk);
+    Ok(())
+}
+
+async fn bounded_attestation_response_json(
+    mut response: reqwest::Response,
+) -> Result<serde_json::Value> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("Failed to read attestation response")?
+    {
+        append_attestation_response_chunk(&mut body, &chunk)?;
+    }
+    serde_json::from_slice(&body).context("Failed to parse attestation response as JSON")
 }
 
 fn resolve_reproduction_e2e_mode(
@@ -250,17 +303,43 @@ fn tls_expectation_from_config(
     Ok(Some(TlsExpectation { domain }))
 }
 
-fn verified_user_data(payload: &serde_cbor::Value) -> Result<Option<&[u8]>> {
+fn attestation_user_data(payload: &serde_cbor::Value) -> Result<Option<&[u8]>> {
     let serde_cbor::Value::Map(payload) = payload else {
-        bail!("verified Nitro payload is not a CBOR map");
+        bail!("Nitro payload is not a CBOR map");
     };
     let Some(value) = payload.get(&serde_cbor::Value::Text("user_data".to_string())) else {
         return Ok(None);
     };
+    if value == &serde_cbor::Value::Null {
+        return Ok(None);
+    }
     let serde_cbor::Value::Bytes(value) = value else {
-        bail!("verified Nitro user_data is not bytes");
+        bail!("Nitro user_data is neither bytes nor null");
     };
     Ok(Some(value))
+}
+
+fn display_user_data(user_data: &[u8]) -> (bool, String) {
+    match std::str::from_utf8(user_data) {
+        Ok(user_data) => (false, user_data.escape_debug().to_string()),
+        Err(_) => (true, hex::encode(user_data)),
+    }
+}
+
+fn attestation_inspection_json(
+    nonce: &[u8],
+    payload: &serde_cbor::Value,
+    manifest: Option<&serde_json::Value>,
+) -> Result<String> {
+    let value = serde_json::json!({
+        "verification": "not_performed",
+        "challenge_nonce": general_purpose::STANDARD.encode(nonce),
+        "attestation_payload": attestation::payload_json(payload)?,
+        "response_metadata": {
+            "manifest": manifest.cloned().unwrap_or(serde_json::Value::Null),
+        },
+    });
+    serde_json::to_string_pretty(&value).context("Failed to serialize parsed attestation")
 }
 
 fn validate_attested_tls(
@@ -1375,6 +1454,19 @@ enum Commands {
             help = "Deprecated: verified trust state is now saved automatically"
         )]
         save_pcrs: bool,
+        #[arg(
+            long,
+            conflicts_with_all = [
+                "from_local",
+                "from_tarball",
+                "app_source_url",
+                "pcrs",
+                "no_cache",
+                "save_pcrs"
+            ],
+            help = "Print the unverified parsed remote attestation and exit"
+        )]
+        inspect_attestation: bool,
     },
     #[command(about = "Manage deployed applications")]
     Apps {
@@ -3105,7 +3197,7 @@ caution {
 enclave "default" {{
   build {{
     # containerfile = "Containerfile"   # defaults to repo-root Containerfile/Dockerfile
-    # app_sources = ["{source_url}"]    # git URLs published in the attestation manifest
+    # app_sources = ["{source_url}"]    # git URLs published in unsigned response metadata
     # cache       = true
   }}
 
@@ -6515,7 +6607,7 @@ enclave "default" {{
         attestation_url: &reqwest::Url,
         attestation_leaf: Option<&[u8]>,
     ) -> Result<TlsVerification> {
-        let user_data = verified_user_data(payload)?
+        let user_data = attestation_user_data(payload)?
             .context("verified Nitro attestation is missing TLS user_data")?;
 
         let deployment_ip = match tls_connection(attestation_url, &expected.domain)? {
@@ -6590,9 +6682,14 @@ enclave "default" {{
         pcrs_file: Option<String>,
         no_cache: bool,
         save_pcrs: bool,
+        inspect_attestation: bool,
     ) -> Result<()> {
-        output::status("Verifying enclave attestation...");
-        output::status("Learn more: https://docs.caution.co/concepts/attestation/");
+        if inspect_attestation {
+            output::status("Inspecting remote attestation...");
+        } else {
+            output::status("Verifying enclave attestation...");
+            output::status("Learn more: https://docs.caution.co/concepts/attestation/");
+        }
 
         for warning in verify_deprecation_warnings(from_local, save_pcrs) {
             output::warning(warning);
@@ -6643,10 +6740,7 @@ enclave "default" {{
         }
         let attestation_leaf = peer_certificate_der(&response);
 
-        let attest_resp: serde_json::Value = response
-            .json()
-            .await
-            .context("Failed to parse attestation response as JSON")?;
+        let attest_resp = bounded_attestation_response_json(response).await?;
 
         let attestation_b64 = attest_resp
             .get("attestation_document")
@@ -6668,14 +6762,42 @@ enclave "default" {{
             .decode(attestation_b64)
             .context("Failed to decode attestation document")?;
 
-        output::status("\nExtracting remote PCR values...");
-        let remote_pcrs = attestation::extract_pcrs(&attestation_bytes)
+        let attestation_payload = attestation::parse(&attestation_bytes)
+            .context("Failed to parse attestation document")?;
+
+        if inspect_attestation {
+            output::warning(
+                "UNVERIFIED: parsing succeeded, but Nitro, expected PCRs, and TLS were not verified",
+            );
+            output::data_ln(attestation_inspection_json(
+                &nonce,
+                &attestation_payload,
+                attest_resp.get("manifest"),
+            )?)?;
+            return Ok(());
+        }
+
+        output::status("\nExtracting remote attestation values...");
+        let remote_pcrs = attestation::extract_pcrs(&attestation_payload)
             .context("Failed to extract PCRs from attestation document")?;
 
-        output::status("\nRemote PCR values (from deployed enclave):");
+        output::status("\nRemote PCR values (unverified until verification succeeds):");
         output::status(format!("  PCR0: {}", remote_pcrs.pcr0));
         output::status(format!("  PCR1: {}", remote_pcrs.pcr1));
         output::status(format!("  PCR2: {}", remote_pcrs.pcr2));
+
+        if let Some(user_data) = attestation_user_data(&attestation_payload)? {
+            let (is_hex, user_data) = display_user_data(user_data);
+            if is_hex {
+                output::status(format_args!(
+                    "Remote user data (unverified, hex): {user_data}"
+                ));
+            } else {
+                output::status(format_args!(
+                    "Remote user data (unverified): {user_data}"
+                ));
+            }
+        }
 
         let manifest: Option<enclave_builder::EnclaveManifest> = attest_resp
             .get("manifest")
@@ -6685,7 +6807,7 @@ enclave "default" {{
             .context("Attestation response contains an invalid manifest")?;
 
         if let Some(ref m) = manifest {
-            output::status("\nManifest information:");
+            output::status("\nResponse manifest information (unsigned):");
             if let Some(ref app_src) = m.app_source {
                 if app_src.urls.len() == 1 {
                     output::status(format!("  App source: {} commit: {}", app_src.urls[0], app_src.commit));
@@ -6846,17 +6968,8 @@ enclave "default" {{
         match nitro.verify(duration_since_epoch, &nonce) {
             Ok(payload) => {
                 output::success("\n✓ Base Nitro attestation and expected PCR0/1/2 verified");
-
-                if let Ok(Some(user_data)) = verified_user_data(&payload) {
-                    match std::str::from_utf8(user_data) {
-                        Ok(user_data) => {
-                            output::status(format!("User data: {}", user_data.escape_debug()))
-                        }
-                        Err(_) => {
-                            output::status(format!("User data (hex): {}", hex::encode(user_data)))
-                        }
-                    }
-                }
+                let verified_pcrs = attestation::extract_pcrs(&payload)
+                    .context("verified Nitro payload has malformed PCRs")?;
 
                 let tls = if pcr_only {
                     TlsVerification::PcrOnly
@@ -6889,9 +7002,9 @@ enclave "default" {{
                 }
 
                 let trusted = TrustedHashes {
-                    pcr0: &remote_pcrs.pcr0,
-                    pcr1: &remote_pcrs.pcr1,
-                    pcr2: &remote_pcrs.pcr2,
+                    pcr0: &verified_pcrs.pcr0,
+                    pcr1: &verified_pcrs.pcr1,
+                    pcr2: &verified_pcrs.pcr2,
                     verified_at: chrono::Utc::now().to_rfc3339(),
                     tls: match tls {
                         TlsVerification::Verified(tls) => Some(tls),
@@ -7302,7 +7415,7 @@ enclave "default" {{
 
     /// Build a non-interactive, stall-bounded `git` command that cannot prompt
     /// for credentials or block on a TTY. During verification the source URL
-    /// comes from the remote attestation manifest and may point at a repo the
+    /// comes from the remote response manifest and may point at a repo the
     /// host refuses to serve anonymously — e.g. a non-existent Codeberg/Forgejo
     /// repo, which returns `401` (rather than `404`, to avoid leaking
     /// existence). Without these guards, `git` falls back to prompting
@@ -7348,65 +7461,86 @@ enclave "default" {{
         cmd
     }
 
-    /// Cheap, advisory reachability check for an enclave/framework source archive.
-    /// A definitive 404/410 blocks; any other HTTP or transport failure is reported
-    /// as inconclusive and left for the real download to resolve.
+    /// Fail-fast reachability check for an enclave/framework source archive.
+    /// Retry a transient HEAD failure once, then stop before the expensive build.
     async fn preflight_archive_url(&self, label: &str, url: &str) -> Result<()> {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Ok(());
         }
 
-        output::status(format!("\nChecking {} is reachable on remote...", label.to_lowercase()));
-        let response = match self
-            .client
-            .head(url)
-            .timeout(ARCHIVE_PREFLIGHT_TIMEOUT)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(e) => {
-                output::status(format!(
-                    "  {} preflight inconclusive; attempting actual download",
-                    label
-                ));
-                output::verbose(
-                    self.verbose,
-                    &format!("{} preflight inconclusive ({})", label, e),
-                );
-                return Ok(());
+        output::status(format_args!(
+            "\nChecking {} is reachable on remote...",
+            label.to_lowercase()
+        ));
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("Failed to create archive preflight client")?;
+        for attempt in 1..=ARCHIVE_PREFLIGHT_ATTEMPTS {
+            match client
+                .head(url)
+                .timeout(ARCHIVE_PREFLIGHT_TIMEOUT)
+                .send()
+                .await
+            {
+                Ok(response) => match classify_archive_preflight(response.status(), attempt) {
+                    ArchivePreflightStatus::Passed => {
+                        output::verbose(
+                            self.verbose,
+                            format_args!(
+                                "{} reachable (HTTP {})",
+                                label,
+                                response.status().as_u16()
+                            ),
+                        );
+                        output::status(format_args!("  {} preflight passed ✓", label));
+                        return Ok(());
+                    }
+                    ArchivePreflightStatus::Missing => {
+                        bail!(
+                            "{label} archive is not available on the remote (HTTP {code}):\n  \
+                             {url}\n\n\
+                             The deployed enclave references a {lower} commit that the remote no \
+                             longer serves — it may have been garbage-collected, or the manifest \
+                             is stale. This build cannot be reproduced from the remote manifest.",
+                            label = label,
+                            lower = label.to_lowercase(),
+                            code = response.status().as_u16(),
+                            url = url,
+                        );
+                    }
+                    ArchivePreflightStatus::Retry => {
+                        output::warning(format_args!(
+                            "  {} preflight returned HTTP {}; retrying once",
+                            label,
+                            response.status().as_u16()
+                        ));
+                    }
+                    ArchivePreflightStatus::Failed => {
+                        bail!(
+                            "{label} preflight failed (HTTP {code}):\n  {url}\n\n\
+                             Refusing to start the reproduction build.",
+                            code = response.status().as_u16(),
+                        );
+                    }
+                },
+                Err(error) if attempt < ARCHIVE_PREFLIGHT_ATTEMPTS => {
+                    output::warning(format_args!(
+                        "  {} preflight failed: {}; retrying once",
+                        label, error
+                    ));
+                }
+                Err(error) => {
+                    bail!(
+                        "{label} preflight failed after {attempts} attempts:\n  {url}\n  \
+                         {error}\n\nRefusing to start the reproduction build.",
+                        attempts = ARCHIVE_PREFLIGHT_ATTEMPTS,
+                    );
+                }
             }
-        };
-
-        let status = response.status();
-        if archive_preflight_is_missing(status) {
-            bail!(
-                "{label} archive is not available on the remote (HTTP {code}):\n  \
-                 {url}\n\n\
-                 The deployed enclave references a {lower} commit that the remote no \
-                 longer serves — it may have been garbage-collected, or the manifest \
-                 is stale. This build cannot be reproduced from the remote manifest.",
-                label = label,
-                lower = label.to_lowercase(),
-                code = status.as_u16(),
-                url = url,
-            );
-        }
-        if !status.is_success() {
-            output::status(format!(
-                "  {} preflight inconclusive (HTTP {}); attempting actual download",
-                label,
-                status.as_u16()
-            ));
-            return Ok(());
         }
 
-        output::verbose(
-            self.verbose,
-            &format!("{} reachable (HTTP {})", label, status.as_u16()),
-        );
-        output::status(format!("  {} preflight passed ✓", label));
-        Ok(())
+        unreachable!("archive preflight attempt loop is non-empty")
     }
 
     /// Cheap network preflight: confirm the app source branch is present on the
@@ -9267,6 +9401,7 @@ pub async fn run() -> Result<(), RunError> {
             pcrs,
             no_cache,
             save_pcrs,
+            inspect_attestation,
         } => {
             client
                 .verify(
@@ -9277,6 +9412,7 @@ pub async fn run() -> Result<(), RunError> {
                     pcrs,
                     no_cache,
                     save_pcrs,
+                    inspect_attestation,
                 )
                 .await
                 .map_err(RunError::CommandDispatch)?;
@@ -9465,12 +9601,14 @@ pub async fn run() -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
-    use super::archive_preflight_is_missing;
     use super::openpgp;
     use super::{
-        AccountCommands, ApiClient, Cli, Commands, LoginUsernameError, PgpKeyCommands,
-        RegisterUsernameError, RunError, TlsConnection, TlsExpectation, TrustedHashes, TrustedTls,
-        dns_answer_is_absent, dns_contains_deployment_ip, encrypt_env_file, encrypt_secret_value,
+        AccountCommands, ApiClient, ArchivePreflightStatus, Cli, Commands, LoginUsernameError,
+        MAX_ATTESTATION_RESPONSE_BYTES, PgpKeyCommands, RegisterUsernameError, RunError,
+        TlsConnection, TlsExpectation, TrustedHashes, TrustedTls,
+        append_attestation_response_chunk, attestation_inspection_json, attestation_user_data,
+        classify_archive_preflight, display_user_data, dns_answer_is_absent,
+        dns_contains_deployment_ip, encrypt_env_file, encrypt_secret_value,
         keymaker_cert_eligibility, load_recipient_cert, login_begin_request_body,
         measured_build_cache_key, normalize_keyring, parse_env_assignments,
         persist_trusted_hashes, persist_trusted_hashes_with_backup,
@@ -9479,7 +9617,7 @@ mod tests {
         resolve_local_build_command_from_dir, resolve_login_username,
         resolve_procfile_build_command, resolve_quorum_parameters, resolve_register_username,
         resolve_reproduction_e2e_mode, tls_connection, tls_expectation_from_config,
-        validate_attested_tls, validate_global_qr, verified_user_data, verify_deprecation_warnings,
+        validate_attested_tls, validate_global_qr, verify_deprecation_warnings,
     };
     use caution_config::{ConfigurationFile, E2eEncryption, E2eMode};
     use clap::Parser;
@@ -9563,6 +9701,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn inspect_attestation_rejects_verification_only_options() {
+        for option in [
+            vec!["--from-local"],
+            vec!["--from-tarball", "source.tar.gz"],
+            vec!["--app-source-url", "https://example.com/app.git"],
+            vec!["--pcrs", "pcrs.txt"],
+            vec!["--no-cache"],
+            vec!["--save-pcrs"],
+        ] {
+            let mut args = vec!["caution", "verify", "--inspect-attestation"];
+            args.extend(option);
+            assert_eq!(
+                Cli::try_parse_from(args).err().unwrap().kind(),
+                clap::error::ErrorKind::ArgumentConflict
+            );
+        }
+
+        let cli = Cli::try_parse_from([
+            "caution",
+            "verify",
+            "--inspect-attestation",
+            "--attestation-url",
+            "https://app.example.com/attestation",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Verify {
+                inspect_attestation: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -9735,24 +9908,75 @@ enclave "main" {{
     }
 
     #[test]
-    fn verified_user_data_rejects_wrong_payload_shapes() {
+    fn attestation_user_data_handles_optional_and_wrong_payload_shapes() {
         let key = serde_cbor::Value::Text("user_data".to_string());
         let bytes = serde_cbor::Value::Bytes(b"metadata".to_vec());
         let payload = serde_cbor::Value::Map([(key.clone(), bytes)].into_iter().collect());
         assert_eq!(
-            verified_user_data(&payload).unwrap(),
+            attestation_user_data(&payload).unwrap(),
             Some(&b"metadata"[..])
         );
 
         let missing = serde_cbor::Value::Map(Default::default());
-        assert_eq!(verified_user_data(&missing).unwrap(), None);
+        assert_eq!(attestation_user_data(&missing).unwrap(), None);
+        let null = serde_cbor::Value::Map(
+            [(key.clone(), serde_cbor::Value::Null)]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(attestation_user_data(&null).unwrap(), None);
         let wrong = serde_cbor::Value::Map(
             [(key, serde_cbor::Value::Text("metadata".to_string()))]
                 .into_iter()
                 .collect(),
         );
-        assert!(verified_user_data(&wrong).is_err());
-        assert!(verified_user_data(&serde_cbor::Value::Null).is_err());
+        assert!(attestation_user_data(&wrong).is_err());
+        assert!(attestation_user_data(&serde_cbor::Value::Null).is_err());
+    }
+
+    #[test]
+    fn user_data_display_escapes_utf8_and_hex_encodes_other_bytes() {
+        assert_eq!(
+            display_user_data(b"line\nnext"),
+            (false, "line\\nnext".to_string())
+        );
+        assert_eq!(display_user_data(&[0xff, 0x00]), (true, "ff00".to_string()));
+    }
+
+    #[test]
+    fn inspection_json_is_explicitly_unverified_and_separates_manifest() {
+        let payload = serde_cbor::Value::Map(
+            [(
+                serde_cbor::Value::Text("user_data".to_string()),
+                serde_cbor::Value::Bytes(b"metadata".to_vec()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let manifest = serde_json::json!({"app_source": {"commit": "abc"}});
+        let output: serde_json::Value = serde_json::from_str(
+            &attestation_inspection_json(b"nonce", &payload, Some(&manifest)).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(output["verification"], "not_performed");
+        assert_eq!(output["challenge_nonce"], "bm9uY2U=");
+        assert_eq!(
+            output["attestation_payload"]["user_data"],
+            "base64:bWV0YWRhdGE="
+        );
+        assert_eq!(output["response_metadata"]["manifest"], manifest);
+    }
+
+    #[test]
+    fn attestation_response_limit_accepts_boundary_and_rejects_excess() {
+        let mut body = vec![0; MAX_ATTESTATION_RESPONSE_BYTES - 1];
+        append_attestation_response_chunk(&mut body, &[0]).unwrap();
+        assert_eq!(body.len(), MAX_ATTESTATION_RESPONSE_BYTES);
+        assert!(append_attestation_response_chunk(&mut body, &[0]).is_err());
+
+        let mut oversized = vec![0; MAX_ATTESTATION_RESPONSE_BYTES + 1];
+        assert!(append_attestation_response_chunk(&mut oversized, &[]).is_err());
     }
 
     fn trusted_hashes<'a>(pcr: &'a str, tls: Option<TrustedTls>) -> TrustedHashes<'a> {
@@ -10429,16 +10653,19 @@ enclave "default" {
 3333333333333333333333333333333333333333\trefs/tags/v1.0\n";
 
     #[test]
-    fn archive_preflight_only_treats_not_found_and_gone_as_missing() {
-        assert!(archive_preflight_is_missing(reqwest::StatusCode::NOT_FOUND));
-        assert!(archive_preflight_is_missing(reqwest::StatusCode::GONE));
-        for status in [
-            reqwest::StatusCode::OK,
-            reqwest::StatusCode::METHOD_NOT_ALLOWED,
-            reqwest::StatusCode::TOO_MANY_REQUESTS,
-            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+    fn archive_preflight_classifies_pass_failure_retry_and_exhaustion() {
+        for (status, attempt, expected) in [
+            (reqwest::StatusCode::OK, 1, ArchivePreflightStatus::Passed),
+            (reqwest::StatusCode::NOT_FOUND, 1, ArchivePreflightStatus::Missing),
+            (reqwest::StatusCode::GONE, 1, ArchivePreflightStatus::Missing),
+            (reqwest::StatusCode::FOUND, 1, ArchivePreflightStatus::Failed),
+            (reqwest::StatusCode::METHOD_NOT_ALLOWED, 1, ArchivePreflightStatus::Failed),
+            (reqwest::StatusCode::REQUEST_TIMEOUT, 1, ArchivePreflightStatus::Retry),
+            (reqwest::StatusCode::TOO_MANY_REQUESTS, 1, ArchivePreflightStatus::Retry),
+            (reqwest::StatusCode::SERVICE_UNAVAILABLE, 1, ArchivePreflightStatus::Retry),
+            (reqwest::StatusCode::SERVICE_UNAVAILABLE, 2, ArchivePreflightStatus::Failed),
         ] {
-            assert!(!archive_preflight_is_missing(status));
+            assert_eq!(classify_archive_preflight(status, attempt), expected);
         }
     }
 
