@@ -403,7 +403,7 @@ export default {
 /* Plus Jakarta Sans */
 @font-face {
   font-family: 'Plus Jakarta Sans';
-  src: url('./assets/fonts/PlusJakartaSans-ExtraLight.otf') format('opentype');
+  src: url('/assets/fonts/PlusJakartaSans-ExtraLight.otf') format('opentype');
   font-weight: 200;
   font-style: normal;
   font-display: swap;
@@ -411,7 +411,7 @@ export default {
 
 @font-face {
   font-family: 'Plus Jakarta Sans';
-  src: url('./assets/fonts/PlusJakartaSans-Light.otf') format('opentype');
+  src: url('/assets/fonts/PlusJakartaSans-Light.otf') format('opentype');
   font-weight: 300;
   font-style: normal;
   font-display: swap;
@@ -419,7 +419,7 @@ export default {
 
 @font-face {
   font-family: 'Plus Jakarta Sans';
-  src: url('./assets/fonts/PlusJakartaSans-Regular.otf') format('opentype');
+  src: url('/assets/fonts/PlusJakartaSans-Regular.otf') format('opentype');
   font-weight: 400;
   font-style: normal;
   font-display: swap;
@@ -427,7 +427,7 @@ export default {
 
 @font-face {
   font-family: 'Plus Jakarta Sans';
-  src: url('./assets/fonts/PlusJakartaSans-Medium.otf') format('opentype');
+  src: url('/assets/fonts/PlusJakartaSans-Medium.otf') format('opentype');
   font-weight: 500;
   font-style: normal;
   font-display: swap;
@@ -435,7 +435,7 @@ export default {
 
 @font-face {
   font-family: 'Plus Jakarta Sans';
-  src: url('./assets/fonts/PlusJakartaSans-SemiBold.otf') format('opentype');
+  src: url('/assets/fonts/PlusJakartaSans-SemiBold.otf') format('opentype');
   font-weight: 600;
   font-style: normal;
   font-display: swap;
@@ -443,7 +443,7 @@ export default {
 
 @font-face {
   font-family: 'Plus Jakarta Sans';
-  src: url('./assets/fonts/PlusJakartaSans-Bold.otf') format('opentype');
+  src: url('/assets/fonts/PlusJakartaSans-Bold.otf') format('opentype');
   font-weight: 700;
   font-style: normal;
   font-display: swap;
@@ -451,7 +451,7 @@ export default {
 
 @font-face {
   font-family: 'Plus Jakarta Sans';
-  src: url('./assets/fonts/PlusJakartaSans-ExtraBold.otf') format('opentype');
+  src: url('/assets/fonts/PlusJakartaSans-ExtraBold.otf') format('opentype');
   font-weight: 800;
   font-style: normal;
   font-display: swap;
@@ -460,7 +460,7 @@ export default {
 /* IBM Plex Sans */
 @font-face {
   font-family: 'IBM Plex Sans';
-  src: url('./assets/fonts/IBMPlexSans-Light.woff2') format('woff2');
+  src: url('/assets/fonts/IBMPlexSans-Light.woff2') format('woff2');
   font-weight: 300;
   font-style: normal;
   font-display: swap;
@@ -468,7 +468,7 @@ export default {
 
 @font-face {
   font-family: 'IBM Plex Sans';
-  src: url('./assets/fonts/IBMPlexSans-Regular.woff2') format('woff2');
+  src: url('/assets/fonts/IBMPlexSans-Regular.woff2') format('woff2');
   font-weight: 400;
   font-style: normal;
   font-display: swap;
@@ -476,7 +476,7 @@ export default {
 
 @font-face {
   font-family: 'IBM Plex Sans';
-  src: url('./assets/fonts/IBMPlexSans-Medium.woff2') format('woff2');
+  src: url('/assets/fonts/IBMPlexSans-Medium.woff2') format('woff2');
   font-weight: 500;
   font-style: normal;
   font-display: swap;
@@ -484,7 +484,7 @@ export default {
 
 @font-face {
   font-family: 'IBM Plex Sans';
-  src: url('./assets/fonts/IBMPlexSans-SemiBold.woff2') format('woff2');
+  src: url('/assets/fonts/IBMPlexSans-SemiBold.woff2') format('woff2');
   font-weight: 600;
   font-style: normal;
   font-display: swap;
@@ -492,7 +492,7 @@ export default {
 
 @font-face {
   font-family: 'IBM Plex Sans';
-  src: url('./assets/fonts/IBMPlexSans-Bold.woff2') format('woff2');
+  src: url('/assets/fonts/IBMPlexSans-Bold.woff2') format('woff2');
   font-weight: 700;
   font-style: normal;
   font-display: swap;
