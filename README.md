@@ -155,6 +155,10 @@ caution verify --attestation-url <attestation-url>
 Local source is the default. If the deployment manifest has no app commit, the
 CLI uses the current checkout at `HEAD`.
 
+Source-archive preflights are bounded and advisory. If a preflight is
+inconclusive, verification attempts the actual download, which remains
+definitive and fails verification if the source is unavailable.
+
 **Option B: Verify against known PCR hashes**
 
 PCRs (Platform Configuration Registers) are cryptographic measurements of the enclave's code and configuration. If you already have the expected PCR hashes, you can verify against a file:

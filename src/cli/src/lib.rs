@@ -75,6 +75,11 @@ const PGP_KEY_NAME_MAX_CHARS: usize = 255;
 const PGP_PUBLIC_KEY_ARMOR_BEGIN: &str = "-----BEGIN PGP PUBLIC KEY BLOCK-----";
 const PGP_PUBLIC_KEY_ARMOR_END: &str = "-----END PGP PUBLIC KEY BLOCK-----";
 const PGP_PRIVATE_KEY_ARMOR_BEGIN: &str = "-----BEGIN PGP PRIVATE KEY BLOCK-----";
+const ARCHIVE_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn archive_preflight_is_missing(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE
+}
 
 fn resolve_reproduction_e2e_mode(
     config: Option<&caution_config::E2eEncryption>,
@@ -7343,13 +7348,9 @@ enclave "default" {{
         cmd
     }
 
-    /// Cheap reachability check for an enclave/framework source archive. A `HEAD`
-    /// transfers no body, so a commit the remote no longer serves (404/410) fails
-    /// in seconds instead of after the Docker image build and user-filesystem
-    /// extraction. Only a definitive "not found" blocks; any other status, an
-    /// unsupported HEAD (405), or a transport error is treated as inconclusive and
-    /// left for the real download to resolve. Non-HTTP sources (git URLs, local
-    /// paths) are skipped.
+    /// Cheap, advisory reachability check for an enclave/framework source archive.
+    /// A definitive 404/410 blocks; any other HTTP or transport failure is reported
+    /// as inconclusive and left for the real download to resolve.
     async fn preflight_archive_url(&self, label: &str, url: &str) -> Result<()> {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Ok(());
@@ -7359,12 +7360,16 @@ enclave "default" {{
         let response = match self
             .client
             .head(url)
-            .timeout(Duration::from_secs(30))
+            .timeout(ARCHIVE_PREFLIGHT_TIMEOUT)
             .send()
             .await
         {
             Ok(response) => response,
             Err(e) => {
+                output::status(format!(
+                    "  {} preflight inconclusive; attempting actual download",
+                    label
+                ));
                 output::verbose(
                     self.verbose,
                     &format!("{} preflight inconclusive ({})", label, e),
@@ -7374,7 +7379,7 @@ enclave "default" {{
         };
 
         let status = response.status();
-        if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
+        if archive_preflight_is_missing(status) {
             bail!(
                 "{label} archive is not available on the remote (HTTP {code}):\n  \
                  {url}\n\n\
@@ -7387,12 +7392,20 @@ enclave "default" {{
                 url = url,
             );
         }
+        if !status.is_success() {
+            output::status(format!(
+                "  {} preflight inconclusive (HTTP {}); attempting actual download",
+                label,
+                status.as_u16()
+            ));
+            return Ok(());
+        }
 
         output::verbose(
             self.verbose,
             &format!("{} reachable (HTTP {})", label, status.as_u16()),
         );
-        output::status(format!("  {} reachable ✓", label));
+        output::status(format!("  {} preflight passed ✓", label));
         Ok(())
     }
 
@@ -9452,6 +9465,7 @@ pub async fn run() -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
+    use super::archive_preflight_is_missing;
     use super::openpgp;
     use super::{
         AccountCommands, ApiClient, Cli, Commands, LoginUsernameError, PgpKeyCommands,
@@ -10413,6 +10427,20 @@ enclave "default" {
 1111111111111111111111111111111111111111\trefs/heads/main\n\
 2222222222222222222222222222222222222222\trefs/heads/deploy-tests\n\
 3333333333333333333333333333333333333333\trefs/tags/v1.0\n";
+
+    #[test]
+    fn archive_preflight_only_treats_not_found_and_gone_as_missing() {
+        assert!(archive_preflight_is_missing(reqwest::StatusCode::NOT_FOUND));
+        assert!(archive_preflight_is_missing(reqwest::StatusCode::GONE));
+        for status in [
+            reqwest::StatusCode::OK,
+            reqwest::StatusCode::METHOD_NOT_ALLOWED,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert!(!archive_preflight_is_missing(status));
+        }
+    }
 
     #[test]
     fn preflight_fails_when_branch_absent_from_remote() {
