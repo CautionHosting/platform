@@ -908,7 +908,7 @@ enum Commands {
         qr: bool,
         #[arg(
             long,
-            help = "Username to log in with (prompted interactively if omitted; --qr uses discoverable credentials by default and skips this prompt)"
+            help = "Username to log in with (prompted interactively if omitted)"
         )]
         username: Option<String>,
     },
@@ -1367,10 +1367,9 @@ struct LoginBeginResponse {
     session: String,
 }
 
-/// JSON body for `POST /auth/login/begin`. The CLI drives USB security keys
-/// directly (no conditional UI), so it always sends this field — but `username`
-/// may be an empty string (the user left the login prompt blank), which the
-/// server's `normalize_login_username` treats as absent, falling back to the
+/// JSON body for login begin requests. `username` may be an empty string (the
+/// user left the login prompt blank), which the server's
+/// `normalize_login_username` treats as absent, falling back to the
 /// broadcast/discoverable no-username path rather than a scoped `allowCredentials`.
 fn login_begin_request_body(username: &str) -> serde_json::Value {
     serde_json::json!({ "username": username })
@@ -3071,17 +3070,23 @@ enclave "default" {{
         Ok(())
     }
 
-    async fn login_qr(&self, username: Option<&str>) -> Result<()> {
+    async fn login_qr(&self, username: Option<String>) -> Result<()> {
         output::verbose(self.verbose, "Starting QR code cross-device login...");
 
-        // Step 1: Request a QR login token from the gateway. An optional
-        // username scopes the eventual allowCredentials to that user's own
-        // credentials, needed for non-resident/legacy keys the scanning
-        // device can't otherwise offer via a discoverable challenge.
+        let username = resolve_login_username(
+            username,
+            std::io::IsTerminal::is_terminal(&std::io::stdin()),
+            &mut std::io::stdin().lock(),
+        )?;
+
+        // Step 1: Request a QR login token from the gateway. The username
+        // scopes the eventual allowCredentials to that user's own credentials,
+        // needed for non-resident/legacy keys the scanning device can't
+        // otherwise offer via a discoverable challenge.
         let response = self
             .client
             .post(format!("{}/auth/qr-login/begin", self.base_url))
-            .json(&serde_json::json!({ "username": username }))
+            .json(&login_begin_request_body(&username))
             .send()
             .await?;
 
@@ -8672,7 +8677,7 @@ pub async fn run() -> Result<(), RunError> {
         Commands::Login { qr, username } => {
             if qr {
                 client
-                    .login_qr(username.as_deref())
+                    .login_qr(username)
                     .await
                     .map_err(RunError::CommandDispatch)?;
             } else {

@@ -23,15 +23,16 @@ caution login --qr
 ### Expected behavior
 
 1. CLI prints "Starting QR code cross-device login..." (verbose)
-2. CLI requests a QR login token from `POST /auth/qr-login/begin`
-3. A QR code is rendered in the terminal
-4. The URL is also printed below the QR code (for manual entry)
-5. CLI shows "Waiting for authentication..." with a spinner
-6. **On your phone:** scan the QR code or open the URL in a browser
-7. The browser opens the gateway's QR login page
-8. Tap "Authenticate" and complete the FIDO2 ceremony (Face ID, fingerprint, PIN, etc.)
-9. The phone shows "Authentication successful"
-10. CLI detects completion, stores session, prints "Login successful"
+2. CLI prompts for the username when `--username` was omitted
+3. CLI requests a QR login token from `POST /auth/qr-login/begin`, scoped to that username
+4. A QR code is rendered in the terminal
+5. The URL is also printed below the QR code (for manual entry)
+6. CLI shows "Waiting for authentication..." with a spinner
+7. **On your phone:** scan the QR code or open the URL in a browser
+8. The browser opens the gateway's QR login page
+9. Tap "Authenticate" and complete the FIDO2 ceremony (Face ID, fingerprint, PIN, etc.)
+10. The phone shows "Authentication successful"
+11. CLI detects completion, stores session, prints "Login successful"
 
 ### Failure cases to test
 
