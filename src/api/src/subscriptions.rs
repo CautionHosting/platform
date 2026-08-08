@@ -244,14 +244,29 @@ pub async fn get_subscription(
     };
 
     let tier: String = row.get("tier");
+    let stored_max_apps: i32 = row.get("max_apps");
     let (tier_name, max_apps, price_cents_per_cycle) = resolved_subscription_values(
         &state.pricing,
         &tier,
-        row.get("max_apps"),
+        stored_max_apps,
         row.get("price_cents_per_cycle"),
     );
 
     let billing_source: String = row.get("billing_source");
+    let stored_status: String = row.get("status");
+    let enterprise_expires_at: Option<DateTime<Utc>> = row.get("enterprise_expires_at");
+    let enterprise_has_expired = billing_source == "enterprise"
+        && enterprise_expires_at.is_some_and(|expires_at| expires_at <= Utc::now());
+    let enterprise_entitlement_active =
+        billing_source == "enterprise" && stored_status == "active" && !enterprise_has_expired;
+    let unlimited_enclaves = billing_source == "enterprise"
+        && tier == "enterprise_unlimited"
+        && stored_max_apps == i32::MAX;
+    let effective_status = if enterprise_has_expired {
+        "expired".to_string()
+    } else {
+        stored_status
+    };
     let pending_tier: Option<String> = row.get("pending_tier");
     let pending_max_apps: Option<i32> = row.get("pending_max_apps");
     let monthly_price = if billing_source == "enterprise" {
@@ -273,6 +288,7 @@ pub async fn get_subscription(
             "enclaves": max_apps,
             "max_apps": max_apps,
             "enclave_limit": max_apps,
+            "unlimited_enclaves": unlimited_enclaves,
             "allocated_enclaves": row.get::<i64, _>("allocated_enclaves"),
             "pending_enclave_limit": pending_max_apps,
             "pending_change": pending_tier.map(|tier_id| serde_json::json!({
@@ -282,9 +298,10 @@ pub async fn get_subscription(
             "price_cents_per_cycle": monthly_price,
             "monthly_price_cents": monthly_price,
             "total_price_cents_per_cycle": monthly_price,
-            "status": row.get::<String, _>("status"),
+            "status": effective_status,
             "catalog_valid": row.get::<bool, _>("catalog_valid"),
-            "enterprise_expires_at": row.get::<Option<DateTime<Utc>>, _>("enterprise_expires_at"),
+            "enterprise_expires_at": enterprise_expires_at,
+            "enterprise_entitlement_active": enterprise_entitlement_active,
             "started_at": row.get::<DateTime<Utc>, _>("started_at"),
             "current_period_start": row.get::<DateTime<Utc>, _>("current_period_start"),
             "current_period_end": row.get::<DateTime<Utc>, _>("current_period_end"),

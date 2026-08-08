@@ -18,6 +18,7 @@ DB_PASSWORD="${DB_PASSWORD:-postgres}"
 export PGPASSWORD="$DB_PASSWORD"
 
 UUID_REGEX='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+UNLIMITED_ENCLAVES_MAX=2147483647
 
 validate_uuid() {
     local id="$1"
@@ -92,6 +93,12 @@ Commands:
                          the full flag list.
   user-legal-status <id> Show legal status for a user
 
+  Entitlements:
+  set-enterprise-entitlement <org-id> --unlimited
+                         (--expires-at <RFC3339> | --never-expires)
+                         Dry-run an enterprise BYOC entitlement update;
+                         add --confirm to apply it
+
 Examples:
   ./utils/admin list-orgs
   ./utils/admin show-org 123e4567-e89b-12d3-a456-426614174000
@@ -102,6 +109,8 @@ Examples:
   ./utils/admin send-legal-notices
   ./utils/admin send-legal-notices --send --limit 25 --recipient-email ops@caution.co
   ./utils/admin send-legal-notices --send --confirm 123e4567-e89b-12d3-a456-426614174000
+  ./utils/admin set-enterprise-entitlement 123e4567-e89b-12d3-a456-426614174000 \
+    --unlimited --never-expires --confirm
   ./utils/admin publish-legal-doc --website-repo ~/caution/website \\
     --document-type terms_of_service --source-path terms.md \\
     --commit abc1234 --version 2026-08-01 \\
@@ -321,6 +330,265 @@ cmd_apps_by_user() {
         WHERE om.user_id = '$user_id'
         ORDER BY cr.created_at DESC;
     "
+}
+
+cmd_set_enterprise_entitlement() {
+    local org_id="${1:-}"
+    if [[ "$org_id" == "--help" || "$org_id" == "-h" ]]; then
+        cat <<EOF
+Usage: ./utils/admin set-enterprise-entitlement <org-id> --unlimited
+  (--expires-at <RFC3339 timestamp> | --never-expires) [--confirm]
+EOF
+        return
+    fi
+    [[ -z "$org_id" ]] && { echo "Error: Missing org ID"; exit 1; }
+    validate_uuid "$org_id"
+    shift
+
+    local unlimited="false"
+    local expiration_mode=""
+    local expires_at=""
+    local confirm="false"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --unlimited)
+                unlimited="true"
+                shift
+                ;;
+            --expires-at)
+                [[ $# -lt 2 ]] && { echo "Error: --expires-at requires a timestamp"; exit 1; }
+                [[ -z "$2" || "$2" == --* ]] && { echo "Error: --expires-at requires a nonempty timestamp value"; exit 1; }
+                [[ -n "$expiration_mode" ]] && { echo "Error: Specify exactly one of --expires-at or --never-expires"; exit 1; }
+                expiration_mode="expires"
+                expires_at="$2"
+                shift 2
+                ;;
+            --never-expires)
+                [[ -n "$expiration_mode" ]] && { echo "Error: Specify exactly one of --expires-at or --never-expires"; exit 1; }
+                expiration_mode="never"
+                shift
+                ;;
+            --confirm)
+                confirm="true"
+                shift
+                ;;
+            --help|-h)
+                cat <<EOF
+Usage: ./utils/admin set-enterprise-entitlement <org-id> --unlimited
+  (--expires-at <RFC3339 timestamp> | --never-expires) [--confirm]
+
+Creates or updates the organization's local enterprise BYOC entitlement. Without
+--confirm this command only shows the organization and proposed change. Existing
+Paddle subscriptions are refused; cancel/reconcile them in Paddle first.
+EOF
+                return
+                ;;
+            *)
+                echo "Error: Unknown option: $1"
+                exit 1
+                ;;
+        esac
+    done
+
+    [[ "$unlimited" != "true" ]] && {
+        echo "Error: --unlimited is required (finite enterprise limits are not supported by this command)"
+        exit 1
+    }
+    [[ -z "$expiration_mode" ]] && {
+        echo "Error: Specify exactly one of --expires-at or --never-expires"
+        exit 1
+    }
+
+    if [[ "$expiration_mode" == "expires" ]] &&
+       ! [[ "$expires_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$ ]]; then
+        echo "Error: --expires-at must be a finite RFC3339 timestamp"
+        exit 1
+    fi
+
+    local org_row
+    org_row=$(printf '%s\n' \
+        "SELECT id || '|' || name FROM organizations WHERE id = :'org_id'::uuid;" \
+        | psql_cmd -X -v ON_ERROR_STOP=1 -v org_id="$org_id")
+    if [[ -z "$org_row" ]]; then
+        echo "Error: Organization not found: $org_id"
+        exit 1
+    fi
+
+    if [[ "$expiration_mode" == "expires" ]]; then
+        printf '%s\n' "SELECT :'expires_at'::timestamptz;" \
+            | psql_cmd -X -v ON_ERROR_STOP=1 -v expires_at="$expires_at" >/dev/null
+    fi
+
+    local existing
+    existing=$(printf '%s\n' "
+        SELECT tier || '|' || billing_source || '|' || status || '|' || max_apps
+        FROM subscriptions
+        WHERE organization_id = :'org_id'::uuid AND status <> 'canceled'
+        LIMIT 1;
+    " | psql_cmd -X -v ON_ERROR_STOP=1 -v org_id="$org_id")
+
+    local blocking_reason
+    blocking_reason=$(printf '%s\n' "
+        SELECT CASE
+            WHEN EXISTS (
+                SELECT 1 FROM subscriptions
+                WHERE organization_id = :'org_id'::uuid
+                  AND (
+                      billing_source = 'paddle'
+                      OR paddle_customer_id IS NOT NULL
+                      OR paddle_subscription_id IS NOT NULL
+                      OR paddle_price_id IS NOT NULL
+                  )
+            ) THEN 'Paddle subscription history'
+            WHEN EXISTS (
+                SELECT 1 FROM subscription_intents
+                WHERE organization_id = :'org_id'::uuid
+                  AND status IN ('pending', 'provider_pending')
+            ) THEN 'pending subscription change'
+            WHEN EXISTS (
+                SELECT 1 FROM subscription_ledger sl
+                JOIN subscriptions s ON s.id = sl.subscription_id
+                WHERE s.organization_id = :'org_id'::uuid
+            ) THEN 'metered subscription history'
+            ELSE ''
+        END;
+    " | psql_cmd -X -v ON_ERROR_STOP=1 -v org_id="$org_id")
+
+    echo "=== Enterprise entitlement change ==="
+    echo "Organization: $org_row"
+    echo "Current:      ${existing:-none}"
+    echo "New:          enterprise_unlimited (unlimited BYOC enclaves)"
+    echo "Expires:      ${expires_at:-never}"
+
+    if [[ "$existing" == *"|paddle|"* ]]; then
+        echo "Error: Organization has a Paddle subscription. Cancel/reconcile it in Paddle before creating an enterprise entitlement."
+        exit 1
+    fi
+    if [[ -n "$existing" && "$existing" != *"|enterprise|"* ]]; then
+        echo "Error: Organization has a non-enterprise subscription. Cancel/reconcile it before creating an enterprise entitlement."
+        exit 1
+    fi
+    if [[ -n "$blocking_reason" ]]; then
+        echo "Error: Organization has $blocking_reason. Reconcile it before creating an enterprise entitlement."
+        exit 1
+    fi
+
+    if [[ "$confirm" != "true" ]]; then
+        echo "Dry run only. Re-run with --confirm to apply."
+        return
+    fi
+
+    psql_pretty -X -v ON_ERROR_STOP=1 -v org_id="$org_id" \
+        -v expires_at="$expires_at" -v unlimited_max="$UNLIMITED_ENCLAVES_MAX" <<'SQL'
+BEGIN;
+
+-- Follow the application lock order: organization advisory lock first, then
+-- serialize this short operator transaction against subscription writers.
+SELECT pg_advisory_xact_lock(hashtextextended(:'org_id', 0));
+LOCK TABLE subscriptions IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE subscription_intents IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE subscription_ledger IN SHARE ROW EXCLUSIVE MODE;
+
+-- Refuse live/in-flight provider billing, provider history, and any current non-enterprise subscription.
+SELECT 1 / CASE
+    WHEN EXISTS (
+        SELECT 1 FROM subscriptions
+        WHERE organization_id = :'org_id'::uuid
+          AND (
+              billing_source = 'paddle'
+              OR paddle_customer_id IS NOT NULL
+              OR paddle_subscription_id IS NOT NULL
+              OR paddle_price_id IS NOT NULL
+              OR (status <> 'canceled' AND billing_source <> 'enterprise')
+          )
+    ) OR EXISTS (
+        SELECT 1 FROM subscription_intents
+        WHERE organization_id = :'org_id'::uuid
+          AND status IN ('pending', 'provider_pending')
+    ) THEN 0
+    ELSE 1
+END AS existing_billing_guard;
+
+-- Refuse provider-linked enterprise rows or any metered subscription history.
+SELECT 1 / CASE
+    WHEN EXISTS (
+        SELECT 1
+        FROM subscriptions s
+        WHERE s.organization_id = :'org_id'::uuid
+          AND s.billing_source = 'enterprise'
+          AND (
+              s.paddle_customer_id IS NOT NULL
+              OR s.paddle_subscription_id IS NOT NULL
+              OR s.paddle_price_id IS NOT NULL
+          )
+    ) OR EXISTS (
+        SELECT 1
+        FROM subscription_ledger sl
+        JOIN subscriptions s ON s.id = sl.subscription_id
+        WHERE s.organization_id = :'org_id'::uuid
+    ) THEN 0
+    ELSE 1
+END AS clean_enterprise_guard;
+
+-- Create the entitlement when the organization has no current subscription.
+INSERT INTO subscriptions (
+    user_id, organization_id, tier, billing_period, max_vcpus, max_apps,
+    price_cents_per_cycle, status, billing_source, enterprise_expires_at,
+    current_period_end, next_billing_at
+)
+SELECT
+    om.user_id, :'org_id'::uuid, 'enterprise_unlimited', 'monthly', 0,
+    :'unlimited_max'::integer, 0, 'active', 'enterprise',
+    NULLIF(:'expires_at', '')::timestamptz,
+    TIMESTAMPTZ '9999-12-31 23:59:59+00',
+    TIMESTAMPTZ '9999-12-31 23:59:59+00'
+FROM organization_members om
+WHERE om.organization_id = :'org_id'::uuid
+  AND NOT EXISTS (
+      SELECT 1 FROM subscriptions
+      WHERE organization_id = :'org_id'::uuid AND status <> 'canceled'
+  )
+ORDER BY CASE om.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, om.created_at
+LIMIT 1;
+
+-- Normalize an existing enterprise row, or the row just inserted.
+UPDATE subscriptions SET
+    tier = 'enterprise_unlimited',
+    max_apps = :'unlimited_max'::integer,
+    price_cents_per_cycle = 0,
+    status = 'active',
+    billing_source = 'enterprise',
+    enterprise_expires_at = NULLIF(:'expires_at', '')::timestamptz,
+    pending_tier = NULL,
+    pending_max_apps = NULL,
+    cancel_at_period_end = false,
+    canceled_at = NULL,
+    current_period_end = TIMESTAMPTZ '9999-12-31 23:59:59+00',
+    next_billing_at = TIMESTAMPTZ '9999-12-31 23:59:59+00',
+    updated_at = NOW()
+WHERE organization_id = :'org_id'::uuid
+  AND status <> 'canceled'
+  AND billing_source = 'enterprise';
+
+-- Fail and roll back if the organization had no member to own a new row.
+SELECT 1 / CASE
+    WHEN EXISTS (
+        SELECT 1 FROM subscriptions
+        WHERE organization_id = :'org_id'::uuid
+          AND status <> 'canceled'
+          AND billing_source = 'enterprise'
+    ) THEN 1
+    ELSE 0
+END AS entitlement_created_guard;
+
+COMMIT;
+
+SELECT organization_id, tier, billing_source, status,
+       CASE WHEN max_apps = :'unlimited_max'::integer THEN 'unlimited' ELSE max_apps::text END AS enclave_limit,
+       enterprise_expires_at
+FROM subscriptions
+WHERE organization_id = :'org_id'::uuid AND status <> 'canceled';
+SQL
 }
 
 cmd_list_legal_docs() {
@@ -813,6 +1081,9 @@ main() {
         apps-by-user)
             [[ $# -lt 1 ]] && { echo "Error: Missing user ID"; exit 1; }
             cmd_apps_by_user "$1"
+            ;;
+        set-enterprise-entitlement)
+            cmd_set_enterprise_entitlement "$@"
             ;;
         list-legal-docs)
             cmd_list_legal_docs
