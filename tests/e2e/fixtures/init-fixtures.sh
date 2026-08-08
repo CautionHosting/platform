@@ -113,7 +113,8 @@ CAUTION_HCL_E2E='enclave "default" {
       port = 8083
       e2e_encryption {
         enabled = true
-        cors_origins = ["*"]
+        key_exchange = "xwing-draft10"
+        cors_origins = ["http://127.0.0.1:3000", "http://localhost:3000"]
       }
     }
   }

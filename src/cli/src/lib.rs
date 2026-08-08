@@ -25,6 +25,7 @@ use enclave_builder::{
 };
 use keymaker_models::generate_quorum::GenerateQuorumResponse;
 use reqwest;
+use reqwest::tls::TlsInfo;
 use sequoia_openpgp as openpgp;
 use serde::{Deserialize, Serialize};
 use serde_cbor;
@@ -33,6 +34,7 @@ use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::net::{IpAddr, SocketAddr};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::panic::Location;
@@ -73,6 +75,64 @@ const PGP_KEY_NAME_MAX_CHARS: usize = 255;
 const PGP_PUBLIC_KEY_ARMOR_BEGIN: &str = "-----BEGIN PGP PUBLIC KEY BLOCK-----";
 const PGP_PUBLIC_KEY_ARMOR_END: &str = "-----END PGP PUBLIC KEY BLOCK-----";
 const PGP_PRIVATE_KEY_ARMOR_BEGIN: &str = "-----BEGIN PGP PRIVATE KEY BLOCK-----";
+const ARCHIVE_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
+const ARCHIVE_PREFLIGHT_ATTEMPTS: usize = 2;
+const MAX_ATTESTATION_RESPONSE_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, PartialEq, Eq)]
+enum ArchivePreflightStatus {
+    Passed,
+    Missing,
+    Retry,
+    Failed,
+}
+
+fn classify_archive_preflight(
+    status: reqwest::StatusCode,
+    attempt: usize,
+) -> ArchivePreflightStatus {
+    if status.is_success() {
+        ArchivePreflightStatus::Passed
+    } else if matches!(
+        status,
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+    ) {
+        ArchivePreflightStatus::Missing
+    } else if attempt < ARCHIVE_PREFLIGHT_ATTEMPTS
+        && (matches!(
+            status,
+            reqwest::StatusCode::REQUEST_TIMEOUT | reqwest::StatusCode::TOO_MANY_REQUESTS
+        ) || status.is_server_error())
+    {
+        ArchivePreflightStatus::Retry
+    } else {
+        ArchivePreflightStatus::Failed
+    }
+}
+
+fn append_attestation_response_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> Result<()> {
+    anyhow::ensure!(
+        body.len() <= MAX_ATTESTATION_RESPONSE_BYTES
+            && chunk.len() <= MAX_ATTESTATION_RESPONSE_BYTES - body.len(),
+        "Attestation response exceeds 1 MiB limit"
+    );
+    body.extend_from_slice(chunk);
+    Ok(())
+}
+
+async fn bounded_attestation_response_json(
+    mut response: reqwest::Response,
+) -> Result<serde_json::Value> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("Failed to read attestation response")?
+    {
+        append_attestation_response_chunk(&mut body, &chunk)?;
+    }
+    serde_json::from_slice(&body).context("Failed to parse attestation response as JSON")
+}
 
 fn resolve_reproduction_e2e_mode(
     config: Option<&caution_config::E2eEncryption>,
@@ -84,6 +144,364 @@ fn resolve_reproduction_e2e_mode(
         }
         _ => manifest_has_steve.then_some(caution_config::E2eMode::Steve),
     }
+}
+
+fn reproduction_uses_steve(
+    config: Option<&caution_config::E2eEncryption>,
+    manifest_has_steve: bool,
+) -> bool {
+    resolve_reproduction_e2e_mode(config, manifest_has_steve)
+        == Some(caution_config::E2eMode::Steve)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TlsExpectation {
+    domain: String,
+}
+
+#[derive(Debug)]
+struct ReproductionResult {
+    pcrs: enclave_builder::PcrValues,
+    tls: Option<TlsExpectation>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+struct TrustedTls {
+    domain: String,
+    certfp: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TrustedHashes<'a> {
+    pcr0: &'a str,
+    pcr1: &'a str,
+    pcr2: &'a str,
+    verified_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tls: Option<TrustedTls>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttestedUserData {
+    tls: AttestedTls,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttestedTls {
+    mode: String,
+    domain: String,
+    certfp: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TlsVerification {
+    NotApplicable,
+    PcrOnly,
+    SkippedNoDns,
+    Verified(TrustedTls),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TlsConnection {
+    AttestationResponse,
+    PinnedIp(IpAddr),
+}
+
+fn tls_connection(
+    attestation_url: &reqwest::Url,
+    configured_domain: &str,
+) -> Result<TlsConnection> {
+    if attestation_url.scheme() == "https"
+        && attestation_url
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case(configured_domain))
+    {
+        return Ok(TlsConnection::AttestationResponse);
+    }
+
+    let deployment_ip = attestation_url
+        .host_str()
+        .context("TLS verification requires an attestation URL host")?
+        .parse()
+        .context(
+            "TLS verification requires either the configured HTTPS domain or a raw deployment IP",
+        )?;
+    Ok(TlsConnection::PinnedIp(deployment_ip))
+}
+
+fn dns_answer_is_absent(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::NotFound {
+        return true;
+    }
+
+    // std does not expose getaddrinfo's EAI_NONAME portably. Match only the
+    // platform messages for a definitive no-name/no-data response; all other
+    // resolver failures remain fatal.
+    let message = error.to_string().to_ascii_lowercase();
+    [
+        "name or service not known",
+        "nodename nor servname provided, or not known",
+        "no address associated with hostname",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+fn dns_contains_deployment_ip(
+    domain: &str,
+    deployment_ip: IpAddr,
+    addresses: &[SocketAddr],
+) -> Result<bool> {
+    if addresses.is_empty() {
+        return Ok(false);
+    }
+    anyhow::ensure!(
+        addresses
+            .iter()
+            .any(|address| address.ip() == deployment_ip),
+        "configured TLS domain {} does not resolve to deployment IP {}",
+        domain,
+        deployment_ip
+    );
+    Ok(true)
+}
+
+fn verify_deprecation_warnings(from_local: bool, save_pcrs: bool) -> Vec<&'static str> {
+    let mut warnings = Vec::new();
+    if from_local {
+        warnings.push("--from-local is deprecated; local source is now the default");
+    }
+    if save_pcrs {
+        warnings.push("--save-pcrs is deprecated; trusted state is now saved automatically");
+    }
+    warnings
+}
+
+fn tls_expectation_from_config(
+    config: &caution_config::ConfigurationFile,
+) -> Result<Option<TlsExpectation>> {
+    let http = config
+        .enclave
+        .as_ref()
+        .and_then(|enclaves| enclaves.values().next())
+        .and_then(|enclave| enclave.network.as_ref())
+        .and_then(|network| network.http.as_ref());
+    let is_tls = http
+        .and_then(|http| http.e2e_encryption.as_ref())
+        .and_then(caution_config::E2eEncryption::effective_mode)
+        == Some(caution_config::E2eMode::Tls);
+
+    if !is_tls {
+        return Ok(None);
+    }
+
+    let domain = http
+        .and_then(|http| http.domain.clone())
+        .context("tls mode requires a configured domain")?;
+    Ok(Some(TlsExpectation { domain }))
+}
+
+fn attestation_user_data(payload: &serde_cbor::Value) -> Result<Option<&[u8]>> {
+    let serde_cbor::Value::Map(payload) = payload else {
+        bail!("Nitro payload is not a CBOR map");
+    };
+    let Some(value) = payload.get(&serde_cbor::Value::Text("user_data".to_string())) else {
+        return Ok(None);
+    };
+    if value == &serde_cbor::Value::Null {
+        return Ok(None);
+    }
+    let serde_cbor::Value::Bytes(value) = value else {
+        bail!("Nitro user_data is neither bytes nor null");
+    };
+    Ok(Some(value))
+}
+
+fn display_user_data(user_data: &[u8]) -> (bool, String) {
+    match std::str::from_utf8(user_data) {
+        Ok(user_data) => (false, user_data.escape_debug().to_string()),
+        Err(_) => (true, hex::encode(user_data)),
+    }
+}
+
+fn attestation_inspection_json(
+    nonce: &[u8],
+    payload: &serde_cbor::Value,
+    manifest: Option<&serde_json::Value>,
+) -> Result<String> {
+    let value = serde_json::json!({
+        "verification": "not_performed",
+        "challenge_nonce": general_purpose::STANDARD.encode(nonce),
+        "attestation_payload": attestation::payload_json(payload)?,
+        "response_metadata": {
+            "manifest": manifest.cloned().unwrap_or(serde_json::Value::Null),
+        },
+    });
+    serde_json::to_string_pretty(&value).context("Failed to serialize parsed attestation")
+}
+
+fn validate_attested_tls(
+    expected: &TlsExpectation,
+    user_data: &[u8],
+    observed_certfp: &str,
+) -> Result<TrustedTls> {
+    let user_data: AttestedUserData = serde_json::from_slice(user_data)
+        .context("verified Nitro user_data is not valid TLS metadata")?;
+    anyhow::ensure!(user_data.tls.mode == "tls", "attested TLS mode is not tls");
+    anyhow::ensure!(
+        user_data.tls.domain == expected.domain,
+        "attested TLS domain does not match configured domain {}",
+        expected.domain
+    );
+    anyhow::ensure!(
+        user_data.tls.certfp.len() == 64
+            && user_data
+                .tls
+                .certfp
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "attested TLS certfp is not lowercase SHA-256 hex"
+    );
+    anyhow::ensure!(
+        user_data.tls.certfp == observed_certfp,
+        "attested TLS certfp does not match the live leaf certificate"
+    );
+
+    Ok(TrustedTls {
+        domain: user_data.tls.domain,
+        certfp: user_data.tls.certfp,
+    })
+}
+
+fn peer_certificate_der(response: &reqwest::Response) -> Option<Vec<u8>> {
+    response
+        .extensions()
+        .get::<TlsInfo>()
+        .and_then(TlsInfo::peer_certificate)
+        .map(ToOwned::to_owned)
+}
+
+fn trusted_state_backup_path(path: &Path) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("Trusted-state path has no parent: {}", path.display()))?;
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.fZ");
+    for suffix in 0u32.. {
+        let suffix = if suffix == 0 {
+            String::new()
+        } else {
+            format!("-{suffix}")
+        };
+        let candidate = parent.join(format!("trusted_hashes.{timestamp}{suffix}.json"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("u32 backup suffix space exhausted")
+}
+
+fn persist_trusted_hashes(path: &Path, trusted: &TrustedHashes<'_>) -> Result<Option<PathBuf>> {
+    persist_trusted_hashes_with_backup(path, trusted, |from, to| fs::copy(from, to).map(|_| ()))
+}
+
+fn persist_trusted_hashes_with_backup<F>(
+    path: &Path,
+    trusted: &TrustedHashes<'_>,
+    mut backup_file: F,
+) -> Result<Option<PathBuf>>
+where
+    F: FnMut(&Path, &Path) -> io::Result<()>,
+{
+    let parent = path
+        .parent()
+        .with_context(|| format!("Trusted-state path has no parent: {}", path.display()))?;
+
+    match fs::symlink_metadata(parent) {
+        Ok(metadata) => anyhow::ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "Trusted-state directory must be a real directory: {}",
+            parent.display()
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir(parent).with_context(|| {
+                format!(
+                    "Failed to create trusted-state directory {}",
+                    parent.display()
+                )
+            })?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Failed to inspect trusted-state directory {}",
+                    parent.display()
+                )
+            });
+        }
+    }
+
+    let existing = match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "Trusted-state path must be a regular file: {}",
+                path.display()
+            );
+            true
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Failed to inspect trusted state {}", path.display()));
+        }
+    };
+
+    let mut serialized = serde_json::to_string_pretty(trusted)?;
+    serialized.push('\n');
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).with_context(|| {
+        format!(
+            "Failed to create temporary trusted state in {}",
+            parent.display()
+        )
+    })?;
+    temporary
+        .write_all(serialized.as_bytes())
+        .context("Failed to write temporary trusted state")?;
+    temporary
+        .as_file()
+        .sync_all()
+        .context("Failed to sync temporary trusted state")?;
+
+    let backup = if existing {
+        loop {
+            let backup = trusted_state_backup_path(path)?;
+            match backup_file(path, &backup) {
+                Ok(()) => break Some(backup),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("Failed to back up trusted state to {}", backup.display())
+                    });
+                }
+            }
+        }
+    } else {
+        None
+    };
+
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| {
+            format!(
+                "Failed to atomically replace trusted state {}",
+                path.display()
+            )
+        })?;
+
+    Ok(backup)
 }
 
 #[derive(Debug)]
@@ -730,6 +1148,28 @@ fn config_egress_enabled(cfg: &caution_config::ConfigurationFile) -> bool {
         .unwrap_or(false)
 }
 
+/// Add the normalized deployment configuration to a local EIF cache key.
+///
+/// Git identity alone is insufficient because local builds may consume an
+/// uncommitted `caution.hcl`. The generated, measured `run.sh` depends on this
+/// configuration and, for E2E builds, the effective STEVE commit.
+fn measured_build_cache_key(
+    source_key: &str,
+    cfg: &caution_config::ConfigurationFile,
+    steve_commit: Option<&str>,
+) -> Result<String> {
+    let config_json =
+        serde_json::to_vec(cfg).context("Failed to serialize deployment config for cache key")?;
+    let mut hasher = Sha256::new();
+    hasher.update(&config_json);
+    if let Some(steve_commit) = steve_commit {
+        hasher.update(b"|steve|");
+        hasher.update(steve_commit.as_bytes());
+    }
+    let config_hash = hex::encode(hasher.finalize());
+    Ok(format!("{}-config-{}", source_key, config_hash))
+}
+
 fn ssh_fingerprint(key: &str) -> String {
     let parts: Vec<&str> = key.split_whitespace().collect();
     parts
@@ -975,7 +1415,7 @@ enum Commands {
         force: bool,
     },
     #[command(
-        about = "Verify enclave attestation. By default, fetches manifest from the remote enclave and reproduces the build."
+        about = "Verify enclave attestation against the local source at the manifest commit."
     )]
     Verify {
         #[arg(
@@ -983,25 +1423,50 @@ enum Commands {
             help = "Attestation endpoint URL (default: inferred from .caution/deployment)"
         )]
         attestation_url: Option<String>,
-        #[arg(long, help = "Build from current directory instead of remote manifest")]
+        #[arg(
+            long,
+            group = "verify_source",
+            help = "Deprecated: local source is now the default"
+        )]
         from_local: bool,
         #[arg(
             long,
-            conflicts_with_all = ["from_local", "app_source_url", "pcrs"],
+            group = "verify_source",
             help = "Build from a local source tarball laid out like git archive"
         )]
         from_tarball: Option<PathBuf>,
-        #[arg(long, help = "Git URL to fetch application source")]
+        #[arg(
+            long,
+            group = "verify_source",
+            help = "Git URL to fetch application source"
+        )]
         app_source_url: Option<String>,
-        #[arg(long, help = "Compare against PCRs from file instead of building")]
+        #[arg(
+            long,
+            group = "verify_source",
+            help = "Compare against PCRs from file without TLS certificate binding"
+        )]
         pcrs: Option<String>,
         #[arg(long, help = "Force rebuild, ignore cache")]
         no_cache: bool,
         #[arg(
             long,
-            help = "Save verified PCR hashes to .caution/trusted_hashes.json for use by send-shard"
+            help = "Deprecated: verified trust state is now saved automatically"
         )]
         save_pcrs: bool,
+        #[arg(
+            long,
+            conflicts_with_all = [
+                "from_local",
+                "from_tarball",
+                "app_source_url",
+                "pcrs",
+                "no_cache",
+                "save_pcrs"
+            ],
+            help = "Print the unverified parsed remote attestation and exit"
+        )]
+        inspect_attestation: bool,
     },
     #[command(about = "Manage deployed applications")]
     Apps {
@@ -1804,6 +2269,9 @@ pub(crate) enum BuildLocalError {
 
     #[error("failed to resolve cache directory")]
     CacheDir(#[source] anyhow::Error),
+
+    #[error("failed to derive measured build cache key")]
+    CacheKey(#[source] anyhow::Error),
 
     #[error("failed to initialize enclave builder")]
     InitBuilder(#[source] anyhow::Error),
@@ -2729,7 +3197,7 @@ caution {
 enclave "default" {{
   build {{
     # containerfile = "Containerfile"   # defaults to repo-root Containerfile/Dockerfile
-    # app_sources = ["{source_url}"]    # git URLs published in the attestation manifest
+    # app_sources = ["{source_url}"]    # git URLs published in unsigned response metadata
     # cache       = true
   }}
 
@@ -2750,6 +3218,7 @@ enclave "default" {{
     #   e2e_encryption {{
     #     enabled      = true
     #     cors_origins = ["*"]
+    #     key_exchange = "x25519"
     #   }}
     # }}
   }}
@@ -5418,12 +5887,22 @@ enclave "default" {{
                     None
                 }
             });
-        let commit_sha = app_commit
+        let source_cache_key = app_commit
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let cfg = self.read_config().map_err(|e| BuildLocalError::ReadConfig(e.into()))?;
         let default_enclave = cfg.enclave.as_ref().and_then(|e| e.get("default"));
+        let e2e_config = default_enclave
+            .and_then(|e| e.network.as_ref())
+            .and_then(|n| n.http.as_ref())
+            .and_then(|h| h.e2e_encryption.as_ref());
+        let e2e_mode = e2e_config.and_then(|config| config.effective_mode());
+        let e2e = e2e_mode == Some(caution_config::E2eMode::Steve);
+        let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
+        let steve_commit = e2e.then(enclave_builder::build::resolve_steve_commit);
+        let cache_key = measured_build_cache_key(&source_cache_key, &cfg, steve_commit.as_deref())
+            .map_err(BuildLocalError::CacheKey)?;
 
         let config_no_cache = default_enclave
             .and_then(|e| e.build.as_ref())
@@ -5443,7 +5922,7 @@ enclave "default" {{
             "unused",
             enclave_builder::FRAMEWORK_SOURCE,
             "local",
-            &commit_sha,
+            &cache_key,
             enclave_builder::CacheType::Build,
             no_cache,
             &cache_dir,
@@ -5492,14 +5971,9 @@ enclave "default" {{
             .and_then(|network| network.http.as_ref())
             .and_then(|http| http.domain.clone());
 
-        let e2e_config = default_enclave
-            .and_then(|e| e.network.as_ref())
-            .and_then(|n| n.http.as_ref())
-            .and_then(|h| h.e2e_encryption.as_ref());
-
-        let e2e_mode = e2e_config.and_then(|config| config.effective_mode());
-        let e2e = e2e_mode == Some(caution_config::E2eMode::Steve);
-        let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
+        let e2e_key_exchange = e2e_config
+            .map(|ee| ee.key_exchange().steve_env_value())
+            .unwrap_or(caution_config::KeyExchange::X25519.steve_env_value());
         output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = cfg.has_vault_env();
@@ -5539,6 +6013,7 @@ enclave "default" {{
                 http_port,
                 e2e,
                 e2e_mode_value,
+                e2e_key_exchange,
                 domain.as_deref(),
                 http_upstream_protocol,
                 locksmith,
@@ -5582,7 +6057,7 @@ enclave "default" {{
         external_manifest: Option<enclave_builder::EnclaveManifest>,
         no_cache: bool,
         local_source: Option<&StagedSource>,
-    ) -> Result<enclave_builder::PcrValues> {
+    ) -> Result<ReproductionResult> {
         let no_cache = if let Some(source) = local_source {
             no_cache
                 || self
@@ -5643,7 +6118,7 @@ enclave "default" {{
             enclave_builder::FRAMEWORK_SOURCE.to_string()
         };
 
-        let cache_key = if let Some(source) = local_source {
+        let source_cache_key = if let Some(source) = local_source {
             if let Some(ref manifest) = external_manifest {
                 let manifest_json = serde_json::to_vec(manifest)
                     .context("Failed to serialize manifest for cache key")?;
@@ -5676,6 +6151,82 @@ enclave "default" {{
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
         };
 
+        let app_source_dir = if let Some(source) = local_source {
+            Some(source.path.clone())
+        } else if let Some(ref manifest) = external_manifest {
+            let app_source = manifest.app_source.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Manifest does not contain app_source - cannot reproduce without source URL"
+                )
+            })?;
+            let archive_urls: Vec<String> = app_source
+                .urls
+                .iter()
+                .filter_map(|url| self.git_url_to_archive_urls(url, &app_source.commit).ok())
+                .flatten()
+                .collect();
+            let git_fallback = app_source.urls.first().map(|url| {
+                (
+                    url.clone(),
+                    app_source.commit.clone(),
+                    app_source.branch.clone(),
+                )
+            });
+
+            if let Some((ref url, ref commit, ref branch)) = git_fallback {
+                self.preflight_app_source_ref(url, commit, branch.as_deref())?;
+            }
+
+            Some(
+                self.download_and_extract_app_source_with_git_fallback(
+                    &archive_urls,
+                    git_fallback
+                        .as_ref()
+                        .map(|(u, c, b)| (u.as_str(), c.as_str(), b.as_deref())),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
+        let measured_config = if let Some(ref app_dir) = app_source_dir {
+            Some(self.read_config_from_dir(app_dir)?)
+        } else if external_manifest.is_none() {
+            Some(self.read_config()?)
+        } else {
+            None
+        };
+        let tls = measured_config
+            .as_ref()
+            .map(tls_expectation_from_config)
+            .transpose()?
+            .flatten();
+        let cache_key = match measured_config.as_ref() {
+            Some(cfg) => {
+                let e2e_config = cfg
+                    .enclave
+                    .as_ref()
+                    .and_then(|e| e.values().next())
+                    .and_then(|enc| enc.network.as_ref())
+                    .and_then(|network| network.http.as_ref())
+                    .and_then(|http| http.e2e_encryption.as_ref());
+                let manifest_steve_commit = external_manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.steve_commit.as_ref());
+                let e2e = reproduction_uses_steve(e2e_config, manifest_steve_commit.is_some());
+                let steve_commit = e2e.then(|| {
+                    manifest_steve_commit
+                        .cloned()
+                        .unwrap_or_else(enclave_builder::build::resolve_steve_commit)
+                });
+                measured_build_cache_key(&source_cache_key, cfg, steve_commit.as_deref())?
+            }
+            // Manifest reproductions already hash the full manifest, including
+            // steve_commit, into source_cache_key.
+            None => source_cache_key,
+        };
+
         let builder = enclave_builder::EnclaveBuilder::new_with_cache(
             &enclave_source,
             &enclave_version,
@@ -5690,7 +6241,10 @@ enclave "default" {{
         if let Some(cached) = builder.get_cached_eif() {
             output::status("Using cached reproduction build");
             output::status(format!("Cache key: {}", cache_key));
-            return Ok(cached.pcrs);
+            return Ok(ReproductionResult {
+                pcrs: cached.pcrs,
+                tls,
+            });
         }
 
         // Preflight the enclave/framework source archives before the expensive
@@ -5708,55 +6262,8 @@ enclave "default" {{
         output::verbose(self.verbose, "Building Docker image locally...");
 
         let loader = Spinner::new("Reproducing enclave image", SpinnerStyle::Processing);
-        let mut app_source_dir: Option<PathBuf> = None;
-        let image_ref = if let Some(source) = local_source {
-            let image_ref = self
-                .build_docker_image_from_dir(&source.path, no_cache)
-                .await?;
-            app_source_dir = Some(source.path.clone());
-            image_ref
-        } else if let Some(ref manifest) = external_manifest {
-            let app_source = manifest.app_source.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Manifest does not contain app_source - cannot reproduce without source URL"
-                )
-            })?;
-
-            let archive_urls: Vec<String> = app_source
-                .urls
-                .iter()
-                .filter_map(|url| self.git_url_to_archive_urls(url, &app_source.commit).ok())
-                .flatten()
-                .collect();
-
-            let git_fallback = app_source.urls.first().map(|url| {
-                (
-                    url.clone(),
-                    app_source.commit.clone(),
-                    app_source.branch.clone(),
-                )
-            });
-
-            // Cheap network preflight before the expensive reproduce. A missing
-            // branch/commit otherwise surfaces only after minutes of archive
-            // downloads and clone/fetch fallbacks (each bounded by a 5-minute
-            // low-speed timeout); `git ls-remote` transfers no objects and fails
-            // in seconds.
-            if let Some((ref url, ref commit, ref branch)) = git_fallback {
-                self.preflight_app_source_ref(url, commit, branch.as_deref())?;
-            }
-
-            let app_dir = self
-                .download_and_extract_app_source_with_git_fallback(
-                    &archive_urls,
-                    git_fallback
-                        .as_ref()
-                        .map(|(u, c, b)| (u.as_str(), c.as_str(), b.as_deref())),
-                )
-                .await?;
-            let image_ref = self.build_docker_image_from_dir(&app_dir, no_cache).await?;
-            app_source_dir = Some(app_dir);
-            image_ref
+        let image_ref = if let Some(ref app_dir) = app_source_dir {
+            self.build_docker_image_from_dir(app_dir, no_cache).await?
         } else {
             self.build_local_docker_image(no_cache).await?
         };
@@ -5916,6 +6423,19 @@ enclave "default" {{
         let e2e_mode = resolve_reproduction_e2e_mode(e2e_config.as_ref(), manifest_has_steve);
         let e2e = e2e_mode == Some(caution_config::E2eMode::Steve);
         let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
+        let e2e_key_exchange = e2e_config
+            .as_ref()
+            .map(|e2e| e2e.key_exchange().steve_env_value().to_string())
+            .unwrap_or_else(|| {
+                // No readable config: fall back to what the deployment recorded,
+                // otherwise reproduction would silently rebuild with X25519.
+                external_manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.steve_key_exchange.clone())
+                    .unwrap_or_else(|| {
+                        caution_config::KeyExchange::X25519.steve_env_value().to_string()
+                    })
+            });
         output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = if let Some(ref app_dir) = app_source_dir {
@@ -5982,6 +6502,7 @@ enclave "default" {{
                     http_port,
                     e2e,
                     e2e_mode_value,
+                    &e2e_key_exchange,
                     domain.as_deref(),
                     http_upstream_protocol,
                     locksmith,
@@ -6005,6 +6526,7 @@ enclave "default" {{
                     http_port,
                     e2e,
                     e2e_mode_value,
+                    &e2e_key_exchange,
                     domain.as_deref(),
                     http_upstream_protocol,
                     locksmith,
@@ -6030,7 +6552,10 @@ enclave "default" {{
             }
         }
 
-        Ok(deployment.pcrs)
+        Ok(ReproductionResult {
+            pcrs: deployment.pcrs,
+            tls,
+        })
     }
 
     fn read_pcrs_from_file(&self, path: &str) -> Result<enclave_builder::PcrValues> {
@@ -6075,6 +6600,79 @@ enclave "default" {{
         }
     }
 
+    async fn verify_tls_binding(
+        &self,
+        expected: &TlsExpectation,
+        payload: &serde_cbor::Value,
+        attestation_url: &reqwest::Url,
+        attestation_leaf: Option<&[u8]>,
+    ) -> Result<TlsVerification> {
+        let user_data = attestation_user_data(payload)?
+            .context("verified Nitro attestation is missing TLS user_data")?;
+
+        let deployment_ip = match tls_connection(attestation_url, &expected.domain)? {
+            TlsConnection::AttestationResponse => {
+                let leaf = attestation_leaf
+                    .context("HTTPS attestation response did not expose its leaf certificate")?;
+                let observed_certfp = hex::encode(Sha256::digest(leaf));
+                return Ok(TlsVerification::Verified(validate_attested_tls(
+                    expected,
+                    user_data,
+                    &observed_certfp,
+                )?));
+            }
+            TlsConnection::PinnedIp(ip) => ip,
+        };
+        let addresses: Vec<SocketAddr> =
+            match tokio::net::lookup_host((&*expected.domain, 443)).await {
+                Ok(addresses) => addresses.collect(),
+                Err(error) if dns_answer_is_absent(&error) => {
+                    return Ok(TlsVerification::SkippedNoDns);
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "Failed to resolve configured TLS domain {}",
+                            expected.domain
+                        )
+                    });
+                }
+            };
+        if !dns_contains_deployment_ip(&expected.domain, deployment_ip, &addresses)? {
+            return Ok(TlsVerification::SkippedNoDns);
+        }
+
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .tls_info(true)
+            .resolve(&expected.domain, SocketAddr::new(deployment_ip, 443))
+            .build()
+            .context("Failed to create pinned TLS verification client")?;
+        let health_url = format!("https://{}/.well-known/caution/health", expected.domain);
+        let response = client
+            .get(&health_url)
+            .send()
+            .await
+            .with_context(|| format!("TLS health request failed for {}", expected.domain))?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "TLS health request returned {}",
+            response.status()
+        );
+        let leaf = peer_certificate_der(&response)
+            .context("TLS health response did not expose its leaf certificate")?;
+        let observed_certfp = hex::encode(Sha256::digest(&leaf));
+
+        Ok(TlsVerification::Verified(validate_attested_tls(
+            expected,
+            user_data,
+            &observed_certfp,
+        )?))
+    }
+
     async fn verify(
         &self,
         attestation_url_opt: Option<String>,
@@ -6084,15 +6682,26 @@ enclave "default" {{
         pcrs_file: Option<String>,
         no_cache: bool,
         save_pcrs: bool,
+        inspect_attestation: bool,
     ) -> Result<()> {
-        output::status("Verifying enclave attestation...");
-        output::status("Learn more: https://docs.caution.co/concepts/attestation/");
+        if inspect_attestation {
+            output::status("Inspecting remote attestation...");
+        } else {
+            output::status("Verifying enclave attestation...");
+            output::status("Learn more: https://docs.caution.co/concepts/attestation/");
+        }
+
+        for warning in verify_deprecation_warnings(from_local, save_pcrs) {
+            output::warning(warning);
+        }
 
         let attestation_url = if let Some(u) = attestation_url_opt {
             u
         } else {
             self.get_attestation_url().await?
         };
+        let attestation_url = reqwest::Url::parse(&attestation_url)
+            .context("Attestation endpoint is not a valid URL")?;
 
         let nonce = {
             use rand::RngCore;
@@ -6112,9 +6721,14 @@ enclave "default" {{
         // Bound the challenge/response: a reachable-but-unresponsive enclave must
         // not hang verify indefinitely. The connect phase is already bounded by
         // the client's connect_timeout; this caps the whole request.
-        let response = self
-            .client
-            .post(&attestation_url)
+        let attestation_client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .tls_info(true)
+            .build()
+            .context("Failed to create attestation client")?;
+        let response = attestation_client
+            .post(attestation_url.clone())
             .timeout(Duration::from_secs(60))
             .json(&serde_json::json!({"nonce": general_purpose::STANDARD.encode(&nonce)}))
             .send()
@@ -6124,11 +6738,9 @@ enclave "default" {{
         if !response.status().is_success() {
             bail!("Failed to fetch attestation: {}", response.status());
         }
+        let attestation_leaf = peer_certificate_der(&response);
 
-        let attest_resp: serde_json::Value = response
-            .json()
-            .await
-            .context("Failed to parse attestation response as JSON")?;
+        let attest_resp = bounded_attestation_response_json(response).await?;
 
         let attestation_b64 = attest_resp
             .get("attestation_document")
@@ -6150,30 +6762,52 @@ enclave "default" {{
             .decode(attestation_b64)
             .context("Failed to decode attestation document")?;
 
-        output::status("\nExtracting remote PCR values...");
-        let remote_pcrs = attestation::extract_pcrs(&attestation_bytes)
+        let attestation_payload = attestation::parse(&attestation_bytes)
+            .context("Failed to parse attestation document")?;
+
+        if inspect_attestation {
+            output::warning(
+                "UNVERIFIED: parsing succeeded, but Nitro, expected PCRs, and TLS were not verified",
+            );
+            output::data_ln(attestation_inspection_json(
+                &nonce,
+                &attestation_payload,
+                attest_resp.get("manifest"),
+            )?)?;
+            return Ok(());
+        }
+
+        output::status("\nExtracting remote attestation values...");
+        let remote_pcrs = attestation::extract_pcrs(&attestation_payload)
             .context("Failed to extract PCRs from attestation document")?;
 
-        output::status("\nRemote PCR values (from deployed enclave):");
+        output::status("\nRemote PCR values (unverified until verification succeeds):");
         output::status(format!("  PCR0: {}", remote_pcrs.pcr0));
         output::status(format!("  PCR1: {}", remote_pcrs.pcr1));
         output::status(format!("  PCR2: {}", remote_pcrs.pcr2));
 
-        let manifest: Option<enclave_builder::EnclaveManifest> =
-            if let Some(manifest_val) = attest_resp.get("manifest").cloned() {
-                match serde_json::from_value(manifest_val) {
-                    Ok(m) => Some(m),
-                    Err(e) => {
-                        output::verbose(self.verbose, &format!("Failed to parse manifest: {}", e));
-                        None
-                    }
-                }
+        if let Some(user_data) = attestation_user_data(&attestation_payload)? {
+            let (is_hex, user_data) = display_user_data(user_data);
+            if is_hex {
+                output::status(format_args!(
+                    "Remote user data (unverified, hex): {user_data}"
+                ));
             } else {
-                None
-            };
+                output::status(format_args!(
+                    "Remote user data (unverified): {user_data}"
+                ));
+            }
+        }
+
+        let manifest: Option<enclave_builder::EnclaveManifest> = attest_resp
+            .get("manifest")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .context("Attestation response contains an invalid manifest")?;
 
         if let Some(ref m) = manifest {
-            output::status("\nManifest information:");
+            output::status("\nResponse manifest information (unsigned):");
             if let Some(ref app_src) = m.app_source {
                 if app_src.urls.len() == 1 {
                     output::status(format!("  App source: {} commit: {}", app_src.urls[0], app_src.commit));
@@ -6226,30 +6860,26 @@ enclave "default" {{
             }
         }
 
-        let expected_pcrs = if let Some(pcrs_path) = pcrs_file {
+        let pcr_only = pcrs_file.is_some();
+        let reproduction = if let Some(pcrs_path) = pcrs_file {
             output::status(format!("\nReading expected PCRs from file: {}", pcrs_path));
-            self.read_pcrs_from_file(&pcrs_path)?
-        } else if from_local {
-            let manifest_app_commit = manifest
-                .as_ref()
-                .and_then(|manifest| manifest.app_source.as_ref())
-                .map(|app_source| app_source.commit.as_str());
-            match manifest_app_commit {
-                Some(commit) => {
-                    output::status(format!("\nBuilding from local Git commit from manifest: {commit}"))
-                }
-                None => output::status("\nBuilding from local Git HEAD archive..."),
+            ReproductionResult {
+                pcrs: self.read_pcrs_from_file(&pcrs_path)?,
+                tls: None,
             }
-            let source = self.stage_git_source(manifest_app_commit).await?;
-            self.build_and_get_pcrs(manifest.clone(), no_cache, Some(&source))
-                .await?
         } else if let Some(ref tarball_path) = from_tarball {
-            output::status(format!("\nBuilding from source tarball: {}", tarball_path.display()));
+            output::status(format!(
+                "\nBuilding from source tarball: {}",
+                tarball_path.display()
+            ));
             let source = self.stage_tarball_source(tarball_path)?;
             self.build_and_get_pcrs(manifest.clone(), no_cache, Some(&source))
                 .await?
         } else if let Some(ref source_url) = app_source_url {
-            output::status(format!("\nBuilding from provided source URL: {}", source_url));
+            output::status(format!(
+                "\nBuilding from provided source URL: {}",
+                source_url
+            ));
             if let Some(ref m) = manifest {
                 let mut modified_manifest = m.clone();
                 let commit = m
@@ -6269,39 +6899,31 @@ enclave "default" {{
                 output::status("Cannot determine commit hash without manifest.");
                 output::status("");
                 output::status("Options:");
-                output::status("  1. Build from local directory: caution verify --from-local");
+                output::status("  1. Build from local directory: caution verify");
                 output::status("  2. Use a PCRs file: caution verify --pcrs pcrs.txt");
                 bail!("Manifest required when using --app-source-url");
             }
         } else {
-            if let Some(ref m) = manifest {
-                if m.app_source.is_none() {
-                    output::warning("⚠️  Cannot reproduce build - no application source code available");
-                    output::status("The remote manifest indicates this deployment uses private code.");
-                    output::status("You cannot reproduce this build from remote manifest.");
-                    output::status("");
-                    output::status("Options:");
-                    output::status(
-                        "  1. Provide the source URL: caution verify --app-source-url git@codeberg.org:org/repo.git"
-                    );
-                    output::status("  2. Build from local directory: caution verify --from-local");
-                    output::status("  3. Use a PCRs file: caution verify --pcrs pcrs.txt");
-                    bail!("Cannot reproduce private code deployment");
-                }
-                output::status("\nReproducing build from remote manifest...");
-                self.build_and_get_pcrs(manifest.clone(), no_cache, None)
-                    .await?
+            let manifest_commit = manifest
+                .as_ref()
+                .and_then(|manifest| manifest.app_source.as_ref())
+                .map(|source| source.commit.as_str());
+            if let Some(commit) = manifest_commit {
+                output::status(format!(
+                    "\nBuilding local source at manifest commit: {commit}"
+                ));
             } else {
-                output::warning("⚠️  Remote attestation does not include a manifest");
-                output::status("The remote deployment was built without manifest support.");
-                output::status("");
-                output::status("Options:");
-                output::status("  1. Build from local directory: caution verify --from-local");
-                output::status("  2. Use a PCRs file: caution verify --pcrs pcrs.txt");
-                output::status("  3. Redeploy your app to enable manifest support");
-                bail!("Manifest not available from remote");
+                output::status("\nBuilding local source at HEAD (manifest has no app commit)");
             }
+            let source = self.stage_git_source(manifest_commit).await?;
+            self.build_and_get_pcrs(manifest.clone(), no_cache, Some(&source))
+                .await?
         };
+
+        let ReproductionResult {
+            pcrs: expected_pcrs,
+            tls: expected_tls,
+        } = reproduction;
 
         output::status("\nExpected PCR values:");
         output::status(format!("  PCR0: {}", expected_pcrs.pcr0));
@@ -6345,44 +6967,56 @@ enclave "default" {{
             .context("could not get time since epoch")?;
         match nitro.verify(duration_since_epoch, &nonce) {
             Ok(payload) => {
-                output::success("✓ Certificate chain verified against AWS Nitro root CA");
-                output::success("✓ All certificates are within validity period");
-                output::success("✓ COSE signature verified");
-                output::success("✓ Nonce verified (prevents replay attacks)");
-                output::success("✓ PCR values match expected");
+                output::success("\n✓ Base Nitro attestation and expected PCR0/1/2 verified");
+                let verified_pcrs = attestation::extract_pcrs(&payload)
+                    .context("verified Nitro payload has malformed PCRs")?;
 
-                if let serde_cbor::Value::Map(map) = &payload {
-                    if let Some(serde_cbor::Value::Bytes(user_data)) =
-                        map.get(&serde_cbor::Value::Text("user_data".to_string()))
-                    {
-                        match str::from_utf8(user_data) {
-                            Ok(user_data) => {
-                                output::status(format!("User data: {user_data}"));
-                            }
-                            Err(_) => {
-                                output::status(format!("User data: {user_data:?}"));
-                            }
-                        }
+                let tls = if pcr_only {
+                    TlsVerification::PcrOnly
+                } else if let Some(ref expected) = expected_tls {
+                    self.verify_tls_binding(
+                        expected,
+                        &payload,
+                        &attestation_url,
+                        attestation_leaf.as_deref(),
+                    )
+                    .await
+                    .context("TLS certificate binding failed")?
+                } else {
+                    TlsVerification::NotApplicable
+                };
+
+                match &tls {
+                    TlsVerification::NotApplicable => {
+                        output::status("TLS certificate binding: not applicable")
+                    }
+                    TlsVerification::PcrOnly => {
+                        output::status("TLS certificate binding: not performed (--pcrs)")
+                    }
+                    TlsVerification::SkippedNoDns => output::warning(
+                        "TLS certificate binding: skipped because the configured domain has no DNS answer",
+                    ),
+                    TlsVerification::Verified(_) => {
+                        output::success("✓ TLS certificate binding verified")
                     }
                 }
 
-                output::success("\n✓ Attestation verification PASSED");
-                output::success("The deployed enclave matches the expected PCRs.");
-                output::success("This means the code running in the enclave is exactly what you expect.");
-                output::success("\nPowered by: Caution (https://caution.co)");
-
-                if save_pcrs {
-                    let trusted = serde_json::json!({
-                        "pcr0": remote_pcrs.pcr0,
-                        "pcr1": remote_pcrs.pcr1,
-                        "pcr2": remote_pcrs.pcr2,
-                        "verified_at": chrono::Utc::now().to_rfc3339(),
-                    });
-                    let hashes_path = PathBuf::from(".caution/trusted_hashes.json");
-                    fs::write(&hashes_path, serde_json::to_string_pretty(&trusted)?).with_context(
-                        || format!("Failed to save trusted hashes to {}", hashes_path.display()),
-                    )?;
-                    output::status(format!("Trusted hashes saved to {}", hashes_path.display()));
+                let trusted = TrustedHashes {
+                    pcr0: &verified_pcrs.pcr0,
+                    pcr1: &verified_pcrs.pcr1,
+                    pcr2: &verified_pcrs.pcr2,
+                    verified_at: chrono::Utc::now().to_rfc3339(),
+                    tls: match tls {
+                        TlsVerification::Verified(tls) => Some(tls),
+                        _ => None,
+                    },
+                };
+                let hashes_path = PathBuf::from(".caution/trusted_hashes.json");
+                let backup = persist_trusted_hashes(&hashes_path, &trusted)?;
+                output::success("✓ Attestation verification PASSED");
+                output::status(format!("Trusted state: {}", hashes_path.display()));
+                if let Some(backup) = backup {
+                    output::status(format!("Previous state: {}", backup.display()));
                 }
 
                 Ok(())
@@ -6432,7 +7066,7 @@ enclave "default" {{
         if !root_output.status.success() {
             let stderr = String::from_utf8_lossy(&root_output.stderr);
             bail!(
-                "--from-local must be run inside a Git repository: {}",
+                "Default source verification must be run inside a Git repository: {}",
                 stderr.trim()
             );
         }
@@ -6781,7 +7415,7 @@ enclave "default" {{
 
     /// Build a non-interactive, stall-bounded `git` command that cannot prompt
     /// for credentials or block on a TTY. During verification the source URL
-    /// comes from the remote attestation manifest and may point at a repo the
+    /// comes from the remote response manifest and may point at a repo the
     /// host refuses to serve anonymously — e.g. a non-existent Codeberg/Forgejo
     /// repo, which returns `401` (rather than `404`, to avoid leaking
     /// existence). Without these guards, `git` falls back to prompting
@@ -6827,57 +7461,86 @@ enclave "default" {{
         cmd
     }
 
-    /// Cheap reachability check for an enclave/framework source archive. A `HEAD`
-    /// transfers no body, so a commit the remote no longer serves (404/410) fails
-    /// in seconds instead of after the Docker image build and user-filesystem
-    /// extraction. Only a definitive "not found" blocks; any other status, an
-    /// unsupported HEAD (405), or a transport error is treated as inconclusive and
-    /// left for the real download to resolve. Non-HTTP sources (git URLs, local
-    /// paths) are skipped.
+    /// Fail-fast reachability check for an enclave/framework source archive.
+    /// Retry a transient HEAD failure once, then stop before the expensive build.
     async fn preflight_archive_url(&self, label: &str, url: &str) -> Result<()> {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Ok(());
         }
 
-        output::status(format!("\nChecking {} is reachable on remote...", label.to_lowercase()));
-        let response = match self
-            .client
-            .head(url)
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(e) => {
-                output::verbose(
-                    self.verbose,
-                    &format!("{} preflight inconclusive ({})", label, e),
-                );
-                return Ok(());
+        output::status(format_args!(
+            "\nChecking {} is reachable on remote...",
+            label.to_lowercase()
+        ));
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("Failed to create archive preflight client")?;
+        for attempt in 1..=ARCHIVE_PREFLIGHT_ATTEMPTS {
+            match client
+                .head(url)
+                .timeout(ARCHIVE_PREFLIGHT_TIMEOUT)
+                .send()
+                .await
+            {
+                Ok(response) => match classify_archive_preflight(response.status(), attempt) {
+                    ArchivePreflightStatus::Passed => {
+                        output::verbose(
+                            self.verbose,
+                            format_args!(
+                                "{} reachable (HTTP {})",
+                                label,
+                                response.status().as_u16()
+                            ),
+                        );
+                        output::status(format_args!("  {} preflight passed ✓", label));
+                        return Ok(());
+                    }
+                    ArchivePreflightStatus::Missing => {
+                        bail!(
+                            "{label} archive is not available on the remote (HTTP {code}):\n  \
+                             {url}\n\n\
+                             The deployed enclave references a {lower} commit that the remote no \
+                             longer serves — it may have been garbage-collected, or the manifest \
+                             is stale. This build cannot be reproduced from the remote manifest.",
+                            label = label,
+                            lower = label.to_lowercase(),
+                            code = response.status().as_u16(),
+                            url = url,
+                        );
+                    }
+                    ArchivePreflightStatus::Retry => {
+                        output::warning(format_args!(
+                            "  {} preflight returned HTTP {}; retrying once",
+                            label,
+                            response.status().as_u16()
+                        ));
+                    }
+                    ArchivePreflightStatus::Failed => {
+                        bail!(
+                            "{label} preflight failed (HTTP {code}):\n  {url}\n\n\
+                             Refusing to start the reproduction build.",
+                            code = response.status().as_u16(),
+                        );
+                    }
+                },
+                Err(error) if attempt < ARCHIVE_PREFLIGHT_ATTEMPTS => {
+                    output::warning(format_args!(
+                        "  {} preflight failed: {}; retrying once",
+                        label, error
+                    ));
+                }
+                Err(error) => {
+                    bail!(
+                        "{label} preflight failed after {attempts} attempts:\n  {url}\n  \
+                         {error}\n\nRefusing to start the reproduction build.",
+                        attempts = ARCHIVE_PREFLIGHT_ATTEMPTS,
+                    );
+                }
             }
-        };
-
-        let status = response.status();
-        if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
-            bail!(
-                "{label} archive is not available on the remote (HTTP {code}):\n  \
-                 {url}\n\n\
-                 The deployed enclave references a {lower} commit that the remote no \
-                 longer serves — it may have been garbage-collected, or the manifest \
-                 is stale. This build cannot be reproduced from the remote manifest.",
-                label = label,
-                lower = label.to_lowercase(),
-                code = status.as_u16(),
-                url = url,
-            );
         }
 
-        output::verbose(
-            self.verbose,
-            &format!("{} reachable (HTTP {})", label, status.as_u16()),
-        );
-        output::status(format!("  {} reachable ✓", label));
-        Ok(())
+        unreachable!("archive preflight attempt loop is non-empty")
     }
 
     /// Cheap network preflight: confirm the app source branch is present on the
@@ -6961,7 +7624,7 @@ enclave "default" {{
                      from the remote manifest.\n\n\
                      Fixes:\n  \
                      - Push the branch:        git push <remote> {branch}\n  \
-                     - Verify a local checkout: caution verify --from-local\n  \
+                     - Verify a local checkout: caution verify\n  \
                      - Verify a source tarball: caution verify --from-tarball <path>",
                     branch = missing_branch,
                     url = git_url,
@@ -8436,10 +9099,10 @@ enclave "default" {{
             bundle_file.display()
         );
 
-        // Load trusted hashes from a prior `caution verify --save-pcrs`
+        // Load trusted hashes from a prior `caution verify`
         let hashes_path = PathBuf::from(".caution/trusted_hashes.json");
         let hashes_text = fs::read_to_string(&hashes_path).context(
-            "No trusted hashes found. Run `caution verify --save-pcrs` first to establish trusted PCR values."
+            "No trusted hashes found. Run `caution verify` first to establish trusted PCR values."
         )?;
         let hashes: serde_json::Value = serde_json::from_str(&hashes_text)
             .context("Failed to parse .caution/trusted_hashes.json")?;
@@ -8738,6 +9401,7 @@ pub async fn run() -> Result<(), RunError> {
             pcrs,
             no_cache,
             save_pcrs,
+            inspect_attestation,
         } => {
             client
                 .verify(
@@ -8748,6 +9412,7 @@ pub async fn run() -> Result<(), RunError> {
                     pcrs,
                     no_cache,
                     save_pcrs,
+                    inspect_attestation,
                 )
                 .await
                 .map_err(RunError::CommandDispatch)?;
@@ -8938,13 +9603,21 @@ pub async fn run() -> Result<(), RunError> {
 mod tests {
     use super::openpgp;
     use super::{
-        AccountCommands, ApiClient, Cli, Commands, LoginUsernameError, PgpKeyCommands,
-        RegisterUsernameError, RunError, encrypt_env_file, encrypt_secret_value,
+        AccountCommands, ApiClient, ArchivePreflightStatus, Cli, Commands, LoginUsernameError,
+        MAX_ATTESTATION_RESPONSE_BYTES, PgpKeyCommands, RegisterUsernameError, RunError,
+        TlsConnection, TlsExpectation, TrustedHashes, TrustedTls,
+        append_attestation_response_chunk, attestation_inspection_json, attestation_user_data,
+        classify_archive_preflight, display_user_data, dns_answer_is_absent,
+        dns_contains_deployment_ip, encrypt_env_file, encrypt_secret_value,
         keymaker_cert_eligibility, load_recipient_cert, login_begin_request_body,
-        normalize_keyring, parse_env_assignments, prepare_pgp_public_key_for_upload,
-        prompt_line_from, prompt_optional_line_from, resolve_local_build_command_from_dir,
-        resolve_login_username, resolve_procfile_build_command, resolve_quorum_parameters,
-        resolve_register_username, resolve_reproduction_e2e_mode, validate_global_qr,
+        measured_build_cache_key, normalize_keyring, parse_env_assignments,
+        persist_trusted_hashes, persist_trusted_hashes_with_backup,
+        prepare_pgp_public_key_for_upload, prompt_line_from, prompt_optional_line_from,
+        reproduction_uses_steve,
+        resolve_local_build_command_from_dir, resolve_login_username,
+        resolve_procfile_build_command, resolve_quorum_parameters, resolve_register_username,
+        resolve_reproduction_e2e_mode, tls_connection, tls_expectation_from_config,
+        validate_attested_tls, validate_global_qr, verify_deprecation_warnings,
     };
     use caution_config::{ConfigurationFile, E2eEncryption, E2eMode};
     use clap::Parser;
@@ -8952,8 +9625,10 @@ mod tests {
     use openpgp::cert::prelude::*;
     use openpgp::parse::Parse;
     use openpgp::serialize::SerializeInto;
+    use sha2::Digest;
     use std::collections::HashMap;
-    use std::io::Cursor;
+    use std::io::{self, Cursor};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -8963,13 +9638,20 @@ mod tests {
             enabled,
             mode,
             cors_origins: None,
+            key_exchange: None,
         };
         let disabled = config(Some(false), None);
-        let steve = config(Some(true), None);
-        let caddy = config(Some(false), Some(E2eMode::Caddy));
+        let legacy_steve = config(Some(true), None);
+        let steve = config(None, Some(E2eMode::Steve));
+        let tls = config(None, Some(E2eMode::Tls));
+        let unspecified = config(None, None);
 
         assert_eq!(
             resolve_reproduction_e2e_mode(None, true),
+            Some(E2eMode::Steve)
+        );
+        assert_eq!(
+            resolve_reproduction_e2e_mode(Some(&unspecified), true),
             Some(E2eMode::Steve)
         );
         assert_eq!(resolve_reproduction_e2e_mode(Some(&disabled), true), None);
@@ -8978,9 +9660,447 @@ mod tests {
             Some(E2eMode::Steve)
         );
         assert_eq!(
-            resolve_reproduction_e2e_mode(Some(&caddy), true),
-            Some(E2eMode::Caddy)
+            resolve_reproduction_e2e_mode(Some(&legacy_steve), false),
+            Some(E2eMode::Steve)
         );
+        assert_eq!(
+            resolve_reproduction_e2e_mode(Some(&tls), true),
+            Some(E2eMode::Tls)
+        );
+    }
+
+    #[test]
+    fn verify_defaults_to_local_source_and_rejects_selector_conflicts() {
+        let cli = Cli::try_parse_from(["caution", "verify"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Verify {
+                from_local: false,
+                from_tarball: None,
+                app_source_url: None,
+                pcrs: None,
+                ..
+            }
+        ));
+
+        let selectors = [
+            ("--from-local", None),
+            ("--from-tarball", Some("source.tar.gz")),
+            ("--app-source-url", Some("https://example.com/app.git")),
+            ("--pcrs", Some("pcrs.txt")),
+        ];
+        for (left_index, left) in selectors.iter().enumerate() {
+            for right in selectors.iter().skip(left_index + 1) {
+                let mut args = vec!["caution", "verify", left.0];
+                args.extend(left.1);
+                args.push(right.0);
+                args.extend(right.1);
+                assert_eq!(
+                    Cli::try_parse_from(args).err().unwrap().kind(),
+                    clap::error::ErrorKind::ArgumentConflict
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inspect_attestation_rejects_verification_only_options() {
+        for option in [
+            vec!["--from-local"],
+            vec!["--from-tarball", "source.tar.gz"],
+            vec!["--app-source-url", "https://example.com/app.git"],
+            vec!["--pcrs", "pcrs.txt"],
+            vec!["--no-cache"],
+            vec!["--save-pcrs"],
+        ] {
+            let mut args = vec!["caution", "verify", "--inspect-attestation"];
+            args.extend(option);
+            assert_eq!(
+                Cli::try_parse_from(args).err().unwrap().kind(),
+                clap::error::ErrorKind::ArgumentConflict
+            );
+        }
+
+        let cli = Cli::try_parse_from([
+            "caution",
+            "verify",
+            "--inspect-attestation",
+            "--attestation-url",
+            "https://app.example.com/attestation",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Verify {
+                inspect_attestation: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn verify_legacy_flags_have_concise_warnings() {
+        assert!(verify_deprecation_warnings(false, false).is_empty());
+        assert_eq!(
+            verify_deprecation_warnings(true, true),
+            vec![
+                "--from-local is deprecated; local source is now the default",
+                "--save-pcrs is deprecated; trusted state is now saved automatically",
+            ]
+        );
+    }
+
+    fn config_with_e2e(body: &str, domain: Option<&str>) -> ConfigurationFile {
+        let domain = domain
+            .map(|domain| format!("domain = \"{domain}\""))
+            .unwrap_or_default();
+        ConfigurationFile::from_str(&format!(
+            r#"
+enclave "main" {{
+  network {{
+    ingress {{
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }}
+    http {{
+      port = 8080
+      {domain}
+      e2e_encryption {{
+        {body}
+      }}
+    }}
+  }}
+}}
+"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn tls_expectation_requires_tls_mode_and_domain() {
+        let tls = config_with_e2e(r#"mode = "tls""#, Some("app.example.com"));
+        assert_eq!(
+            tls_expectation_from_config(&tls).unwrap(),
+            Some(TlsExpectation {
+                domain: "app.example.com".to_string()
+            })
+        );
+
+        let steve = config_with_e2e(r#"mode = "steve""#, None);
+        assert_eq!(tls_expectation_from_config(&steve).unwrap(), None);
+
+        let missing_domain = config_with_e2e(r#"mode = "tls""#, None);
+        assert!(tls_expectation_from_config(&missing_domain).is_err());
+    }
+
+    #[test]
+    fn tls_connection_accepts_only_same_https_domain_or_raw_ip() {
+        let same = reqwest::Url::parse("https://app.example.com/attestation").unwrap();
+        assert_eq!(
+            tls_connection(&same, "app.example.com").unwrap(),
+            TlsConnection::AttestationResponse
+        );
+
+        let raw_ip = reqwest::Url::parse("http://192.0.2.10/attestation").unwrap();
+        assert_eq!(
+            tls_connection(&raw_ip, "app.example.com").unwrap(),
+            TlsConnection::PinnedIp(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)))
+        );
+
+        for rejected in [
+            "http://app.example.com/attestation",
+            "https://proxy.example.net/attestation",
+        ] {
+            assert!(
+                tls_connection(&reqwest::Url::parse(rejected).unwrap(), "app.example.com").is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn dns_absence_does_not_include_transient_errors() {
+        assert!(dns_answer_is_absent(&io::Error::new(
+            io::ErrorKind::NotFound,
+            "missing"
+        )));
+        assert!(dns_answer_is_absent(&io::Error::other(
+            "Name or service not known"
+        )));
+        assert!(!dns_answer_is_absent(&io::Error::new(
+            io::ErrorKind::TimedOut,
+            "resolver timed out"
+        )));
+
+        let deployment_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        assert!(!dns_contains_deployment_ip("app.example.com", deployment_ip, &[]).unwrap());
+        assert!(
+            dns_contains_deployment_ip(
+                "app.example.com",
+                deployment_ip,
+                &[SocketAddr::new(deployment_ip, 443)]
+            )
+            .unwrap()
+        );
+        assert!(
+            dns_contains_deployment_ip(
+                "app.example.com",
+                deployment_ip,
+                &[SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)),
+                    443
+                )]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn tls_metadata_is_strict_and_binds_the_live_fingerprint() {
+        let expected = TlsExpectation {
+            domain: "app.example.com".to_string(),
+        };
+        let certfp = "ab".repeat(32);
+        let metadata = |mode: &str, domain: &str, fingerprint: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "tls": { "mode": mode, "domain": domain, "certfp": fingerprint }
+            }))
+            .unwrap()
+        };
+
+        assert_eq!(
+            validate_attested_tls(
+                &expected,
+                &metadata("tls", "app.example.com", &certfp),
+                &certfp
+            )
+            .unwrap(),
+            TrustedTls {
+                domain: "app.example.com".to_string(),
+                certfp: certfp.clone(),
+            }
+        );
+
+        for invalid in [
+            metadata("steve", "app.example.com", &certfp),
+            metadata("tls", "other.example.com", &certfp),
+            metadata("tls", "app.example.com", &certfp.to_uppercase()),
+            metadata("tls", "app.example.com", "abcd"),
+            serde_json::to_vec(&serde_json::json!({
+                "tls": {
+                    "mode": "tls",
+                    "domain": "app.example.com",
+                    "certfp": certfp,
+                    "extra": true
+                }
+            }))
+            .unwrap(),
+        ] {
+            assert!(validate_attested_tls(&expected, &invalid, &"ab".repeat(32)).is_err());
+        }
+        assert!(
+            validate_attested_tls(
+                &expected,
+                &metadata("tls", "app.example.com", &"ab".repeat(32)),
+                &"cd".repeat(32)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn attestation_user_data_handles_optional_and_wrong_payload_shapes() {
+        let key = serde_cbor::Value::Text("user_data".to_string());
+        let bytes = serde_cbor::Value::Bytes(b"metadata".to_vec());
+        let payload = serde_cbor::Value::Map([(key.clone(), bytes)].into_iter().collect());
+        assert_eq!(
+            attestation_user_data(&payload).unwrap(),
+            Some(&b"metadata"[..])
+        );
+
+        let missing = serde_cbor::Value::Map(Default::default());
+        assert_eq!(attestation_user_data(&missing).unwrap(), None);
+        let null = serde_cbor::Value::Map(
+            [(key.clone(), serde_cbor::Value::Null)]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(attestation_user_data(&null).unwrap(), None);
+        let wrong = serde_cbor::Value::Map(
+            [(key, serde_cbor::Value::Text("metadata".to_string()))]
+                .into_iter()
+                .collect(),
+        );
+        assert!(attestation_user_data(&wrong).is_err());
+        assert!(attestation_user_data(&serde_cbor::Value::Null).is_err());
+    }
+
+    #[test]
+    fn user_data_display_escapes_utf8_and_hex_encodes_other_bytes() {
+        assert_eq!(
+            display_user_data(b"line\nnext"),
+            (false, "line\\nnext".to_string())
+        );
+        assert_eq!(display_user_data(&[0xff, 0x00]), (true, "ff00".to_string()));
+    }
+
+    #[test]
+    fn inspection_json_is_explicitly_unverified_and_separates_manifest() {
+        let payload = serde_cbor::Value::Map(
+            [(
+                serde_cbor::Value::Text("user_data".to_string()),
+                serde_cbor::Value::Bytes(b"metadata".to_vec()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let manifest = serde_json::json!({"app_source": {"commit": "abc"}});
+        let output: serde_json::Value = serde_json::from_str(
+            &attestation_inspection_json(b"nonce", &payload, Some(&manifest)).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(output["verification"], "not_performed");
+        assert_eq!(output["challenge_nonce"], "bm9uY2U=");
+        assert_eq!(
+            output["attestation_payload"]["user_data"],
+            "base64:bWV0YWRhdGE="
+        );
+        assert_eq!(output["response_metadata"]["manifest"], manifest);
+    }
+
+    #[test]
+    fn attestation_response_limit_accepts_boundary_and_rejects_excess() {
+        let mut body = vec![0; MAX_ATTESTATION_RESPONSE_BYTES - 1];
+        append_attestation_response_chunk(&mut body, &[0]).unwrap();
+        assert_eq!(body.len(), MAX_ATTESTATION_RESPONSE_BYTES);
+        assert!(append_attestation_response_chunk(&mut body, &[0]).is_err());
+
+        let mut oversized = vec![0; MAX_ATTESTATION_RESPONSE_BYTES + 1];
+        assert!(append_attestation_response_chunk(&mut oversized, &[]).is_err());
+    }
+
+    fn trusted_hashes<'a>(pcr: &'a str, tls: Option<TrustedTls>) -> TrustedHashes<'a> {
+        TrustedHashes {
+            pcr0: pcr,
+            pcr1: pcr,
+            pcr2: pcr,
+            verified_at: "2026-08-05T00:00:00Z".to_string(),
+            tls,
+        }
+    }
+
+    #[test]
+    fn trusted_state_is_atomic_compatible_and_removes_stale_tls() {
+        let work_dir = tempdir().unwrap();
+        let path = work_dir.path().join(".caution/trusted_hashes.json");
+        assert!(
+            persist_trusted_hashes(&path, &trusted_hashes("first", None))
+                .unwrap()
+                .is_none()
+        );
+
+        let tls = TrustedTls {
+            domain: "app.example.com".to_string(),
+            certfp: "ab".repeat(32),
+        };
+        let first_backup =
+            persist_trusted_hashes(&path, &trusted_hashes("second", Some(tls.clone())))
+                .unwrap()
+                .unwrap();
+        let second_backup = persist_trusted_hashes(&path, &trusted_hashes("third", None))
+            .unwrap()
+            .unwrap();
+
+        assert_ne!(first_backup, second_backup);
+        let canonical: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(canonical["pcr0"], "third");
+        assert!(canonical.get("tls").is_none());
+        assert_eq!(canonical["pcr1"], "third"); // send-shard reads these top-level fields
+
+        let previous: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(second_backup).unwrap()).unwrap();
+        assert_eq!(previous["pcr0"], "second");
+        assert_eq!(previous["tls"]["domain"], tls.domain);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(first_backup).unwrap())
+                .unwrap()["pcr0"],
+            "first"
+        );
+    }
+
+    #[test]
+    fn trusted_state_backup_failure_preserves_the_canonical_file() {
+        let work_dir = tempdir().unwrap();
+        let state_dir = work_dir.path().join(".caution");
+        std::fs::create_dir(&state_dir).unwrap();
+        let path = state_dir.join("trusted_hashes.json");
+        std::fs::write(&path, b"original").unwrap();
+
+        assert!(
+            persist_trusted_hashes_with_backup(
+                &path,
+                &trusted_hashes("new", None),
+                |_, _| Err(io::Error::new(io::ErrorKind::PermissionDenied, "injected"))
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_state_rejects_symlinks_without_touching_the_target() {
+        use std::os::unix::fs::symlink;
+
+        let work_dir = tempdir().unwrap();
+        let state_dir = work_dir.path().join(".caution");
+        std::fs::create_dir(&state_dir).unwrap();
+        let target = work_dir.path().join("victim.json");
+        std::fs::write(&target, b"do not replace").unwrap();
+        let state = state_dir.join("trusted_hashes.json");
+        symlink(&target, &state).unwrap();
+
+        assert!(persist_trusted_hashes(&state, &trusted_hashes("new", None)).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"do not replace");
+
+        let linked_dir = work_dir.path().join("linked");
+        symlink(&state_dir, &linked_dir).unwrap();
+        assert!(
+            persist_trusted_hashes(
+                &linked_dir.join("trusted_hashes.json"),
+                &trusted_hashes("new", None)
+            )
+            .is_err()
+        );
+
+        let directory_state = work_dir.path().join("directory-state");
+        std::fs::create_dir(&directory_state).unwrap();
+        assert!(
+            persist_trusted_hashes(&directory_state, &trusted_hashes("new", None)).is_err()
+        );
+        assert!(directory_state.is_dir());
+    }
+
+    #[test]
+    fn reproduction_steve_cache_binding_follows_effective_mode() {
+        let config = |enabled, mode| E2eEncryption {
+            enabled,
+            mode,
+            cors_origins: None,
+            key_exchange: None,
+        };
+        let disabled = config(Some(false), None);
+        let legacy_steve = config(Some(true), None);
+        let steve = config(None, Some(E2eMode::Steve));
+        let tls = config(None, Some(E2eMode::Tls));
+
+        assert!(reproduction_uses_steve(Some(&steve), false));
+        assert!(reproduction_uses_steve(Some(&legacy_steve), false));
+        assert!(!reproduction_uses_steve(Some(&tls), true));
+        assert!(!reproduction_uses_steve(Some(&disabled), true));
+        assert!(reproduction_uses_steve(None, true));
+        assert!(!reproduction_uses_steve(None, false));
     }
 
     fn test_api_client() -> ApiClient {
@@ -9361,7 +10481,94 @@ containerfile: Missing.Containerfile\n",
                 "generated HCL should parse for byoc={byoc}: {:?}",
                 config.err()
             );
+            assert!(hcl.contains("key_exchange = \"x25519\""));
         }
+    }
+
+    #[test]
+    fn measured_build_cache_key_changes_with_configuration() {
+        let e2e_enabled = ConfigurationFile::from_str(
+            r#"
+enclave "default" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }
+    http {
+      port = 8080
+      e2e_encryption {
+        enabled = true
+      }
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+        let e2e_disabled = ConfigurationFile::from_str(
+            r#"
+enclave "default" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }
+    http {
+      port = 8080
+      e2e_encryption {
+        enabled = false
+      }
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let e2e_enabled_key =
+            measured_build_cache_key("deadbeef", &e2e_enabled, Some("steve-v1")).unwrap();
+        let e2e_disabled_key = measured_build_cache_key("deadbeef", &e2e_disabled, None).unwrap();
+        assert_ne!(e2e_enabled_key, e2e_disabled_key);
+    }
+
+    #[test]
+    fn local_cache_keys_bind_steve_only_for_e2e() {
+        let e2e_config = ConfigurationFile::from_str(
+            r#"
+enclave "default" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }
+    http {
+      port = 8080
+      e2e_encryption {
+        enabled = true
+      }
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let e2e_v1 =
+            measured_build_cache_key("deadbeef", &e2e_config, Some("steve-v1")).unwrap();
+        let e2e_v2 =
+            measured_build_cache_key("deadbeef", &e2e_config, Some("steve-v2")).unwrap();
+        assert_ne!(e2e_v1, e2e_v2);
+
+        let plain = measured_build_cache_key("deadbeef", &e2e_config, None).unwrap();
+        let config_json = serde_json::to_vec(&e2e_config).unwrap();
+        assert_eq!(
+            plain,
+            format!(
+                "deadbeef-config-{}",
+                hex::encode(sha2::Sha256::digest(&config_json))
+            )
+        );
     }
 
     #[test]
@@ -9444,6 +10651,23 @@ containerfile: Missing.Containerfile\n",
 1111111111111111111111111111111111111111\trefs/heads/main\n\
 2222222222222222222222222222222222222222\trefs/heads/deploy-tests\n\
 3333333333333333333333333333333333333333\trefs/tags/v1.0\n";
+
+    #[test]
+    fn archive_preflight_classifies_pass_failure_retry_and_exhaustion() {
+        for (status, attempt, expected) in [
+            (reqwest::StatusCode::OK, 1, ArchivePreflightStatus::Passed),
+            (reqwest::StatusCode::NOT_FOUND, 1, ArchivePreflightStatus::Missing),
+            (reqwest::StatusCode::GONE, 1, ArchivePreflightStatus::Missing),
+            (reqwest::StatusCode::FOUND, 1, ArchivePreflightStatus::Failed),
+            (reqwest::StatusCode::METHOD_NOT_ALLOWED, 1, ArchivePreflightStatus::Failed),
+            (reqwest::StatusCode::REQUEST_TIMEOUT, 1, ArchivePreflightStatus::Retry),
+            (reqwest::StatusCode::TOO_MANY_REQUESTS, 1, ArchivePreflightStatus::Retry),
+            (reqwest::StatusCode::SERVICE_UNAVAILABLE, 1, ArchivePreflightStatus::Retry),
+            (reqwest::StatusCode::SERVICE_UNAVAILABLE, 2, ArchivePreflightStatus::Failed),
+        ] {
+            assert_eq!(classify_archive_preflight(status, attempt), expected);
+        }
+    }
 
     #[test]
     fn preflight_fails_when_branch_absent_from_remote() {

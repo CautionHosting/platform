@@ -108,6 +108,24 @@ impl E2eMode {
 }
 
 /// The `e2e_encryption { }` block inside HTTP config.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeyExchange {
+    #[default]
+    #[serde(rename = "x25519")]
+    X25519,
+    #[serde(rename = "xwing-draft10")]
+    XwingDraft10,
+}
+
+impl KeyExchange {
+    pub const fn steve_env_value(self) -> &'static str {
+        match self {
+            Self::X25519 => "X25519",
+            Self::XwingDraft10 => "XWING-DRAFT10",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct E2eEncryption {
@@ -116,6 +134,13 @@ pub struct E2eEncryption {
     pub enabled: Option<bool>,
     pub mode: Option<E2eMode>,
     pub cors_origins: Option<Vec<String>>,
+    pub key_exchange: Option<KeyExchange>,
+}
+
+impl E2eEncryption {
+    pub fn key_exchange(&self) -> KeyExchange {
+        self.key_exchange.unwrap_or_default()
+    }
 }
 
 impl E2eEncryption {
@@ -354,6 +379,11 @@ pub enum FromStrError {
 
     #[error("http_port {0} must also be present in ingress rules")]
     HttpPortNotInPorts(u16),
+
+    #[error(
+        "key_exchange is only supported when e2e_encryption resolves to mode = \"steve\""
+    )]
+    KeyExchangeRequiresSteve,
 
     #[error(
         "Invalid env expression for key '{0}'; only string literals and env::vault(...) are allowed"
@@ -664,6 +694,7 @@ impl ConfigurationFile {
             enabled: Some(enabled),
             mode: None,
             cors_origins: None,
+            key_exchange: None,
         });
 
         validate_domain(domain.as_deref()).map_err(FromProcfileError::InvalidDomain)?;
@@ -813,6 +844,13 @@ impl ConfigurationFile {
                 {
                     validate_domain(http.domain.as_deref()).map_err(FromStrError::InvalidDomain)?;
 
+                    if let Some(e2e) = http.e2e_encryption.as_ref()
+                        && e2e.key_exchange.is_some()
+                        && e2e.effective_mode() != Some(E2eMode::Steve)
+                    {
+                        return Err(FromStrError::KeyExchangeRequiresSteve);
+                    }
+
                     let port_covered = network.ingress.iter().any(|rule| match &rule.port_spec {
                         Some(PortSpec::Exact { port }) => *port == http.port,
                         Some(PortSpec::FromTo {
@@ -924,6 +962,7 @@ mod tests {
                                 enabled: Some(true),
                                 mode: None,
                                 cors_origins: Some(vec!["*".into()]),
+                                key_exchange: Some(KeyExchange::X25519),
                             }),
                         }),
                     }),
@@ -2546,6 +2585,89 @@ caution {
         let hcl = r#"enabled = true unknown = false"#;
         let err = hcl::from_str::<E2eEncryption>(hcl).unwrap_err();
         assert!(err.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn e2e_key_exchange_defaults_to_x25519_and_rejects_unknown_values() {
+        let default = hcl::from_str::<E2eEncryption>("enabled = true").unwrap();
+        assert_eq!(default.key_exchange(), KeyExchange::X25519);
+
+        let xwing =
+            hcl::from_str::<E2eEncryption>("enabled = true\nkey_exchange = \"xwing-draft10\"")
+                .unwrap();
+        assert_eq!(xwing.key_exchange().steve_env_value(), "XWING-DRAFT10");
+
+        assert!(
+            hcl::from_str::<E2eEncryption>("enabled = true\nkey_exchange = \"unsupported\"",)
+                .is_err()
+        );
+    }
+
+    fn parse_config_with_e2e(body: &str) -> Result<ConfigurationFile, FromStrError> {
+        ConfigurationFile::from_str(&format!(
+            r#"
+enclave "main" {{
+  network {{
+    ingress {{
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }}
+    http {{
+      port = 8080
+      e2e_encryption {{
+        {body}
+      }}
+    }}
+  }}
+}}
+"#
+        ))
+    }
+
+    #[test]
+    fn e2e_key_exchange_requires_effective_steve_mode() {
+        for body in [
+            r#"mode = "steve""#,
+            "mode = \"steve\"\nkey_exchange = \"x25519\"",
+            "mode = \"steve\"\nkey_exchange = \"xwing-draft10\"",
+            "enabled = true\nkey_exchange = \"x25519\"",
+            "enabled = true\nkey_exchange = \"xwing-draft10\"",
+            // Explicit mode takes precedence over the legacy boolean.
+            "mode = \"steve\"\nenabled = false\nkey_exchange = \"xwing-draft10\"",
+            r#"mode = "tls""#,
+        ] {
+            assert!(
+                parse_config_with_e2e(body).is_ok(),
+                "expected valid E2E configuration: {body}"
+            );
+        }
+
+        for body in [
+            "mode = \"tls\"\nkey_exchange = \"x25519\"",
+            "mode = \"tls\"\nkey_exchange = \"xwing-draft10\"",
+            "enabled = false\nkey_exchange = \"x25519\"",
+            "enabled = false\nkey_exchange = \"xwing-draft10\"",
+            r#"key_exchange = "x25519""#,
+            r#"key_exchange = "xwing-draft10""#,
+            // Explicit mode takes precedence over the legacy boolean.
+            "mode = \"tls\"\nenabled = true\nkey_exchange = \"xwing-draft10\"",
+        ] {
+            assert!(
+                matches!(
+                    parse_config_with_e2e(body),
+                    Err(FromStrError::KeyExchangeRequiresSteve)
+                ),
+                "expected key_exchange rejection: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_caddy_mode_is_rejected() {
+        assert!(matches!(
+            parse_config_with_e2e(r#"mode = "caddy""#),
+            Err(FromStrError::HclParse(_))
+        ));
     }
 
     #[test]

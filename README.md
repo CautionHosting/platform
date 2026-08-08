@@ -97,10 +97,11 @@ make up
    git push caution main
    ```
 
-#### Enclave-terminated HTTPS (Caddy POC)
+#### Enclave-terminated HTTPS (TLS mode, implemented by Caddy)
 
 To terminate standard HTTPS inside the enclave without changing clients, select
-Caddy mode on the HTTP ingress:
+TLS mode on the HTTP ingress. The enclave currently implements this mode with
+Caddy:
 
 ```hcl
 network {
@@ -114,7 +115,7 @@ network {
   http {
     domain = "app.example.com"
     port   = 8080
-    e2e_encryption { mode = "caddy" }
+    e2e_encryption { mode = "tls" }
   }
 }
 ```
@@ -122,9 +123,12 @@ network {
 The domain must resolve directly to the deployed host, the HTTP port must have
 an ingress rule, and outbound egress is required for Let's Encrypt. Disable any
 CDN or proxy TLS termination. Caddy publishes the verified leaf certificate
-SHA-256 fingerprint in signed Nitro `user_data`; an external verifier must
-compare it with the live certificate and enforce the expected enclave PCRs.
-Certificate changes can take up to 60 seconds to appear in new attestations.
+SHA-256 fingerprint in authenticated Nitro `user_data`. For a source-backed
+`mode = "tls"` deployment, `caution verify` validates the fresh Nitro evidence
+and expected PCRs, compares that fingerprint with the live WebPKI-validated
+leaf, and saves the verified PCRs and TLS binding to
+`.caution/trusted_hashes.json`. Certificate changes can take up to 60 seconds
+to appear in new attestations.
 
 Run the opt-in live binding test against any production-mode Caddy deployment:
 
@@ -148,6 +152,13 @@ Fetches the attestation from the endpoint, rebuilds the enclave locally, and ver
 caution verify --attestation-url <attestation-url>
 ```
 
+Local source is the default. If the deployment manifest has no app commit, the
+CLI uses the current checkout at `HEAD`.
+
+Source-archive preflights use at most two five-second HEAD requests. If the
+remote remains unavailable, verification stops before starting the expensive
+reproduction build.
+
 **Option B: Verify against known PCR hashes**
 
 PCRs (Platform Configuration Registers) are cryptographic measurements of the enclave's code and configuration. If you already have the expected PCR hashes, you can verify against a file:
@@ -161,6 +172,9 @@ PCR2: 21b9efbc184807662e966d34f390821309eeac6802309798826296bf3e8bec7c10edb30948
 
 caution verify --pcrs pcrs.txt
 ```
+
+This is explicitly PCR-only: it does not verify TLS certificate binding, and
+the persisted trusted state contains no `tls` object.
 
 ## Reference
 
