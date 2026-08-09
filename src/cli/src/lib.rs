@@ -903,12 +903,13 @@ enum Commands {
     Login {
         #[arg(
             long,
-            help = "Use QR code for cross-device authentication (no local security key needed)"
+            help = "Use QR code for cross-device authentication (--username required; no local security key needed)"
         )]
         qr: bool,
         #[arg(
             long,
-            help = "Username to log in with (prompted interactively if omitted; --qr uses discoverable credentials by default and skips this prompt)"
+            required_if_eq("qr", "true"),
+            help = "Username to log in with (required when using --qr; prompted interactively otherwise)"
         )]
         username: Option<String>,
     },
@@ -9593,9 +9594,12 @@ containerfile: Missing.Containerfile\n",
     }
 
     #[test]
-    fn global_qr_is_allowed_for_non_register_commands() {
-        let cli = Cli::try_parse_from(["caution", "login", "--qr"]).unwrap();
-        assert!(validate_global_qr(&cli.command, cli.qr).is_ok());
+    fn global_qr_requires_username_for_login() {
+        // --qr now requires --username on login
+        let result = Cli::try_parse_from(["caution", "login", "--qr"]);
+        assert!(result.is_err());
+        let err_str = format!("{:?}", result);
+        assert!(err_str.contains("--username") || err_str.contains("MissingRequiredArgument"));
     }
 
     #[test]
