@@ -246,6 +246,8 @@ pub enum QrLoginError {
     UnexpectedState(String),
     #[error("QR login token already claimed")]
     AlreadyClaimed,
+    #[error("username is required for QR login")]
+    MissingUsername,
     #[error("could not create QR login token")]
     DbCreateToken {
         #[source]
@@ -298,6 +300,7 @@ impl IntoResponse for QrLoginError {
             Self::UnexpectedState(_) | Self::AlreadyClaimed => {
                 (StatusCode::CONFLICT, self.to_string())
             }
+            Self::MissingUsername => (StatusCode::BAD_REQUEST, self.to_string()),
             Self::RateLimited => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
             _ => {
                 tracing::error!(?self, "QR login error");
@@ -2318,13 +2321,14 @@ pub async fn qr_login_begin_handler(
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
     body: axum::body::Bytes,
 ) -> Result<Json<crate::types::QrLoginBeginResponse>, QrLoginError> {
-    let username: Option<String> = normalize_login_username(if body.is_empty() {
-        None
-    } else {
+    // Parse request body and validate username is present and non-empty.
+    let Some(username) = normalize_login_username(
         serde_json::from_slice::<crate::types::QrLoginBeginRequest>(&body)
             .ok()
-            .and_then(|r| r.username)
-    });
+            .map(|r| r.username),
+    ) else {
+        return Err(QrLoginError::MissingUsername);
+    };
 
     let token = db::generate_session_id();
     let requestee_token = db::generate_session_id();
@@ -2339,7 +2343,7 @@ pub async fn qr_login_begin_handler(
         &requestee_token,
         Some(&ip_address),
         expires_at,
-        username.as_deref(),
+        &username,
     )
     .await
     .map_err(|source| QrLoginError::DbCreateToken { source })?;
@@ -2454,55 +2458,18 @@ pub async fn qr_login_authenticate_handler(
         _ => return Err(QrLoginError::UnexpectedState(row.status)),
     }
 
-    // A username stored on the token (from qr_login_begin_handler) scopes the
-    // challenge to that user's own credentials — needed for non-resident/
-    // legacy keys, which phone platform authenticators normally don't need.
-    // Otherwise mirror begin_login_handler's flag-driven behavior: broadcast
-    // when the flag is on (unchanged), otherwise discoverable.
-    let (rcr, auth_state) = if let Some(username) = row.username.as_deref() {
-        // Same per-IP scoped-begin budget as begin_login_handler: this branch
-        // does the same username-scoped DB lookup and is the same enumeration
-        // shape, just reached via the QR flow instead of /auth/login/begin.
+    // A username stored on the token scopes the challenge to that user's own
+    // credentials — needed for non-resident/legacy keys.
+    let (rcr, auth_state) = {
         let ip = connect_info.0.ip();
         if !state.scoped_begin_limiter.check_rate_limit(&ip.to_string()).await {
             tracing::warn!("Scoped begin-login rate limit exceeded for IP: {}", ip);
             return Err(QrLoginError::RateLimited);
         }
 
-        scoped_or_decoy_challenge(&state, username)
+        scoped_or_decoy_challenge(&state, &row.username)
             .await
             .map_err(|source| QrLoginError::ScopedChallenge { source })?
-    } else if state.login_allow_broadcast {
-        let all_public_keys = db::get_all_credential_public_keys(&state.db)
-            .await
-            .map_err(|source| QrLoginError::DbGetCredentials { source })?;
-
-        let mut allow_credentials = Vec::new();
-        for cred_bytes in all_public_keys.iter() {
-            let seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(cred_bytes)
-                .map_err(|source| QrLoginError::DeserializeCredential { source })?;
-            allow_credentials.push(seckey);
-        }
-
-        let (mut rcr, auth_state) = state
-            .webauthn
-            .start_securitykey_authentication(&allow_credentials)
-            .map_err(|source| QrLoginError::StartAuthentication { source })?;
-
-        rcr.public_key.user_verification = webauthn_rs_proto::UserVerificationPolicy::Preferred;
-        (rcr, AuthState::SecurityKey(auth_state))
-    } else {
-        let (rcr, auth_state) = state
-            .webauthn
-            .start_discoverable_authentication()
-            .map_err(|source| QrLoginError::StartAuthentication { source })?;
-        (
-            rcr,
-            AuthState::Discoverable {
-                auth_state,
-                scope: UsernameScope::Unscoped,
-            },
-        )
     };
 
     let session_key = uuid::Uuid::new_v4().to_string();

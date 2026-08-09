@@ -316,14 +316,14 @@ pub struct QrLoginBeginResponse {
     pub expires_at: String,
 }
 
-/// Optional username to scope the eventual `allowCredentials` list by, for
+/// Username to scope the eventual `allowCredentials` list by, for
 /// non-resident/legacy keys that can't respond to a discoverable challenge.
 /// Never encoded in the QR URL — chosen desktop-side, stored server-side on
 /// the token row, and only consumed when the phone/browser later hits
 /// `/auth/qr-login/authenticate`.
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct QrLoginBeginRequest {
-    pub username: Option<String>,
+    pub username: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -367,7 +367,7 @@ pub struct DbQrLoginToken {
     pub session_id: Option<String>,
     pub expires_at: time::OffsetDateTime,
     pub created_at: time::OffsetDateTime,
-    pub username: Option<String>,
+    pub username: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
