@@ -442,11 +442,12 @@ step_pass "Invalid username claim -> 400 (retryable validation, distinct from 40
 # ── Step 17: fresh QR token -> status "pending" (desktop poll start state) ──
 STEP_NUM=17
 # GET /auth/qr-login/status is what the desktop side polls while waiting for the
-# phone to authenticate. A just-issued token must report "pending" with no
-# session_id yet — the starting state of the cross-device handoff. Independent
-# of credential state (step 13 deleted the user's cred), so a bare begin is fine.
+# phone to authenticate. A just-issued, username-scoped token must report
+# "pending" with no session_id yet — the starting state of the cross-device
+# handoff. The username need not have a registered credential because the
+# gateway preserves enumeration resistance with a decoy challenge.
 QR_BEGIN=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/begin" \
-    -H 'Content-Type: application/json' -d '{}')
+    -H 'Content-Type: application/json' -d '{"username":"qr-e2e-user"}')
 CODE=$(echo "$QR_BEGIN" | tail -1)
 JSON=$(echo "$QR_BEGIN" | sed '$d')
 [ "$CODE" = 200 ] || step_fail "qr-login/begin (status test) returned HTTP $CODE (want 200)"

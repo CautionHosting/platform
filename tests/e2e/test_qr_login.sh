@@ -7,7 +7,7 @@
 # Requires: make up-test (gateway on :8000, postgres-test on caution_test).
 #
 # Exercises the gateway HTTP surface directly (no authenticator needed):
-#   1. begin issues distinct requester/requestee tokens; URL carries requestee
+#   1. begin requires a username and issues distinct requester/requestee tokens
 #   2. authenticate rejects the requester token (split boundary)
 #   3. status: a completed token is returned once, then consumed (one-shot)
 #   4. status: the requestee token cannot poll the session
@@ -43,8 +43,17 @@ for _ in $(seq 1 30); do
     sleep 1
 done
 
-# ── 1. begin: distinct tokens, requestee in URL ──────────────────────
-BEGIN=$(curl -s -X POST "$GATEWAY_URL/auth/qr-login/begin")
+# ── 1. begin: username required; distinct tokens, requestee in URL ───
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+    "$GATEWAY_URL/auth/qr-login/begin" -H 'Content-Type: application/json' -d '{}')
+if [ "$CODE" = "400" ]; then
+    pass "begin rejects a missing username"
+else
+    fail "begin without username returned $CODE, expected 400"
+fi
+
+BEGIN=$(curl -s -X POST "$GATEWAY_URL/auth/qr-login/begin" \
+    -H 'Content-Type: application/json' -d '{"username":"e2e-qr-user"}')
 REQUESTER=$(echo "$BEGIN" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
 URL=$(echo "$BEGIN" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
 REQUESTEE=$(echo "$URL" | sed -n 's/.*token=\([^"&]*\).*/\1/p')
@@ -78,8 +87,25 @@ if [ -n "$CRED" ]; then
 else
     EXPECT_EXPIRES=0  # no credentials registered; session fetch returns None
 fi
-psql_c "INSERT INTO qr_login_tokens (token, requestee_token, status, session_id, expires_at)
-        VALUES ('$REQ','$REE','completed','$SID', NOW() + INTERVAL '1 hour');" >/dev/null
+psql_c "INSERT INTO qr_login_tokens (token, requestee_token, username, status, session_id, expires_at)
+        VALUES ('$REQ','$REE','e2e-qr-user','completed','$SID', NOW() + INTERVAL '1 hour');" >/dev/null
+
+# Username-less tokens minted by older CLIs must fail closed regardless of how
+# far they progressed before the backend was upgraded.
+for STATUS in pending authenticated completed; do
+    LEGACY_REQ="e2e-qr-legacy-$STATUS"
+    LEGACY_REE="e2e-qr-legacy-ree-$STATUS"
+    psql_c "INSERT INTO qr_login_tokens (token, requestee_token, status, expires_at)
+            VALUES ('$LEGACY_REQ','$LEGACY_REE','$STATUS', NOW() + INTERVAL '1 hour')
+            ON CONFLICT (token) DO UPDATE SET username=NULL, status=EXCLUDED.status;" >/dev/null
+    CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+        "$GATEWAY_URL/auth/qr-login/status?token=$LEGACY_REQ")
+    if [ "$CODE" = "400" ]; then
+        pass "status rejects legacy username-less $STATUS token"
+    else
+        fail "legacy username-less $STATUS token returned $CODE, expected 400"
+    fi
+done
 
 # ── 3. status: session returned once, then consumed (one-shot) ───────
 POLL1=$(curl -s "$GATEWAY_URL/auth/qr-login/status?token=$REQ")
