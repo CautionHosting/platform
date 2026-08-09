@@ -40,7 +40,7 @@ while true; do
 
         if [ -n "${certfp}" ] && [ "${certfp}" != "${last_certfp}" ]; then
             metadata_tmp="${metadata_path}.tmp.$$"
-            if printf '{"tls":{"mode":"caddy","domain":"%s","certfp":"%s"}}\n' \
+            if printf '{"tls":{"mode":"tls","domain":"%s","certfp":"%s"}}\n' \
                 "${caddy_domain}" "${certfp}" >"${metadata_tmp}" \
                 && mv -f "${metadata_tmp}" "${metadata_path}"; then
                 last_certfp="${certfp}"

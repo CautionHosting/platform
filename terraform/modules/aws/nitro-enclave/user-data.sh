@@ -304,7 +304,7 @@ mkdir -p /etc/caddy /var/lib/caddy /var/log/caddy
 chown caddy:caddy /var/lib/caddy /var/log/caddy
 
 %{ if e2e_mode == "tls" ~}
-echo "Configuring host Caddy for caddy-mode HTTP health/proxy only"
+echo "Configuring host Caddy for TLS-mode HTTP health/proxy only"
 cat > /etc/caddy/Caddyfile <<EOF
 :80 {
     handle /.well-known/caution/health {
@@ -489,7 +489,7 @@ systemctl daemon-reload
 systemctl enable caddy
 systemctl start caddy
 %{ if e2e_mode == "tls" ~}
-echo "Host Caddy started for caddy-mode HTTP health/proxy; TLS :443 is forwarded into the enclave"
+echo "Host Caddy started for TLS-mode HTTP health/proxy; TLS :443 is forwarded into the enclave"
 %{ else ~}
 %{ if domain != "" ~}
 echo "Caddy started with Let's Encrypt TLS for ${domain}"

@@ -455,7 +455,7 @@
             <div class="guide-intro-eyebrow">QUICK START GUIDE</div>
             <h2 class="guide-intro-title">{{ apps.length === 0 ? 'Deploy your first application' : 'How to deploy an application' }}</h2>
             <p class="guide-intro-description">
-              Learn how to use the Caution CLI to deploy your application in a secure enclave and verify exactly what code is running.
+              Learn how to use the Caution CLI to deploy your application in a secure enclave and verify its attested measurements against a reproducible local build.
             </p>
 
             <button class="btn-guide" @click="setupStep = 1">
@@ -729,10 +729,10 @@ make build-cli
           <div class="guide-layout guide-layout-balanced">
             <div class="guide-content">
               <p class="quick-start-description">
-                Run <code>caution verify --reproduce</code> to rebuild the image, compare hashes, and confirm exactly what code is running inside the enclave.
+                Run <code>caution verify</code> to reproduce the enclave from the selected source and build inputs, then compare its PCR measurements with fresh Nitro evidence.
               </p>
               <p class="quick-start-description">
-                Independent verification confirms the deployed enclave matches your source code.
+                A successful result verifies PCR0/1/2, performs TLS certificate binding when required, and saves the trusted state locally.
               </p>
             </div>
             <div class="guide-code">
@@ -746,7 +746,7 @@ make build-cli
                   <img src="/assets/copy.svg" alt="Copy" class="copy-icon" />
                   <span class="copy-btn-text">Copied</span>
                 </button>
-                <pre ref="codeVerify">caution verify --reproduce</pre>
+                <pre ref="codeVerify">caution verify</pre>
               </div>
             </div>
           </div>

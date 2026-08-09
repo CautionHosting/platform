@@ -12,7 +12,7 @@ use crate::EifFile;
 
 const DEFAULT_ENCLAVEOS_COMMIT: &str = "9582e25239430070667fdd0a6b64d887f1c308df";
 const DEFAULT_BOOTPROOF_COMMIT: &str = "64dae0628e58b9f898b89f9b7a404b37e2f0ca9f";
-const DEFAULT_STEVE_COMMIT: &str = "ed38a190cd5d7a8f452c854e41d00ec748e172bf";
+const DEFAULT_STEVE_COMMIT: &str = "36b414e9bf49ba206bb18f89dd74996c21c1e6f8";
 const DEFAULT_LOCKSMITH_COMMIT: &str = "d16b74c6b3fd1d1006a5b00e4d9e21a4613947a9";
 
 // Kept in sync with the git clone URLs in templates/Containerfile.eif.
@@ -20,6 +20,19 @@ pub const ENCLAVEOS_REPO: &str = "https://git.distrust.co/public/enclaveos.git";
 pub const BOOTPROOF_REPO: &str = "https://git.distrust.co/public/bootproof.git";
 pub const STEVE_REPO: &str = "https://git.distrust.co/public/steve.git";
 pub const LOCKSMITH_REPO: &str = "https://codeberg.org/caution/locksmith.git";
+
+/// STEVE's built-in default key exchange. Must match
+/// `caution_config::KeyExchange::X25519.steve_env_value()`.
+pub const DEFAULT_KEY_EXCHANGE: &str = "X25519";
+const XWING_DRAFT10_KEY_EXCHANGE: &str = "XWING-DRAFT10";
+
+pub fn validate_key_exchange(value: &str) -> Result<()> {
+    anyhow::ensure!(
+        matches!(value, DEFAULT_KEY_EXCHANGE | XWING_DRAFT10_KEY_EXCHANGE),
+        "unsupported STEVE key exchange: {value}"
+    );
+    Ok(())
+}
 
 const RESERVED_INTERNAL_PORT_START: u16 = 49_500;
 const RESERVED_INTERNAL_PORT_END: u16 = 49_600;
@@ -122,6 +135,7 @@ pub async fn stage_eif_components(
     http_port: Option<u16>,
     e2e: bool,
     e2e_mode: &str,
+    e2e_key_exchange: &str,
     domain: Option<&str>,
     http_upstream_protocol: &str,
     locksmith: bool,
@@ -129,6 +143,8 @@ pub async fn stage_eif_components(
     egress: bool,
     templates_dir: Option<&Path>,
 ) -> Result<PathBuf> {
+    validate_key_exchange(e2e_key_exchange)?;
+
     let stage_dir = work_dir.join("eif-stage");
     fs::create_dir_all(&stage_dir).await?;
 
@@ -178,6 +194,8 @@ pub async fn stage_eif_components(
         if e2e {
             manifest.steve_commit.get_or_insert(steve_commit.clone());
         }
+        manifest.steve_key_exchange =
+            (e2e && e2e_key_exchange != DEFAULT_KEY_EXCHANGE).then(|| e2e_key_exchange.to_string());
         if locksmith {
             manifest.locksmith = true;
             manifest
@@ -228,6 +246,7 @@ pub async fn stage_eif_components(
         http_port,
         e2e,
         e2e_mode,
+        e2e_key_exchange,
         domain,
         http_upstream_protocol,
         locksmith,
@@ -304,6 +323,7 @@ async fn render_run_sh_template(
     http_port: Option<u16>,
     e2e: bool,
     e2e_mode: &str,
+    e2e_key_exchange: &str,
     domain: Option<&str>,
     http_upstream_protocol: &str,
     locksmith: bool,
@@ -419,6 +439,15 @@ async fn render_run_sh_template(
         )
     };
 
+    // Only emit the variable for non-default key exchanges: STEVE defaults to
+    // X25519, so omitting it keeps run.sh (and therefore the PCRs) byte-identical
+    // to deployments made before key exchange was selectable.
+    let key_exchange_env = if e2e_key_exchange == DEFAULT_KEY_EXCHANGE {
+        String::new()
+    } else {
+        format!("STEVE_KEY_EXCHANGE={} ", e2e_key_exchange)
+    };
+
     let cors_env = match e2e_cors_origins {
         Some(origins) => format!(
             "STEVE_CORS_ORIGINS='{}'",
@@ -431,6 +460,7 @@ async fn render_run_sh_template(
         .replace("{{USER_CMD}}", &user_cmd)
         .replace("{{STEVE_APP_PORT}}", &steve_app_port)
         .replace("{{CADDY_UPSTREAM}}", &caddy_upstream)
+        .replace("{{STEVE_KEY_EXCHANGE_ENV}}", &key_exchange_env)
         .replace("{{CADDY_DOMAIN}}", caddy_domain)
         .replace("{{CUSTOM_PORT_SECTION}}", &custom_port_section)
         .replace("{{STEVE_CORS_ORIGINS_ENV}}", &cors_env);
@@ -483,6 +513,7 @@ pub async fn build_eif_from_filesystems(
     no_cache: bool,
     e2e: bool,
     e2e_mode: &str,
+    e2e_key_exchange: &str,
     domain: Option<&str>,
     http_upstream_protocol: &str,
     locksmith: bool,
@@ -506,6 +537,7 @@ pub async fn build_eif_from_filesystems(
         http_port,
         e2e,
         e2e_mode,
+        e2e_key_exchange,
         domain,
         http_upstream_protocol,
         locksmith,
@@ -716,11 +748,57 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    fn test_manifest() -> EnclaveManifest {
+        EnclaveManifest::new(
+            None,
+            crate::manifest::EnclaveSource::Local {
+                path: ".".to_string(),
+            },
+            crate::manifest::FrameworkSource::GitArchive {
+                url: "https://example.com/platform/archive/main.tar.gz".to_string(),
+                commit: None,
+            },
+            None,
+            Some("/app/server".to_string()),
+            None,
+        )
+    }
+
+    async fn stage_test_manifest(key_exchange: &str) -> Result<EnclaveManifest> {
+        let work_dir = tempfile::tempdir()?;
+        let user_dir = work_dir.path().join("user");
+        let enclave_dir = work_dir.path().join("enclave");
+        fs::create_dir_all(&user_dir).await?;
+        fs::create_dir_all(&enclave_dir).await?;
+
+        let stage_dir = stage_eif_components(
+            &user_dir,
+            &enclave_dir,
+            work_dir.path(),
+            Some("/app/server".to_string()),
+            Some(test_manifest()),
+            &[8080],
+            Some(8080),
+            true,
+            "steve",
+            key_exchange,
+            None,
+            "http",
+            false,
+            None,
+            false,
+            None,
+        )
+        .await?;
+
+        EnclaveManifest::read_from_file(&stage_dir.join("manifest.json")).await
+    }
+
     fn run_template_file() -> tempfile::NamedTempFile {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         write!(
             file,
-            "#!/bin/sh\n# {{STEVE\necho steve\nSTEVE_APP_UPSTREAM=\"http://127.0.0.1:{{{{STEVE_APP_PORT}}}}\"\n# }}STEVE\n{{{{CUSTOM_PORT_SECTION}}}}\n{{{{USER_CMD}}}}\n"
+            "#!/bin/sh\n# {{STEVE\necho steve\nSTEVE_APP_UPSTREAM=\"http://127.0.0.1:{{{{STEVE_APP_PORT}}}}\" {{{{STEVE_KEY_EXCHANGE_ENV}}}}/steve\n# }}STEVE\n{{{{CUSTOM_PORT_SECTION}}}}\n{{{{USER_CMD}}}}\n"
         )
         .unwrap();
         file
@@ -762,6 +840,58 @@ mod tests {
         );
         std::env::remove_var("BOOTPROOF_COMMIT");
         assert_eq!(resolve_bootproof_commit(), DEFAULT_BOOTPROOF_COMMIT);
+    }
+
+    #[tokio::test]
+    async fn test_stage_manifest_records_non_default_key_exchange() {
+        let manifest = stage_test_manifest(XWING_DRAFT10_KEY_EXCHANGE)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            manifest.steve_key_exchange.as_deref(),
+            Some(XWING_DRAFT10_KEY_EXCHANGE)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stage_manifest_omits_default_key_exchange() {
+        let manifest = stage_test_manifest(DEFAULT_KEY_EXCHANGE).await.unwrap();
+
+        assert!(manifest.steve_key_exchange.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stage_rejects_invalid_key_exchange_before_generating_run_script() {
+        let work_dir = tempfile::tempdir().unwrap();
+        let user_dir = work_dir.path().join("user");
+        let enclave_dir = work_dir.path().join("enclave");
+        fs::create_dir_all(&user_dir).await.unwrap();
+        fs::create_dir_all(&enclave_dir).await.unwrap();
+
+        let err = stage_eif_components(
+            &user_dir,
+            &enclave_dir,
+            work_dir.path(),
+            Some("/app/server".to_string()),
+            Some(test_manifest()),
+            &[8080],
+            Some(8080),
+            true,
+            "steve",
+            "XWING-DRAFT10; touch /tmp/injected",
+            None,
+            "http",
+            false,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("unsupported STEVE key exchange"));
+        assert!(!work_dir.path().join("eif-stage/run.sh").exists());
     }
 
     #[test]
@@ -859,6 +989,7 @@ mod tests {
             None,
             false,
             "disabled",
+            "X25519",
             None,
             "http",
             true,
@@ -884,6 +1015,7 @@ mod tests {
             Some(3000),
             true,
             "steve",
+            "XWING-DRAFT10",
             None,
             "http",
             false,
@@ -894,6 +1026,7 @@ mod tests {
         .unwrap();
 
         assert!(result.contains("STEVE_APP_UPSTREAM=\"http://127.0.0.1:3000\""));
+        assert!(result.contains("STEVE_KEY_EXCHANGE=XWING-DRAFT10"));
     }
 
     #[tokio::test]
@@ -906,6 +1039,7 @@ mod tests {
             None,
             true,
             "steve",
+            "X25519",
             None,
             "http",
             false,
@@ -916,6 +1050,9 @@ mod tests {
         .unwrap();
 
         assert!(result.contains("STEVE_APP_UPSTREAM=\"http://127.0.0.1:8080\""));
+        // The default key exchange is left implicit so run.sh stays byte-identical
+        // to pre-key-exchange deployments (and their PCRs).
+        assert!(!result.contains("STEVE_KEY_EXCHANGE"));
     }
 
     #[tokio::test]
@@ -928,6 +1065,7 @@ mod tests {
             None,
             true,
             "steve",
+            "X25519",
             None,
             "http",
             false,
@@ -943,7 +1081,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_render_run_sh_caddy_mode_terminates_tls_in_enclave() {
+    async fn test_render_run_sh_tls_mode_terminates_tls_in_enclave() {
         let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
         let rendered = render_run_sh_template(
             &template,
@@ -952,6 +1090,7 @@ mod tests {
             Some(8080),
             false,
             "tls",
+            "X25519",
             Some("app.example.com"),
             "h2c",
             false,
@@ -976,7 +1115,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_render_run_sh_caddy_mode_requires_http_port() {
+    async fn test_render_run_sh_tls_mode_requires_http_port() {
         let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
         let err = render_run_sh_template(
             &template,
@@ -985,6 +1124,7 @@ mod tests {
             None,
             false,
             "tls",
+            "X25519",
             Some("app.example.com"),
             "http",
             false,
@@ -998,7 +1138,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_render_run_sh_caddy_mode_requires_domain_and_egress() {
+    async fn test_render_run_sh_tls_mode_requires_domain_and_egress() {
         let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
 
         let missing_domain = render_run_sh_template(
@@ -1008,6 +1148,7 @@ mod tests {
             Some(8080),
             false,
             "tls",
+            "X25519",
             None,
             "http",
             false,
@@ -1027,6 +1168,7 @@ mod tests {
             Some(8080),
             false,
             "tls",
+            "X25519",
             Some("app.example.com"),
             "http",
             false,
@@ -1091,6 +1233,7 @@ mod tests {
             None,
             false,
             "disabled",
+            "X25519",
             None,
             "http",
             false,
@@ -1113,6 +1256,7 @@ mod tests {
             None,
             false,
             "disabled",
+            "X25519",
             None,
             "http",
             false,

@@ -271,10 +271,10 @@ fi
 
 if [ -n "$APP_IP" ]; then
     log "  App IP: $APP_IP"
-    # Wait for app to respond (may take a moment after deployment reports running)
+    # This fixture has raw ingress only; reach the application on its declared port.
     APP_RESPONDED=false
     for i in $(seq 1 30); do
-        APP_BODY=$(curl -sk --connect-timeout 5 "https://$APP_IP/" 2>/dev/null || true)
+        APP_BODY=$(curl -s --connect-timeout 5 "http://$APP_IP:8083/" 2>/dev/null || true)
         if [ -n "$APP_BODY" ]; then
             APP_RESPONDED=true
             break
@@ -315,7 +315,7 @@ else
 fi
 
 set +e
-VERIFY_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" verify --attestation-url "http://$APP_IP/attestation" --from-local --no-cache 2>&1)
+VERIFY_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" verify --attestation-url "http://$APP_IP/attestation" --no-cache 2>&1)
 VERIFY_STATUS=$?
 set -e
 echo "$VERIFY_OUTPUT"
@@ -328,7 +328,7 @@ if [ $VERIFY_STATUS -ne 0 ]; then
     if echo "$VERIFY_OUTPUT" | grep -q "does not include a manifest"; then
         step_warn "caution verify (PCRs extracted but no manifest — bootproofd needs manifest support)"
     elif echo "$VERIFY_OUTPUT" | grep -q "private code"; then
-        step_warn "caution verify (manifest present but app_source is private — use --from-local or --app-source-url)"
+        step_warn "caution verify (manifest present but local source is unavailable — use --app-source-url)"
     elif [ "$PCR_MATCHES" -gt 0 ] && [ "$PCR_MISMATCHES" -eq 0 ]; then
         # All PCRs match but attestation crypto failed (e.g. CA bundle issue)
         step_warn "caution verify (PCRs match but attestation crypto failed)"

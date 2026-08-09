@@ -46,6 +46,14 @@ fn http_port_from_env() -> Option<u16> {
     })
 }
 
+fn key_exchange_from_env() -> Result<String> {
+    let value = std::env::var("CAUTION_KEY_EXCHANGE")
+        .unwrap_or_else(|_| enclave_builder::build::DEFAULT_KEY_EXCHANGE.to_string());
+    enclave_builder::build::validate_key_exchange(&value)
+        .with_context(|| format!("unsupported CAUTION_KEY_EXCHANGE: {value}"))?;
+    Ok(value)
+}
+
 fn enclave_source_from_manifest(manifest: &EnclaveManifest) -> Result<(String, String)> {
     match &manifest.enclave_source {
         EnclaveSource::GitArchive { urls, commit } => {
@@ -96,6 +104,7 @@ async fn main() -> Result<()> {
             "disabled".to_string()
         }
     });
+    let e2e_key_exchange = key_exchange_from_env()?;
     let domain = std::env::var("CAUTION_DOMAIN")
         .ok()
         .filter(|s| !s.is_empty());
@@ -163,6 +172,7 @@ async fn main() -> Result<()> {
                 http_port,
                 e2e,
                 &e2e_mode,
+                &e2e_key_exchange,
                 domain.as_deref(),
                 &http_upstream_protocol,
                 locksmith,
@@ -185,6 +195,7 @@ async fn main() -> Result<()> {
                 http_port,
                 e2e,
                 &e2e_mode,
+                &e2e_key_exchange,
                 domain.as_deref(),
                 &http_upstream_protocol,
                 locksmith,
