@@ -360,6 +360,18 @@ async fn run_subscription_maintenance_inner(state: &AppState) -> Result<()> {
             .bind(sub_id)
             .execute(&mut *tx)
             .await?;
+            sqlx::query(
+                "UPDATE self_managed_plans p
+                 SET enclave_limit = 0, terminated_at = COALESCE(terminated_at, $1),
+                     updated_at = NOW()
+                 FROM subscriptions s
+                 WHERE s.id = $2 AND s.self_managed_plan_id = p.id
+                   AND p.source = 'legacy'",
+            )
+            .bind(now)
+            .bind(sub_id)
+            .execute(&mut *tx)
+            .await?;
             tx.commit().await?;
 
             tracing::info!(

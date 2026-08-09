@@ -1641,7 +1641,7 @@ make build-cli
           <div class="subscription-details">
             <div class="subscription-detail-item">
               <span class="subscription-detail-label">Price</span>
-              <span class="subscription-detail-value">{{ subscription.source === 'enterprise' ? 'Contract' : `$${(subscription.price_cents_per_cycle / 100).toLocaleString()}/mo` }}</span>
+              <span class="subscription-detail-value">{{ subscription.source === 'manual' ? 'Contract' : `$${(subscription.price_cents_per_cycle / 100).toLocaleString()}/mo` }}</span>
             </div>
             <div class="subscription-detail-item">
               <span class="subscription-detail-label">Managed enclaves</span>
@@ -1651,12 +1651,12 @@ make build-cli
               <span class="subscription-detail-label">Started</span>
               <span class="subscription-detail-value">{{ formatDate(subscription.started_at) }}</span>
             </div>
-            <div v-if="subscription.source === 'enterprise' && subscription.enterprise_expires_at" class="subscription-detail-item">
+            <div v-if="subscription.source === 'manual' && subscription.enterprise_expires_at" class="subscription-detail-item">
               <span class="subscription-detail-label">Contract expires</span>
               <span class="subscription-detail-value">{{ formatDate(subscription.enterprise_expires_at) }}</span>
             </div>
           </div>
-          <div v-if="subscription.source !== 'enterprise'" class="subscription-actions">
+          <div v-if="subscription.source !== 'manual'" class="subscription-actions">
             <button @click="showSelectPlanModal = true" class="btn-secondary btn-small">Change plan</button>
             <button @click="cancelSubscription" class="btn-secondary btn-small btn-danger-text">Cancel</button>
           </div>

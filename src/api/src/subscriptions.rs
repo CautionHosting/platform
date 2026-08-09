@@ -212,22 +212,17 @@ pub async fn get_subscription(
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
 
-    let row = sqlx::query(
-        "SELECT s.id, s.user_id, s.organization_id, s.tier, s.max_vcpus, s.max_apps,
-                s.price_cents_per_cycle, s.status, s.billing_source, s.pending_tier,
-                s.pending_max_apps, s.catalog_valid, s.enterprise_expires_at,
-                s.started_at, s.current_period_start, s.current_period_end, s.canceled_at,
-                s.cancel_at_period_end, s.last_billed_at, s.next_billing_at, s.created_at,
-                s.updated_at,
+    let plan = sqlx::query(
+        "SELECT p.id, p.tier, p.enclave_limit, p.source, p.expires_at,
+                p.terminated_at, p.created_at, p.updated_at,
                 (SELECT COUNT(*) FROM compute_resources cr
                  JOIN cloud_credentials cc ON cc.resource_id = cr.id
-                 WHERE cr.organization_id = s.organization_id
+                 WHERE cr.organization_id = p.organization_id
                    AND cc.managed_on_prem = true
                    AND cr.destroyed_at IS NULL
                    AND cr.state NOT IN ('terminated', 'failed')) AS allocated_enclaves
-         FROM subscriptions s
-         WHERE s.organization_id = $1 AND s.status <> 'canceled'
-         LIMIT 1",
+         FROM self_managed_plans p
+         WHERE p.organization_id = $1",
     )
     .bind(org_id)
     .fetch_optional(&state.db)
@@ -239,78 +234,141 @@ pub async fn get_subscription(
         )
     })?;
 
-    let Some(row) = row else {
+    let Some(plan) = plan else {
         return Ok(Json(serde_json::json!({ "subscription": null })));
     };
 
-    let tier: String = row.get("tier");
-    let stored_max_apps: i32 = row.get("max_apps");
-    let (tier_name, max_apps, price_cents_per_cycle) = resolved_subscription_values(
-        &state.pricing,
-        &tier,
-        stored_max_apps,
-        row.get("price_cents_per_cycle"),
-    );
+    let subscription = sqlx::query(
+        "SELECT s.id, s.user_id, s.tier, s.price_cents_per_cycle, s.status,
+                s.pending_tier, s.pending_max_apps, s.catalog_valid,
+                s.started_at, s.current_period_start, s.current_period_end,
+                s.canceled_at, s.cancel_at_period_end, s.last_billed_at,
+                s.next_billing_at, s.created_at, s.updated_at
+         FROM subscriptions s
+         WHERE s.organization_id = $1 AND s.self_managed_plan_id = $2
+           AND s.status <> 'canceled'
+         LIMIT 1",
+    )
+    .bind(org_id)
+    .bind(plan.get::<Uuid, _>("id"))
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
 
-    let billing_source: String = row.get("billing_source");
-    let stored_status: String = row.get("status");
-    let enterprise_expires_at: Option<DateTime<Utc>> = row.get("enterprise_expires_at");
-    let enterprise_has_expired = billing_source == "enterprise"
-        && enterprise_expires_at.is_some_and(|expires_at| expires_at <= Utc::now());
-    let enterprise_entitlement_active =
-        billing_source == "enterprise" && stored_status == "active" && !enterprise_has_expired;
-    let unlimited_enclaves = billing_source == "enterprise"
-        && tier == "enterprise_unlimited"
-        && stored_max_apps == i32::MAX;
-    let effective_status = if enterprise_has_expired {
-        "expired".to_string()
+    let source: String = plan.get("source");
+    let tier: String = plan.get("tier");
+    let enclave_limit: Option<i32> = plan.get("enclave_limit");
+    let expires_at: Option<DateTime<Utc>> = plan.get("expires_at");
+    let terminated_at: Option<DateTime<Utc>> = plan.get("terminated_at");
+    let expired = expires_at.is_some_and(|value| value <= Utc::now());
+    let status = if terminated_at.is_some() || enclave_limit == Some(0) {
+        "terminated"
+    } else if expired {
+        "expired"
     } else {
-        stored_status
+        "active"
     };
-    let pending_tier: Option<String> = row.get("pending_tier");
-    let pending_max_apps: Option<i32> = row.get("pending_max_apps");
-    let monthly_price = if billing_source == "enterprise" {
-        None
+    let unlimited = enclave_limit.is_none();
+    let allocated_enclaves = plan.get::<i64, _>("allocated_enclaves");
+
+    let (
+        subscription_id,
+        user_id,
+        pending_tier,
+        pending_limit,
+        monthly_price,
+        catalog_valid,
+        started_at,
+        period_start,
+        period_end,
+        canceled_at,
+        cancel_at_period_end,
+        last_billed_at,
+        next_billing_at,
+        created_at,
+        updated_at,
+    ) = if let Some(row) = subscription {
+        let pending_tier: Option<String> = row.get("pending_tier");
+        let pending_limit: Option<i32> = row.get("pending_max_apps");
+        (
+            Some(row.get::<Uuid, _>("id")),
+            row.get::<Uuid, _>("user_id"),
+            pending_tier,
+            pending_limit,
+            Some(row.get::<i64, _>("price_cents_per_cycle")),
+            row.get::<bool, _>("catalog_valid"),
+            Some(row.get::<DateTime<Utc>, _>("started_at")),
+            Some(row.get::<DateTime<Utc>, _>("current_period_start")),
+            Some(row.get::<DateTime<Utc>, _>("current_period_end")),
+            row.get::<Option<DateTime<Utc>>, _>("canceled_at"),
+            row.get::<bool, _>("cancel_at_period_end"),
+            row.get::<Option<DateTime<Utc>>, _>("last_billed_at"),
+            Some(row.get::<DateTime<Utc>, _>("next_billing_at")),
+            row.get::<DateTime<Utc>, _>("created_at"),
+            row.get::<DateTime<Utc>, _>("updated_at"),
+        )
     } else {
-        Some(price_cents_per_cycle)
+        (
+            None,
+            auth.user_id,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            plan.get::<DateTime<Utc>, _>("created_at"),
+            plan.get::<DateTime<Utc>, _>("updated_at"),
+        )
     };
 
     Ok(Json(serde_json::json!({
         "subscription": {
-            "id": row.get::<Uuid, _>("id"),
-            "user_id": row.get::<Uuid, _>("user_id"),
-            "organization_id": row.get::<Uuid, _>("organization_id"),
-            "source": billing_source,
-            "tier": tier,
-            "tier_id": tier,
-            "tier_name": tier_name,
-            "billing_period": "monthly",
-            "enclaves": max_apps,
-            "max_apps": max_apps,
-            "enclave_limit": max_apps,
-            "unlimited_enclaves": unlimited_enclaves,
-            "allocated_enclaves": row.get::<i64, _>("allocated_enclaves"),
-            "pending_enclave_limit": pending_max_apps,
+            "id": subscription_id,
+            "self_managed_plan_id": plan.get::<Uuid, _>("id"),
+            "user_id": user_id,
+            "organization_id": org_id,
+            "source": &source,
+            "tier": &tier,
+            "tier_id": &tier,
+            "tier_name": if source == "manual" { "Enterprise contract" } else { tier.as_str() },
+            "billing_period": if source == "manual" { "contract" } else { "monthly" },
+            "enclaves": enclave_limit,
+            "max_apps": enclave_limit,
+            "enclave_limit": enclave_limit,
+            "unlimited_enclaves": unlimited,
+            "allocated_enclaves": allocated_enclaves,
+            "pending_enclave_limit": pending_limit,
             "pending_change": pending_tier.map(|tier_id| serde_json::json!({
                 "tier_id": tier_id,
-                "enclave_limit": pending_max_apps,
+                "enclave_limit": pending_limit,
             })),
             "price_cents_per_cycle": monthly_price,
             "monthly_price_cents": monthly_price,
             "total_price_cents_per_cycle": monthly_price,
-            "status": effective_status,
-            "catalog_valid": row.get::<bool, _>("catalog_valid"),
-            "enterprise_expires_at": enterprise_expires_at,
-            "enterprise_entitlement_active": enterprise_entitlement_active,
-            "started_at": row.get::<DateTime<Utc>, _>("started_at"),
-            "current_period_start": row.get::<DateTime<Utc>, _>("current_period_start"),
-            "current_period_end": row.get::<DateTime<Utc>, _>("current_period_end"),
-            "canceled_at": row.get::<Option<DateTime<Utc>>, _>("canceled_at"),
-            "cancel_at_period_end": row.get::<bool, _>("cancel_at_period_end"),
-            "last_billed_at": row.get::<Option<DateTime<Utc>>, _>("last_billed_at"),
-            "next_billing_at": row.get::<DateTime<Utc>, _>("next_billing_at"),
-            "created_at": row.get::<DateTime<Utc>, _>("created_at"),
-            "updated_at": row.get::<DateTime<Utc>, _>("updated_at"),
+            "status": status,
+            "catalog_valid": catalog_valid,
+            "enterprise_expires_at": expires_at,
+            "enterprise_entitlement_active": source == "manual" && status == "active",
+            "started_at": started_at,
+            "current_period_start": period_start,
+            "current_period_end": period_end,
+            "canceled_at": canceled_at,
+            "cancel_at_period_end": cancel_at_period_end,
+            "last_billed_at": last_billed_at,
+            "next_billing_at": next_billing_at,
+            "created_at": created_at,
+            "updated_at": updated_at,
         }
     })))
 }
@@ -401,7 +459,14 @@ pub async fn checkout_subscription(
     })?;
 
     let existing: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM subscriptions WHERE organization_id = $1 AND status <> 'canceled')",
+        "SELECT
+             EXISTS(SELECT 1 FROM subscriptions WHERE organization_id = $1 AND status <> 'canceled')
+             OR EXISTS(
+                 SELECT 1 FROM self_managed_plans
+                 WHERE organization_id = $1 AND source = 'manual'
+                   AND (enclave_limit IS NULL OR enclave_limit > 0)
+                   AND (expires_at IS NULL OR expires_at > NOW())
+             )",
     )
     .bind(org_id)
     .fetch_one(&mut *tx)
@@ -716,6 +781,27 @@ async fn change_paddle_subscription(
             "Unable to persist pending subscription change".to_string(),
         )
     })?;
+    sqlx::query(
+        "UPDATE self_managed_plans p
+         SET enclave_limit = CASE
+             WHEN p.enclave_limit IS NULL THEN $1
+             ELSE LEAST(p.enclave_limit, $1)
+         END, updated_at = NOW()
+         FROM subscriptions s
+         WHERE s.id = $2 AND s.self_managed_plan_id = p.id
+           AND p.source = 'paddle' AND $1 < $3",
+    )
+    .bind(new_tier.enclaves)
+    .bind(subscription_id)
+    .bind(old_limit)
+    .execute(&mut *pending_tx)
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to reserve downgraded plan capacity".to_string(),
+        )
+    })?;
     pending_tx.commit().await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -828,13 +914,43 @@ pub async fn subscribe(
         )
     })?;
 
+    let plan_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO self_managed_plans
+            (organization_id, tier, enclave_limit, source, terminated_at)
+         VALUES ($1, $2, $3, 'legacy', NULL)
+         ON CONFLICT (organization_id) DO UPDATE SET
+            tier = EXCLUDED.tier, enclave_limit = EXCLUDED.enclave_limit,
+            terminated_at = NULL, updated_at = NOW()
+         WHERE self_managed_plans.source = 'legacy'
+         RETURNING id",
+    )
+    .bind(org_id)
+    .bind(&req.tier_id)
+    .bind(tier.enclaves)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to create self-managed plan: {}", e),
+        )
+    })?
+    .ok_or_else(|| {
+        (
+            StatusCode::CONFLICT,
+            "Organization already has a provider or operator-managed plan".to_string(),
+        )
+    })?;
+
     let sub_id: (Uuid,) = sqlx::query_as(
         "INSERT INTO subscriptions (
              user_id, organization_id, tier, billing_period, max_vcpus, max_apps,
              price_cents_per_cycle, extra_vcpu_blocks, extra_app_blocks,
-             extra_block_price_cents_per_cycle, current_period_end, next_billing_at
+             extra_block_price_cents_per_cycle, current_period_end, next_billing_at,
+             self_managed_plan_id
          )
-         VALUES ($1, $2, $3, 'monthly', $4, $5, $6, 0, 0, 0, $7, TIMESTAMPTZ '9999-12-31 23:59:59+00')
+         VALUES ($1, $2, $3, 'monthly', $4, $5, $6, 0, 0, 0, $7,
+                 TIMESTAMPTZ '9999-12-31 23:59:59+00', $8)
          RETURNING id",
     )
     .bind(auth.user_id)
@@ -844,6 +960,7 @@ pub async fn subscribe(
     .bind(tier.enclaves)
     .bind(price_per_cycle)
     .bind(now)
+    .bind(plan_id)
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
@@ -1046,6 +1163,24 @@ pub async fn change_subscription_tier(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Database error: {}", e),
+        )
+    })?;
+
+    sqlx::query(
+        "UPDATE self_managed_plans p
+         SET tier = $1, enclave_limit = $2, terminated_at = NULL, updated_at = NOW()
+         FROM subscriptions s
+         WHERE s.id = $3 AND s.self_managed_plan_id = p.id AND p.source = 'legacy'",
+    )
+    .bind(&req.tier_id)
+    .bind(new_tier.enclaves)
+    .bind(sub_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to update self-managed plan: {}", e),
         )
     })?;
 
@@ -1302,6 +1437,23 @@ pub async fn cancel_subscription(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Database error: {}", e),
+        )
+    })?;
+
+    sqlx::query(
+        "UPDATE self_managed_plans p
+         SET enclave_limit = 0, terminated_at = COALESCE(terminated_at, $1), updated_at = NOW()
+         FROM subscriptions s
+         WHERE s.id = $2 AND s.self_managed_plan_id = p.id AND p.source = 'legacy'",
+    )
+    .bind(now)
+    .bind(sub_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to disable self-managed plan: {}", e),
         )
     })?;
 

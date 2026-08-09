@@ -19,7 +19,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::credits::{credit_ledger_once, CreditOutcome};
+use crate::credits::{CreditOutcome, credit_ledger_once};
 
 /// Paddle webhook payload
 #[derive(Debug, Deserialize, Serialize)]
@@ -269,6 +269,7 @@ async fn handle_subscription_event(
     .fetch_optional(&mut *tx)
     .await?;
 
+    let existing_subscription = existing.is_some();
     let (subscription_id, organization_id, user_id, effective_start, effective_end) =
         if let Some(row) = existing {
             let current_start: DateTime<Utc> = row.get("current_period_start");
@@ -348,16 +349,57 @@ async fn handle_subscription_event(
             .version,
     )
     .map_err(|_| anyhow::anyhow!("Paddle catalog version is too large"))?;
+    let self_managed_plan = sqlx::query(
+        "SELECT id, source FROM self_managed_plans
+         WHERE organization_id = $1 FOR UPDATE",
+    )
+    .bind(organization_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let self_managed_plan_id: Option<Uuid> = if let Some(plan) = self_managed_plan {
+        let source: String = plan.get("source");
+        if source == "paddle" {
+            Some(plan.get::<Uuid, _>("id"))
+        } else if existing_subscription {
+            // A manual plan is intentionally detached from the retained Paddle row.
+            None
+        } else {
+            return Err(anyhow::anyhow!(
+                "organization self-managed plan is not controlled by Paddle"
+            ));
+        }
+    } else if existing_subscription {
+        None
+    } else {
+        Some(
+            sqlx::query_scalar(
+                "INSERT INTO self_managed_plans
+                 (organization_id, tier, enclave_limit, source)
+                 VALUES ($1, $2, $3, 'paddle') RETURNING id",
+            )
+            .bind(organization_id)
+            .bind(&tier_id)
+            .bind(if status == "canceled" {
+                0
+            } else {
+                tier.enclaves
+            })
+            .fetch_one(&mut *tx)
+            .await?,
+        )
+    };
+
     let projection = sqlx::query(
         "INSERT INTO subscriptions
          (id, user_id, organization_id, tier, max_vcpus, max_apps,
           price_cents_per_cycle, status, billing_source, paddle_customer_id,
           paddle_subscription_id, paddle_price_id, catalog_version, catalog_valid,
           current_period_start, current_period_end, next_billing_at,
-          cancel_at_period_end, canceled_at, provider_occurred_at)
+          cancel_at_period_end, canceled_at, provider_occurred_at,
+          self_managed_plan_id)
          VALUES ($1, $2, $3, $4, 0, $5, $6, $7, 'paddle', $8, $9, $10,
                  $11, true, $12, $13, $13, $14,
-                 CASE WHEN $7 = 'canceled' THEN $15 ELSE NULL END, $15)
+                 CASE WHEN $7 = 'canceled' THEN $15 ELSE NULL END, $15, $16)
          ON CONFLICT (paddle_subscription_id) WHERE paddle_subscription_id IS NOT NULL
          DO UPDATE SET tier = EXCLUDED.tier,
                        max_apps = EXCLUDED.max_apps,
@@ -373,25 +415,32 @@ async fn handle_subscription_event(
                        cancel_at_period_end = EXCLUDED.cancel_at_period_end,
                        canceled_at = EXCLUDED.canceled_at,
                        provider_occurred_at = EXCLUDED.provider_occurred_at,
+                       self_managed_plan_id = COALESCE(
+                           subscriptions.self_managed_plan_id,
+                           EXCLUDED.self_managed_plan_id
+                       ),
                        updated_at = NOW()
-         WHERE subscriptions.provider_occurred_at IS NULL
-            OR subscriptions.provider_occurred_at < EXCLUDED.provider_occurred_at
-            OR (
-                subscriptions.provider_occurred_at = EXCLUDED.provider_occurred_at
-                AND CASE EXCLUDED.status
-                    WHEN 'canceled' THEN 4
-                    WHEN 'paused' THEN 3
-                    WHEN 'past_due' THEN 2
-                    WHEN 'active' THEN 1
-                    ELSE 0
-                END > CASE subscriptions.status
-                    WHEN 'canceled' THEN 4
-                    WHEN 'paused' THEN 3
-                    WHEN 'past_due' THEN 2
-                    WHEN 'active' THEN 1
-                    ELSE 0
-                END
-            )",
+         WHERE subscriptions.billing_source = 'paddle'
+           AND (
+                subscriptions.provider_occurred_at IS NULL
+                OR subscriptions.provider_occurred_at < EXCLUDED.provider_occurred_at
+                OR (
+                    subscriptions.provider_occurred_at = EXCLUDED.provider_occurred_at
+                    AND CASE EXCLUDED.status
+                        WHEN 'canceled' THEN 4
+                        WHEN 'paused' THEN 3
+                        WHEN 'past_due' THEN 2
+                        WHEN 'active' THEN 1
+                        ELSE 0
+                    END > CASE subscriptions.status
+                        WHEN 'canceled' THEN 4
+                        WHEN 'paused' THEN 3
+                        WHEN 'past_due' THEN 2
+                        WHEN 'active' THEN 1
+                        ELSE 0
+                    END
+                )
+           )",
     )
     .bind(subscription_id)
     .bind(user_id)
@@ -408,10 +457,124 @@ async fn handle_subscription_event(
     .bind(effective_end)
     .bind(cancel_at_period_end)
     .bind(occurred_at)
+    .bind(self_managed_plan_id)
     .execute(&mut *tx)
     .await?;
     if projection.rows_affected() == 0 {
         return Ok(());
+    }
+
+    if let Some(self_managed_plan_id) = self_managed_plan_id {
+        if status == "active" {
+            sqlx::query(
+                "UPDATE self_managed_plans SET
+                    tier = $1, enclave_limit = $2, expires_at = NULL,
+                    terminated_at = NULL, updated_at = NOW()
+                 WHERE id = $3 AND source = 'paddle'",
+            )
+            .bind(&tier_id)
+            .bind(tier.enclaves)
+            .bind(self_managed_plan_id)
+            .execute(&mut *tx)
+            .await?;
+        } else if status == "canceled" {
+            let manual_change = sqlx::query(
+                "SELECT id, requested_enclave_limit, requested_expires_at,
+                        operator_identity, operator_reason
+                 FROM self_managed_plan_changes
+                 WHERE organization_id = $1 AND subscription_id = $2
+                   AND status = 'provider_pending'
+                 ORDER BY created_at LIMIT 1 FOR UPDATE",
+            )
+            .bind(organization_id)
+            .bind(subscription_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            if let Some(change) = manual_change {
+                let change_id: Uuid = change.get("id");
+                sqlx::query(
+                    "UPDATE self_managed_plans SET
+                        tier = 'enterprise_contract', enclave_limit = $1,
+                        source = 'manual', expires_at = $2,
+                        operator_identity = $3, operator_reason = $4,
+                        terminated_at = NULL, updated_at = NOW()
+                     WHERE id = $5 AND source = 'paddle'",
+                )
+                .bind(change.get::<Option<i32>, _>("requested_enclave_limit"))
+                .bind(change.get::<Option<DateTime<Utc>>, _>("requested_expires_at"))
+                .bind(change.get::<String, _>("operator_identity"))
+                .bind(change.get::<String, _>("operator_reason"))
+                .bind(self_managed_plan_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "UPDATE subscriptions SET self_managed_plan_id = NULL, updated_at = NOW()
+                     WHERE id = $1 AND self_managed_plan_id = $2",
+                )
+                .bind(subscription_id)
+                .bind(self_managed_plan_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "UPDATE self_managed_plan_changes
+                     SET status = 'applied', applied_at = NOW(), updated_at = NOW()
+                     WHERE id = $1 AND status = 'provider_pending'",
+                )
+                .bind(change_id)
+                .execute(&mut *tx)
+                .await?;
+            } else {
+                sqlx::query(
+                    "UPDATE self_managed_plans SET enclave_limit = 0,
+                            terminated_at = COALESCE(terminated_at, $1), updated_at = NOW()
+                     WHERE id = $2 AND source = 'paddle'",
+                )
+                .bind(occurred_at)
+                .bind(self_managed_plan_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "INSERT INTO self_managed_termination_jobs
+                        (self_managed_plan_id, subscription_id, resource_id, provider_occurred_at)
+                     SELECT $1, $2, cr.id, $3
+                     FROM compute_resources cr
+                     WHERE cr.organization_id = $4 AND cr.destroyed_at IS NULL
+                       AND EXISTS (
+                           SELECT 1 FROM cloud_credentials cc
+                           WHERE cc.resource_id = cr.id AND cc.managed_on_prem = true
+                       )
+                     ON CONFLICT (subscription_id, resource_id)
+                     DO NOTHING",
+                )
+                .bind(self_managed_plan_id)
+                .bind(subscription_id)
+                .bind(occurred_at)
+                .bind(organization_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "UPDATE subscriptions
+                     SET self_managed_plan_id = NULL, updated_at = NOW()
+                     WHERE id = $1 AND self_managed_plan_id = $2",
+                )
+                .bind(subscription_id)
+                .bind(self_managed_plan_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+        } else {
+            // Paused and past-due provider rows remain billing history but do
+            // not authorize new self-managed deployments.
+            sqlx::query(
+                "UPDATE self_managed_plans
+                 SET enclave_limit = 0, terminated_at = NULL, updated_at = NOW()
+                 WHERE id = $1 AND source = 'paddle'",
+            )
+            .bind(self_managed_plan_id)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     if let Some(intent_id) = data["custom_data"]["caution_checkout_intent_id"]
@@ -478,7 +641,6 @@ async fn handle_subscription_event(
     tx.commit().await?;
     Ok(())
 }
-
 
 async fn clear_credit_suspension_if_needed(
     state: &AppState,
@@ -814,13 +976,21 @@ async fn handle_payment_failed(
     // Mark subscription as past_due if this was a subscription payment
     if let Err(e) = sqlx::query(
         r#"
-        UPDATE subscriptions SET status = 'past_due', updated_at = NOW()
-        WHERE id IN (
-            SELECT sl.subscription_id
-            FROM subscription_ledger sl
-            JOIN invoices i ON sl.invoice_id = i.id
-            WHERE i.paddle_transaction_id = $1
+        WITH affected AS (
+            UPDATE subscriptions SET status = 'past_due', updated_at = NOW()
+            WHERE billing_source = 'paddle'
+              AND id IN (
+                SELECT sl.subscription_id
+                FROM subscription_ledger sl
+                JOIN invoices i ON sl.invoice_id = i.id
+                WHERE i.paddle_transaction_id = $1
+              )
+            RETURNING self_managed_plan_id
         )
+        UPDATE self_managed_plans p
+        SET enclave_limit = 0, terminated_at = NULL, updated_at = NOW()
+        FROM affected a
+        WHERE p.id = a.self_managed_plan_id AND p.source = 'paddle'
         "#,
     )
     .bind(transaction_id)

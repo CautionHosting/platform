@@ -31,6 +31,7 @@ mod balance;
 mod billing;
 mod collection;
 mod dunning;
+mod self_managed_termination;
 
 use types::*;
 
@@ -174,6 +175,9 @@ async fn main() -> Result<()> {
             }
         }
     });
+
+    // Terminate canceled Paddle BYOC resources through a durable retry queue.
+    tokio::spawn(self_managed_termination::run_loop(state.clone()));
 
     let enable_test_endpoints = std::env::var("ENABLE_TEST_ENDPOINTS")
         .map(|v| v == "true" || v == "1")
