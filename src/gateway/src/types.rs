@@ -316,12 +316,11 @@ pub struct QrLoginBeginResponse {
     pub expires_at: String,
 }
 
-/// Optional username to scope the eventual `allowCredentials` list by, for
-/// non-resident/legacy keys that can't respond to a discoverable challenge.
+/// Username used to scope the eventual `allowCredentials` list.
 /// Never encoded in the QR URL — chosen desktop-side, stored server-side on
 /// the token row, and only consumed when the phone/browser later hits
 /// `/auth/qr-login/authenticate`.
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct QrLoginBeginRequest {
     pub username: Option<String>,
 }

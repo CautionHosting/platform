@@ -643,6 +643,37 @@ fn resolve_login_username<R: std::io::BufRead>(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+enum QrLoginUsernameError {
+    #[error(
+        "QR login requires a username. Re-run with `caution login --qr --username <name>`."
+    )]
+    Required,
+    #[error(transparent)]
+    Prompt(#[from] PromptLineError),
+}
+
+fn resolve_qr_login_username<R: std::io::BufRead>(
+    provided: Option<String>,
+    is_terminal: bool,
+    reader: &mut R,
+) -> Result<String, QrLoginUsernameError> {
+    let username = match provided {
+        Some(username) => username.trim().to_string(),
+        None if is_terminal => prompt_line_from(
+            reader,
+            "Username: ",
+            "Username is required for QR login, please try again.",
+        )?,
+        None => return Err(QrLoginUsernameError::Required),
+    };
+
+    if username.is_empty() {
+        return Err(QrLoginUsernameError::Required);
+    }
+    Ok(username)
+}
+
 /// Reads a single trimmed line from `reader`, returning it as-is (including
 /// empty). No retry loop: an empty line is a valid answer here.
 fn prompt_optional_line_from<R: std::io::BufRead>(
@@ -908,7 +939,7 @@ enum Commands {
         qr: bool,
         #[arg(
             long,
-            help = "Username to log in with (prompted interactively if omitted; --qr uses discoverable credentials by default and skips this prompt)"
+            help = "Username to log in with (prompted interactively if omitted)"
         )]
         username: Option<String>,
     },
@@ -1521,6 +1552,8 @@ struct Config {
     expires_at: String,
     #[serde(default)]
     server_url: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
 }
 
 impl Config {
@@ -2123,11 +2156,17 @@ impl ApiClient {
         }
     }
 
-    fn save_config(&self, session_id: String, expires_at: String) -> Result<()> {
+    fn save_config(
+        &self,
+        session_id: String,
+        expires_at: String,
+        username: Option<&str>,
+    ) -> Result<()> {
         let config = Config {
             session_id,
             expires_at,
             server_url: Some(self.base_url.clone()),
+            username: username.map(str::to_string),
         };
 
         let json = serde_json::to_string_pretty(&config)?;
@@ -2179,19 +2218,22 @@ impl ApiClient {
     }
 
     async fn ensure_authenticated(&self) -> Result<Config> {
-        match self.load_config() {
-            Ok(config) if !self.is_session_expired(&config) && self.is_same_server(&config) => {
-                Ok(config)
+        let username = match self.load_config().ok() {
+            Some(config)
+                if !self.is_session_expired(&config) && self.is_same_server(&config) =>
+            {
+                return Ok(config);
             }
-            _ => {
-                if self.qr {
-                    self.login_qr(None).await?;
-                } else {
-                    self.login(None).await?;
-                }
-                self.load_config()
-            }
+            Some(config) if self.is_same_server(&config) => config.username,
+            _ => None,
+        };
+
+        if self.qr {
+            self.login_qr(username).await?;
+        } else {
+            self.login(None).await?;
         }
+        self.load_config()
     }
 
     fn require_existing_authenticated_config(&self) -> Result<Config> {
@@ -2992,7 +3034,11 @@ enclave "default" {{
             output::success("FIDO2 registration successful");
             output::success(&format!("Logged in. Account expires: {}", finish_resp.expires_at));
 
-            self.save_config(session_id.clone(), finish_resp.expires_at.clone())?;
+            self.save_config(
+                session_id.clone(),
+                finish_resp.expires_at.clone(),
+                Some(username),
+            )?;
 
             output::success("\nALPHA ACCESS GRANTED");
             output::status("You're registered as an alpha user. You can now:");
@@ -3071,13 +3117,16 @@ enclave "default" {{
         Ok(())
     }
 
-    async fn login_qr(&self, username: Option<&str>) -> Result<()> {
+    async fn login_qr(&self, username: Option<String>) -> Result<()> {
         output::verbose(self.verbose, "Starting QR code cross-device login...");
 
-        // Step 1: Request a QR login token from the gateway. An optional
-        // username scopes the eventual allowCredentials to that user's own
-        // credentials, needed for non-resident/legacy keys the scanning
-        // device can't otherwise offer via a discoverable challenge.
+        let username = resolve_qr_login_username(
+            username,
+            std::io::IsTerminal::is_terminal(&std::io::stdin()),
+            &mut std::io::stdin().lock(),
+        )?;
+
+        // Step 1: Request a username-scoped QR login token from the gateway.
         let response = self
             .client
             .post(format!("{}/auth/qr-login/begin", self.base_url))
@@ -3147,7 +3196,7 @@ enclave "default" {{
                             anyhow::anyhow!("Completed but no expires_at returned")
                         })?;
 
-                        self.save_config(session_id.clone(), expires_at)?;
+                        self.save_config(session_id.clone(), expires_at, Some(&username))?;
                         return Ok(session_id);
                     }
                     "expired" => {
@@ -3587,7 +3636,11 @@ enclave "default" {{
 
             let finish_resp: LoginFinishResponse = response.json().await?;
 
-            self.save_config(session_id.clone(), finish_resp.expires_at.clone())?;
+            self.save_config(
+                session_id.clone(),
+                finish_resp.expires_at.clone(),
+                (!username.is_empty()).then_some(username),
+            )?;
 
             Ok((session_id, finish_resp.expires_at))
         } else {
@@ -8672,7 +8725,7 @@ pub async fn run() -> Result<(), RunError> {
         Commands::Login { qr, username } => {
             if qr {
                 client
-                    .login_qr(username.as_deref())
+                    .login_qr(username)
                     .await
                     .map_err(RunError::CommandDispatch)?;
             } else {
@@ -8939,12 +8992,13 @@ mod tests {
     use super::openpgp;
     use super::{
         AccountCommands, ApiClient, Cli, Commands, LoginUsernameError, PgpKeyCommands,
-        RegisterUsernameError, RunError, encrypt_env_file, encrypt_secret_value,
-        keymaker_cert_eligibility, load_recipient_cert, login_begin_request_body,
-        normalize_keyring, parse_env_assignments, prepare_pgp_public_key_for_upload,
-        prompt_line_from, prompt_optional_line_from, resolve_local_build_command_from_dir,
-        resolve_login_username, resolve_procfile_build_command, resolve_quorum_parameters,
-        resolve_register_username, resolve_reproduction_e2e_mode, validate_global_qr,
+        QrLoginUsernameError, RegisterUsernameError, RunError, encrypt_env_file,
+        encrypt_secret_value, keymaker_cert_eligibility, load_recipient_cert,
+        login_begin_request_body, normalize_keyring, parse_env_assignments,
+        prepare_pgp_public_key_for_upload, prompt_line_from, prompt_optional_line_from,
+        resolve_local_build_command_from_dir, resolve_login_username, resolve_procfile_build_command,
+        resolve_qr_login_username, resolve_quorum_parameters, resolve_register_username,
+        resolve_reproduction_e2e_mode, validate_global_qr,
     };
     use caution_config::{ConfigurationFile, E2eEncryption, E2eMode};
     use clap::Parser;
@@ -9669,6 +9723,35 @@ containerfile: Missing.Containerfile\n",
         let mut input = Cursor::new(b"".to_vec());
         let err = resolve_login_username(None, false, &mut input).unwrap_err();
         assert!(matches!(err, LoginUsernameError::NonInteractive));
+    }
+
+    #[test]
+    fn resolve_qr_login_username_requires_nonblank_provided_username() {
+        let mut input = Cursor::new(b"".to_vec());
+        assert_eq!(
+            resolve_qr_login_username(Some("  alice  ".to_string()), false, &mut input).unwrap(),
+            "alice"
+        );
+        let err =
+            resolve_qr_login_username(Some("   ".to_string()), false, &mut input).unwrap_err();
+        assert!(matches!(err, QrLoginUsernameError::Required));
+    }
+
+    #[test]
+    fn resolve_qr_login_username_reprompts_when_interactive() {
+        let mut input = Cursor::new(b"\n bob \n".to_vec());
+        let username = resolve_qr_login_username(None, true, &mut input).unwrap();
+        assert_eq!(username, "bob");
+    }
+
+    #[test]
+    fn resolve_qr_login_username_fails_on_eof_or_noninteractive_omission() {
+        let mut input = Cursor::new(b"".to_vec());
+        let eof = resolve_qr_login_username(None, true, &mut input).unwrap_err();
+        assert!(matches!(eof, QrLoginUsernameError::Required));
+
+        let noninteractive = resolve_qr_login_username(None, false, &mut input).unwrap_err();
+        assert!(matches!(noninteractive, QrLoginUsernameError::Required));
     }
 
     #[test]

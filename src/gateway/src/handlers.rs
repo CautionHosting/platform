@@ -246,6 +246,10 @@ pub enum QrLoginError {
     UnexpectedState(String),
     #[error("QR login token already claimed")]
     AlreadyClaimed,
+    #[error("username is required for QR login")]
+    UsernameRequired,
+    #[error("invalid QR login request")]
+    InvalidRequest,
     #[error("could not create QR login token")]
     DbCreateToken {
         #[source]
@@ -266,21 +270,6 @@ pub enum QrLoginError {
         #[source]
         source: anyhow::Error,
     },
-    #[error("could not fetch credentials")]
-    DbGetCredentials {
-        #[source]
-        source: anyhow::Error,
-    },
-    #[error("could not deserialize credential")]
-    DeserializeCredential {
-        #[source]
-        source: serde_json::Error,
-    },
-    #[error("could not start authentication challenge")]
-    StartAuthentication {
-        #[source]
-        source: WebauthnError,
-    },
     #[error("could not build username-scoped challenge")]
     ScopedChallenge {
         #[source]
@@ -297,6 +286,9 @@ impl IntoResponse for QrLoginError {
             Self::TokenExpired => (StatusCode::GONE, self.to_string()),
             Self::UnexpectedState(_) | Self::AlreadyClaimed => {
                 (StatusCode::CONFLICT, self.to_string())
+            }
+            Self::UsernameRequired | Self::InvalidRequest => {
+                (StatusCode::BAD_REQUEST, self.to_string())
             }
             Self::RateLimited => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
             _ => {
@@ -2313,18 +2305,25 @@ fn qr_login_url(requestee_token: &str) -> String {
     qr_login_url_for_origin(&get_rp_origin(), requestee_token)
 }
 
+fn qr_login_username_from_body(body: &[u8]) -> Result<String, QrLoginError> {
+    if body.is_empty() {
+        return Err(QrLoginError::UsernameRequired);
+    }
+    let request = serde_json::from_slice::<crate::types::QrLoginBeginRequest>(body)
+        .map_err(|_| QrLoginError::InvalidRequest)?;
+    normalize_login_username(request.username).ok_or(QrLoginError::UsernameRequired)
+}
+
+fn required_qr_login_username(username: Option<&str>) -> Result<&str, QrLoginError> {
+    username.ok_or(QrLoginError::UsernameRequired)
+}
+
 pub async fn qr_login_begin_handler(
     State(state): State<AppState>,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
     body: axum::body::Bytes,
 ) -> Result<Json<crate::types::QrLoginBeginResponse>, QrLoginError> {
-    let username: Option<String> = normalize_login_username(if body.is_empty() {
-        None
-    } else {
-        serde_json::from_slice::<crate::types::QrLoginBeginRequest>(&body)
-            .ok()
-            .and_then(|r| r.username)
-    });
+    let username = qr_login_username_from_body(&body)?;
 
     let token = db::generate_session_id();
     let requestee_token = db::generate_session_id();
@@ -2339,7 +2338,7 @@ pub async fn qr_login_begin_handler(
         &requestee_token,
         Some(&ip_address),
         expires_at,
-        username.as_deref(),
+        Some(&username),
     )
     .await
     .map_err(|source| QrLoginError::DbCreateToken { source })?;
@@ -2366,6 +2365,8 @@ pub async fn qr_login_status_handler(
             expires_at: None,
         }));
     };
+
+    required_qr_login_username(row.username.as_deref())?;
 
     if time::OffsetDateTime::now_utc() > row.expires_at {
         return Ok(Json(crate::types::QrLoginStatusResponse {
@@ -2454,56 +2455,17 @@ pub async fn qr_login_authenticate_handler(
         _ => return Err(QrLoginError::UnexpectedState(row.status)),
     }
 
-    // A username stored on the token (from qr_login_begin_handler) scopes the
-    // challenge to that user's own credentials — needed for non-resident/
-    // legacy keys, which phone platform authenticators normally don't need.
-    // Otherwise mirror begin_login_handler's flag-driven behavior: broadcast
-    // when the flag is on (unchanged), otherwise discoverable.
-    let (rcr, auth_state) = if let Some(username) = row.username.as_deref() {
-        // Same per-IP scoped-begin budget as begin_login_handler: this branch
-        // does the same username-scoped DB lookup and is the same enumeration
-        // shape, just reached via the QR flow instead of /auth/login/begin.
-        let ip = connect_info.0.ip();
-        if !state.scoped_begin_limiter.check_rate_limit(&ip.to_string()).await {
-            tracing::warn!("Scoped begin-login rate limit exceeded for IP: {}", ip);
-            return Err(QrLoginError::RateLimited);
-        }
-
-        scoped_or_decoy_challenge(&state, username)
-            .await
-            .map_err(|source| QrLoginError::ScopedChallenge { source })?
-    } else if state.login_allow_broadcast {
-        let all_public_keys = db::get_all_credential_public_keys(&state.db)
-            .await
-            .map_err(|source| QrLoginError::DbGetCredentials { source })?;
-
-        let mut allow_credentials = Vec::new();
-        for cred_bytes in all_public_keys.iter() {
-            let seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(cred_bytes)
-                .map_err(|source| QrLoginError::DeserializeCredential { source })?;
-            allow_credentials.push(seckey);
-        }
-
-        let (mut rcr, auth_state) = state
-            .webauthn
-            .start_securitykey_authentication(&allow_credentials)
-            .map_err(|source| QrLoginError::StartAuthentication { source })?;
-
-        rcr.public_key.user_verification = webauthn_rs_proto::UserVerificationPolicy::Preferred;
-        (rcr, AuthState::SecurityKey(auth_state))
-    } else {
-        let (rcr, auth_state) = state
-            .webauthn
-            .start_discoverable_authentication()
-            .map_err(|source| QrLoginError::StartAuthentication { source })?;
-        (
-            rcr,
-            AuthState::Discoverable {
-                auth_state,
-                scope: UsernameScope::Unscoped,
-            },
-        )
-    };
+    // Reject pre-deployment links created by older clients without a username,
+    // then always scope QR authentication to the requested account.
+    let username = required_qr_login_username(row.username.as_deref())?;
+    let ip = connect_info.0.ip();
+    if !state.scoped_begin_limiter.check_rate_limit(&ip.to_string()).await {
+        tracing::warn!("Scoped begin-login rate limit exceeded for IP: {}", ip);
+        return Err(QrLoginError::RateLimited);
+    }
+    let (rcr, auth_state) = scoped_or_decoy_challenge(&state, username)
+        .await
+        .map_err(|source| QrLoginError::ScopedChallenge { source })?;
 
     let session_key = uuid::Uuid::new_v4().to_string();
     let pending = PendingAuthentication {
@@ -2548,6 +2510,9 @@ pub async fn qr_login_authenticate_finish_handler(
         .await
         .map_err(|e| LoginError::InvalidSession(e.to_string()))?
         .ok_or_else(|| LoginError::InvalidSession("invalid QR login token".into()))?;
+
+    required_qr_login_username(row.username.as_deref())
+        .map_err(|_| LoginError::InvalidSession("QR login username required".into()))?;
 
     match QrStatus::from_db(&row.status) {
         Some(QrStatus::Authenticated) => {}
@@ -2977,7 +2942,12 @@ pub async fn logout_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::qr_login_url_for_origin;
+    use axum::{http::StatusCode, response::IntoResponse};
+
+    use super::{
+        QrLoginError, qr_login_url_for_origin, qr_login_username_from_body,
+        required_qr_login_username,
+    };
 
     #[test]
     fn qr_login_url_uses_requestee_token_only() {
@@ -2992,6 +2962,47 @@ mod tests {
         );
         assert!(url.contains(requestee_token));
         assert!(!url.contains(requester_token));
+    }
+
+    #[test]
+    fn qr_login_begin_requires_and_normalizes_username() {
+        assert_eq!(
+            qr_login_username_from_body(br#"{"username":"  Alice  "}"#).unwrap(),
+            "alice"
+        );
+        assert!(matches!(
+            qr_login_username_from_body(br#"{"username":"   "}"#),
+            Err(QrLoginError::UsernameRequired)
+        ));
+        assert!(matches!(
+            qr_login_username_from_body(b""),
+            Err(QrLoginError::UsernameRequired)
+        ));
+        assert!(matches!(
+            qr_login_username_from_body(br#"{}"#),
+            Err(QrLoginError::UsernameRequired)
+        ));
+        assert!(matches!(
+            qr_login_username_from_body(b"not json"),
+            Err(QrLoginError::InvalidRequest)
+        ));
+    }
+
+    #[test]
+    fn qr_login_authentication_rejects_legacy_unscoped_token() {
+        assert!(matches!(
+            required_qr_login_username(None),
+            Err(QrLoginError::UsernameRequired)
+        ));
+        assert_eq!(required_qr_login_username(Some("alice")).unwrap(), "alice");
+    }
+
+    #[test]
+    fn missing_qr_login_username_is_a_bad_request() {
+        assert_eq!(
+            QrLoginError::UsernameRequired.into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 }
 
