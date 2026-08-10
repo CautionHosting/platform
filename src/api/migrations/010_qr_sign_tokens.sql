@@ -1,7 +1,7 @@
 -- SPDX-FileCopyrightText: 2025 Caution SEZC
 -- SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-CREATE TABLE qr_sign_tokens (
+CREATE TABLE IF NOT EXISTS qr_sign_tokens (
     token VARCHAR(255) PRIMARY KEY,
     status VARCHAR(20) NOT NULL DEFAULT 'pending',
     challenge_id VARCHAR(255) NOT NULL,
@@ -17,5 +17,5 @@ CREATE TABLE qr_sign_tokens (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_qr_sign_tokens_status ON qr_sign_tokens(status);
-CREATE INDEX idx_qr_sign_tokens_expires ON qr_sign_tokens(expires_at);
+CREATE INDEX IF NOT EXISTS idx_qr_sign_tokens_status ON qr_sign_tokens(status);
+CREATE INDEX IF NOT EXISTS idx_qr_sign_tokens_expires ON qr_sign_tokens(expires_at);

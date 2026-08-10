@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
 );
 
 -- Unique: one active subscription per org
-CREATE UNIQUE INDEX idx_subscriptions_org_active
+CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_org_active
     ON subscriptions(organization_id) WHERE status IN ('active', 'past_due');
 
 CREATE TABLE IF NOT EXISTS subscription_billing_events (

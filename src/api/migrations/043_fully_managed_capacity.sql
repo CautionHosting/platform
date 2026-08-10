@@ -22,7 +22,7 @@ CREATE INDEX IF NOT EXISTS idx_fully_managed_capacity_pending
 CREATE INDEX IF NOT EXISTS idx_fully_managed_capacity_resource
     ON fully_managed_capacity_reservations(resource_id);
 
-CREATE TRIGGER fully_managed_capacity_reservations_updated_at
+CREATE OR REPLACE TRIGGER fully_managed_capacity_reservations_updated_at
     BEFORE UPDATE ON fully_managed_capacity_reservations
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
