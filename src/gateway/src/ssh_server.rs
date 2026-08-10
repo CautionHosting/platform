@@ -1178,6 +1178,20 @@ mod tests {
     }
 
     #[test]
+    fn ssh_config_keeps_long_deploy_connections_alive() {
+        use russh::keys::{Algorithm, PrivateKey};
+
+        let host_key = PrivateKey::random(&mut rand010::rng(), Algorithm::Ed25519).unwrap();
+        let config = super::ssh_server_config(host_key);
+
+        assert_eq!(
+            config.keepalive_interval,
+            Some(std::time::Duration::from_secs(30))
+        );
+        assert_eq!(config.keepalive_max, 3);
+    }
+
+    #[test]
     fn pushed_ref_parser_keeps_branch_updates() {
         let log = format!("{OLD_SHA} {FEATURE_SHA} refs/heads/qwen2.5-model-swap\n");
 
@@ -1307,6 +1321,9 @@ mod tests {
 fn ssh_server_config(host_key: PrivateKey) -> russh::server::Config {
     russh::server::Config {
         inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
+        // Keep silent deploy phases alive without writing into Git's output channel.
+        keepalive_interval: Some(std::time::Duration::from_secs(30)),
+        keepalive_max: 3,
         auth_rejection_time: std::time::Duration::from_secs(3),
         auth_rejection_time_initial: Some(std::time::Duration::from_secs(0)),
         keys: vec![host_key],

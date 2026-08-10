@@ -97,6 +97,9 @@ make up
    git push caution main
    ```
 
+   Long-running builds use protocol-level SSH keepalives so quiet deployment
+   phases do not require client-side keepalive configuration.
+
 #### Enclave-terminated HTTPS (TLS mode, implemented by Caddy)
 
 To terminate standard HTTPS inside the enclave without changing clients, select
