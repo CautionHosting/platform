@@ -16,9 +16,7 @@
         </p>
         <a
           class="btn-light btn access-code-cta"
-          href="https://cal.com/caution/get-access"
-          target="_blank"
-          rel="noopener noreferrer"
+          href="https://caution.co/contact.html"
         >
           Book a call
           <svg
