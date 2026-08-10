@@ -111,6 +111,14 @@ fn classify_archive_preflight(
     }
 }
 
+fn archive_preflight_urls(url: &str, use_platform_mirror: bool) -> Vec<String> {
+    if use_platform_mirror {
+        enclave_builder::archive_url_candidates(url)
+    } else {
+        vec![url.to_string()]
+    }
+}
+
 fn append_attestation_response_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> Result<()> {
     anyhow::ensure!(
         body.len() <= MAX_ATTESTATION_RESPONSE_BYTES
@@ -6445,9 +6453,9 @@ enclave "default" {{
         // user-filesystem extraction (minutes in). Only meaningful when
         // reproducing from a manifest.
         if external_manifest.is_some() {
-            self.preflight_archive_url("Enclave source", &enclave_source)
+            self.preflight_archive_url("Enclave source", &enclave_source, false)
                 .await?;
-            self.preflight_archive_url("Framework source", &framework_source)
+            self.preflight_archive_url("Framework source", &framework_source, true)
                 .await?;
         }
 
@@ -7655,12 +7663,17 @@ enclave "default" {{
 
     /// Fail-fast reachability check for an enclave/framework source archive.
     /// Try configured mirrors in order, then stop before the expensive build.
-    async fn preflight_archive_url(&self, label: &str, url: &str) -> Result<()> {
+    async fn preflight_archive_url(
+        &self,
+        label: &str,
+        url: &str,
+        use_platform_mirror: bool,
+    ) -> Result<()> {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Ok(());
         }
 
-        let candidates = enclave_builder::archive_url_candidates(url);
+        let candidates = archive_preflight_urls(url, use_platform_mirror);
         self.preflight_archive_urls(label, &candidates).await
     }
 
@@ -7680,11 +7693,7 @@ enclave "default" {{
         let client = client
             .build()
             .context("Failed to create archive preflight client")?;
-        let attempts = if urls.len() == 1 {
-            ARCHIVE_PREFLIGHT_ATTEMPTS
-        } else {
-            1
-        };
+        let attempts = ARCHIVE_PREFLIGHT_ATTEMPTS;
         let mut failures = Vec::new();
 
         for url in urls {
@@ -9843,8 +9852,8 @@ mod tests {
         AccountCommands, ApiClient, ArchivePreflightStatus, Cli, Commands, LoginUsernameError,
         ARCHIVE_PREFLIGHT_ATTEMPTS, MAX_ATTESTATION_RESPONSE_BYTES, PgpKeyCommands,
         RegisterUsernameError, RunError, TlsConnection, TlsExpectation, TrustedHashes, TrustedTls,
-        append_attestation_response_chunk, attestation_inspection_json, attestation_user_data,
-        classify_archive_preflight, display_user_data, dns_answer_is_absent,
+        append_attestation_response_chunk, archive_preflight_urls, attestation_inspection_json,
+        attestation_user_data, classify_archive_preflight, display_user_data, dns_answer_is_absent,
         dns_contains_deployment_ip, encrypt_env_file, encrypt_secret_value,
         keymaker_cert_eligibility, load_recipient_cert, login_begin_request_body,
         measured_build_cache_key, normalize_keyring, parse_env_assignments,
@@ -10952,6 +10961,20 @@ enclave "default" {
         }
     }
 
+    #[test]
+    fn archive_preflight_mirrors_framework_but_not_enclave_source() {
+        let url = "https://codeberg.org/caution/platform/archive/abc123.tar.gz";
+
+        assert_eq!(archive_preflight_urls(url, false), vec![url.to_string()]);
+        assert_eq!(
+            archive_preflight_urls(url, true),
+            vec![
+                url.to_string(),
+                "https://github.com/CautionHosting/platform/archive/abc123.tar.gz".to_string(),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn archive_preflight_falls_back_and_follows_redirects() {
         let (target, target_server) =
@@ -10970,6 +10993,24 @@ enclave "default" {
         assert_eq!(primary_server.await.unwrap(), 1);
         assert_eq!(mirror_server.await.unwrap(), 1);
         assert_eq!(target_server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn archive_preflight_retries_transient_primary_before_mirror() {
+        let (primary, primary_server) = serve_preflight_responses(vec![
+            (reqwest::StatusCode::SERVICE_UNAVAILABLE, None),
+            (reqwest::StatusCode::OK, None),
+        ])
+        .await;
+        let mirror = "http://127.0.0.1:1/archive.tar.gz".to_string();
+        let client = test_api_client();
+
+        client
+            .preflight_archive_urls("Framework source", &[primary, mirror])
+            .await
+            .unwrap();
+
+        assert_eq!(primary_server.await.unwrap(), 2);
     }
 
     #[tokio::test]

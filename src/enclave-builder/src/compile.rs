@@ -512,11 +512,7 @@ async fn get_or_clone_framework_source_from_urls(
     }
 
     let download_dir = work_dir.join("framework-source");
-    let retry_delays: &[Duration] = if framework_source_urls.len() == 1 {
-        &ARCHIVE_RETRY_DELAYS
-    } else {
-        &[]
-    };
+    let retry_delays = &ARCHIVE_RETRY_DELAYS;
     let mut failures = Vec::new();
     let client = archive_http_client()?;
 
@@ -814,6 +810,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn framework_archive_retries_transient_primary_before_fallback() {
+        let (primary, primary_server) = serve_statuses(
+            vec![StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK],
+            valid_framework_archive(),
+        )
+        .await;
+        let fallback = "http://127.0.0.1:1/archive.tar.gz".to_string();
+        let work_dir = tempfile::tempdir().unwrap();
+
+        let source = get_or_clone_framework_source_from_urls(&[primary, fallback], work_dir.path())
+            .await
+            .unwrap();
+
+        assert!(source.join("README").is_file());
+        assert_eq!(primary_server.await.unwrap(), 2);
+    }
+
+    #[tokio::test]
     async fn framework_archive_falls_back_after_invalid_archive() {
         let (primary, primary_server) =
             serve_statuses(vec![StatusCode::OK], b"not a tarball".to_vec()).await;
@@ -835,7 +849,7 @@ mod tests {
         let (primary, primary_server) =
             serve_statuses(vec![StatusCode::NOT_FOUND], Vec::new()).await;
         let (fallback, fallback_server) =
-            serve_statuses(vec![StatusCode::BAD_GATEWAY], Vec::new()).await;
+            serve_statuses(vec![StatusCode::BAD_GATEWAY; 3], Vec::new()).await;
         let work_dir = tempfile::tempdir().unwrap();
 
         let error = get_or_clone_framework_source_from_urls(
@@ -849,6 +863,6 @@ mod tests {
         assert!(message.contains(&primary));
         assert!(message.contains(&fallback));
         assert_eq!(primary_server.await.unwrap(), 1);
-        assert_eq!(fallback_server.await.unwrap(), 1);
+        assert_eq!(fallback_server.await.unwrap(), 3);
     }
 }

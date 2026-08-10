@@ -159,12 +159,12 @@ Local source is the default. If the deployment manifest has no app commit, the
 CLI uses the current checkout at `HEAD`.
 
 Source-archive preflights use five-second HEAD requests. The Platform framework
-archive is checked on Codeberg once, then on the configured GitHub mirror; its
-canonical Codeberg URL remains in the measured manifest. Other archive URLs are
-retried once as before. If every candidate remains unavailable, verification
-stops before starting the expensive reproduction build. Mirrors improve
-availability but do not independently prove that an archive matches its claimed
-Git commit.
+archive is checked on Codeberg first, then on the configured GitHub mirror; each
+candidate is retried once for transient failures, while missing archives advance
+to the next candidate immediately. The canonical Codeberg URL remains in the
+measured manifest. If every candidate remains unavailable, verification stops
+before starting the expensive reproduction build. Mirrors improve availability
+but do not independently prove that an archive matches its claimed Git commit.
 
 **Option B: Verify against known PCR hashes**
 
