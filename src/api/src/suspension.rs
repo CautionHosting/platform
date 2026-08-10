@@ -97,7 +97,7 @@ pub async fn suspend_managed_resources(
             }
         }
 
-        if let Err(e) = sqlx::query("UPDATE compute_resources SET state = 'stopped', public_ip = NULL, region = NULL WHERE id = $1")
+        if let Err(e) = sqlx::query("UPDATE compute_resources SET state = 'stopped' WHERE id = $1")
             .bind(resource_id)
             .execute(&state.db)
             .await
@@ -194,7 +194,7 @@ pub async fn suspend_org_resources(
         }
 
         // Mark resource as stopped in DB regardless
-        if let Err(e) = sqlx::query("UPDATE compute_resources SET state = 'stopped', public_ip = NULL, region = NULL WHERE id = $1")
+        if let Err(e) = sqlx::query("UPDATE compute_resources SET state = 'stopped' WHERE id = $1")
             .bind(resource_id)
             .execute(&state.db)
             .await
@@ -248,9 +248,12 @@ pub async fn unsuspend_org_resources(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     tracing::info!("Unsuspending resources for org {}", org_id);
 
-    let resources: Vec<(Uuid, String, String, Option<String>, Option<serde_json::Value>)> = sqlx::query_as(
-        "SELECT id, resource_name, provider_resource_id, region, configuration FROM compute_resources
-         WHERE organization_id = $1 AND state = 'stopped'"
+    let resources: Vec<(Uuid, String, String, Option<String>, Option<serde_json::Value>, bool)> = sqlx::query_as(
+        "SELECT cr.id, cr.resource_name, cr.provider_resource_id, cr.region, cr.configuration,
+                EXISTS (SELECT 1 FROM cloud_credentials cc
+                        WHERE cc.resource_id = cr.id AND cc.managed_on_prem = true)
+         FROM compute_resources cr
+         WHERE cr.organization_id = $1 AND cr.state = 'stopped'"
     )
     .bind(org_id)
     .fetch_all(&state.db)
@@ -260,8 +263,9 @@ pub async fn unsuspend_org_resources(
     let mut started = 0u32;
     let mut errors = Vec::new();
 
-    for (resource_id, resource_name, provider_resource_id, region, configuration) in &resources {
+    for (resource_id, resource_name, provider_resource_id, region, configuration, managed_on_prem) in &resources {
         let aws_creds = get_aws_credentials_for_resource(&state, org_id, *resource_id).await;
+        let mut recovered_address = None;
 
         if let Some(creds) = aws_creds {
             let ec2 = ec2::Ec2Client::new(&creds);
@@ -292,9 +296,29 @@ pub async fn unsuspend_org_resources(
                     continue;
                 }
             }
+
+            if !managed_on_prem {
+                match ec2
+                    .associate_app_address(&resource_id_tag, provider_resource_id)
+                    .await
+                {
+                    Ok(public_ip) => recovered_address = Some((public_ip, creds.region)),
+                    Err(e) => {
+                        tracing::error!("Failed to attach Elastic IP for {}: {}", resource_name, e);
+                        errors.push(resource_name.clone() + ": " + &e.to_string());
+                        continue;
+                    }
+                }
+            }
         }
 
-        if let Err(e) = sqlx::query("UPDATE compute_resources SET state = 'running' WHERE id = $1")
+        if let Err(e) = sqlx::query(
+            "UPDATE compute_resources
+             SET state = 'running', public_ip = COALESCE($1, public_ip), region = COALESCE($2, region)
+             WHERE id = $3",
+        )
+            .bind(recovered_address.as_ref().map(|address| address.0.as_str()))
+            .bind(recovered_address.as_ref().map(|address| address.1.as_str()))
             .bind(resource_id)
             .execute(&state.db)
             .await
@@ -404,7 +428,8 @@ pub async fn get_aws_credentials_for_resource(
     let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").ok()?;
     let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").ok()?;
     let region: Option<String> = sqlx::query_scalar(
-        "SELECT region FROM compute_resources WHERE id = $1 AND organization_id = $2",
+        "SELECT COALESCE(region, configuration->>'region')
+         FROM compute_resources WHERE id = $1 AND organization_id = $2",
     )
     .bind(resource_id)
     .bind(org_id)
