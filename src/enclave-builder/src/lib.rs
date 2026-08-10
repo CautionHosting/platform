@@ -381,6 +381,11 @@ impl EnclaveBuilder {
             tracing::info!("Extracted git_url={}, ref_name={}", git_url, ref_name);
 
             if !ref_name.is_empty() {
+                if ref_name.len() == 40
+                    && ref_name.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Some(ref_name.to_ascii_lowercase());
+                }
                 tracing::info!("Resolving framework ref '{}' to commit SHA", ref_name);
                 if let Some(sha) = compile::resolve_ref_to_commit(&git_url, ref_name).await {
                     tracing::info!("Resolved framework '{}' to commit {}", ref_name, sha);
@@ -917,6 +922,7 @@ mod tests {
             "https://codeberg.org/caution/platform/archive/abc123.tar.gz"
         );
     }
+
 
     #[test]
     fn test_pin_archive_url_to_commit_leaves_non_archive_urls_unchanged() {
