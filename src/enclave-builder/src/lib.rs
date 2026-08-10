@@ -3,6 +3,8 @@
 
 const ENCLAVE_SOURCE_BASE: &str = "https://git.distrust.co/public/enclaveos/archive";
 pub const FRAMEWORK_SOURCE: &str = "https://codeberg.org/caution/platform/archive/main.tar.gz";
+const PLATFORM_CODEBERG_ARCHIVE_PREFIX: &str = "https://codeberg.org/caution/platform/archive/";
+const PLATFORM_GITHUB_ARCHIVE_PREFIX: &str = "https://github.com/CautionHosting/platform/archive/";
 
 pub fn enclave_source_url(commit: &str) -> String {
     format!("{}/{}.tar.gz", ENCLAVE_SOURCE_BASE, commit)
@@ -14,6 +16,17 @@ pub fn pin_archive_url_to_commit(url: &str, commit: &str) -> String {
     } else {
         url.to_string()
     }
+}
+
+/// Return the canonical archive URL followed by any explicitly configured mirrors.
+pub fn archive_url_candidates(url: &str) -> Vec<String> {
+    let mut candidates = vec![url.to_string()];
+
+    if let Some(archive_name) = url.strip_prefix(PLATFORM_CODEBERG_ARCHIVE_PREFIX) {
+        candidates.push([PLATFORM_GITHUB_ARCHIVE_PREFIX, archive_name].concat());
+    }
+
+    candidates
 }
 
 /// Classify `enclave_source` (archive URL, git URL, or local path) into the
@@ -923,6 +936,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_archive_url_candidates_adds_platform_mirror() {
+        for archive_name in ["main.tar.gz", "abc123.tar.gz"] {
+            let codeberg = [PLATFORM_CODEBERG_ARCHIVE_PREFIX, archive_name].concat();
+            let github = [PLATFORM_GITHUB_ARCHIVE_PREFIX, archive_name].concat();
+
+            assert_eq!(archive_url_candidates(&codeberg), vec![codeberg, github]);
+        }
+    }
+
+    #[test]
+    fn test_archive_url_candidates_ignores_unconfigured_repositories() {
+        for url in [
+            "https://codeberg.org/caution/locksmith/archive/abc123.tar.gz",
+            "https://codeberg.org/caution/platform-extra/archive/abc123.tar.gz",
+            "https://example.com/caution/platform/archive/abc123.tar.gz",
+        ] {
+            assert_eq!(archive_url_candidates(url), vec![url.to_string()]);
+        }
+    }
 
     #[test]
     fn test_pin_archive_url_to_commit_leaves_non_archive_urls_unchanged() {

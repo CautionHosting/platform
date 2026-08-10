@@ -499,33 +499,94 @@ pub async fn get_or_clone_framework_source(
     framework_source_url: &str,
     work_dir: &Path,
 ) -> Result<PathBuf> {
-    let download_dir = work_dir.join("framework-source");
+    let candidates = crate::archive_url_candidates(framework_source_url);
+    get_or_clone_framework_source_from_urls(&candidates, work_dir).await
+}
 
-    if download_dir.exists() {
-        tracing::info!(
-            "Removing existing framework source directory: {}",
-            download_dir.display()
-        );
-        fs::remove_dir_all(&download_dir).await?;
+async fn get_or_clone_framework_source_from_urls(
+    framework_source_urls: &[String],
+    work_dir: &Path,
+) -> Result<PathBuf> {
+    if framework_source_urls.is_empty() {
+        return Err(anyhow::anyhow!("No framework source archive URLs provided"));
     }
 
-    fs::create_dir_all(&download_dir).await?;
-
-    tracing::info!(
-        "Downloading framework source archive from: {}",
-        framework_source_url
-    );
+    let download_dir = work_dir.join("framework-source");
+    let retry_delays: &[Duration] = if framework_source_urls.len() == 1 {
+        &ARCHIVE_RETRY_DELAYS
+    } else {
+        &[]
+    };
+    let mut failures = Vec::new();
     let client = archive_http_client()?;
-    let archive_bytes = download_archive_bytes(
-        &client,
-        framework_source_url,
-        "framework source archive",
-        &ARCHIVE_RETRY_DELAYS,
-    )
-    .await?;
 
-    tracing::info!("Downloaded {} bytes, extracting...", archive_bytes.len());
+    for framework_source_url in framework_source_urls {
+        if download_dir.exists() {
+            tracing::info!(
+                "Removing existing framework source directory: {}",
+                download_dir.display()
+            );
+            fs::remove_dir_all(&download_dir).await?;
+        }
 
+        fs::create_dir_all(&download_dir).await?;
+
+        tracing::info!(
+            "Downloading framework source archive from: {}",
+            framework_source_url
+        );
+        let result = match download_archive_bytes(
+            &client,
+            framework_source_url,
+            "framework source archive",
+            retry_delays,
+        )
+        .await
+        {
+            Ok(archive_bytes) => {
+                tracing::info!("Downloaded {} bytes, extracting...", archive_bytes.len());
+                extract_framework_archive(&archive_bytes, &download_dir).await
+            }
+            Err(error) => Err(error),
+        };
+
+        match result {
+            Ok(framework_source_dir) => {
+                tracing::info!(
+                    "Framework source archive selected: {}",
+                    framework_source_url
+                );
+                tracing::info!(
+                    "Framework source extracted to: {}",
+                    framework_source_dir.display()
+                );
+                return Ok(framework_source_dir);
+            }
+            Err(error) => {
+                let details = error
+                    .chain()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(": ");
+                tracing::warn!(
+                    "Framework source archive failed from {}: {}",
+                    framework_source_url,
+                    details
+                );
+                failures.push([framework_source_url.as_str(), ": ", details.as_str()].concat());
+            }
+        }
+    }
+
+    let failures = failures.join("\n  ");
+    Err(anyhow::anyhow!([
+        "All framework source archive URLs failed:\n  ",
+        failures.as_str(),
+    ]
+    .concat()))
+}
+
+async fn extract_framework_archive(archive_bytes: &[u8], download_dir: &Path) -> Result<PathBuf> {
     let decoder = GzDecoder::new(&archive_bytes[..]);
     let mut archive = Archive::new(decoder);
 
@@ -542,7 +603,6 @@ pub async fn get_or_clone_framework_source(
     let framework_source_dir = find_top_level_dir(&download_dir)
         .await
         .context("Failed to find top-level directory in extracted framework source")?;
-    tracing::info!("Framework source extracted to: {}", framework_source_dir.display());
     Ok(framework_source_dir)
 }
 
@@ -591,14 +651,20 @@ async fn find_top_level_dir(dir: &Path) -> Result<PathBuf, FindTopLevelDirError>
 
 #[cfg(test)]
 mod tests {
-    use super::{download_archive_bytes, is_retryable_archive_status};
+    use super::{
+        download_archive_bytes, get_or_clone_framework_source_from_urls,
+        is_retryable_archive_status,
+    };
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
     use reqwest::StatusCode;
     use std::time::Duration;
+    use tar::{Builder, EntryType, Header};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn serve_statuses(
         statuses: Vec<StatusCode>,
-        success_body: &'static [u8],
+        success_body: Vec<u8>,
     ) -> (String, tokio::task::JoinHandle<usize>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -611,7 +677,7 @@ mod tests {
                 requests += 1;
 
                 let body = if status.is_success() {
-                    success_body
+                    success_body.as_slice()
                 } else {
                     b"error"
                 };
@@ -627,6 +693,22 @@ mod tests {
             requests
         });
         (format!("http://{address}/archive.tar.gz"), handle)
+    }
+
+    fn valid_framework_archive() -> Vec<u8> {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut archive = Builder::new(encoder);
+        let contents = b"framework";
+        let mut header = Header::new_gnu();
+        header.set_entry_type(EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_size(contents.len() as u64);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "platform/README", &contents[..])
+            .unwrap();
+        archive.finish().unwrap();
+        archive.into_inner().unwrap().finish().unwrap()
     }
 
     fn test_client() -> reqwest::Client {
@@ -649,7 +731,7 @@ mod tests {
     async fn archive_download_retries_then_succeeds() {
         let (url, server) = serve_statuses(
             vec![StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK],
-            b"archive",
+            b"archive".to_vec(),
         )
         .await;
         let bytes = download_archive_bytes(
@@ -667,7 +749,7 @@ mod tests {
 
     #[tokio::test]
     async fn archive_download_does_not_retry_non_transient_status() {
-        let (url, server) = serve_statuses(vec![StatusCode::NOT_FOUND], b"").await;
+        let (url, server) = serve_statuses(vec![StatusCode::NOT_FOUND], Vec::new()).await;
         let error = download_archive_bytes(
             &test_client(),
             &url,
@@ -684,7 +766,8 @@ mod tests {
 
     #[tokio::test]
     async fn archive_download_stops_after_three_attempts() {
-        let (url, server) = serve_statuses(vec![StatusCode::SERVICE_UNAVAILABLE; 3], b"").await;
+        let (url, server) =
+            serve_statuses(vec![StatusCode::SERVICE_UNAVAILABLE; 3], Vec::new()).await;
         let error = download_archive_bytes(
             &test_client(),
             &url,
@@ -696,5 +779,76 @@ mod tests {
 
         assert!(error.to_string().contains("after 3 attempt(s)"));
         assert_eq!(server.await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn framework_archive_uses_primary_without_contacting_fallback() {
+        let (primary, server) =
+            serve_statuses(vec![StatusCode::OK], valid_framework_archive()).await;
+        let fallback = "http://127.0.0.1:1/archive.tar.gz".to_string();
+        let work_dir = tempfile::tempdir().unwrap();
+
+        let source = get_or_clone_framework_source_from_urls(&[primary, fallback], work_dir.path())
+            .await
+            .unwrap();
+
+        assert!(source.join("README").is_file());
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn framework_archive_falls_back_after_http_failure() {
+        let (primary, primary_server) =
+            serve_statuses(vec![StatusCode::NOT_FOUND], Vec::new()).await;
+        let (fallback, fallback_server) =
+            serve_statuses(vec![StatusCode::OK], valid_framework_archive()).await;
+        let work_dir = tempfile::tempdir().unwrap();
+
+        let source = get_or_clone_framework_source_from_urls(&[primary, fallback], work_dir.path())
+            .await
+            .unwrap();
+
+        assert!(source.join("README").is_file());
+        assert_eq!(primary_server.await.unwrap(), 1);
+        assert_eq!(fallback_server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn framework_archive_falls_back_after_invalid_archive() {
+        let (primary, primary_server) =
+            serve_statuses(vec![StatusCode::OK], b"not a tarball".to_vec()).await;
+        let (fallback, fallback_server) =
+            serve_statuses(vec![StatusCode::OK], valid_framework_archive()).await;
+        let work_dir = tempfile::tempdir().unwrap();
+
+        let source = get_or_clone_framework_source_from_urls(&[primary, fallback], work_dir.path())
+            .await
+            .unwrap();
+
+        assert!(source.join("README").is_file());
+        assert_eq!(primary_server.await.unwrap(), 1);
+        assert_eq!(fallback_server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn framework_archive_reports_all_candidate_failures() {
+        let (primary, primary_server) =
+            serve_statuses(vec![StatusCode::NOT_FOUND], Vec::new()).await;
+        let (fallback, fallback_server) =
+            serve_statuses(vec![StatusCode::BAD_GATEWAY], Vec::new()).await;
+        let work_dir = tempfile::tempdir().unwrap();
+
+        let error = get_or_clone_framework_source_from_urls(
+            &[primary.clone(), fallback.clone()],
+            work_dir.path(),
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(&primary));
+        assert!(message.contains(&fallback));
+        assert_eq!(primary_server.await.unwrap(), 1);
+        assert_eq!(fallback_server.await.unwrap(), 1);
     }
 }
