@@ -921,6 +921,12 @@ fn generate_builder_userdata(
             branch: Some(request.branch.clone()),
         })
     };
+    let framework_url = framework_commit
+        .as_deref()
+        .map(|commit| {
+            enclave_builder::pin_archive_url_to_commit(enclave_builder::FRAMEWORK_SOURCE, commit)
+        })
+        .unwrap_or_else(|| enclave_builder::FRAMEWORK_SOURCE.to_string());
     let mut manifest = enclave_builder::EnclaveManifest::new(
         app_source,
         enclave_builder::EnclaveSource::GitArchive {
@@ -931,7 +937,7 @@ fn generate_builder_userdata(
             commit: Some(request.enclaveos_commit.clone()),
         },
         enclave_builder::FrameworkSource::GitArchive {
-            url: enclave_builder::FRAMEWORK_SOURCE.to_string(),
+            url: framework_url,
             commit: framework_commit,
         },
         None,
