@@ -25,8 +25,8 @@ CREATE TABLE legal_notice_batch_documents (
 CREATE INDEX idx_legal_notice_batch_documents_document
     ON legal_notice_batch_documents (document_id);
 
-INSERT INTO legal_notice_batch_documents (batch_id, document_id)
-SELECT id, terms_document_id FROM legal_notice_batches WHERE terms_document_id IS NOT NULL;
+-- INSERT INTO legal_notice_batch_documents (batch_id, document_id)
+-- SELECT id, terms_document_id FROM legal_notice_batches WHERE terms_document_id IS NOT NULL;
 
 INSERT INTO legal_notice_batch_documents (batch_id, document_id)
 SELECT id, privacy_document_id FROM legal_notice_batches WHERE privacy_document_id IS NOT NULL;
