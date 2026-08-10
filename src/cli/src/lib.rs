@@ -2032,6 +2032,99 @@ struct UsernameRequiredError {
     error: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct PublicBuildInputs {
+    platform: Option<PublicBuildInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublicBuildInput {
+    commit: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Invalid Platform framework commit {commit:?}; expected a 40-character Git SHA [{location}]"
+)]
+struct PinPlatformFrameworkSourceError {
+    commit: String,
+    location: &'static Location<'static>,
+}
+
+#[track_caller]
+fn pinned_platform_framework_source(
+    commit: &str,
+) -> std::result::Result<String, PinPlatformFrameworkSourceError> {
+    let normalized = commit.trim();
+    if normalized.len() != 40 || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(PinPlatformFrameworkSourceError {
+            commit: commit.to_string(),
+            location: Location::caller(),
+        });
+    }
+    Ok(enclave_builder::pin_archive_url_to_commit(
+        enclave_builder::FRAMEWORK_SOURCE,
+        &normalized.to_ascii_lowercase(),
+    ))
+}
+
+#[derive(Debug)]
+enum CurrentPlatformFrameworkSourceErrorKind {
+    InvalidServerUrl,
+    FetchBuildInputs,
+    BuildInputsStatus,
+    DecodeBuildInputs,
+    MissingPlatformCommit,
+    PinFrameworkSource,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Public build-input endpoint returned HTTP {status}")]
+struct PublicBuildInputsStatusError {
+    status: reqwest::StatusCode,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Unable to resolve the current Platform framework source from {endpoint}: {kind:?} [{location}]"
+)]
+pub(crate) struct CurrentPlatformFrameworkSourceError {
+    kind: CurrentPlatformFrameworkSourceErrorKind,
+    endpoint: String,
+    location: &'static Location<'static>,
+
+    #[source]
+    source: Option<Box<dyn StdError + Send + Sync + 'static>>,
+}
+
+impl CurrentPlatformFrameworkSourceError {
+    #[track_caller]
+    fn new(kind: CurrentPlatformFrameworkSourceErrorKind, endpoint: impl Into<String>) -> Self {
+        Self {
+            kind,
+            endpoint: endpoint.into(),
+            location: Location::caller(),
+            source: None,
+        }
+    }
+
+    fn with_source<E>(mut self, source: E) -> Self
+    where
+        E: StdError + Send + Sync + 'static,
+    {
+        self.source = Some(Box::new(source));
+        self
+    }
+}
+
+fn framework_cache_key(source_key: &str, framework_commit: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(source_key.as_bytes());
+    hasher.update(b"|framework|");
+    hasher.update(framework_commit.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 struct StagedSource {
     path: PathBuf,
     cache_key: String,
@@ -2265,6 +2358,9 @@ pub(crate) enum BuildLocalError {
     #[error("failed to read deployment config")]
     ReadConfig(#[source] anyhow::Error),
 
+    #[error("failed to resolve the Platform framework build input")]
+    BuildInput(#[source] CurrentPlatformFrameworkSourceError),
+
     #[error("failed to build Docker image")]
     BuildDockerImage(#[source] anyhow::Error),
 
@@ -2416,6 +2512,71 @@ impl ApiClient {
 
     fn api_base_url(&self) -> &str {
         &self.base_url
+    }
+
+    async fn current_platform_framework_source(
+        &self,
+    ) -> std::result::Result<(String, String), CurrentPlatformFrameworkSourceError> {
+        let mut endpoint = reqwest::Url::parse(&self.base_url).map_err(|source| {
+            CurrentPlatformFrameworkSourceError::new(
+                CurrentPlatformFrameworkSourceErrorKind::InvalidServerUrl,
+                &self.base_url,
+            )
+            .with_source(source)
+        })?;
+        endpoint.set_path("/.well-known/caution/build-inputs");
+        endpoint.set_query(None);
+        endpoint.set_fragment(None);
+        let response = self
+            .client
+            .get(endpoint.clone())
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|source| {
+                CurrentPlatformFrameworkSourceError::new(
+                    CurrentPlatformFrameworkSourceErrorKind::FetchBuildInputs,
+                    endpoint.as_str(),
+                )
+                .with_source(source)
+            })?;
+        if !response.status().is_success() {
+            return Err(CurrentPlatformFrameworkSourceError::new(
+                CurrentPlatformFrameworkSourceErrorKind::BuildInputsStatus,
+                endpoint.as_str(),
+            )
+            .with_source(PublicBuildInputsStatusError {
+                status: response.status(),
+            }));
+        }
+        let inputs: PublicBuildInputs = response
+            .json()
+            .await
+            .map_err(|source| {
+                CurrentPlatformFrameworkSourceError::new(
+                    CurrentPlatformFrameworkSourceErrorKind::DecodeBuildInputs,
+                    endpoint.as_str(),
+                )
+                .with_source(source)
+            })?;
+        let commit = inputs
+            .platform
+            .ok_or_else(|| {
+                CurrentPlatformFrameworkSourceError::new(
+                    CurrentPlatformFrameworkSourceErrorKind::MissingPlatformCommit,
+                    endpoint.as_str(),
+                )
+            })?
+            .commit;
+        let source = pinned_platform_framework_source(&commit).map_err(|source| {
+            CurrentPlatformFrameworkSourceError::new(
+                CurrentPlatformFrameworkSourceErrorKind::PinFrameworkSource,
+                endpoint.as_str(),
+            )
+            .with_source(source)
+        })?;
+        let commit = commit.trim().to_ascii_lowercase();
+        Ok((commit, source))
     }
 
     /// Get deployment path, creating .caution directory if needed
@@ -5866,6 +6027,11 @@ enclave "default" {{
     async fn build_local(&self, no_cache: bool) -> Result<(), BuildLocalError> {
         output::status("Building EIF locally for inspection...");
 
+        let (framework_commit, framework_source) = self
+            .current_platform_framework_source()
+            .await
+            .map_err(BuildLocalError::BuildInput)?;
+
         let app_commit = Command::new("git")
             .args(&["rev-parse", "HEAD"])
             .output()
@@ -5902,8 +6068,10 @@ enclave "default" {{
         let e2e = e2e_mode == Some(caution_config::E2eMode::Steve);
         let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
         let steve_commit = e2e.then(enclave_builder::build::resolve_steve_commit);
-        let cache_key = measured_build_cache_key(&source_cache_key, &cfg, steve_commit.as_deref())
+        let measured_cache_key =
+            measured_build_cache_key(&source_cache_key, &cfg, steve_commit.as_deref())
             .map_err(BuildLocalError::CacheKey)?;
+        let cache_key = framework_cache_key(&measured_cache_key, &framework_commit);
 
         let config_no_cache = default_enclave
             .and_then(|e| e.build.as_ref())
@@ -5921,7 +6089,7 @@ enclave "default" {{
         let builder = enclave_builder::EnclaveBuilder::new_with_cache(
             enclave_builder::enclave_source_url(&enclave_builder::build::resolve_enclaveos_commit()),
             "unused",
-            enclave_builder::FRAMEWORK_SOURCE,
+            &framework_source,
             "local",
             &cache_key,
             enclave_builder::CacheType::Build,
@@ -6059,6 +6227,11 @@ enclave "default" {{
         no_cache: bool,
         local_source: Option<&StagedSource>,
     ) -> Result<ReproductionResult> {
+        let public_framework = if external_manifest.is_none() {
+            Some(self.current_platform_framework_source().await?)
+        } else {
+            None
+        };
         let no_cache = if let Some(source) = local_source {
             no_cache
                 || self
@@ -6116,7 +6289,11 @@ enclave "default" {{
                 }
             }
         } else {
-            enclave_builder::FRAMEWORK_SOURCE.to_string()
+            public_framework
+                .as_ref()
+                .expect("manifestless builds resolve public framework input")
+                .1
+                .clone()
         };
 
         let source_cache_key = if let Some(source) = local_source {
@@ -6126,7 +6303,13 @@ enclave "default" {{
                 let manifest_hash = hex::encode(Sha256::digest(&manifest_json));
                 format!("{}-{}", source.cache_key, &manifest_hash[..16])
             } else {
-                source.cache_key.clone()
+                framework_cache_key(
+                    &source.cache_key,
+                    &public_framework
+                        .as_ref()
+                        .expect("manifestless builds resolve public framework input")
+                        .0,
+                )
             }
         } else if let Some(ref manifest) = external_manifest {
             let manifest_json = serde_json::to_vec(manifest)
@@ -6138,7 +6321,7 @@ enclave "default" {{
                 format!("manifest-{}", &manifest_hash[..16])
             }
         } else {
-            Command::new("git")
+            let source_key = Command::new("git")
                 .args(&["rev-parse", "HEAD"])
                 .output()
                 .ok()
@@ -6149,7 +6332,14 @@ enclave "default" {{
                         None
                     }
                 })
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            framework_cache_key(
+                &source_key,
+                &public_framework
+                    .as_ref()
+                    .expect("manifestless builds resolve public framework input")
+                    .0,
+            )
         };
 
         let app_source_dir = if let Some(source) = local_source {
@@ -9632,6 +9822,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::PathBuf;
     use tempfile::tempdir;
+
 
     #[test]
     fn reproduction_e2e_mode_preserves_explicit_config_and_manifest_fallback() {
