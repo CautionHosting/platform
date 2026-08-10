@@ -158,8 +158,7 @@ pub async fn stage_eif_components(
     fs::create_dir_all(&enclave_dir).await?;
     fs::create_dir_all(&output_dir).await?;
 
-    tracing::info!("Staging user application from: {}", user_fs_path.display());
-    copy_dir_recursive(user_fs_path, &app_dir).await?;
+    stage_user_application(user_fs_path, &stage_dir, &app_dir).await?;
 
     tracing::info!(
         "Staging enclave source from: {}",
@@ -579,12 +578,41 @@ pub async fn build_eif_from_filesystems(
         docker_args.insert(1, "--no-cache".to_string());
         tracing::info!("EIF build: no_cache=true, adding --no-cache flag");
     }
-    docker_args.push(".".to_string());
+
+    // When the application arrived as a payload tar, hand Docker a tar context
+    // on stdin with the payload expanded into app/. That keeps the application
+    // filesystem off the host, where a case-insensitive volume would silently
+    // drop colliding entries (issue #401), while the Containerfile still sees
+    // the same `app/` it always has.
+    let payload = stage_dir.join(APP_PAYLOAD_TAR);
+    let context_tar = if payload.exists() {
+        let stage_for_ctx = stage_dir.clone();
+        // Sits beside the stage dir so it is not swept into its own context.
+        let ctx_path = work_dir.join("eif-context.tar");
+        let ctx_for_task = ctx_path.clone();
+        tokio::task::spawn_blocking(move || write_context_tar(&stage_for_ctx, &ctx_for_task))
+            .await
+            .context("Build context assembly panicked")??;
+        docker_args.push("-".to_string());
+        Some(ctx_path)
+    } else {
+        docker_args.push(".".to_string());
+        None
+    };
+
+    let stdin = match &context_tar {
+        Some(path) => {
+            let file = std::fs::File::open(path).context("Failed to open build context tar")?;
+            std::process::Stdio::from(file)
+        }
+        None => std::process::Stdio::null(),
+    };
 
     let output = Command::new("docker")
         .args(&docker_args)
         .env("DOCKER_BUILDKIT", "1")
         .env("SOURCE_DATE_EPOCH", "1")
+        .stdin(stdin)
         .current_dir(&stage_dir)
         .output()
         .await
@@ -694,6 +722,212 @@ pub async fn build_eif_from_filesystems(
         size: metadata.len(),
         sha256,
     })
+}
+
+/// Name of the application payload inside the stage directory. Its presence is
+/// what tells the build to assemble a tar context instead of a directory one;
+/// it is never sent to Docker under this name.
+pub(crate) const APP_PAYLOAD_TAR: &str = "app.tar";
+
+/// Place the user application into the EIF build context.
+///
+/// Returns `true` when the application was left as a tar payload for the build
+/// to stream into the context, `false` when it was staged as a directory.
+///
+/// The full-image path hands us the raw `docker export` tar precisely so the
+/// application filesystem never round-trips through the host. Unpacking it here
+/// would drop entries whose names differ only by case on a case-insensitive
+/// host (macOS APFS), silently changing PCR0/PCR1 for a byte-correct deployment
+/// while PCR2 continues to match. See issue #401.
+///
+/// The narrower extract paths (specific files, static binary) still hand us a
+/// directory. They select a handful of known names where a case collision
+/// cannot arise, so they keep directory staging and the previous behaviour.
+async fn stage_user_application(user_fs_path: &Path, stage_dir: &Path, app_dir: &Path) -> Result<bool> {
+    let is_tar = user_fs_path.is_file()
+        && user_fs_path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("tar"));
+
+    if !is_tar {
+        tracing::info!("Staging user application from: {}", user_fs_path.display());
+        copy_dir_recursive(user_fs_path, app_dir).await?;
+        return Ok(false);
+    }
+
+    tracing::info!(
+        "Staging user application tar (unpacked inside the builder) from: {}",
+        user_fs_path.display()
+    );
+
+    // The caller pre-creates app/; leaving an empty one behind would have COPY
+    // layer it over the unpacked tree, so drop it when the tar path is taken.
+    fs::remove_dir_all(app_dir).await.ok();
+
+    fs::copy(user_fs_path, stage_dir.join(APP_PAYLOAD_TAR))
+        .await
+        .context("Failed to stage user application tar")?;
+
+    Ok(true)
+}
+
+/// Assemble the Docker build context as a tar, expanding the application
+/// payload into `app/` entries on the way through.
+///
+/// This exists so the application filesystem reaches Docker without ever being
+/// written to the host filesystem as individual files. A directory context
+/// requires the CLI to materialise every entry locally first, and on a
+/// case-insensitive host (macOS APFS) siblings differing only by case collide
+/// and one silently disappears - changing the cpio and therefore PCR0/PCR1
+/// while PCR2 still matches, which is what makes issue #401 so hard to read.
+///
+/// Crucially the Containerfile is untouched: it still sees `app/` exactly as
+/// before, so an enclave built by any framework version reproduces bit-for-bit.
+/// Fixing this in the Containerfile instead would only help enclaves built
+/// *after* the fix shipped, because a reproduction uses the framework template
+/// pinned in the deployment's own manifest.
+/// Paths the *container runtime* injects, which are not part of the image and
+/// must not reach the ramdisk.
+///
+/// Docker Desktop on Apple Silicon runs amd64 images under Rosetta and creates
+/// its translation cache inside the container, so `docker export` captures
+/// `<home>/.cache/rosetta` even though nothing in the image put it there. A
+/// Linux builder has no such directory, so leaving it in makes every macOS
+/// reproduction differ from the deployment by exactly those entries - the same
+/// class of false PCR0/PCR1 mismatch as issue #401, from a different cause.
+///
+/// Deliberately narrow. `.dockerenv` is also runtime-injected but appears on
+/// Linux builders too, so it is part of what deployed enclaves actually contain
+/// and removing it would break reproduction of every existing deployment.
+/// Only artifacts that differ *between* hosts belong here.
+fn container_runtime_artifacts(paths: &std::collections::BTreeSet<PathBuf>) -> std::collections::BTreeSet<PathBuf> {
+    let mut drop: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+
+    let is_rosetta = |p: &Path| {
+        let mut parts = p.components().rev();
+        matches!(parts.next().map(|c| c.as_os_str().to_string_lossy().into_owned()), Some(last) if last == "rosetta")
+            && matches!(parts.next().map(|c| c.as_os_str().to_string_lossy().into_owned()), Some(prev) if prev == ".cache")
+    };
+
+    for path in paths {
+        if is_rosetta(path) || path.ancestors().skip(1).any(is_rosetta) {
+            drop.insert(path.clone());
+        }
+    }
+
+    // A `.cache` directory that existed only to hold the Rosetta cache is
+    // itself an artifact; one with other contents is the image's own.
+    for path in paths {
+        if path.file_name().is_some_and(|n| n == ".cache") {
+            let prefix = path.join("");
+            let has_survivor = paths
+                .iter()
+                .any(|other| other != path && other.starts_with(&prefix) && !drop.contains(other));
+            if !has_survivor {
+                drop.insert(path.clone());
+            }
+        }
+    }
+
+    drop
+}
+
+fn write_context_tar(stage_dir: &Path, context_tar: &Path) -> Result<()> {
+    use walkdir::WalkDir;
+
+    let payload = stage_dir.join(APP_PAYLOAD_TAR);
+    let out = std::fs::File::create(context_tar).context("Failed to create build context tar")?;
+    let mut builder = tar::Builder::new(out);
+    builder.follow_symlinks(false);
+
+    for entry in WalkDir::new(stage_dir).min_depth(1).follow_links(false) {
+        let entry = entry.context("Failed to walk stage directory")?;
+        let path = entry.path();
+        let rel = path.strip_prefix(stage_dir)?;
+
+        // The payload is expanded below under app/; it must not also appear
+        // verbatim, or the context carries a redundant 9 MB blob.
+        if rel == Path::new(APP_PAYLOAD_TAR) {
+            continue;
+        }
+
+        let file_type = entry.file_type();
+        if file_type.is_dir() {
+            builder.append_dir(rel, path)?;
+        } else if file_type.is_symlink() {
+            let target = std::fs::read_link(path)
+                .with_context(|| format!("Failed to read symlink: {}", path.display()))?;
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_mode(0o777);
+            header.set_cksum();
+            builder.append_link(&mut header, rel, &target)?;
+        } else {
+            let mut file = std::fs::File::open(path)
+                .with_context(|| format!("Failed to open: {}", path.display()))?;
+            builder.append_file(rel, &mut file)?;
+        }
+    }
+
+    // First pass: which entries exist, so runtime artifacts can be identified
+    // by their surroundings rather than by a hardcoded absolute path.
+    let mut all_paths = std::collections::BTreeSet::new();
+    {
+        let payload_file = std::fs::File::open(&payload)
+            .context("Failed to open staged application payload")?;
+        let mut archive = tar::Archive::new(payload_file);
+        for entry in archive.entries().context("Failed to read application payload")? {
+            let entry = entry.context("Failed to read application payload entry")?;
+            all_paths.insert(entry.path()?.into_owned());
+        }
+    }
+    let skip = container_runtime_artifacts(&all_paths);
+    if !skip.is_empty() {
+        tracing::info!(
+            "Excluding {} container-runtime artifact(s) from the ramdisk: {:?}",
+            skip.len(),
+            skip
+        );
+    }
+
+    // Second pass: re-emit every payload entry under app/, header intact, so
+    // file type, mode, and link targets survive exactly as `docker export`
+    // recorded them.
+    let payload_file =
+        std::fs::File::open(&payload).context("Failed to open staged application payload")?;
+    let mut archive = tar::Archive::new(payload_file);
+    let mut count = 0usize;
+    for entry in archive.entries().context("Failed to read application payload")? {
+        let mut entry = entry.context("Failed to read application payload entry")?;
+        let entry_path = entry.path()?.into_owned();
+        if skip.contains(&entry_path) {
+            continue;
+        }
+        let mut header = entry.header().clone();
+
+        // Docker's `COPY` assigns uid/gid 0 unless told otherwise, so the
+        // directory-context path this replaces produced a root-owned ramdisk
+        // regardless of what the image recorded. Preserving the image's real
+        // ownership here would be *more* faithful but would change PCR0/PCR1
+        // for every existing deployment - e.g. an image with a `/home/user`
+        // owned by 1000:1000 reproduces as 0:0 in every enclave deployed to
+        // date. Match the established behaviour rather than the tar.
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_username("")?;
+        header.set_groupname("")?;
+
+        let staged_path = Path::new("app").join(&entry_path);
+        builder
+            .append_data(&mut header, &staged_path, &mut entry)
+            .with_context(|| format!("Failed to stage application entry: {}", entry_path.display()))?;
+        count += 1;
+    }
+
+    builder.finish().context("Failed to finalise build context tar")?;
+    tracing::info!("Build context assembled with {} application entries", count);
+    Ok(())
 }
 
 async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
@@ -1205,6 +1439,195 @@ mod tests {
         assert!(rendered.contains("chroot /build/initramfs /caddy version"));
         assert!(rendered.contains("chroot /build/initramfs /usr/bin/openssl version"));
         assert!(!rendered.contains("COPY --from=steve-builder"));
+    }
+
+    /// Build a tar holding two entries that differ only by case. On a
+    /// case-insensitive filesystem these collide the moment anything unpacks
+    /// them, which is the whole of issue #401.
+    fn case_colliding_tar(path: &Path) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut builder = tar::Builder::new(file);
+        for (name, body) in [("foo", b"lower" as &[u8]), ("FOO", b"upper" as &[u8])] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, body).unwrap();
+        }
+        builder.finish().unwrap();
+    }
+
+    fn tar_entry_names(path: &Path) -> Vec<String> {
+        let file = std::fs::File::open(path).unwrap();
+        let mut archive = tar::Archive::new(file);
+        archive
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The acceptance criterion from issue #401: an application containing both
+    /// `foo` and `FOO` must reach the builder with BOTH entries intact, on any
+    /// host filesystem. Staging copies the tar verbatim rather than unpacking,
+    /// so this holds on case-insensitive macOS exactly as it does on Linux.
+    #[tokio::test]
+    async fn test_case_colliding_entries_survive_staging() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_tar = tmp.path().join("user-service.tar");
+        case_colliding_tar(&src_tar);
+
+        let stage_dir = tmp.path().join("eif-stage");
+        let app_dir = stage_dir.join("app");
+        fs::create_dir_all(&app_dir).await.unwrap();
+
+        let staged_tar = stage_user_application(&src_tar, &stage_dir, &app_dir)
+            .await
+            .unwrap();
+        assert!(staged_tar, "a .tar payload must take the tar path");
+
+        let staged = stage_dir.join("app.tar");
+        assert!(staged.exists(), "app.tar must be staged into the context");
+        assert!(
+            !app_dir.exists(),
+            "app/ must not survive, or COPY would layer it over the unpacked tree"
+        );
+
+        let names = tar_entry_names(&staged);
+        assert!(names.contains(&"foo".to_string()), "lost 'foo': {names:?}");
+        assert!(names.contains(&"FOO".to_string()), "lost 'FOO': {names:?}");
+
+        // Byte-identical: nothing about the payload is reinterpreted host-side.
+        assert_eq!(
+            std::fs::read(&src_tar).unwrap(),
+            std::fs::read(&staged).unwrap()
+        );
+    }
+
+    /// A directory payload keeps the previous behaviour, so the narrower
+    /// extract paths are unaffected by the fix.
+    #[tokio::test]
+    async fn test_directory_payload_still_staged_as_app_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tmp.path().join("user-service");
+        fs::create_dir_all(src_dir.join("bin")).await.unwrap();
+        fs::write(src_dir.join("bin/app"), b"binary").await.unwrap();
+
+        let stage_dir = tmp.path().join("eif-stage");
+        let app_dir = stage_dir.join("app");
+        fs::create_dir_all(&app_dir).await.unwrap();
+
+        let staged_tar = stage_user_application(&src_dir, &stage_dir, &app_dir)
+            .await
+            .unwrap();
+        assert!(!staged_tar, "a directory payload must keep directory staging");
+        assert!(app_dir.join("bin/app").exists());
+        assert!(!stage_dir.join("app.tar").exists());
+    }
+
+    /// The acceptance criterion of issue #401, at the layer that now enforces
+    /// it: an application containing both `foo` and `FOO` must reach Docker
+    /// with BOTH entries under `app/`, on any host filesystem. The context is
+    /// assembled tar-to-tar, so a case-insensitive host never gets the chance
+    /// to fold them together.
+    #[tokio::test]
+    async fn test_context_tar_preserves_case_colliding_app_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work_dir = tmp.path();
+        let stage_dir = work_dir.join("eif-stage");
+        let app_dir = stage_dir.join("app");
+        fs::create_dir_all(&app_dir).await.unwrap();
+
+        // A couple of ordinary context files alongside the payload.
+        fs::write(stage_dir.join("Containerfile.eif"), b"FROM scratch\n")
+            .await
+            .unwrap();
+        fs::create_dir_all(stage_dir.join("enclave")).await.unwrap();
+        fs::write(stage_dir.join("enclave/rootfs.sh"), b"#!/bin/sh\n")
+            .await
+            .unwrap();
+
+        let payload = work_dir.join("user-service.tar");
+        case_colliding_tar(&payload);
+        assert!(stage_user_application(&payload, &stage_dir, &app_dir)
+            .await
+            .unwrap());
+
+        let context_tar = work_dir.join("eif-context.tar");
+        write_context_tar(&stage_dir, &context_tar).unwrap();
+
+        let names = tar_entry_names(&context_tar);
+
+        // Both colliding entries present, namespaced under app/.
+        assert!(
+            names.contains(&"app/foo".to_string()),
+            "lost app/foo: {names:?}"
+        );
+        assert!(
+            names.contains(&"app/FOO".to_string()),
+            "lost app/FOO: {names:?}"
+        );
+
+        // The rest of the context is carried through unchanged...
+        assert!(names.contains(&"Containerfile.eif".to_string()));
+        assert!(names.contains(&"enclave/rootfs.sh".to_string()));
+
+        // ...and the payload blob itself is not shipped twice.
+        assert!(
+            !names.iter().any(|n| n == APP_PAYLOAD_TAR),
+            "payload must not appear verbatim in the context: {names:?}"
+        );
+    }
+
+    /// Rosetta's translation cache is created by Docker Desktop inside the
+    /// container on Apple Silicon and captured by `docker export`. A Linux
+    /// builder never has it, so it must be dropped or every macOS reproduction
+    /// differs from the deployment by exactly these entries.
+    #[test]
+    fn test_rosetta_cache_is_treated_as_a_runtime_artifact() {
+        let paths: std::collections::BTreeSet<PathBuf> = [
+            "home",
+            "home/user",
+            "home/user/.cache",
+            "home/user/.cache/rosetta",
+            ".dockerenv",
+            "zero-indexer-shim",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+
+        let drop = container_runtime_artifacts(&paths);
+
+        assert!(drop.contains(&PathBuf::from("home/user/.cache/rosetta")));
+        // The .cache dir existed only to hold it, so it goes too.
+        assert!(drop.contains(&PathBuf::from("home/user/.cache")));
+        // Real image content is untouched...
+        assert!(!drop.contains(&PathBuf::from("home/user")));
+        assert!(!drop.contains(&PathBuf::from("zero-indexer-shim")));
+        // ...and .dockerenv stays: Linux builders have it too, so deployed
+        // enclaves genuinely contain it.
+        assert!(!drop.contains(&PathBuf::from(".dockerenv")));
+    }
+
+    /// A `.cache` holding real application data must survive even when Rosetta
+    /// also wrote into it.
+    #[test]
+    fn test_cache_dir_with_real_contents_is_kept() {
+        let paths: std::collections::BTreeSet<PathBuf> = [
+            "app/.cache",
+            "app/.cache/rosetta",
+            "app/.cache/real-data.bin",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+
+        let drop = container_runtime_artifacts(&paths);
+
+        assert!(drop.contains(&PathBuf::from("app/.cache/rosetta")));
+        assert!(!drop.contains(&PathBuf::from("app/.cache")));
+        assert!(!drop.contains(&PathBuf::from("app/.cache/real-data.bin")));
     }
 
     #[test]
