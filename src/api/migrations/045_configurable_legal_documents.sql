@@ -28,8 +28,8 @@ CREATE INDEX idx_legal_notice_batch_documents_document
 -- INSERT INTO legal_notice_batch_documents (batch_id, document_id)
 -- SELECT id, terms_document_id FROM legal_notice_batches WHERE terms_document_id IS NOT NULL;
 
-INSERT INTO legal_notice_batch_documents (batch_id, document_id)
-SELECT id, privacy_document_id FROM legal_notice_batches WHERE privacy_document_id IS NOT NULL;
+-- INSERT INTO legal_notice_batch_documents (batch_id, document_id)
+-- SELECT id, privacy_document_id FROM legal_notice_batches WHERE privacy_document_id IS NOT NULL;
 
 -- legal_notice_dedupe_key() now generates sorted-UUID keys ("<id>;<id>...")
 -- instead of the old fixed "terms=<id>;privacy=<id>" format. Existing rows
