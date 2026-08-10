@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose};
 use coset::CborSerializable;
 use serde_cbor::Value as CborValue;
+use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 
 #[derive(Debug, Clone)]
 pub struct AttestationPcrs {
@@ -12,7 +14,7 @@ pub struct AttestationPcrs {
     pub pcr2: String,
 }
 
-pub fn extract_pcrs(attestation_bytes: &[u8]) -> Result<AttestationPcrs> {
+pub fn parse(attestation_bytes: &[u8]) -> Result<CborValue> {
     let cose_sign1 = coset::CoseSign1::from_slice(attestation_bytes)
         .map_err(|e| anyhow::anyhow!("Failed to parse COSE_Sign1: {:?}", e))?;
 
@@ -20,14 +22,10 @@ pub fn extract_pcrs(attestation_bytes: &[u8]) -> Result<AttestationPcrs> {
         .payload
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("No payload in COSE_Sign1"))?;
-
-    extract_pcrs_from_payload(payload)
+    serde_cbor::from_slice(payload).context("Failed to parse attestation payload as CBOR")
 }
 
-fn extract_pcrs_from_payload(payload: &[u8]) -> Result<AttestationPcrs> {
-    let attestation: CborValue =
-        serde_cbor::from_slice(payload).context("Failed to parse attestation payload as CBOR")?;
-
+pub fn extract_pcrs(attestation: &CborValue) -> Result<AttestationPcrs> {
     let attestation_map = match attestation {
         CborValue::Map(map) => map,
         _ => bail!("Attestation payload is not a CBOR map"),
@@ -39,33 +37,65 @@ fn extract_pcrs_from_payload(payload: &[u8]) -> Result<AttestationPcrs> {
         _ => bail!("No PCRs found in attestation document"),
     };
 
-    let mut pcr0 = None;
-    let mut pcr1 = None;
-    let mut pcr2 = None;
-
-    for (key, value) in pcrs_map {
-        let pcr_num = match key {
-            CborValue::Integer(n) => *n as i64,
-            _ => continue,
-        };
-
-        let pcr_hex = match value {
-            CborValue::Bytes(bytes) => hex::encode(bytes),
-            _ => continue,
-        };
-
-        match pcr_num {
-            0 => pcr0 = Some(pcr_hex),
-            1 => pcr1 = Some(pcr_hex),
-            2 => pcr2 = Some(pcr_hex),
-            _ => {}
-        }
-    }
+    let pcr = |index: i128, missing: &'static str| match pcrs_map.get(&CborValue::Integer(index)) {
+        Some(CborValue::Bytes(bytes)) => Ok(hex::encode(bytes)),
+        _ => Err(anyhow::anyhow!(missing)),
+    };
 
     Ok(AttestationPcrs {
-        pcr0: pcr0.context("PCR0 not found in attestation document")?,
-        pcr1: pcr1.context("PCR1 not found in attestation document")?,
-        pcr2: pcr2.context("PCR2 not found in attestation document")?,
+        pcr0: pcr(0, "PCR0 not found in attestation document")?,
+        pcr1: pcr(1, "PCR1 not found in attestation document")?,
+        pcr2: pcr(2, "PCR2 not found in attestation document")?,
+    })
+}
+
+pub fn payload_json(value: &CborValue) -> Result<JsonValue> {
+    Ok(match value {
+        CborValue::Null => JsonValue::Null,
+        CborValue::Bool(value) => JsonValue::Bool(*value),
+        CborValue::Integer(value) => {
+            if let Ok(value) = i64::try_from(*value) {
+                JsonValue::Number(JsonNumber::from(value))
+            } else if let Ok(value) = u64::try_from(*value) {
+                JsonValue::Number(JsonNumber::from(value))
+            } else {
+                JsonValue::String(value.to_string())
+            }
+        }
+        CborValue::Float(value) => JsonNumber::from_f64(*value)
+            .map(JsonValue::Number)
+            .context("CBOR float cannot be represented as JSON")?,
+        CborValue::Bytes(value) => {
+            let mut encoded = String::from("base64:");
+            general_purpose::STANDARD.encode_string(value, &mut encoded);
+            JsonValue::String(encoded)
+        }
+        CborValue::Text(value) => JsonValue::String(value.clone()),
+        CborValue::Array(values) => JsonValue::Array(
+            values
+                .iter()
+                .map(payload_json)
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        CborValue::Map(values) => {
+            let mut map = JsonMap::new();
+            for (key, value) in values {
+                let key = match key {
+                    CborValue::Text(key) => key.clone(),
+                    CborValue::Integer(key) => key.to_string(),
+                    _ => bail!("CBOR map key cannot be represented as a JSON object key"),
+                };
+                if map.insert(key, payload_json(value)?).is_some() {
+                    bail!("CBOR map keys collide when represented as JSON");
+                }
+            }
+            JsonValue::Object(map)
+        }
+        CborValue::Tag(tag, value) => serde_json::json!({
+            "tag": tag,
+            "value": payload_json(value)?,
+        }),
+        _ => bail!("Unsupported CBOR value"),
     })
 }
 
@@ -106,7 +136,8 @@ mod tests {
             (2, &[0xDD, 0xEE, 0xFF]),
         ]);
 
-        let result = extract_pcrs(&cose_bytes).unwrap();
+        let payload = parse(&cose_bytes).unwrap();
+        let result = extract_pcrs(&payload).unwrap();
         assert_eq!(result.pcr0, "aabbcc");
         assert_eq!(result.pcr1, "112233");
         assert_eq!(result.pcr2, "ddeeff");
@@ -116,7 +147,7 @@ mod tests {
     fn test_extract_pcrs_missing_pcr0() {
         let cose_bytes = build_cose_sign1_with_pcrs(&[(1, &[0x11]), (2, &[0x22])]);
 
-        let result = extract_pcrs(&cose_bytes);
+        let result = parse(&cose_bytes).and_then(|payload| extract_pcrs(&payload));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("PCR0"));
     }
@@ -125,7 +156,7 @@ mod tests {
     fn test_extract_pcrs_missing_pcr1() {
         let cose_bytes = build_cose_sign1_with_pcrs(&[(0, &[0xAA]), (2, &[0x22])]);
 
-        let result = extract_pcrs(&cose_bytes);
+        let result = parse(&cose_bytes).and_then(|payload| extract_pcrs(&payload));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("PCR1"));
     }
@@ -134,7 +165,7 @@ mod tests {
     fn test_extract_pcrs_missing_pcr2() {
         let cose_bytes = build_cose_sign1_with_pcrs(&[(0, &[0xAA]), (1, &[0x11])]);
 
-        let result = extract_pcrs(&cose_bytes);
+        let result = parse(&cose_bytes).and_then(|payload| extract_pcrs(&payload));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("PCR2"));
     }
@@ -150,7 +181,8 @@ mod tests {
             (15, &[0xFF]),
         ]);
 
-        let result = extract_pcrs(&cose_bytes).unwrap();
+        let payload = parse(&cose_bytes).unwrap();
+        let result = extract_pcrs(&payload).unwrap();
         assert_eq!(result.pcr0, "aa");
         assert_eq!(result.pcr1, "bb");
         assert_eq!(result.pcr2, "cc");
@@ -162,19 +194,20 @@ mod tests {
         let hash = vec![0xABu8; 48];
         let cose_bytes = build_cose_sign1_with_pcrs(&[(0, &hash), (1, &hash), (2, &hash)]);
 
-        let result = extract_pcrs(&cose_bytes).unwrap();
+        let payload = parse(&cose_bytes).unwrap();
+        let result = extract_pcrs(&payload).unwrap();
         assert_eq!(result.pcr0.len(), 96);
     }
 
     #[test]
     fn test_extract_pcrs_invalid_cbor() {
-        let result = extract_pcrs(&[0xFF, 0xFF, 0xFF]);
+        let result = parse(&[0xFF, 0xFF, 0xFF]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_extract_pcrs_empty_input() {
-        let result = extract_pcrs(&[]);
+        let result = parse(&[]);
         assert!(result.is_err());
     }
 
@@ -190,7 +223,8 @@ mod tests {
         );
         let payload = serde_cbor::to_vec(&CborValue::Map(att_map)).unwrap();
 
-        let result = extract_pcrs_from_payload(&payload);
+        let attestation = serde_cbor::from_slice(&payload).unwrap();
+        let result = extract_pcrs(&attestation);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("PCRs"));
     }
@@ -200,8 +234,36 @@ mod tests {
         let payload =
             serde_cbor::to_vec(&serde_cbor::Value::Text("not a map".to_string())).unwrap();
 
-        let result = extract_pcrs_from_payload(&payload);
+        let attestation = serde_cbor::from_slice(&payload).unwrap();
+        let result = extract_pcrs(&attestation);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_pcrs_does_not_wrap_oversized_integer_keys() {
+        let wrapped_zero = -(1_i128 << 64);
+        let cose_bytes =
+            build_cose_sign1_with_pcrs(&[(wrapped_zero, &[0xAA]), (1, &[0xBB]), (2, &[0xCC])]);
+
+        let result = parse(&cose_bytes).and_then(|payload| extract_pcrs(&payload));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("PCR0"));
+    }
+
+    #[test]
+    fn payload_json_encodes_bytes_and_integer_keys_losslessly() {
+        use std::collections::BTreeMap;
+
+        let value = CborValue::Map(
+            [(CborValue::Integer(0), CborValue::Bytes(vec![0x00, 0x01]))]
+                .into_iter()
+                .collect::<BTreeMap<_, _>>(),
+        );
+
+        assert_eq!(
+            payload_json(&value).unwrap(),
+            serde_json::json!({"0": "base64:AAE="})
+        );
     }
 
     #[test]

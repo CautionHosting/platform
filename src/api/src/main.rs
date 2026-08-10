@@ -1020,6 +1020,23 @@ fn milestone_error(msg: &str) -> bytes::Bytes {
     bytes::Bytes::from(format!("error: {}\n", msg))
 }
 
+fn dedicated_builder_failure_message(build_id: Uuid, error: &str) -> String {
+    format!("Build {build_id} failed: {error}")
+}
+
+#[cfg(test)]
+#[test]
+fn dedicated_builder_failure_includes_one_prefix_and_build_id() {
+    let build_id = Uuid::parse_str("fa2805c7-f67a-42c6-b74c-0a42510981a9").unwrap();
+    let message = dedicated_builder_failure_message(build_id, "framework download timed out");
+
+    assert_eq!(
+        message,
+        "Build fa2805c7-f67a-42c6-b74c-0a42510981a9 failed: framework download timed out"
+    );
+    assert!(!message.contains("Build failed: Build failed:"));
+}
+
 async fn recover_deploy_failure(
     state: &Arc<AppState>,
     org_id: Uuid,
@@ -1889,6 +1906,13 @@ async fn deploy_logic(
         req.app_id
     );
 
+    let platform_git_sha = std::env::var("PLATFORM_GIT_SHA").ok();
+    let framework_commit = builder::require_platform_framework_commit(platform_git_sha.as_deref())
+        .map_err(|error| {
+            tracing::error!("Invalid Platform framework commit: {}", error);
+            (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        })?;
+
     let app_id_str = req.app_id.to_string();
 
     let user_in_org: Option<bool> = sqlx::query_scalar(
@@ -2375,14 +2399,9 @@ async fn deploy_logic(
     let e2e_mode = e2e_config.and_then(|e| e.effective_mode());
     let e2e = e2e_mode == Some(config::E2eMode::Steve);
     let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
-    let platform_git_sha = std::env::var("PLATFORM_GIT_SHA").ok();
-    let framework_commit =
-        builder::framework_commit_for_mode(e2e_mode_value, platform_git_sha.as_deref()).map_err(
-            |error| {
-                tracing::error!("Invalid Platform framework commit: {}", error);
-                (StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-            },
-        )?;
+    let e2e_key_exchange = e2e_config
+        .map(|e| e.key_exchange().steve_env_value())
+        .unwrap_or(caution_config::KeyExchange::X25519.steve_env_value());
 
     let no_cache = ec_build
         .and_then(|b| b.cache)
@@ -2486,17 +2505,20 @@ async fn deploy_logic(
     .await?;
     let builder_eif_s3_key = {
         let enclaveos_commit = enclave_builder::build::resolve_enclaveos_commit();
+        let steve_commit = enclave_builder::build::resolve_steve_commit();
         let cache_key = builder::compute_cache_key(
             &commit_sha,
             &enclaveos_commit,
+            &steve_commit,
             &config_content,
             e2e,
+            e2e_key_exchange,
             config_file.has_vault_env(), // auto-enable locksmith when env::vault is used
             e2e_config
                 .as_ref()
                 .and_then(|e2e| e2e.cors_origins.as_ref())
                 .unwrap_or(&vec![]),
-            framework_commit.as_deref(),
+            &framework_commit,
         );
         let s3_client = s3_client_for_credentials(&builder_target.aws_credentials).await;
 
@@ -2612,6 +2634,7 @@ async fn deploy_logic(
                 http_port: ec_network.and_then(|n| n.http.as_ref()).map(|h| h.port),
                 e2e,
                 e2e_mode: e2e_mode_value.to_string(),
+                e2e_key_exchange: e2e_key_exchange.to_string(),
                 domain: ec_network
                     .and_then(|n| n.http.as_ref())
                     .and_then(|h| h.domain.clone()),
@@ -2625,6 +2648,7 @@ async fn deploy_logic(
                     .map(|origins| origins.join(",")),
                 no_cache,
                 enclaveos_commit,
+                steve_commit,
                 builder_size: resolved_size.id.clone(),
                 builder_instance_type: resolved_size.instance_type.clone(),
                 app_sources,
@@ -2643,7 +2667,8 @@ async fn deploy_logic(
             .await
             .map_err(|e| {
                 tracing::error!("Dedicated builder failed: {:?}", e);
-                if e.to_string() == builder::ACTIVE_BUILD_CONFLICT_MSG {
+                let error = e.to_string();
+                if error == builder::ACTIVE_BUILD_CONFLICT_MSG {
                     (
                         StatusCode::CONFLICT,
                         builder::ACTIVE_BUILD_CONFLICT_MSG.to_string(),
@@ -2651,7 +2676,7 @@ async fn deploy_logic(
                 } else {
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Build failed: {}", e),
+                        dedicated_builder_failure_message(build_id, &error),
                     )
                 }
             })?;

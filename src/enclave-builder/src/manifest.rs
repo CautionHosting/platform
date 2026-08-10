@@ -31,6 +31,10 @@ pub struct EnclaveManifest {
     pub bootproof_commit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub steve_commit: Option<String>,
+    /// STEVE key exchange, recorded only when it differs from STEVE's default,
+    /// so manifests for existing deployments stay byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steve_key_exchange: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub locksmith: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -95,6 +99,7 @@ impl EnclaveManifest {
             enclaveos_commit: None,
             bootproof_commit: None,
             steve_commit: None,
+            steve_key_exchange: None,
             locksmith: false,
             locksmith_commit: None,
             extra: Map::new(),

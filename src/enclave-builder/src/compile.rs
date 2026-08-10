@@ -4,9 +4,12 @@
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tar::Archive;
 use tokio::fs;
 use tokio::process::Command;
+
+const ARCHIVE_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
 
 pub struct EnclaveBinaries {
     pub bootproofd: PathBuf,
@@ -169,16 +172,68 @@ fn guarded_git() -> Command {
     cmd
 }
 
-/// HTTP client for enclave/framework source archive downloads. A connect timeout
-/// bounds an unresponsive mirror and a total timeout bounds a stalled transfer,
-/// so a missing or hung source fails in minutes at worst instead of hanging
-/// forever — reqwest's default client (`reqwest::get`) has neither bound.
+/// HTTP client for enclave/framework archives. Three 90-second attempts plus
+/// bounded backoff stay within the existing five-minute ceiling.
 fn archive_http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_secs(90))
         .build()
         .context("Failed to build archive HTTP client")
+}
+
+fn is_retryable_archive_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+fn is_retryable_archive_error(error: &reqwest::Error) -> bool {
+    error
+        .status()
+        .map(is_retryable_archive_status)
+        .unwrap_or_else(|| error.is_timeout() || error.is_connect() || error.is_body())
+}
+
+async fn download_archive_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    description: &str,
+    retry_delays: &[Duration],
+) -> Result<Vec<u8>> {
+    let attempts = retry_delays.len() + 1;
+    for attempt in 1..=attempts {
+        let result = async {
+            let response = client.get(url).send().await?.error_for_status()?;
+            Ok::<_, reqwest::Error>(response.bytes().await?.to_vec())
+        }
+        .await;
+
+        match result {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) if is_retryable_archive_error(&error) && attempt < attempts => {
+                let delay = retry_delays[attempt - 1];
+                tracing::warn!(
+                    "Failed to download {} (attempt {}/{}): {}; retrying in {:?}",
+                    description,
+                    attempt,
+                    attempts,
+                    error,
+                    delay
+                );
+                tokio::time::sleep(delay).await;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "Failed to download {} after {} attempt(s)",
+                        description, attempt
+                    )
+                });
+            }
+        }
+    }
+    unreachable!("archive download loop always returns")
 }
 
 /// Resolve a branch/tag name to a commit SHA using git ls-remote
@@ -321,22 +376,15 @@ pub async fn get_or_clone_enclave_source(
 
         fs::create_dir_all(&download_dir).await?;
 
-        // Download archive using reqwest
         tracing::info!("Downloading archive...");
-        let response = archive_http_client()?
-            .get(enclave_source)
-            .send()
-            .await
-            .context("Failed to download archive")?;
-
-        if !response.status().is_success() {
-            anyhow::bail!("Failed to download archive: HTTP {}", response.status());
-        }
-
-        let archive_bytes = response
-            .bytes()
-            .await
-            .context("Failed to read archive bytes")?;
+        let client = archive_http_client()?;
+        let archive_bytes = download_archive_bytes(
+            &client,
+            enclave_source,
+            "enclave source archive",
+            &ARCHIVE_RETRY_DELAYS,
+        )
+        .await?;
 
         tracing::info!("Downloaded {} bytes, extracting...", archive_bytes.len());
 
@@ -467,23 +515,14 @@ pub async fn get_or_clone_framework_source(
         "Downloading framework source archive from: {}",
         framework_source_url
     );
-    let response = archive_http_client()?
-        .get(framework_source_url)
-        .send()
-        .await
-        .context("Failed to download framework source archive")?;
-
-    if !response.status().is_success() {
-        anyhow::bail!(
-            "Failed to download framework source archive: HTTP {}",
-            response.status()
-        );
-    }
-
-    let archive_bytes = response
-        .bytes()
-        .await
-        .context("Failed to read framework source archive bytes")?;
+    let client = archive_http_client()?;
+    let archive_bytes = download_archive_bytes(
+        &client,
+        framework_source_url,
+        "framework source archive",
+        &ARCHIVE_RETRY_DELAYS,
+    )
+    .await?;
 
     tracing::info!("Downloaded {} bytes, extracting...", archive_bytes.len());
 
@@ -548,4 +587,114 @@ async fn find_top_level_dir(dir: &Path) -> Result<PathBuf, FindTopLevelDirError>
     top_dir.ok_or(FindTopLevelDirError::NoTopLevelDir(
         dir.display().to_string(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{download_archive_bytes, is_retryable_archive_status};
+    use reqwest::StatusCode;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn serve_statuses(
+        statuses: Vec<StatusCode>,
+        success_body: &'static [u8],
+    ) -> (String, tokio::task::JoinHandle<usize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut requests = 0;
+            for status in statuses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = socket.read(&mut request).await.unwrap();
+                requests += 1;
+
+                let body = if status.is_success() {
+                    success_body
+                } else {
+                    b"error"
+                };
+                let response = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    status.as_u16(),
+                    status.canonical_reason().unwrap_or(""),
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.write_all(body).await.unwrap();
+            }
+            requests
+        });
+        (format!("http://{address}/archive.tar.gz"), handle)
+    }
+
+    fn test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn archive_retry_statuses_are_transient_only() {
+        assert!(is_retryable_archive_status(StatusCode::REQUEST_TIMEOUT));
+        assert!(is_retryable_archive_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_archive_status(StatusCode::BAD_GATEWAY));
+        assert!(!is_retryable_archive_status(StatusCode::NOT_FOUND));
+        assert!(!is_retryable_archive_status(StatusCode::UNAUTHORIZED));
+    }
+
+    #[tokio::test]
+    async fn archive_download_retries_then_succeeds() {
+        let (url, server) = serve_statuses(
+            vec![StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK],
+            b"archive",
+        )
+        .await;
+        let bytes = download_archive_bytes(
+            &test_client(),
+            &url,
+            "test archive",
+            &[Duration::ZERO, Duration::ZERO],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(bytes, b"archive");
+        assert_eq!(server.await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn archive_download_does_not_retry_non_transient_status() {
+        let (url, server) = serve_statuses(vec![StatusCode::NOT_FOUND], b"").await;
+        let error = download_archive_bytes(
+            &test_client(),
+            &url,
+            "test archive",
+            &[Duration::ZERO, Duration::ZERO],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("after 1 attempt(s)"));
+        assert!(format!("{error:#}").contains("404 Not Found"));
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn archive_download_stops_after_three_attempts() {
+        let (url, server) = serve_statuses(vec![StatusCode::SERVICE_UNAVAILABLE; 3], b"").await;
+        let error = download_archive_bytes(
+            &test_client(),
+            &url,
+            "test archive",
+            &[Duration::ZERO, Duration::ZERO],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("after 3 attempt(s)"));
+        assert_eq!(server.await.unwrap(), 3);
+    }
 }

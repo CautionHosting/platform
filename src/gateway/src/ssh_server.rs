@@ -109,15 +109,24 @@ fn deploy_progress_started_message(milestone: &str) -> String {
     format!("remote: {milestone}")
 }
 
-fn deploy_progress_completed_message(elapsed: std::time::Duration) -> String {
+fn deploy_progress_finished_message(elapsed: std::time::Duration, failed: bool) -> String {
     let duration_str = if elapsed.as_secs() >= 60 {
         let mins = elapsed.as_secs() / 60;
         let secs = elapsed.as_secs() % 60;
         format!("{mins}m{secs}s")
     } else {
-        format!("{}.{:01}s", elapsed.as_secs(), elapsed.subsec_millis() / 100)
+        format!(
+            "{}.{:01}s",
+            elapsed.as_secs(),
+            elapsed.subsec_millis() / 100
+        )
     };
-    format!(" Complete! ({duration_str})\n")
+    let status = if failed { "Failed" } else { "Complete!" };
+    format!(" {status} ({duration_str})\n")
+}
+
+fn deploy_progress_completed_message(elapsed: std::time::Duration) -> String {
+    deploy_progress_finished_message(elapsed, false)
 }
 
 #[cfg(test)]
@@ -910,7 +919,7 @@ async fn handle_git_push(
 
                         // Check if this line is JSON (the final result)
                         if line.starts_with('{') {
-                            if let Some((milestone, start_time)) = current_milestone.take() {
+                            if let Some((_milestone, start_time)) = current_milestone.take() {
                                 let elapsed = start_time.elapsed();
                                 let done_msg = deploy_progress_completed_message(elapsed);
                                 if !done_msg.is_empty() {
@@ -921,7 +930,7 @@ async fn handle_git_push(
                             }
                             last_line = line;
                         } else if let Some(step_msg) = line.strip_prefix("STEP:") {
-                            if let Some((prev_milestone, start_time)) = current_milestone.take() {
+                            if let Some((_prev_milestone, start_time)) = current_milestone.take() {
                                 let elapsed = start_time.elapsed();
                                 let done_msg = deploy_progress_completed_message(elapsed);
                                 if !done_msg.is_empty() {
@@ -938,9 +947,10 @@ async fn handle_git_push(
                                 .await;
                             current_milestone = Some((milestone_text, Instant::now()));
                         } else if !line.is_empty() {
-                            if let Some((milestone, start_time)) = current_milestone.take() {
+                            let failed = line.starts_with("error:");
+                            if let Some((_milestone, start_time)) = current_milestone.take() {
                                 let elapsed = start_time.elapsed();
-                                let done_msg = deploy_progress_completed_message(elapsed);
+                                let done_msg = deploy_progress_finished_message(elapsed, failed);
                                 if !done_msg.is_empty() {
                                     let _ = session_handle
                                         .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
@@ -971,7 +981,7 @@ async fn handle_git_push(
         }
 
         // Handle any remaining content in buffer
-        if let Some((milestone, start_time)) = current_milestone.take() {
+        if let Some((_milestone, start_time)) = current_milestone.take() {
             let elapsed = start_time.elapsed();
             let done_msg = deploy_progress_completed_message(elapsed);
             if !done_msg.is_empty() {
@@ -1037,7 +1047,7 @@ async fn handle_git_push(
         };
 
         let success_msg = format!(
-            "\nApplication: {}\nAttestation: {}{}\n\nRun 'caution verify --from-local' to verify the application attestation against this checkout.\n\n",
+            "\nApplication: {}\nAttestation: {}{}\n\nRun 'caution verify' to verify the application attestation against this checkout.\n\n",
             deploy_result.url, attestation_url, dns_note
         );
         let _ = session_handle
@@ -1054,8 +1064,9 @@ async fn handle_git_push(
 mod tests {
     use super::{
         contains_non_line_terminal_control, deploy_progress_completed_message,
-        deploy_progress_started_message, parse_pushed_branch_ref,
-        resource_state_allows_noop_redeploy, PushedBranchSelection, ZERO_SHA1,
+        deploy_progress_finished_message, deploy_progress_started_message,
+        parse_pushed_branch_ref, resource_state_allows_noop_redeploy, PushedBranchSelection,
+        ZERO_SHA1,
     };
 
     const OLD_SHA: &str = "1111111111111111111111111111111111111111";
@@ -1110,6 +1121,13 @@ mod tests {
         // Zero duration
         let msg = deploy_progress_completed_message(std::time::Duration::from_millis(100));
         assert!(msg.contains("(0.1s)"));
+    }
+
+    #[test]
+    fn failed_deploy_progress_is_terminal_and_not_complete() {
+        let msg = deploy_progress_finished_message(std::time::Duration::from_secs(125), true);
+        assert_eq!(msg, " Failed (2m5s)\n");
+        assert!(!msg.contains("Complete"));
     }
 
     #[test]

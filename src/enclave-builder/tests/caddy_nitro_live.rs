@@ -148,8 +148,8 @@ async fn attest(client: &Client, base_url: &Url, live_certfp: &str) -> Result<bo
 
     let domain = base_url.host_str().context("CADDY_E2E_URL has no host")?;
     ensure!(
-        user_data.tls.mode == "caddy",
-        "attested TLS mode is not caddy"
+        user_data.tls.mode == "tls",
+        "attested TLS mode is not tls"
     );
     ensure!(
         user_data.tls.domain == domain,

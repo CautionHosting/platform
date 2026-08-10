@@ -9,11 +9,11 @@
 #   1. Wait for gateway
 #   2. Create test user
 #   3. Add SSH key
-#   4. Clone demo app and enable STEVE/e2e
+#   4. Clone demo app and enable STEVE v2 with X-Wing
 #   5. Deploy app
 #   6. Assert AWS security group exposes only the expected platform port
-#   7. Assert STEVE is reachable on 49500
-#   8. Assert Caddy routes encrypted E2P requests to STEVE
+#   7. Assert STEVE v2 is reachable on 49500
+#   8. Assert current plaintext routing and Caddy E2P v2 parity
 
 set -euo pipefail
 
@@ -337,38 +337,42 @@ step_pass "Security group platform port rules"
 # ── Step 7: Assert STEVE Reachability ────────────────────────────────
 
 STEP_NUM=7
-log "Checking STEVE key exchange endpoint on 49500..."
-REQUEST_JSON=$(jq -nc '{public_key_bytes: ([range(0;32)] | map(0)), nonce: ([range(0;16)] | map(0))}')
-STEVE_RESPONSE="$WORK_DIR/steve-response.json"
+log "Checking STEVE E2P v2 endpoint on 49500..."
+INVALID_E2P_BODY="$WORK_DIR/invalid-e2p-body.bin"
+printf "not-valid-cbor" > "$INVALID_E2P_BODY"
+STEVE_RESPONSE="$WORK_DIR/steve-response.txt"
+STEVE_STATUS=""
 
 STEVE_READY=false
 for i in $(seq 1 30); do
-    if curl -sf --connect-timeout 5 --max-time 10 \
-        -H "Content-Type: application/json" \
-        -d "$REQUEST_JSON" \
-        "http://$APP_IP:49500/e2p/v1/create_shared_key" > "$STEVE_RESPONSE"; then
-        if jq -e '.public_key and .signature and .enclave_encrypted_shared_key' "$STEVE_RESPONSE" >/dev/null; then
-            STEVE_READY=true
-            break
-        fi
+    STEVE_STATUS=$(curl -sS --connect-timeout 5 --max-time 10 \
+        -o "$STEVE_RESPONSE" -w "%{http_code}" \
+        -H "Content-Type: application/cbor" \
+        --data-binary "@$INVALID_E2P_BODY" \
+        "http://$APP_IP:49500/e2p/v2/session" || true)
+    if [ "$STEVE_STATUS" = "400" ] &&
+        jq -e '.error == "protocol_error"' "$STEVE_RESPONSE" >/dev/null 2>&1; then
+        STEVE_READY=true
+        break
     fi
     log "STEVE not ready yet... ($i/30)"
     sleep 5
 done
 
 if ! $STEVE_READY; then
-    echo "--- Last STEVE response ---"
+    echo "--- Last STEVE status/body ---"
+    echo "$STEVE_STATUS"
     cat "$STEVE_RESPONSE" 2>/dev/null || true
     echo ""
-    step_fail "STEVE endpoint reachable on 49500"
+    step_fail "STEVE E2P v2 endpoint reachable on 49500"
 fi
 
-step_pass "STEVE endpoint reachable on 49500"
+step_pass "STEVE E2P v2 endpoint reachable on 49500"
 
 # ── Step 8: Assert Caddy E2P Routing ─────────────────────────────────
 
 STEP_NUM=8
-log "Checking Caddy routes encrypted E2P requests to STEVE..."
+log "Checking Caddy routes E2P v2 requests to STEVE..."
 
 APP_ROOT_STATUS=$(curl -sS --connect-timeout 5 --max-time 10 \
     -o /dev/null -w "%{http_code}" \
@@ -378,33 +382,17 @@ if [ "$APP_ROOT_STATUS" != "200" ]; then
     step_fail "App root remains routed to app upstream (HTTP $APP_ROOT_STATUS)"
 fi
 
-INVALID_E2P_BODY="$WORK_DIR/invalid-e2p-body.bin"
-printf "not-a-valid-e2p-envelope" > "$INVALID_E2P_BODY"
-
-DIRECT_STEVE_RESPONSE="$WORK_DIR/direct-steve-invalid.txt"
+DIRECT_STEVE_STATUS="$STEVE_STATUS"
+DIRECT_STEVE_RESPONSE="$STEVE_RESPONSE"
 CADDY_E2P_RESPONSE="$WORK_DIR/caddy-e2p-invalid.txt"
-
-DIRECT_STEVE_STATUS=$(curl -sS --connect-timeout 5 --max-time 10 \
-    -o "$DIRECT_STEVE_RESPONSE" -w "%{http_code}" \
-    -H "Content-Type: application/octet-stream" \
-    -H "X-E2P-Key: test" \
-    -H "X-E2P-Original-Method: POST" \
-    --data-binary "@$INVALID_E2P_BODY" \
-    "http://$APP_IP:49500/__caution_e2p_probe" || true)
-
-if [ -z "$DIRECT_STEVE_STATUS" ] || [ "$DIRECT_STEVE_STATUS" = "000" ]; then
-    step_fail "Direct STEVE invalid encrypted request"
-fi
 
 CADDY_E2P_READY=false
 for i in $(seq 1 30); do
     CADDY_E2P_STATUS=$(curl -sS --connect-timeout 5 --max-time 10 \
         -o "$CADDY_E2P_RESPONSE" -w "%{http_code}" \
-        -H "Content-Type: application/octet-stream" \
-        -H "X-E2P-Key: test" \
-        -H "X-E2P-Original-Method: POST" \
+        -H "Content-Type: application/cbor" \
         --data-binary "@$INVALID_E2P_BODY" \
-        "http://$APP_IP/__caution_e2p_probe" || true)
+        "http://$APP_IP/e2p/v2/session" || true)
 
     if [ "$CADDY_E2P_STATUS" = "$DIRECT_STEVE_STATUS" ] &&
         cmp -s "$DIRECT_STEVE_RESPONSE" "$CADDY_E2P_RESPONSE"; then
@@ -425,7 +413,7 @@ if ! $CADDY_E2P_READY; then
     echo "${CADDY_E2P_STATUS:-}"
     cat "$CADDY_E2P_RESPONSE" 2>/dev/null || true
     echo ""
-    step_fail "Caddy encrypted E2P route"
+    step_fail "Caddy E2P v2 route"
 fi
 
-step_pass "Caddy encrypted E2P route"
+step_pass "Caddy E2P v2 route"
