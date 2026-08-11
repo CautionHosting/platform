@@ -35,6 +35,7 @@ Reads expected state from the database:
 
 - `get_active_organization_ids(pool)` - Fetch IDs of all active organizations
 - `get_provider_accounts(pool, org_id)` - Fetch all active provider accounts for an organization
+- `get_org_users(pool, org_id)` - Fetch all users belonging to an organization (username + optional email)
 - `get_compute_resources(pool, org_id)` - Fetch all active compute resources  
 - `get_compute_resource(pool, org_id, resource_id)` - Fetch a specific resource
 
@@ -61,13 +62,38 @@ Compares expected vs actual state and generates reports:
 
 ```rust
 use drift_detector::db::ProviderAccount;
-use drift_detector::drift::{detect_resource_drift, detect_orphaned_resources};
+use drift_detector::drift::{
+    ScannedInstance, detect_orphaned_resources, detect_resource_drift,
+    detect_unattributed_orphaned_resources,
+};
 
 // Check a single resource
 let drifts = detect_resource_drift(&expected_resource, Some(&aws_instance));
 
-// Find orphaned resources within one provider account
+// Find orphaned resources within one provider account. Orphan reports are
+// scoped to the account's organization: an instance is in scope when its
+// `org_id` tag names the organization, or when its `ResourceId` tag resolves
+// to a database resource of the organization.
 let orphaned = detect_orphaned_resources(&db_resources, &aws_instances, &account);
+
+// After every organization has been scanned, report instances that could not
+// be attributed to any organization (e.g. untagged instances in the shared
+// fully-managed account). Duplicate sightings of the same instance across
+// organizations' scans are reported once.
+let scanned: Vec<ScannedInstance> = queried_accounts
+    .iter()
+    .flat_map(|(account, instances)| {
+        instances.iter().map(|instance| ScannedInstance {
+            account: (*account).clone(),
+            instance: instance.clone(),
+        })
+    })
+    .collect();
+let unattributed = detect_unattributed_orphaned_resources(
+    &all_resources,
+    &scanned,
+    &known_org_ids,
+);
 ```
 
 ## Usage Example
@@ -85,10 +111,12 @@ async fn detect_org_drift(
     // 1. Get expected state from the database (AWS accounts only)
     let accounts = get_provider_accounts(pool, org_id).await?;
     let resources = get_compute_resources(pool, org_id).await?;
+    let users = get_org_users(pool, org_id).await?;
 
     // 2. Query actual state from AWS once per provider account. Empty static
     //    credentials fall back to the default credential chain.
     let mut all_drifts = Vec::new();
+    let mut scanned_instances = Vec::new();
     for account in &accounts {
         let creds = AwsCredentials {
             access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
@@ -113,14 +141,35 @@ async fn detect_org_drift(
         }
 
         // Find instances in this account that aren't tracked in the database.
-        // Orphaned instances carrying a `ResourceId` tag are cross-referenced
-        // against `resources` so the report includes the matching resource's
-        // name and expected state when the row still exists.
+        // Reports are scoped to the account's organization (matched by the
+        // `org_id` tag or a `ResourceId` database join), so a shared account
+        // does not produce duplicate reports for every organization. Orphaned
+        // instances carrying a `ResourceId` tag are cross-referenced against
+        // `resources` so the report includes the matching resource's name and
+        // expected state when the row still exists.
         all_drifts.extend(detect_orphaned_resources(&resources, &instances, account));
+
+        // Accumulate observed instances for the unattributed pass below.
+        scanned_instances.extend(instances.iter().map(|instance| ScannedInstance {
+            account: account.clone(),
+            instance: instance.clone(),
+        }));
     }
 
-    // 3. Generate report
-    Ok(OrganizationDriftReport::new(org_id, accounts, all_drifts))
+    // 2b. Instances that could not be attributed to any organization (e.g.
+    //     untagged instances in the shared fully-managed account) are
+    //     reported once, deduplicated across organizations' scans.
+    let org_ids = vec![org_id];
+    let unattributed = detect_unattributed_orphaned_resources(
+        &resources,
+        &scanned_instances,
+        &org_ids,
+    );
+    all_drifts.extend(unattributed);
+
+    // 3. Generate report (users are listed with username and, when one is on
+    //    file, email)
+    Ok(OrganizationDriftReport::new(org_id, accounts, users, all_drifts))
 }
 ```
 

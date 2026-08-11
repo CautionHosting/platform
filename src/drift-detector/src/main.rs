@@ -7,6 +7,15 @@
 //! queries the expected state from the database and actual state from AWS EC2,
 //! then prints a formatted drift report to stdout.
 //!
+//! Each organization's report lists its members (username, plus email when one
+//! is on file) alongside the scanned accounts and detected drift.
+//!
+//! Fully-managed deployments share one AWS account across all organizations,
+//! so orphan reports are scoped to each organization's own instances (matched
+//! by their `org_id` tag or `ResourceId` database join). Instances that cannot
+//! be attributed to any organization are reported once, after all
+//! organizations have been scanned.
+//!
 //! Arguments:
 //! - `ORG_ID` (optional): scan only this organization; all active organizations are
 //!   scanned when omitted
@@ -22,11 +31,12 @@
 use drift_detector::aws::{AwsCredentials, AwsError, Ec2Inspector, Ec2Instance};
 use drift_detector::db::{
     ComputeResource, DbError, ProviderAccount, get_active_organization_ids, get_compute_resources,
-    get_provider_accounts,
+    get_org_users, get_provider_accounts,
 };
 use drift_detector::drift::{
-    DriftReport, DriftSeverity, OrganizationDriftReport, ParseDriftSeverityError,
-    detect_orphaned_resources, detect_resource_drift, format_drift_report,
+    DriftReport, DriftSeverity, OrganizationDriftReport, ParseDriftSeverityError, ScannedInstance,
+    detect_orphaned_resources, detect_resource_drift, detect_unattributed_orphaned_resources,
+    format_drift_report, format_org_users,
 };
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -73,6 +83,8 @@ async fn run() -> Result<(), RunError> {
     let mut any_critical = false;
     let mut failed_scans = 0;
     let mut total_resources_checked = 0;
+    let mut all_scanned_instances: Vec<ScannedInstance> = Vec::new();
+    let mut all_resources: Vec<ComputeResource> = Vec::new();
 
     println!(
         "  DRIFT DETECTION REPORT - Scanning {} organization(s) (minimum severity: {})",
@@ -97,6 +109,8 @@ async fn run() -> Result<(), RunError> {
         {
             Ok(Some(scan)) => {
                 total_resources_checked += scan.resources_checked;
+                all_scanned_instances.extend(scan.scanned_instances);
+                all_resources.extend(scan.expected_resources);
 
                 println!("\n{}", format_drift_report(&scan.report));
 
@@ -118,6 +132,28 @@ async fn run() -> Result<(), RunError> {
                 failed_scans += 1;
                 tracing::error!(%org_id, ?err, "Failed to scan organization; skipping");
             }
+        }
+    }
+
+    let unattributed =
+        detect_unattributed_orphaned_resources(&all_resources, &all_scanned_instances, &org_ids)
+            .into_iter()
+            .filter(|drift| drift.severity >= min_severity)
+            .collect::<Vec<DriftReport>>();
+
+    if !unattributed.is_empty() {
+        println!("\n---\n");
+        println!("  UNATTRIBUTED INSTANCES");
+        println!("Instances that could not be attributed to any organization in this scan:");
+        for (i, drift) in unattributed.iter().enumerate() {
+            println!("{}. {drift}", i + 1);
+        }
+        if unattributed
+            .iter()
+            .any(|drift| drift.severity == DriftSeverity::Critical)
+        {
+            tracing::error!("CRITICAL unattributed instance detected");
+            any_critical = true;
         }
     }
 
@@ -271,6 +307,10 @@ struct OrgScan {
     report: OrganizationDriftReport,
     /// Number of expected resources that were compared against AWS.
     resources_checked: usize,
+    /// Instances observed while scanning this organization's accounts.
+    scanned_instances: Vec<ScannedInstance>,
+    /// The organization's expected resources, for the unattributed pass.
+    expected_resources: Vec<ComputeResource>,
 }
 
 /// Detect drift for one organization.
@@ -293,11 +333,20 @@ async fn detect_organization_drift(
         .await
         .map_err(|source| OrgScanError::LoadProviderAccounts { org_id, source })?;
 
+    let users = match get_org_users(pool, org_id).await {
+        Ok(users) => users,
+        Err(source) => {
+            tracing::warn!(%org_id, ?source, "Failed to load organization users; continuing");
+            Vec::new()
+        }
+    };
+
     if provider_accounts.is_empty() {
         println!(
-            "[{}] No active provider accounts found for organization {}\n",
+            "[{}] No active provider accounts found for organization {}\n{}",
             idx + 1,
-            org_id
+            org_id,
+            format_org_users(&users)
         );
         return Ok(None);
     }
@@ -308,9 +357,10 @@ async fn detect_organization_drift(
 
     if expected_resources.is_empty() {
         println!(
-            "[{}] No drift detected for organization {}: no resources tracked in database\n",
+            "[{}] No drift detected for organization {}: no resources tracked in database\n{}",
             idx + 1,
-            org_id
+            org_id,
+            format_org_users(&users)
         );
         return Ok(None);
     }
@@ -334,9 +384,11 @@ async fn detect_organization_drift(
     }
 
     Ok(Some(OrgScan {
-        report: OrganizationDriftReport::new(org_id, provider_accounts, result.drifts)
+        report: OrganizationDriftReport::new(org_id, provider_accounts, users, result.drifts)
             .with_severity(min_severity),
         resources_checked: result.resources_checked,
+        scanned_instances: result.scanned_instances,
+        expected_resources,
     }))
 }
 
@@ -348,6 +400,9 @@ struct AwsScanResult {
     resources_checked: usize,
     /// Number of provider accounts that could not be queried.
     accounts_failed: usize,
+    /// Instances observed across all queried accounts, for the unattributed
+    /// instance pass that runs after every organization has been scanned.
+    scanned_instances: Vec<ScannedInstance>,
 }
 
 /// Compare expected resources against AWS and collect all detected drift,
@@ -357,9 +412,10 @@ struct AwsScanResult {
 /// provider account, so a resource is only reported missing when it does not
 /// exist in that account. Resources whose owning account could not be queried
 /// are skipped (a warning is logged at the account level) rather than being
-/// reported missing. Orphan detection is likewise scoped per account, so an
-/// instance is only treated as tracked when the database records a resource
-/// for the same account.
+/// reported missing. Orphan detection is scoped per organization (a shared
+/// fully-managed account is listed by every organization's scan), and every
+/// observed instance is returned so the caller can run the unattributed
+/// instance pass afterwards.
 async fn detect_aws_drift(
     provider_accounts: &[ProviderAccount],
     expected_resources: &[ComputeResource],
@@ -369,11 +425,18 @@ async fn detect_aws_drift(
     let mut drifts = Vec::new();
     let mut resources_checked = 0;
     let mut accounts_failed = 0;
+    let mut scanned_instances: Vec<ScannedInstance> = Vec::new();
 
     let mut queried_accounts: Vec<(&ProviderAccount, Vec<Ec2Instance>)> = Vec::new();
     for account in provider_accounts {
         match query_live_instances(account, aws_access_key_id, aws_secret_access_key).await {
-            Ok(instances) => queried_accounts.push((account, instances)),
+            Ok(instances) => {
+                scanned_instances.extend(instances.iter().map(|instance| ScannedInstance {
+                    account: account.clone(),
+                    instance: instance.clone(),
+                }));
+                queried_accounts.push((account, instances));
+            }
             Err(err) => {
                 accounts_failed += 1;
                 tracing::warn!(
@@ -423,6 +486,7 @@ async fn detect_aws_drift(
         drifts,
         resources_checked,
         accounts_failed,
+        scanned_instances,
     }
 }
 

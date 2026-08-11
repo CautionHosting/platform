@@ -40,6 +40,16 @@ pub enum DbError {
         source: sqlx::Error,
     },
 
+    /// Failed to list the users of an organization.
+    #[error("failed to list users for organization {org_id}")]
+    ListOrgUsers {
+        /// The organization being queried.
+        org_id: Uuid,
+        /// The underlying database error.
+        #[source]
+        source: sqlx::Error,
+    },
+
     /// Failed to fetch a single compute resource.
     #[error("failed to fetch compute resource {resource_id} for organization {org_id}")]
     FetchComputeResource {
@@ -66,6 +76,15 @@ pub struct ProviderAccount {
     pub role_arn: Option<String>,
     /// The region to query (e.g. `us-west-2`).
     pub region: String,
+}
+
+/// Represents a user that belongs to an organization.
+#[derive(Debug, Clone)]
+pub struct OrgUser {
+    /// The user's display/login username.
+    pub username: String,
+    /// The user's email address, when one is on file.
+    pub email: Option<String>,
 }
 
 /// Represents a compute resource expected to exist in AWS.
@@ -158,6 +177,15 @@ impl From<sqlx::postgres::PgRow> for ProviderAccount {
     }
 }
 
+impl From<sqlx::postgres::PgRow> for OrgUser {
+    fn from(row: sqlx::postgres::PgRow) -> Self {
+        Self {
+            username: row.get("username"),
+            email: row.get("email"),
+        }
+    }
+}
+
 impl From<sqlx::postgres::PgRow> for ComputeResource {
     fn from(row: sqlx::postgres::PgRow) -> Self {
         Self {
@@ -241,6 +269,35 @@ pub async fn get_provider_accounts(
     let accounts: Vec<ProviderAccount> = rows.into_iter().map(Into::into).collect();
 
     Ok(accounts)
+}
+
+/// Fetch the users belonging to an organization, ordered by username.
+///
+/// All members are returned regardless of the user's active state, matching
+/// how the platform lists organization members.
+///
+/// # Errors
+///
+/// Returns [`DbError::ListOrgUsers`] when the query fails, carrying the
+/// queried organization ID.
+pub async fn get_org_users(pool: &PgPool, org_id: Uuid) -> Result<Vec<OrgUser>, DbError> {
+    let rows = sqlx::query(
+        r"
+        SELECT u.username, u.email
+        FROM organization_members om
+        INNER JOIN users u ON u.id = om.user_id
+        WHERE om.organization_id = $1
+        ORDER BY u.username ASC
+        ",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|source| DbError::ListOrgUsers { org_id, source })?;
+
+    let users: Vec<OrgUser> = rows.into_iter().map(Into::into).collect();
+
+    Ok(users)
 }
 
 /// Fetch all active compute resources for an organization.

@@ -7,7 +7,7 @@
 //! (from database) with actual state (from AWS) and reporting differences.
 
 use crate::aws::Ec2Instance;
-use crate::db::{ComputeResource, ProviderAccount, ResourceState};
+use crate::db::{ComputeResource, OrgUser, ProviderAccount, ResourceState};
 use aws_sdk_ec2::types::InstanceStateName;
 use std::collections::{HashMap, HashSet};
 
@@ -28,6 +28,11 @@ const RESOURCE_ID_TAG: &str = "ResourceId";
 const DEPLOYMENT_ID_TAG: &str = "caution:deployment-id";
 /// Tag key on deployment instances holding the configured HTTP domain.
 const CONFIG_DOMAIN_TAG: &str = "ConfigDomain";
+/// Tag key on instances holding the UUID of the organization they were
+/// launched for. Both build runners and deployments are tagged with their
+/// owning organization, so a fully-managed AWS account shared across
+/// organizations can attribute each instance to its owner.
+const ORG_ID_TAG: &str = "org_id";
 /// Legacy tag key recognized for backward compatibility. The platform now
 /// tags deployments with [`RESOURCE_ID_TAG`]; this alias was never emitted by
 /// the current codebase but is accepted so older orphaned instances are still
@@ -211,6 +216,9 @@ pub struct OrganizationDriftReport {
     /// The provider accounts that were scanned for this organization.
     pub accounts: Vec<ProviderAccount>,
 
+    /// The users belonging to this organization.
+    pub users: Vec<OrgUser>,
+
     /// All detected drifts.
     pub drifts: Vec<DriftReport>,
 
@@ -219,12 +227,13 @@ pub struct OrganizationDriftReport {
 }
 
 impl OrganizationDriftReport {
-    /// Create a new organization drift report from the scanned accounts and
-    /// the drifts detected across them.
+    /// Create a new organization drift report from the scanned accounts, the
+    /// organization's users, and the drifts detected across the accounts.
     #[must_use]
     pub fn new(
         org_id: uuid::Uuid,
         accounts: Vec<ProviderAccount>,
+        users: Vec<OrgUser>,
         drifts: Vec<DriftReport>,
     ) -> Self {
         let mut summary = DriftSummary::default();
@@ -242,6 +251,7 @@ impl OrganizationDriftReport {
         Self {
             org_id,
             accounts,
+            users,
             drifts,
             summary,
         }
@@ -249,7 +259,7 @@ impl OrganizationDriftReport {
 
     /// Keep only drifts at or above `min_severity`, recomputing the summary.
     ///
-    /// Account information is preserved.
+    /// Account and user information is preserved.
     #[must_use]
     pub fn with_severity(self, min_severity: DriftSeverity) -> Self {
         let filtered_drifts = self
@@ -258,7 +268,7 @@ impl OrganizationDriftReport {
             .filter(|d| d.severity >= min_severity)
             .collect();
 
-        OrganizationDriftReport::new(self.org_id, self.accounts, filtered_drifts)
+        OrganizationDriftReport::new(self.org_id, self.accounts, self.users, filtered_drifts)
     }
 
     /// Check if there are any critical drifts.
@@ -505,6 +515,16 @@ fn is_deployment(tags: &HashMap<String, String>) -> bool {
 /// informational. The owning provider account is included in the report
 /// description, along with the full tag set (keys and values).
 ///
+/// Orphan reports are scoped to the organization owning `account`. Fully
+/// managed deployments share one AWS account across all organizations, so
+/// every organization's scan lists every other organization's instances;
+/// without scoping each run would report all of them N times. An instance is
+/// in scope when its `org_id` tag names the account's organization, or when
+/// its `ResourceId` tag resolves to a database resource of that organization.
+/// Instances that cannot be attributed to any organization are reported once
+/// by [`detect_unattributed_orphaned_resources`] after all organizations have
+/// been scanned.
+///
 /// Instances carrying a `ResourceId` tag are cross-referenced against
 /// `db_resources`: the tag value is the database resource UUID, so the report
 /// names the matching resource and its expected state when the row still
@@ -526,7 +546,9 @@ pub fn detect_orphaned_resources(
     let mut orphaned = Vec::new();
 
     for instance in aws_instances {
-        if !db_resource_ids.contains(&instance.instance_id) {
+        if !db_resource_ids.contains(&instance.instance_id)
+            && instance_belongs_to_org(instance, account.organization_id, db_resources)
+        {
             let kind = classify_caution_resource(&instance.tags);
 
             let severity = if kind.is_some() {
@@ -564,6 +586,26 @@ pub fn detect_orphaned_resources(
     orphaned
 }
 
+/// Whether an instance can be attributed to the given organization: its
+/// `org_id` tag names the organization, or its `ResourceId` tag resolves to a
+/// database resource owned by the organization.
+fn instance_belongs_to_org(
+    instance: &Ec2Instance,
+    org_id: uuid::Uuid,
+    db_resources: &[ComputeResource],
+) -> bool {
+    if instance
+        .tags
+        .get(ORG_ID_TAG)
+        .is_some_and(|value| value == &org_id.to_string())
+    {
+        return true;
+    }
+
+    tagged_resource(instance, db_resources)
+        .is_some_and(|resource| resource.organization_id == org_id)
+}
+
 /// Format a tag map as `key=value` pairs sorted by key, e.g.
 /// `{ManagedBy=caution+tofu, Name=i-456, ResourceId=…}`.
 fn format_tags(tags: &HashMap<String, String>) -> String {
@@ -598,30 +640,45 @@ fn expected_instance_type(resource: &ComputeResource) -> &str {
         .unwrap_or("not configured")
 }
 
-/// Build the database-match clause for an orphaned instance's description.
-///
-/// The `ResourceId` tag (or its legacy `caution:resource_id` alias) holds the
-/// database resource UUID. When the tag is absent — builders do not carry one
-/// — no clause is emitted. When it is present, the report names the matching
-/// resource and its expected state, or notes that no row matches.
-fn describe_db_match(instance: &Ec2Instance, db_resources: &[ComputeResource]) -> String {
-    let Some(tagged_resource_id) = instance
+/// The value of an instance's resource-id tag (`ResourceId`, or its legacy
+/// `caution:resource_id` alias), when present.
+fn tagged_resource_id(instance: &Ec2Instance) -> Option<&str> {
+    instance
         .tags
         .get(RESOURCE_ID_TAG)
         .or_else(|| instance.tags.get(LEGACY_RESOURCE_ID_TAG))
-    else {
-        return String::new();
-    };
+        .map(String::as_str)
+}
 
-    let matched = uuid::Uuid::parse_str(tagged_resource_id)
+/// Look up the database resource referenced by an instance's resource-id tag.
+///
+/// The `ResourceId` tag (or its legacy alias) holds the database resource
+/// UUID. Builders do not carry one, so this returns `None` for them.
+fn tagged_resource<'a>(
+    instance: &Ec2Instance,
+    db_resources: &'a [ComputeResource],
+) -> Option<&'a ComputeResource> {
+    let resource_id = tagged_resource_id(instance)?;
+    uuid::Uuid::parse_str(resource_id)
         .ok()
         .and_then(|resource_uuid| {
             db_resources
                 .iter()
                 .find(|resource| resource.id == resource_uuid)
-        });
+        })
+}
 
-    match matched {
+/// Build the database-match clause for an orphaned instance's description.
+///
+/// When the resource-id tag is absent no clause is emitted. When it is
+/// present, the report names the matching resource and its expected state, or
+/// notes that no row matches.
+fn describe_db_match(instance: &Ec2Instance, db_resources: &[ComputeResource]) -> String {
+    let Some(resource_id) = tagged_resource_id(instance) else {
+        return String::new();
+    };
+
+    match tagged_resource(instance, db_resources) {
         Some(resource) => format!(
             "; matching database resource '{}' (expected state: {}, region: {}, \
              public IP: {:?}, instance type: {})",
@@ -632,9 +689,120 @@ fn describe_db_match(instance: &Ec2Instance, db_resources: &[ComputeResource]) -
             expected_instance_type(resource),
         ),
         None => {
-            format!("; no matching database resource for tagged resource id '{tagged_resource_id}'")
+            format!("; no matching database resource for tagged resource id '{resource_id}'")
         }
     }
+}
+
+/// An EC2 instance observed while scanning a provider account, together with
+/// the account it was listed through.
+///
+/// Instances in a shared fully-managed account are listed once per
+/// organization that scans it; [`detect_unattributed_orphaned_resources`]
+/// deduplicates them by instance ID.
+#[derive(Debug, Clone)]
+pub struct ScannedInstance {
+    /// The provider account the instance was listed through.
+    pub account: ProviderAccount,
+    /// The instance itself.
+    pub instance: Ec2Instance,
+}
+
+/// Detect orphaned instances that could not be attributed to any
+/// organization.
+///
+/// Runs after every organization has been scanned. An instance is attributed
+/// to an organization when its `org_id` tag names one of `known_org_ids`, or
+/// when its `ResourceId` tag resolves to a database resource owned by one of
+/// those organizations. Instances tracked in `db_resources` by instance ID
+/// are skipped, and duplicate sightings of the same instance are reported
+/// once (a shared account is listed once per organization). Everything else
+/// is reported here so that no dangling instance in a shared account silently
+/// escapes the per-organization passes.
+///
+/// Severity follows the same rule as [`detect_orphaned_resources`]: instances
+/// matching the platform's tagging scheme are critical, everything else is
+/// informational.
+#[must_use]
+pub fn detect_unattributed_orphaned_resources(
+    db_resources: &[ComputeResource],
+    scanned_instances: &[ScannedInstance],
+    known_org_ids: &[uuid::Uuid],
+) -> Vec<DriftReport> {
+    let known_orgs: HashSet<&uuid::Uuid> = known_org_ids.iter().collect();
+    let tracked_ids: HashSet<&str> = db_resources
+        .iter()
+        .map(|resource| resource.provider_resource_id.as_str())
+        .collect();
+
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut unattributed = Vec::new();
+
+    for scanned in scanned_instances {
+        let instance = &scanned.instance;
+
+        if tracked_ids.contains(instance.instance_id.as_str()) {
+            continue;
+        }
+        if !seen.insert(instance.instance_id.as_str()) {
+            continue;
+        }
+        if instance_attributed_to_known_org(instance, db_resources, &known_orgs) {
+            continue;
+        }
+
+        let kind = classify_caution_resource(&instance.tags);
+        let severity = if kind.is_some() {
+            DriftSeverity::Critical
+        } else {
+            DriftSeverity::Info
+        };
+
+        unattributed.push(DriftReport::new(
+            DriftType::OrphanedInAws(instance.instance_id.clone()),
+            format!(
+                "Instance '{}' exists in AWS but could not be attributed to any organization \
+                 (account: {}, region: {}): state {:?}, type: {:?}, \
+                 public IP: {:?}, private IP: {:?}, VPC: {:?}, subnet: {:?}, \
+                 tags: {}{}{}",
+                instance.instance_id,
+                scanned.account.external_account_id,
+                scanned.account.region,
+                instance.state,
+                instance.instance_type,
+                instance.public_ip,
+                instance.private_ip,
+                instance.vpc_id,
+                instance.subnet_id,
+                format_tags(&instance.tags),
+                kind.map(|kind| format!(" (appears to be a Caution {kind})"))
+                    .unwrap_or_default(),
+                describe_db_match(instance, db_resources),
+            ),
+            severity,
+        ));
+    }
+
+    unattributed
+}
+
+/// Whether an instance can be attributed to one of the known organizations:
+/// its `org_id` tag names a known organization, or its `ResourceId` tag
+/// resolves to a database resource owned by a known organization.
+fn instance_attributed_to_known_org(
+    instance: &Ec2Instance,
+    db_resources: &[ComputeResource],
+    known_orgs: &HashSet<&uuid::Uuid>,
+) -> bool {
+    let org_tagged = instance
+        .tags
+        .get(ORG_ID_TAG)
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .is_some_and(|org_id| known_orgs.contains(&org_id));
+
+    org_tagged
+        || tagged_resource(instance, db_resources)
+            .is_some_and(|resource| known_orgs.contains(&resource.organization_id))
 }
 
 /// Convert AWS instance state to database resource state.
@@ -655,10 +823,40 @@ fn db_state_from_aws(state: &InstanceStateName) -> ResourceState {
     }
 }
 
+/// Format an organization's users as a display section, one per line:
+/// `- username (email)` when an email is on file, `- username` otherwise.
+///
+/// Returns an empty string when there are no users, so the section can be
+/// omitted from reports and messages.
+#[must_use]
+pub fn format_org_users(users: &[OrgUser]) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::new();
+
+    if !users.is_empty() {
+        output.push_str("Users:\n");
+        for user in users {
+            match &user.email {
+                Some(email) => {
+                    writeln!(output, "  - {} ({})", user.username, email)
+                        .expect("writing to a String cannot fail");
+                }
+                None => {
+                    writeln!(output, "  - {}", user.username)
+                        .expect("writing to a String cannot fail");
+                }
+            }
+        }
+    }
+
+    output
+}
+
 /// Format drift reports for display.
 ///
-/// The report lists the scanned provider accounts, the drift summary, and each
-/// drift ordered by resource ID.
+/// The report lists the scanned provider accounts, the organization's users,
+/// the drift summary, and each drift ordered by resource ID.
 #[must_use]
 pub fn format_drift_report(report: &OrganizationDriftReport) -> String {
     use std::fmt::Write as _;
@@ -681,6 +879,8 @@ pub fn format_drift_report(report: &OrganizationDriftReport) -> String {
             .expect("writing to a String cannot fail");
         }
     }
+
+    output.push_str(&format_org_users(&report.users));
 
     writeln!(output, "{}", report.summary).expect("writing to a String cannot fail");
     output.push('\n');
@@ -770,16 +970,19 @@ mod tests {
 
         let aws_instances = vec![
             tagged_instance("i-123", HashMap::new()),
-            Ec2Instance {
-                instance_id: "i-456".to_string(),
-                instance_type: Some("t3.micro".to_string()),
-                state: InstanceStateName::Running,
-                public_ip: Some("54.123.45.67".to_string()),
-                private_ip: Some("10.0.1.100".to_string()),
-                vpc_id: Some("vpc-12345678".to_string()),
-                subnet_id: Some("subnet-12345678".to_string()),
-                tags: HashMap::new(),
-            },
+            ensure_org_tag(
+                Ec2Instance {
+                    instance_id: "i-456".to_string(),
+                    instance_type: Some("t3.micro".to_string()),
+                    state: InstanceStateName::Running,
+                    public_ip: Some("54.123.45.67".to_string()),
+                    private_ip: Some("10.0.1.100".to_string()),
+                    vpc_id: Some("vpc-12345678".to_string()),
+                    subnet_id: Some("subnet-12345678".to_string()),
+                    tags: HashMap::new(),
+                },
+                account.organization_id,
+            ),
         ];
 
         let orphaned = detect_orphaned_resources(&db_resources, &aws_instances, &account);
@@ -823,17 +1026,19 @@ mod tests {
         }
     }
 
-    /// A resource with a known database ID, so the `ResourceId` tag lookup can
-    /// match it.
+    /// A resource with a known database ID and the given account's
+    /// organization, so the `ResourceId` tag lookup can match it within that
+    /// account's scan.
     fn tagged_resource(
+        account: &ProviderAccount,
         resource_uuid: uuid::Uuid,
         instance_id: &str,
         state: ResourceState,
     ) -> ComputeResource {
         ComputeResource {
             id: resource_uuid,
-            organization_id: uuid::Uuid::new_v4(),
-            provider_account_id: uuid::Uuid::new_v4(),
+            organization_id: account.organization_id,
+            provider_account_id: account.id,
             provider_resource_id: instance_id.to_string(),
             resource_name: Some("app-matching".to_string()),
             state,
@@ -863,9 +1068,21 @@ mod tests {
         }
     }
 
+    /// Tag an instance with the given organization unless it already carries
+    /// an `org_id` tag.
+    fn ensure_org_tag(mut instance: Ec2Instance, org_id: uuid::Uuid) -> Ec2Instance {
+        instance
+            .tags
+            .entry(ORG_ID_TAG.to_string())
+            .or_insert_with(|| org_id.to_string());
+        instance
+    }
+
     fn orphaned_from(db_resources: &[ComputeResource], instance: Ec2Instance) -> DriftReport {
-        let orphaned = detect_orphaned_resources(db_resources, &[instance], &test_account());
-        assert_eq!(orphaned.len(), 1);
+        let account = test_account();
+        let instance = ensure_org_tag(instance, account.organization_id);
+        let orphaned = detect_orphaned_resources(db_resources, &[instance], &account);
+        assert_eq!(orphaned.len(), 1, "expected exactly one orphan report");
         orphaned.into_iter().next().expect("one orphan reported")
     }
 
@@ -910,8 +1127,6 @@ mod tests {
 
     #[test]
     fn test_orphaned_legacy_resource_id_tagged_instance_is_critical() {
-        // `caution:resource_id` was never emitted by the current platform but
-        // is recognized for backward compatibility.
         let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
         let report = orphaned_from(
             &db_resources,
@@ -923,7 +1138,7 @@ mod tests {
     }
 
     #[test]
-    fn test_orphaned_untagged_instance_is_info() {
+    fn test_orphaned_org_tagged_non_caution_instance_is_info() {
         let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
         let report = orphaned_from(&db_resources, tagged_instance("i-456", HashMap::new()));
 
@@ -976,8 +1191,6 @@ mod tests {
 
     #[test]
     fn test_orphaned_onprem_builder_is_reported_as_builder_not_deployment() {
-        // Managed on-prem builders carry both `ManagedBy: caution-builder`
-        // and `caution:deployment-id`; builder markers take precedence.
         let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
         let report = orphaned_from(
             &db_resources,
@@ -1038,15 +1251,22 @@ mod tests {
 
     #[test]
     fn test_orphaned_matches_database_resource_and_expected_state() {
+        let account = test_account();
         let resource_uuid = uuid::Uuid::new_v4();
         let db_resources = vec![
             create_test_resource("i-123", ResourceState::Running),
-            tagged_resource(resource_uuid, "i-999", ResourceState::Running),
+            tagged_resource(&account, resource_uuid, "i-999", ResourceState::Running),
         ];
-        let report = orphaned_from(
+        let orphaned = detect_orphaned_resources(
             &db_resources,
-            tagged_instance("i-456", tags(&[("ResourceId", &resource_uuid.to_string())])),
+            &[tagged_instance(
+                "i-456",
+                tags(&[("ResourceId", &resource_uuid.to_string())]),
+            )],
+            &account,
         );
+        assert_eq!(orphaned.len(), 1);
+        let report = &orphaned[0];
 
         assert_eq!(report.severity, DriftSeverity::Critical);
         assert!(
@@ -1081,23 +1301,26 @@ mod tests {
 
     #[test]
     fn test_orphaned_matches_stopped_database_resource_state() {
+        let account = test_account();
         let resource_uuid = uuid::Uuid::new_v4();
         let db_resources = vec![
             create_test_resource("i-123", ResourceState::Running),
-            tagged_resource(resource_uuid, "i-999", ResourceState::Stopped),
+            tagged_resource(&account, resource_uuid, "i-999", ResourceState::Stopped),
         ];
-        let report = orphaned_from(
+        let orphaned = detect_orphaned_resources(
             &db_resources,
-            tagged_instance("i-456", tags(&[("ResourceId", &resource_uuid.to_string())])),
+            &[tagged_instance(
+                "i-456",
+                tags(&[("ResourceId", &resource_uuid.to_string())]),
+            )],
+            &account,
         );
-
-        assert!(report.description.contains("expected state: stopped"));
+        assert_eq!(orphaned.len(), 1);
+        assert!(orphaned[0].description.contains("expected state: stopped"));
     }
 
     #[test]
     fn test_orphaned_builder_has_no_db_match_clause() {
-        // Builders do not carry a `ResourceId` tag, so no database match is
-        // attempted and the description has no match clause.
         let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
         let report = orphaned_from(
             &db_resources,
@@ -1108,6 +1331,173 @@ mod tests {
         assert!(report.description.contains("Caution builder"));
         assert!(!report.description.contains("matching database resource"));
         assert!(!report.description.contains("no matching database resource"));
+    }
+
+    #[test]
+    fn test_orphaned_other_orgs_instance_not_reported_in_this_orgs_scan() {
+        let account = test_account();
+        let db_resources = vec![tracked_resource(&account, "i-123", ResourceState::Running)];
+
+        let other_orgs_instance = tagged_instance(
+            "i-456",
+            tags(&[
+                ("org_id", "550e8400-e29b-41d4-a716-446655440000"),
+                ("ManagedBy", "caution+tofu"),
+            ]),
+        );
+
+        let orphaned = detect_orphaned_resources(&db_resources, &[other_orgs_instance], &account);
+        assert!(
+            orphaned.is_empty(),
+            "another org's instance must not be reported here"
+        );
+    }
+
+    #[test]
+    fn test_unattributed_untagged_instance_reported_once_across_accounts() {
+        let account_a = test_account();
+        let account_b = test_account();
+        let instance = tagged_instance("i-456", HashMap::new());
+        let scanned = vec![
+            ScannedInstance {
+                account: account_a.clone(),
+                instance: instance.clone(),
+            },
+            ScannedInstance {
+                account: account_b,
+                instance,
+            },
+        ];
+
+        let reports =
+            detect_unattributed_orphaned_resources(&[], &scanned, &[account_a.organization_id]);
+
+        assert_eq!(reports.len(), 1);
+        match &reports[0].drift_type {
+            DriftType::OrphanedInAws(id) => assert_eq!(id, "i-456"),
+            _ => panic!("Expected OrphanedInAws drift type"),
+        }
+        assert_eq!(reports[0].severity, DriftSeverity::Info);
+        assert!(
+            reports[0]
+                .description
+                .contains("could not be attributed to any organization")
+        );
+        assert!(reports[0].description.contains("123456789012"));
+    }
+
+    #[test]
+    fn test_unattributed_caution_managed_instance_is_critical() {
+        let account = test_account();
+        let scanned = vec![ScannedInstance {
+            account: account.clone(),
+            instance: tagged_instance("i-456", tags(&[("ManagedBy", "caution+tofu")])),
+        }];
+
+        let reports =
+            detect_unattributed_orphaned_resources(&[], &scanned, &[account.organization_id]);
+
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].severity, DriftSeverity::Critical);
+        assert!(
+            reports[0]
+                .description
+                .contains("appears to be a Caution deployment")
+        );
+    }
+
+    #[test]
+    fn test_unattributed_instance_tagged_with_known_org_not_reported() {
+        let account = test_account();
+        let instance = tagged_instance(
+            "i-456",
+            tags(&[
+                ("org_id", &account.organization_id.to_string()),
+                ("ManagedBy", "caution+tofu"),
+            ]),
+        );
+        let scanned = vec![ScannedInstance {
+            account: account.clone(),
+            instance,
+        }];
+
+        let reports =
+            detect_unattributed_orphaned_resources(&[], &scanned, &[account.organization_id]);
+
+        assert!(
+            reports.is_empty(),
+            "an instance owned by a known organization is not unattributed"
+        );
+    }
+
+    #[test]
+    fn test_unattributed_instance_matching_known_resource_not_reported() {
+        let account = test_account();
+        let resource_uuid = uuid::Uuid::new_v4();
+        let db_resources = vec![tagged_resource(
+            &account,
+            resource_uuid,
+            "i-999",
+            ResourceState::Running,
+        )];
+        let instance =
+            tagged_instance("i-456", tags(&[("ResourceId", &resource_uuid.to_string())]));
+        let scanned = vec![ScannedInstance {
+            account: account.clone(),
+            instance,
+        }];
+
+        let reports = detect_unattributed_orphaned_resources(
+            &db_resources,
+            &scanned,
+            &[account.organization_id],
+        );
+
+        assert!(
+            reports.is_empty(),
+            "a resource-owned instance is not unattributed"
+        );
+    }
+
+    #[test]
+    fn test_unattributed_tracked_instance_not_reported() {
+        let account = test_account();
+        let db_resources = vec![tracked_resource(&account, "i-456", ResourceState::Running)];
+        let scanned = vec![ScannedInstance {
+            account: account.clone(),
+            instance: tagged_instance("i-456", HashMap::new()),
+        }];
+
+        let reports = detect_unattributed_orphaned_resources(
+            &db_resources,
+            &scanned,
+            &[account.organization_id],
+        );
+
+        assert!(reports.is_empty(), "a tracked instance is not unattributed");
+    }
+
+    #[test]
+    fn test_unattributed_stale_org_id_reported() {
+        let account = test_account();
+        let scanned = vec![ScannedInstance {
+            account: account.clone(),
+            instance: tagged_instance(
+                "i-456",
+                tags(&[("org_id", "550e8400-e29b-41d4-a716-446655440000")]),
+            ),
+        }];
+
+        let reports =
+            detect_unattributed_orphaned_resources(&[], &scanned, &[account.organization_id]);
+
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].severity, DriftSeverity::Info);
+        assert!(
+            reports[0]
+                .description
+                .contains("could not be attributed to any organization")
+        );
     }
 
     #[test]
@@ -1302,16 +1692,54 @@ mod tests {
             ),
         ];
 
-        let report = OrganizationDriftReport::new(uuid::Uuid::new_v4(), vec![account], drifts);
+        let report =
+            OrganizationDriftReport::new(uuid::Uuid::new_v4(), vec![account], vec![], drifts);
 
         let formatted = format_drift_report(&report);
 
         assert!(formatted.contains("123456789012"));
         assert!(formatted.contains("us-west-2"));
         assert!(formatted.contains("role: arn:aws:iam::123456789012:role/caution"));
+        assert!(!formatted.contains("Users:"), "no users section when empty");
         let missing = formatted.find("i-123").expect("missing resource listed");
         let orphaned = formatted.find("i-456").expect("orphaned resource listed");
         assert!(missing < orphaned, "drifts should be sorted by resource ID");
+    }
+
+    #[test]
+    fn test_format_drift_report_includes_users_with_optional_emails() {
+        let users = vec![
+            OrgUser {
+                username: "alice".to_string(),
+                email: Some("alice@example.com".to_string()),
+            },
+            OrgUser {
+                username: "bob".to_string(),
+                email: None,
+            },
+        ];
+
+        let report = OrganizationDriftReport::new(
+            uuid::Uuid::new_v4(),
+            vec![],
+            users,
+            vec![DriftReport::new(
+                DriftType::MissingInAws("i-123".to_string()),
+                "missing".to_string(),
+                DriftSeverity::Critical,
+            )],
+        );
+
+        let formatted = format_drift_report(&report);
+
+        assert!(formatted.contains("Users:"));
+        assert!(formatted.contains("  - alice (alice@example.com)"));
+        assert!(formatted.contains("  - bob"));
+    }
+
+    #[test]
+    fn test_format_org_users_omits_section_when_empty() {
+        assert_eq!(format_org_users(&[]), "");
     }
 
     #[test]
