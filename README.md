@@ -198,6 +198,11 @@ caution verify --pcrs pcrs.txt
 This is explicitly PCR-only: it does not verify TLS certificate binding, and
 the persisted trusted state contains no `tls` object.
 
+### Credit suspension recovery
+
+Resuming a fully managed app starts the same instance and reattaches the
+Elastic IP tagged to that app. Redeployment is not required.
+
 ## Reference
 
 ### Limitations
