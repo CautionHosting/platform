@@ -90,6 +90,7 @@ enum ArchivePreflightStatus {
 fn classify_archive_preflight(
     status: reqwest::StatusCode,
     attempt: usize,
+    attempts: usize,
 ) -> ArchivePreflightStatus {
     if status.is_success() {
         ArchivePreflightStatus::Passed
@@ -98,7 +99,7 @@ fn classify_archive_preflight(
         reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
     ) {
         ArchivePreflightStatus::Missing
-    } else if attempt < ARCHIVE_PREFLIGHT_ATTEMPTS
+    } else if attempt < attempts
         && (matches!(
             status,
             reqwest::StatusCode::REQUEST_TIMEOUT | reqwest::StatusCode::TOO_MANY_REQUESTS
@@ -107,6 +108,14 @@ fn classify_archive_preflight(
         ArchivePreflightStatus::Retry
     } else {
         ArchivePreflightStatus::Failed
+    }
+}
+
+fn archive_preflight_urls(url: &str, use_platform_mirror: bool) -> Vec<String> {
+    if use_platform_mirror {
+        enclave_builder::archive_url_candidates(url)
+    } else {
+        vec![url.to_string()]
     }
 }
 
@@ -6444,9 +6453,9 @@ enclave "default" {{
         // user-filesystem extraction (minutes in). Only meaningful when
         // reproducing from a manifest.
         if external_manifest.is_some() {
-            self.preflight_archive_url("Enclave source", &enclave_source)
+            self.preflight_archive_url("Enclave source", &enclave_source, false)
                 .await?;
-            self.preflight_archive_url("Framework source", &framework_source)
+            self.preflight_archive_url("Framework source", &framework_source, true)
                 .await?;
         }
 
@@ -7653,85 +7662,131 @@ enclave "default" {{
     }
 
     /// Fail-fast reachability check for an enclave/framework source archive.
-    /// Retry a transient HEAD failure once, then stop before the expensive build.
-    async fn preflight_archive_url(&self, label: &str, url: &str) -> Result<()> {
+    /// Try configured mirrors in order, then stop before the expensive build.
+    async fn preflight_archive_url(
+        &self,
+        label: &str,
+        url: &str,
+        use_platform_mirror: bool,
+    ) -> Result<()> {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Ok(());
+        }
+
+        let candidates = archive_preflight_urls(url, use_platform_mirror);
+        self.preflight_archive_urls(label, &candidates).await
+    }
+
+    async fn preflight_archive_urls(&self, label: &str, urls: &[String]) -> Result<()> {
+        if urls.is_empty() {
+            bail!("No archive URLs provided for {label}");
         }
 
         output::status(format_args!(
             "\nChecking {} is reachable on remote...",
             label.to_lowercase()
         ));
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
+        let mut client = reqwest::Client::builder();
+        if urls.len() == 1 {
+            client = client.redirect(reqwest::redirect::Policy::none());
+        }
+        let client = client
             .build()
             .context("Failed to create archive preflight client")?;
-        for attempt in 1..=ARCHIVE_PREFLIGHT_ATTEMPTS {
-            match client
-                .head(url)
-                .timeout(ARCHIVE_PREFLIGHT_TIMEOUT)
-                .send()
-                .await
-            {
-                Ok(response) => match classify_archive_preflight(response.status(), attempt) {
-                    ArchivePreflightStatus::Passed => {
-                        output::verbose(
-                            self.verbose,
-                            format_args!(
-                                "{} reachable (HTTP {})",
+        let attempts = ARCHIVE_PREFLIGHT_ATTEMPTS;
+        let mut failures = Vec::new();
+
+        for url in urls {
+            for attempt in 1..=attempts {
+                match client
+                    .head(url)
+                    .timeout(ARCHIVE_PREFLIGHT_TIMEOUT)
+                    .send()
+                    .await
+                {
+                    Ok(response) => match classify_archive_preflight(
+                        response.status(),
+                        attempt,
+                        attempts,
+                    ) {
+                        ArchivePreflightStatus::Passed => {
+                            output::verbose(
+                                self.verbose,
+                                format_args!(
+                                    "{} reachable via {} (HTTP {})",
+                                    label,
+                                    url,
+                                    response.status().as_u16()
+                                ),
+                            );
+                            output::status(format_args!("  {} preflight passed ✓", label));
+                            return Ok(());
+                        }
+                        ArchivePreflightStatus::Missing if urls.len() == 1 => {
+                            bail!(
+                                "{label} archive is not available on the remote (HTTP {code}):\n  \
+                                 {url}\n\n\
+                                 The deployed enclave references a {lower} commit that the remote \
+                                 no longer serves — it may have been garbage-collected, or the \
+                                 manifest is stale. This build cannot be reproduced from the \
+                                 remote manifest.",
+                                label = label,
+                                lower = label.to_lowercase(),
+                                code = response.status().as_u16(),
+                                url = url,
+                            );
+                        }
+                        ArchivePreflightStatus::Retry => {
+                            output::warning(format_args!(
+                                "  {} preflight returned HTTP {}; retrying once",
                                 label,
                                 response.status().as_u16()
-                            ),
-                        );
-                        output::status(format_args!("  {} preflight passed ✓", label));
-                        return Ok(());
-                    }
-                    ArchivePreflightStatus::Missing => {
-                        bail!(
-                            "{label} archive is not available on the remote (HTTP {code}):\n  \
-                             {url}\n\n\
-                             The deployed enclave references a {lower} commit that the remote no \
-                             longer serves — it may have been garbage-collected, or the manifest \
-                             is stale. This build cannot be reproduced from the remote manifest.",
-                            label = label,
-                            lower = label.to_lowercase(),
-                            code = response.status().as_u16(),
-                            url = url,
-                        );
-                    }
-                    ArchivePreflightStatus::Retry => {
+                            ));
+                        }
+                        ArchivePreflightStatus::Failed if urls.len() == 1 => {
+                            bail!(
+                                "{label} preflight failed (HTTP {code}):\n  {url}\n\n\
+                                 Refusing to start the reproduction build.",
+                                code = response.status().as_u16(),
+                            );
+                        }
+                        ArchivePreflightStatus::Missing | ArchivePreflightStatus::Failed => {
+                            let code = response.status().as_u16().to_string();
+                            failures.push([url.as_str(), ": HTTP ", code.as_str()].concat());
+                            break;
+                        }
+                    },
+                    Err(error) if attempt < attempts => {
                         output::warning(format_args!(
-                            "  {} preflight returned HTTP {}; retrying once",
-                            label,
-                            response.status().as_u16()
+                            "  {} preflight failed: {}; retrying once",
+                            label, error
                         ));
                     }
-                    ArchivePreflightStatus::Failed => {
+                    Err(error) if urls.len() == 1 => {
                         bail!(
-                            "{label} preflight failed (HTTP {code}):\n  {url}\n\n\
-                             Refusing to start the reproduction build.",
-                            code = response.status().as_u16(),
+                            "{label} preflight failed after {attempts} attempts:\n  {url}\n  \
+                             {error}\n\nRefusing to start the reproduction build.",
                         );
                     }
-                },
-                Err(error) if attempt < ARCHIVE_PREFLIGHT_ATTEMPTS => {
-                    output::warning(format_args!(
-                        "  {} preflight failed: {}; retrying once",
-                        label, error
-                    ));
-                }
-                Err(error) => {
-                    bail!(
-                        "{label} preflight failed after {attempts} attempts:\n  {url}\n  \
-                         {error}\n\nRefusing to start the reproduction build.",
-                        attempts = ARCHIVE_PREFLIGHT_ATTEMPTS,
-                    );
+                    Err(error) => {
+                        let details = error.to_string();
+                        failures.push([url.as_str(), ": ", details.as_str()].concat());
+                        break;
+                    }
                 }
             }
         }
 
-        unreachable!("archive preflight attempt loop is non-empty")
+        let failures = failures.join("\n  ");
+        let lower_label = label.to_lowercase();
+        Err(anyhow::anyhow!([
+            "All ",
+            lower_label.as_str(),
+            " archive preflights failed:\n  ",
+            failures.as_str(),
+            "\n\nRefusing to start the reproduction build.",
+        ]
+        .concat()))
     }
 
     /// Cheap network preflight: confirm the app source branch is present on the
@@ -9795,10 +9850,10 @@ mod tests {
     use super::openpgp;
     use super::{
         AccountCommands, ApiClient, ArchivePreflightStatus, Cli, Commands, LoginUsernameError,
-        MAX_ATTESTATION_RESPONSE_BYTES, PgpKeyCommands, RegisterUsernameError, RunError,
-        TlsConnection, TlsExpectation, TrustedHashes, TrustedTls,
-        append_attestation_response_chunk, attestation_inspection_json, attestation_user_data,
-        classify_archive_preflight, display_user_data, dns_answer_is_absent,
+        ARCHIVE_PREFLIGHT_ATTEMPTS, MAX_ATTESTATION_RESPONSE_BYTES, PgpKeyCommands,
+        RegisterUsernameError, RunError, TlsConnection, TlsExpectation, TrustedHashes, TrustedTls,
+        append_attestation_response_chunk, archive_preflight_urls, attestation_inspection_json,
+        attestation_user_data, classify_archive_preflight, display_user_data, dns_answer_is_absent,
         dns_contains_deployment_ip, encrypt_env_file, encrypt_secret_value,
         keymaker_cert_eligibility, load_recipient_cert, login_begin_request_body,
         measured_build_cache_key, normalize_keyring, parse_env_assignments,
@@ -9822,6 +9877,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::PathBuf;
     use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 
     #[test]
@@ -10305,6 +10361,47 @@ enclave "main" {{
             qr: false,
             workdir: None,
         }
+    }
+
+    async fn serve_preflight_responses(
+        responses: Vec<(reqwest::StatusCode, Option<String>)>,
+    ) -> (String, tokio::task::JoinHandle<usize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut requests = 0;
+            for (status, location) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = socket.read(&mut request).await.unwrap();
+                requests += 1;
+
+                let code = status.as_u16().to_string();
+                let mut response = [
+                    "HTTP/1.1 ",
+                    code.as_str(),
+                    " ",
+                    status.canonical_reason().unwrap_or(""),
+                    "\r\nContent-Length: 0\r\nConnection: close\r\n",
+                ]
+                .concat();
+                if let Some(location) = location {
+                    response.push_str("Location: ");
+                    response.push_str(&location);
+                    response.push_str("\r\n");
+                }
+                response.push_str("\r\n");
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let address = address.to_string();
+        (
+            ["http://", address.as_str(), "/archive.tar.gz"].concat(),
+            handle,
+        )
     }
 
     #[test]
@@ -10857,8 +10954,80 @@ enclave "default" {
             (reqwest::StatusCode::SERVICE_UNAVAILABLE, 1, ArchivePreflightStatus::Retry),
             (reqwest::StatusCode::SERVICE_UNAVAILABLE, 2, ArchivePreflightStatus::Failed),
         ] {
-            assert_eq!(classify_archive_preflight(status, attempt), expected);
+            assert_eq!(
+                classify_archive_preflight(status, attempt, ARCHIVE_PREFLIGHT_ATTEMPTS),
+                expected
+            );
         }
+    }
+
+    #[test]
+    fn archive_preflight_mirrors_framework_but_not_enclave_source() {
+        let url = "https://codeberg.org/caution/platform/archive/abc123.tar.gz";
+
+        assert_eq!(archive_preflight_urls(url, false), vec![url.to_string()]);
+        assert_eq!(
+            archive_preflight_urls(url, true),
+            vec![
+                url.to_string(),
+                "https://github.com/CautionHosting/platform/archive/abc123.tar.gz".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_preflight_falls_back_and_follows_redirects() {
+        let (target, target_server) =
+            serve_preflight_responses(vec![(reqwest::StatusCode::OK, None)]).await;
+        let (mirror, mirror_server) =
+            serve_preflight_responses(vec![(reqwest::StatusCode::FOUND, Some(target))]).await;
+        let (primary, primary_server) =
+            serve_preflight_responses(vec![(reqwest::StatusCode::SERVICE_UNAVAILABLE, None)]).await;
+        let client = test_api_client();
+
+        client
+            .preflight_archive_urls("Framework source", &[primary, mirror])
+            .await
+            .unwrap();
+
+        assert_eq!(primary_server.await.unwrap(), 1);
+        assert_eq!(mirror_server.await.unwrap(), 1);
+        assert_eq!(target_server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn archive_preflight_retries_transient_primary_before_mirror() {
+        let (primary, primary_server) = serve_preflight_responses(vec![
+            (reqwest::StatusCode::SERVICE_UNAVAILABLE, None),
+            (reqwest::StatusCode::OK, None),
+        ])
+        .await;
+        let mirror = "http://127.0.0.1:1/archive.tar.gz".to_string();
+        let client = test_api_client();
+
+        client
+            .preflight_archive_urls("Framework source", &[primary, mirror])
+            .await
+            .unwrap();
+
+        assert_eq!(primary_server.await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn archive_preflight_retries_a_single_unmapped_url() {
+        let (url, server) = serve_preflight_responses(vec![
+            (reqwest::StatusCode::SERVICE_UNAVAILABLE, None),
+            (reqwest::StatusCode::OK, None),
+        ])
+        .await;
+        let client = test_api_client();
+
+        client
+            .preflight_archive_urls("Enclave source", &[url])
+            .await
+            .unwrap();
+
+        assert_eq!(server.await.unwrap(), 2);
     }
 
     #[test]

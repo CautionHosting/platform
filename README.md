@@ -97,6 +97,9 @@ make up
    git push caution main
    ```
 
+   Long-running builds use protocol-level SSH keepalives so quiet deployment
+   phases do not require client-side keepalive configuration.
+
 #### Enclave-terminated HTTPS (TLS mode, implemented by Caddy)
 
 To terminate standard HTTPS inside the enclave without changing clients, select
@@ -155,9 +158,13 @@ caution verify --attestation-url <attestation-url>
 Local source is the default. If the deployment manifest has no app commit, the
 CLI uses the current checkout at `HEAD`.
 
-Source-archive preflights use at most two five-second HEAD requests. If the
-remote remains unavailable, verification stops before starting the expensive
-reproduction build.
+Source-archive preflights use five-second HEAD requests. The Platform framework
+archive is checked on Codeberg first, then on the configured GitHub mirror; each
+candidate is retried once for transient failures, while missing archives advance
+to the next candidate immediately. The canonical Codeberg URL remains in the
+measured manifest. If every candidate remains unavailable, verification stops
+before starting the expensive reproduction build. Mirrors improve availability
+but do not independently prove that an archive matches its claimed Git commit.
 
 **Option B: Verify against known PCR hashes**
 
