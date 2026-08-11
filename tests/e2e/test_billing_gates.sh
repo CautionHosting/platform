@@ -93,8 +93,8 @@ set_balance() {
 
   if [ "$cents" -gt 0 ]; then
     docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-    INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
-    VALUES ('$ORG_ID', '$USER_ID', $cents, 'purchase', 'billing gate seed');
+    INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
+    VALUES ('$ORG_ID', $cents, 'purchase', 'billing gate seed');
     " >/dev/null 2>&1
   fi
 }
@@ -178,8 +178,8 @@ if [ -z "$ORG_ID" ] || [ "$ORG_ID" = "null" ]; then
   RETURNING id;
   " 2>/dev/null | head -1 | tr -d ' \n' || true)
   docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-  INSERT INTO organization_members (organization_id, user_id, role)
-  VALUES ('$ORG_ID', '$USER_ID', 'owner');
+  INSERT INTO organization_members (organization_id, role)
+  VALUES ('$ORG_ID', 'owner');
   " >/dev/null 2>&1 || true
 fi
 

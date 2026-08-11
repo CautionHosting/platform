@@ -3,7 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS credit_ledger (
     id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id               UUID NOT NULL REFERENCES users(id),
+    organization_id       UUID NOT NULL REFERENCES organizations(id),
     delta_cents           BIGINT NOT NULL,
     balance_after         BIGINT NOT NULL,
     entry_type            TEXT NOT NULL,
@@ -13,5 +13,5 @@ CREATE TABLE IF NOT EXISTS credit_ledger (
     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_credit_ledger_user ON credit_ledger(user_id);
+CREATE INDEX IF NOT EXISTS idx_credit_ledger_org ON credit_ledger(organization_id);
 CREATE INDEX IF NOT EXISTS idx_credit_ledger_created ON credit_ledger(created_at DESC);

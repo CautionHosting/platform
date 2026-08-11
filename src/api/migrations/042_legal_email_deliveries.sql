@@ -3,14 +3,7 @@
 CREATE TABLE IF NOT EXISTS legal_notice_batches (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     dedupe_key TEXT NOT NULL UNIQUE,
-    -- terms_document_id UUID REFERENCES legal_documents(id),
-    -- privacy_document_id UUID REFERENCES legal_documents(id),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT chk_legal_notice_batches_has_document CHECK (
-        -- terms_document_id IS NOT NULL OR
-	privacy_document_id IS NOT NULL
-    )
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- CREATE INDEX IF NOT EXISTS idx_legal_notice_batches_terms_document

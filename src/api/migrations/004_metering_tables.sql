@@ -3,7 +3,8 @@
 -- Table to track resources being monitored for billing
 CREATE TABLE IF NOT EXISTS tracked_resources (
     resource_id TEXT PRIMARY KEY,
-    user_id UUID NOT NULL REFERENCES users(id),
+    organization_id UUID NOT NULL REFERENCES organizations(id),
+    user_id UUID REFERENCES users(id),
     provider TEXT NOT NULL,  -- aws, gcp, azure, baremetal
     instance_type TEXT,
     region TEXT,
@@ -16,6 +17,7 @@ CREATE TABLE IF NOT EXISTS tracked_resources (
 );
 
 -- Index for efficient queries
+CREATE INDEX IF NOT EXISTS idx_tracked_resources_organization_id ON tracked_resources(organization_id);
 CREATE INDEX IF NOT EXISTS idx_tracked_resources_user_id ON tracked_resources(user_id);
 CREATE INDEX IF NOT EXISTS idx_tracked_resources_status ON tracked_resources(status);
 CREATE INDEX IF NOT EXISTS idx_tracked_resources_provider ON tracked_resources(provider);
@@ -43,9 +45,9 @@ CREATE INDEX IF NOT EXISTS idx_usage_ledger_user_id ON usage_ledger(user_id);
 CREATE INDEX IF NOT EXISTS idx_usage_ledger_resource_id ON usage_ledger(resource_id);
 CREATE INDEX IF NOT EXISTS idx_usage_ledger_recorded_at ON usage_ledger(recorded_at);
 
--- Table for billing configuration per user (spend limits, payment preferences)
+-- Table for billing configuration per organization (spend limits, payment preferences)
 CREATE TABLE IF NOT EXISTS billing_config (
-    user_id UUID PRIMARY KEY REFERENCES users(id),
+    organization_id UUID PRIMARY KEY REFERENCES organizations(id),
     billing_mode TEXT NOT NULL DEFAULT 'prepaid',  -- prepaid, postpaid
     monthly_spend_limit_cents INTEGER,  -- NULL means no limit
     payment_method TEXT,  -- paypal, crypto, card
@@ -56,7 +58,7 @@ CREATE TABLE IF NOT EXISTS billing_config (
 
 -- Table for wallet/credit balance (local cache, Lago is source of truth)
 CREATE TABLE IF NOT EXISTS wallet_balance (
-    user_id UUID PRIMARY KEY REFERENCES users(id),
+    organization_id UUID PRIMARY KEY REFERENCES organizations(id),
     balance_cents BIGINT NOT NULL DEFAULT 0,
     currency TEXT NOT NULL DEFAULT 'USD',
     last_synced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
