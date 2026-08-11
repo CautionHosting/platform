@@ -4,7 +4,7 @@
 -- insertion. The per-user uniqueness constraint permits the same public
 -- certificate to be associated with more than one Caution account while
 -- preventing duplicate enrollment on a single account.
-CREATE TABLE pgp_keys (
+CREATE TABLE IF NOT EXISTS pgp_keys (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     public_key TEXT NOT NULL,
@@ -18,4 +18,4 @@ CREATE TABLE pgp_keys (
         UNIQUE (user_id, fingerprint)
 );
 
-CREATE INDEX idx_pgp_keys_user_id ON pgp_keys(user_id);
+CREATE INDEX IF NOT EXISTS idx_pgp_keys_user_id ON pgp_keys(user_id);

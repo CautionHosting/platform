@@ -8,26 +8,36 @@
 
 -- Add resource_id column with foreign key to compute_resources
 ALTER TABLE cloud_credentials
-ADD COLUMN resource_id UUID REFERENCES compute_resources(id) ON DELETE SET NULL;
+ADD COLUMN IF NOT EXISTS resource_id UUID REFERENCES compute_resources(id) ON DELETE SET NULL;
 
 -- Add managed_on_prem boolean flag (defaults to false for regular credentials)
 ALTER TABLE cloud_credentials
-ADD COLUMN managed_on_prem BOOLEAN NOT NULL DEFAULT false;
+ADD COLUMN IF NOT EXISTS managed_on_prem BOOLEAN NOT NULL DEFAULT false;
 
 -- Create index for looking up credentials by resource
-CREATE INDEX idx_cloud_credentials_resource ON cloud_credentials(resource_id) WHERE resource_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_cloud_credentials_resource ON cloud_credentials(resource_id) WHERE resource_id IS NOT NULL;
 
 -- Create index for managed on-prem credentials
-CREATE INDEX idx_cloud_credentials_managed_onprem ON cloud_credentials(organization_id) WHERE managed_on_prem = true;
+CREATE INDEX IF NOT EXISTS idx_cloud_credentials_managed_onprem ON cloud_credentials(organization_id) WHERE managed_on_prem = true;
 
 -- Drop the unique constraint on name (we're removing the name column)
-ALTER TABLE cloud_credentials DROP CONSTRAINT cloud_credentials_unique_name;
+DO
+$$BEGIN
+    ALTER TABLE cloud_credentials DROP CONSTRAINT cloud_credentials_unique_name;
+EXCEPTION
+    WHEN undefined_object THEN NULL;
+END;$$;
 
 -- Remove the name column
-ALTER TABLE cloud_credentials DROP COLUMN name;
+DO
+$$BEGIN
+    ALTER TABLE cloud_credentials DROP COLUMN name;
+EXCEPTION
+    WHEN undefined_column THEN NULL;
+END;$$;
 
 -- Add unique constraint: only one credential per resource (if resource_id is set)
-CREATE UNIQUE INDEX idx_cloud_credentials_unique_resource
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cloud_credentials_unique_resource
     ON cloud_credentials(resource_id)
     WHERE resource_id IS NOT NULL;
 

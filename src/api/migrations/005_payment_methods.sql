@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS payment_methods (
 CREATE INDEX IF NOT EXISTS idx_payment_methods_org ON payment_methods(organization_id);
 CREATE INDEX IF NOT EXISTS idx_payment_methods_active ON payment_methods(organization_id, is_active) WHERE is_active = true;
 
-CREATE TRIGGER payment_methods_updated_at BEFORE UPDATE ON payment_methods
+CREATE OR REPLACE TRIGGER payment_methods_updated_at BEFORE UPDATE ON payment_methods
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- Add organization_id to invoices table for consistency

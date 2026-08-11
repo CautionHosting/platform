@@ -10,7 +10,7 @@ ALTER TYPE cloud_provider ADD VALUE IF NOT EXISTS 'vultr';
 ALTER TYPE cloud_provider ADD VALUE IF NOT EXISTS 'ovh';
 ALTER TYPE cloud_provider ADD VALUE IF NOT EXISTS 'baremetal';
 
-CREATE TABLE cloud_credentials (
+CREATE TABLE IF NOT EXISTS cloud_credentials (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     platform cloud_provider NOT NULL,
@@ -50,16 +50,16 @@ CREATE TABLE cloud_credentials (
     CONSTRAINT cloud_credentials_unique_name UNIQUE (organization_id, name)
 );
 
-CREATE INDEX idx_cloud_credentials_org ON cloud_credentials(organization_id);
-CREATE INDEX idx_cloud_credentials_platform ON cloud_credentials(organization_id, platform);
-CREATE INDEX idx_cloud_credentials_default ON cloud_credentials(organization_id, platform, is_default) WHERE is_default = true;
-CREATE INDEX idx_cloud_credentials_active ON cloud_credentials(organization_id) WHERE is_active = true;
+CREATE INDEX IF NOT EXISTS idx_cloud_credentials_org ON cloud_credentials(organization_id);
+CREATE INDEX IF NOT EXISTS idx_cloud_credentials_platform ON cloud_credentials(organization_id, platform);
+CREATE INDEX IF NOT EXISTS idx_cloud_credentials_default ON cloud_credentials(organization_id, platform, is_default) WHERE is_default = true;
+CREATE INDEX IF NOT EXISTS idx_cloud_credentials_active ON cloud_credentials(organization_id) WHERE is_active = true;
 
-CREATE TRIGGER cloud_credentials_updated_at BEFORE UPDATE ON cloud_credentials
+CREATE OR REPLACE TRIGGER cloud_credentials_updated_at BEFORE UPDATE ON cloud_credentials
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- Ensure only one default credential per platform per organization
-CREATE UNIQUE INDEX idx_cloud_credentials_one_default
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cloud_credentials_one_default
     ON cloud_credentials(organization_id, platform)
     WHERE is_default = true;
 

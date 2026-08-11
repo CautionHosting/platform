@@ -2247,7 +2247,6 @@ pub async fn purchase_credits(
     let new_balance = apply_credit(
         &state.db,
         org_id,
-        auth.user_id,
         authoritative_credit_cents,
         "purchase",
         &purchase.description,
@@ -2412,11 +2411,10 @@ pub async fn redeem_credit_code(
         })?;
 
     sqlx::query(
-        "INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
-         VALUES ($1, $2, $3, 'code_redemption', 'Redeemed credit code')",
+        "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
+         VALUES ($1, $2, 'code_redemption', 'Redeemed credit code')",
     )
     .bind(org_id)
-    .bind(auth.user_id)
     .bind(amount_cents)
     .execute(&mut *tx)
     .await
@@ -2494,7 +2492,6 @@ pub async fn redeem_credit_code(
 pub async fn apply_credit(
     db: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
     delta_cents: i64,
     entry_type: &str,
     description: &str,
@@ -2507,12 +2504,11 @@ pub async fn apply_credit(
         .map_err(|e| format!("Failed to begin transaction: {}", e))?;
 
     sqlx::query(
-        "INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description, paddle_transaction_id, invoice_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, paddle_transaction_id, invoice_id)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (paddle_transaction_id) DO NOTHING"
     )
     .bind(org_id)
-    .bind(user_id)
     .bind(delta_cents)
     .bind(entry_type)
     .bind(description)
