@@ -377,7 +377,8 @@ async fn main() -> Result<()> {
         .route_service("/invite", ServeFile::new(frontend_index.clone()))
         .route_service("/dashboard", ServeFile::new(frontend_index.clone()))
         .route_service("/qr-login", ServeFile::new(frontend_index.clone()))
-        .route_service("/qr-sign", ServeFile::new(frontend_index));
+        .route_service("/qr-sign", ServeFile::new(frontend_index.clone()))
+        .route_service("/verify", ServeFile::new(frontend_index));
 
     // Webhook proxy to metering service (no auth required — Paddle verifies via signature)
     let webhook_proxy = Router::new()

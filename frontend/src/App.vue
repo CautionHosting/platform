@@ -27,6 +27,7 @@ import AuthLogin from './views/AuthLogin.vue'
 import Dashboard from './views/Dashboard.vue'
 import QrLogin from './views/QrLogin.vue'
 import InviteAccept from './views/InviteAccept.vue'
+import PublicAttestation from './views/PublicAttestation.vue'
 import LegalAcceptanceModal from './components/LegalAcceptanceModal.vue'
 import { authFetch, getCsrfToken } from './composables/useWebAuthn.js'
 
@@ -39,6 +40,7 @@ export default {
     Dashboard,
     QrLogin,
     InviteAccept,
+    PublicAttestation,
     LegalAcceptanceModal
   },
   setup() {
@@ -109,6 +111,11 @@ export default {
         title: 'CLI signing • Caution',
         description: 'Approve a Caution CLI signing request.',
         path: '/qr-sign'
+      },
+      '/verify': {
+        title: 'Verify an application • Caution',
+        description: 'Verify a Caution application enclave attestation in your browser.',
+        path: '/verify'
       }
     }
 
@@ -361,6 +368,9 @@ export default {
         // Public route - QR code CLI signing (no auth required)
         // Same component as QrLogin — it detects sign vs login from the path
         return 'QrLogin'
+      } else if (path === '/verify') {
+        // Public route - client-side enclave attestation verification
+        return 'PublicAttestation'
       }
 
       // Unknown path - redirect to home
@@ -369,8 +379,12 @@ export default {
     })
 
     onMounted(() => {
-      // Check authentication on mount
-      checkAuth()
+      // Public verification must not be gated by account or legal status.
+      if (window.location.pathname === '/verify') {
+        authChecked.value = true
+      } else {
+        checkAuth()
+      }
 
       // Handle browser back/forward buttons and dashboard hash changes
       window.addEventListener('popstate', refreshCurrentLocation)
