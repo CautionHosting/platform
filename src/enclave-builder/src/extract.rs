@@ -38,6 +38,78 @@ fn safe_unpack(archive: &mut tar::Archive<impl std::io::Read>, dest: &Path) -> R
     Ok(())
 }
 
+/// Export the user image filesystem as a tar, WITHOUT unpacking it on the host.
+///
+/// The tar is handed to the EIF build context verbatim and unpacked inside the
+/// Linux builder. Unpacking here instead would silently corrupt the image on a
+/// case-insensitive filesystem: macOS APFS folds `Foo` and `foo` onto one inode,
+/// so entries whose names differ only by case overwrite each other and simply
+/// vanish from the ramdisk. That is not a cosmetic difference - it changes the
+/// cpio, so PCR0/PCR1 diverge and `caution verify` reports a mismatch against a
+/// deployment that is in fact byte-correct. It also fails *silently*: the export
+/// succeeds, the build succeeds, and only the attestation comparison reveals it.
+///
+/// Observed on a stock macOS host: 9 OpenSSL man-page symlinks
+/// (`OPENSSL_VERSION_*`/`OSSL_TRACE_*`, which differ from siblings only by case)
+/// were lost, 11,447 entries reproduced against 11,456 deployed. PCR2 still
+/// matched, because it measures the application rather than the whole image,
+/// which is what makes the failure so confusing to diagnose.
+///
+/// See https://codeberg.org/caution/platform/issues/401.
+pub async fn export_image_filesystem_tar(image_ref: &str, work_dir: &Path) -> Result<PathBuf> {
+    tracing::info!("Exporting filesystem tar from image: {}", image_ref);
+
+    let docker =
+        Docker::connect_with_local_defaults().context("Failed to connect to Docker daemon")?;
+
+    verify_image_exists_locally(&docker, image_ref).await?;
+
+    let container_id = create_container(&docker, image_ref).await?;
+
+    fs::create_dir_all(work_dir).await?;
+    let tar_path = work_dir.join("user-service.tar");
+
+    let export_result = write_container_export(&docker, &container_id, &tar_path).await;
+
+    // Remove the container even if the export failed, so a transient error does
+    // not leak a container per attempt.
+    let remove_result = docker
+        .remove_container(&container_id, None)
+        .await
+        .context("Failed to remove temporary container");
+
+    export_result?;
+    remove_result?;
+
+    tracing::info!("Exported user filesystem tar to: {}", tar_path.display());
+    Ok(tar_path)
+}
+
+/// Stream `docker export` straight to a file. No unpacking, no host filesystem
+/// semantics applied to the contents.
+async fn write_container_export(
+    docker: &Docker,
+    container_id: &str,
+    tar_path: &Path,
+) -> Result<()> {
+    let mut stream = docker.export_container(container_id);
+
+    let mut tar_file = fs::File::create(tar_path)
+        .await
+        .context("Failed to create container export tar")?;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("Failed to read export stream")?;
+        tar_file
+            .write_all(&chunk)
+            .await
+            .context("Failed to write tar data")?;
+    }
+
+    tar_file.flush().await?;
+    Ok(())
+}
+
 pub async fn extract_image_filesystem(image_ref: &str, work_dir: &Path) -> Result<PathBuf> {
     tracing::info!("Extracting filesystem from image: {}", image_ref);
 

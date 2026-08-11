@@ -297,8 +297,12 @@ impl EnclaveBuilder {
             tracing::info!("Extracting specific files: {:?}", files);
             extract::extract_specific_files(&image.reference, &files, &self.work_dir).await
         } else {
-            tracing::info!("Extracting full filesystem");
-            extract::extract_image_filesystem(&image.reference, &self.work_dir).await
+            // Hand the build the export tar rather than an unpacked directory:
+            // unpacking here would drop case-colliding entries on macOS and
+            // silently change PCR0/PCR1 (issue #401). `stage_eif_components`
+            // recognises a `.tar` and lets the Linux builder unpack it.
+            tracing::info!("Exporting full filesystem as tar");
+            extract::export_image_filesystem_tar(&image.reference, &self.work_dir).await
         }
     }
 
