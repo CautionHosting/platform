@@ -10,6 +10,7 @@ import {
   describeAttestationError,
   ensureUint8ArrayBase64,
   extractVerifiedAppSource,
+  normalizeAttestationInput,
   parseExpectedPcrs,
   resolveAttestationTarget,
 } from '../src/utils/publicAttestation.js'
@@ -68,11 +69,15 @@ test('preserves an explicit attestation endpoint path', () => {
   )
 })
 
-test('uses the current origin when no target url is provided', () => {
-  assert.deepEqual(resolveAttestationTarget('', 'https://demo.example.com'), {
-    appUrl: 'https://demo.example.com/',
-    attestationUrl: 'https://demo.example.com/attestation',
-  })
+test('returns no target when the url query parameter is absent', () => {
+  assert.equal(resolveAttestationTarget(''), null)
+})
+
+test('normalizes interactive domain and IP input while preserving explicit HTTP', () => {
+  assert.equal(normalizeAttestationInput('demo.example.com'), 'https://demo.example.com/')
+  assert.equal(normalizeAttestationInput('https://192.0.2.10/attestation'), 'https://192.0.2.10/attestation')
+  assert.equal(normalizeAttestationInput('http://192.0.2.10'), 'http://192.0.2.10/')
+  assert.throws(() => normalizeAttestationInput(''), /domain, IP address, or attestation URL/i)
 })
 
 test('rejects non-http and credential-bearing targets', () => {

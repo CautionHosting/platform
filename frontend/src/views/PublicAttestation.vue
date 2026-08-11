@@ -20,6 +20,7 @@
       </div>
 
       <section
+        v-if="status !== 'idle'"
         :class="['verification-result', `verification-result--${status}`]"
         aria-live="polite"
       >
@@ -112,9 +113,23 @@
       </section>
 
       <section v-else class="usage-card">
-        <h2>Provide an application URL</h2>
-        <p>Pass an HTTPS application origin or an explicit attestation endpoint:</p>
-        <code>/verify?url=https%3A%2F%2Fapp.example.com</code>
+        <h2>Choose an application to verify</h2>
+        <p>Enter an application domain, IP address, or explicit attestation endpoint.</p>
+        <form class="target-form" @submit.prevent="submitTarget">
+          <label for="attestation-target">Application or attestation URL</label>
+          <div class="target-form__controls">
+            <input
+              id="attestation-target"
+              v-model="targetInput"
+              type="text"
+              inputmode="url"
+              autocomplete="url"
+              placeholder="https://app.example.com"
+            />
+            <button type="submit">Verify application</button>
+          </div>
+          <p v-if="inputMessage" class="target-form__error" role="alert">{{ inputMessage }}</p>
+        </form>
       </section>
     </main>
   </div>
@@ -128,6 +143,7 @@ import {
   describeAttestationError,
   ensureUint8ArrayBase64,
   extractVerifiedAppSource,
+  normalizeAttestationInput,
   resolveAttestationTarget,
 } from '../utils/publicAttestation.js'
 
@@ -138,8 +154,10 @@ export default {
     const target = ref(null)
     const source = ref(null)
     const attestationResult = ref(null)
+    const inputMessage = ref('')
     const pcrInput = ref(new URLSearchParams(window.location.search).get('hashes') || '')
     const status = ref('loading')
+    const targetInput = ref('')
     const errorMessage = ref('')
     let widget = null
 
@@ -161,6 +179,17 @@ export default {
     const cliVerifyCommand = computed(() =>
       target.value ? `caution verify --attestation-url ${target.value.attestationUrl}` : '',
     )
+
+    const submitTarget = () => {
+      try {
+        const normalized = normalizeAttestationInput(targetInput.value)
+        const search = new URLSearchParams()
+        search.set('url', normalized)
+        window.location.assign(`/verify?${search.toString()}`)
+      } catch (error) {
+        inputMessage.value = error.message
+      }
+    }
 
     const checkExpectedPcrs = () => {
       let comparison
@@ -198,6 +227,11 @@ export default {
       } catch (error) {
         status.value = 'input-error'
         errorMessage.value = error.message
+        return
+      }
+
+      if (!target.value) {
+        status.value = 'idle'
         return
       }
 
@@ -251,12 +285,15 @@ export default {
       checkExpectedPcrs,
       cliVerifyCommand,
       errorMessage,
+      inputMessage,
       pcrInput,
       source,
       status,
       statusIcon,
       statusLabel,
+      submitTarget,
       target,
+      targetInput,
       widgetContainer,
     }
   },
@@ -524,6 +561,53 @@ h1 {
   color: #56636f;
 }
 
+.target-form {
+  display: grid;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.target-form label {
+  font-weight: 700;
+}
+
+.target-form__controls {
+  display: flex;
+  gap: 10px;
+}
+
+.target-form input {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid #b8c2cc;
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: #fff;
+  color: #0f0f0f;
+  font: inherit;
+}
+
+.target-form input:focus {
+  outline: 3px solid rgba(46, 106, 234, 0.22);
+  border-color: #2e6aea;
+}
+
+.target-form button {
+  border: 0;
+  border-radius: 999px;
+  padding: 11px 20px;
+  background: #0f0f0f;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.target-form .target-form__error {
+  margin: 0;
+  color: #a51d1d;
+}
+
 @media (max-width: 600px) {
   .public-attestation-header,
   .public-attestation-main {
@@ -535,11 +619,15 @@ h1 {
   }
 
   .verification-result,
-  .target-card,
-  .pcr-card,
-  .source-card,
+  .metadata-card,
+  .verification-guide,
   .usage-card {
     padding: 18px;
+  }
+
+  .target-form__controls {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 </style>

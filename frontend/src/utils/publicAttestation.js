@@ -49,11 +49,11 @@ function parseHttpUrl(value) {
   return parsed
 }
 
-export function resolveAttestationTarget(search, currentOrigin = null) {
+export function resolveAttestationTarget(search) {
   const rawUrl = new URLSearchParams(search).get('url')?.trim()
-  const fallbackOrigin = currentOrigin || (typeof window !== 'undefined' ? window.location.origin : '')
+  if (!rawUrl) return null
 
-  const appUrl = parseHttpUrl(rawUrl || fallbackOrigin)
+  const appUrl = parseHttpUrl(rawUrl)
   const attestationUrl = new URL(appUrl)
 
   if (attestationUrl.pathname === '/') {
@@ -65,6 +65,14 @@ export function resolveAttestationTarget(search, currentOrigin = null) {
     appUrl: appUrl.href,
     attestationUrl: attestationUrl.href,
   }
+}
+
+export function normalizeAttestationInput(value) {
+  const trimmed = value.trim()
+  if (!trimmed) throw new Error('Enter an application domain, IP address, or attestation URL.')
+
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
+  return parseHttpUrl(withScheme).href
 }
 
 function sourceRepositoryUrl(source) {
