@@ -1148,10 +1148,14 @@ fn is_pin_related_error(error: &anyhow::Error) -> bool {
 
 /// Egress is enabled iff the (single) enclave's network block declares >=1 egress rule.
 /// Derived solely from the parsed HCL config — never from a manifest.
+fn configured_enclave(
+    cfg: &caution_config::ConfigurationFile,
+) -> Option<&caution_config::EnclaveConfig> {
+    cfg.enclave.as_ref().and_then(|enclaves| enclaves.values().next())
+}
+
 fn config_egress_enabled(cfg: &caution_config::ConfigurationFile) -> bool {
-    cfg.enclave
-        .as_ref()
-        .and_then(|e| e.values().next())
+    configured_enclave(cfg)
         .and_then(|enc| enc.network.as_ref())
         .map(|n| n.egress_enabled())
         .unwrap_or(false)
@@ -3388,8 +3392,9 @@ enclave "default" {{
     #   port   = 8080
     #   e2e_encryption {{
     #     enabled      = true
-    #     cors_origins = ["*"]
+    #     cors_origins = ["https://app.example.com"]
     #     key_exchange = "x25519"
+    #     allow_plaintext_fallback = false
     #   }}
     # }}
   }}
@@ -6068,8 +6073,8 @@ enclave "default" {{
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let cfg = self.read_config().map_err(|e| BuildLocalError::ReadConfig(e.into()))?;
-        let default_enclave = cfg.enclave.as_ref().and_then(|e| e.get("default"));
-        let e2e_config = default_enclave
+        let enclave = configured_enclave(&cfg);
+        let e2e_config = enclave
             .and_then(|e| e.network.as_ref())
             .and_then(|n| n.http.as_ref())
             .and_then(|h| h.e2e_encryption.as_ref());
@@ -6082,7 +6087,7 @@ enclave "default" {{
             .map_err(BuildLocalError::CacheKey)?;
         let cache_key = framework_cache_key(&measured_cache_key, &framework_commit);
 
-        let config_no_cache = default_enclave
+        let config_no_cache = enclave
             .and_then(|e| e.build.as_ref())
             .and_then(|b| b.cache)
             .map(|c| !c)
@@ -6113,19 +6118,19 @@ enclave "default" {{
             reference: image_ref.clone(),
         };
 
-        let run_command = default_enclave
+        let run_command = enclave
             .and_then(|e| e.unit.as_ref())
             .and_then(|u| u.values().next())
             .map(|u| u.run_command_string())
             .transpose()
             .map_err(BuildLocalError::ParseRunCommand)?;
 
-        let app_source_urls_opt = default_enclave
+        let app_source_urls_opt = enclave
             .and_then(|e| e.build.as_ref())
             .map(|b| b.app_sources.clone())
             .filter(|s| !s.is_empty());
 
-        let ports: Vec<u16> = default_enclave
+        let ports: Vec<u16> = enclave
             .and_then(|e| e.network.as_ref())
             .map(|n| {
                 n.ingress
@@ -6138,13 +6143,13 @@ enclave "default" {{
             })
             .unwrap_or_default();
 
-        let http_port = default_enclave
+        let http_port = enclave
             .and_then(|config| config.network.as_ref())
             .and_then(|network| network.http.as_ref())
             .map(|http| http.port);
         output::verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
 
-        let domain = default_enclave
+        let domain = enclave
             .and_then(|config| config.network.as_ref())
             .and_then(|network| network.http.as_ref())
             .and_then(|http| http.domain.clone());
@@ -6152,6 +6157,9 @@ enclave "default" {{
         let e2e_key_exchange = e2e_config
             .map(|ee| ee.key_exchange().steve_env_value())
             .unwrap_or(caution_config::KeyExchange::X25519.steve_env_value());
+        let allow_plaintext_fallback = e2e_config
+            .map(|ee| ee.allow_plaintext_fallback())
+            .unwrap_or(false);
         output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = cfg.has_vault_env();
@@ -6164,7 +6172,7 @@ enclave "default" {{
             .and_then(|e2e| e2e.cors_origins.as_ref())
             .map(|origins| origins.join(","));
 
-        let http_upstream_protocol = default_enclave
+        let http_upstream_protocol = enclave
             .and_then(|config| config.network.as_ref())
             .and_then(|network| network.http.as_ref())
             .and_then(|http| http.upstream_protocol)
@@ -6192,6 +6200,7 @@ enclave "default" {{
                 e2e,
                 e2e_mode_value,
                 e2e_key_exchange,
+                allow_plaintext_fallback,
                 domain.as_deref(),
                 http_upstream_protocol,
                 locksmith,
@@ -6509,15 +6518,15 @@ enclave "default" {{
             } else {
                 let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
                 let cfg = self.read_config_from_dir(config_dir)?;
-                let default_enclave = cfg.enclave.as_ref().and_then(|e| e.get("default"));
+                let enclave = configured_enclave(&cfg);
 
                 let binary = None;
-                let run_cmd = default_enclave
+                let run_cmd = enclave
                     .and_then(|e| e.unit.as_ref())
                     .and_then(|u| u.values().next())
                     .map(|u| u.run_command_string())
                     .transpose()?;
-                let source_urls = default_enclave
+                let source_urls = enclave
                     .and_then(|e| e.build.as_ref())
                     .map(|b| b.app_sources.clone())
                     .filter(|s| !s.is_empty());
@@ -6636,6 +6645,15 @@ enclave "default" {{
                         caution_config::KeyExchange::X25519.steve_env_value().to_string()
                     })
             });
+        let allow_plaintext_fallback = e2e_config
+            .as_ref()
+            .map(|e2e| e2e.allow_plaintext_fallback())
+            .unwrap_or_else(|| {
+                external_manifest
+                    .as_ref()
+                    .map(|manifest| manifest.steve_allow_plaintext_fallback)
+                    .unwrap_or(false)
+            });
         output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = if let Some(ref app_dir) = app_source_dir {
@@ -6703,6 +6721,7 @@ enclave "default" {{
                     e2e,
                     e2e_mode_value,
                     &e2e_key_exchange,
+                    allow_plaintext_fallback,
                     domain.as_deref(),
                     http_upstream_protocol,
                     locksmith,
@@ -6727,6 +6746,7 @@ enclave "default" {{
                     e2e,
                     e2e_mode_value,
                     &e2e_key_exchange,
+                    allow_plaintext_fallback,
                     domain.as_deref(),
                     http_upstream_protocol,
                     locksmith,
@@ -9853,17 +9873,17 @@ mod tests {
         ARCHIVE_PREFLIGHT_ATTEMPTS, MAX_ATTESTATION_RESPONSE_BYTES, PgpKeyCommands,
         RegisterUsernameError, RunError, TlsConnection, TlsExpectation, TrustedHashes, TrustedTls,
         append_attestation_response_chunk, archive_preflight_urls, attestation_inspection_json,
-        attestation_user_data, classify_archive_preflight, display_user_data, dns_answer_is_absent,
+        attestation_user_data, classify_archive_preflight, configured_enclave, display_user_data,
+        dns_answer_is_absent,
         dns_contains_deployment_ip, encrypt_env_file, encrypt_secret_value,
         keymaker_cert_eligibility, load_recipient_cert, login_begin_request_body,
-        measured_build_cache_key, normalize_keyring, parse_env_assignments,
-        persist_trusted_hashes, persist_trusted_hashes_with_backup,
-        prepare_pgp_public_key_for_upload, prompt_line_from, prompt_optional_line_from,
-        reproduction_uses_steve,
-        resolve_local_build_command_from_dir, resolve_login_username,
-        resolve_procfile_build_command, resolve_quorum_parameters, resolve_register_username,
-        resolve_reproduction_e2e_mode, tls_connection, tls_expectation_from_config,
-        validate_attested_tls, validate_global_qr, verify_deprecation_warnings,
+        measured_build_cache_key, normalize_keyring, parse_env_assignments, persist_trusted_hashes,
+        persist_trusted_hashes_with_backup, prepare_pgp_public_key_for_upload, prompt_line_from,
+        prompt_optional_line_from, reproduction_uses_steve, resolve_local_build_command_from_dir,
+        resolve_login_username, resolve_procfile_build_command, resolve_quorum_parameters,
+        resolve_register_username, resolve_reproduction_e2e_mode, tls_connection,
+        tls_expectation_from_config, validate_attested_tls, validate_global_qr,
+        verify_deprecation_warnings,
     };
     use caution_config::{ConfigurationFile, E2eEncryption, E2eMode};
     use clap::Parser;
@@ -9887,6 +9907,7 @@ mod tests {
             mode,
             cors_origins: None,
             key_exchange: None,
+            allow_plaintext_fallback: None,
         };
         let disabled = config(Some(false), None);
         let legacy_steve = config(Some(true), None);
@@ -10337,6 +10358,7 @@ enclave "main" {{
             mode,
             cors_origins: None,
             key_exchange: None,
+            allow_plaintext_fallback: None,
         };
         let disabled = config(Some(false), None);
         let legacy_steve = config(Some(true), None);
@@ -10772,6 +10794,24 @@ containerfile: Missing.Containerfile\n",
             );
             assert!(hcl.contains("key_exchange = \"x25519\""));
         }
+    }
+
+    #[test]
+    fn configured_enclave_accepts_non_default_label() {
+        let config = ConfigurationFile::from_str(
+            r#"
+enclave "main" {
+  resources {
+    cpu = 2
+    memory_mb = 2048
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let enclave = configured_enclave(&config).expect("single enclave");
+        assert_eq!(enclave.resources.as_ref().unwrap().memory_mb, 2048);
     }
 
     #[test]

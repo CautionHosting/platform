@@ -300,6 +300,10 @@ fn build_network_block(network: &caution_config::NetworkConfig) -> Option<hcl::B
                 e2e_builder = e2e_builder.add_attribute(("key_exchange", "xwing-draft10"));
             }
 
+            if e2e.allow_plaintext_fallback == Some(true) {
+                e2e_builder = e2e_builder.add_attribute(("allow_plaintext_fallback", true));
+            }
+
             http_builder = http_builder.add_block(e2e_builder.build());
         }
 
@@ -457,6 +461,53 @@ ports: 8083
         let output = build_body(&config);
         let reparsed = caution_config::ConfigurationFile::from_str(&output);
         assert!(reparsed.is_ok(), "generated HCL should parse: {:?}", reparsed.err());
+    }
+
+    #[test]
+    fn migration_emits_only_explicit_plaintext_fallback_opt_in() {
+        let enabled = caution_config::ConfigurationFile::from_str(
+            r#"
+enclave "default" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }
+    http {
+      port = 8080
+      e2e_encryption {
+        enabled = true
+        allow_plaintext_fallback = true
+      }
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+        assert!(build_body(&enabled).contains("allow_plaintext_fallback = true"));
+
+        let disabled = caution_config::ConfigurationFile::from_str(
+            r#"
+enclave "default" {
+  network {
+    ingress {
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }
+    http {
+      port = 8080
+      e2e_encryption {
+        enabled = true
+        allow_plaintext_fallback = false
+      }
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+        assert!(!build_body(&disabled).contains("allow_plaintext_fallback"));
     }
 
     #[test]

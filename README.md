@@ -143,6 +143,21 @@ This checks HTTPS, redirects, health, Nitro authenticity, and the signed
 certificate binding. It does not establish workload identity; use
 `caution verify` with independently trusted source or PCRs for that.
 
+For STEVE-protected HTTP deployments, plaintext application routing is denied
+by default. Legacy fallback requires an explicit opt-in:
+
+```hcl
+e2e_encryption {
+  enabled                  = true
+  key_exchange             = "xwing-draft10"
+  allow_plaintext_fallback = true
+}
+```
+
+The platform health and attestation endpoints remain available outside the
+application route. In fail-closed mode the application HTTP port is not exposed
+through a host or enclave VSOCK proxy; STEVE reaches it over enclave-local TCP.
+
 ### 4. Verify a deployed app
 
 You can verify an enclave's attestation in two ways:

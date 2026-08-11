@@ -152,6 +152,7 @@ pub struct BuildRequest {
     pub e2e: bool,
     pub e2e_mode: String,
     pub e2e_key_exchange: String,
+    pub allow_plaintext_fallback: bool,
     pub domain: Option<String>,
     pub http_upstream_protocol: String,
     pub framework_commit: String,
@@ -265,6 +266,7 @@ pub fn compute_cache_key(
     procfile_content: &str,
     e2e: bool,
     e2e_key_exchange: &str,
+    allow_plaintext_fallback: bool,
     locksmith: bool,
     e2e_cors_origins: &[String],
     framework_commit: &str,
@@ -288,6 +290,9 @@ pub fn compute_cache_key(
         hasher.update(e2e_key_exchange.as_bytes());
     }
     hasher.update(b"|");
+    if e2e && allow_plaintext_fallback {
+        hasher.update(b"allow-plaintext-fallback|");
+    }
     hasher.update(
         if locksmith {
             "locksmith"
@@ -892,6 +897,11 @@ fn generate_builder_userdata(
 
     let e2e_flag = if request.e2e { "true" } else { "false" };
     let key_exchange = &request.e2e_key_exchange;
+    let plaintext_fallback_flag = if request.allow_plaintext_fallback {
+        "true"
+    } else {
+        "false"
+    };
     let locksmith_flag = if request.locksmith { "true" } else { "false" };
     let egress_flag = if request.egress { "true" } else { "false" };
     let cors_origins_value = request.e2e_cors_origins.as_deref().unwrap_or("");
@@ -933,6 +943,7 @@ fn generate_builder_userdata(
     manifest.bootproof_commit = Some(bootproof_commit);
     if request.e2e {
         manifest.steve_commit = Some(request.steve_commit.clone());
+        manifest.steve_allow_plaintext_fallback = request.allow_plaintext_fallback;
         if request.e2e_key_exchange != enclave_builder::build::DEFAULT_KEY_EXCHANGE {
             manifest.steve_key_exchange = Some(request.e2e_key_exchange.clone());
         }
@@ -967,6 +978,7 @@ HTTP_PORT="{http_port}"
 E2E="{e2e_flag}"
 E2E_MODE="{e2e_mode}"
 KEY_EXCHANGE="{key_exchange}"
+ALLOW_PLAINTEXT_FALLBACK="{plaintext_fallback_flag}"
 DOMAIN="{domain}"
 HTTP_UPSTREAM_PROTOCOL="{http_upstream_protocol}"
 LOCKSMITH="{locksmith_flag}"
@@ -1071,6 +1083,7 @@ CAUTION_E2E_MODE="$E2E_MODE" \
 CAUTION_DOMAIN="$DOMAIN" \
 CAUTION_HTTP_UPSTREAM_PROTOCOL="$HTTP_UPSTREAM_PROTOCOL" \
 CAUTION_KEY_EXCHANGE="$KEY_EXCHANGE" \
+CAUTION_ALLOW_PLAINTEXT_FALLBACK="$ALLOW_PLAINTEXT_FALLBACK" \
 CAUTION_LOCKSMITH="$LOCKSMITH" \
 CAUTION_EGRESS="$EGRESS" \
 CAUTION_CORS_ORIGINS="$CORS_ORIGINS" \
@@ -1317,6 +1330,7 @@ mod tests {
             procfile,
             e2e,
             e2e_key_exchange,
+            false,
             locksmith,
             &[],
             framework_commit.unwrap_or(TEST_FRAMEWORK_COMMIT),
@@ -1401,6 +1415,7 @@ mod tests {
             true,
             "X25519",
             false,
+            false,
             &[],
             TEST_FRAMEWORK_COMMIT,
         );
@@ -1411,6 +1426,7 @@ mod tests {
             "run: /app",
             true,
             "X25519",
+            false,
             false,
             &[],
             TEST_FRAMEWORK_COMMIT,
@@ -1425,6 +1441,7 @@ mod tests {
             false,
             "X25519",
             false,
+            false,
             &[],
             TEST_FRAMEWORK_COMMIT,
         );
@@ -1435,6 +1452,7 @@ mod tests {
             "run: /app",
             false,
             "X25519",
+            false,
             false,
             &[],
             TEST_FRAMEWORK_COMMIT,
@@ -1455,6 +1473,69 @@ mod tests {
             None,
         );
         assert_ne!(x25519, xwing);
+    }
+
+    #[test]
+    fn test_cache_key_changes_with_plaintext_fallback_only_for_e2e() {
+        let fail_closed = compute_cache_key(
+            "abc123",
+            "enclave-v1",
+            "steve-v1",
+            "run: /app",
+            true,
+            "X25519",
+            false,
+            false,
+            &[],
+            TEST_FRAMEWORK_COMMIT,
+        );
+        let fallback = compute_cache_key(
+            "abc123",
+            "enclave-v1",
+            "steve-v1",
+            "run: /app",
+            true,
+            "X25519",
+            true,
+            false,
+            &[],
+            TEST_FRAMEWORK_COMMIT,
+        );
+        assert_ne!(fail_closed, fallback);
+        assert_eq!(
+            fail_closed,
+            "36ed62e47d1cde90321166fa213b60a55da0dfebd45728bb0f8599b582f905aa"
+        );
+
+        let plain_default = compute_cache_key(
+            "abc123",
+            "enclave-v1",
+            "steve-v1",
+            "run: /app",
+            false,
+            "X25519",
+            false,
+            false,
+            &[],
+            TEST_FRAMEWORK_COMMIT,
+        );
+        let plain_ignored = compute_cache_key(
+            "abc123",
+            "enclave-v1",
+            "steve-v1",
+            "run: /app",
+            false,
+            "X25519",
+            true,
+            false,
+            &[],
+            TEST_FRAMEWORK_COMMIT,
+        );
+        assert_eq!(plain_default, plain_ignored);
+        assert_eq!(
+            plain_default,
+            "f0b5c8c963ebbc0bba86733210780a95d0be45efbca04891ed08314b2bead71f"
+        );
     }
 
     #[test]
@@ -1681,6 +1762,7 @@ mod tests {
             e2e: true,
             e2e_mode: "steve".to_string(),
             e2e_key_exchange: "X25519".to_string(),
+            allow_plaintext_fallback: true,
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
@@ -1795,6 +1877,14 @@ mod tests {
             userdata.contains(&format!("\"commit\":\"{TEST_FRAMEWORK_COMMIT}\"")),
             "manifest should use the Platform commit resolved before cache lookup"
         );
+        assert!(
+            userdata.contains("ALLOW_PLAINTEXT_FALLBACK=\"true\"")
+                && userdata.contains(
+                    "CAUTION_ALLOW_PLAINTEXT_FALLBACK=\"$ALLOW_PLAINTEXT_FALLBACK\"",
+                )
+                && userdata.contains("\"steve_allow_plaintext_fallback\":true"),
+            "explicit plaintext fallback should reach the helper and manifest"
+        );
 
         // Should upload EIF to S3
         assert!(
@@ -1883,6 +1973,7 @@ mod tests {
             e2e: false,
             e2e_mode: "disabled".to_string(),
             e2e_key_exchange: "X25519".to_string(),
+            allow_plaintext_fallback: false,
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
@@ -1942,6 +2033,7 @@ mod tests {
             e2e: false,
             e2e_mode: "disabled".to_string(),
             e2e_key_exchange: "X25519".to_string(),
+            allow_plaintext_fallback: false,
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
@@ -1999,6 +2091,7 @@ mod tests {
             e2e: false,
             e2e_mode: "disabled".to_string(),
             e2e_key_exchange: "X25519".to_string(),
+            allow_plaintext_fallback: false,
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
@@ -2064,6 +2157,7 @@ mod tests {
             e2e: false,
             e2e_mode: "disabled".to_string(),
             e2e_key_exchange: "X25519".to_string(),
+            allow_plaintext_fallback: false,
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
@@ -2125,6 +2219,7 @@ mod tests {
             e2e: false,
             e2e_mode: "disabled".to_string(),
             e2e_key_exchange: "X25519".to_string(),
+            allow_plaintext_fallback: false,
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
@@ -2183,6 +2278,7 @@ mod tests {
             e2e: false,
             e2e_mode: "disabled".to_string(),
             e2e_key_exchange: "X25519".to_string(),
+            allow_plaintext_fallback: false,
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
