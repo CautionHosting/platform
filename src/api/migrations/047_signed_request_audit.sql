@@ -5,7 +5,7 @@
 -- removed. Request bodies are deliberately not retained here: the exact body
 -- digest and length prove which bytes were authorized without turning this
 -- generic audit table into permanent storage for future secret-bearing APIs.
-CREATE TABLE signed_request_audit (
+CREATE TABLE IF NOT EXISTS signed_request_audit (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     signature_scheme VARCHAR(32) NOT NULL DEFAULT 'webauthn',
@@ -61,11 +61,11 @@ CREATE TABLE signed_request_audit (
         )
 );
 
-CREATE INDEX idx_signed_request_audit_user_verified
+CREATE INDEX IF NOT EXISTS idx_signed_request_audit_user_verified
     ON signed_request_audit(user_id, verified_at DESC);
-CREATE INDEX idx_signed_request_audit_credential
+CREATE INDEX IF NOT EXISTS idx_signed_request_audit_credential
     ON signed_request_audit(credential_id);
-CREATE INDEX idx_signed_request_audit_incomplete
+CREATE INDEX IF NOT EXISTS idx_signed_request_audit_incomplete
     ON signed_request_audit(verified_at)
     WHERE completed_at IS NULL;
 
@@ -86,11 +86,11 @@ ALTER TABLE pgp_keys
 ALTER TABLE pgp_keys
     DROP CONSTRAINT IF EXISTS pgp_keys_user_fingerprint_unique;
 
-CREATE UNIQUE INDEX pgp_keys_active_user_fingerprint_unique
+CREATE UNIQUE INDEX IF NOT EXISTS pgp_keys_active_user_fingerprint_unique
     ON pgp_keys(user_id, fingerprint)
     WHERE removed_at IS NULL;
 
-CREATE INDEX idx_pgp_keys_user_removed_at
+CREATE INDEX IF NOT EXISTS idx_pgp_keys_user_removed_at
     ON pgp_keys(user_id, removed_at, created_at DESC);
 
 COMMENT ON COLUMN pgp_keys.removed_at IS

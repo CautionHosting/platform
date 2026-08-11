@@ -13,32 +13,48 @@ ALTER TABLE subscriptions
     ADD COLUMN IF NOT EXISTS catalog_valid BOOLEAN NOT NULL DEFAULT true;
 
 ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_billing_source_check;
-ALTER TABLE subscriptions
-    ADD CONSTRAINT subscriptions_billing_source_check
-    CHECK (billing_source IN ('legacy_credits', 'paddle', 'enterprise'));
+DO $$BEGIN
+    ALTER TABLE subscriptions
+        ADD CONSTRAINT subscriptions_billing_source_check
+        CHECK (billing_source IN ('legacy_credits', 'paddle', 'enterprise'));
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END;$$;
 
 ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_status_check;
-ALTER TABLE subscriptions
-    ADD CONSTRAINT subscriptions_status_check
-    CHECK (status IN ('pending', 'trialing', 'active', 'past_due', 'paused', 'canceled'));
+DO $$BEGIN
+    ALTER TABLE subscriptions
+        ADD CONSTRAINT subscriptions_status_check
+        CHECK (status IN ('pending', 'trialing', 'active', 'past_due', 'paused', 'canceled'));
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END;$$;
 
 ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_pending_max_apps_check;
-ALTER TABLE subscriptions
-    ADD CONSTRAINT subscriptions_pending_max_apps_check
-    CHECK (pending_max_apps IS NULL OR pending_max_apps > 0);
+DO $$BEGIN
+    ALTER TABLE subscriptions
+        ADD CONSTRAINT subscriptions_pending_max_apps_check
+        CHECK (pending_max_apps IS NULL OR pending_max_apps > 0);
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END;$$;
 
 ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_paddle_fields_check;
-ALTER TABLE subscriptions
-    ADD CONSTRAINT subscriptions_paddle_fields_check
-    CHECK (
-        billing_source <> 'paddle'
-        OR (
-            paddle_customer_id IS NOT NULL
-            AND paddle_subscription_id IS NOT NULL
-            AND paddle_price_id IS NOT NULL
-            AND catalog_version IS NOT NULL
-        )
-    ) NOT VALID;
+DO $$BEGIN
+    ALTER TABLE subscriptions
+        ADD CONSTRAINT subscriptions_paddle_fields_check
+        CHECK (
+            billing_source <> 'paddle'
+            OR (
+                paddle_customer_id IS NOT NULL
+                AND paddle_subscription_id IS NOT NULL
+                AND paddle_price_id IS NOT NULL
+                AND catalog_version IS NOT NULL
+            )
+        ) NOT VALID;
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END;$$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_paddle_subscription
     ON subscriptions(paddle_subscription_id)
