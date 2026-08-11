@@ -193,8 +193,10 @@ pub async fn get_active_organization_ids(pool: &PgPool) -> Result<Vec<Uuid>, DbE
 /// Fetch all active AWS provider accounts for an organization.
 ///
 /// Only active accounts backed by the `aws` provider are returned (drift
-/// detection only understands EC2); accounts without a region fall back to
-/// `us-west-2`.
+/// detection only understands EC2). The region is resolved from the
+/// organization's default AWS cloud credential configuration (`config->>'region'`
+/// or `config->>'aws_region'`), then its `default_region` column, falling back
+/// to `us-west-2`.
 ///
 /// # Errors
 ///
@@ -206,14 +208,28 @@ pub async fn get_provider_accounts(
 ) -> Result<Vec<ProviderAccount>, DbError> {
     let rows = sqlx::query(
         r"
-        SELECT 
+        SELECT
             pa.id,
             pa.organization_id,
             pa.external_account_id,
             pa.role_arn,
-            COALESCE(pa.region, 'us-west-2') as region
+            COALESCE(
+                NULLIF(cc.config->>'region', ''),
+                NULLIF(cc.config->>'aws_region', ''),
+                cc.default_region,
+                'us-west-2'
+            ) AS region
         FROM provider_accounts pa
         JOIN providers p ON p.id = pa.provider_id
+        LEFT JOIN LATERAL (
+            SELECT config, default_region
+            FROM cloud_credentials
+            WHERE organization_id = pa.organization_id
+              AND platform = 'aws'
+              AND is_active = true
+            ORDER BY is_default DESC, created_at ASC
+            LIMIT 1
+        ) cc ON true
         WHERE pa.organization_id = $1 AND pa.is_active = true AND p.provider_type = 'aws'
         ",
     )
