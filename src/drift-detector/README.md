@@ -67,8 +67,7 @@ use drift_detector::drift::{detect_resource_drift, detect_orphaned_resources};
 let drifts = detect_resource_drift(&expected_resource, Some(&aws_instance));
 
 // Find orphaned resources within one provider account
-let db_ids: HashSet<String> = ...;
-let orphaned = detect_orphaned_resources(&db_ids, &aws_instances, &account);
+let orphaned = detect_orphaned_resources(&db_resources, &aws_instances, &account);
 ```
 
 ## Usage Example
@@ -113,13 +112,11 @@ async fn detect_org_drift(
             all_drifts.extend(detect_resource_drift(resource, aws_instance));
         }
 
-        // Find instances in this account that aren't tracked in the database
-        let db_ids: HashSet<String> = resources
-            .iter()
-            .filter(|r| r.provider_account_id == account.id)
-            .map(|r| r.provider_resource_id.clone())
-            .collect();
-        all_drifts.extend(detect_orphaned_resources(&db_ids, &instances, account));
+        // Find instances in this account that aren't tracked in the database.
+        // Orphaned instances carrying a `ResourceId` tag are cross-referenced
+        // against `resources` so the report includes the matching resource's
+        // name and expected state when the row still exists.
+        all_drifts.extend(detect_orphaned_resources(&resources, &instances, account));
     }
 
     // 3. Generate report

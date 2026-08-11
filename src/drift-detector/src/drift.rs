@@ -9,7 +9,32 @@
 use crate::aws::Ec2Instance;
 use crate::db::{ComputeResource, ProviderAccount, ResourceState};
 use aws_sdk_ec2::types::InstanceStateName;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+/// Tag key marking the entity that created an EC2 instance.
+const MANAGED_BY_TAG: &str = "ManagedBy";
+/// Value of [`MANAGED_BY_TAG`] on build runner instances.
+const MANAGED_BY_BUILDER: &str = "caution-builder";
+/// Value of [`MANAGED_BY_TAG`] applied by the deployment Terraform/OpenTofu
+/// provider `default_tags` block to every provisioned resource.
+const MANAGED_BY_TOFU: &str = "caution+tofu";
+/// Tag key on build runner instances holding the build UUID.
+const BUILD_ID_TAG: &str = "BuildId";
+/// Tag key used by AWS for the instance display name.
+const NAME_TAG: &str = "Name";
+/// Tag key on deployment resources holding the database resource UUID.
+const RESOURCE_ID_TAG: &str = "ResourceId";
+/// Tag key on managed on-prem deployment resources holding the deployment ID.
+const DEPLOYMENT_ID_TAG: &str = "caution:deployment-id";
+/// Tag key on deployment instances holding the configured HTTP domain.
+const CONFIG_DOMAIN_TAG: &str = "ConfigDomain";
+/// Legacy tag key recognized for backward compatibility. The platform now
+/// tags deployments with [`RESOURCE_ID_TAG`]; this alias was never emitted by
+/// the current codebase but is accepted so older orphaned instances are still
+/// flagged.
+const LEGACY_RESOURCE_ID_TAG: &str = "caution:resource_id";
+/// Prefix of the `Name` tag on build runner instances.
+const BUILDER_NAME_PREFIX: &str = "caution-builder-";
 
 /// Represents a type of drift detected between expected and actual state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -407,37 +432,104 @@ pub fn detect_resource_drift(
     drifts
 }
 
+/// The kind of Caution-managed resource an EC2 instance belongs to, inferred
+/// from its tags.
+///
+/// This mirrors how the platform categorizes the instances it launches:
+/// ephemeral build runners (tagged `ManagedBy: caution-builder`) and deployed
+/// enclaves (provisioned via Terraform/OpenTofu with `ManagedBy:
+/// caution+tofu` as a provider default tag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CautionResourceKind {
+    /// An ephemeral enclave build runner instance.
+    Builder,
+    /// A deployed enclave instance.
+    Deployment,
+}
+
+impl std::fmt::Display for CautionResourceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CautionResourceKind::Builder => write!(f, "builder"),
+            CautionResourceKind::Deployment => write!(f, "deployment"),
+        }
+    }
+}
+
+/// Classify an EC2 instance by its tags as the kind of Caution-managed
+/// resource it is, or `None` when it is not managed by Caution.
+///
+/// Builders are recognized by `ManagedBy: caution-builder`, the `BuildId`
+/// tag, or the `caution-builder-` `Name` prefix. Deployments are recognized
+/// by the `ResourceId`, `caution:deployment-id`, or `ConfigDomain` tags
+/// emitted by the deployment templates, by the `ManagedBy: caution+tofu`
+/// provider default tag, or by the legacy `caution:resource_id` alias.
+/// Builder markers take precedence so a managed on-prem builder (which also
+/// carries `caution:deployment-id`) is still categorized as a builder.
+#[must_use]
+pub fn classify_caution_resource(tags: &HashMap<String, String>) -> Option<CautionResourceKind> {
+    if is_builder(tags) {
+        Some(CautionResourceKind::Builder)
+    } else if is_deployment(tags) {
+        Some(CautionResourceKind::Deployment)
+    } else {
+        None
+    }
+}
+
+fn is_builder(tags: &HashMap<String, String>) -> bool {
+    tags.get(MANAGED_BY_TAG)
+        .is_some_and(|value| value == MANAGED_BY_BUILDER)
+        || tags.contains_key(BUILD_ID_TAG)
+        || tags
+            .get(NAME_TAG)
+            .is_some_and(|value| value.starts_with(BUILDER_NAME_PREFIX))
+}
+
+fn is_deployment(tags: &HashMap<String, String>) -> bool {
+    tags.contains_key(RESOURCE_ID_TAG)
+        || tags.contains_key(DEPLOYMENT_ID_TAG)
+        || tags.contains_key(CONFIG_DOMAIN_TAG)
+        || tags.contains_key(LEGACY_RESOURCE_ID_TAG)
+        || tags
+            .get(MANAGED_BY_TAG)
+            .is_some_and(|value| value == MANAGED_BY_TOFU)
+}
+
 /// Detect orphaned resources: EC2 instances that exist in AWS but are not
 /// tracked in the database.
 ///
-/// Instances tagged with `caution:resource_id` or `caution:deployment-id`, or
-/// with `ManagedBy: caution-builder`, are treated as managed by Caution and
-/// reported as critical; other untracked instances are reported as
+/// Untracked instances that match the platform's tagging scheme (see
+/// [`classify_caution_resource`]) are treated as Caution-managed resources
+/// and reported as critical; all other untracked instances are reported as
 /// informational. The owning provider account is included in the report
-/// description.
+/// description, along with the full tag set (keys and values).
+///
+/// Instances carrying a `ResourceId` tag are cross-referenced against
+/// `db_resources`: the tag value is the database resource UUID, so the report
+/// names the matching resource and its expected state when the row still
+/// exists, and notes when it does not. An instance is only considered tracked
+/// when its instance ID is recorded for the same provider account; the
+/// resource lookup itself is organization-wide.
 #[must_use]
 pub fn detect_orphaned_resources(
-    db_resource_ids: &HashSet<String, impl std::hash::BuildHasher>,
+    db_resources: &[ComputeResource],
     aws_instances: &[Ec2Instance],
     account: &ProviderAccount,
 ) -> Vec<DriftReport> {
+    let db_resource_ids: HashSet<String> = db_resources
+        .iter()
+        .filter(|resource| resource.provider_account_id == account.id)
+        .map(|resource| resource.provider_resource_id.clone())
+        .collect();
+
     let mut orphaned = Vec::new();
 
     for instance in aws_instances {
         if !db_resource_ids.contains(&instance.instance_id) {
-            let is_caution_resource = instance
-                .tags
-                .get("caution:resource_id")
-                .or_else(|| instance.tags.get("caution:deployment-id"))
-                .or_else(|| {
-                    instance
-                        .tags
-                        .get("ManagedBy")
-                        .filter(|value| value.as_str() == "caution-builder")
-                })
-                .is_some();
+            let kind = classify_caution_resource(&instance.tags);
 
-            let severity = if is_caution_resource {
+            let severity = if kind.is_some() {
                 DriftSeverity::Critical
             } else {
                 DriftSeverity::Info
@@ -449,7 +541,7 @@ pub fn detect_orphaned_resources(
                     "Instance '{}' exists in AWS but not tracked in database \
                      (account: {}, region: {}): state {:?}, type: {:?}, \
                      public IP: {:?}, private IP: {:?}, VPC: {:?}, subnet: {:?}, \
-                     tags: {:?}{}",
+                     tags: {}{}{}",
                     instance.instance_id,
                     account.external_account_id,
                     account.region,
@@ -459,12 +551,10 @@ pub fn detect_orphaned_resources(
                     instance.private_ip,
                     instance.vpc_id,
                     instance.subnet_id,
-                    instance.tags.keys().collect::<Vec<_>>(),
-                    if is_caution_resource {
-                        " (appears to be managed by Caution)"
-                    } else {
-                        ""
-                    }
+                    format_tags(&instance.tags),
+                    kind.map(|kind| format!(" (appears to be a Caution {kind})"))
+                        .unwrap_or_default(),
+                    describe_db_match(instance, db_resources),
                 ),
                 severity,
             ));
@@ -472,6 +562,79 @@ pub fn detect_orphaned_resources(
     }
 
     orphaned
+}
+
+/// Format a tag map as `key=value` pairs sorted by key, e.g.
+/// `{ManagedBy=caution+tofu, Name=i-456, ResourceId=…}`.
+fn format_tags(tags: &HashMap<String, String>) -> String {
+    let mut pairs: Vec<(&str, &str)> = tags
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    pairs.sort_unstable();
+
+    if pairs.is_empty() {
+        "{}".to_string()
+    } else {
+        format!(
+            "{{{}}}",
+            pairs
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+/// The expected instance type recorded in a resource's configuration, when
+/// present.
+fn expected_instance_type(resource: &ComputeResource) -> &str {
+    resource
+        .configuration
+        .as_ref()
+        .and_then(|config| config.get("instance_type"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("not configured")
+}
+
+/// Build the database-match clause for an orphaned instance's description.
+///
+/// The `ResourceId` tag (or its legacy `caution:resource_id` alias) holds the
+/// database resource UUID. When the tag is absent — builders do not carry one
+/// — no clause is emitted. When it is present, the report names the matching
+/// resource and its expected state, or notes that no row matches.
+fn describe_db_match(instance: &Ec2Instance, db_resources: &[ComputeResource]) -> String {
+    let Some(tagged_resource_id) = instance
+        .tags
+        .get(RESOURCE_ID_TAG)
+        .or_else(|| instance.tags.get(LEGACY_RESOURCE_ID_TAG))
+    else {
+        return String::new();
+    };
+
+    let matched = uuid::Uuid::parse_str(tagged_resource_id)
+        .ok()
+        .and_then(|resource_uuid| {
+            db_resources
+                .iter()
+                .find(|resource| resource.id == resource_uuid)
+        });
+
+    match matched {
+        Some(resource) => format!(
+            "; matching database resource '{}' (expected state: {}, region: {}, \
+             public IP: {:?}, instance type: {})",
+            resource.resource_name.as_deref().unwrap_or("unknown"),
+            resource.state.as_str(),
+            resource.region.as_deref().unwrap_or("unknown"),
+            resource.public_ip,
+            expected_instance_type(resource),
+        ),
+        None => {
+            format!("; no matching database resource for tagged resource id '{tagged_resource_id}'")
+        }
+    }
 }
 
 /// Convert AWS instance state to database resource state.
@@ -602,32 +765,11 @@ mod tests {
 
     #[test]
     fn test_detect_orphaned_resource() {
-        let db_ids: HashSet<String> = ["i-123".to_string()].into_iter().collect();
-
-        use crate::aws::Ec2Instance;
-        use crate::db::ProviderAccount;
-        use aws_sdk_ec2::types::InstanceStateName;
-        use std::collections::HashMap;
-
-        let account = ProviderAccount {
-            id: uuid::Uuid::new_v4(),
-            organization_id: uuid::Uuid::new_v4(),
-            external_account_id: "123456789012".to_string(),
-            role_arn: None,
-            region: "us-west-2".to_string(),
-        };
+        let account = test_account();
+        let db_resources = vec![tracked_resource(&account, "i-123", ResourceState::Running)];
 
         let aws_instances = vec![
-            Ec2Instance {
-                instance_id: "i-123".to_string(),
-                instance_type: None,
-                state: InstanceStateName::Running,
-                public_ip: None,
-                private_ip: None,
-                vpc_id: None,
-                subnet_id: None,
-                tags: HashMap::new(),
-            },
+            tagged_instance("i-123", HashMap::new()),
             Ec2Instance {
                 instance_id: "i-456".to_string(),
                 instance_type: Some("t3.micro".to_string()),
@@ -640,7 +782,7 @@ mod tests {
             },
         ];
 
-        let orphaned = detect_orphaned_resources(&db_ids, &aws_instances, &account);
+        let orphaned = detect_orphaned_resources(&db_resources, &aws_instances, &account);
 
         assert_eq!(orphaned.len(), 1);
         match &orphaned[0].drift_type {
@@ -652,28 +794,65 @@ mod tests {
         assert!(orphaned[0].description.contains("54.123.45.67"));
     }
 
-    #[test]
-    fn test_orphaned_caution_tagged_instance_is_critical() {
-        use crate::aws::Ec2Instance;
-        use crate::db::ProviderAccount;
-        use aws_sdk_ec2::types::InstanceStateName;
-        use std::collections::HashMap;
-
-        let db_ids: HashSet<String> = ["i-123".to_string()].into_iter().collect();
-
-        let account = ProviderAccount {
+    fn test_account() -> ProviderAccount {
+        ProviderAccount {
             id: uuid::Uuid::new_v4(),
             organization_id: uuid::Uuid::new_v4(),
             external_account_id: "123456789012".to_string(),
             role_arn: None,
             region: "us-west-2".to_string(),
-        };
+        }
+    }
 
-        let mut tags = HashMap::new();
-        tags.insert("caution:resource_id".to_string(), "cr-123".to_string());
+    /// A resource tracked in the database for the given provider account.
+    fn tracked_resource(
+        account: &ProviderAccount,
+        instance_id: &str,
+        state: ResourceState,
+    ) -> ComputeResource {
+        ComputeResource {
+            id: uuid::Uuid::new_v4(),
+            organization_id: account.organization_id,
+            provider_account_id: account.id,
+            provider_resource_id: instance_id.to_string(),
+            resource_name: Some(format!("app-{}", &instance_id[2..])),
+            state,
+            region: Some("us-west-2".to_string()),
+            public_ip: None,
+            configuration: Some(serde_json::json!({ "instance_type": "c5.xlarge" })),
+        }
+    }
 
-        let aws_instances = vec![Ec2Instance {
-            instance_id: "i-456".to_string(),
+    /// A resource with a known database ID, so the `ResourceId` tag lookup can
+    /// match it.
+    fn tagged_resource(
+        resource_uuid: uuid::Uuid,
+        instance_id: &str,
+        state: ResourceState,
+    ) -> ComputeResource {
+        ComputeResource {
+            id: resource_uuid,
+            organization_id: uuid::Uuid::new_v4(),
+            provider_account_id: uuid::Uuid::new_v4(),
+            provider_resource_id: instance_id.to_string(),
+            resource_name: Some("app-matching".to_string()),
+            state,
+            region: Some("us-west-2".to_string()),
+            public_ip: Some("1.2.3.4".to_string()),
+            configuration: Some(serde_json::json!({ "instance_type": "c5.xlarge" })),
+        }
+    }
+
+    fn tags(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
+    fn tagged_instance(instance_id: &str, tags: HashMap<String, String>) -> Ec2Instance {
+        Ec2Instance {
+            instance_id: instance_id.to_string(),
             instance_type: None,
             state: InstanceStateName::Running,
             public_ip: None,
@@ -681,144 +860,309 @@ mod tests {
             vpc_id: None,
             subnet_id: None,
             tags,
-        }];
+        }
+    }
 
-        let orphaned = detect_orphaned_resources(&db_ids, &aws_instances, &account);
-
+    fn orphaned_from(db_resources: &[ComputeResource], instance: Ec2Instance) -> DriftReport {
+        let orphaned = detect_orphaned_resources(db_resources, &[instance], &test_account());
         assert_eq!(orphaned.len(), 1);
-        assert_eq!(orphaned[0].severity, DriftSeverity::Critical);
-        assert!(orphaned[0].description.contains("managed by Caution"));
+        orphaned.into_iter().next().expect("one orphan reported")
+    }
+
+    #[test]
+    fn test_orphaned_resource_id_tagged_instance_is_critical() {
+        let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
+        let report = orphaned_from(
+            &db_resources,
+            tagged_instance(
+                "i-456",
+                tags(&[("ResourceId", "550e8400-e29b-41d4-a716-446655440000")]),
+            ),
+        );
+
+        assert_eq!(report.severity, DriftSeverity::Critical);
+        assert!(report.description.contains("Caution deployment"));
+    }
+
+    #[test]
+    fn test_orphaned_managed_by_tofu_tagged_instance_is_critical() {
+        let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
+        let report = orphaned_from(
+            &db_resources,
+            tagged_instance("i-456", tags(&[("ManagedBy", "caution+tofu")])),
+        );
+
+        assert_eq!(report.severity, DriftSeverity::Critical);
+        assert!(report.description.contains("Caution deployment"));
+    }
+
+    #[test]
+    fn test_orphaned_config_domain_tagged_instance_is_critical() {
+        let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
+        let report = orphaned_from(
+            &db_resources,
+            tagged_instance("i-456", tags(&[("ConfigDomain", "app.example.com")])),
+        );
+
+        assert_eq!(report.severity, DriftSeverity::Critical);
+        assert!(report.description.contains("Caution deployment"));
+    }
+
+    #[test]
+    fn test_orphaned_legacy_resource_id_tagged_instance_is_critical() {
+        // `caution:resource_id` was never emitted by the current platform but
+        // is recognized for backward compatibility.
+        let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
+        let report = orphaned_from(
+            &db_resources,
+            tagged_instance("i-456", tags(&[("caution:resource_id", "cr-123")])),
+        );
+
+        assert_eq!(report.severity, DriftSeverity::Critical);
+        assert!(report.description.contains("Caution deployment"));
     }
 
     #[test]
     fn test_orphaned_untagged_instance_is_info() {
-        use crate::aws::Ec2Instance;
-        use crate::db::ProviderAccount;
-        use aws_sdk_ec2::types::InstanceStateName;
-        use std::collections::HashMap;
+        let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
+        let report = orphaned_from(&db_resources, tagged_instance("i-456", HashMap::new()));
 
-        let db_ids: HashSet<String> = ["i-123".to_string()].into_iter().collect();
-
-        let account = ProviderAccount {
-            id: uuid::Uuid::new_v4(),
-            organization_id: uuid::Uuid::new_v4(),
-            external_account_id: "123456789012".to_string(),
-            role_arn: None,
-            region: "us-west-2".to_string(),
-        };
-
-        let aws_instances = vec![Ec2Instance {
-            instance_id: "i-456".to_string(),
-            instance_type: None,
-            state: InstanceStateName::Running,
-            public_ip: None,
-            private_ip: None,
-            vpc_id: None,
-            subnet_id: None,
-            tags: HashMap::new(),
-        }];
-
-        let orphaned = detect_orphaned_resources(&db_ids, &aws_instances, &account);
-
-        assert_eq!(orphaned.len(), 1);
-        assert_eq!(orphaned[0].severity, DriftSeverity::Info);
-        assert!(!orphaned[0].description.contains("managed by Caution"));
+        assert_eq!(report.severity, DriftSeverity::Info);
+        assert!(!report.description.contains("appears to be a Caution"));
     }
 
     #[test]
     fn test_orphaned_managed_by_value_must_be_caution_builder() {
-        use crate::aws::Ec2Instance;
-        use crate::db::ProviderAccount;
-        use aws_sdk_ec2::types::InstanceStateName;
-        use std::collections::HashMap;
+        let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
 
-        let db_ids: HashSet<String> = ["i-123".to_string()].into_iter().collect();
+        let foreign = orphaned_from(
+            &db_resources,
+            tagged_instance("i-456", tags(&[("ManagedBy", "CloudFormation")])),
+        );
+        assert_eq!(foreign.severity, DriftSeverity::Info);
+        assert!(!foreign.description.contains("appears to be a Caution"));
 
-        let account = ProviderAccount {
-            id: uuid::Uuid::new_v4(),
-            organization_id: uuid::Uuid::new_v4(),
-            external_account_id: "123456789012".to_string(),
-            role_arn: None,
-            region: "us-west-2".to_string(),
-        };
+        let builder = orphaned_from(
+            &db_resources,
+            tagged_instance("i-456", tags(&[("ManagedBy", "caution-builder")])),
+        );
+        assert_eq!(builder.severity, DriftSeverity::Critical);
+        assert!(builder.description.contains("Caution builder"));
+    }
 
-        let mut foreign_tags = HashMap::new();
-        foreign_tags.insert("ManagedBy".to_string(), "CloudFormation".to_string());
+    #[test]
+    fn test_orphaned_builder_build_id_tagged_instance_is_critical() {
+        let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
+        let report = orphaned_from(
+            &db_resources,
+            tagged_instance("i-456", tags(&[("BuildId", "b-123")])),
+        );
 
-        let aws_instances = vec![Ec2Instance {
-            instance_id: "i-456".to_string(),
-            instance_type: None,
-            state: InstanceStateName::Running,
-            public_ip: None,
-            private_ip: None,
-            vpc_id: None,
-            subnet_id: None,
-            tags: foreign_tags,
-        }];
+        assert_eq!(report.severity, DriftSeverity::Critical);
+        assert!(report.description.contains("Caution builder"));
+    }
 
-        let orphaned = detect_orphaned_resources(&db_ids, &aws_instances, &account);
-        assert_eq!(orphaned.len(), 1);
-        assert_eq!(orphaned[0].severity, DriftSeverity::Info);
+    #[test]
+    fn test_orphaned_builder_name_prefixed_instance_is_critical() {
+        let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
+        let report = orphaned_from(
+            &db_resources,
+            tagged_instance("i-456", tags(&[("Name", "caution-builder-abc12345")])),
+        );
 
-        let mut builder_tags = HashMap::new();
-        builder_tags.insert("ManagedBy".to_string(), "caution-builder".to_string());
+        assert_eq!(report.severity, DriftSeverity::Critical);
+        assert!(report.description.contains("Caution builder"));
+    }
 
-        let aws_instances = vec![Ec2Instance {
-            instance_id: "i-456".to_string(),
-            instance_type: None,
-            state: InstanceStateName::Running,
-            public_ip: None,
-            private_ip: None,
-            vpc_id: None,
-            subnet_id: None,
-            tags: builder_tags,
-        }];
+    #[test]
+    fn test_orphaned_onprem_builder_is_reported_as_builder_not_deployment() {
+        // Managed on-prem builders carry both `ManagedBy: caution-builder`
+        // and `caution:deployment-id`; builder markers take precedence.
+        let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
+        let report = orphaned_from(
+            &db_resources,
+            tagged_instance(
+                "i-456",
+                tags(&[
+                    ("ManagedBy", "caution-builder"),
+                    ("caution:deployment-id", "dep-1"),
+                ]),
+            ),
+        );
 
-        let orphaned = detect_orphaned_resources(&db_ids, &aws_instances, &account);
-        assert_eq!(orphaned.len(), 1);
-        assert_eq!(orphaned[0].severity, DriftSeverity::Critical);
-        assert!(orphaned[0].description.contains("managed by Caution"));
+        assert_eq!(report.severity, DriftSeverity::Critical);
+        assert!(report.description.contains("Caution builder"));
+        assert!(!report.description.contains("Caution deployment"));
     }
 
     #[test]
     fn test_orphaned_deployment_id_tagged_instance_is_critical() {
-        use crate::aws::Ec2Instance;
-        use crate::db::ProviderAccount;
-        use aws_sdk_ec2::types::InstanceStateName;
-        use std::collections::HashMap;
-
-        let db_ids: HashSet<String> = ["i-123".to_string()].into_iter().collect();
-
-        let account = ProviderAccount {
-            id: uuid::Uuid::new_v4(),
-            organization_id: uuid::Uuid::new_v4(),
-            external_account_id: "123456789012".to_string(),
-            role_arn: None,
-            region: "us-west-2".to_string(),
-        };
-
-        let mut tags = HashMap::new();
-        tags.insert(
-            "caution:deployment-id".to_string(),
-            uuid::Uuid::new_v4().to_string(),
+        let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
+        let report = orphaned_from(
+            &db_resources,
+            tagged_instance(
+                "i-456",
+                tags(&[("caution:deployment-id", &uuid::Uuid::new_v4().to_string())]),
+            ),
         );
 
-        let aws_instances = vec![Ec2Instance {
-            instance_id: "i-456".to_string(),
-            instance_type: None,
-            state: InstanceStateName::Running,
-            public_ip: None,
-            private_ip: None,
-            vpc_id: None,
-            subnet_id: None,
-            tags,
-        }];
+        assert_eq!(report.severity, DriftSeverity::Critical);
+        assert!(report.description.contains("Caution deployment"));
+    }
 
-        let orphaned = detect_orphaned_resources(&db_ids, &aws_instances, &account);
+    #[test]
+    fn test_orphaned_description_includes_full_tag_values() {
+        let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
+        let report = orphaned_from(
+            &db_resources,
+            tagged_instance(
+                "i-456",
+                tags(&[
+                    ("ResourceId", "550e8400-e29b-41d4-a716-446655440000"),
+                    ("Name", "i-456"),
+                    ("ManagedBy", "caution+tofu"),
+                    ("ConfigDomain", "app.example.com"),
+                ]),
+            ),
+        );
 
-        assert_eq!(orphaned.len(), 1);
-        assert_eq!(orphaned[0].severity, DriftSeverity::Critical);
-        assert!(orphaned[0].description.contains("managed by Caution"));
+        assert!(
+            report
+                .description
+                .contains("ResourceId=550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert!(report.description.contains("ManagedBy=caution+tofu"));
+        assert!(report.description.contains("ConfigDomain=app.example.com"));
+        assert!(report.description.contains("Name=i-456"));
+    }
+
+    #[test]
+    fn test_orphaned_matches_database_resource_and_expected_state() {
+        let resource_uuid = uuid::Uuid::new_v4();
+        let db_resources = vec![
+            create_test_resource("i-123", ResourceState::Running),
+            tagged_resource(resource_uuid, "i-999", ResourceState::Running),
+        ];
+        let report = orphaned_from(
+            &db_resources,
+            tagged_instance("i-456", tags(&[("ResourceId", &resource_uuid.to_string())])),
+        );
+
+        assert_eq!(report.severity, DriftSeverity::Critical);
+        assert!(
+            report
+                .description
+                .contains("matching database resource 'app-matching'")
+        );
+        assert!(report.description.contains("expected state: running"));
+        assert!(report.description.contains("region: us-west-2"));
+        assert!(report.description.contains("public IP: Some(\"1.2.3.4\")"));
+        assert!(report.description.contains("instance type: c5.xlarge"));
+    }
+
+    #[test]
+    fn test_orphaned_resource_id_without_db_match_notes_missing_row() {
+        let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
+        let report = orphaned_from(
+            &db_resources,
+            tagged_instance(
+                "i-456",
+                tags(&[("ResourceId", "550e8400-e29b-41d4-a716-446655440000")]),
+            ),
+        );
+
+        assert_eq!(report.severity, DriftSeverity::Critical);
+        assert!(
+            report
+                .description
+                .contains("no matching database resource for tagged resource id '550e8400")
+        );
+    }
+
+    #[test]
+    fn test_orphaned_matches_stopped_database_resource_state() {
+        let resource_uuid = uuid::Uuid::new_v4();
+        let db_resources = vec![
+            create_test_resource("i-123", ResourceState::Running),
+            tagged_resource(resource_uuid, "i-999", ResourceState::Stopped),
+        ];
+        let report = orphaned_from(
+            &db_resources,
+            tagged_instance("i-456", tags(&[("ResourceId", &resource_uuid.to_string())])),
+        );
+
+        assert!(report.description.contains("expected state: stopped"));
+    }
+
+    #[test]
+    fn test_orphaned_builder_has_no_db_match_clause() {
+        // Builders do not carry a `ResourceId` tag, so no database match is
+        // attempted and the description has no match clause.
+        let db_resources = vec![create_test_resource("i-123", ResourceState::Running)];
+        let report = orphaned_from(
+            &db_resources,
+            tagged_instance("i-456", tags(&[("ManagedBy", "caution-builder")])),
+        );
+
+        assert_eq!(report.severity, DriftSeverity::Critical);
+        assert!(report.description.contains("Caution builder"));
+        assert!(!report.description.contains("matching database resource"));
+        assert!(!report.description.contains("no matching database resource"));
+    }
+
+    #[test]
+    fn test_classify_caution_resource_matches_platform_tag_scheme() {
+        assert_eq!(
+            classify_caution_resource(&tags(&[("ManagedBy", "caution-builder")])),
+            Some(CautionResourceKind::Builder)
+        );
+        assert_eq!(
+            classify_caution_resource(&tags(&[("BuildId", "b-123")])),
+            Some(CautionResourceKind::Builder)
+        );
+        assert_eq!(
+            classify_caution_resource(&tags(&[("Name", "caution-builder-abc12345")])),
+            Some(CautionResourceKind::Builder)
+        );
+        assert_eq!(
+            classify_caution_resource(&tags(&[(
+                "ResourceId",
+                "550e8400-e29b-41d4-a716-446655440000"
+            )])),
+            Some(CautionResourceKind::Deployment)
+        );
+        assert_eq!(
+            classify_caution_resource(&tags(&[("ManagedBy", "caution+tofu")])),
+            Some(CautionResourceKind::Deployment)
+        );
+        assert_eq!(
+            classify_caution_resource(&tags(&[("ConfigDomain", "app.example.com")])),
+            Some(CautionResourceKind::Deployment)
+        );
+        assert_eq!(
+            classify_caution_resource(&tags(&[("caution:deployment-id", "dep-1")])),
+            Some(CautionResourceKind::Deployment)
+        );
+        assert_eq!(
+            classify_caution_resource(&tags(&[("caution:resource_id", "cr-123")])),
+            Some(CautionResourceKind::Deployment)
+        );
+        assert_eq!(classify_caution_resource(&HashMap::new()), None);
+        assert_eq!(
+            classify_caution_resource(&tags(&[("ManagedBy", "CloudFormation")])),
+            None
+        );
+    }
+
+    #[test]
+    fn test_classify_builder_takes_precedence_over_deployment_markers() {
+        assert_eq!(
+            classify_caution_resource(&tags(&[
+                ("ManagedBy", "caution-builder"),
+                ("caution:deployment-id", "dep-1"),
+            ])),
+            Some(CautionResourceKind::Builder)
+        );
     }
 
     #[test]

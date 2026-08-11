@@ -340,8 +340,8 @@ mod tests {
             .instance_id("i-1234567890abcdef0")
             .tags(
                 Tag::builder()
-                    .key("caution:resource_id")
-                    .value("cr-123")
+                    .key("ResourceId")
+                    .value("550e8400-e29b-41d4-a716-446655440000")
                     .build(),
             )
             .tags(Tag::builder().key("Name").value("web-1").build())
@@ -351,8 +351,8 @@ mod tests {
 
         assert_eq!(converted.tags.len(), 2);
         assert_eq!(
-            converted.tags.get("caution:resource_id"),
-            Some(&"cr-123".to_string())
+            converted.tags.get("ResourceId"),
+            Some(&"550e8400-e29b-41d4-a716-446655440000".to_string())
         );
         assert_eq!(converted.tags.get("Name"), Some(&"web-1".to_string()));
     }

@@ -30,10 +30,11 @@ use drift_detector::drift::{
 };
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
 use thiserror::Error;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
@@ -212,6 +213,7 @@ enum OrgScanError {
 /// Initialize tracing with an optional `RUST_LOG` filter (defaults to `info`).
 fn init_tracing() {
     tracing_subscriber::registry()
+        .with(fmt::layer())
         .with(EnvFilter::new(
             env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
         ))
@@ -410,13 +412,8 @@ async fn detect_aws_drift(
     }
 
     for (account, instances) in &queried_accounts {
-        let account_db_ids: HashSet<String> = expected_resources
-            .iter()
-            .filter(|resource| resource.provider_account_id == account.id)
-            .map(|resource| resource.provider_resource_id.clone())
-            .collect();
         drifts.extend(detect_orphaned_resources(
-            &account_db_ids,
+            expected_resources,
             instances,
             account,
         ));
