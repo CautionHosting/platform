@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+[package]
+name = "drift-detector"
+version = "0.1.0"
+edition = "2024"
+description = "Detect drift between expected database state and actual AWS resources"
+license = "AGPL-3.0-only OR LicenseRef-Commercial"
+
+[dependencies]
+sqlx = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+aws-config = "1.5"
+aws-sdk-ec2 = "1.82"
+
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[[bin]]
+name = "drift-detector"
+path = "src/main.rs"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
