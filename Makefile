@@ -103,7 +103,7 @@ build-metering:
 
 build-drift-detector:
 	@echo "Building drift-detector image..."
-	@docker build -t caution-drift-detector -f ./containerfiles/Containerfile.drift-detector .
+	@docker build --platform linux/amd64 -t caution-drift-detector -f ./containerfiles/Containerfile.drift-detector .
 	@echo "Drift-detector image built: caution-drift-detector"
 
 build-frontend-dist:

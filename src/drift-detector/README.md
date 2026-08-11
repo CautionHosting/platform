@@ -193,8 +193,18 @@ The binary additionally defines small per-function error enums in `main.rs`
 Run tests with:
 
 ```bash
-cargo test -p drift-detector
+cargo test --locked -p drift-detector
 ```
+
+Build the static `linux/amd64` release image with:
+
+```bash
+BUILDKIT_PROGRESS=plain make build-drift-detector
+```
+
+The release profile leaves the generated `aws-sdk-ec2` package unoptimized to
+avoid excessive LLVM memory use while retaining single-codegen-unit builds.
+The drift detector itself remains release-optimized.
 
 The crate includes comprehensive unit tests for:
 - Database row parsing
