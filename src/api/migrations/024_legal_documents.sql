@@ -2,7 +2,7 @@
 -- Supports append-only audit trail of TOS acceptance and privacy notice acknowledgment
 
 -- Canonical registry of legal documents and their versions
-CREATE TABLE legal_documents (
+CREATE TABLE IF NOT EXISTS legal_documents (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     document_type VARCHAR(50) NOT NULL,
     version VARCHAR(50) NOT NULL,        -- e.g. '2026-04-08'
@@ -19,13 +19,13 @@ CREATE TABLE legal_documents (
     CONSTRAINT chk_legal_documents_type CHECK (document_type IN ('terms_of_service', 'privacy_notice'))
 );
 
-CREATE UNIQUE INDEX idx_legal_documents_one_active_per_type
+CREATE UNIQUE INDEX IF NOT EXISTS idx_legal_documents_one_active_per_type
     ON legal_documents (document_type)
     WHERE is_active = true;
 
 -- Append-only audit trail of user legal events
 -- Never update or delete rows in this table
-CREATE TABLE user_legal_events (
+CREATE TABLE IF NOT EXISTS user_legal_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     document_type VARCHAR(50) NOT NULL,
@@ -46,8 +46,8 @@ CREATE TABLE user_legal_events (
         REFERENCES legal_documents(document_type, version)
 );
 
-CREATE INDEX idx_user_legal_events_user ON user_legal_events (user_id, document_type);
-CREATE INDEX idx_user_legal_events_occurred ON user_legal_events (occurred_at);
+CREATE INDEX IF NOT EXISTS idx_user_legal_events_user ON user_legal_events (user_id, document_type);
+CREATE INDEX IF NOT EXISTS idx_user_legal_events_occurred ON user_legal_events (occurred_at);
 
 -- Seed the initial active documents
 INSERT INTO legal_documents (document_type, version, url, effective_at, is_active, requires_blocking_reacceptance, requires_acknowledgment)

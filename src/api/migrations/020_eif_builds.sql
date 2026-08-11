@@ -1,7 +1,7 @@
 -- Dedicated builder EIF cache
 -- Tracks builds and their outputs so we can reuse EIFs across deploys.
 
-CREATE TABLE eif_builds (
+CREATE TABLE IF NOT EXISTS eif_builds (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id UUID NOT NULL REFERENCES organizations(id),
 
@@ -36,6 +36,6 @@ CREATE TABLE eif_builds (
 
 DROP INDEX IF EXISTS idx_eif_builds_cache_lookup;
 
-CREATE INDEX idx_eif_builds_stale
+CREATE INDEX IF NOT EXISTS idx_eif_builds_stale
     ON eif_builds(created_at)
     WHERE status IN ('pending', 'building');

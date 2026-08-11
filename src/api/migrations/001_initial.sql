@@ -54,7 +54,7 @@ $$ LANGUAGE plpgsql;
 -- ALPHA CODES (for closed alpha registration)
 -- ============================================
 
-CREATE TABLE beta_codes (
+CREATE TABLE IF NOT EXISTS beta_codes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     code VARCHAR(64) NOT NULL UNIQUE,
     created_by VARCHAR(255),
@@ -63,7 +63,7 @@ CREATE TABLE beta_codes (
     used_at TIMESTAMP  -- NULL if not yet used, set when redeemed
 );
 
-CREATE INDEX idx_beta_codes_code ON beta_codes(code);
+CREATE INDEX IF NOT EXISTS idx_beta_codes_code ON beta_codes(code);
 
 -- Generate and insert a random alpha code:
 -- code=$(openssl rand -hex 16) && psql -c "INSERT INTO beta_codes (code) VALUES ('$code')" && echo "Alpha code: $code"
@@ -72,7 +72,7 @@ CREATE INDEX idx_beta_codes_code ON beta_codes(code);
 -- CORE ENTITIES
 -- ============================================
 
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     username VARCHAR(255) NOT NULL UNIQUE,
     email VARCHAR(255) UNIQUE,
@@ -96,11 +96,11 @@ CREATE TABLE users (
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_users_email ON users(email) WHERE email IS NOT NULL;
-CREATE INDEX idx_users_active ON users(is_active) WHERE is_active = true;
-CREATE INDEX idx_users_fido2_handle ON users(fido2_user_handle) WHERE fido2_user_handle IS NOT NULL;
-CREATE INDEX idx_users_verification_token ON users(email_verification_token) WHERE email_verification_token IS NOT NULL;
-CREATE INDEX idx_users_stripe_customer ON users(stripe_customer_id) WHERE stripe_customer_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email) WHERE email IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_active ON users(is_active) WHERE is_active = true;
+CREATE INDEX IF NOT EXISTS idx_users_fido2_handle ON users(fido2_user_handle) WHERE fido2_user_handle IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_verification_token ON users(email_verification_token) WHERE email_verification_token IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_stripe_customer ON users(stripe_customer_id) WHERE stripe_customer_id IS NOT NULL;
 
 COMMENT ON COLUMN users.email_verified_at IS 'Timestamp when user verified their email address';
 COMMENT ON COLUMN users.email_verification_token IS 'Token sent via email for verification';
@@ -108,14 +108,14 @@ COMMENT ON COLUMN users.email_verification_token_expires_at IS 'Expiration time 
 COMMENT ON COLUMN users.stripe_customer_id IS 'Stripe customer ID for billing';
 COMMENT ON COLUMN users.payment_method_added_at IS 'Timestamp when user added payment method';
 
-CREATE TRIGGER users_updated_at BEFORE UPDATE ON users
+CREATE OR REPLACE TRIGGER users_updated_at BEFORE UPDATE ON users
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- ============================================
 -- ORGANIZATIONS
 -- ============================================
 
-CREATE TABLE organizations (
+CREATE TABLE IF NOT EXISTS organizations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(255) NOT NULL,
     is_active BOOLEAN NOT NULL DEFAULT true,
@@ -123,16 +123,21 @@ CREATE TABLE organizations (
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
-CREATE TRIGGER organizations_updated_at BEFORE UPDATE ON organizations
+CREATE OR REPLACE TRIGGER organizations_updated_at BEFORE UPDATE ON organizations
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- ============================================
 -- USER-ORGANIZATION RELATIONSHIP
 -- ============================================
 
-CREATE TYPE user_role AS ENUM ('owner', 'admin', 'member', 'viewer');
+DO
+$$BEGIN
+    CREATE TYPE user_role AS ENUM ('owner', 'admin', 'member', 'viewer');
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END;$$;
 
-CREATE TABLE organization_members (
+CREATE TABLE IF NOT EXISTS organization_members (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -145,20 +150,25 @@ CREATE TABLE organization_members (
     CONSTRAINT organization_members_unique UNIQUE (organization_id, user_id)
 );
 
-CREATE INDEX idx_org_members_org ON organization_members(organization_id);
-CREATE INDEX idx_org_members_user ON organization_members(user_id);
-CREATE INDEX idx_org_members_invited_by ON organization_members(invited_by) WHERE invited_by IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_org_members_org ON organization_members(organization_id);
+CREATE INDEX IF NOT EXISTS idx_org_members_user ON organization_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_org_members_invited_by ON organization_members(invited_by) WHERE invited_by IS NOT NULL;
 
-CREATE TRIGGER organization_members_updated_at BEFORE UPDATE ON organization_members
+CREATE OR REPLACE TRIGGER organization_members_updated_at BEFORE UPDATE ON organization_members
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- ============================================
 -- CLOUD PROVIDERS
 -- ============================================
 
-CREATE TYPE cloud_provider AS ENUM ('aws', 'gcp', 'azure', 'digitalocean', 'hetzner');
+DO
+$$BEGIN
+    CREATE TYPE cloud_provider AS ENUM ('aws', 'gcp', 'azure', 'digitalocean', 'hetzner');
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END;$$;
 
-CREATE TABLE providers (
+CREATE TABLE IF NOT EXISTS providers (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     provider_type cloud_provider NOT NULL UNIQUE,
     display_name VARCHAR(100) NOT NULL,
@@ -172,16 +182,17 @@ INSERT INTO providers (provider_type, display_name) VALUES
     ('gcp', 'Google Cloud Platform'),
     ('azure', 'Microsoft Azure'),
     ('digitalocean', 'DigitalOcean'),
-    ('hetzner', 'Hetzner');
+    ('hetzner', 'Hetzner')
+ON CONFLICT DO NOTHING;
 
-CREATE TRIGGER providers_updated_at BEFORE UPDATE ON providers
+CREATE OR REPLACE TRIGGER providers_updated_at BEFORE UPDATE ON providers
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- ============================================
 -- PROVIDER ACCOUNTS (Per Organization)
 -- ============================================
 
-CREATE TABLE provider_accounts (
+CREATE TABLE IF NOT EXISTS provider_accounts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     provider_id UUID NOT NULL REFERENCES providers(id),
@@ -197,17 +208,17 @@ CREATE TABLE provider_accounts (
     CONSTRAINT provider_accounts_unique UNIQUE (organization_id, provider_id, external_account_id)
 );
 
-CREATE INDEX idx_provider_accounts_org ON provider_accounts(organization_id);
-CREATE INDEX idx_provider_accounts_provider ON provider_accounts(provider_id);
+CREATE INDEX IF NOT EXISTS idx_provider_accounts_org ON provider_accounts(organization_id);
+CREATE INDEX IF NOT EXISTS idx_provider_accounts_provider ON provider_accounts(provider_id);
 
-CREATE TRIGGER provider_accounts_updated_at BEFORE UPDATE ON provider_accounts
+CREATE OR REPLACE TRIGGER provider_accounts_updated_at BEFORE UPDATE ON provider_accounts
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- ============================================
 -- RESOURCE TYPES
 -- ============================================
 
-CREATE TABLE resource_types (
+CREATE TABLE IF NOT EXISTS resource_types (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     provider_id UUID NOT NULL REFERENCES providers(id),
     type_code VARCHAR(100) NOT NULL,
@@ -220,25 +231,31 @@ CREATE TABLE resource_types (
     CONSTRAINT resource_types_unique UNIQUE (provider_id, type_code)
 );
 
-CREATE INDEX idx_resource_types_provider ON resource_types(provider_id);
+CREATE INDEX IF NOT EXISTS idx_resource_types_provider ON resource_types(provider_id);
 
 INSERT INTO resource_types (provider_id, type_code, display_name, category)
 SELECT id, 'ec2-instance', 'EC2 Instance', 'compute' FROM providers WHERE provider_type = 'aws'
 UNION ALL
 SELECT id, 'rds-instance', 'RDS Database', 'database' FROM providers WHERE provider_type = 'aws'
 UNION ALL
-SELECT id, 's3-bucket', 'S3 Bucket', 'storage' FROM providers WHERE provider_type = 'aws';
+SELECT id, 's3-bucket', 'S3 Bucket', 'storage' FROM providers WHERE provider_type = 'aws'
+ON CONFLICT DO NOTHING;
 
-CREATE TRIGGER resource_types_updated_at BEFORE UPDATE ON resource_types
+CREATE OR REPLACE TRIGGER resource_types_updated_at BEFORE UPDATE ON resource_types
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- ============================================
 -- COMPUTE RESOURCES
 -- ============================================
 
-CREATE TYPE resource_state AS ENUM ('pending', 'running', 'stopped', 'terminated', 'failed');
+DO
+$$BEGIN
+    CREATE TYPE resource_state AS ENUM ('pending', 'running', 'stopped', 'terminated', 'failed');
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END;$$;
 
-CREATE TABLE compute_resources (
+CREATE TABLE IF NOT EXISTS compute_resources (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     provider_account_id UUID NOT NULL REFERENCES provider_accounts(id),
@@ -263,26 +280,26 @@ CREATE TABLE compute_resources (
     CONSTRAINT compute_resources_unique UNIQUE (provider_account_id, provider_resource_id)
 );
 
-CREATE INDEX idx_resources_org ON compute_resources(organization_id);
-CREATE INDEX idx_resources_provider_account ON compute_resources(provider_account_id);
-CREATE INDEX idx_resources_type ON compute_resources(resource_type_id);
-CREATE INDEX idx_resources_public_ip ON compute_resources(public_ip);
-CREATE INDEX idx_resources_state ON compute_resources(state);
-CREATE INDEX idx_resources_billing ON compute_resources(billing_tag);
-CREATE INDEX idx_resources_tags ON compute_resources USING GIN (tags);
-CREATE INDEX idx_resources_created_by ON compute_resources(created_by) WHERE created_by IS NOT NULL;
-CREATE INDEX idx_resources_destroyed_by ON compute_resources(destroyed_by) WHERE destroyed_by IS NOT NULL;
-CREATE INDEX idx_resources_active ON compute_resources(organization_id, state) WHERE destroyed_at IS NULL;
-CREATE UNIQUE INDEX idx_resources_name ON compute_resources(organization_id, resource_name) WHERE resource_name IS NOT NULL AND destroyed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_resources_org ON compute_resources(organization_id);
+CREATE INDEX IF NOT EXISTS idx_resources_provider_account ON compute_resources(provider_account_id);
+CREATE INDEX IF NOT EXISTS idx_resources_type ON compute_resources(resource_type_id);
+CREATE INDEX IF NOT EXISTS idx_resources_public_ip ON compute_resources(public_ip);
+CREATE INDEX IF NOT EXISTS idx_resources_state ON compute_resources(state);
+CREATE INDEX IF NOT EXISTS idx_resources_billing ON compute_resources(billing_tag);
+CREATE INDEX IF NOT EXISTS idx_resources_tags ON compute_resources USING GIN (tags);
+CREATE INDEX IF NOT EXISTS idx_resources_created_by ON compute_resources(created_by) WHERE created_by IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_resources_destroyed_by ON compute_resources(destroyed_by) WHERE destroyed_by IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_resources_active ON compute_resources(organization_id, state) WHERE destroyed_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_resources_name ON compute_resources(organization_id, resource_name) WHERE resource_name IS NOT NULL AND destroyed_at IS NULL;
 
-CREATE TRIGGER compute_resources_updated_at BEFORE UPDATE ON compute_resources
+CREATE OR REPLACE TRIGGER compute_resources_updated_at BEFORE UPDATE ON compute_resources
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- ============================================
 -- FIDO2 AUTHENTICATION TABLES
 -- ============================================
 
-CREATE TABLE fido2_credentials (
+CREATE TABLE IF NOT EXISTS fido2_credentials (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     credential_id BYTEA NOT NULL UNIQUE,
@@ -296,17 +313,17 @@ CREATE TABLE fido2_credentials (
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_fido2_user_id ON fido2_credentials(user_id);
-CREATE INDEX idx_fido2_credential_id ON fido2_credentials(credential_id);
+CREATE INDEX IF NOT EXISTS idx_fido2_user_id ON fido2_credentials(user_id);
+CREATE INDEX IF NOT EXISTS idx_fido2_credential_id ON fido2_credentials(credential_id);
 
-CREATE TRIGGER fido2_credentials_updated_at BEFORE UPDATE ON fido2_credentials
+CREATE OR REPLACE TRIGGER fido2_credentials_updated_at BEFORE UPDATE ON fido2_credentials
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- ============================================
 -- AUTHENTICATION SESSIONS
 -- ============================================
 
-CREATE TABLE auth_sessions (
+CREATE TABLE IF NOT EXISTS auth_sessions (
     session_id VARCHAR(255) PRIMARY KEY,
     credential_id BYTEA NOT NULL,
     expires_at TIMESTAMP NOT NULL,
@@ -319,8 +336,8 @@ CREATE TABLE auth_sessions (
         ON DELETE CASCADE
 );
 
-CREATE INDEX idx_sessions_credential_id ON auth_sessions(credential_id);
-CREATE INDEX idx_sessions_expires ON auth_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_credential_id ON auth_sessions(credential_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON auth_sessions(expires_at);
 
 COMMENT ON TABLE auth_sessions IS 'Active authentication sessions - no updated_at needed';
 
@@ -328,7 +345,7 @@ COMMENT ON TABLE auth_sessions IS 'Active authentication sessions - no updated_a
 -- SSH KEYS FOR GIT AUTHENTICATION
 -- ============================================
 
-CREATE TABLE ssh_keys (
+CREATE TABLE IF NOT EXISTS ssh_keys (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     public_key TEXT NOT NULL,
@@ -339,17 +356,17 @@ CREATE TABLE ssh_keys (
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_ssh_keys_user_id ON ssh_keys(user_id);
-CREATE INDEX idx_ssh_keys_fingerprint ON ssh_keys(fingerprint);
+CREATE INDEX IF NOT EXISTS idx_ssh_keys_user_id ON ssh_keys(user_id);
+CREATE INDEX IF NOT EXISTS idx_ssh_keys_fingerprint ON ssh_keys(fingerprint);
 
-CREATE TRIGGER ssh_keys_updated_at BEFORE UPDATE ON ssh_keys
+CREATE OR REPLACE TRIGGER ssh_keys_updated_at BEFORE UPDATE ON ssh_keys
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- ============================================
 -- HELPFUL VIEWS
 -- ============================================
 
-CREATE VIEW active_resources AS
+CREATE OR REPLACE VIEW active_resources AS
 SELECT
     cr.id,
     cr.resource_name,
@@ -372,7 +389,7 @@ WHERE cr.destroyed_at IS NULL;
 -- ============================================
 
 -- Stores AMI IDs by commit SHA to avoid rebuilding identical images
-CREATE TABLE ami_cache (
+CREATE TABLE IF NOT EXISTS ami_cache (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     app_name VARCHAR(255) NOT NULL,
     commit_sha VARCHAR(64) NOT NULL,
@@ -385,7 +402,7 @@ CREATE TABLE ami_cache (
 );
 
 -- Index for fast lookups
-CREATE INDEX idx_ami_cache_lookup ON ami_cache(app_name, commit_sha, region);
+CREATE INDEX IF NOT EXISTS idx_ami_cache_lookup ON ami_cache(app_name, commit_sha, region);
 
 -- Index for cleanup queries
-CREATE INDEX idx_ami_cache_created_at ON ami_cache(created_at);
+CREATE INDEX IF NOT EXISTS idx_ami_cache_created_at ON ami_cache(created_at);

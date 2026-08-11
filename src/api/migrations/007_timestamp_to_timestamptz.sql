@@ -66,7 +66,7 @@ ALTER TABLE compute_resources
     ALTER COLUMN created_at TYPE TIMESTAMPTZ USING created_at AT TIME ZONE 'UTC',
     ALTER COLUMN updated_at TYPE TIMESTAMPTZ USING updated_at AT TIME ZONE 'UTC';
 
-CREATE VIEW active_resources AS
+CREATE OR REPLACE VIEW active_resources AS
 SELECT
     cr.id,
     cr.resource_name,

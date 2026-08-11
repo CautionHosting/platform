@@ -1,6 +1,6 @@
 -- Organization invitations for one-time passkey onboarding links.
 
-CREATE TABLE organization_invitations (
+CREATE TABLE IF NOT EXISTS organization_invitations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     email TEXT NOT NULL,
@@ -20,13 +20,13 @@ CREATE TABLE organization_invitations (
 
 -- invite_member revokes expired rows before reinviting; uniqueness also closes
 -- concurrent check-and-insert races for the same organization and email.
-CREATE UNIQUE INDEX idx_org_invitations_active_email
+CREATE UNIQUE INDEX IF NOT EXISTS idx_org_invitations_active_email
     ON organization_invitations (organization_id, lower(email))
     WHERE accepted_at IS NULL AND revoked_at IS NULL;
 
-CREATE INDEX idx_org_invitations_org
+CREATE INDEX IF NOT EXISTS idx_org_invitations_org
     ON organization_invitations (organization_id);
 
-CREATE TRIGGER organization_invitations_updated_at
+CREATE OR REPLACE TRIGGER organization_invitations_updated_at
     BEFORE UPDATE ON organization_invitations
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
