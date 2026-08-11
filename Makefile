@@ -620,14 +620,15 @@ postgres-test: network
 
 migrate-test: postgres-test
 	@echo "Running migrations on test DB..."
-	@for migration in src/api/migrations/*.sql; do \
-		docker run --rm \
-			--network $(NETWORK) \
-			-v $(PWD)/src/api/migrations:/migrations:ro \
-			-e PGPASSWORD=postgres \
-			postgres:16-alpine \
-			psql -h $(TEST_DB_HOST) -U postgres -d $(TEST_DB_NAME) -f /migrations/$$(basename $$migration) 2>&1 | grep -v "^$$" || true; \
-	done
+	@docker run --rm \
+		--network $(NETWORK) \
+		-v $(PWD)/src/api/migrations:/migrations:ro \
+		-v $(PWD)/utils/makefile-run-migrations.sh:/makefile-run-migrations.sh:ro \
+		-e PGPASSWORD=postgres \
+		-e MIGRATION_DB_HOST=$(TEST_DB_HOST) \
+		-e MIGRATION_DB_NAME=$(TEST_DB_NAME) \
+		postgres:16-alpine \
+		sh /makefile-run-migrations.sh
 	@echo "Test migrations complete"
 
 run-api-test: network

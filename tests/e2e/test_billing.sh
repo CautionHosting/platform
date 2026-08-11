@@ -144,8 +144,8 @@ reset_effective_balance() {
 
     if [ "$cents" -gt 0 ]; then
         docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-        INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
-        VALUES ('$ORG_ID', '$USER_ID', $cents, 'purchase', '$description');
+        INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
+        VALUES ('$ORG_ID', $cents, 'purchase', '$description');
         " >/dev/null 2>&1 || true
     fi
 }
@@ -226,8 +226,8 @@ if [ -z "$ORG_ID" ] || [ "$ORG_ID" = "null" ]; then
     " 2>/dev/null | head -1 | tr -d ' \n' || true)
     if [ -n "$ORG_ID" ] && [ "$ORG_ID" != "null" ]; then
         docker exec "${TEST_DB_HOST:-postgres-test}" psql -U postgres -d caution_test -c "
-        INSERT INTO organization_members (organization_id, user_id, role)
-        VALUES ('$ORG_ID', '$USER_ID', 'owner');
+        INSERT INTO organization_members (organization_id, role)
+        VALUES ('$ORG_ID', 'owner');
         " >/dev/null 2>&1 || true
         log "  Created org $ORG_ID and added user as owner"
     else
@@ -964,8 +964,8 @@ log "Testing unsuspend on credit deposit..."
 
 # Add credits back
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
-VALUES ('$ORG_ID', '$USER_ID', 5000, 'purchase', 'Test deposit to clear suspension');
+INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
+VALUES ('$ORG_ID', 5000, 'purchase', 'Test deposit to clear suspension');
 " >/dev/null 2>&1
 
 # Clear credit_suspended_at (simulating what the API does on credit purchase)
@@ -1416,20 +1416,20 @@ log "Testing credit_ledger one-payment-one-grant invariant (migration 044)..."
 # is a no-op.
 CONSTRAINT_TXN="txn_constraint_$(date +%s)_$RANDOM"
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description, paddle_transaction_id)
-VALUES ('$ORG_ID', '$USER_ID', 1000, 'purchase', 'constraint test', '$CONSTRAINT_TXN');
+INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, paddle_transaction_id)
+VALUES ('$ORG_ID', 1000, 'purchase', 'constraint test', '$CONSTRAINT_TXN');
 " >/dev/null 2>&1
 
 # Plain duplicate must violate the unique constraint.
 DUP_PLAIN=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description, paddle_transaction_id)
-VALUES ('$ORG_ID', '$USER_ID', 1000, 'purchase', 'constraint dup', '$CONSTRAINT_TXN');
+INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, paddle_transaction_id)
+VALUES ('$ORG_ID', 1000, 'purchase', 'constraint dup', '$CONSTRAINT_TXN');
 " 2>&1 || true)
 
 # ON CONFLICT duplicate must be a silent no-op ("INSERT 0 0").
 DUP_ONCONFLICT=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description, paddle_transaction_id)
-VALUES ('$ORG_ID', '$USER_ID', 1000, 'purchase', 'constraint dup', '$CONSTRAINT_TXN')
+INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, paddle_transaction_id)
+VALUES ('$ORG_ID', 1000, 'purchase', 'constraint dup', '$CONSTRAINT_TXN')
 ON CONFLICT (paddle_transaction_id) DO NOTHING;
 " 2>&1 || true)
 

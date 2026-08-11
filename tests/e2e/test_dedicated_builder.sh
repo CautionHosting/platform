@@ -229,8 +229,8 @@ log "  Org ID: $ORG_ID"
 
 docker exec "$DB_HOST" psql -U postgres -d "$DB_NAME" -c "
 DELETE FROM credit_ledger WHERE organization_id = '$ORG_ID';
-INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description)
-VALUES ('$ORG_ID', '$USER_ID', 10000, 'purchase', 'e2e builder gate seed');
+INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
+VALUES ('$ORG_ID', 10000, 'purchase', 'e2e builder gate seed');
 " >/dev/null 2>&1 || {
     step_fail "Failed to seed credits"
     exit 1
