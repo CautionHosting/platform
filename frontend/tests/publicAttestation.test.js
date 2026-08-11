@@ -88,7 +88,7 @@ test('rejects non-http and credential-bearing targets', () => {
   )
 })
 
-test('only returns app source details from a successful verification', () => {
+test('extracts authenticated app source when available and allows it to be absent', () => {
   const manifest = {
     app_source: {
       commit: '0123456789abcdef0123456789abcdef01234567',

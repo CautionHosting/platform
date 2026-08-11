@@ -52,6 +52,10 @@
           <code v-else class="source-card__commit">{{ source.commit }}</code>
           <span v-if="source.branch">Branch: {{ source.branch }}</span>
         </div>
+        <div v-else-if="status === 'success'" class="metadata-card__item">
+          <span class="source-card__label">Application source</span>
+          <span>Not included in the attested manifest.</span>
+        </div>
       </section>
 
       <section v-if="target" class="widget-card attestation-widget">
@@ -247,15 +251,7 @@ export default {
         showSources: true,
         onVerified: (result) => {
           attestationResult.value = result
-          const verifiedSource = extractVerifiedAppSource(result)
-          if (!verifiedSource) {
-            source.value = null
-            status.value = 'failure'
-            errorMessage.value = 'The verified attestation did not include an application source commit.'
-            return
-          }
-
-          source.value = verifiedSource
+          source.value = extractVerifiedAppSource(result)
           if (pcrInput.value.trim()) {
             checkExpectedPcrs()
           } else {
