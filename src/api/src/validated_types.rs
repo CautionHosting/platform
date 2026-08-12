@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
+    Json,
     extract::{FromRequest, Request},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::de::DeserializeOwned;
 
@@ -223,6 +223,9 @@ pub struct CreateResourceResponse {
     pub git_url: String,
     pub state: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    pub managed_hostname: String,
+    pub dns_status: String,
+    pub dns_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -232,6 +235,9 @@ pub struct DeployResponse {
     pub resource_id: Uuid,
     pub public_ip: String,
     pub domain: Option<String>,
+    pub managed_hostname: String,
+    pub dns_status: String,
+    pub dns_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

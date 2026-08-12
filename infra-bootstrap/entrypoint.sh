@@ -66,28 +66,39 @@ echo ""
 echo -e "${GREEN}Bootstrap complete!${NC}"
 echo ""
 echo "=========================================="
-echo "Platform Credentials (store securely!):"
+echo "Platform Configuration:"
 echo "=========================================="
 echo ""
-echo "AWS_ACCESS_KEY_ID=$($TF_CMD output -raw aws_access_key_id)"
-echo "AWS_SECRET_ACCESS_KEY=$($TF_CMD output -raw aws_secret_access_key)"
+PLATFORM_ACCESS_KEY_ID=$($TF_CMD output -json aws_access_key_id)
+if [ "$PLATFORM_ACCESS_KEY_ID" != "null" ]; then
+    echo "AWS_ACCESS_KEY_ID=$($TF_CMD output -raw aws_access_key_id)"
+    echo "AWS_SECRET_ACCESS_KEY=$($TF_CMD output -raw aws_secret_access_key)"
+fi
 echo "AWS_ACCOUNT_ID=$ACCOUNT_ID"
 echo "AWS_REGION=us-west-2"
 echo "TERRAFORM_STATE_BUCKET=$($TF_CMD output -raw s3_bucket_name)"
 echo "EIF_S3_BUCKET=$($TF_CMD output -raw eif_bucket_name)"
+echo "CAUTION_APPS_DNS_ZONE_ID=$($TF_CMD output -raw apps_dns_zone_id)"
 echo ""
 echo "=========================================="
 echo ""
 
 CREDS_FILE="../aws-credentials.env"
 cat > $CREDS_FILE << EOF
-AWS_ACCESS_KEY_ID=$($TF_CMD output -raw aws_access_key_id)
-AWS_SECRET_ACCESS_KEY=$($TF_CMD output -raw aws_secret_access_key)
 AWS_ACCOUNT_ID=$ACCOUNT_ID
 AWS_REGION=us-west-2
 TERRAFORM_STATE_BUCKET=$($TF_CMD output -raw s3_bucket_name)
 EIF_S3_BUCKET=$($TF_CMD output -raw eif_bucket_name)
+CAUTION_APPS_DNS_ZONE_ID=$($TF_CMD output -raw apps_dns_zone_id)
+CAUTION_APPS_DNS_SUFFIX=$($TF_CMD output -raw apps_dns_zone_name)
 EOF
+
+if [ "$PLATFORM_ACCESS_KEY_ID" != "null" ]; then
+    {
+        echo "AWS_ACCESS_KEY_ID=$($TF_CMD output -raw aws_access_key_id)"
+        echo "AWS_SECRET_ACCESS_KEY=$($TF_CMD output -raw aws_secret_access_key)"
+    } >> $CREDS_FILE
+fi
 
 chmod 600 $CREDS_FILE
 
@@ -114,8 +125,12 @@ echo ""
 echo -e "${GREEN}Bootstrap complete!${NC}"
 echo ""
 echo "Next steps:"
-echo "  1. Copy credentials to your platform .env file"
-echo "  2. Run 'make up' to start the platform"
+APPS_DNS_ZONE_NAME=$($TF_CMD output -raw apps_dns_zone_name)
+echo "  1. At the parent DNS provider, delegate '$APPS_DNS_ZONE_NAME' to these Route53 nameservers:"
+$TF_CMD output -json apps_dns_name_servers
+echo "  2. Copy credentials, CAUTION_APPS_DNS_ZONE_ID, and CAUTION_APPS_DNS_SUFFIX=$APPS_DNS_ZONE_NAME to your platform .env file"
+echo "  3. Verify public NS and SOA answers for $APPS_DNS_ZONE_NAME"
+echo "  4. Run 'make up' to start the platform"
 echo ""
 echo "To use these credentials in your shell:"
 echo "  source $CREDS_FILE"

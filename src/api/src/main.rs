@@ -51,6 +51,7 @@ mod errors;
 mod fully_managed_capacity;
 mod gpg;
 mod legal;
+mod managed_dns;
 mod metering;
 mod middleware;
 mod onboarding;
@@ -65,6 +66,8 @@ mod validated_types;
 mod validation;
 
 const DEFAULT_DEPLOYMENT_HEALTH_TIMEOUT_SECS: u64 = 600;
+const LIFECYCLE_RECONCILE_INTERVAL_SECS: u64 = 30;
+const TEARDOWN_CONCURRENCY: usize = 2;
 
 use caution_config::pricing::{
     CreditPackagePricing, PaddleCatalog, PricingConfig as SharedPricingConfig, TierPricing,
@@ -138,6 +141,8 @@ impl PricingConfig {
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) db: PgPool,
+    pub(crate) database_url: String,
+    pub(crate) teardown_slots: Arc<tokio::sync::Semaphore>,
     pub(crate) git_hostname: String,
     pub(crate) git_ssh_port: Option<u16>,
     pub(crate) data_dir: String,
@@ -152,6 +157,7 @@ pub(crate) struct AppState {
     pub(crate) builder_config: builder::BuilderConfig,
     pub(crate) builder_sizes: builder::BuilderSizesConfig,
     pub(crate) eif_download_cache: eif_download::EifDownloadCache,
+    pub(crate) managed_dns: Option<managed_dns::ManagedDns>,
 }
 
 #[derive(Clone)]
@@ -355,7 +361,7 @@ async fn build_inputs() -> impl IntoResponse {
     })
 }
 
-fn deployment_health_timeout_secs() -> u64 {
+pub(crate) fn deployment_health_timeout_secs() -> u64 {
     std::env::var("DEPLOYMENT_HEALTH_TIMEOUT_SECS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -363,7 +369,7 @@ fn deployment_health_timeout_secs() -> u64 {
         .unwrap_or(DEFAULT_DEPLOYMENT_HEALTH_TIMEOUT_SECS)
 }
 
-async fn wait_for_health(public_ip: &str, timeout_secs: u64) -> Result<(), String> {
+pub(crate) async fn wait_for_health(public_ip: &str, timeout_secs: u64) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
@@ -435,7 +441,10 @@ mod deployment_health_tests {
     }
 }
 
-async fn wait_for_attestation_health(public_ip: &str, timeout_secs: u64) -> Result<(), String> {
+pub(crate) async fn wait_for_attestation_health(
+    public_ip: &str,
+    timeout_secs: u64,
+) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
@@ -856,22 +865,23 @@ async fn create_managed_onprem_resource(
             deployment_id
         );
 
-        let existing: Option<(String, types::ResourceState)> = sqlx::query_as(
-            "SELECT resource_name, state FROM compute_resources
+        let existing: Option<(String, types::ResourceState, String, Option<String>)> =
+            sqlx::query_as(
+                "SELECT resource_name, state, dns_status, dns_error FROM compute_resources
              WHERE id = $1 AND organization_id = $2",
-        )
-        .bind(existing_resource_id)
-        .bind(org_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
             )
-        })?;
+            .bind(existing_resource_id)
+            .bind(org_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Database error: {}", e),
+                )
+            })?;
 
-        let (resource_name, resource_state) = existing.ok_or((
+        let (resource_name, resource_state, dns_status, dns_error) = existing.ok_or((
             StatusCode::NOT_FOUND,
             format!("Resource {} not found", existing_resource_id),
         ))?;
@@ -928,6 +938,9 @@ async fn create_managed_onprem_resource(
             "state": resource_state.as_str(),
             "credential_id": credential.id,
             "managed_onprem": managed_onprem_config,
+            "managed_hostname": managed_dns::managed_hostname(existing_resource_id),
+            "dns_status": dns_status,
+            "dns_error": dns_error,
             "updated": true,
         })))
     } else {
@@ -1004,6 +1017,9 @@ async fn create_managed_onprem_resource(
             "created_at": created_at,
             "credential_id": credential.id,
             "managed_onprem": managed_onprem_config,
+            "managed_hostname": managed_dns::managed_hostname(resource_id),
+            "dns_status": "reserved",
+            "dns_error": null,
         })))
     }
 }
@@ -1041,11 +1057,11 @@ async fn recover_deploy_failure(
     state: &Arc<AppState>,
     org_id: Uuid,
     resource_id: Uuid,
+    deploy_attempt_id: Uuid,
     resource_name: &str,
     previous_state: types::ResourceState,
     should_cleanup: bool,
-    deployment_credentials: Option<deployment::AwsCredentials>,
-    managed_onprem_config: Option<deployment::ManagedOnPremConfig>,
+    deployed_region: &str,
 ) {
     if should_cleanup {
         tracing::warn!(
@@ -1053,41 +1069,39 @@ async fn recover_deploy_failure(
             resource_id,
             resource_name
         );
-
-        let asg_name = managed_onprem_config
-            .as_ref()
-            .map(|cfg| cfg.asg_name.clone());
-        if let Err(e) = deployment::destroy_app_with_credentials(
-            org_id,
+        match managed_dns::begin_owned_deploy_rollback(
+            &state.db,
             resource_id,
-            resource_name.to_string(),
-            deployment_credentials,
-            asg_name,
+            org_id,
+            deploy_attempt_id,
+            deployed_region,
         )
         .await
         {
-            tracing::error!(
-                "Rollback destroy failed for resource {} after deploy error: {:#}",
-                resource_id,
-                e
-            );
+            Ok(true) => {
+                if let Err(error) =
+                    resources::destroy_resource_by_id(state, resource_id, false).await
+                {
+                    tracing::error!(resource_id = %resource_id, error = %error, "rollback retained infrastructure and will be retried");
+                }
+            }
+            Ok(false) => {
+                tracing::warn!(resource_id = %resource_id, deploy_attempt_id = %deploy_attempt_id, "rollback skipped because deploy ownership changed");
+            }
+            Err(error) => {
+                tracing::error!(resource_id = %resource_id, error = %error, "failed to hand deploy attempt to guarded rollback");
+            }
         }
-    }
-
-    let target_state = if should_cleanup {
-        types::ResourceState::Failed
-    } else {
-        previous_state
-    };
-
-    if let Err(e) = sqlx::query(
+    } else if let Err(e) = sqlx::query(
         "UPDATE compute_resources
-         SET state = $1
-         WHERE id = $2 AND organization_id = $3",
+         SET state = $1, deploy_attempt_id = NULL
+         WHERE id = $2 AND organization_id = $3
+           AND state = 'pending' AND deploy_attempt_id = $4",
     )
-    .bind(target_state)
+    .bind(previous_state)
     .bind(resource_id)
     .bind(org_id)
+    .bind(deploy_attempt_id)
     .execute(&state.db)
     .await
     {
@@ -1103,29 +1117,35 @@ async fn restore_pending_deploy_rejection(
     state: &Arc<AppState>,
     org_id: Uuid,
     resource_id: Uuid,
+    deploy_attempt_id: Uuid,
     previous_state: types::ResourceState,
     was_destroyed: bool,
 ) {
     let result = if was_destroyed {
         sqlx::query(
             "UPDATE compute_resources
-             SET state = $1, destroyed_at = COALESCE(destroyed_at, NOW())
-             WHERE id = $2 AND organization_id = $3",
+             SET state = $1, destroyed_at = COALESCE(destroyed_at, NOW()),
+                 deploy_attempt_id = NULL
+             WHERE id = $2 AND organization_id = $3
+               AND state = 'pending' AND deploy_attempt_id = $4",
         )
         .bind(previous_state)
         .bind(resource_id)
         .bind(org_id)
+        .bind(deploy_attempt_id)
         .execute(&state.db)
         .await
     } else {
         sqlx::query(
             "UPDATE compute_resources
-             SET state = $1
-             WHERE id = $2 AND organization_id = $3",
+             SET state = $1, deploy_attempt_id = NULL
+             WHERE id = $2 AND organization_id = $3
+               AND state = 'pending' AND deploy_attempt_id = $4",
         )
         .bind(previous_state)
         .bind(resource_id)
         .bind(org_id)
+        .bind(deploy_attempt_id)
         .execute(&state.db)
         .await
     };
@@ -1382,13 +1402,14 @@ async fn deploy_handler(
     validated_types::Validated(req): validated_types::Validated<DeployRequest>,
 ) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+    let deploy_attempt_id = Uuid::new_v4();
 
     // Spawn the deploy logic in a separate task
     let db_for_recovery = state.db.clone();
     let app_id_for_recovery = req.app_id;
     let org_id_for_recovery = req.org_id;
     tokio::spawn(async move {
-        let result = deploy_logic(state, auth, req, tx.clone()).await;
+        let result = deploy_logic(state, auth, req, deploy_attempt_id, tx.clone()).await;
 
         // Send final result as JSON
         match result {
@@ -1397,14 +1418,18 @@ async fn deploy_handler(
                 let _ = tx.send(Ok(bytes::Bytes::from(format!("{}\n", json)))).await;
             }
             Err((status, msg)) => {
-                // Reset state from Pending to Failed so the resource isn't stuck
+                // Reset only the pending state owned by this deploy attempt.
                 if let Err(e) = sqlx::query(
-                    "UPDATE compute_resources SET state = $1 WHERE id = $2 AND organization_id = $3 AND state = $4"
+                    "UPDATE compute_resources
+                     SET state = $1, deploy_attempt_id = NULL
+                     WHERE id = $2 AND organization_id = $3 AND state = $4
+                       AND deploy_attempt_id = $5"
                 )
                 .bind(types::ResourceState::Failed)
                 .bind(app_id_for_recovery)
                 .bind(org_id_for_recovery)
                 .bind(types::ResourceState::Pending)
+                .bind(deploy_attempt_id)
                 .execute(&db_for_recovery)
                 .await {
                     tracing::error!("Failed to reset resource state after deploy error: {}", e);
@@ -1897,6 +1922,7 @@ async fn deploy_logic(
     state: Arc<AppState>,
     auth: AuthContext,
     req: DeployRequest,
+    deploy_attempt_id: Uuid,
     tx: tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
 ) -> Result<DeployResponse, (StatusCode, String)> {
     tracing::info!(
@@ -2038,6 +2064,9 @@ async fn deploy_logic(
                 // Reject if a deploy is already in progress
                 if *state == types::ResourceState::Pending {
                     return Err((StatusCode::CONFLICT, "A deployment is already in progress for this app. Please wait for it to complete.".to_string()));
+                }
+                if *state == types::ResourceState::Terminating {
+                    return Err((StatusCode::CONFLICT, "This app is being destroyed. Wait for teardown to complete before deploying it again.".to_string()));
                 }
                 let name = name_opt.clone().unwrap_or_else(|| "unnamed".to_string());
                 let config = config_opt.clone().unwrap_or_else(|| serde_json::json!({}));
@@ -2277,8 +2306,9 @@ async fn deploy_logic(
     // Atomically transition to Pending — rejects concurrent deploys via the check above
     if was_destroyed {
         tracing::info!("Reactivating previously destroyed resource {}", resource_id);
-        let updated = sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1 WHERE id = $2 AND organization_id = $3 AND state != $1")
+        let updated = sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1, deploy_attempt_id = $2 WHERE id = $3 AND organization_id = $4 AND state != $1 AND state <> 'terminating'")
             .bind(types::ResourceState::Pending)
+            .bind(deploy_attempt_id)
             .bind(resource_id)
             .bind(req.org_id)
             .execute(&state.db)
@@ -2295,9 +2325,11 @@ async fn deploy_logic(
     } else {
         // Mark as Pending so concurrent pushes are rejected
         let updated = sqlx::query(
-            "UPDATE compute_resources SET state = $1 WHERE id = $2 AND organization_id = $3 AND state != $1"
+            "UPDATE compute_resources SET state = $1, deploy_attempt_id = $2
+             WHERE id = $3 AND organization_id = $4 AND state != $1 AND state <> 'terminating'"
         )
         .bind(types::ResourceState::Pending)
+        .bind(deploy_attempt_id)
         .bind(resource_id)
         .bind(req.org_id)
         .execute(&state.db)
@@ -2766,6 +2798,7 @@ async fn deploy_logic(
                     &state,
                     req.org_id,
                     resource_id,
+                    deploy_attempt_id,
                     previous_state,
                     was_destroyed,
                 )
@@ -2839,16 +2872,6 @@ async fn deploy_logic(
         credentials: deployment_credentials,
         managed_onprem: managed_onprem_config,
     };
-    let cleanup_credentials = nitro_request.credentials.clone().or_else(|| {
-        if nitro_request.managed_onprem.is_none() {
-            Some(fully_managed_capacity::platform_credentials_for_region(
-                &deployed_region,
-            ))
-        } else {
-            None
-        }
-    });
-    let cleanup_managed_onprem = nitro_request.managed_onprem.clone();
 
     let _ = tx.send(Ok(milestone("Uploading and launching..."))).await;
 
@@ -2870,11 +2893,11 @@ async fn deploy_logic(
                 &state,
                 req.org_id,
                 resource_id,
+                deploy_attempt_id,
                 &app_name,
                 previous_state,
                 should_cleanup_on_failure,
-                cleanup_credentials.clone(),
-                cleanup_managed_onprem.clone(),
+                &deployed_region,
             )
             .await;
             return Err((
@@ -2911,11 +2934,11 @@ async fn deploy_logic(
             &state,
             req.org_id,
             resource_id,
+            deploy_attempt_id,
             &app_name,
             previous_state,
             should_cleanup_on_failure,
-            cleanup_credentials,
-            cleanup_managed_onprem,
+            &deployed_region,
         )
         .await;
         return Err((
@@ -2939,11 +2962,11 @@ async fn deploy_logic(
                 &state,
                 req.org_id,
                 resource_id,
+                deploy_attempt_id,
                 &app_name,
                 previous_state,
                 should_cleanup_on_failure,
-                cleanup_credentials,
-                cleanup_managed_onprem,
+                &deployed_region,
             )
             .await;
             return Err((
@@ -2953,21 +2976,62 @@ async fn deploy_logic(
         }
     }
 
-    if let Err(e) = sqlx::query(
+    let managed_dns_enabled = state.managed_dns.is_some();
+    let resource_update = sqlx::query_as::<_, (String, Option<String>)>(
         "UPDATE compute_resources
-         SET provider_resource_id = $1, state = $2, public_ip = $3, region = $4, configuration = COALESCE(configuration, '{}'::jsonb) || $5::jsonb
-         WHERE id = $6 AND organization_id = $7"
+         SET provider_resource_id = $1, state = $2, public_ip = $3, region = $4,
+             configuration = COALESCE(configuration, '{}'::jsonb) || $5::jsonb,
+             dns_status = CASE
+                 WHEN NOT $6::boolean THEN dns_status
+                 WHEN dns_status = 'ready' AND public_ip = $3 THEN 'ready'
+                 ELSE 'publishing'
+             END,
+             dns_error = CASE WHEN $6::boolean THEN NULL ELSE dns_error END,
+             dns_change_id = CASE
+                 WHEN $6::boolean AND NOT (dns_status = 'ready' AND public_ip = $3) THEN NULL
+                 ELSE dns_change_id
+             END,
+             dns_release_not_before = CASE WHEN $6::boolean THEN NULL ELSE dns_release_not_before END,
+             deploy_attempt_id = NULL
+         WHERE id = $7 AND organization_id = $8 AND state = 'pending'
+           AND deploy_attempt_id = $9
+         RETURNING dns_status, dns_error"
     )
     .bind(&deployment_result.instance_id)
     .bind(types::ResourceState::Running)
     .bind(&deployment_result.public_ip)
     .bind(&deployed_region)
     .bind(&final_config)
+    .bind(managed_dns_enabled)
     .bind(resource_id)
     .bind(req.org_id)
-    .execute(&state.db)
-    .await
-    {
+    .bind(deploy_attempt_id)
+    .fetch_optional(&state.db)
+    .await;
+    let resource_update = match resource_update {
+        Ok(result) => result,
+        Err(e) => {
+            if let Some(reservation) = capacity_reservation.as_ref() {
+                fully_managed_capacity::release_reservation(&state.db, reservation).await;
+            }
+            recover_deploy_failure(
+                &state,
+                req.org_id,
+                resource_id,
+                deploy_attempt_id,
+                &app_name,
+                previous_state,
+                should_cleanup_on_failure,
+                &deployed_region,
+            )
+            .await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to update resource: {}", e),
+            ));
+        }
+    };
+    let Some((initial_dns_status, initial_dns_error)) = resource_update else {
         if let Some(reservation) = capacity_reservation.as_ref() {
             fully_managed_capacity::release_reservation(&state.db, reservation).await;
         }
@@ -2975,18 +3039,19 @@ async fn deploy_logic(
             &state,
             req.org_id,
             resource_id,
+            deploy_attempt_id,
             &app_name,
             previous_state,
             should_cleanup_on_failure,
-            cleanup_credentials.clone(),
-            cleanup_managed_onprem.clone(),
+            &deployed_region,
         )
         .await;
         return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to update resource: {}", e),
+            StatusCode::CONFLICT,
+            "Deployment completed after the app lifecycle changed; refusing to publish it"
+                .to_string(),
         ));
-    }
+    };
 
     if let Err(e) = crate::metering::upsert_tracked_resource(
         &state,
@@ -3022,6 +3087,30 @@ async fn deploy_logic(
         fully_managed_capacity::release_reservation(&state.db, reservation).await;
     }
 
+    let initial_dns = managed_dns::DnsSnapshot {
+        status: initial_dns_status,
+        error: initial_dns_error,
+    };
+    let dns = if initial_dns.status == "publishing" {
+        let _ = tx.send(Ok(milestone("Publishing managed DNS..."))).await;
+        if let Some(managed_dns) = state.managed_dns.as_ref() {
+            match managed_dns.publish_resource(&state.db, resource_id).await {
+                Ok(dns) => dns,
+                Err(error) => {
+                    tracing::error!(resource_id = %resource_id, error = %error, "managed DNS publication will be retried");
+                    managed_dns::DnsSnapshot {
+                        status: initial_dns.status,
+                        error: Some(managed_dns::sanitize_error(&error)),
+                    }
+                }
+            }
+        } else {
+            initial_dns
+        }
+    } else {
+        initial_dns
+    };
+
     tracing::info!(
         "EIF deployment complete: resource_id={}, instance_id={}, public_ip={}, instance_type={:?}",
         resource_id,
@@ -3044,7 +3133,129 @@ async fn deploy_logic(
         resource_id,
         public_ip: deployment_result.public_ip.clone(),
         domain,
+        managed_hostname: managed_dns::managed_hostname(resource_id),
+        dns_status: dns.status,
+        dns_error: dns.error,
     })
+}
+
+async fn reconcile_terminating_resources(state: Arc<AppState>) {
+    use futures::{StreamExt, stream};
+
+    let terminating: Vec<Uuid> = match sqlx::query_scalar(
+        "SELECT id FROM compute_resources
+         WHERE destroyed_at IS NULL AND state = 'terminating'
+         ORDER BY updated_at ASC LIMIT 20",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to list interrupted app teardowns");
+            return;
+        }
+    };
+    stream::iter(terminating)
+        .for_each_concurrent(TEARDOWN_CONCURRENCY, |resource_id| {
+            let state = state.clone();
+            async move {
+                if let Err(error) = resources::destroy_resource_by_id(&state, resource_id, false).await {
+                    tracing::warn!(resource_id = %resource_id, error = %error, "app teardown reconciliation will retry");
+                }
+            }
+        })
+        .await;
+}
+
+async fn reconcile_managed_dns(state: Arc<AppState>, managed_dns: managed_dns::ManagedDns) {
+    use futures::{StreamExt, stream};
+
+    let publishing: Vec<Uuid> = match sqlx::query_scalar(
+        "SELECT id FROM compute_resources
+         WHERE destroyed_at IS NULL AND dns_status = 'publishing' AND state <> 'terminating'
+         ORDER BY updated_at ASC LIMIT 20",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(ids) => ids,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to list managed DNS publications");
+            return;
+        }
+    };
+    stream::iter(publishing)
+        .for_each_concurrent(4, |resource_id| {
+            let managed_dns = managed_dns.clone();
+            let db = state.db.clone();
+            async move {
+                if let Err(error) = managed_dns.publish_resource(&db, resource_id).await {
+                    tracing::warn!(resource_id = %resource_id, error = %error, "managed DNS publication will retry");
+                }
+            }
+        })
+        .await;
+
+    let backfill: Vec<(Uuid, String, Option<serde_json::Value>)> = match sqlx::query_as(
+        "SELECT id, public_ip, configuration
+             FROM compute_resources
+             WHERE destroyed_at IS NULL AND state = 'running' AND public_ip IS NOT NULL
+               AND dns_status = 'reserved'
+             ORDER BY updated_at ASC LIMIT 4",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(resources) => resources,
+        Err(error) => {
+            tracing::error!(error = %error, "failed to list managed DNS backfill candidates");
+            return;
+        }
+    };
+    stream::iter(backfill)
+        .for_each_concurrent(4, |(resource_id, public_ip, configuration)| {
+            let state = state.clone();
+            let managed_dns = managed_dns.clone();
+            async move {
+                let timeout = deployment_health_timeout_secs();
+                let debug = configuration
+                    .as_ref()
+                    .and_then(|value| value.get("debug"))
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                let readiness = match wait_for_health(&public_ip, timeout).await {
+                    Err(error) => Err(error),
+                    Ok(()) if debug => Ok(()),
+                    Ok(()) => wait_for_attestation_health(&public_ip, timeout).await,
+                };
+                if let Err(error) = readiness {
+                    let error = ("Managed DNS backfill readiness failed: ".to_string()
+                        + &error)
+                        .replace(['\r', '\n'], " ")
+                        .chars()
+                        .take(500)
+                        .collect::<String>();
+                    let _ = sqlx::query(
+                        "UPDATE compute_resources SET dns_error = $1, updated_at = NOW()
+                         WHERE id = $2 AND state = 'running' AND dns_status = 'reserved'",
+                    )
+                    .bind(error)
+                    .bind(resource_id)
+                    .execute(&state.db)
+                    .await;
+                    return;
+                }
+                if let Err(error) = managed_dns::mark_publishing(&state.db, resource_id).await {
+                    tracing::warn!(resource_id = %resource_id, error = %error, "failed to schedule managed DNS backfill");
+                    return;
+                }
+                if let Err(error) = managed_dns.publish_resource(&state.db, resource_id).await {
+                    tracing::warn!(resource_id = %resource_id, error = %error, "managed DNS backfill publication will retry");
+                }
+            }
+        })
+        .await;
 }
 
 #[tokio::main]
@@ -3143,9 +3354,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
     let eif_download_cache = eif_download::EifDownloadCache::new(&data_dir, eif_cache_size_gb);
+    let managed_dns = managed_dns::ManagedDns::from_env().await?;
 
     let state = Arc::new(AppState {
         db: pool,
+        database_url,
+        teardown_slots: Arc::new(tokio::sync::Semaphore::new(TEARDOWN_CONCURRENCY)),
         git_hostname,
         git_ssh_port,
         data_dir,
@@ -3160,7 +3374,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder_config,
         builder_sizes,
         eif_download_cache,
+        managed_dns,
     });
+
+    let teardown_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            LIFECYCLE_RECONCILE_INTERVAL_SECS,
+        ));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            reconcile_terminating_resources(teardown_state.clone()).await;
+        }
+    });
+    info!("App teardown reconciler started (runs every 30 seconds)");
+
+    if let Some(managed_dns) = state.managed_dns.clone() {
+        let dns_state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                LIFECYCLE_RECONCILE_INTERVAL_SECS,
+            ));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                reconcile_managed_dns(dns_state.clone(), managed_dns.clone()).await;
+            }
+        });
+        info!("Managed app DNS reconciler started (runs every 30 seconds)");
+    }
 
     let onboarding_routes = Router::new()
         .route("/user/status", get(onboarding::get_user_status))

@@ -46,6 +46,7 @@ rand = { workspace = true }
 
 # AWS SDK for S3 uploads and managed on-prem deployments
 aws-config = { version = "1.1", features = ["behavior-version-latest"] }
+aws-sdk-route53 = "1.15"
 aws-sdk-s3 = "1.15"
 
 hmac = { workspace = true }

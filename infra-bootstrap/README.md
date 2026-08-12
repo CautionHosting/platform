@@ -6,6 +6,7 @@ This guide walks you through setting up the required AWS infrastructure for the 
 - **S3 bucket** for storing enclave images (EIFs)
 - **DynamoDB table** for Terraform state locking
 - **IAM user** with scoped permissions for the Caution platform service
+- **Protected Route53 public hosted zone** for `apps.caution.sh`, with a 60-second SOA TTL
 
 Run this once per AWS account you want to deploy into.
 
@@ -52,8 +53,10 @@ S3 bucket names must be globally unique. Pass them via `-var` flags or edit `var
 | `state_bucket_name` | `caution-terraform-state` | **Yes**          | S3 bucket for Terraform state (globally unique)  |
 | `eif_bucket_name`   | `caution-eif-storage`    | **Yes**          | S3 bucket for enclave images (globally unique)   |
 | `aws_region`        | `us-west-2`              | Optional         | AWS region for all resources                     |
+| `apps_dns_zone_name` | `apps.caution.sh`        | Optional         | Delegated suffix for managed application records |
 | `lock_table_name`   | `terraform-state-lock`   | No               | DynamoDB table name                              |
 | `service_user_name` | `caution-platform`       | No               | IAM user name                                    |
+| `create_platform_access_key` | `false`             | Optional         | Create a new long-lived service key in Terraform state; enable only for first-time bootstrap |
 
 A good convention for unique bucket names is to append the account ID:
 ```
@@ -126,14 +129,73 @@ cd ..
 cp env.example .env
 ```
 
-Set these values in `.env`:
+Set these values in `.env`. By default bootstrap does not create or rotate a
+platform access key; continue using the operationally managed credentials
+already deployed to the service. For a first-time installation only, pass
+`-var="create_platform_access_key=true"` and securely capture the sensitive
+outputs:
 ```
 AWS_ACCESS_KEY_ID=<from terraform output>
 AWS_SECRET_ACCESS_KEY=<from terraform output>
 AWS_ACCOUNT_ID=<target account id>
 TERRAFORM_STATE_BUCKET=<your state bucket name>
 EIF_S3_BUCKET=<your eif bucket name>
+CAUTION_APPS_DNS_ZONE_ID=<from apps_dns_zone_id output>
+CAUTION_APPS_DNS_SUFFIX=<apps_dns_zone_name; defaults to apps.caution.sh>
 ```
+
+For an isolated development zone, pass the suffix to bootstrap and use the
+same value in the API environment, for example:
+
+```bash
+terraform apply -var="apps_dns_zone_name=apps.aposdw.space" # plus the existing required variables
+```
+
+Before starting the production API, delegate `apps.caution.sh` from the current
+`caution.sh` DNS provider. Add the four values from
+`terraform output apps_dns_name_servers` as NS records for host `apps`. Do not
+change the domain-level nameservers and do not migrate the parent zone.
+
+Verify the delegation and the negative-cache setting publicly:
+
+```bash
+dig NS apps.caution.sh
+dig SOA apps.caution.sh
+```
+
+The SOA record TTL must be 60 seconds. Then set `CAUTION_APPS_DNS_ZONE_ID` and
+restart the API. Production startup fails if this variable is missing;
+non-production runs with managed DNS disabled when it is unset.
+
+The API reconciles interrupted app teardown independently from Route53
+publication, including when managed DNS is disabled. Teardown concurrency is
+limited to two operations per API process and may use up to two dedicated
+PostgreSQL sessions so long OpenTofu operations do not occupy the API pool.
+The dedicated OpenTofu session locks use a separate advisory-lock namespace
+from the short Route53 transactions. Failed deploy rollback is also recorded as
+`terminating`; the same worker completes its DNS-safe cleanup and restores the
+app to the redeployable `failed` state after an API restart.
+
+If an unsuspend health or attestation check fails after recovering a different
+Elastic IP, the API stops the instances it just started and leaves managed DNS
+unchanged. If that compensating stop also fails, the API records the app as
+running and metered with a DNS retry error but does not publish the unready IP.
+Fix readiness, suspend the app, and retry unsuspend; the next successful
+readiness check publishes the recovered IP.
+
+### Production rollout checklist
+
+1. Have an AWS administrator review and apply this existing `infra-bootstrap`
+   state. This creates the zone and updates the existing platform IAM policy.
+2. Have the parent-DNS administrator add the four `apps` NS values at the
+   current `caution.sh` provider.
+3. Verify the public NS and SOA answers, including the 60-second SOA TTL.
+4. Set `CAUTION_APPS_DNS_ZONE_ID` and deploy or restart the API.
+5. Run one real deploy, customer CNAME, TLS, and destroy smoke test.
+
+Existing customers must replace a direct A record with the returned CNAME and
+wait the former A record's TTL once. This is a customer-DNS migration, not a
+per-app AWS administrator action.
 
 To view the credentials after the fact:
 ```bash
@@ -152,6 +214,12 @@ The `caution-platform` IAM user is created with these scoped permissions:
 - **S3**: Read/write to the Terraform state and EIF storage buckets only
 - **DynamoDB**: Read/write to the state lock table only
 - **STS**: `GetCallerIdentity` (for Terraform identity checks)
+- **Route53**: UPSERT/DELETE only A records under `*.apps.caution.sh`, list only
+  that hosted zone's records, and inspect Route53 change status
+
+These Route53 permissions belong only to the existing platform identity.
+Customer and BYOC credentials receive no Route53 permission, and there is no
+per-app AWS administrator step.
 
 ## Destroy
 
@@ -163,7 +231,7 @@ terraform destroy \
   -var="eif_bucket_name=caution-eif-storage-123456789012"
 ```
 
-**Warning:** This will delete the S3 buckets (including all Terraform state!) and the DynamoDB table. Only do this if you're completely removing the Caution installation from this account.
+**Warning:** This will delete the S3 buckets (including all Terraform state!) and the DynamoDB table. The `apps.caution.sh` zone and its SOA record are protected with `prevent_destroy`; remove that protection only as a deliberate separate DNS-retirement change.
 
 ## Troubleshooting
 

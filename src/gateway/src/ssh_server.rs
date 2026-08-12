@@ -886,8 +886,15 @@ async fn handle_git_push(
         struct DeployResponse {
             url: String,
             resource_id: String,
-            public_ip: String,
+            #[serde(rename = "public_ip")]
+            _public_ip: String,
             domain: Option<String>,
+            #[serde(default)]
+            managed_hostname: Option<String>,
+            #[serde(default)]
+            dns_status: Option<String>,
+            #[serde(default)]
+            dns_error: Option<String>,
         }
 
         #[derive(serde::Deserialize)]
@@ -1037,14 +1044,12 @@ async fn handle_git_push(
 
         let attestation_url = format!("{}/attestation", deploy_result.url);
 
-        let dns_note = if let Some(ref domain) = deploy_result.domain {
-            format!(
-                "\nNOTE: Add a DNS A record for '{}' pointing to {}\n",
-                domain, deploy_result.public_ip
-            )
-        } else {
-            String::new()
-        };
+        let dns_note = managed_dns_note(
+            deploy_result.managed_hostname.as_deref(),
+            deploy_result.dns_status.as_deref(),
+            deploy_result.dns_error.as_deref(),
+            deploy_result.domain.as_deref(),
+        );
 
         let success_msg = format!(
             "\nApplication: {}\nAttestation: {}{}\n\nRun 'caution verify' to verify the application attestation against this checkout.\n\n",
@@ -1060,11 +1065,41 @@ async fn handle_git_push(
     Ok(())
 }
 
+fn managed_dns_note(
+    hostname: Option<&str>,
+    status: Option<&str>,
+    error: Option<&str>,
+    domain: Option<&str>,
+) -> String {
+    let Some(hostname) = hostname else {
+        return String::new();
+    };
+    let mut note = ["\nDNS target: ", hostname, "\n"].concat();
+    if let Some(status) = status {
+        note.push_str("Managed DNS: ");
+        note.push_str(status);
+        note.push('\n');
+    }
+    if let Some(error) = error {
+        note.push_str("Managed DNS retry error: ");
+        note.push_str(error);
+        note.push('\n');
+    }
+    if let Some(domain) = domain {
+        note.push_str("Create a CNAME for ");
+        note.push_str(domain);
+        note.push_str(" pointing to ");
+        note.push_str(hostname);
+        note.push('\n');
+    }
+    note
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         contains_non_line_terminal_control, deploy_progress_completed_message,
-        deploy_progress_finished_message, deploy_progress_started_message,
+        deploy_progress_finished_message, deploy_progress_started_message, managed_dns_note,
         parse_pushed_branch_ref, resource_state_allows_noop_redeploy, PushedBranchSelection,
         ZERO_SHA1,
     };
@@ -1072,6 +1107,20 @@ mod tests {
     const OLD_SHA: &str = "1111111111111111111111111111111111111111";
     const MAIN_SHA: &str = "2222222222222222222222222222222222222222";
     const FEATURE_SHA: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    #[test]
+    fn deploy_guidance_uses_managed_cname_target() {
+        let note = managed_dns_note(
+            Some("123e4567-e89b-12d3-a456-426614174000.apps.caution.sh"),
+            Some("ready"),
+            None,
+            Some("app.example.com"),
+        );
+        assert!(note.contains("DNS target: 123e4567-e89b-12d3-a456-426614174000.apps.caution.sh"));
+        assert!(note.contains("Create a CNAME for app.example.com pointing to"));
+        assert!(!note.contains("DNS A record"));
+        assert!(!note.contains("https://123e4567"));
+    }
 
     #[test]
     fn deploy_progress_messages_are_git_safe_line_output() {
