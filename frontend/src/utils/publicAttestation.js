@@ -88,6 +88,9 @@ export function quotePosixShellArgument(value) {
 }
 
 function normalizePcrHash(value) {
+  if (typeof value !== 'string') {
+    throw new Error('Each PCR value must be a 96 hexadecimal character SHA-384 hash.')
+  }
   const normalized = value.trim().replace(/^0x/i, '').toLowerCase()
   if (!/^[0-9a-f]{96}$/.test(normalized)) {
     throw new Error('Each PCR value must be a 96 hexadecimal character SHA-384 hash.')
@@ -96,6 +99,8 @@ function normalizePcrHash(value) {
 }
 
 const REQUIRED_PCR_NAMES = ['PCR0', 'PCR1', 'PCR2']
+export const MAX_EXPECTED_PCR_FILE_SIZE = 64 * 1024
+const REMEMBERED_PCR_PREFIX = 'caution.verify.expected-pcrs.v1:'
 
 export function hasDebugPcrs(result) {
   return (
@@ -105,6 +110,26 @@ export function hasDebugPcrs(result) {
 }
 
 export function parseExpectedPcrs(input) {
+  const trimmed = input.trim()
+  if (trimmed.startsWith('{')) {
+    let parsed
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      throw new Error('Expected PCR JSON is invalid.')
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Expected PCR JSON must contain pcr0, pcr1, and pcr2.')
+    }
+
+    return Object.fromEntries(
+      REQUIRED_PCR_NAMES.map((name) => [
+        name,
+        normalizePcrHash(parsed[name] ?? parsed[name.toLowerCase()]),
+      ]),
+    )
+  }
+
   const entries = input
     .split(/[\n,;]+/)
     .map((entry) => entry.trim())
@@ -112,6 +137,20 @@ export function parseExpectedPcrs(input) {
 
   if (entries.length !== 3) {
     throw new Error('Provide PCR0, PCR1, and PCR2.')
+  }
+
+  const digestFirst = entries.map((entry) => entry.match(/^(\S+)\s+PCR([012])$/i))
+  if (digestFirst.every(Boolean)) {
+    const result = {}
+    for (const match of digestFirst) {
+      const name = `PCR${match[2]}`
+      if (result[name]) throw new Error(`${name} was provided more than once.`)
+      result[name] = normalizePcrHash(match[1])
+    }
+    if (!REQUIRED_PCR_NAMES.every((name) => result[name])) {
+      throw new Error('Provide PCR0, PCR1, and PCR2.')
+    }
+    return result
   }
 
   const labeled = entries.map((entry) => entry.match(/^PCR([012])\s*(?:=|:|\s)\s*(.+)$/i))
@@ -174,4 +213,74 @@ export function compareOptionalExpectedPcrs(result, input) {
     checked: true,
     ...compareVerifiedPcrs(result, parseExpectedPcrs(input)),
   }
+}
+
+export function parseExpectedPcrFile(input) {
+  const trimmed = input.trim()
+  if (trimmed.startsWith('{')) {
+    let parsed
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      throw new Error('Expected PCR JSON is invalid.')
+    }
+    if (
+      !parsed ||
+      typeof parsed !== 'object' ||
+      Array.isArray(parsed) ||
+      !REQUIRED_PCR_NAMES.every((name) => parsed[name.toLowerCase()] !== undefined)
+    ) {
+      throw new Error('Choose an enclave.pcrs or .caution/trusted_hashes.json file.')
+    }
+    return { pcrs: parseExpectedPcrs(input), source: 'cli' }
+  }
+
+  const entries = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  if (!entries.every((entry) => /^(\S+)\s+PCR[012]$/i.test(entry))) {
+    throw new Error('Choose an enclave.pcrs or .caution/trusted_hashes.json file.')
+  }
+  return { pcrs: parseExpectedPcrs(input), source: 'build' }
+}
+
+export async function readExpectedPcrFile(file) {
+  if (!file || typeof file.text !== 'function') throw new Error('Choose a PCR file.')
+  if (file.size > MAX_EXPECTED_PCR_FILE_SIZE) {
+    throw new Error('Expected PCR files must be 64 KiB or smaller.')
+  }
+  return parseExpectedPcrFile(await file.text())
+}
+
+function rememberedPcrKey(attestationUrl) {
+  return `${REMEMBERED_PCR_PREFIX}${attestationUrl}`
+}
+
+export function loadRememberedPcrs(storage, attestationUrl) {
+  const value = storage.getItem(rememberedPcrKey(attestationUrl))
+  if (!value) return null
+
+  try {
+    const record = JSON.parse(value)
+    if (record.version !== 1 || typeof record.savedAt !== 'string') return null
+    if (Number.isNaN(Date.parse(record.savedAt))) return null
+    return {
+      pcrs: parseExpectedPcrs(JSON.stringify(record.pcrs)),
+      savedAt: record.savedAt,
+    }
+  } catch {
+    return null
+  }
+}
+
+export function saveRememberedPcrs(storage, attestationUrl, pcrs, savedAt = new Date().toISOString()) {
+  const record = {
+    version: 1,
+    pcrs: parseExpectedPcrs(JSON.stringify(pcrs)),
+    savedAt,
+  }
+  storage.setItem(rememberedPcrKey(attestationUrl), JSON.stringify(record))
+  return record
+}
+
+export function forgetRememberedPcrs(storage, attestationUrl) {
+  storage.removeItem(rememberedPcrKey(attestationUrl))
 }

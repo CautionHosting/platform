@@ -5,15 +5,21 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  MAX_EXPECTED_PCR_FILE_SIZE,
   compareOptionalExpectedPcrs,
   compareVerifiedPcrs,
   describeAttestationError,
   ensureUint8ArrayBase64,
+  forgetRememberedPcrs,
   hasDebugPcrs,
+  loadRememberedPcrs,
   normalizeAttestationInput,
+  parseExpectedPcrFile,
   parseExpectedPcrs,
   quotePosixShellArgument,
+  readExpectedPcrFile,
   resolveAttestationTarget,
+  saveRememberedPcrs,
 } from '../src/utils/publicAttestation.js'
 
 test('installs the base64 method required by the attestation widget', () => {
@@ -128,6 +134,51 @@ test('parses three unlabeled hashes in PCR order and rejects incomplete input', 
   assert.throws(() => parseExpectedPcrs(`PCR0=${'f'.repeat(95)}\nPCR1=${hashes[1]}\nPCR2=${hashes[2]}`), /96 hexadecimal/i)
 })
 
+test('parses canonical enclave.pcrs build output', () => {
+  const pcrs = {
+    PCR0: 'a'.repeat(96),
+    PCR1: 'b'.repeat(96),
+    PCR2: 'c'.repeat(96),
+  }
+  const content = Object.entries(pcrs).map(([name, hash]) => `${hash} ${name}`).join('\n')
+
+  assert.deepEqual(parseExpectedPcrs(content), pcrs)
+  assert.deepEqual(parseExpectedPcrFile(content), { pcrs, source: 'build' })
+})
+
+test('parses trusted_hashes.json without treating its metadata as verification', () => {
+  const pcrs = {
+    PCR0: 'a'.repeat(96),
+    PCR1: 'b'.repeat(96),
+    PCR2: 'c'.repeat(96),
+  }
+  const content = JSON.stringify({
+    pcr0: pcrs.PCR0,
+    pcr1: pcrs.PCR1,
+    pcr2: pcrs.PCR2,
+    verified_at: '2026-08-12T12:00:00Z',
+    tls: { domain: 'app.example.com', certfp: 'd'.repeat(64) },
+  })
+
+  assert.deepEqual(parseExpectedPcrs(content), pcrs)
+  assert.deepEqual(parseExpectedPcrFile(content), { pcrs, source: 'cli' })
+})
+
+test('rejects malformed and oversized expected PCR files', async () => {
+  await assert.rejects(
+    readExpectedPcrFile({ size: MAX_EXPECTED_PCR_FILE_SIZE + 1, text: async () => '' }),
+    /64 KiB/i,
+  )
+  await assert.rejects(
+    readExpectedPcrFile({ size: 12, text: async () => 'PCR0=manual' }),
+    /enclave\.pcrs.*trusted_hashes\.json/i,
+  )
+  assert.throws(
+    () => parseExpectedPcrFile(JSON.stringify({ pcr0: 'a'.repeat(96) })),
+    /enclave\.pcrs.*trusted_hashes\.json/i,
+  )
+})
+
 test('compares all expected PCRs against cryptographically verified values', () => {
   const expected = {
     PCR0: 'a'.repeat(96),
@@ -212,4 +263,55 @@ test('treats expected PCR comparison as an optional extra check', () => {
       })),
     },
   )
+})
+
+function createMemoryStorage() {
+  const values = new Map()
+  return {
+    values,
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => values.delete(key),
+  }
+}
+
+test('remembers complete PCR profiles for the exact attestation endpoint', () => {
+  const storage = createMemoryStorage()
+  const endpoint = 'https://app.example.com/attestation?profile=release'
+  const otherEndpoint = 'https://app.example.com/attestation?profile=staging'
+  const pcrs = {
+    PCR0: 'a'.repeat(96),
+    PCR1: 'b'.repeat(96),
+    PCR2: 'c'.repeat(96),
+  }
+  const savedAt = '2026-08-12T12:00:00.000Z'
+
+  saveRememberedPcrs(storage, endpoint, pcrs, savedAt)
+  assert.deepEqual(loadRememberedPcrs(storage, endpoint), { pcrs, savedAt })
+  assert.equal(loadRememberedPcrs(storage, otherEndpoint), null)
+
+  const replacement = { ...pcrs, PCR2: 'd'.repeat(96) }
+  saveRememberedPcrs(storage, endpoint, replacement, savedAt)
+  assert.deepEqual(loadRememberedPcrs(storage, endpoint)?.pcrs, replacement)
+
+  forgetRememberedPcrs(storage, endpoint)
+  assert.equal(loadRememberedPcrs(storage, endpoint), null)
+})
+
+test('ignores corrupt or unsupported remembered PCR state', () => {
+  const storage = createMemoryStorage()
+  const endpoint = 'https://app.example.com/attestation'
+  const pcrs = {
+    PCR0: 'a'.repeat(96),
+    PCR1: 'b'.repeat(96),
+    PCR2: 'c'.repeat(96),
+  }
+
+  saveRememberedPcrs(storage, endpoint, pcrs)
+  const [key] = storage.values.keys()
+  storage.values.set(key, '{bad json')
+  assert.equal(loadRememberedPcrs(storage, endpoint), null)
+
+  storage.values.set(key, JSON.stringify({ version: 2, pcrs, savedAt: new Date().toISOString() }))
+  assert.equal(loadRememberedPcrs(storage, endpoint), null)
 })

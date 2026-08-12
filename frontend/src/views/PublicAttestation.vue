@@ -67,37 +67,68 @@
         <div ref="widgetContainer"></div>
         <details
           class="attestation-status attestation-status--expandable optional-pcr"
-          :open="Boolean(pcrInput.trim())"
+          :open="Boolean(pcrInput.trim() || activePcrProfile || pcrNotice)"
         >
           <summary class="attestation-status-header">
             <span class="attestation-status-text">Check expected deployment (recommended)</span>
           </summary>
           <div class="attestation-status-content">
-            <form @submit.prevent="checkExpectedPcrs">
-              <label for="expected-pcrs">Expected Nitro PCR0, PCR1, and PCR2</label>
-              <p>
-                Paste PCRs only after reviewing them through an independent trusted source.
-                <strong>Do not copy the attested values from this page into the expected fields.</strong>
-              </p>
-              <textarea
-                id="expected-pcrs"
-                v-model="pcrInput"
-                rows="6"
-                spellcheck="false"
-                placeholder="PCR0=…&#10;PCR1=…&#10;PCR2=…"
-                :aria-invalid="Boolean(pcrError)"
-                :aria-describedby="pcrError ? 'expected-pcrs-error' : undefined"
-              ></textarea>
-              <p v-if="pcrError" id="expected-pcrs-error" class="optional-pcr__error" role="alert">
-                {{ pcrError }}
-              </p>
-              <button
-                type="submit"
-                :disabled="!attestationResult || isDebugResult || !pcrInput.trim()"
-              >
-                Compare expected hashes
-              </button>
-            </form>
+            <div
+              class="pcr-import"
+              @dragover.prevent
+              @drop.prevent="handlePcrDrop"
+            >
+              <input
+                id="expected-pcr-file"
+                type="file"
+                accept=".pcrs,.json,text/plain,application/json"
+                :disabled="!attestationResult || isDebugResult || status === 'loading'"
+                :aria-describedby="pcrError ? 'expected-pcrs-error' : 'expected-pcrs-privacy'"
+                @change="handlePcrSelection"
+              />
+              <label for="expected-pcr-file">
+                <strong>{{ rememberedPcrs ? 'Replace saved PCRs' : 'Import expected PCRs' }}</strong>
+                <span>
+                  Choose or drop an enclave.pcrs or trusted_hashes.json file
+                </span>
+              </label>
+            </div>
+            <p id="expected-pcrs-privacy" class="optional-pcr__privacy">
+              The file is read in this browser and is not uploaded.
+            </p>
+            <p v-if="activePcrProfile" class="optional-pcr__source">
+              {{ activePcrSourceLabel }}
+            </p>
+            <p v-if="pcrError" id="expected-pcrs-error" class="optional-pcr__error" role="alert">
+              {{ pcrError }}
+            </p>
+
+            <details class="manual-pcr" :open="Boolean(pcrInput.trim())">
+              <summary>Advanced: paste PCRs manually</summary>
+              <form @submit.prevent="checkExpectedPcrs">
+                <label for="expected-pcrs">Expected Nitro PCR0, PCR1, and PCR2</label>
+                <p>
+                  Paste PCRs only after reviewing them through an independent trusted source.
+                  <strong>Do not copy the attested values from this page into these fields.</strong>
+                </p>
+                <textarea
+                  id="expected-pcrs"
+                  v-model="pcrInput"
+                  rows="6"
+                  spellcheck="false"
+                  placeholder="PCR0=…&#10;PCR1=…&#10;PCR2=…"
+                  :aria-invalid="Boolean(pcrError)"
+                  :aria-describedby="pcrError ? 'expected-pcrs-error' : undefined"
+                ></textarea>
+                <button
+                  type="submit"
+                  :disabled="!attestationResult || isDebugResult || !pcrInput.trim()"
+                >
+                  Compare expected hashes
+                </button>
+              </form>
+            </details>
+
             <div v-if="pcrComparison?.checked" class="pcr-comparison" aria-live="polite">
               <div
                 v-for="comparison in pcrComparison.comparisons"
@@ -130,6 +161,12 @@
                 </dl>
               </div>
             </div>
+            <div v-if="rememberedPcrs" class="pcr-memory">
+              <button type="button" class="secondary" @click="forgetExpectedPcrs">
+                Forget saved PCRs
+              </button>
+            </div>
+            <p v-if="pcrNotice" class="optional-pcr__notice" aria-live="polite">{{ pcrNotice }}</p>
           </div>
         </details>
       </section>
@@ -195,13 +232,18 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { renderInline } from 'attestation-widget'
 import {
-  compareOptionalExpectedPcrs,
+  compareVerifiedPcrs,
   describeAttestationError,
   ensureUint8ArrayBase64,
+  forgetRememberedPcrs,
   hasDebugPcrs,
+  loadRememberedPcrs,
   normalizeAttestationInput,
+  parseExpectedPcrs,
   quotePosixShellArgument,
+  readExpectedPcrFile,
   resolveAttestationTarget,
+  saveRememberedPcrs,
 } from '../utils/publicAttestation.js'
 
 export default {
@@ -210,11 +252,14 @@ export default {
     const widgetContainer = ref(null)
     const target = ref(null)
     const attestationResult = ref(null)
+    const activePcrProfile = ref(null)
     const copyStatus = ref('')
     const inputMessage = ref('')
     const pcrComparison = ref(null)
     const pcrError = ref('')
     const pcrInput = ref('')
+    const pcrNotice = ref('')
+    const rememberedPcrs = ref(null)
     const status = ref('loading')
     const targetInput = ref('')
     const statusMessage = ref('')
@@ -224,6 +269,22 @@ export default {
     ensureUint8ArrayBase64()
 
     const isDebugResult = computed(() => hasDebugPcrs(attestationResult.value))
+
+    const activePcrSourceLabel = computed(() => {
+      if (activePcrProfile.value?.source === 'build') {
+        return 'Local build output — unsigned; review the checkout and build independently.'
+      }
+      if (activePcrProfile.value?.source === 'cli') {
+        return 'Caution CLI state — unsigned and editable.'
+      }
+      if (activePcrProfile.value?.source === 'manual') {
+        return 'Manual entry — source not authenticated by this page.'
+      }
+      if (activePcrProfile.value?.source === 'remembered') {
+        return 'Saved PCRs for this endpoint — browser continuity only.'
+      }
+      return ''
+    })
 
     const summaryHeadline = computed(() => {
       if (status.value === 'evidence') {
@@ -259,7 +320,7 @@ export default {
       if (status.value === 'matched') return { label: 'Matched', tone: 'success' }
       if (status.value === 'mismatch') return { label: 'Mismatch', tone: 'danger' }
       if (status.value === 'debug') return { label: 'Unavailable', tone: 'danger' }
-      if (status.value === 'evidence') return { label: 'Paste PCRs below', tone: 'neutral' }
+      if (status.value === 'evidence') return { label: 'Import PCRs below', tone: 'neutral' }
       if (status.value === 'loading') return { label: 'Pending', tone: 'neutral' }
       return { label: 'Not checked', tone: 'neutral' }
     })
@@ -295,28 +356,101 @@ export default {
       }
     }
 
+    const clearComparison = () => {
+      pcrComparison.value = null
+      pcrError.value = ''
+      pcrNotice.value = ''
+      if (attestationResult.value) {
+        status.value = isDebugResult.value ? 'debug' : 'evidence'
+      }
+    }
+
+    const compareActivePcrs = () => {
+      if (!attestationResult.value || !activePcrProfile.value || isDebugResult.value) return
+
+      pcrComparison.value = {
+        checked: true,
+        ...compareVerifiedPcrs(attestationResult.value, activePcrProfile.value.pcrs),
+      }
+      status.value = pcrComparison.value.matches ? 'matched' : 'mismatch'
+      if (pcrComparison.value.matches && activePcrProfile.value.source !== 'remembered') {
+        const replacing = Boolean(rememberedPcrs.value)
+        try {
+          rememberedPcrs.value = saveRememberedPcrs(
+            window.localStorage,
+            target.value.attestationUrl,
+            activePcrProfile.value.pcrs,
+          )
+          pcrNotice.value = replacing
+            ? 'Replaced saved PCRs for this endpoint.'
+            : 'Saved PCRs for this endpoint.'
+        } catch {
+          pcrNotice.value = 'PCRs matched, but browser storage was unavailable.'
+        }
+      }
+    }
+
     const checkExpectedPcrs = () => {
       if (!attestationResult.value || isDebugResult.value) return
 
-      pcrComparison.value = null
       pcrError.value = ''
-      status.value = 'evidence'
-
+      pcrNotice.value = ''
       try {
-        pcrComparison.value = compareOptionalExpectedPcrs(attestationResult.value, pcrInput.value)
+        activePcrProfile.value = {
+          pcrs: parseExpectedPcrs(pcrInput.value),
+          source: 'manual',
+        }
       } catch (error) {
         pcrError.value = error.message
         return
       }
-
-      status.value = pcrComparison.value.matches ? 'matched' : 'mismatch'
+      compareActivePcrs()
     }
 
-    const clearComparison = () => {
-      pcrComparison.value = null
-      pcrError.value = ''
-      if (attestationResult.value) {
-        status.value = isDebugResult.value ? 'debug' : 'evidence'
+    const importExpectedPcrFile = async (file) => {
+      if (!attestationResult.value || isDebugResult.value) return
+
+      activePcrProfile.value = null
+      clearComparison()
+      try {
+        const profile = await readExpectedPcrFile(file)
+        if (pcrInput.value) {
+          pcrInput.value = ''
+          await nextTick()
+        }
+        activePcrProfile.value = profile
+        compareActivePcrs()
+      } catch (error) {
+        pcrError.value = error.message
+      }
+    }
+
+    const handlePcrSelection = async (event) => {
+      const file = event.target.files?.[0]
+      if (file) await importExpectedPcrFile(file)
+      event.target.value = ''
+    }
+
+    const handlePcrDrop = async (event) => {
+      const file = event.dataTransfer?.files?.[0]
+      if (file) await importExpectedPcrFile(file)
+    }
+
+    const forgetExpectedPcrs = () => {
+      if (!target.value) return
+
+      pcrNotice.value = ''
+      try {
+        forgetRememberedPcrs(window.localStorage, target.value.attestationUrl)
+        rememberedPcrs.value = null
+        pcrNotice.value = 'Forgot saved PCRs for this endpoint.'
+        if (activePcrProfile.value?.source === 'remembered') {
+          activePcrProfile.value = null
+          clearComparison()
+          pcrNotice.value = 'Forgot saved PCRs for this endpoint.'
+        }
+      } catch {
+        pcrNotice.value = 'Could not use browser storage.'
       }
     }
 
@@ -360,7 +494,10 @@ export default {
       }
     }
 
-    watch(pcrInput, clearComparison)
+    watch(pcrInput, () => {
+      activePcrProfile.value = null
+      clearComparison()
+    })
 
     onMounted(async () => {
       try {
@@ -374,6 +511,21 @@ export default {
       if (!target.value) {
         status.value = 'idle'
         return
+      }
+
+      try {
+        rememberedPcrs.value = loadRememberedPcrs(
+          window.localStorage,
+          target.value.attestationUrl,
+        )
+        if (rememberedPcrs.value) {
+          activePcrProfile.value = {
+            pcrs: rememberedPcrs.value.pcrs,
+            source: 'remembered',
+          }
+        }
+      } catch {
+        pcrNotice.value = 'Could not use browser storage.'
       }
 
       await nextTick()
@@ -394,6 +546,7 @@ export default {
           status.value = hasDebugPcrs(result) ? 'debug' : 'evidence'
           statusMessage.value = ''
           verifiedAt.value = Date.now()
+          compareActivePcrs()
         },
         onError: handleVerificationError,
       })
@@ -404,6 +557,8 @@ export default {
     })
 
     return {
+      activePcrProfile,
+      activePcrSourceLabel,
       attestationResult,
       checkExpectedPcrs,
       cliVerifyCommand,
@@ -412,11 +567,16 @@ export default {
       deploymentCheck,
       evidenceCheck,
       formattedVerificationTime,
+      forgetExpectedPcrs,
+      handlePcrDrop,
+      handlePcrSelection,
       inputMessage,
       isDebugResult,
       pcrComparison,
       pcrError,
       pcrInput,
+      pcrNotice,
+      rememberedPcrs,
       status,
       summaryHeadline,
       statusMessage,
@@ -655,6 +815,50 @@ h1 {
   margin-top: 12px;
 }
 
+.pcr-import {
+  position: relative;
+  overflow: hidden;
+  border: 1px dashed #8795a1;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.pcr-import:focus-within {
+  outline: 3px solid rgba(46, 106, 234, 0.22);
+  border-color: #2e6aea;
+}
+
+.pcr-import input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.pcr-import input:disabled {
+  cursor: not-allowed;
+}
+
+.pcr-import label {
+  display: grid;
+  gap: 3px;
+  padding: 14px;
+  cursor: pointer;
+}
+
+.pcr-import label span {
+  color: #56636f;
+  font-size: 0.86rem;
+  font-weight: 400;
+}
+
+.pcr-import input:disabled + label {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .optional-pcr form {
   display: grid;
   gap: 12px;
@@ -672,6 +876,34 @@ h1 {
 
 .optional-pcr .optional-pcr__error {
   color: #a51d1d;
+}
+
+.optional-pcr__privacy,
+.optional-pcr__source,
+.optional-pcr__notice {
+  margin-top: 8px;
+  font-size: 0.86rem;
+}
+
+.optional-pcr__source {
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: #f1f5f9;
+}
+
+.manual-pcr {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(15, 15, 15, 0.1);
+}
+
+.manual-pcr summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.manual-pcr form {
+  margin-top: 16px;
 }
 
 .optional-pcr textarea {
@@ -777,6 +1009,19 @@ h1 {
 .pcr-comparison code {
   overflow-wrap: anywhere;
   font-size: 0.78rem;
+}
+
+.pcr-memory {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.pcr-memory button.secondary {
+  border: 1px solid #b8c2cc;
+  background: transparent;
+  color: #0f0f0f;
 }
 
 .metadata-card code,

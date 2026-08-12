@@ -178,6 +178,19 @@ and cannot be used for workload identity. The page reports when fresh
 nonce-bound evidence was verified in the browser, supports explicit
 re-verification, and reports each PCR comparison separately.
 
+Expected PCRs can be imported from an `enclave.pcrs` produced by
+`caution apps build --no-cache` from a reviewed checkout, or from the
+`.caution/trusted_hashes.json` written by a successful CLI verification. Files
+are read only in the browser and are not uploaded; both formats remain unsigned
+and editable, so importing one does not authenticate its source. Manual entry is
+available under the advanced control.
+
+After an exact match, the page saves PCR0, PCR1, and PCR2 for that exact
+attestation endpoint and compares them with fresh evidence on later visits. The
+page labels saved values as browser continuity and provides explicit replace and
+forget controls. This browser storage is not an independent trust root:
+same-origin code or the local user can change or clear it.
+
 The default Bootproof pin includes the required attestation CORS policy. An
 operator override through `BOOTPROOF_COMMIT` takes precedence. Pin changes apply
 only to newly built EIFs; existing applications must be rebuilt and redeployed,
