@@ -56,6 +56,7 @@ S3 bucket names must be globally unique. Pass them via `-var` flags or edit `var
 | `apps_dns_zone_name` | `apps.caution.sh`        | Optional         | Delegated suffix for managed application records |
 | `lock_table_name`   | `terraform-state-lock`   | No               | DynamoDB table name                              |
 | `service_user_name` | `caution-platform`       | No               | IAM user name                                    |
+| `create_platform_access_key` | `false`             | Optional         | Create a new long-lived service key in Terraform state; enable only for first-time bootstrap |
 
 A good convention for unique bucket names is to append the account ID:
 ```
@@ -128,7 +129,11 @@ cd ..
 cp env.example .env
 ```
 
-Set these values in `.env`:
+Set these values in `.env`. By default bootstrap does not create or rotate a
+platform access key; continue using the operationally managed credentials
+already deployed to the service. For a first-time installation only, pass
+`-var="create_platform_access_key=true"` and securely capture the sensitive
+outputs:
 ```
 AWS_ACCESS_KEY_ID=<from terraform output>
 AWS_SECRET_ACCESS_KEY=<from terraform output>

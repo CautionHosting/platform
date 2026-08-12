@@ -158,10 +158,17 @@ resource "aws_iam_user" "platform" {
     Purpose   = "caution-platform"
     ManagedBy = "infra-bootstrap"
   }
+
+  # Access-key ownership is operational: key-identifying tags document where
+  # deployed credentials are used and must survive unrelated bootstrap applies.
+  lifecycle {
+    ignore_changes = [tags]
+  }
 }
 
 resource "aws_iam_access_key" "platform" {
-  user = aws_iam_user.platform.name
+  count = var.create_platform_access_key ? 1 : 0
+  user  = aws_iam_user.platform.name
 }
 
 resource "aws_iam_policy" "platform_deploy" {
@@ -544,14 +551,14 @@ output "policy_arn" {
 }
 
 output "aws_access_key_id" {
-  description = "AWS Access Key ID — put in .env as AWS_ACCESS_KEY_ID"
-  value       = aws_iam_access_key.platform.id
+  description = "New AWS access key ID when create_platform_access_key is enabled"
+  value       = try(aws_iam_access_key.platform[0].id, null)
   sensitive   = true
 }
 
 output "aws_secret_access_key" {
-  description = "AWS Secret Access Key — put in .env as AWS_SECRET_ACCESS_KEY"
-  value       = aws_iam_access_key.platform.secret
+  description = "New AWS secret access key when create_platform_access_key is enabled"
+  value       = try(aws_iam_access_key.platform[0].secret, null)
   sensitive   = true
 }
 

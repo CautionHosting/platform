@@ -52,6 +52,12 @@ variable "service_user_name" {
   default     = "caution-platform"
 }
 
+variable "create_platform_access_key" {
+  description = "Create and store a new long-lived platform access key in Terraform state. Leave false when credentials are managed and rotated operationally."
+  type        = bool
+  default     = false
+}
+
 variable "builder_vpc_id" {
   description = "Optional VPC ID for builder subnet validation. If omitted, bootstrap derives the VPC from builder_subnet_id."
   type        = string

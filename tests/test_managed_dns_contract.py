@@ -37,6 +37,20 @@ def test_managed_zone_has_protected_sixty_second_negative_cache_ttl():
     assert bootstrap.count("prevent_destroy = true") >= 2
 
 
+def test_bootstrap_preserves_operational_platform_credentials():
+    bootstrap = (ROOT / "infra-bootstrap" / "main.tf").read_text()
+    variables = (ROOT / "infra-bootstrap" / "variables.tf").read_text()
+
+    assert 'variable "create_platform_access_key"' in variables
+    assert 'default     = false' in variables
+    assert "count = var.create_platform_access_key ? 1 : 0" in bootstrap
+    assert "ignore_changes = [tags]" in bootstrap
+    assert "try(aws_iam_access_key.platform[0].id, null)" in bootstrap
+    assert "output -json aws_access_key_id" in (
+        ROOT / "infra-bootstrap" / "entrypoint.sh"
+    ).read_text()
+
+
 def test_pending_deploy_updates_are_attempt_owned():
     migration = (
         ROOT / "src" / "api" / "migrations" / "052_deploy_attempt_ownership.sql"

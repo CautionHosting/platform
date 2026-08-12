@@ -66,11 +66,14 @@ echo ""
 echo -e "${GREEN}Bootstrap complete!${NC}"
 echo ""
 echo "=========================================="
-echo "Platform Credentials (store securely!):"
+echo "Platform Configuration:"
 echo "=========================================="
 echo ""
-echo "AWS_ACCESS_KEY_ID=$($TF_CMD output -raw aws_access_key_id)"
-echo "AWS_SECRET_ACCESS_KEY=$($TF_CMD output -raw aws_secret_access_key)"
+PLATFORM_ACCESS_KEY_ID=$($TF_CMD output -json aws_access_key_id)
+if [ "$PLATFORM_ACCESS_KEY_ID" != "null" ]; then
+    echo "AWS_ACCESS_KEY_ID=$($TF_CMD output -raw aws_access_key_id)"
+    echo "AWS_SECRET_ACCESS_KEY=$($TF_CMD output -raw aws_secret_access_key)"
+fi
 echo "AWS_ACCOUNT_ID=$ACCOUNT_ID"
 echo "AWS_REGION=us-west-2"
 echo "TERRAFORM_STATE_BUCKET=$($TF_CMD output -raw s3_bucket_name)"
@@ -82,14 +85,20 @@ echo ""
 
 CREDS_FILE="../aws-credentials.env"
 cat > $CREDS_FILE << EOF
-AWS_ACCESS_KEY_ID=$($TF_CMD output -raw aws_access_key_id)
-AWS_SECRET_ACCESS_KEY=$($TF_CMD output -raw aws_secret_access_key)
 AWS_ACCOUNT_ID=$ACCOUNT_ID
 AWS_REGION=us-west-2
 TERRAFORM_STATE_BUCKET=$($TF_CMD output -raw s3_bucket_name)
 EIF_S3_BUCKET=$($TF_CMD output -raw eif_bucket_name)
 CAUTION_APPS_DNS_ZONE_ID=$($TF_CMD output -raw apps_dns_zone_id)
+CAUTION_APPS_DNS_SUFFIX=$($TF_CMD output -raw apps_dns_zone_name)
 EOF
+
+if [ "$PLATFORM_ACCESS_KEY_ID" != "null" ]; then
+    {
+        echo "AWS_ACCESS_KEY_ID=$($TF_CMD output -raw aws_access_key_id)"
+        echo "AWS_SECRET_ACCESS_KEY=$($TF_CMD output -raw aws_secret_access_key)"
+    } >> $CREDS_FILE
+fi
 
 chmod 600 $CREDS_FILE
 
