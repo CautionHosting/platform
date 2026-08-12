@@ -95,6 +95,15 @@ function normalizePcrHash(value) {
   return normalized
 }
 
+const REQUIRED_PCR_NAMES = ['PCR0', 'PCR1', 'PCR2']
+
+export function hasDebugPcrs(result) {
+  return (
+    result?.verified === true &&
+    REQUIRED_PCR_NAMES.every((name) => result.pcrs?.[name] === '0'.repeat(96))
+  )
+}
+
 export function parseExpectedPcrs(input) {
   const entries = input
     .split(/[\n,;]+/)
@@ -131,14 +140,23 @@ export function parseExpectedPcrs(input) {
 }
 
 export function compareVerifiedPcrs(result, expectedPcrs) {
-  const mismatches = Object.keys(expectedPcrs).filter((name) => {
+  const comparisons = Object.keys(expectedPcrs).map((name) => {
     const actual = result?.verified ? result.pcrs?.[name] : null
-    return typeof actual !== 'string' || actual.toLowerCase() !== expectedPcrs[name]
+    const authenticated = typeof actual === 'string' ? actual.toLowerCase() : null
+
+    return {
+      name,
+      expected: expectedPcrs[name],
+      authenticated,
+      matches: authenticated === expectedPcrs[name],
+    }
   })
+  const mismatches = comparisons.filter((comparison) => !comparison.matches).map(({ name }) => name)
 
   return {
     matches: mismatches.length === 0,
     mismatches,
+    comparisons,
   }
 }
 
@@ -148,6 +166,7 @@ export function compareOptionalExpectedPcrs(result, input) {
       checked: false,
       matches: true,
       mismatches: [],
+      comparisons: [],
     }
   }
 

@@ -9,6 +9,7 @@ import {
   compareVerifiedPcrs,
   describeAttestationError,
   ensureUint8ArrayBase64,
+  hasDebugPcrs,
   normalizeAttestationInput,
   parseExpectedPcrs,
   quotePosixShellArgument,
@@ -137,17 +138,48 @@ test('compares all expected PCRs against cryptographically verified values', () 
   assert.deepEqual(compareVerifiedPcrs({ verified: true, pcrs: expected }, expected), {
     matches: true,
     mismatches: [],
+    comparisons: Object.entries(expected).map(([name, value]) => ({
+      name,
+      expected: value,
+      authenticated: value,
+      matches: true,
+    })),
   })
 
   const actual = { ...expected, PCR1: 'd'.repeat(96) }
   assert.deepEqual(compareVerifiedPcrs({ verified: true, pcrs: actual }, expected), {
     matches: false,
     mismatches: ['PCR1'],
+    comparisons: Object.entries(expected).map(([name, value]) => ({
+      name,
+      expected: value,
+      authenticated: actual[name],
+      matches: name !== 'PCR1',
+    })),
   })
   assert.deepEqual(compareVerifiedPcrs({ verified: false, pcrs: expected }, expected), {
     matches: false,
     mismatches: ['PCR0', 'PCR1', 'PCR2'],
+    comparisons: Object.entries(expected).map(([name, value]) => ({
+      name,
+      expected: value,
+      authenticated: null,
+      matches: false,
+    })),
   })
+})
+
+test('detects only verified debug attestations with all-zero PCR0, PCR1, and PCR2', () => {
+  const zeroPcrs = {
+    PCR0: '0'.repeat(96),
+    PCR1: '0'.repeat(96),
+    PCR2: '0'.repeat(96),
+  }
+
+  assert.equal(hasDebugPcrs({ verified: true, pcrs: zeroPcrs }), true)
+  assert.equal(hasDebugPcrs({ verified: false, pcrs: zeroPcrs }), false)
+  assert.equal(hasDebugPcrs({ verified: true, pcrs: { ...zeroPcrs, PCR2: '1'.repeat(96) } }), false)
+  assert.equal(hasDebugPcrs({ verified: true, pcrs: { PCR0: zeroPcrs.PCR0 } }), false)
 })
 
 test('treats expected PCR comparison as an optional extra check', () => {
@@ -161,6 +193,7 @@ test('treats expected PCR comparison as an optional extra check', () => {
     checked: false,
     matches: true,
     mismatches: [],
+    comparisons: [],
   })
   assert.deepEqual(
     compareOptionalExpectedPcrs(
@@ -171,6 +204,12 @@ test('treats expected PCR comparison as an optional extra check', () => {
       checked: true,
       matches: true,
       mismatches: [],
+      comparisons: Object.entries(pcrs).map(([name, value]) => ({
+        name,
+        expected: value,
+        authenticated: value,
+        matches: true,
+      })),
     },
   )
 })

@@ -21,22 +21,45 @@
 
       <section
         v-if="status !== 'idle'"
-        :class="['verification-result', `verification-result--${status}`]"
+        :class="['verification-summary', `verification-summary--${status}`]"
         aria-live="polite"
       >
-        <div class="verification-result__icon" aria-hidden="true">
-          {{ statusIcon }}
+        <div class="verification-summary__header">
+          <p class="verification-summary__label">Verification summary</p>
+          <h2>{{ summaryHeadline }}</h2>
+          <p v-if="statusMessage" class="verification-summary__message">{{ statusMessage }}</p>
         </div>
-        <div>
-          <p class="verification-result__label">{{ statusLabel }}</p>
-          <p v-if="statusMessage" class="verification-result__message">{{ statusMessage }}</p>
+        <div class="verification-summary__checks">
+          <div class="verification-summary__check">
+            <span>AWS Nitro evidence</span>
+            <strong :class="`check-status--${evidenceCheck.tone}`">{{ evidenceCheck.label }}</strong>
+          </div>
+          <div class="verification-summary__check">
+            <span>Expected PCR0, PCR1, and PCR2</span>
+            <strong :class="`check-status--${deploymentCheck.tone}`">
+              {{ deploymentCheck.label }}
+            </strong>
+          </div>
         </div>
+        <div v-if="verifiedAt" class="verification-summary__freshness">
+          <span>
+            Fresh nonce-bound evidence verified in this browser at
+            {{ formattedVerificationTime }}
+          </span>
+          <button type="button" :disabled="status === 'loading'" @click="verifyAgain">
+            Verify again
+          </button>
+        </div>
+        <p v-if="attestationResult" class="verification-summary__boundary">
+          This page does not reproduce source or test a STEVE encrypted session.
+        </p>
       </section>
 
       <section v-if="target" class="metadata-card">
         <div class="metadata-card__item">
-          <span class="metadata-card__label">Attestation endpoint</span>
-          <code>{{ target.attestationUrl }}</code>
+          <span class="metadata-card__label">Target</span>
+          <strong class="metadata-card__hostname">{{ targetHostname }}</strong>
+          <code class="metadata-card__endpoint">{{ target.attestationUrl }}</code>
         </div>
       </section>
 
@@ -47,14 +70,14 @@
           :open="Boolean(pcrInput.trim())"
         >
           <summary class="attestation-status-header">
-            <span class="attestation-status-text">Optional: compare expected PCR hashes</span>
+            <span class="attestation-status-text">Check expected deployment (recommended)</span>
           </summary>
           <div class="attestation-status-content">
             <form @submit.prevent="checkExpectedPcrs">
               <label for="expected-pcrs">Expected Nitro PCR0, PCR1, and PCR2</label>
               <p>
-                This browser verifier does not pin expected PCRs automatically. Paste hashes only
-                after reviewing them through an independent trusted source.
+                Paste PCRs only after reviewing them through an independent trusted source.
+                <strong>Do not copy the attested values from this page into the expected fields.</strong>
               </p>
               <textarea
                 id="expected-pcrs"
@@ -62,11 +85,51 @@
                 rows="6"
                 spellcheck="false"
                 placeholder="PCR0=…&#10;PCR1=…&#10;PCR2=…"
+                :aria-invalid="Boolean(pcrError)"
+                :aria-describedby="pcrError ? 'expected-pcrs-error' : undefined"
               ></textarea>
-              <button type="submit" :disabled="!attestationResult || !pcrInput.trim()">
+              <p v-if="pcrError" id="expected-pcrs-error" class="optional-pcr__error" role="alert">
+                {{ pcrError }}
+              </p>
+              <button
+                type="submit"
+                :disabled="!attestationResult || isDebugResult || !pcrInput.trim()"
+              >
                 Compare expected hashes
               </button>
             </form>
+            <div v-if="pcrComparison?.checked" class="pcr-comparison" aria-live="polite">
+              <div
+                v-for="comparison in pcrComparison.comparisons"
+                :key="comparison.name"
+                class="pcr-comparison__row"
+              >
+                <div class="pcr-comparison__result">
+                  <strong>{{ comparison.name }}</strong>
+                  <span
+                    :class="
+                      comparison.matches
+                        ? pcrComparison.matches
+                          ? 'is-match'
+                          : 'is-neutral-match'
+                        : 'is-mismatch'
+                    "
+                  >
+                    {{ comparison.matches ? 'Matched' : 'Mismatch' }}
+                  </span>
+                </div>
+                <dl v-if="!comparison.matches">
+                  <div>
+                    <dt>Expected</dt>
+                    <dd><code>{{ comparison.expected }}</code></dd>
+                  </div>
+                  <div>
+                    <dt>Authenticated</dt>
+                    <dd><code>{{ comparison.authenticated || 'Unavailable' }}</code></dd>
+                  </div>
+                </dl>
+              </div>
+            </div>
           </div>
         </details>
       </section>
@@ -83,7 +146,13 @@
             and run:
           </p>
         </div>
-        <code class="verification-guide__command">{{ cliVerifyCommand }}</code>
+        <div class="verification-guide__command">
+          <code>{{ cliVerifyCommand }}</code>
+          <button type="button" aria-label="Copy CLI command" @click="copyCliCommand">Copy</button>
+        </div>
+        <span v-if="copyStatus" class="verification-guide__copy-status" aria-live="polite">
+          {{ copyStatus }}
+        </span>
         <p>
           The browser authenticates fresh Nitro evidence, but it does not authenticate the sibling
           manifest, reproduce source, or establish a STEVE encrypted session. The CLI reproduces
@@ -123,12 +192,13 @@
 </template>
 
 <script>
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { renderInline } from 'attestation-widget'
 import {
   compareOptionalExpectedPcrs,
   describeAttestationError,
   ensureUint8ArrayBase64,
+  hasDebugPcrs,
   normalizeAttestationInput,
   quotePosixShellArgument,
   resolveAttestationTarget,
@@ -140,32 +210,78 @@ export default {
     const widgetContainer = ref(null)
     const target = ref(null)
     const attestationResult = ref(null)
+    const copyStatus = ref('')
     const inputMessage = ref('')
+    const pcrComparison = ref(null)
+    const pcrError = ref('')
     const pcrInput = ref('')
     const status = ref('loading')
     const targetInput = ref('')
     const statusMessage = ref('')
+    const verifiedAt = ref(null)
     let widget = null
 
     ensureUint8ArrayBase64()
 
-    const statusLabel = computed(() => {
-      if (status.value === 'success') return 'Fresh Nitro attestation authenticated'
-      if (status.value === 'failure') return 'Failed verification'
-      if (status.value === 'input-error') return 'Unable to verify'
-      return 'Verifying application…'
+    const isDebugResult = computed(() => hasDebugPcrs(attestationResult.value))
+
+    const summaryHeadline = computed(() => {
+      if (status.value === 'evidence') {
+        return 'Nitro evidence verified; compare expected PCRs below.'
+      }
+      if (status.value === 'matched') {
+        return 'Nitro evidence verified; supplied expected PCRs match.'
+      }
+      if (status.value === 'mismatch') {
+        return 'Expected deployment does not match authenticated PCRs.'
+      }
+      if (status.value === 'debug') {
+        return 'Debug enclave authenticated; workload identity cannot be verified.'
+      }
+      if (status.value === 'failure') return 'Nitro attestation verification failed.'
+      if (status.value === 'input-error') return 'Unable to verify this target.'
+      return 'Verifying fresh Nitro evidence…'
     })
 
-    const statusIcon = computed(() => {
-      if (status.value === 'success') return '✓'
-      if (status.value === 'failure' || status.value === 'input-error') return '×'
-      return '···'
+    const evidenceCheck = computed(() => {
+      if (attestationResult.value?.verified) {
+        return {
+          label: 'Authenticated',
+          tone: 'success',
+        }
+      }
+      if (status.value === 'failure') return { label: 'Failed', tone: 'danger' }
+      if (status.value === 'loading') return { label: 'Checking', tone: 'neutral' }
+      return { label: 'Not checked', tone: 'neutral' }
+    })
+
+    const deploymentCheck = computed(() => {
+      if (status.value === 'matched') return { label: 'Matched', tone: 'success' }
+      if (status.value === 'mismatch') return { label: 'Mismatch', tone: 'danger' }
+      if (status.value === 'debug') return { label: 'Unavailable', tone: 'danger' }
+      if (status.value === 'evidence') return { label: 'Paste PCRs below', tone: 'neutral' }
+      if (status.value === 'loading') return { label: 'Pending', tone: 'neutral' }
+      return { label: 'Not checked', tone: 'neutral' }
     })
 
     const cliVerifyCommand = computed(() =>
       target.value
         ? `caution verify --attestation-url ${quotePosixShellArgument(target.value.attestationUrl)}`
         : '',
+    )
+
+    const formattedVerificationTime = computed(() =>
+      verifiedAt.value
+        ? new Date(verifiedAt.value).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          })
+        : '',
+    )
+
+    const targetHostname = computed(() =>
+      target.value ? new URL(target.value.attestationUrl).hostname : '',
     )
 
     const submitTarget = () => {
@@ -180,31 +296,71 @@ export default {
     }
 
     const checkExpectedPcrs = () => {
-      let comparison
+      if (!attestationResult.value || isDebugResult.value) return
+
+      pcrComparison.value = null
+      pcrError.value = ''
+      status.value = 'evidence'
+
       try {
-        comparison = compareOptionalExpectedPcrs(attestationResult.value, pcrInput.value)
+        pcrComparison.value = compareOptionalExpectedPcrs(attestationResult.value, pcrInput.value)
       } catch (error) {
-        status.value = 'input-error'
-        statusMessage.value = error.message
+        pcrError.value = error.message
         return
       }
 
-      if (!attestationResult.value) {
-        status.value = 'loading'
-        statusMessage.value = 'Waiting for cryptographic attestation verification.'
-        return
-      }
-
-      if (!comparison.matches) {
-        status.value = 'failure'
-        statusMessage.value = `${comparison.mismatches.join(', ')} did not match the attested values.`
-        return
-      }
-
-      status.value = 'success'
-      statusMessage.value =
-        'The supplied PCR0, PCR1, and PCR2 matched the authenticated values. This does not establish a STEVE encrypted session.'
+      status.value = pcrComparison.value.matches ? 'matched' : 'mismatch'
     }
+
+    const clearComparison = () => {
+      pcrComparison.value = null
+      pcrError.value = ''
+      if (attestationResult.value) {
+        status.value = isDebugResult.value ? 'debug' : 'evidence'
+      }
+    }
+
+    const handleVerificationError = (error) => {
+      attestationResult.value = null
+      pcrComparison.value = null
+      pcrError.value = ''
+      verifiedAt.value = null
+      status.value = 'failure'
+      statusMessage.value = describeAttestationError(
+        error,
+        target.value.attestationUrl,
+        window.location.origin,
+      )
+    }
+
+    const verifyAgain = async () => {
+      if (!widget || status.value === 'loading') return
+
+      attestationResult.value = null
+      pcrComparison.value = null
+      pcrError.value = ''
+      status.value = 'loading'
+      statusMessage.value = ''
+      verifiedAt.value = null
+
+      try {
+        await widget.verify()
+      } catch (error) {
+        handleVerificationError(error)
+      }
+    }
+
+    const copyCliCommand = async () => {
+      copyStatus.value = ''
+      try {
+        await navigator.clipboard.writeText(cliVerifyCommand.value)
+        copyStatus.value = 'Copied'
+      } catch {
+        copyStatus.value = 'Could not copy'
+      }
+    }
+
+    watch(pcrInput, clearComparison)
 
     onMounted(async () => {
       try {
@@ -233,19 +389,13 @@ export default {
         showConnectionStatus: false,
         onVerified: (result) => {
           attestationResult.value = result
-          status.value = 'success'
-          statusMessage.value =
-            'Fresh nonce-bound Nitro evidence is authenticated. PCR0, PCR1, and PCR2 have not been compared with independently reviewed values. This does not establish a STEVE encrypted session.'
+          pcrComparison.value = null
+          pcrError.value = ''
+          status.value = hasDebugPcrs(result) ? 'debug' : 'evidence'
+          statusMessage.value = ''
+          verifiedAt.value = Date.now()
         },
-        onError: (error) => {
-          attestationResult.value = null
-          status.value = 'failure'
-          statusMessage.value = describeAttestationError(
-            error,
-            target.value.attestationUrl,
-            window.location.origin,
-          )
-        },
+        onError: handleVerificationError,
       })
     })
 
@@ -257,15 +407,25 @@ export default {
       attestationResult,
       checkExpectedPcrs,
       cliVerifyCommand,
+      copyCliCommand,
+      copyStatus,
+      deploymentCheck,
+      evidenceCheck,
+      formattedVerificationTime,
       inputMessage,
+      isDebugResult,
+      pcrComparison,
+      pcrError,
       pcrInput,
       status,
-      statusIcon,
-      statusLabel,
+      summaryHeadline,
       statusMessage,
       submitTarget,
       target,
+      targetHostname,
       targetInput,
+      verifiedAt,
+      verifyAgain,
       widgetContainer,
     }
   },
@@ -301,7 +461,7 @@ export default {
 }
 
 .eyebrow,
-.verification-result__label,
+.verification-summary__label,
 .target-card span {
   font-size: 0.78rem;
   font-weight: 700;
@@ -327,7 +487,7 @@ h1 {
   line-height: 1.65;
 }
 
-.verification-result,
+.verification-summary,
 .metadata-card,
 .widget-card,
 .verification-guide,
@@ -338,57 +498,120 @@ h1 {
   box-shadow: 0 12px 36px rgba(46, 106, 234, 0.08);
 }
 
-.verification-result {
-  display: flex;
-  align-items: center;
-  gap: 16px;
+.verification-summary {
+  display: grid;
+  gap: 18px;
   padding: 22px 24px;
   margin-bottom: 18px;
 }
 
-.verification-result--success {
+.verification-summary--matched {
   border-color: #2e7d32;
   background: #f0f9f1;
 }
 
-.verification-result--failure,
-.verification-result--input-error {
+.verification-summary--mismatch,
+.verification-summary--debug,
+.verification-summary--failure,
+.verification-summary--input-error {
   border-color: #c62828;
   background: #fff3f3;
 }
 
-.verification-result__icon {
+.verification-summary__header {
   display: grid;
-  place-items: center;
-  width: 42px;
-  height: 42px;
-  flex: 0 0 42px;
-  border-radius: 50%;
-  background: #edf1f7;
-  font-size: 1.35rem;
-  font-weight: 700;
+  gap: 5px;
 }
 
-.verification-result--success .verification-result__icon {
-  color: #fff;
-  background: #2e7d32;
+.verification-summary__header h2 {
+  font-size: 1.18rem;
+  line-height: 1.35;
 }
 
-.verification-result--failure .verification-result__icon,
-.verification-result--input-error .verification-result__icon {
-  color: #fff;
-  background: #c62828;
+.verification-summary__label {
+  color: #56636f;
 }
 
-.verification-result__message {
-  margin-top: 5px;
+.verification-summary__message,
+.verification-summary__boundary,
+.verification-summary__freshness {
   color: #56636f;
   line-height: 1.45;
 }
 
-.verification-result--failure .verification-result__message,
-.verification-result--input-error .verification-result__message {
+.verification-summary--failure .verification-summary__message,
+.verification-summary--input-error .verification-summary__message {
   color: #6e2020;
+}
+
+.verification-summary__checks {
+  overflow: hidden;
+  border: 1px solid rgba(15, 15, 15, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.verification-summary__check {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 12px 14px;
+}
+
+.verification-summary__check + .verification-summary__check {
+  border-top: 1px solid rgba(15, 15, 15, 0.1);
+}
+
+.verification-summary__check strong {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 0.78rem;
+}
+
+.check-status--neutral {
+  color: #475569;
+  background: #e8edf3;
+}
+
+.check-status--success {
+  color: #fff;
+  background: #2e7d32;
+}
+
+.check-status--danger {
+  color: #fff;
+  background: #c62828;
+}
+
+.verification-summary__freshness {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 0.9rem;
+}
+
+.verification-summary__freshness button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #1559a6;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.verification-summary__freshness button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.verification-summary__boundary {
+  padding-top: 14px;
+  border-top: 1px solid rgba(15, 15, 15, 0.1);
+  font-size: 0.9rem;
 }
 
 .metadata-card,
@@ -419,6 +642,15 @@ h1 {
   text-transform: uppercase;
 }
 
+.metadata-card__hostname {
+  font-size: 1.2rem;
+}
+
+.metadata-card__endpoint {
+  color: #56636f;
+  font-size: 0.9rem;
+}
+
 .optional-pcr {
   margin-top: 12px;
 }
@@ -436,6 +668,10 @@ h1 {
 .optional-pcr p {
   color: #56636f;
   line-height: 1.5;
+}
+
+.optional-pcr .optional-pcr__error {
+  color: #a51d1d;
 }
 
 .optional-pcr textarea {
@@ -471,6 +707,78 @@ h1 {
   opacity: 0.45;
 }
 
+.pcr-comparison {
+  margin-top: 20px;
+  border: 1px solid rgba(15, 15, 15, 0.12);
+  border-radius: 10px;
+}
+
+.pcr-comparison__row {
+  display: grid;
+  gap: 12px;
+  padding: 12px 14px;
+}
+
+.pcr-comparison__row + .pcr-comparison__row {
+  border-top: 1px solid rgba(15, 15, 15, 0.1);
+}
+
+.pcr-comparison__result {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.pcr-comparison__result span {
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.pcr-comparison__result .is-match {
+  color: #1b5e20;
+  background: #e8f5e9;
+}
+
+.pcr-comparison__result .is-neutral-match {
+  color: #475569;
+  background: #e8edf3;
+}
+
+.pcr-comparison__result .is-mismatch {
+  color: #8b1a1a;
+  background: #fde8e8;
+}
+
+.pcr-comparison dl,
+.pcr-comparison dl > div {
+  display: grid;
+  gap: 5px;
+}
+
+.pcr-comparison dl {
+  gap: 10px;
+  margin: 0;
+}
+
+.pcr-comparison dt {
+  color: #56636f;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.pcr-comparison dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.pcr-comparison code {
+  overflow-wrap: anywhere;
+  font-size: 0.78rem;
+}
+
 .metadata-card code,
 .verification-guide__command,
 .usage-card code {
@@ -480,6 +788,19 @@ h1 {
 
 .widget-card {
   padding: 16px;
+  margin-bottom: 18px;
+}
+
+.widget-card :deep(.attestation-endpoint) {
+  display: none;
+}
+
+.widget-card :deep(.attestation-body) {
+  padding: 12px;
+}
+
+.widget-card :deep(.attestation-status--result) {
+  margin-bottom: 0;
 }
 
 .verification-guide {
@@ -501,13 +822,37 @@ h1 {
 }
 
 .verification-guide__command {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 12px;
   overflow-x: auto;
   padding: 14px 16px;
   border-radius: 10px;
   background: #111827;
   color: #f8fafc;
   white-space: nowrap;
+}
+
+.verification-guide__command code {
+  min-width: 0;
+  flex: 1;
+}
+
+.verification-guide__command button {
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 7px;
+  padding: 6px 10px;
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.verification-guide__copy-status {
+  color: #56636f;
+  font-size: 0.88rem;
 }
 
 .usage-card h2 {
@@ -576,7 +921,7 @@ h1 {
     margin-top: 24px;
   }
 
-  .verification-result,
+  .verification-summary,
   .metadata-card,
   .verification-guide,
   .usage-card {
@@ -586,6 +931,21 @@ h1 {
   .target-form__controls {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .verification-summary__check,
+  .verification-summary__freshness {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .verification-guide__command {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .verification-guide__command button {
+    align-self: flex-start;
   }
 }
 </style>

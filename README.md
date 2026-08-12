@@ -170,6 +170,14 @@ application source, establish a STEVE encrypted session, or automatically
 identify the expected deployment. Compare PCRs only with values reviewed through
 an independent trusted source.
 
+The verification summary marks authenticated Nitro evidence in green and keeps
+the expected deployment neutral until independently reviewed PCRs are supplied.
+It turns green when PCR0, PCR1, and PCR2 all match and red for a mismatch.
+Attestations with all-zero PCR0, PCR1, and PCR2 are identified as debug enclaves
+and cannot be used for workload identity. The page reports when fresh
+nonce-bound evidence was verified in the browser, supports explicit
+re-verification, and reports each PCR comparison separately.
+
 The default Bootproof pin includes the required attestation CORS policy. An
 operator override through `BOOTPROOF_COMMIT` takes precedence. Pin changes apply
 only to newly built EIFs; existing applications must be rebuilt and redeployed,
