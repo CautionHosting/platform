@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::{
     AppliedPricing,
     deployment::{AwsCredentials, ManagedOnPremConfig},
-    ec2::{Ec2Client, Filter, RunInstancesParams},
+    ec2::{Ec2Client, RunInstancesParams},
 };
 
 const REMOTE_BUILDER_HELPER: &str = "remote-build-helper";
@@ -1457,11 +1457,9 @@ pub async fn reap_unattributed_builders(db: &PgPool, ec2: &Ec2Client) {
     let mut found_unattributed = 0usize;
     let mut terminated = 0usize;
     for region in regions {
+        tracing::debug!(region, "Searching for instances");
         let region_ec2 = ec2.for_region(&region);
-        let instances = match region_ec2
-            .describe_instances(&[Filter::new("instance-state-name", &["pending", "running"])])
-            .await
-        {
+        let instances = match region_ec2.describe_instances(&[]).await {
             Ok(instances) => instances,
             Err(e) => {
                 tracing::error!(
