@@ -11,17 +11,32 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc, TimeDelta};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::{
-    deployment::{AwsCredentials, ManagedOnPremConfig},
-    ec2::{Ec2Client, RunInstancesParams},
     AppliedPricing,
+    deployment::{AwsCredentials, ManagedOnPremConfig},
+    ec2::{Ec2Client, Filter, RunInstancesParams},
 };
 
 const REMOTE_BUILDER_HELPER: &str = "remote-build-helper";
 const MANAGED_ONPREM_DEPLOYMENT_TAG_KEY: &str = "caution:deployment-id";
+
+/// Tag key on EC2 instances holding the UUID of the owning organization.
+/// Build runners are tagged with their owning organization at launch.
+const ORG_ID_TAG: &str = "org_id";
+/// Tag key marking the entity that created an EC2 instance.
+const MANAGED_BY_TAG: &str = "ManagedBy";
+/// Value of [`MANAGED_BY_TAG`] on build runner instances.
+const MANAGED_BY_BUILDER: &str = "caution-builder";
+/// Tag key on build runner instances holding the build UUID.
+const BUILD_ID_TAG: &str = "BuildId";
+/// Tag key used by AWS for the instance display name.
+const NAME_TAG: &str = "Name";
+/// Prefix of the `Name` tag on build runner instances.
+const BUILDER_NAME_PREFIX: &str = "caution-builder-";
 
 /// Specification for a builder instance size, loaded from config.json.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -1297,6 +1312,165 @@ pub async fn reap_orphaned_builders(
     }
 }
 
+/// Whether an EC2 instance's tags identify it as a Caution build machine.
+///
+/// Builders launched by [`execute_remote_build`] carry `ManagedBy:
+/// caution-builder`, a `BuildId` tag, and a `Name` tag prefixed with
+/// `caution-builder-`. Any of the three markers is sufficient, mirroring the
+/// drift detector's builder classification.
+fn is_caution_builder(tags: &HashMap<String, String>) -> bool {
+    tags.get(MANAGED_BY_TAG)
+        .is_some_and(|value| value == MANAGED_BY_BUILDER)
+        || tags.contains_key(BUILD_ID_TAG)
+        || tags
+            .get(NAME_TAG)
+            .is_some_and(|value| value.starts_with(BUILDER_NAME_PREFIX))
+}
+
+/// Whether an instance's `org_id` tag names one of the active organizations.
+///
+/// A missing, unparseable, or stale `org_id` tag means the instance has no
+/// organization attached, matching how the drift detector attributes
+/// instances to the active organizations it scans.
+fn attached_to_active_org(tags: &HashMap<String, String>, active_orgs: &HashSet<Uuid>) -> bool {
+    tags.get(ORG_ID_TAG)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .is_some_and(|org_id| active_orgs.contains(&org_id))
+}
+
+/// Terminate build machines running with no organization attached.
+///
+/// Build runners are tagged with their owning organization (`org_id`) at
+/// launch, so a running instance recognized as a Caution builder whose
+/// `org_id` tag is missing, unparseable, or names an organization that no
+/// longer exists is a leak (typically a manually launched instance or one
+/// stranded by a failed launch). This complements [`reap_orphaned_builders`]:
+/// that reaper handles builds stuck in `pending`/`building` for over 30
+/// minutes, while this one sweeps up instances that can never be attributed
+/// to an organization at all.
+///
+/// Instances whose `BuildId` tag (or instance ID) matches an in-flight build
+/// are left for [`reap_orphaned_builders`]: terminating them here would
+/// strand the `eif_builds` row in `building` and wedge the app's build slot
+/// until the timeout reaper runs.
+pub async fn reap_unattributed_builders(db: &PgPool, ec2: &Ec2Client) {
+    let active_orgs: HashSet<Uuid> =
+        match sqlx::query_scalar("SELECT id FROM organizations WHERE is_active = true")
+            .fetch_all(db)
+            .await
+        {
+            Ok(ids) => ids.into_iter().collect(),
+            Err(e) => {
+                tracing::error!(
+                    "Failed to load active organizations for unattributed builder reaping: {}",
+                    e
+                );
+                return;
+            }
+        };
+
+    // Builders backing an in-flight build are owned by that build; skip them
+    // so a missing `org_id` tag can never abort a live build.
+    let in_flight_build_ids: HashSet<Uuid> = match sqlx::query_scalar(
+        "SELECT id FROM eif_builds WHERE status IN ('pending', 'building')",
+    )
+    .fetch_all(db)
+    .await
+    {
+        Ok(ids) => ids.into_iter().collect(),
+        Err(e) => {
+            tracing::error!(
+                "Failed to load in-flight builds for unattributed builder reaping: {}",
+                e
+            );
+            return;
+        }
+    };
+    let in_flight_instance_ids: HashSet<String> = match sqlx::query_scalar::<
+        sqlx::Postgres,
+        Option<String>,
+    >(
+        "SELECT builder_instance_id FROM eif_builds
+             WHERE status IN ('pending', 'building') AND builder_instance_id IS NOT NULL",
+    )
+    .fetch_all(db)
+    .await
+    {
+        Ok(ids) => ids.into_iter().flatten().collect(),
+        Err(e) => {
+            tracing::error!(
+                "Failed to load in-flight builder instances for unattributed builder reaping: {}",
+                e
+            );
+            return;
+        }
+    };
+
+    let instances = match ec2
+        .describe_instances(&[Filter::new("instance-state-name", &["pending", "running"])])
+        .await
+    {
+        Ok(instances) => instances,
+        Err(e) => {
+            tracing::error!(
+                "Failed to describe instances for unattributed builder reaping: {}",
+                e
+            );
+            return;
+        }
+    };
+
+    let mut terminated = 0usize;
+    for instance in instances {
+        if !is_caution_builder(&instance.tags) {
+            continue;
+        }
+        if attached_to_active_org(&instance.tags, &active_orgs) {
+            continue;
+        }
+
+        let build_id = instance
+            .tags
+            .get(BUILD_ID_TAG)
+            .and_then(|value| Uuid::parse_str(value).ok());
+        if in_flight_instance_ids.contains(&instance.instance_id)
+            || build_id.is_some_and(|id| in_flight_build_ids.contains(&id))
+        {
+            tracing::warn!(
+                "Skipping unattributed builder {} (build {:?} is in flight)",
+                instance.instance_id,
+                build_id.map(|id| id.to_string())
+            );
+            continue;
+        }
+
+        tracing::warn!(
+            "Terminating build machine {} with no organization attached (tags: {:?})",
+            instance.instance_id,
+            instance.tags
+        );
+        if let Err(e) = ec2
+            .terminate_instances(std::slice::from_ref(&instance.instance_id))
+            .await
+        {
+            tracing::error!(
+                "Failed to terminate unattributed build machine {}: {}",
+                instance.instance_id,
+                e
+            );
+            continue;
+        }
+        terminated += 1;
+    }
+
+    if terminated > 0 {
+        tracing::info!(
+            "Terminated {} build machine(s) with no organization attached",
+            terminated
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1308,6 +1482,70 @@ mod tests {
             build_phase_milestone("docker_built"),
             Some("Docker image built, building EIF...")
         );
+    }
+
+    // --- unattributed builder classification ---
+
+    fn tags(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn test_is_caution_builder_recognizes_launch_tags() {
+        let launch_tags = tags(&[
+            ("Name", "caution-builder-12345678"),
+            ("org_id", "550e8400-e29b-41d4-a716-446655440000"),
+            ("ManagedBy", "caution-builder"),
+            ("BuildId", "12345678-1234-1234-1234-123456789abc"),
+        ]);
+
+        assert!(is_caution_builder(&launch_tags));
+    }
+
+    #[test]
+    fn test_is_caution_builder_requires_caution_marker() {
+        let unrelated = tags(&[
+            ("Name", "web-1"),
+            ("ManagedBy", "CloudFormation"),
+            ("org_id", "550e8400-e29b-41d4-a716-446655440000"),
+        ]);
+
+        assert!(!is_caution_builder(&unrelated));
+        assert!(!is_caution_builder(&HashMap::new()));
+    }
+
+    #[test]
+    fn test_is_caution_builder_accepts_each_marker_independently() {
+        let by_managed_by = tags(&[("ManagedBy", "caution-builder")]);
+        let by_build_id = tags(&[("BuildId", "b-123")]);
+        let by_name_prefix = tags(&[("Name", "caution-builder-abc12345")]);
+        let foreign_managed_by = tags(&[("ManagedBy", "CloudFormation")]);
+        let non_prefixed_name = tags(&[("Name", "caution-builder")]);
+
+        assert!(is_caution_builder(&by_managed_by));
+        assert!(is_caution_builder(&by_build_id));
+        assert!(is_caution_builder(&by_name_prefix));
+        assert!(!is_caution_builder(&foreign_managed_by));
+        assert!(!is_caution_builder(&non_prefixed_name));
+    }
+
+    #[test]
+    fn test_attached_to_active_org_matches_org_id_tag() {
+        let org_id = Uuid::new_v4();
+        let active: HashSet<Uuid> = [org_id].into_iter().collect();
+
+        let attached = tags(&[("org_id", &org_id.to_string())]);
+        let missing = tags(&[]);
+        let unparseable = tags(&[("org_id", "not-a-uuid")]);
+        let stale = tags(&[("org_id", &Uuid::new_v4().to_string())]);
+
+        assert!(attached_to_active_org(&attached, &active));
+        assert!(!attached_to_active_org(&missing, &active));
+        assert!(!attached_to_active_org(&unparseable, &active));
+        assert!(!attached_to_active_org(&stale, &active));
     }
 
     // --- compute_cache_key ---

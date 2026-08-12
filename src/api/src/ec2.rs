@@ -38,6 +38,7 @@ pub struct Filter {
 pub struct Instance {
     pub instance_id: String,
     pub instance_type: Option<String>,
+    pub tags: std::collections::HashMap<String, String>,
 }
 
 pub struct Image {
@@ -736,19 +737,78 @@ fn derive_signing_key(secret: &str, date_stamp: &str, region: &str, service: &st
     hmac_sha256(&k_service, b"aws4_request")
 }
 
-/// Extract instance IDs from EC2 DescribeInstances XML response.
+/// Extract instances from EC2 DescribeInstances XML response.
+///
+/// Each `<instancesSet>` is walked item-by-item so tags stay grouped with
+/// their owning instance; a flat scan of tag names would mix tags from
+/// different instances together.
 fn parse_instance_ids(xml: &str) -> Vec<Instance> {
-    let instance_ids = parse_tag_values(xml, "instanceId");
-    let instance_types = parse_tag_values(xml, "instanceType");
+    let mut instances = Vec::new();
 
-    instance_ids
-        .into_iter()
-        .enumerate()
-        .map(|(index, instance_id)| Instance {
-            instance_id,
-            instance_type: instance_types.get(index).cloned(),
-        })
-        .collect()
+    for set in top_level_blocks(xml, "<instancesSet>", "</instancesSet>") {
+        for item in top_level_blocks(set, "<item>", "</item>") {
+            let Some(instance_id) = parse_first_tag_value(item, "instanceId") else {
+                continue;
+            };
+            instances.push(Instance {
+                instance_id,
+                instance_type: parse_first_tag_value(item, "instanceType"),
+                tags: parse_tag_set(item),
+            });
+        }
+    }
+
+    instances
+}
+
+/// Return the contents of each top-level `<open>`...`</open>` element in
+/// `xml`, tracking one level of nesting so a nested occurrence of the same
+/// tag (e.g. `tagSet` `<item>`s inside an instance `<item>`) does not
+/// truncate a block early.
+fn top_level_blocks<'a>(xml: &'a str, open: &str, close: &str) -> Vec<&'a str> {
+    let mut blocks = Vec::new();
+    let mut depth = 0usize;
+    let mut block_start = 0usize;
+    let mut pos = 0usize;
+
+    while pos < xml.len() {
+        let rest = &xml[pos..];
+        if rest.starts_with(open) {
+            if depth == 0 {
+                block_start = pos + open.len();
+            }
+            depth += 1;
+            pos += open.len();
+        } else if rest.starts_with(close) {
+            if depth == 1 {
+                blocks.push(&xml[block_start..pos]);
+            }
+            depth = depth.saturating_sub(1);
+            pos += close.len();
+        } else {
+            pos += 1;
+        }
+    }
+
+    blocks
+}
+
+/// Parse the `<tagSet>` of an instance item into a key/value map.
+///
+/// Tags missing a key or value are omitted.
+fn parse_tag_set(instance_item: &str) -> std::collections::HashMap<String, String> {
+    let mut tags = std::collections::HashMap::new();
+
+    for tag_item in top_level_blocks(instance_item, "<item>", "</item>") {
+        if let (Some(key), Some(value)) = (
+            parse_first_tag_value(tag_item, "key"),
+            parse_first_tag_value(tag_item, "value"),
+        ) {
+            tags.insert(key, value);
+        }
+    }
+
+    tags
 }
 
 fn parse_app_address(xml: &str) -> Result<(String, String, Option<String>)> {
@@ -873,6 +933,80 @@ mod tests {
 
         let instances = parse_instance_ids(xml);
         assert!(instances.is_empty());
+    }
+
+    #[test]
+    fn test_parse_instance_tags_grouped_per_instance() {
+        let xml = r#"
+        <DescribeInstancesResponse>
+          <reservationSet>
+            <item>
+              <instancesSet>
+                <item>
+                  <instanceId>i-aaaa1111</instanceId>
+                  <instanceType>c5.xlarge</instanceType>
+                  <tagSet>
+                    <item><key>Name</key><value>caution-builder-aaaa1111</value></item>
+                    <item><key>org_id</key><value>11111111-1111-1111-1111-111111111111</value></item>
+                  </tagSet>
+                </item>
+                <item>
+                  <instanceId>i-bbbb2222</instanceId>
+                  <instanceType>m5.large</instanceType>
+                  <tagSet>
+                    <item><key>Name</key><value>caution-builder-bbbb2222</value></item>
+                  </tagSet>
+                </item>
+              </instancesSet>
+            </item>
+          </reservationSet>
+        </DescribeInstancesResponse>"#;
+
+        let instances = parse_instance_ids(xml);
+        assert_eq!(instances.len(), 2);
+
+        assert_eq!(instances[0].instance_id, "i-aaaa1111");
+        assert_eq!(instances[0].instance_type.as_deref(), Some("c5.xlarge"));
+        assert_eq!(
+            instances[0].tags.get("org_id").map(String::as_str),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        assert_eq!(
+            instances[0].tags.get("Name").map(String::as_str),
+            Some("caution-builder-aaaa1111")
+        );
+
+        assert_eq!(instances[1].instance_id, "i-bbbb2222");
+        assert_eq!(
+            instances[1].tags.get("Name").map(String::as_str),
+            Some("caution-builder-bbbb2222")
+        );
+        assert!(
+            instances[1].tags.get("org_id").is_none(),
+            "tags from one instance must not bleed into another"
+        );
+    }
+
+    #[test]
+    fn test_parse_instance_without_tags() {
+        let xml = r#"
+        <DescribeInstancesResponse>
+          <reservationSet>
+            <item>
+              <instancesSet>
+                <item>
+                  <instanceId>i-cccc3333</instanceId>
+                  <tagSet/>
+                </item>
+              </instancesSet>
+            </item>
+          </reservationSet>
+        </DescribeInstancesResponse>"#;
+
+        let instances = parse_instance_ids(xml);
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].instance_id, "i-cccc3333");
+        assert!(instances[0].tags.is_empty());
     }
 
     #[test]

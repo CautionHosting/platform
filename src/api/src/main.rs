@@ -3386,6 +3386,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 reaper_state.pricing.instance_pricing(itype)
             })
             .await;
+            builder::reap_unattributed_builders(&reaper_state.db, &ec2).await;
         }
     });
     info!("Builder orphan reaper started (runs every 5 minutes)");
