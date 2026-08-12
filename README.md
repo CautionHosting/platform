@@ -89,6 +89,9 @@ make up
    repo-root `Containerfile`, then a repo-root `Dockerfile`. Put setup,
    compilation, asset builds, and runtime packaging in that Containerfile or
    Dockerfile so the build inputs are explicit and reproducible.
+   Application images may use the conventional relative merged-/usr links
+   `/bin -> usr/bin` and `/lib -> usr/lib`; other `/bin` or `/lib` symlink
+   layouts are rejected during EIF assembly.
 
    The <a href="https://codeberg.org/Caution/hello-world-enclave" target="_blank">hello-world-enclave</a> repo is a good test app to deploy.
 
