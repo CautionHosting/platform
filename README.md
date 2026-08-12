@@ -163,7 +163,43 @@ through a host or enclave VSOCK proxy; STEVE reaches it over enclave-local TCP.
 
 ### 4. Verify a deployed app
 
-You can verify an enclave's attestation in two ways:
+Use the public `/verify` page to authenticate fresh nonce-bound Nitro evidence
+and inspect its PCR0, PCR1, and PCR2 values without an account. Browser targets
+must use an HTTPS domain, and their `/attestation` endpoint must permit
+cross-origin POST requests. HTTP and raw-IP endpoints require the CLI.
+
+The browser does not authenticate the sibling response manifest, reproduce the
+application source, establish a STEVE encrypted session, or automatically
+identify the expected deployment. Compare PCRs only with values reviewed through
+an independent trusted source.
+
+The verification summary marks authenticated Nitro evidence in green and keeps
+the expected deployment neutral until independently reviewed PCRs are supplied.
+It turns green when PCR0, PCR1, and PCR2 all match and red for a mismatch.
+Attestations with all-zero PCR0, PCR1, and PCR2 are identified as debug enclaves
+and cannot be used for workload identity. The page reports when fresh
+nonce-bound evidence was verified in the browser, supports explicit
+re-verification, and reports each PCR comparison separately.
+
+Expected PCRs can be imported from an `enclave.pcrs` produced by
+`caution apps build --no-cache` from a reviewed checkout, or from the
+`.caution/trusted_hashes.json` written by a successful CLI verification. Files
+are read only in the browser and are not uploaded; both formats remain unsigned
+and editable, so importing one does not authenticate its source. Manual entry is
+available under the advanced control.
+
+After an exact match, the page saves PCR0, PCR1, and PCR2 for that exact
+attestation endpoint and compares them with fresh evidence on later visits. The
+page labels saved values as browser continuity and provides explicit replace and
+forget controls. This browser storage is not an independent trust root:
+same-origin code or the local user can change or clear it.
+
+The default Bootproof pin includes the required attestation CORS policy. An
+operator override through `BOOTPROOF_COMMIT` takes precedence. Pin changes apply
+only to newly built EIFs; existing applications must be rebuilt and redeployed,
+and their expected PCRs reviewed again.
+
+For source reproduction or expected-PCR enforcement, use the CLI:
 
 **Option A: Reproduce and verify (recommended)**
 
