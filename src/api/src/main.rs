@@ -1061,8 +1061,7 @@ async fn recover_deploy_failure(
     resource_name: &str,
     previous_state: types::ResourceState,
     should_cleanup: bool,
-    deployment_credentials: Option<deployment::AwsCredentials>,
-    managed_onprem_config: Option<deployment::ManagedOnPremConfig>,
+    deployed_region: &str,
 ) {
     if should_cleanup {
         tracing::warn!(
@@ -1070,59 +1069,36 @@ async fn recover_deploy_failure(
             resource_id,
             resource_name
         );
-
-        let asg_name = managed_onprem_config
-            .as_ref()
-            .map(|cfg| cfg.asg_name.clone());
-        let dns_safe = if let Some(managed_dns) = state.managed_dns.as_ref() {
-            managed_dns
-                .ensure_safe_to_release(&state.db, resource_id)
-                .await
-        } else {
-            managed_dns::dns_snapshot(&state.db, resource_id)
-                .await
-                .and_then(|dns| {
-                    if dns.status == "reserved" {
-                        Ok(())
-                    } else {
-                        anyhow::bail!("managed DNS is not reserved while DNS is disabled")
-                    }
-                })
-        };
-        if let Err(error) = dns_safe {
-            tracing::error!(resource_id = %resource_id, error = %error, "rollback retained infrastructure because managed DNS safety was not established");
-            return;
-        }
-        if let Err(e) = deployment::destroy_app_with_credentials(
-            org_id,
+        match managed_dns::begin_owned_deploy_rollback(
+            &state.db,
             resource_id,
-            resource_name.to_string(),
-            deployment_credentials,
-            asg_name,
+            org_id,
+            deploy_attempt_id,
+            deployed_region,
         )
         .await
         {
-            tracing::error!(
-                "Rollback destroy failed for resource {} after deploy error: {:#}",
-                resource_id,
-                e
-            );
+            Ok(true) => {
+                if let Err(error) =
+                    resources::destroy_resource_by_id(state, resource_id, false).await
+                {
+                    tracing::error!(resource_id = %resource_id, error = %error, "rollback retained infrastructure and will be retried");
+                }
+            }
+            Ok(false) => {
+                tracing::warn!(resource_id = %resource_id, deploy_attempt_id = %deploy_attempt_id, "rollback skipped because deploy ownership changed");
+            }
+            Err(error) => {
+                tracing::error!(resource_id = %resource_id, error = %error, "failed to hand deploy attempt to guarded rollback");
+            }
         }
-    }
-
-    let target_state = if should_cleanup {
-        types::ResourceState::Failed
-    } else {
-        previous_state
-    };
-
-    if let Err(e) = sqlx::query(
+    } else if let Err(e) = sqlx::query(
         "UPDATE compute_resources
          SET state = $1, deploy_attempt_id = NULL
          WHERE id = $2 AND organization_id = $3
            AND state = 'pending' AND deploy_attempt_id = $4",
     )
-    .bind(target_state)
+    .bind(previous_state)
     .bind(resource_id)
     .bind(org_id)
     .bind(deploy_attempt_id)
@@ -2896,16 +2872,6 @@ async fn deploy_logic(
         credentials: deployment_credentials,
         managed_onprem: managed_onprem_config,
     };
-    let cleanup_credentials = nitro_request.credentials.clone().or_else(|| {
-        if nitro_request.managed_onprem.is_none() {
-            Some(fully_managed_capacity::platform_credentials_for_region(
-                &deployed_region,
-            ))
-        } else {
-            None
-        }
-    });
-    let cleanup_managed_onprem = nitro_request.managed_onprem.clone();
 
     let _ = tx.send(Ok(milestone("Uploading and launching..."))).await;
 
@@ -2931,8 +2897,7 @@ async fn deploy_logic(
                 &app_name,
                 previous_state,
                 should_cleanup_on_failure,
-                cleanup_credentials.clone(),
-                cleanup_managed_onprem.clone(),
+                &deployed_region,
             )
             .await;
             return Err((
@@ -2973,8 +2938,7 @@ async fn deploy_logic(
             &app_name,
             previous_state,
             should_cleanup_on_failure,
-            cleanup_credentials,
-            cleanup_managed_onprem,
+            &deployed_region,
         )
         .await;
         return Err((
@@ -3002,8 +2966,7 @@ async fn deploy_logic(
                 &app_name,
                 previous_state,
                 should_cleanup_on_failure,
-                cleanup_credentials,
-                cleanup_managed_onprem,
+                &deployed_region,
             )
             .await;
             return Err((
@@ -3014,7 +2977,7 @@ async fn deploy_logic(
     }
 
     let managed_dns_enabled = state.managed_dns.is_some();
-    let resource_update = sqlx::query(
+    let resource_update = sqlx::query_as::<_, (String, Option<String>)>(
         "UPDATE compute_resources
          SET provider_resource_id = $1, state = $2, public_ip = $3, region = $4,
              configuration = COALESCE(configuration, '{}'::jsonb) || $5::jsonb,
@@ -3031,7 +2994,8 @@ async fn deploy_logic(
              dns_release_not_before = CASE WHEN $6::boolean THEN NULL ELSE dns_release_not_before END,
              deploy_attempt_id = NULL
          WHERE id = $7 AND organization_id = $8 AND state = 'pending'
-           AND deploy_attempt_id = $9"
+           AND deploy_attempt_id = $9
+         RETURNING dns_status, dns_error"
     )
     .bind(&deployment_result.instance_id)
     .bind(types::ResourceState::Running)
@@ -3042,7 +3006,7 @@ async fn deploy_logic(
     .bind(resource_id)
     .bind(req.org_id)
     .bind(deploy_attempt_id)
-    .execute(&state.db)
+    .fetch_optional(&state.db)
     .await;
     let resource_update = match resource_update {
         Ok(result) => result,
@@ -3058,8 +3022,7 @@ async fn deploy_logic(
                 &app_name,
                 previous_state,
                 should_cleanup_on_failure,
-                cleanup_credentials.clone(),
-                cleanup_managed_onprem.clone(),
+                &deployed_region,
             )
             .await;
             return Err((
@@ -3068,7 +3031,7 @@ async fn deploy_logic(
             ));
         }
     };
-    if resource_update.rows_affected() == 0 {
+    let Some((initial_dns_status, initial_dns_error)) = resource_update else {
         if let Some(reservation) = capacity_reservation.as_ref() {
             fully_managed_capacity::release_reservation(&state.db, reservation).await;
         }
@@ -3080,8 +3043,7 @@ async fn deploy_logic(
             &app_name,
             previous_state,
             should_cleanup_on_failure,
-            cleanup_credentials,
-            cleanup_managed_onprem,
+            &deployed_region,
         )
         .await;
         return Err((
@@ -3089,7 +3051,7 @@ async fn deploy_logic(
             "Deployment completed after the app lifecycle changed; refusing to publish it"
                 .to_string(),
         ));
-    }
+    };
 
     if let Err(e) = crate::metering::upsert_tracked_resource(
         &state,
@@ -3125,29 +3087,26 @@ async fn deploy_logic(
         fully_managed_capacity::release_reservation(&state.db, reservation).await;
     }
 
-    let initial_dns = managed_dns::dns_snapshot(&state.db, resource_id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to read managed DNS state: ".to_string() + &e.to_string(),
-            )
-        })?;
+    let initial_dns = managed_dns::DnsSnapshot {
+        status: initial_dns_status,
+        error: initial_dns_error,
+    };
     let dns = if initial_dns.status == "publishing" {
         let _ = tx.send(Ok(milestone("Publishing managed DNS..."))).await;
         if let Some(managed_dns) = state.managed_dns.as_ref() {
-            if let Err(error) = managed_dns.publish_resource(&state.db, resource_id).await {
-                tracing::error!(resource_id = %resource_id, error = %error, "managed DNS publication will be retried");
+            match managed_dns.publish_resource(&state.db, resource_id).await {
+                Ok(dns) => dns,
+                Err(error) => {
+                    tracing::error!(resource_id = %resource_id, error = %error, "managed DNS publication will be retried");
+                    managed_dns::DnsSnapshot {
+                        status: initial_dns.status,
+                        error: Some(managed_dns::sanitize_error(&error)),
+                    }
+                }
             }
+        } else {
+            initial_dns
         }
-        managed_dns::dns_snapshot(&state.db, resource_id)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to read managed DNS state: ".to_string() + &e.to_string(),
-                )
-            })?
     } else {
         initial_dns
     };

@@ -157,6 +157,17 @@ The API reconciles interrupted app teardown independently from Route53
 publication, including when managed DNS is disabled. Teardown concurrency is
 limited to two operations per API process and may use up to two dedicated
 PostgreSQL sessions so long OpenTofu operations do not occupy the API pool.
+The dedicated OpenTofu session locks use a separate advisory-lock namespace
+from the short Route53 transactions. Failed deploy rollback is also recorded as
+`terminating`; the same worker completes its DNS-safe cleanup and restores the
+app to the redeployable `failed` state after an API restart.
+
+If an unsuspend health or attestation check fails after recovering a different
+Elastic IP, the API stops the instances it just started and leaves managed DNS
+unchanged. If that compensating stop also fails, the API records the app as
+running and metered with a DNS retry error but does not publish the unready IP.
+Fix readiness, suspend the app, and retry unsuspend; the next successful
+readiness check publishes the recovered IP.
 
 ### Production rollout checklist
 

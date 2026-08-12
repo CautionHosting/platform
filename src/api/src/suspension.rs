@@ -295,9 +295,10 @@ pub async fn unsuspend_org_resources(
     {
         let aws_creds = get_aws_credentials_for_resource(&state, org_id, *resource_id).await;
         let mut recovered_address = None;
+        let mut started_instance_ids = Vec::new();
 
-        if let Some(creds) = aws_creds {
-            let ec2 = ec2::Ec2Client::new(&creds);
+        if let Some(creds) = aws_creds.as_ref() {
+            let ec2 = ec2::Ec2Client::new(creds);
             let resource_id_tag = resource_id.to_string();
             let filters = instance_lookup_filters(&resource_id_tag, "stopped");
 
@@ -315,6 +316,7 @@ pub async fn unsuspend_org_resources(
                         ids.len(),
                         resource_name
                     );
+                    started_instance_ids = ids;
                 }
                 Ok(_) => {
                     tracing::info!("No stopped instances found for resource {}", resource_name);
@@ -331,7 +333,7 @@ pub async fn unsuspend_org_resources(
                     .associate_app_address(&resource_id_tag, provider_resource_id)
                     .await
                 {
-                    Ok(public_ip) => recovered_address = Some((public_ip, creds.region)),
+                    Ok(public_ip) => recovered_address = Some((public_ip, creds.region.clone())),
                     Err(e) => {
                         tracing::error!("Failed to attach Elastic IP for {}: {}", resource_name, e);
                         errors.push(resource_name.clone() + ": " + &e.to_string());
@@ -344,6 +346,7 @@ pub async fn unsuspend_org_resources(
         let recovered_ip_changed = recovered_address
             .as_ref()
             .is_some_and(|address| previous_public_ip.as_ref() != Some(&address.0));
+        let mut degraded_readiness_error = None;
         if recovered_ip_changed {
             let public_ip = &recovered_address.as_ref().expect("checked above").0;
             let timeout = crate::deployment_health_timeout_secs();
@@ -362,10 +365,33 @@ pub async fn unsuspend_org_resources(
             };
             if let Err(error) = readiness {
                 tracing::error!(resource_id = %resource_id, error = %error, "recovered Elastic IP failed readiness; managed DNS remains unchanged");
-                errors.push(
-                    resource_name.clone() + ": readiness failed: " + &error,
-                );
-                continue;
+                let stop_error = if started_instance_ids.is_empty() {
+                    Some("no newly started instances were available to stop".to_string())
+                } else if let Some(creds) = aws_creds.as_ref() {
+                    match ec2::Ec2Client::new(creds)
+                        .stop_instances(&started_instance_ids)
+                        .await
+                    {
+                        Ok(()) => None,
+                        Err(stop_error) => Some(stop_error.to_string()),
+                    }
+                } else {
+                    Some("AWS credentials were unavailable for the compensating stop".to_string())
+                };
+
+                if let Some(stop_error) = stop_error {
+                    let message = "readiness failed: ".to_string()
+                        + &error
+                        + "; automatic stop failed: "
+                        + &stop_error;
+                    let sanitized = crate::managed_dns::sanitize_error(&anyhow::anyhow!(message));
+                    tracing::error!(resource_id = %resource_id, error = %sanitized, "unsuspend requires operator recovery; recording app as running and metered");
+                    degraded_readiness_error = Some(sanitized);
+                } else {
+                    tracing::warn!(resource_id = %resource_id, "stopped newly started instances after readiness failure");
+                    errors.push(resource_name.clone() + ": readiness failed: " + &error);
+                    continue;
+                }
             }
         }
 
@@ -374,12 +400,22 @@ pub async fn unsuspend_org_resources(
             "UPDATE compute_resources
              SET state = 'running', public_ip = COALESCE($1, public_ip), region = COALESCE($2, region),
                  dns_status = CASE
-                     WHEN $4::boolean AND $5::boolean THEN 'publishing'
+                     WHEN $6::text IS NULL AND $4::boolean AND $5::boolean THEN 'publishing'
                      ELSE dns_status
                  END,
-                 dns_error = CASE WHEN $4::boolean AND $5::boolean THEN NULL ELSE dns_error END,
-                 dns_change_id = CASE WHEN $4::boolean AND $5::boolean THEN NULL ELSE dns_change_id END,
-                 dns_release_not_before = CASE WHEN $4::boolean AND $5::boolean THEN NULL ELSE dns_release_not_before END
+                 dns_error = CASE
+                     WHEN $6::text IS NOT NULL THEN $6
+                     WHEN $4::boolean AND $5::boolean THEN NULL
+                     ELSE dns_error
+                 END,
+                 dns_change_id = CASE
+                     WHEN $6::text IS NULL AND $4::boolean AND $5::boolean THEN NULL
+                     ELSE dns_change_id
+                 END,
+                 dns_release_not_before = CASE
+                     WHEN $6::text IS NULL AND $4::boolean AND $5::boolean THEN NULL
+                     ELSE dns_release_not_before
+                 END
              WHERE id = $3 AND state = 'stopped'",
         )
             .bind(recovered_address.as_ref().map(|address| address.0.as_str()))
@@ -387,6 +423,7 @@ pub async fn unsuspend_org_resources(
             .bind(resource_id)
             .bind(managed_dns_enabled)
             .bind(recovered_ip_changed)
+            .bind(degraded_readiness_error.as_deref())
             .execute(&state.db)
             .await;
         match update_result {
@@ -405,7 +442,8 @@ pub async fn unsuspend_org_resources(
             }
         }
 
-        if recovered_ip_changed
+        if degraded_readiness_error.is_none()
+            && recovered_ip_changed
             && let Some(managed_dns) = state.managed_dns.as_ref()
             && let Err(error) = managed_dns.publish_resource(&state.db, *resource_id).await
         {
@@ -430,7 +468,10 @@ pub async fn unsuspend_org_resources(
             *resource_id,
             "aws",
             instance_type,
-            region.as_deref(),
+            recovered_address
+                .as_ref()
+                .map(|address| address.1.as_str())
+                .or(region.as_deref()),
             &metadata,
         )
         .await
@@ -440,6 +481,9 @@ pub async fn unsuspend_org_resources(
                 resource_id,
                 e
             );
+        }
+        if let Some(error) = degraded_readiness_error {
+            errors.push(resource_name.clone() + ": " + &error);
         }
         started += 1;
     }

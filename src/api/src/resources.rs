@@ -521,11 +521,11 @@ pub async fn delete_resource(
         auth.user_id,
         resource_id
     );
-    let resource: Option<Uuid> = sqlx::query_scalar(
-        "SELECT cr.id
+    let resource: Option<(Uuid, bool)> = sqlx::query_as(
+        "SELECT cr.id, cr.destroyed_at IS NOT NULL
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
-         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL",
+         WHERE cr.id = $1 AND om.user_id = $2",
     )
     .bind(resource_id)
     .bind(auth.user_id)
@@ -539,7 +539,7 @@ pub async fn delete_resource(
         )
     })?;
 
-    let Some(resource_id) = resource else {
+    let Some((resource_id, destroyed)) = resource else {
         tracing::warn!(
             "Resource {} not found or user {} has no access",
             resource_id,
@@ -547,18 +547,55 @@ pub async fn delete_resource(
         );
         return Err((StatusCode::NOT_FOUND, "App not found".to_string()));
     };
+    if destroyed {
+        return Ok(StatusCode::NO_CONTENT);
+    }
 
-    destroy_resource_by_id(&state, resource_id, query.force)
+    // An explicit user delete takes precedence over a crash-safe deploy rollback
+    // which is already terminating under its retained attempt marker.
+    sqlx::query(
+        "UPDATE compute_resources SET deploy_attempt_id = NULL
+         WHERE id = $1 AND state = 'terminating' AND deploy_attempt_id IS NOT NULL",
+    )
+    .bind(resource_id)
+    .execute(&state.db)
+    .await
+    .map_err(|error| {
+        tracing::error!(resource_id = %resource_id, error = %error, "failed to claim terminating app for explicit deletion");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to update app deletion state".to_string(),
+        )
+    })?;
+
+    if let Err(error) = destroy_resource_by_id(&state, resource_id, query.force).await {
+        let destroyed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                 SELECT 1 FROM compute_resources cr
+                 INNER JOIN organization_members om ON cr.organization_id = om.organization_id
+                 WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NOT NULL
+             )",
+        )
+        .bind(resource_id)
+        .bind(auth.user_id)
+        .fetch_one(&state.db)
         .await
-        .map_err(|error| {
-            tracing::error!(resource_id = %resource_id, error = %error, "app destroy failed");
-            let status = if error.to_string().contains("deploying") {
-                StatusCode::CONFLICT
-            } else {
-                StatusCode::SERVICE_UNAVAILABLE
-            };
-            (status, error.to_string())
-        })?;
+        .unwrap_or(false);
+        if destroyed {
+            return Ok(StatusCode::NO_CONTENT);
+        }
+
+        tracing::error!(resource_id = %resource_id, error = %error, "app destroy failed");
+        let message = error.to_string();
+        let status = if message == "resource is deploying" {
+            StatusCode::CONFLICT
+        } else if message == "resource no longer exists" {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
+        return Err((status, message));
+    }
 
     tracing::info!(
         "Resource {} terminated by user {} (git repo preserved for redeployment)",
@@ -575,6 +612,12 @@ pub(crate) async fn destroy_resource_by_id(
     force: bool,
 ) -> anyhow::Result<()> {
     crate::managed_dns::begin_termination(&state.db, resource_id).await?;
+
+    let _teardown_slot = state
+        .teardown_slots
+        .acquire()
+        .await
+        .map_err(|_| anyhow::anyhow!("teardown concurrency limiter closed"))?;
 
     if let Some(managed_dns) = state.managed_dns.as_ref() {
         managed_dns
@@ -610,13 +653,8 @@ pub(crate) async fn destroy_resource_by_id(
 
     // Use a dedicated session lock so OpenTofu cannot consume the API pool or
     // hold a database transaction open. Closing the connection releases it.
-    let _teardown_slot = state
-        .teardown_slots
-        .acquire()
-        .await
-        .map_err(|_| anyhow::anyhow!("teardown concurrency limiter closed"))?;
     let mut lock_connection = PgConnection::connect(&state.database_url).await?;
-    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 1))")
         .bind(resource_id.to_string())
         .execute(&mut lock_connection)
         .await?;
@@ -659,7 +697,12 @@ pub(crate) async fn destroy_resource_by_id(
 
     sqlx::query(
         "UPDATE compute_resources
-         SET destroyed_at = NOW(), state = 'terminated', public_ip = NULL, region = NULL,
+         SET destroyed_at = CASE WHEN deploy_attempt_id IS NULL THEN NOW() ELSE NULL END,
+             state = CASE
+                 WHEN deploy_attempt_id IS NULL THEN 'terminated'::resource_state
+                 ELSE 'failed'::resource_state
+             END,
+             public_ip = NULL, region = NULL, deploy_attempt_id = NULL,
              dns_status = 'reserved', dns_error = NULL, dns_change_id = NULL,
              dns_release_not_before = NULL, updated_at = NOW()
          WHERE id = $1 AND organization_id = $2 AND state = 'terminating'",
@@ -691,7 +734,7 @@ pub(crate) async fn destroy_resource_by_id(
 }
 
 async fn release_teardown_lock(connection: &mut PgConnection, resource_id: Uuid) {
-    if let Err(error) = sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+    if let Err(error) = sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 1))")
         .bind(resource_id.to_string())
         .execute(connection)
         .await

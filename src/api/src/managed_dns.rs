@@ -206,7 +206,12 @@ impl ManagedDns {
         let started = tokio::time::Instant::now();
         loop {
             match self.publish_once(pool, resource_id).await {
-                Ok(PublishProgress::Ready) => return dns_snapshot(pool, resource_id).await,
+                Ok(PublishProgress::Ready) => {
+                    return Ok(DnsSnapshot {
+                        status: "ready".to_string(),
+                        error: None,
+                    });
+                }
                 Ok(PublishProgress::Pending) if started.elapsed() < CHANGE_WAIT_TIMEOUT => {
                     tokio::time::sleep(CHANGE_POLL_INTERVAL).await;
                 }
@@ -450,9 +455,61 @@ pub(crate) async fn begin_termination(pool: &PgPool, resource_id: Uuid) -> Resul
     .execute(pool)
     .await?;
     if result.rows_affected() == 0 {
-        bail!("resource is deploying or no longer exists");
+        let state: Option<(String, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT state::text, destroyed_at FROM compute_resources WHERE id = $1",
+        )
+        .bind(resource_id)
+        .fetch_optional(pool)
+        .await?;
+        if state.is_some_and(|(state, destroyed_at)| state == "pending" && destroyed_at.is_none()) {
+            bail!("resource is deploying");
+        }
+        bail!("resource no longer exists");
     }
     Ok(())
+}
+
+pub(crate) async fn begin_owned_deploy_rollback(
+    pool: &PgPool,
+    resource_id: Uuid,
+    organization_id: Uuid,
+    deploy_attempt_id: Uuid,
+    region: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE compute_resources
+         SET state = 'terminating', region = $1,
+             dns_status = CASE WHEN dns_status = 'ready' THEN 'withdrawing' ELSE dns_status END,
+             dns_error = CASE WHEN dns_status = 'ready' THEN NULL ELSE dns_error END,
+             dns_change_id = CASE WHEN dns_status = 'ready' THEN NULL ELSE dns_change_id END,
+             dns_release_not_before = CASE WHEN dns_status = 'ready' THEN NULL ELSE dns_release_not_before END,
+             updated_at = NOW()
+         WHERE id = $2 AND organization_id = $3 AND destroyed_at IS NULL
+           AND state = 'pending' AND deploy_attempt_id = $4",
+    )
+    .bind(region)
+    .bind(resource_id)
+    .bind(organization_id)
+    .bind(deploy_attempt_id)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 1 {
+        return Ok(true);
+    }
+
+    sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM compute_resources
+             WHERE id = $1 AND organization_id = $2 AND destroyed_at IS NULL
+               AND state = 'terminating' AND deploy_attempt_id = $3
+         )",
+    )
+    .bind(resource_id)
+    .bind(organization_id)
+    .bind(deploy_attempt_id)
+    .fetch_one(pool)
+    .await
+    .map_err(Into::into)
 }
 
 async fn transition_to_withdrawing(pool: &PgPool, resource_id: Uuid) -> Result<()> {
@@ -558,7 +615,7 @@ async fn record_dns_error(pool: &PgPool, resource_id: Uuid, status: &str, error:
     }
 }
 
-fn sanitize_error(error: &anyhow::Error) -> String {
+pub(crate) fn sanitize_error(error: &anyhow::Error) -> String {
     let single_line = error
         .chain()
         .map(ToString::to_string)
