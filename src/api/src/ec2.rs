@@ -176,6 +176,22 @@ impl Ec2Client {
         }
     }
 
+    /// The region this client is pinned to.
+    pub fn region(&self) -> &str {
+        &self.region
+    }
+
+    /// A client with the same credentials and HTTP connection pool, targeting
+    /// another region.
+    pub fn for_region(&self, region: &str) -> Self {
+        Self {
+            access_key_id: self.access_key_id.clone(),
+            secret_access_key: self.secret_access_key.clone(),
+            region: region.to_string(),
+            http: self.http.clone(),
+        }
+    }
+
     pub async fn describe_instances(&self, filters: &[Filter]) -> Result<Vec<Instance>> {
         let mut params = vec![
             ("Action".to_string(), "DescribeInstances".to_string()),

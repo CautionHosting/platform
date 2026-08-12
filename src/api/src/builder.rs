@@ -1369,6 +1369,10 @@ fn attached_to_active_org(tags: &HashMap<String, String>, active_orgs: &HashSet<
 /// minutes, while this one sweeps up instances that can never be attributed
 /// to an organization at all.
 ///
+/// Every enabled AWS region is swept (falling back to the client's configured
+/// region when discovery fails), so a builder stranded in any region is found
+/// and terminated from within that region.
+///
 /// Instances whose `BuildId` tag (or instance ID) matches an in-flight build
 /// are left for [`reap_orphaned_builders`]: terminating them here would
 /// strand the `eif_builds` row in `building` and wedge the app's build slot
@@ -1426,63 +1430,91 @@ pub async fn reap_unattributed_builders(db: &PgPool, ec2: &Ec2Client) {
         }
     };
 
-    let instances = match ec2
-        .describe_instances(&[Filter::new("instance-state-name", &["pending", "running"])])
-        .await
-    {
-        Ok(instances) => instances,
+    // Sweep every enabled region: a builder stranded in a region other than
+    // the API's configured region would otherwise leak forever.
+    let regions = match ec2.describe_regions(false).await {
+        Ok(regions) if !regions.is_empty() => regions
+            .into_iter()
+            .map(|region| region.name)
+            .collect::<Vec<_>>(),
+        Ok(_) => {
+            tracing::warn!(
+                "No enabled AWS regions discovered; falling back to configured region {}",
+                ec2.region()
+            );
+            vec![ec2.region().to_string()]
+        }
         Err(e) => {
-            tracing::error!(
-                "Failed to describe instances for unattributed builder reaping: {}",
+            tracing::warn!(
+                "Failed to discover AWS regions; falling back to configured region {}: {}",
+                ec2.region(),
                 e
             );
-            return;
+            vec![ec2.region().to_string()]
         }
     };
 
     let mut found_unattributed = 0usize;
     let mut terminated = 0usize;
-    for instance in instances {
-        if !is_caution_builder(&instance.tags) {
-            continue;
-        }
-        if attached_to_active_org(&instance.tags, &active_orgs) {
-            continue;
-        }
-        found_unattributed += 1;
-
-        let build_id = instance
-            .tags
-            .get(BUILD_ID_TAG)
-            .and_then(|value| Uuid::parse_str(value).ok());
-        if in_flight_instance_ids.contains(&instance.instance_id)
-            || build_id.is_some_and(|id| in_flight_build_ids.contains(&id))
-        {
-            tracing::warn!(
-                "Skipping unattributed builder {} (build {:?} is in flight)",
-                instance.instance_id,
-                build_id.map(|id| id.to_string())
-            );
-            continue;
-        }
-
-        tracing::warn!(
-            "Terminating build machine {} with no organization attached (tags: {:?})",
-            instance.instance_id,
-            instance.tags
-        );
-        if let Err(e) = ec2
-            .terminate_instances(std::slice::from_ref(&instance.instance_id))
+    for region in regions {
+        let region_ec2 = ec2.for_region(&region);
+        let instances = match region_ec2
+            .describe_instances(&[Filter::new("instance-state-name", &["pending", "running"])])
             .await
         {
-            tracing::error!(
-                "Failed to terminate unattributed build machine {}: {}",
+            Ok(instances) => instances,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to describe instances in region {} for unattributed builder reaping: {}",
+                    region,
+                    e
+                );
+                continue;
+            }
+        };
+        for instance in instances {
+            if !is_caution_builder(&instance.tags) {
+                continue;
+            }
+            if attached_to_active_org(&instance.tags, &active_orgs) {
+                continue;
+            }
+            found_unattributed += 1;
+
+            let build_id = instance
+                .tags
+                .get(BUILD_ID_TAG)
+                .and_then(|value| Uuid::parse_str(value).ok());
+            if in_flight_instance_ids.contains(&instance.instance_id)
+                || build_id.is_some_and(|id| in_flight_build_ids.contains(&id))
+            {
+                tracing::warn!(
+                    "Skipping unattributed builder {} (build {:?} is in flight)",
+                    instance.instance_id,
+                    build_id.map(|id| id.to_string())
+                );
+                continue;
+            }
+
+            tracing::warn!(
+                "Terminating build machine {} with no organization attached (region: {}, tags: {:?})",
                 instance.instance_id,
-                e
+                region,
+                instance.tags
             );
-            continue;
+            if let Err(e) = region_ec2
+                .terminate_instances(std::slice::from_ref(&instance.instance_id))
+                .await
+            {
+                tracing::error!(
+                    "Failed to terminate unattributed build machine {}: {}",
+                    instance.instance_id,
+                    e
+                );
+                continue;
+            }
+            terminated += 1;
         }
-        terminated += 1;
     }
 
     tracing::info!(
