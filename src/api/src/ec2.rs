@@ -4,7 +4,7 @@
 //! Minimal AWS clients using direct HTTP calls with SigV4 signing.
 //! Replaces aws-sdk-ec2 and aws-sdk-autoscaling to avoid compiling massive generated SDKs.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use thiserror::Error;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -166,6 +166,24 @@ fn run_instances_request_params(params: &RunInstancesParams) -> Vec<(String, Str
     req_params
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum Ec2SignedRequestError {
+    #[error("EC2 API request failed")]
+    Request(#[source] SignedRequestError),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum DescribeInstancesError {
+    #[error("EC2 DescribeInstances request failed")]
+    Request(#[source] Ec2SignedRequestError),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum TerminateInstancesError {
+    #[error("EC2 TerminateInstances request failed")]
+    Request(#[source] Ec2SignedRequestError),
+}
+
 impl Ec2Client {
     pub fn new(credentials: &AwsCredentials) -> Self {
         Self {
@@ -192,7 +210,10 @@ impl Ec2Client {
         }
     }
 
-    pub async fn describe_instances(&self, filters: &[Filter]) -> Result<Vec<Instance>> {
+    pub async fn describe_instances(
+        &self,
+        filters: &[Filter],
+    ) -> Result<Vec<Instance>, DescribeInstancesError> {
         let mut params = vec![
             ("Action".to_string(), "DescribeInstances".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -206,7 +227,10 @@ impl Ec2Client {
             }
         }
 
-        let body = self.signed_request(&params).await?;
+        let body = self
+            .signed_request(&params)
+            .await
+            .map_err(DescribeInstancesError::Request)?;
         Ok(parse_instance_ids(&body))
     }
 
@@ -216,7 +240,10 @@ impl Ec2Client {
             ("Version".to_string(), "2016-11-15".to_string()),
         ];
 
-        let body = self.signed_request(&params).await.map_err(CountVpcsError::Request)?;
+        let body = self
+            .signed_request(&params)
+            .await
+            .map_err(|e| CountVpcsError::Request(anyhow::Error::new(e)))?;
         Ok(parse_tag_values(&body, "vpcId").len() as u32)
     }
 
@@ -226,7 +253,10 @@ impl Ec2Client {
             ("Version".to_string(), "2016-11-15".to_string()),
         ];
 
-        let body = self.signed_request(&params).await.map_err(CountElasticIpsError::Request)?;
+        let body = self
+            .signed_request(&params)
+            .await
+            .map_err(|e| CountElasticIpsError::Request(anyhow::Error::new(e)))?;
         Ok(parse_tag_values(&body, "publicIp").len() as u32)
     }
 
@@ -253,7 +283,7 @@ impl Ec2Client {
         let instances = self
             .describe_instances(&[Filter::new("instance-state-name", &["pending", "running"])])
             .await
-            .map_err(ActiveInstanceTypesError::Describe)?;
+            .map_err(|e| ActiveInstanceTypesError::Describe(anyhow::Error::new(e)))?;
 
         Ok(instances
             .into_iter()
@@ -271,7 +301,10 @@ impl Ec2Client {
             params.push(("AllRegions".to_string(), "true".to_string()));
         }
 
-        let body = self.signed_request(&params).await.map_err(DescribeRegionsError::Request)?;
+        let body = self
+            .signed_request(&params)
+            .await
+            .map_err(|e| DescribeRegionsError::Request(anyhow::Error::new(e)))?;
         Ok(parse_regions(&body))
     }
 
@@ -287,7 +320,10 @@ impl Ec2Client {
             ("Filter.1.Value.1".to_string(), instance_type.to_string()),
         ];
 
-        let body = self.signed_request(&params).await.map_err(InstanceTypeOfferedError::Request)?;
+        let body = self
+            .signed_request(&params)
+            .await
+            .map_err(|e| InstanceTypeOfferedError::Request(anyhow::Error::new(e)))?;
         Ok(!parse_tag_values(&body, "instanceType").is_empty())
     }
 
@@ -411,7 +447,10 @@ impl Ec2Client {
         })
     }
 
-    pub async fn terminate_instances(&self, instance_ids: &[String]) -> Result<()> {
+    pub async fn terminate_instances(
+        &self,
+        instance_ids: &[String],
+    ) -> Result<(), TerminateInstancesError> {
         let mut params = vec![
             ("Action".to_string(), "TerminateInstances".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -419,7 +458,9 @@ impl Ec2Client {
         for (i, id) in instance_ids.iter().enumerate() {
             params.push((format!("InstanceId.{}", i + 1), id.clone()));
         }
-        self.signed_request(&params).await?;
+        self.signed_request(&params)
+            .await
+            .map_err(TerminateInstancesError::Request)?;
         Ok(())
     }
 
@@ -435,7 +476,10 @@ impl Ec2Client {
         Ok(())
     }
 
-    async fn signed_request(&self, params: &[(String, String)]) -> Result<String> {
+    async fn signed_request(
+        &self,
+        params: &[(String, String)],
+    ) -> Result<String, Ec2SignedRequestError> {
         signed_request(
             &self.http,
             &self.access_key_id,
@@ -445,6 +489,7 @@ impl Ec2Client {
             params,
         )
         .await
+        .map_err(Ec2SignedRequestError::Request)
     }
 }
 
@@ -554,7 +599,18 @@ impl AsgClient {
             params,
         )
         .await
+        .map_err(anyhow::Error::new)
     }
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum SignedRequestError {
+    #[error("{1} API request failed")]
+    Http(#[source] reqwest::Error, String),
+    #[error("{0} API returned {1}")]
+    NonSuccess(String, u16),
+    #[error("Failed to read {1} response")]
+    ReadResponse(#[source] reqwest::Error, String),
 }
 
 async fn signed_request(
@@ -564,7 +620,7 @@ async fn signed_request(
     region: &str,
     service: &str,
     params: &[(String, String)],
-) -> Result<String> {
+) -> Result<String, SignedRequestError> {
     let host = format!("{}.{}.amazonaws.com", service, region);
     let url = format!("https://{}/", host);
     let body = encode_form(params);
@@ -615,16 +671,19 @@ async fn signed_request(
         .body(body)
         .send()
         .await
-        .context(format!("{} API request failed", service))?;
+        .map_err(|e| SignedRequestError::Http(e, service.to_string()))?;
 
     let status = response.status();
     let text = response
         .text()
         .await
-        .context(format!("Failed to read {} response", service))?;
+        .map_err(|e| SignedRequestError::ReadResponse(e, service.to_string()))?;
 
     if !status.is_success() {
-        bail!("{} API returned {}: {}", service, status, text);
+        return Err(SignedRequestError::NonSuccess(
+            service.to_string(),
+            status.as_u16(),
+        ));
     }
 
     Ok(text)

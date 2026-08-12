@@ -1465,7 +1465,7 @@ pub async fn reap_unattributed_builders(db: &PgPool, ec2: &Ec2Client) {
             Ok(instances) => instances,
             Err(e) => {
                 tracing::error!(
-                    "Failed to describe instances in region {} for unattributed builder reaping: {}",
+                    "Failed to describe instances in region {} for unattributed builder reaping: {:?}",
                     region,
                     e
                 );
