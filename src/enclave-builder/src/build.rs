@@ -1575,6 +1575,9 @@ mod tests {
         assert!(rendered.contains("cp /usr/lib/libcrypto.so.3"));
         assert!(rendered.contains("chroot /build/initramfs /caddy version"));
         assert!(rendered.contains("chroot /build/initramfs /usr/bin/openssl version"));
+        assert!(rendered.contains("ensure_root_dir /build/initramfs/bin usr/bin"));
+        assert!(rendered.contains("ensure_root_dir /build/initramfs/lib usr/lib"));
+        assert!(rendered.contains("readlink -n \"$path\"; printf x"));
         assert!(!rendered.contains("COPY --from=steve-builder"));
     }
 
