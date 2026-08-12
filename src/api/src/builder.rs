@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::{
     AppliedPricing,
     deployment::{AwsCredentials, ManagedOnPremConfig},
-    ec2::{Ec2Client, RunInstancesParams},
+    ec2::{Ec2Client, Filter, RunInstancesParams},
 };
 
 const REMOTE_BUILDER_HELPER: &str = "remote-build-helper";
@@ -1243,10 +1243,9 @@ pub async fn reap_orphaned_builders(
     ec2: &Ec2Client,
     instance_pricing: impl Fn(&str) -> Option<AppliedPricing>,
 ) {
-    let rows = match sqlx::query_as::<_, (Uuid, Option<String>, Uuid, Option<Uuid>, Option<String>, Option<chrono::DateTime<chrono::Utc>>)>(
-        "SELECT id, builder_instance_id, organization_id, app_id, builder_instance_type, started_at FROM eif_builds
-         WHERE status IN ('pending', 'building')
-         AND created_at < NOW() - INTERVAL '30 minutes'"
+    let rows = match sqlx::query_as::<_, (Uuid, Option<String>, Uuid, Option<Uuid>, Option<String>, Option<chrono::DateTime<chrono::Utc>>, String)>(
+        "SELECT id, builder_instance_id, organization_id, app_id, builder_instance_type, started_at, status FROM eif_builds
+         WHERE created_at < NOW() - INTERVAL '30 minutes'"
     )
     .fetch_all(db)
     .await {
@@ -1258,60 +1257,95 @@ pub async fn reap_orphaned_builders(
     };
 
     let mut orphaned_per_org: HashMap<Uuid, usize> = HashMap::new();
-    for (build_id, instance_id, org_id, app_id, instance_type, started_at) in rows {
-        *orphaned_per_org.entry(org_id).or_default() += 1;
+    for (build_id, instance_id, org_id, app_id, instance_type, started_at, status) in rows {
+        // Every build older than 30 minutes is a candidate regardless of build
+        // status: a builder instance can be left behind by a timeout, a
+        // failure, or even a successful build. Only builds still stuck in
+        // pending/building get the metering/timeout treatment; anything else
+        // just gets its still-existing instance terminated.
+        let stuck = status == "pending" || status == "building";
+        if stuck {
+            tracing::warn!(
+                "Reaping orphaned build {} (instance: {:?})",
+                build_id,
+                instance_id
+            );
 
-        tracing::warn!(
-            "Reaping orphaned build {} (instance: {:?})",
-            build_id,
-            instance_id
-        );
-
-        if let Some(ref iid) = instance_id {
-            // Check if this builder was tracked by the metering collection loop
-            let was_tracked: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM tracked_resources WHERE resource_id = $1)",
-            )
-            .bind(iid)
-            .fetch_one(db)
-            .await
-            .unwrap_or(false);
-
-            if was_tracked {
-                // Stop metering — the collection loop already billed for runtime
-                let _ = sqlx::query(
-                    "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
+            if let Some(ref iid) = instance_id {
+                // Check if this builder was tracked by the metering collection loop
+                let was_tracked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM tracked_resources WHERE resource_id = $1)",
                 )
                 .bind(iid)
-                .execute(db)
-                .await;
-            } else if let (Some(itype), Some(started)) = (&instance_type, started_at) {
-                // Fallback: metering tracking failed, bill directly for the full duration
-                if let Some(pricing) = instance_pricing(itype) {
-                    bill_builder_usage(db, build_id, iid, org_id, app_id, itype, started, pricing)
-                        .await;
-                } else {
-                    tracing::error!(
-                        "Cannot bill orphaned builder {} for build {}: unknown instance type {}",
-                        iid,
-                        build_id,
-                        itype
-                    );
+                .fetch_one(db)
+                .await
+                .unwrap_or(false);
+
+                if was_tracked {
+                    // Stop metering — the collection loop already billed for runtime
+                    let _ = sqlx::query(
+                        "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
+                    )
+                    .bind(iid)
+                    .execute(db)
+                    .await;
+                } else if let (Some(itype), Some(started)) = (&instance_type, started_at) {
+                    // Fallback: metering tracking failed, bill directly for the full duration
+                    if let Some(pricing) = instance_pricing(itype) {
+                        bill_builder_usage(db, build_id, iid, org_id, app_id, itype, started, pricing)
+                            .await;
+                    } else {
+                        tracing::error!(
+                            "Cannot bill orphaned builder {} for build {}: unknown instance type {}",
+                            iid,
+                            build_id,
+                            itype
+                        );
+                    }
                 }
             }
 
-            if let Err(e) = ec2.terminate_instances(&[iid.clone()]).await {
-                tracing::error!("Failed to terminate orphaned builder {}: {}", iid, e);
-            }
+            let _ = sqlx::query(
+                "UPDATE eif_builds SET status = 'timeout', error_message = 'Build timed out (reaped)', completed_at = NOW()
+                 WHERE id = $1"
+            )
+            .bind(build_id)
+            .execute(db)
+            .await;
         }
 
-        let _ = sqlx::query(
-            "UPDATE eif_builds SET status = 'timeout', error_message = 'Build timed out (reaped)', completed_at = NOW()
-             WHERE id = $1"
-        )
-        .bind(build_id)
-        .execute(db)
-        .await;
+        // Terminate the builder only if the instance still exists; a build in
+        // a terminal state, or one reaped on an earlier pass, has no instance
+        // left to clean up.
+        let Some(iid) = instance_id else { continue };
+        let still_exists = match ec2
+            .describe_instances(&[Filter::new("instance-id", &[iid.as_str()])])
+            .await
+        {
+            Ok(instances) => !instances.is_empty(),
+            Err(e) => {
+                tracing::error!(
+                    "Failed to check instance {} existence for build {}: {}",
+                    iid,
+                    build_id,
+                    e
+                );
+                continue;
+            }
+        };
+        if !still_exists {
+            tracing::debug!(
+                "Skipping build {} (instance {} no longer exists)",
+                build_id,
+                iid
+            );
+            continue;
+        }
+
+        *orphaned_per_org.entry(org_id).or_default() += 1;
+        if let Err(e) = ec2.terminate_instances(std::slice::from_ref(&iid)).await {
+            tracing::error!("Failed to terminate orphaned builder {}: {}", iid, e);
+        }
     }
 
     if !orphaned_per_org.is_empty() {
