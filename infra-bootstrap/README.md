@@ -153,6 +153,11 @@ The SOA record TTL must be 60 seconds. Then set `CAUTION_APPS_DNS_ZONE_ID` and
 restart the API. Production startup fails if this variable is missing;
 non-production runs with managed DNS disabled when it is unset.
 
+The API reconciles interrupted app teardown independently from Route53
+publication, including when managed DNS is disabled. Teardown concurrency is
+limited to two operations per API process and may use up to two dedicated
+PostgreSQL sessions so long OpenTofu operations do not occupy the API pool.
+
 ### Production rollout checklist
 
 1. Have an AWS administrator review and apply this existing `infra-bootstrap`

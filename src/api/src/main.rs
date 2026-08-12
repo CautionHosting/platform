@@ -66,6 +66,8 @@ mod validated_types;
 mod validation;
 
 const DEFAULT_DEPLOYMENT_HEALTH_TIMEOUT_SECS: u64 = 600;
+const LIFECYCLE_RECONCILE_INTERVAL_SECS: u64 = 30;
+const TEARDOWN_CONCURRENCY: usize = 2;
 
 use caution_config::pricing::{
     CreditPackagePricing, PaddleCatalog, PricingConfig as SharedPricingConfig, TierPricing,
@@ -139,6 +141,8 @@ impl PricingConfig {
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) db: PgPool,
+    pub(crate) database_url: String,
+    pub(crate) teardown_slots: Arc<tokio::sync::Semaphore>,
     pub(crate) git_hostname: String,
     pub(crate) git_ssh_port: Option<u16>,
     pub(crate) data_dir: String,
@@ -1053,6 +1057,7 @@ async fn recover_deploy_failure(
     state: &Arc<AppState>,
     org_id: Uuid,
     resource_id: Uuid,
+    deploy_attempt_id: Uuid,
     resource_name: &str,
     previous_state: types::ResourceState,
     should_cleanup: bool,
@@ -1113,12 +1118,14 @@ async fn recover_deploy_failure(
 
     if let Err(e) = sqlx::query(
         "UPDATE compute_resources
-         SET state = $1
-         WHERE id = $2 AND organization_id = $3",
+         SET state = $1, deploy_attempt_id = NULL
+         WHERE id = $2 AND organization_id = $3
+           AND state = 'pending' AND deploy_attempt_id = $4",
     )
     .bind(target_state)
     .bind(resource_id)
     .bind(org_id)
+    .bind(deploy_attempt_id)
     .execute(&state.db)
     .await
     {
@@ -1134,29 +1141,35 @@ async fn restore_pending_deploy_rejection(
     state: &Arc<AppState>,
     org_id: Uuid,
     resource_id: Uuid,
+    deploy_attempt_id: Uuid,
     previous_state: types::ResourceState,
     was_destroyed: bool,
 ) {
     let result = if was_destroyed {
         sqlx::query(
             "UPDATE compute_resources
-             SET state = $1, destroyed_at = COALESCE(destroyed_at, NOW())
-             WHERE id = $2 AND organization_id = $3",
+             SET state = $1, destroyed_at = COALESCE(destroyed_at, NOW()),
+                 deploy_attempt_id = NULL
+             WHERE id = $2 AND organization_id = $3
+               AND state = 'pending' AND deploy_attempt_id = $4",
         )
         .bind(previous_state)
         .bind(resource_id)
         .bind(org_id)
+        .bind(deploy_attempt_id)
         .execute(&state.db)
         .await
     } else {
         sqlx::query(
             "UPDATE compute_resources
-             SET state = $1
-             WHERE id = $2 AND organization_id = $3",
+             SET state = $1, deploy_attempt_id = NULL
+             WHERE id = $2 AND organization_id = $3
+               AND state = 'pending' AND deploy_attempt_id = $4",
         )
         .bind(previous_state)
         .bind(resource_id)
         .bind(org_id)
+        .bind(deploy_attempt_id)
         .execute(&state.db)
         .await
     };
@@ -1413,13 +1426,14 @@ async fn deploy_handler(
     validated_types::Validated(req): validated_types::Validated<DeployRequest>,
 ) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+    let deploy_attempt_id = Uuid::new_v4();
 
     // Spawn the deploy logic in a separate task
     let db_for_recovery = state.db.clone();
     let app_id_for_recovery = req.app_id;
     let org_id_for_recovery = req.org_id;
     tokio::spawn(async move {
-        let result = deploy_logic(state, auth, req, tx.clone()).await;
+        let result = deploy_logic(state, auth, req, deploy_attempt_id, tx.clone()).await;
 
         // Send final result as JSON
         match result {
@@ -1428,14 +1442,18 @@ async fn deploy_handler(
                 let _ = tx.send(Ok(bytes::Bytes::from(format!("{}\n", json)))).await;
             }
             Err((status, msg)) => {
-                // Reset state from Pending to Failed so the resource isn't stuck
+                // Reset only the pending state owned by this deploy attempt.
                 if let Err(e) = sqlx::query(
-                    "UPDATE compute_resources SET state = $1 WHERE id = $2 AND organization_id = $3 AND state = $4"
+                    "UPDATE compute_resources
+                     SET state = $1, deploy_attempt_id = NULL
+                     WHERE id = $2 AND organization_id = $3 AND state = $4
+                       AND deploy_attempt_id = $5"
                 )
                 .bind(types::ResourceState::Failed)
                 .bind(app_id_for_recovery)
                 .bind(org_id_for_recovery)
                 .bind(types::ResourceState::Pending)
+                .bind(deploy_attempt_id)
                 .execute(&db_for_recovery)
                 .await {
                     tracing::error!("Failed to reset resource state after deploy error: {}", e);
@@ -1928,6 +1946,7 @@ async fn deploy_logic(
     state: Arc<AppState>,
     auth: AuthContext,
     req: DeployRequest,
+    deploy_attempt_id: Uuid,
     tx: tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
 ) -> Result<DeployResponse, (StatusCode, String)> {
     tracing::info!(
@@ -2311,8 +2330,9 @@ async fn deploy_logic(
     // Atomically transition to Pending — rejects concurrent deploys via the check above
     if was_destroyed {
         tracing::info!("Reactivating previously destroyed resource {}", resource_id);
-        let updated = sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1 WHERE id = $2 AND organization_id = $3 AND state != $1 AND state <> 'terminating'")
+        let updated = sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1, deploy_attempt_id = $2 WHERE id = $3 AND organization_id = $4 AND state != $1 AND state <> 'terminating'")
             .bind(types::ResourceState::Pending)
+            .bind(deploy_attempt_id)
             .bind(resource_id)
             .bind(req.org_id)
             .execute(&state.db)
@@ -2329,9 +2349,11 @@ async fn deploy_logic(
     } else {
         // Mark as Pending so concurrent pushes are rejected
         let updated = sqlx::query(
-            "UPDATE compute_resources SET state = $1 WHERE id = $2 AND organization_id = $3 AND state != $1 AND state <> 'terminating'"
+            "UPDATE compute_resources SET state = $1, deploy_attempt_id = $2
+             WHERE id = $3 AND organization_id = $4 AND state != $1 AND state <> 'terminating'"
         )
         .bind(types::ResourceState::Pending)
+        .bind(deploy_attempt_id)
         .bind(resource_id)
         .bind(req.org_id)
         .execute(&state.db)
@@ -2800,6 +2822,7 @@ async fn deploy_logic(
                     &state,
                     req.org_id,
                     resource_id,
+                    deploy_attempt_id,
                     previous_state,
                     was_destroyed,
                 )
@@ -2904,6 +2927,7 @@ async fn deploy_logic(
                 &state,
                 req.org_id,
                 resource_id,
+                deploy_attempt_id,
                 &app_name,
                 previous_state,
                 should_cleanup_on_failure,
@@ -2945,6 +2969,7 @@ async fn deploy_logic(
             &state,
             req.org_id,
             resource_id,
+            deploy_attempt_id,
             &app_name,
             previous_state,
             should_cleanup_on_failure,
@@ -2973,6 +2998,7 @@ async fn deploy_logic(
                 &state,
                 req.org_id,
                 resource_id,
+                deploy_attempt_id,
                 &app_name,
                 previous_state,
                 should_cleanup_on_failure,
@@ -3002,8 +3028,10 @@ async fn deploy_logic(
                  WHEN $6::boolean AND NOT (dns_status = 'ready' AND public_ip = $3) THEN NULL
                  ELSE dns_change_id
              END,
-             dns_release_not_before = CASE WHEN $6::boolean THEN NULL ELSE dns_release_not_before END
-         WHERE id = $7 AND organization_id = $8 AND state = 'pending'"
+             dns_release_not_before = CASE WHEN $6::boolean THEN NULL ELSE dns_release_not_before END,
+             deploy_attempt_id = NULL
+         WHERE id = $7 AND organization_id = $8 AND state = 'pending'
+           AND deploy_attempt_id = $9"
     )
     .bind(&deployment_result.instance_id)
     .bind(types::ResourceState::Running)
@@ -3013,6 +3041,7 @@ async fn deploy_logic(
     .bind(managed_dns_enabled)
     .bind(resource_id)
     .bind(req.org_id)
+    .bind(deploy_attempt_id)
     .execute(&state.db)
     .await;
     let resource_update = match resource_update {
@@ -3025,6 +3054,7 @@ async fn deploy_logic(
                 &state,
                 req.org_id,
                 resource_id,
+                deploy_attempt_id,
                 &app_name,
                 previous_state,
                 should_cleanup_on_failure,
@@ -3039,6 +3069,21 @@ async fn deploy_logic(
         }
     };
     if resource_update.rows_affected() == 0 {
+        if let Some(reservation) = capacity_reservation.as_ref() {
+            fully_managed_capacity::release_reservation(&state.db, reservation).await;
+        }
+        recover_deploy_failure(
+            &state,
+            req.org_id,
+            resource_id,
+            deploy_attempt_id,
+            &app_name,
+            previous_state,
+            should_cleanup_on_failure,
+            cleanup_credentials,
+            cleanup_managed_onprem,
+        )
+        .await;
         return Err((
             StatusCode::CONFLICT,
             "Deployment completed after the app lifecycle changed; refusing to publish it"
@@ -3135,12 +3180,8 @@ async fn deploy_logic(
     })
 }
 
-async fn reconcile_managed_dns(state: Arc<AppState>) {
+async fn reconcile_terminating_resources(state: Arc<AppState>) {
     use futures::{StreamExt, stream};
-
-    let Some(managed_dns) = state.managed_dns.clone() else {
-        return;
-    };
 
     let terminating: Vec<Uuid> = match sqlx::query_scalar(
         "SELECT id FROM compute_resources
@@ -3157,15 +3198,19 @@ async fn reconcile_managed_dns(state: Arc<AppState>) {
         }
     };
     stream::iter(terminating)
-        .for_each_concurrent(4, |resource_id| {
+        .for_each_concurrent(TEARDOWN_CONCURRENCY, |resource_id| {
             let state = state.clone();
             async move {
                 if let Err(error) = resources::destroy_resource_by_id(&state, resource_id, false).await {
-                    tracing::warn!(resource_id = %resource_id, error = %error, "managed DNS teardown reconciliation will retry");
+                    tracing::warn!(resource_id = %resource_id, error = %error, "app teardown reconciliation will retry");
                 }
             }
         })
         .await;
+}
+
+async fn reconcile_managed_dns(state: Arc<AppState>, managed_dns: managed_dns::ManagedDns) {
+    use futures::{StreamExt, stream};
 
     let publishing: Vec<Uuid> = match sqlx::query_scalar(
         "SELECT id FROM compute_resources
@@ -3354,6 +3399,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = Arc::new(AppState {
         db: pool,
+        database_url,
+        teardown_slots: Arc::new(tokio::sync::Semaphore::new(TEARDOWN_CONCURRENCY)),
         git_hostname,
         git_ssh_port,
         data_dir,
@@ -3371,12 +3418,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         managed_dns,
     });
 
-    if state.managed_dns.is_some() {
+    let teardown_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            LIFECYCLE_RECONCILE_INTERVAL_SECS,
+        ));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            reconcile_terminating_resources(teardown_state.clone()).await;
+        }
+    });
+    info!("App teardown reconciler started (runs every 30 seconds)");
+
+    if let Some(managed_dns) = state.managed_dns.clone() {
         let dns_state = state.clone();
         tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                LIFECYCLE_RECONCILE_INTERVAL_SECS,
+            ));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                reconcile_managed_dns(dns_state.clone()).await;
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                interval.tick().await;
+                reconcile_managed_dns(dns_state.clone(), managed_dns.clone()).await;
             }
         });
         info!("Managed app DNS reconciler started (runs every 30 seconds)");

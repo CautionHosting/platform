@@ -6,7 +6,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
+use sqlx::{Connection, FromRow, PgConnection};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -608,7 +608,19 @@ pub(crate) async fn destroy_resource_by_id(
     let destroy_credentials =
         destroy_credentials(state, org_id, resource_id, &resource_region).await;
 
-    let mut tx = crate::managed_dns::locked_transaction(&state.db, resource_id).await?;
+    // Use a dedicated session lock so OpenTofu cannot consume the API pool or
+    // hold a database transaction open. Closing the connection releases it.
+    let _teardown_slot = state
+        .teardown_slots
+        .acquire()
+        .await
+        .map_err(|_| anyhow::anyhow!("teardown concurrency limiter closed"))?;
+    let mut lock_connection = PgConnection::connect(&state.database_url).await?;
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(resource_id.to_string())
+        .execute(&mut lock_connection)
+        .await?;
+
     let still_terminating: bool = sqlx::query_scalar(
         "SELECT EXISTS(
              SELECT 1 FROM compute_resources
@@ -616,10 +628,10 @@ pub(crate) async fn destroy_resource_by_id(
          )",
     )
     .bind(resource_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut lock_connection)
     .await?;
     if !still_terminating {
-        tx.commit().await?;
+        release_teardown_lock(&mut lock_connection, resource_id).await;
         return Ok(());
     }
 
@@ -654,9 +666,10 @@ pub(crate) async fn destroy_resource_by_id(
     )
     .bind(resource_id)
     .bind(org_id)
-    .execute(&mut *tx)
+    .execute(&mut lock_connection)
     .await?;
-    tx.commit().await?;
+    release_teardown_lock(&mut lock_connection, resource_id).await;
+    drop(lock_connection);
 
     if let Err(error) = crate::metering::stop_tracked_resource(
         state.internal_service_secret.as_deref(),
@@ -675,6 +688,16 @@ pub(crate) async fn destroy_resource_by_id(
     }
 
     Ok(())
+}
+
+async fn release_teardown_lock(connection: &mut PgConnection, resource_id: Uuid) {
+    if let Err(error) = sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(resource_id.to_string())
+        .execute(connection)
+        .await
+    {
+        tracing::warn!(resource_id = %resource_id, error = %error, "failed to explicitly release teardown advisory lock; closing its connection");
+    }
 }
 
 async fn destroy_credentials(
