@@ -1257,7 +1257,10 @@ pub async fn reap_orphaned_builders(
         }
     };
 
+    let mut orphaned_per_org: HashMap<Uuid, usize> = HashMap::new();
     for (build_id, instance_id, org_id, app_id, instance_type, started_at) in rows {
+        *orphaned_per_org.entry(org_id).or_default() += 1;
+
         tracing::warn!(
             "Reaping orphaned build {} (instance: {:?})",
             build_id,
@@ -1309,6 +1312,23 @@ pub async fn reap_orphaned_builders(
         .bind(build_id)
         .execute(db)
         .await;
+    }
+
+    if !orphaned_per_org.is_empty() {
+        tracing::info!(
+            "Found {} orphaned builder(s) across {} organization(s)",
+            orphaned_per_org.values().sum::<usize>(),
+            orphaned_per_org.len()
+        );
+        let mut orgs: Vec<&Uuid> = orphaned_per_org.keys().collect();
+        orgs.sort_unstable();
+        for org_id in orgs {
+            tracing::info!(
+                "Found {} orphaned builder(s) in organization {}",
+                orphaned_per_org[org_id],
+                org_id
+            );
+        }
     }
 }
 
@@ -1420,6 +1440,7 @@ pub async fn reap_unattributed_builders(db: &PgPool, ec2: &Ec2Client) {
         }
     };
 
+    let mut found_unattributed = 0usize;
     let mut terminated = 0usize;
     for instance in instances {
         if !is_caution_builder(&instance.tags) {
@@ -1428,6 +1449,7 @@ pub async fn reap_unattributed_builders(db: &PgPool, ec2: &Ec2Client) {
         if attached_to_active_org(&instance.tags, &active_orgs) {
             continue;
         }
+        found_unattributed += 1;
 
         let build_id = instance
             .tags
@@ -1463,6 +1485,10 @@ pub async fn reap_unattributed_builders(db: &PgPool, ec2: &Ec2Client) {
         terminated += 1;
     }
 
+    tracing::info!(
+        "Found {} unattributed Caution builder(s) with no organization attached",
+        found_unattributed
+    );
     if terminated > 0 {
         tracing::info!(
             "Terminated {} build machine(s) with no organization attached",
