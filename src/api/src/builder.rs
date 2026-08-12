@@ -1473,6 +1473,12 @@ pub async fn reap_unattributed_builders(db: &PgPool, ec2: &Ec2Client) {
             }
         };
         for instance in instances {
+            tracing::debug!(
+                "Found AWS instance {} (region: {}, org_id tag: {:?})",
+                instance.instance_id,
+                region,
+                instance.tags.get(ORG_ID_TAG)
+            );
             if !is_caution_builder(&instance.tags) {
                 continue;
             }
