@@ -9,9 +9,9 @@ import {
   compareVerifiedPcrs,
   describeAttestationError,
   ensureUint8ArrayBase64,
-  extractVerifiedAppSource,
   normalizeAttestationInput,
   parseExpectedPcrs,
+  quotePosixShellArgument,
   resolveAttestationTarget,
 } from '../src/utils/publicAttestation.js'
 
@@ -73,60 +73,33 @@ test('returns no target when the url query parameter is absent', () => {
   assert.equal(resolveAttestationTarget(''), null)
 })
 
-test('normalizes interactive domain and IP input while preserving explicit HTTP', () => {
+test('normalizes HTTPS domain input and preserves an explicit endpoint', () => {
   assert.equal(normalizeAttestationInput('demo.example.com'), 'https://demo.example.com/')
-  assert.equal(normalizeAttestationInput('https://192.0.2.10/attestation'), 'https://192.0.2.10/attestation')
-  assert.equal(normalizeAttestationInput('http://192.0.2.10'), 'http://192.0.2.10/')
-  assert.throws(() => normalizeAttestationInput(''), /domain, IP address, or attestation URL/i)
+  assert.equal(
+    normalizeAttestationInput('https://demo.example.com/custom-attestation'),
+    'https://demo.example.com/custom-attestation',
+  )
+  assert.throws(() => normalizeAttestationInput(''), /HTTPS application domain or attestation URL/i)
 })
 
-test('rejects non-http and credential-bearing targets', () => {
-  assert.throws(() => resolveAttestationTarget('?url=javascript%3Aalert(1)'), /http or https/i)
+test('rejects insecure, raw-IP, non-HTTPS, and credential-bearing targets', () => {
+  const useCli = /Caution CLI.*HTTP or raw-IP/i
+
+  assert.throws(() => normalizeAttestationInput('http://demo.example.com'), useCli)
+  assert.throws(() => normalizeAttestationInput('https://192.0.2.10/attestation'), useCli)
+  assert.throws(() => normalizeAttestationInput('https://[2001:db8::1]/attestation'), useCli)
+  assert.throws(() => resolveAttestationTarget('?url=http%3A%2F%2Fdemo.example.com'), useCli)
+  assert.throws(() => resolveAttestationTarget('?url=javascript%3Aalert(1)'), useCli)
   assert.throws(
     () => resolveAttestationTarget('?url=https%3A%2F%2Fuser%3Asecret%40demo.example.com'),
     /credentials/i,
   )
 })
 
-test('extracts authenticated app source when available and allows it to be absent', () => {
-  const manifest = {
-    app_source: {
-      commit: '0123456789abcdef0123456789abcdef01234567',
-      urls: ['https://codeberg.org/example/demo'],
-      branch: 'main',
-    },
-  }
-
-  assert.deepEqual(extractVerifiedAppSource({ verified: true, manifest }), {
-    commit: '0123456789abcdef0123456789abcdef01234567',
-    url: 'https://codeberg.org/example/demo',
-    commitUrl:
-      'https://codeberg.org/example/demo/commit/0123456789abcdef0123456789abcdef01234567',
-    branch: 'main',
-  })
-  assert.equal(extractVerifiedAppSource({ verified: false, manifest }), null)
-  assert.equal(extractVerifiedAppSource({ verified: true, manifest: {} }), null)
-})
-
-test('turns an authenticated Git SSH source into a complete browsable commit URL', () => {
-  const commit = 'aed869c16f9d644f4b10479285ff0ee0f35c7f64'
-  assert.deepEqual(
-    extractVerifiedAppSource({
-      verified: true,
-      manifest: {
-        app_source: {
-          commit,
-          urls: ['git@codeberg.org:caution/demo-hello-world-enclave.git'],
-          branch: 'main',
-        },
-      },
-    }),
-    {
-      commit,
-      url: 'https://codeberg.org/caution/demo-hello-world-enclave',
-      commitUrl: `https://codeberg.org/caution/demo-hello-world-enclave/commit/${commit}`,
-      branch: 'main',
-    },
+test('quotes untrusted URLs as one POSIX shell argument', () => {
+  assert.equal(
+    quotePosixShellArgument("https://demo.example/a'b;$(touch /tmp/x)`id`&c"),
+    `'https://demo.example/a'"'"'b;$(touch /tmp/x)\`id\`&c'`,
   )
 })
 

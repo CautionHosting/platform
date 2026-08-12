@@ -160,7 +160,22 @@ through a host or enclave VSOCK proxy; STEVE reaches it over enclave-local TCP.
 
 ### 4. Verify a deployed app
 
-You can verify an enclave's attestation in two ways:
+Use the public `/verify` page to authenticate fresh nonce-bound Nitro evidence
+and inspect its PCR0, PCR1, and PCR2 values without an account. Browser targets
+must use an HTTPS domain, and their `/attestation` endpoint must permit
+cross-origin POST requests. HTTP and raw-IP endpoints require the CLI.
+
+The browser does not authenticate the sibling response manifest, reproduce the
+application source, establish a STEVE encrypted session, or automatically
+identify the expected deployment. Compare PCRs only with values reviewed through
+an independent trusted source.
+
+The default Bootproof pin includes the required attestation CORS policy. An
+operator override through `BOOTPROOF_COMMIT` takes precedence. Pin changes apply
+only to newly built EIFs; existing applications must be rebuilt and redeployed,
+and their expected PCRs reviewed again.
+
+For source reproduction or expected-PCR enforcement, use the CLI:
 
 **Option A: Reproduce and verify (recommended)**
 

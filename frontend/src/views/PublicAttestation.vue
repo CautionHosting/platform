@@ -29,7 +29,7 @@
         </div>
         <div>
           <p class="verification-result__label">{{ statusLabel }}</p>
-          <p v-if="errorMessage" class="verification-result__message">{{ errorMessage }}</p>
+          <p v-if="statusMessage" class="verification-result__message">{{ statusMessage }}</p>
         </div>
       </section>
 
@@ -37,24 +37,6 @@
         <div class="metadata-card__item">
           <span class="metadata-card__label">Attestation endpoint</span>
           <code>{{ target.attestationUrl }}</code>
-        </div>
-        <div v-if="source" class="metadata-card__item">
-          <span class="source-card__label">Application source</span>
-          <a
-            v-if="source.commitUrl"
-            class="source-card__commit"
-            :href="source.commitUrl"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            {{ source.commitUrl }}
-          </a>
-          <code v-else class="source-card__commit">{{ source.commit }}</code>
-          <span v-if="source.branch">Branch: {{ source.branch }}</span>
-        </div>
-        <div v-else-if="status === 'success'" class="metadata-card__item">
-          <span class="source-card__label">Application source</span>
-          <span>Not included in the attested manifest.</span>
         </div>
       </section>
 
@@ -71,8 +53,8 @@
             <form @submit.prevent="checkExpectedPcrs">
               <label for="expected-pcrs">Expected Nitro PCR0, PCR1, and PCR2</label>
               <p>
-                The attestation above is verified without this input. Paste expected hashes only
-                when you also want to enforce a specific measured build.
+                This browser verifier does not pin expected PCRs automatically. Paste hashes only
+                after reviewing them through an independent trusted source.
               </p>
               <textarea
                 id="expected-pcrs"
@@ -94,7 +76,7 @@
           <span class="metadata-card__label">Verify independently</span>
           <h2>Reproduce and verify with the Caution CLI</h2>
           <p>
-            Install the
+            From a reviewed application checkout, install the
             <a href="https://codeberg.org/caution/cli" target="_blank" rel="noopener noreferrer">
               Caution CLI
             </a>
@@ -103,8 +85,9 @@
         </div>
         <code class="verification-guide__command">{{ cliVerifyCommand }}</code>
         <p>
-          The CLI authenticates fresh enclave evidence, reproduces the measured build, and compares
-          its PCR values. Read the
+          The browser authenticates fresh Nitro evidence, but it does not authenticate the sibling
+          manifest, reproduce source, or establish a STEVE encrypted session. The CLI reproduces
+          the reviewed build and compares its PCR values. Read the
           <a
             href="https://docs.caution.co/guides/verify-an-app/"
             target="_blank"
@@ -118,7 +101,7 @@
 
       <section v-else class="usage-card">
         <h2>Choose an application to verify</h2>
-        <p>Enter an application domain, IP address, or explicit attestation endpoint.</p>
+        <p>Enter an HTTPS application domain or explicit HTTPS attestation endpoint.</p>
         <form class="target-form" @submit.prevent="submitTarget">
           <label for="attestation-target">Application or attestation URL</label>
           <div class="target-form__controls">
@@ -146,8 +129,8 @@ import {
   compareOptionalExpectedPcrs,
   describeAttestationError,
   ensureUint8ArrayBase64,
-  extractVerifiedAppSource,
   normalizeAttestationInput,
+  quotePosixShellArgument,
   resolveAttestationTarget,
 } from '../utils/publicAttestation.js'
 
@@ -156,19 +139,18 @@ export default {
   setup() {
     const widgetContainer = ref(null)
     const target = ref(null)
-    const source = ref(null)
     const attestationResult = ref(null)
     const inputMessage = ref('')
-    const pcrInput = ref(new URLSearchParams(window.location.search).get('hashes') || '')
+    const pcrInput = ref('')
     const status = ref('loading')
     const targetInput = ref('')
-    const errorMessage = ref('')
+    const statusMessage = ref('')
     let widget = null
 
     ensureUint8ArrayBase64()
 
     const statusLabel = computed(() => {
-      if (status.value === 'success') return 'Successfully verified'
+      if (status.value === 'success') return 'Fresh Nitro attestation authenticated'
       if (status.value === 'failure') return 'Failed verification'
       if (status.value === 'input-error') return 'Unable to verify'
       return 'Verifying application…'
@@ -181,7 +163,9 @@ export default {
     })
 
     const cliVerifyCommand = computed(() =>
-      target.value ? `caution verify --attestation-url ${target.value.attestationUrl}` : '',
+      target.value
+        ? `caution verify --attestation-url ${quotePosixShellArgument(target.value.attestationUrl)}`
+        : '',
     )
 
     const submitTarget = () => {
@@ -201,28 +185,25 @@ export default {
         comparison = compareOptionalExpectedPcrs(attestationResult.value, pcrInput.value)
       } catch (error) {
         status.value = 'input-error'
-        errorMessage.value = error.message
+        statusMessage.value = error.message
         return
       }
 
-      const currentUrl = new URL(window.location.href)
-      currentUrl.searchParams.set('hashes', pcrInput.value.trim())
-      window.history.replaceState({}, '', currentUrl)
-
       if (!attestationResult.value) {
         status.value = 'loading'
-        errorMessage.value = 'Waiting for cryptographic attestation verification.'
+        statusMessage.value = 'Waiting for cryptographic attestation verification.'
         return
       }
 
       if (!comparison.matches) {
         status.value = 'failure'
-        errorMessage.value = `${comparison.mismatches.join(', ')} did not match the attested values.`
+        statusMessage.value = `${comparison.mismatches.join(', ')} did not match the attested values.`
         return
       }
 
       status.value = 'success'
-      errorMessage.value = ''
+      statusMessage.value =
+        'The supplied PCR0, PCR1, and PCR2 matched the authenticated values. This does not establish a STEVE encrypted session.'
     }
 
     onMounted(async () => {
@@ -230,7 +211,7 @@ export default {
         target.value = resolveAttestationTarget(window.location.search)
       } catch (error) {
         status.value = 'input-error'
-        errorMessage.value = error.message
+        statusMessage.value = error.message
         return
       }
 
@@ -248,22 +229,18 @@ export default {
         showChecks: true,
         showUserData: true,
         showPCRs: true,
-        showSources: true,
+        showSources: false,
+        showConnectionStatus: false,
         onVerified: (result) => {
           attestationResult.value = result
-          source.value = extractVerifiedAppSource(result)
-          if (pcrInput.value.trim()) {
-            checkExpectedPcrs()
-          } else {
-            status.value = 'success'
-            errorMessage.value = ''
-          }
+          status.value = 'success'
+          statusMessage.value =
+            'Fresh nonce-bound Nitro evidence is authenticated. PCR0, PCR1, and PCR2 have not been compared with independently reviewed values. This does not establish a STEVE encrypted session.'
         },
         onError: (error) => {
           attestationResult.value = null
-          source.value = null
           status.value = 'failure'
-          errorMessage.value = describeAttestationError(
+          statusMessage.value = describeAttestationError(
             error,
             target.value.attestationUrl,
             window.location.origin,
@@ -280,13 +257,12 @@ export default {
       attestationResult,
       checkExpectedPcrs,
       cliVerifyCommand,
-      errorMessage,
       inputMessage,
       pcrInput,
-      source,
       status,
       statusIcon,
       statusLabel,
+      statusMessage,
       submitTarget,
       target,
       targetInput,
@@ -326,9 +302,7 @@ export default {
 
 .eyebrow,
 .verification-result__label,
-.source-card__label,
-.target-card span,
-.source-card__repository span {
+.target-card span {
   font-size: 0.78rem;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -437,8 +411,7 @@ h1 {
   border-top: 1px solid rgba(15, 15, 15, 0.1);
 }
 
-.metadata-card__label,
-.source-card__label {
+.metadata-card__label {
   color: #56636f;
   font-size: 0.78rem;
   font-weight: 700;
@@ -499,21 +472,10 @@ h1 {
 }
 
 .metadata-card code,
-.source-card__commit,
 .verification-guide__command,
 .usage-card code {
   overflow-wrap: anywhere;
   font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
-}
-
-.source-card__commit {
-  color: #0f0f0f;
-  font-size: 1rem;
-}
-
-.source-card__repository a {
-  color: #1559a6;
-  overflow-wrap: anywhere;
 }
 
 .widget-card {

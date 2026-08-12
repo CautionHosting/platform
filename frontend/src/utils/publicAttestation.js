@@ -30,7 +30,15 @@ export function describeAttestationError(error, attestationUrl, currentOrigin) {
   return message
 }
 
-function parseHttpUrl(value) {
+const BROWSER_TARGET_ERROR =
+  'Browser verification requires an HTTPS domain. Use the Caution CLI for HTTP or raw-IP attestation endpoints.'
+
+function isIpAddress(hostname) {
+  const unwrapped = hostname.replace(/^\[|\]$/g, '')
+  return unwrapped.includes(':') || /^\d{1,3}(?:\.\d{1,3}){3}$/.test(unwrapped)
+}
+
+function parseBrowserAttestationUrl(value) {
   let parsed
   try {
     parsed = new URL(value)
@@ -38,11 +46,11 @@ function parseHttpUrl(value) {
     throw new Error('The url query parameter must be a valid absolute URL.')
   }
 
-  if (!['http:', 'https:'].includes(parsed.protocol)) {
-    throw new Error('The url query parameter must use HTTP or HTTPS.')
-  }
   if (parsed.username || parsed.password) {
     throw new Error('The url query parameter must not contain credentials.')
+  }
+  if (parsed.protocol !== 'https:' || isIpAddress(parsed.hostname)) {
+    throw new Error(BROWSER_TARGET_ERROR)
   }
 
   parsed.hash = ''
@@ -53,7 +61,7 @@ export function resolveAttestationTarget(search) {
   const rawUrl = new URLSearchParams(search).get('url')?.trim()
   if (!rawUrl) return null
 
-  const appUrl = parseHttpUrl(rawUrl)
+  const appUrl = parseBrowserAttestationUrl(rawUrl)
   const attestationUrl = new URL(appUrl)
 
   if (attestationUrl.pathname === '/') {
@@ -69,49 +77,14 @@ export function resolveAttestationTarget(search) {
 
 export function normalizeAttestationInput(value) {
   const trimmed = value.trim()
-  if (!trimmed) throw new Error('Enter an application domain, IP address, or attestation URL.')
+  if (!trimmed) throw new Error('Enter an HTTPS application domain or attestation URL.')
 
   const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
-  return parseHttpUrl(withScheme).href
+  return parseBrowserAttestationUrl(withScheme).href
 }
 
-function sourceRepositoryUrl(source) {
-  const candidate = source?.urls?.[0] || source?.url
-  if (typeof candidate !== 'string') return null
-
-  const scpStyle = candidate.trim().match(/^git@([a-z0-9.-]+):(.+)$/i)
-  if (scpStyle) {
-    const repositoryPath = scpStyle[2].replace(/\.git\/?$/, '')
-    return `https://${scpStyle[1]}/${repositoryPath}`
-  }
-
-  try {
-    const sshUrl = new URL(candidate)
-    if (sshUrl.protocol === 'ssh:' && sshUrl.hostname) {
-      return `https://${sshUrl.hostname}${sshUrl.pathname.replace(/\.git\/?$/, '')}`
-    }
-
-    const parsed = parseHttpUrl(candidate.replace(/\.git\/?$/, ''))
-    return parsed.href
-  } catch {
-    return null
-  }
-}
-
-export function extractVerifiedAppSource(result) {
-  if (!result?.verified) return null
-
-  const appSource = result.manifest?.app_source
-  const commit = typeof appSource?.commit === 'string' ? appSource.commit.trim() : ''
-  if (!commit) return null
-
-  const url = sourceRepositoryUrl(appSource)
-  return {
-    commit,
-    url,
-    commitUrl: url ? `${url.replace(/\/$/, '')}/commit/${encodeURIComponent(commit)}` : null,
-    branch: typeof appSource.branch === 'string' ? appSource.branch : null,
-  }
+export function quotePosixShellArgument(value) {
+  return `'${String(value).replaceAll("'", `'"'"'`)}'`
 }
 
 function normalizePcrHash(value) {
