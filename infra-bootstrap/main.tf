@@ -18,6 +18,40 @@ provider "aws" {
 
 data "aws_caller_identity" "current" {}
 
+# --- Route53: stable per-app DNS targets ---
+
+resource "aws_route53_zone" "apps" {
+  name          = "apps.caution.sh"
+  force_destroy = false
+
+  tags = {
+    Name      = "apps.caution.sh"
+    Purpose   = "managed-app-endpoints"
+    ManagedBy = "infra-bootstrap"
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# Route53 creates this record with the zone. Taking ownership lets us cap
+# standards-compliant negative caching at 60 seconds.
+resource "aws_route53_record" "apps_soa" {
+  allow_overwrite = true
+  zone_id         = aws_route53_zone.apps.zone_id
+  name            = aws_route53_zone.apps.name
+  type            = "SOA"
+  ttl             = 60
+  records = [
+    "${aws_route53_zone.apps.name_servers[0]}. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 60",
+  ]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 # --- S3: Terraform state ---
 
 resource "aws_s3_bucket" "terraform_state" {
@@ -201,6 +235,33 @@ resource "aws_iam_policy" "platform_deploy" {
         Effect   = "Allow"
         Action   = ["sts:GetCallerIdentity"]
         Resource = "*"
+      },
+      {
+        Sid      = "ManageAppDNSRecords"
+        Effect   = "Allow"
+        Action   = "route53:ChangeResourceRecordSets"
+        Resource = aws_route53_zone.apps.arn
+        Condition = {
+          "ForAllValues:StringEquals" = {
+            "route53:ChangeResourceRecordSetsRecordTypes" = ["A"]
+            "route53:ChangeResourceRecordSetsActions"     = ["UPSERT", "DELETE"]
+          }
+          "ForAllValues:StringLike" = {
+            "route53:ChangeResourceRecordSetsNormalizedRecordNames" = ["*.apps.caution.sh"]
+          }
+        }
+      },
+      {
+        Sid      = "ReadAppDNSRecords"
+        Effect   = "Allow"
+        Action   = "route53:ListResourceRecordSets"
+        Resource = aws_route53_zone.apps.arn
+      },
+      {
+        Sid      = "ReadAppDNSChanges"
+        Effect   = "Allow"
+        Action   = "route53:GetChange"
+        Resource = "arn:aws:route53:::change/*"
       },
       {
         Sid    = "ManageEnclaveRoles"
@@ -524,6 +585,16 @@ output "builder_subnet_id" {
   value       = local.builder_subnet_id
 }
 
+output "apps_dns_zone_id" {
+  description = "Route53 hosted zone ID for apps.caution.sh — put in .env as CAUTION_APPS_DNS_ZONE_ID"
+  value       = aws_route53_zone.apps.zone_id
+}
+
+output "apps_dns_name_servers" {
+  description = "Nameservers to delegate from the caution.sh parent zone"
+  value       = aws_route53_zone.apps.name_servers
+}
+
 output "configuration_summary" {
   description = "Summary of created resources"
   value = {
@@ -538,5 +609,7 @@ output "configuration_summary" {
     builder_sg      = aws_security_group.builder.id
     builder_profile = aws_iam_instance_profile.builder.name
     builder_subnet  = local.builder_subnet_id
+    apps_dns_zone   = aws_route53_zone.apps.zone_id
+    apps_dns_ns     = aws_route53_zone.apps.name_servers
   }
 }

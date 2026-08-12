@@ -6,6 +6,7 @@ This guide walks you through setting up the required AWS infrastructure for the 
 - **S3 bucket** for storing enclave images (EIFs)
 - **DynamoDB table** for Terraform state locking
 - **IAM user** with scoped permissions for the Caution platform service
+- **Protected Route53 public hosted zone** for `apps.caution.sh`, with a 60-second SOA TTL
 
 Run this once per AWS account you want to deploy into.
 
@@ -133,7 +134,38 @@ AWS_SECRET_ACCESS_KEY=<from terraform output>
 AWS_ACCOUNT_ID=<target account id>
 TERRAFORM_STATE_BUCKET=<your state bucket name>
 EIF_S3_BUCKET=<your eif bucket name>
+CAUTION_APPS_DNS_ZONE_ID=<from apps_dns_zone_id output>
 ```
+
+Before starting the production API, delegate `apps.caution.sh` from the current
+`caution.sh` DNS provider. Add the four values from
+`terraform output apps_dns_name_servers` as NS records for host `apps`. Do not
+change the domain-level nameservers and do not migrate the parent zone.
+
+Verify the delegation and the negative-cache setting publicly:
+
+```bash
+dig NS apps.caution.sh
+dig SOA apps.caution.sh
+```
+
+The SOA record TTL must be 60 seconds. Then set `CAUTION_APPS_DNS_ZONE_ID` and
+restart the API. Production startup fails if this variable is missing;
+non-production runs with managed DNS disabled when it is unset.
+
+### Production rollout checklist
+
+1. Have an AWS administrator review and apply this existing `infra-bootstrap`
+   state. This creates the zone and updates the existing platform IAM policy.
+2. Have the parent-DNS administrator add the four `apps` NS values at the
+   current `caution.sh` provider.
+3. Verify the public NS and SOA answers, including the 60-second SOA TTL.
+4. Set `CAUTION_APPS_DNS_ZONE_ID` and deploy or restart the API.
+5. Run one real deploy, customer CNAME, TLS, and destroy smoke test.
+
+Existing customers must replace a direct A record with the returned CNAME and
+wait the former A record's TTL once. This is a customer-DNS migration, not a
+per-app AWS administrator action.
 
 To view the credentials after the fact:
 ```bash
@@ -152,6 +184,12 @@ The `caution-platform` IAM user is created with these scoped permissions:
 - **S3**: Read/write to the Terraform state and EIF storage buckets only
 - **DynamoDB**: Read/write to the state lock table only
 - **STS**: `GetCallerIdentity` (for Terraform identity checks)
+- **Route53**: UPSERT/DELETE only A records under `*.apps.caution.sh`, list only
+  that hosted zone's records, and inspect Route53 change status
+
+These Route53 permissions belong only to the existing platform identity.
+Customer and BYOC credentials receive no Route53 permission, and there is no
+per-app AWS administrator step.
 
 ## Destroy
 
@@ -163,7 +201,7 @@ terraform destroy \
   -var="eif_bucket_name=caution-eif-storage-123456789012"
 ```
 
-**Warning:** This will delete the S3 buckets (including all Terraform state!) and the DynamoDB table. Only do this if you're completely removing the Caution installation from this account.
+**Warning:** This will delete the S3 buckets (including all Terraform state!) and the DynamoDB table. The `apps.caution.sh` zone and its SOA record are protected with `prevent_destroy`; remove that protection only as a deliberate separate DNS-retirement change.
 
 ## Troubleshooting
 

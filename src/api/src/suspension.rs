@@ -97,10 +97,13 @@ pub async fn suspend_managed_resources(
             }
         }
 
-        if let Err(e) = sqlx::query("UPDATE compute_resources SET state = 'stopped' WHERE id = $1")
-            .bind(resource_id)
-            .execute(&state.db)
-            .await
+        if let Err(e) = sqlx::query(
+            "UPDATE compute_resources SET state = 'stopped'
+             WHERE id = $1 AND state = 'running'",
+        )
+        .bind(resource_id)
+        .execute(&state.db)
+        .await
         {
             tracing::error!("Failed to mark resource {} as stopped: {}", resource_id, e);
         }
@@ -194,10 +197,13 @@ pub async fn suspend_org_resources(
         }
 
         // Mark resource as stopped in DB regardless
-        if let Err(e) = sqlx::query("UPDATE compute_resources SET state = 'stopped' WHERE id = $1")
-            .bind(resource_id)
-            .execute(&state.db)
-            .await
+        if let Err(e) = sqlx::query(
+            "UPDATE compute_resources SET state = 'stopped'
+             WHERE id = $1 AND state = 'running'",
+        )
+        .bind(resource_id)
+        .execute(&state.db)
+        .await
         {
             tracing::error!("Failed to mark resource {} as stopped: {}", resource_id, e);
         }
@@ -248,22 +254,45 @@ pub async fn unsuspend_org_resources(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     tracing::info!("Unsuspending resources for org {}", org_id);
 
-    let resources: Vec<(Uuid, String, String, Option<String>, Option<serde_json::Value>, bool)> = sqlx::query_as(
-        "SELECT cr.id, cr.resource_name, cr.provider_resource_id, cr.region, cr.configuration,
+    let resources: Vec<(
+        Uuid,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<serde_json::Value>,
+        bool,
+    )> = sqlx::query_as(
+        "SELECT cr.id, cr.resource_name, cr.provider_resource_id, cr.region, cr.public_ip,
+                cr.configuration,
                 EXISTS (SELECT 1 FROM cloud_credentials cc
                         WHERE cc.resource_id = cr.id AND cc.managed_on_prem = true)
          FROM compute_resources cr
-         WHERE cr.organization_id = $1 AND cr.state = 'stopped'"
+         WHERE cr.organization_id = $1 AND cr.state = 'stopped'",
     )
     .bind(org_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
 
     let mut started = 0u32;
     let mut errors = Vec::new();
 
-    for (resource_id, resource_name, provider_resource_id, region, configuration, managed_on_prem) in &resources {
+    for (
+        resource_id,
+        resource_name,
+        provider_resource_id,
+        region,
+        previous_public_ip,
+        configuration,
+        managed_on_prem,
+    ) in &resources
+    {
         let aws_creds = get_aws_credentials_for_resource(&state, org_id, *resource_id).await;
         let mut recovered_address = None;
 
@@ -312,18 +341,75 @@ pub async fn unsuspend_org_resources(
             }
         }
 
-        if let Err(e) = sqlx::query(
+        let recovered_ip_changed = recovered_address
+            .as_ref()
+            .is_some_and(|address| previous_public_ip.as_ref() != Some(&address.0));
+        if recovered_ip_changed {
+            let public_ip = &recovered_address.as_ref().expect("checked above").0;
+            let timeout = crate::deployment_health_timeout_secs();
+            let readiness = match crate::wait_for_health(public_ip, timeout).await {
+                Err(error) => Err(error),
+                Ok(())
+                    if configuration
+                        .as_ref()
+                        .and_then(|value| value.get("debug"))
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false) =>
+                {
+                    Ok(())
+                }
+                Ok(()) => crate::wait_for_attestation_health(public_ip, timeout).await,
+            };
+            if let Err(error) = readiness {
+                tracing::error!(resource_id = %resource_id, error = %error, "recovered Elastic IP failed readiness; managed DNS remains unchanged");
+                errors.push(
+                    resource_name.clone() + ": readiness failed: " + &error,
+                );
+                continue;
+            }
+        }
+
+        let managed_dns_enabled = state.managed_dns.is_some();
+        let update_result = sqlx::query(
             "UPDATE compute_resources
-             SET state = 'running', public_ip = COALESCE($1, public_ip), region = COALESCE($2, region)
-             WHERE id = $3",
+             SET state = 'running', public_ip = COALESCE($1, public_ip), region = COALESCE($2, region),
+                 dns_status = CASE
+                     WHEN $4::boolean AND $5::boolean THEN 'publishing'
+                     ELSE dns_status
+                 END,
+                 dns_error = CASE WHEN $4::boolean AND $5::boolean THEN NULL ELSE dns_error END,
+                 dns_change_id = CASE WHEN $4::boolean AND $5::boolean THEN NULL ELSE dns_change_id END,
+                 dns_release_not_before = CASE WHEN $4::boolean AND $5::boolean THEN NULL ELSE dns_release_not_before END
+             WHERE id = $3 AND state = 'stopped'",
         )
             .bind(recovered_address.as_ref().map(|address| address.0.as_str()))
             .bind(recovered_address.as_ref().map(|address| address.1.as_str()))
             .bind(resource_id)
+            .bind(managed_dns_enabled)
+            .bind(recovered_ip_changed)
             .execute(&state.db)
-            .await
+            .await;
+        match update_result {
+            Ok(result) if result.rows_affected() == 1 => {}
+            Ok(_) => {
+                tracing::warn!(resource_id = %resource_id, "app lifecycle changed during unsuspend; managed DNS remains unchanged");
+                errors.push(resource_name.clone() + ": app lifecycle changed during unsuspend");
+                continue;
+            }
+            Err(error) => {
+                tracing::error!(resource_id = %resource_id, error = %error, "failed to mark app as running");
+                errors.push(
+                    resource_name.clone() + ": database update failed: " + &error.to_string(),
+                );
+                continue;
+            }
+        }
+
+        if recovered_ip_changed
+            && let Some(managed_dns) = state.managed_dns.as_ref()
+            && let Err(error) = managed_dns.publish_resource(&state.db, *resource_id).await
         {
-            tracing::error!("Failed to mark resource {} as running: {}", resource_id, e);
+            tracing::warn!(resource_id = %resource_id, error = %error, "managed DNS update after unsuspend will retry");
         }
 
         let instance_type = configuration

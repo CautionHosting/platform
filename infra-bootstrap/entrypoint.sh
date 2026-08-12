@@ -75,6 +75,7 @@ echo "AWS_ACCOUNT_ID=$ACCOUNT_ID"
 echo "AWS_REGION=us-west-2"
 echo "TERRAFORM_STATE_BUCKET=$($TF_CMD output -raw s3_bucket_name)"
 echo "EIF_S3_BUCKET=$($TF_CMD output -raw eif_bucket_name)"
+echo "CAUTION_APPS_DNS_ZONE_ID=$($TF_CMD output -raw apps_dns_zone_id)"
 echo ""
 echo "=========================================="
 echo ""
@@ -87,6 +88,7 @@ AWS_ACCOUNT_ID=$ACCOUNT_ID
 AWS_REGION=us-west-2
 TERRAFORM_STATE_BUCKET=$($TF_CMD output -raw s3_bucket_name)
 EIF_S3_BUCKET=$($TF_CMD output -raw eif_bucket_name)
+CAUTION_APPS_DNS_ZONE_ID=$($TF_CMD output -raw apps_dns_zone_id)
 EOF
 
 chmod 600 $CREDS_FILE
@@ -114,8 +116,11 @@ echo ""
 echo -e "${GREEN}Bootstrap complete!${NC}"
 echo ""
 echo "Next steps:"
-echo "  1. Copy credentials to your platform .env file"
-echo "  2. Run 'make up' to start the platform"
+echo "  1. At the caution.sh DNS provider, delegate host 'apps' to these Route53 nameservers:"
+$TF_CMD output -json apps_dns_name_servers
+echo "  2. Copy credentials and CAUTION_APPS_DNS_ZONE_ID to your platform .env file"
+echo "  3. Verify public NS and SOA answers for apps.caution.sh"
+echo "  4. Run 'make up' to start the platform"
 echo ""
 echo "To use these credentials in your shell:"
 echo "  source $CREDS_FILE"

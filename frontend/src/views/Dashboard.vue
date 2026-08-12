@@ -161,6 +161,37 @@
                  </div>
                   <span v-else class="app-detail-value app-detail-muted">Not set</span>
                 </div>
+                <div class="app-detail-item app-detail-item--span2">
+                  <span class="app-detail-label">DNS target</span>
+                  <div v-if="selectedApp.managed_hostname" class="app-detail-value-with-copy">
+                    <span class="app-detail-value">{{ selectedApp.managed_hostname }}</span>
+                    <button
+                      class="copy-inline-btn"
+                      @click="copyToClipboard(selectedApp.managed_hostname, 'managedHostname')"
+                      :title="copiedField === 'managedHostname' ? 'Copied!' : 'Copy to clipboard'"
+                      :aria-label="copiedField === 'managedHostname' ? 'Copied DNS target' : 'Copy DNS target to clipboard'"
+                    >
+                      <svg v-if="copiedField !== 'managedHostname'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                      </svg>
+                      <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                        <polyline points="20 6 9 17 4 12"></polyline>
+                      </svg>
+                    </button>
+                  </div>
+                  <span v-else class="app-detail-value app-detail-muted">Unavailable</span>
+                  <span v-if="selectedApp.configuration?.domain && selectedApp.managed_hostname" class="app-detail-value app-detail-muted">
+                    Create a CNAME for {{ selectedApp.configuration.domain }} pointing to {{ selectedApp.managed_hostname }}.
+                  </span>
+                </div>
+                <div class="app-detail-item">
+                  <span class="app-detail-label">Managed DNS</span>
+                  <span class="app-detail-value">{{ selectedApp.dns_status || 'Unavailable' }}</span>
+                  <span v-if="selectedApp.dns_error" class="app-detail-value app-detail-muted">
+                    Retry error: {{ selectedApp.dns_error }}
+                  </span>
+                </div>
               </div>
             </div>
 
@@ -2130,6 +2161,8 @@ export default {
         app.region?.toLowerCase().includes(query) ||
         app.state?.toLowerCase().includes(query) ||
         app.public_ip?.toLowerCase().includes(query) ||
+        app.managed_hostname?.toLowerCase().includes(query) ||
+        app.dns_status?.toLowerCase().includes(query) ||
         app.configuration?.domain?.toLowerCase().includes(query) ||
         app.configuration?.instance_type?.toLowerCase().includes(query)
       );

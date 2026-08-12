@@ -58,6 +58,7 @@ pub enum ResourceState {
     Pending,
     Running,
     Stopped,
+    Terminating,
     Terminated,
     Failed,
 }
@@ -69,6 +70,7 @@ impl ResourceState {
             ResourceState::Pending => "pending",
             ResourceState::Running => "running",
             ResourceState::Stopped => "stopped",
+            ResourceState::Terminating => "terminating",
             ResourceState::Terminated => "terminated",
             ResourceState::Failed => "failed",
         }

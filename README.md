@@ -29,7 +29,7 @@ An enclave is **verifiable** when you can independently confirm that the code ru
 
 ### 1. Bootstrap AWS infrastructure
 
-Follow the [bootstrapping guide](infra-bootstrap/README.md) to create the required AWS infrastructure (S3 buckets, IAM user, DynamoDB table).
+Follow the [bootstrapping guide](infra-bootstrap/README.md) to create the required AWS infrastructure (S3 buckets, IAM user, DynamoDB table, and the delegated `apps.caution.sh` Route53 zone).
 
 ### 2. Run the platform
 
@@ -123,7 +123,8 @@ network {
 }
 ```
 
-The domain must resolve directly to the deployed host, the HTTP port must have
+Create a CNAME for this subdomain pointing to the app's `DNS target` shown by
+the CLI or dashboard. Zone-apex domains are not supported. The HTTP port must have
 an ingress rule, and outbound egress is required for Let's Encrypt. Disable any
 CDN or proxy TLS termination. Caddy publishes the verified leaf certificate
 SHA-256 fingerprint in authenticated Nitro `user_data`. For a source-backed

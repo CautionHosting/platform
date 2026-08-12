@@ -1549,7 +1549,7 @@ enum AppCommands {
         force: bool,
         #[arg(
             long,
-            help = "Force delete from database even if cloud resource cleanup fails"
+            help = "After managed DNS withdrawal, delete from the database even if cloud cleanup fails"
         )]
         force_delete: bool,
         #[arg(
@@ -1974,6 +1974,12 @@ pub struct App {
     pub provider_resource_id: String,
     pub public_ip: Option<String>,
     pub domain: Option<String>,
+    #[serde(default)]
+    pub managed_hostname: Option<String>,
+    #[serde(default)]
+    pub dns_status: Option<String>,
+    #[serde(default)]
+    pub dns_error: Option<String>,
     pub configuration: Option<serde_json::Value>,
     #[serde(default)]
     pub git_url: String,
@@ -1985,6 +1991,33 @@ pub struct CreateAppResponse {
     pub resource_name: String,
     pub git_url: String,
     pub state: String,
+    #[serde(default)]
+    pub managed_hostname: Option<String>,
+    #[serde(default)]
+    pub dns_status: Option<String>,
+    #[serde(default)]
+    pub dns_error: Option<String>,
+}
+
+fn print_managed_dns_details(
+    hostname: Option<&str>,
+    status: Option<&str>,
+    error: Option<&str>,
+    domain: Option<&str>,
+) {
+    let Some(hostname) = hostname else {
+        return;
+    };
+    output::status(["DNS target: ", hostname].concat());
+    if let Some(status) = status {
+        output::status(["Managed DNS: ", status].concat());
+    }
+    if let Some(error) = error {
+        output::warning(["Managed DNS retry error: ", error].concat());
+    }
+    if let Some(domain) = domain {
+        output::status(["Create a CNAME for ", domain, " pointing to ", hostname].concat());
+    }
 }
 
 /// Minimal deployment info stored locally in .caution file
@@ -4771,6 +4804,12 @@ enclave "default" {{
         output::status(format!("Name: {}", create_response.resource_name));
         output::status(format!("State: {}", create_response.state));
         output::status(format!("Git URL: {}", create_response.git_url));
+        print_managed_dns_details(
+            create_response.managed_hostname.as_deref(),
+            create_response.dns_status.as_deref(),
+            create_response.dns_error.as_deref(),
+            None,
+        );
 
         output::verbose(self.verbose, "Setting git remote...");
         self.set_git_remote(&create_response.git_url)?;
@@ -4815,6 +4854,9 @@ enclave "default" {{
 
                 if let Some(ip) = &app.public_ip {
                     details.push(ip.clone());
+                }
+                if let Some(dns_status) = &app.dns_status {
+                    details.push(["dns:", dns_status].concat());
                 }
 
                 output::status(format!("  {} - {} ({})", app.id, name, details.join(", ")));
@@ -4958,6 +5000,13 @@ enclave "default" {{
             output::status(format!("  Attestation: http://{}/attestation", ip));
         }
 
+        print_managed_dns_details(
+            app.managed_hostname.as_deref(),
+            app.dns_status.as_deref(),
+            app.dns_error.as_deref(),
+            app.domain.as_deref(),
+        );
+
         Ok(())
     }
 
@@ -4994,7 +5043,7 @@ enclave "default" {{
             if force_delete {
                 output::status("");
                 output::warning(
-                    "  WARNING: --force-delete will remove from database even if cloud cleanup fails!"
+                    "  WARNING: --force-delete may bypass cloud cleanup failure only after managed DNS is withdrawn and drained."
                 );
             }
             output::status("");
@@ -5236,6 +5285,13 @@ enclave "default" {{
         output::status(format!("Name: {}", create_response.resource_name));
         output::status(format!("State: {}", create_response.state));
         output::status(format!("Git URL: {}", create_response.git_url));
+
+        print_managed_dns_details(
+            create_response.managed_hostname.as_deref(),
+            create_response.dns_status.as_deref(),
+            create_response.dns_error.as_deref(),
+            None,
+        );
 
         output::verbose(self.verbose, "Saving deployment info...");
         self.save_deployment(&create_response.id)?;
@@ -5918,6 +5974,10 @@ enclave "default" {{
                 )
             })?;
 
+        resource_id.as_ref().context(
+            "Caution app ID is unavailable; AWS teardown was not started and local BYOC state was preserved",
+        )?;
+
         // Destroy Caution resource first
         if let Some(ref rid) = resource_id {
             output::status("\nDestroying Caution app...");
@@ -5928,7 +5988,6 @@ enclave "default" {{
                 .client
                 .delete(format!("{}/api/resources/{}", self.base_url, rid))
                 .header("X-Session-ID", &auth_config.session_id)
-                .query(&[("force_delete", "true")])
                 .send()
                 .await;
 
@@ -5939,11 +5998,19 @@ enclave "default" {{
                     output::success("Caution app destroyed");
                 }
                 Ok(resp) => {
+                    let status = resp.status();
                     let error = resp.text().await.unwrap_or_default();
-                    output::warning(format!("Warning: Failed to destroy Caution app: {}", error));
+                    bail!(
+                        "Caution app deletion is unresolved (status {}): {}. AWS teardown was not started and local BYOC state was preserved.",
+                        status,
+                        error
+                    );
                 }
                 Err(e) => {
-                    output::warning(format!("Warning: Failed to destroy Caution app: {}", e));
+                    bail!(
+                        "Caution app deletion is unresolved: {}. AWS teardown was not started and local BYOC state was preserved.",
+                        e
+                    );
                 }
             }
         }
@@ -5993,8 +6060,10 @@ enclave "default" {{
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            output::warning(format!("Warning: AWS teardown may have failed: {}", stderr));
-            output::warning("You may need to manually clean up resources in AWS console.");
+            bail!(
+                "AWS teardown failed; local BYOC state was preserved for retry: {}",
+                stderr.trim()
+            );
         } else {
             output::success("AWS infrastructure destroyed");
         }
@@ -9898,7 +9967,6 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
 
     #[test]
     fn reproduction_e2e_mode_preserves_explicit_config_and_manifest_fallback() {
