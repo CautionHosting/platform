@@ -3376,6 +3376,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            info!("Builder orphan reaper starting scan");
             let platform_creds = crate::deployment::AwsCredentials {
                 access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
                 secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),

@@ -319,10 +319,11 @@ struct OrgScan {
 
 /// Detect drift for one organization.
 ///
-/// Returns `Ok(None)` when the organization has no provider accounts or no
-/// tracked resources to compare (the corresponding message is printed to
-/// stdout), `Err` when the scan could not be completed (for example when none
-/// of the organization's accounts could be queried).
+/// Returns `Ok(None)` when the organization has no provider accounts (the
+/// corresponding message is printed to stdout), `Err` when the scan could not
+/// be completed (for example when none of the organization's accounts could be
+/// queried). AWS is scanned even when the database tracks no resources for the
+/// organization, so orphaned instances are still reported.
 async fn detect_organization_drift(
     pool: &PgPool,
     org_id: Uuid,
@@ -360,13 +361,10 @@ async fn detect_organization_drift(
         .map_err(|source| OrgScanError::LoadComputeResources { org_id, source })?;
 
     if expected_resources.is_empty() {
-        println!(
-            "[{}] No drift detected for organization {}: no resources tracked in database\n{}",
-            idx + 1,
-            org_id,
-            format_org_users(&users)
+        tracing::info!(
+            %org_id,
+            "No resources tracked in database; scanning AWS for orphaned instances"
         );
-        return Ok(None);
     }
 
     tracing::info!(
