@@ -11,7 +11,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
-pub(crate) const MANAGED_DNS_SUFFIX: &str = "apps.caution.sh";
+pub(crate) const DEFAULT_MANAGED_DNS_SUFFIX: &str = "apps.caution.sh";
 pub(crate) const MANAGED_DNS_TTL_SECS: i64 = 60;
 const CHANGE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CHANGE_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -148,6 +148,7 @@ impl Route53Api for AwsRoute53Api {
 #[derive(Clone)]
 pub(crate) struct ManagedDns {
     zone_id: String,
+    suffix: String,
     api: Arc<dyn Route53Api>,
 }
 
@@ -179,6 +180,7 @@ enum WithdrawalProgress {
 impl ManagedDns {
     pub(crate) async fn from_env() -> Result<Option<Self>> {
         let environment = std::env::var("ENVIRONMENT").unwrap_or_default();
+        let suffix = configured_dns_suffix()?;
         let zone_id = std::env::var("CAUTION_APPS_DNS_ZONE_ID")
             .ok()
             .map(|value| value.trim().to_string())
@@ -194,6 +196,7 @@ impl ManagedDns {
 
         Ok(Some(Self {
             zone_id,
+            suffix,
             api: Arc::new(AwsRoute53Api::from_environment().await),
         }))
     }
@@ -264,7 +267,7 @@ impl ManagedDns {
             .api
             .upsert_a(
                 &self.zone_id,
-                &managed_hostname(resource_id),
+                &managed_hostname_for_suffix(resource_id, &self.suffix),
                 &public_ip,
                 MANAGED_DNS_TTL_SECS,
             )
@@ -363,7 +366,7 @@ impl ManagedDns {
             )));
         }
 
-        let name = managed_hostname(resource_id);
+        let name = managed_hostname_for_suffix(resource_id, &self.suffix);
         let record = match self.api.get_a(&self.zone_id, &name).await? {
             Some(record) => record,
             None => {
@@ -412,7 +415,39 @@ impl ManagedDns {
 }
 
 pub(crate) fn managed_hostname(resource_id: Uuid) -> String {
-    resource_id.as_hyphenated().to_string() + "." + MANAGED_DNS_SUFFIX
+    let suffix = configured_dns_suffix().expect("managed DNS suffix was validated at startup");
+    managed_hostname_for_suffix(resource_id, &suffix)
+}
+
+fn configured_dns_suffix() -> Result<String> {
+    normalize_dns_suffix(
+        &std::env::var("CAUTION_APPS_DNS_SUFFIX")
+            .unwrap_or_else(|_| DEFAULT_MANAGED_DNS_SUFFIX.to_string()),
+    )
+}
+
+fn normalize_dns_suffix(value: &str) -> Result<String> {
+    let suffix = value.trim().trim_end_matches('.').to_ascii_lowercase();
+    let valid = !suffix.is_empty()
+        && suffix.len() <= 253
+        && suffix.split('.').count() >= 2
+        && suffix.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        });
+    if !valid {
+        bail!("CAUTION_APPS_DNS_SUFFIX must be a valid DNS suffix");
+    }
+    Ok(suffix)
+}
+
+fn managed_hostname_for_suffix(resource_id: Uuid, suffix: &str) -> String {
+    resource_id.as_hyphenated().to_string() + "." + suffix
 }
 
 pub(crate) async fn dns_snapshot(pool: &PgPool, resource_id: Uuid) -> Result<DnsSnapshot> {
@@ -635,7 +670,10 @@ fn drain_wait(release_at: DateTime<Utc>, now: DateTime<Utc>) -> Option<Duration>
 
 #[cfg(test)]
 mod tests {
-    use super::{drain_wait, managed_hostname, sanitize_error};
+    use super::{
+        DEFAULT_MANAGED_DNS_SUFFIX, drain_wait, managed_hostname_for_suffix, normalize_dns_suffix,
+        sanitize_error,
+    };
     use anyhow::anyhow;
     use chrono::{Duration as ChronoDuration, TimeZone, Utc};
     use std::time::Duration;
@@ -645,9 +683,24 @@ mod tests {
     fn hostname_is_derived_from_lowercase_resource_uuid() {
         let id = Uuid::parse_str("A0A13A1B-8C7F-4F3B-AB74-E662FF31A982").unwrap();
         assert_eq!(
-            managed_hostname(id),
+            managed_hostname_for_suffix(id, DEFAULT_MANAGED_DNS_SUFFIX),
             "a0a13a1b-8c7f-4f3b-ab74-e662ff31a982.apps.caution.sh"
         );
+    }
+
+    #[test]
+    fn custom_suffix_is_normalized_and_validated() {
+        let id = Uuid::nil();
+        assert_eq!(
+            normalize_dns_suffix(" Apps.APOSDW.Space. ").unwrap(),
+            "apps.aposdw.space"
+        );
+        assert_eq!(
+            managed_hostname_for_suffix(id, "apps.aposdw.space"),
+            "00000000-0000-0000-0000-000000000000.apps.aposdw.space"
+        );
+        assert!(normalize_dns_suffix("not-a-suffix").is_err());
+        assert!(normalize_dns_suffix("-apps.aposdw.space").is_err());
     }
 
     #[test]

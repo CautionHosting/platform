@@ -21,11 +21,11 @@ data "aws_caller_identity" "current" {}
 # --- Route53: stable per-app DNS targets ---
 
 resource "aws_route53_zone" "apps" {
-  name          = "apps.caution.sh"
+  name          = var.apps_dns_zone_name
   force_destroy = false
 
   tags = {
-    Name      = "apps.caution.sh"
+    Name      = var.apps_dns_zone_name
     Purpose   = "managed-app-endpoints"
     ManagedBy = "infra-bootstrap"
   }
@@ -247,7 +247,7 @@ resource "aws_iam_policy" "platform_deploy" {
             "route53:ChangeResourceRecordSetsActions"     = ["UPSERT", "DELETE"]
           }
           "ForAllValues:StringLike" = {
-            "route53:ChangeResourceRecordSetsNormalizedRecordNames" = ["*.apps.caution.sh"]
+            "route53:ChangeResourceRecordSetsNormalizedRecordNames" = ["*.${var.apps_dns_zone_name}"]
           }
         }
       },
@@ -586,12 +586,17 @@ output "builder_subnet_id" {
 }
 
 output "apps_dns_zone_id" {
-  description = "Route53 hosted zone ID for apps.caution.sh — put in .env as CAUTION_APPS_DNS_ZONE_ID"
+  description = "Route53 hosted zone ID for managed app DNS — put in .env as CAUTION_APPS_DNS_ZONE_ID"
   value       = aws_route53_zone.apps.zone_id
 }
 
+output "apps_dns_zone_name" {
+  description = "Managed app DNS suffix — put in .env as CAUTION_APPS_DNS_SUFFIX"
+  value       = var.apps_dns_zone_name
+}
+
 output "apps_dns_name_servers" {
-  description = "Nameservers to delegate from the caution.sh parent zone"
+  description = "Nameservers to delegate from the managed app DNS parent zone"
   value       = aws_route53_zone.apps.name_servers
 }
 

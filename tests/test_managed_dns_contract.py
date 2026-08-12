@@ -16,7 +16,7 @@ def test_route53_policy_is_scoped_to_managed_a_records():
     )
     assert (
         '"route53:ChangeResourceRecordSetsNormalizedRecordNames" = '
-        '["*.apps.caution.sh"]' in bootstrap
+        '["*.${var.apps_dns_zone_name}"]' in bootstrap
     )
     assert 'Action   = "route53:ListResourceRecordSets"' in bootstrap
     assert 'Action   = "route53:GetChange"' in bootstrap
@@ -26,8 +26,11 @@ def test_route53_policy_is_scoped_to_managed_a_records():
 
 def test_managed_zone_has_protected_sixty_second_negative_cache_ttl():
     bootstrap = (ROOT / "infra-bootstrap" / "main.tf").read_text()
+    variables = (ROOT / "infra-bootstrap" / "variables.tf").read_text()
 
-    assert 'name          = "apps.caution.sh"' in bootstrap
+    assert "name          = var.apps_dns_zone_name" in bootstrap
+    assert 'default     = "apps.caution.sh"' in variables
+    assert 'output "apps_dns_zone_name"' in bootstrap
     assert 'resource "aws_route53_record" "apps_soa"' in bootstrap
     assert "ttl             = 60" in bootstrap
     assert "1209600 60" in bootstrap

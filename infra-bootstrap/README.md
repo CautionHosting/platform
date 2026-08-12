@@ -53,6 +53,7 @@ S3 bucket names must be globally unique. Pass them via `-var` flags or edit `var
 | `state_bucket_name` | `caution-terraform-state` | **Yes**          | S3 bucket for Terraform state (globally unique)  |
 | `eif_bucket_name`   | `caution-eif-storage`    | **Yes**          | S3 bucket for enclave images (globally unique)   |
 | `aws_region`        | `us-west-2`              | Optional         | AWS region for all resources                     |
+| `apps_dns_zone_name` | `apps.caution.sh`        | Optional         | Delegated suffix for managed application records |
 | `lock_table_name`   | `terraform-state-lock`   | No               | DynamoDB table name                              |
 | `service_user_name` | `caution-platform`       | No               | IAM user name                                    |
 
@@ -135,6 +136,14 @@ AWS_ACCOUNT_ID=<target account id>
 TERRAFORM_STATE_BUCKET=<your state bucket name>
 EIF_S3_BUCKET=<your eif bucket name>
 CAUTION_APPS_DNS_ZONE_ID=<from apps_dns_zone_id output>
+CAUTION_APPS_DNS_SUFFIX=<apps_dns_zone_name; defaults to apps.caution.sh>
+```
+
+For an isolated development zone, pass the suffix to bootstrap and use the
+same value in the API environment, for example:
+
+```bash
+terraform apply -var="apps_dns_zone_name=apps.aposdw.space" # plus the existing required variables
 ```
 
 Before starting the production API, delegate `apps.caution.sh` from the current

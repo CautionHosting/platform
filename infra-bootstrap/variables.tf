@@ -7,6 +7,17 @@ variable "aws_region" {
   default     = "us-west-2"
 }
 
+variable "apps_dns_zone_name" {
+  description = "Delegated public DNS suffix for stable managed app endpoints"
+  type        = string
+  default     = "apps.caution.sh"
+
+  validation {
+    condition     = can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$", var.apps_dns_zone_name))
+    error_message = "apps_dns_zone_name must be a lowercase DNS suffix without a trailing dot."
+  }
+}
+
 variable "state_bucket_name" {
   description = "Name of the S3 bucket for Terraform state (must be globally unique)"
   type        = string
