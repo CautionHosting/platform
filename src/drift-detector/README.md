@@ -41,7 +41,7 @@ Reads expected state from the database:
 
 ### `aws` - AWS API Client
 
-Queries actual state from AWS EC2:
+Queries actual state from AWS EC2, optionally across every enabled region. `enabled_regions` lists the regions the account can use, excluding opt-in regions the account has not enabled; `list_live_instances_in_region` lists the pending, running, and stopped instances of one region, each stamped with the region it was found in:
 
 ```rust
 use drift_detector::aws::{AwsCredentials, Ec2Inspector};
@@ -53,12 +53,17 @@ let creds = AwsCredentials {
 };
 
 let inspector = Ec2Inspector::from_credentials(&creds).await;
-let instances = inspector.describe_instances(&filters).await?;
+let regions = inspector.enabled_regions().await?;
+let instances = inspector.list_live_instances_in_region("ap-southeast-2").await?;
 ```
 
 ### `drift` - Core Drift Detection Logic
 
 Compares expected vs actual state and generates reports:
+
+- `detect_resource_drift` checks a single resource against its actual AWS state.
+- `detect_orphaned_resources` finds instances in one provider account that are not tracked in the database. Orphan reports are scoped to the account's organization: an instance is in scope when its `org_id` tag names the organization, or when its `ResourceId` tag resolves to a database resource of the organization.
+- `detect_unattributed_orphaned_resources` runs after every organization has been scanned and reports instances that could not be attributed to any organization (e.g. untagged instances in the shared fully-managed account), deduplicating sightings of the same instance across organizations' scans.
 
 ```rust
 use drift_detector::db::ProviderAccount;
@@ -67,19 +72,10 @@ use drift_detector::drift::{
     detect_unattributed_orphaned_resources,
 };
 
-// Check a single resource
 let drifts = detect_resource_drift(&expected_resource, Some(&aws_instance));
 
-// Find orphaned resources within one provider account. Orphan reports are
-// scoped to the account's organization: an instance is in scope when its
-// `org_id` tag names the organization, or when its `ResourceId` tag resolves
-// to a database resource of the organization.
 let orphaned = detect_orphaned_resources(&db_resources, &aws_instances, &account);
 
-// After every organization has been scanned, report instances that could not
-// be attributed to any organization (e.g. untagged instances in the shared
-// fully-managed account). Duplicate sightings of the same instance across
-// organizations' scans are reported once.
 let scanned: Vec<ScannedInstance> = queried_accounts
     .iter()
     .flat_map(|(account, instances)| {
@@ -98,23 +94,29 @@ let unattributed = detect_unattributed_orphaned_resources(
 
 ## Usage Example
 
+The scan proceeds in phases:
+
+1. Load expected state from the database: provider accounts, compute resources, and users for the organization.
+2. Query AWS once per provider account, across every enabled region (empty static credentials fall back to the default credential chain). Compare each resource of the account against its own account's instances, then find instances that are not tracked in the database. Orphan reports are scoped to the account's organization and instances carrying a `ResourceId` tag are cross-referenced against `resources` so the report includes the matching resource's name and expected state when the row still exists.
+3. After the per-account passes, instances that could not be attributed to any organization (e.g. untagged instances in the shared fully-managed account) are reported once, deduplicated across organizations' scans.
+
 ```rust
-use std::collections::{HashMap, HashSet};
-use drift_detector::db::{get_compute_resources, get_provider_accounts};
+use std::collections::HashMap;
+use drift_detector::db::{get_compute_resources, get_org_users, get_provider_accounts};
 use drift_detector::aws::{AwsCredentials, Ec2Inspector};
-use drift_detector::drift::{detect_resource_drift, detect_orphaned_resources, OrganizationDriftReport};
+use drift_detector::drift::{
+    ScannedInstance, detect_orphaned_resources, detect_resource_drift,
+    detect_unattributed_orphaned_resources, OrganizationDriftReport,
+};
 
 async fn detect_org_drift(
     pool: &sqlx::PgPool,
     org_id: uuid::Uuid,
 ) -> Result<OrganizationDriftReport, Box<dyn std::error::Error>> {
-    // 1. Get expected state from the database (AWS accounts only)
     let accounts = get_provider_accounts(pool, org_id).await?;
     let resources = get_compute_resources(pool, org_id).await?;
     let users = get_org_users(pool, org_id).await?;
 
-    // 2. Query actual state from AWS once per provider account. Empty static
-    //    credentials fall back to the default credential chain.
     let mut all_drifts = Vec::new();
     let mut scanned_instances = Vec::new();
     for account in &accounts {
@@ -125,14 +127,16 @@ async fn detect_org_drift(
         };
 
         let inspector = Ec2Inspector::from_credentials(&creds).await;
-        let instances = inspector.list_live_instances().await?;
+        let mut instances = Vec::new();
+        for region in inspector.enabled_regions().await? {
+            instances.extend(inspector.list_live_instances_in_region(&region).await?);
+        }
 
         let aws_by_id: HashMap<_, _> = instances
             .iter()
             .map(|i| (i.instance_id.as_str(), i))
             .collect();
 
-        // Compare each resource of this account against its own account's state
         for resource in resources.iter().filter(|r| r.provider_account_id == account.id) {
             let aws_instance = aws_by_id
                 .get(resource.provider_resource_id.as_str())
@@ -140,25 +144,14 @@ async fn detect_org_drift(
             all_drifts.extend(detect_resource_drift(resource, aws_instance));
         }
 
-        // Find instances in this account that aren't tracked in the database.
-        // Reports are scoped to the account's organization (matched by the
-        // `org_id` tag or a `ResourceId` database join), so a shared account
-        // does not produce duplicate reports for every organization. Orphaned
-        // instances carrying a `ResourceId` tag are cross-referenced against
-        // `resources` so the report includes the matching resource's name and
-        // expected state when the row still exists.
         all_drifts.extend(detect_orphaned_resources(&resources, &instances, account));
 
-        // Accumulate observed instances for the unattributed pass below.
         scanned_instances.extend(instances.iter().map(|instance| ScannedInstance {
             account: account.clone(),
             instance: instance.clone(),
         }));
     }
 
-    // 2b. Instances that could not be attributed to any organization (e.g.
-    //     untagged instances in the shared fully-managed account) are
-    //     reported once, deduplicated across organizations' scans.
     let org_ids = vec![org_id];
     let unattributed = detect_unattributed_orphaned_resources(
         &resources,
@@ -167,8 +160,6 @@ async fn detect_org_drift(
     );
     all_drifts.extend(unattributed);
 
-    // 3. Generate report (users are listed with username and, when one is on
-    //    file, email)
     Ok(OrganizationDriftReport::new(org_id, accounts, users, all_drifts))
 }
 ```
@@ -182,7 +173,8 @@ distinct, context-carrying error type:
   embed the identifiers involved, e.g. `ListComputeResources { org_id, source }`
   or `FetchComputeResource { org_id, resource_id, source }`.
 - `aws::AwsError` - AWS API call failures. `DescribeInstances { region, source }`
-  carries the region that was queried alongside the underlying SDK error.
+  carries the region that was queried alongside the underlying SDK error;
+  `DescribeRegions` surfaces failures to discover the enabled regions.
 
 The binary additionally defines small per-function error enums in `main.rs`
 (`EnvironmentError`, `DatabaseConnectError`, `ResolveOrgsError`, `OrgScanError`,

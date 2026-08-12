@@ -566,7 +566,7 @@ pub fn detect_orphaned_resources(
                      tags: {}{}{}",
                     instance.instance_id,
                     account.external_account_id,
-                    account.region,
+                    instance.region,
                     instance.state,
                     instance.instance_type,
                     instance.public_ip,
@@ -767,7 +767,7 @@ pub fn detect_unattributed_orphaned_resources(
                  tags: {}{}{}",
                 instance.instance_id,
                 scanned.account.external_account_id,
-                scanned.account.region,
+                instance.region,
                 instance.state,
                 instance.instance_type,
                 instance.public_ip,
@@ -937,6 +937,7 @@ mod tests {
 
         let actual = Ec2Instance {
             instance_id: "i-123".to_string(),
+            region: "us-west-2".to_string(),
             instance_type: Some("c5.xlarge".to_string()),
             state: InstanceStateName::Stopped,
             public_ip: None,
@@ -973,6 +974,7 @@ mod tests {
             ensure_org_tag(
                 Ec2Instance {
                     instance_id: "i-456".to_string(),
+                    region: "us-west-2".to_string(),
                     instance_type: Some("t3.micro".to_string()),
                     state: InstanceStateName::Running,
                     public_ip: Some("54.123.45.67".to_string()),
@@ -995,6 +997,10 @@ mod tests {
         assert!(orphaned[0].description.contains("123456789012"));
         assert!(orphaned[0].description.contains("t3.micro"));
         assert!(orphaned[0].description.contains("54.123.45.67"));
+        assert!(
+            orphaned[0].description.contains("region: us-west-2"),
+            "description should report the instance's region"
+        );
     }
 
     fn test_account() -> ProviderAccount {
@@ -1058,6 +1064,7 @@ mod tests {
     fn tagged_instance(instance_id: &str, tags: HashMap<String, String>) -> Ec2Instance {
         Ec2Instance {
             instance_id: instance_id.to_string(),
+            region: "us-west-2".to_string(),
             instance_type: None,
             state: InstanceStateName::Running,
             public_ip: None,

@@ -25,7 +25,8 @@
 //!
 //! - [`db::DbError`]: database query failures, carrying the organization and/or
 //!   resource identifiers involved
-//! - [`aws::AwsError`]: AWS API call failures, carrying the queried region
+//! - [`aws::AwsError`]: AWS API call failures (instance listing carries the
+//!   queried region; region discovery failures are surfaced separately)
 
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]

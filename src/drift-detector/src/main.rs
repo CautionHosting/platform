@@ -16,6 +16,10 @@
 //! be attributed to any organization are reported once, after all
 //! organizations have been scanned.
 //!
+//! Each provider account is scanned across every enabled AWS region; when
+//! region discovery is unavailable the account's configured region is scanned
+//! instead.
+//!
 //! Arguments:
 //! - `ORG_ID` (optional): scan only this organization; all active organizations are
 //!   scanned when omitted
@@ -490,17 +494,59 @@ async fn detect_aws_drift(
     }
 }
 
-/// List live EC2 instances for a provider account.
+/// List live EC2 instances for a provider account across all enabled regions.
+///
+/// Region discovery fails or returns nothing (for example when the account
+/// lacks `ec2:DescribeRegions`), the account's configured region is scanned
+/// instead so the scan degrades to the previous single-region behavior. A
+/// per-region listing failure propagates so the account is treated as not
+/// fully queried and the run is marked incomplete.
 async fn query_live_instances(
     account: &ProviderAccount,
     aws_access_key_id: &str,
     aws_secret_access_key: &str,
 ) -> Result<Vec<Ec2Instance>, AwsError> {
     let creds = aws_credentials(account, aws_access_key_id, aws_secret_access_key);
-
     let inspector = Ec2Inspector::from_credentials(&creds).await;
-    tracing::info!(region = %inspector.region(), "Querying AWS EC2");
-    inspector.list_live_instances().await
+
+    let regions = match inspector.enabled_regions().await {
+        Ok(regions) if !regions.is_empty() => regions,
+        Ok(_) => {
+            tracing::warn!(
+                region = %creds.region,
+                "No enabled AWS regions discovered; falling back to configured region"
+            );
+            vec![creds.region.clone()]
+        }
+        Err(err) => {
+            tracing::warn!(
+                region = %creds.region,
+                ?err,
+                "Failed to discover AWS regions; falling back to configured region"
+            );
+            vec![creds.region.clone()]
+        }
+    };
+
+    let mut instances = Vec::new();
+    for region in &regions {
+        match inspector.list_live_instances_in_region(region).await {
+            Ok(mut region_instances) => {
+                tracing::info!(
+                    region = %region,
+                    count = %region_instances.len(),
+                    "Scanned AWS region"
+                );
+                instances.append(&mut region_instances);
+            }
+            Err(err) => {
+                tracing::warn!(region = %region, ?err, "Failed to scan AWS region");
+                return Err(err);
+            }
+        }
+    }
+
+    Ok(instances)
 }
 
 /// Build AWS credentials for a provider account, falling back to the default
