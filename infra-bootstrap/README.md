@@ -176,6 +176,11 @@ from the short Route53 transactions. Failed deploy rollback is also recorded as
 `terminating`; the same worker completes its DNS-safe cleanup and restores the
 app to the redeployable `failed` state after an API restart.
 
+Pre-existing running apps that still have `dns_status='reserved'` are not
+probed automatically. Managed DNS is assigned on the next successful deploy or
+redeploy, which transitions the app into the normal `publishing` flow. The
+background DNS reconciler retries only interrupted Route53 publications.
+
 If an unsuspend health or attestation check fails after recovering a different
 Elastic IP, the API stops the instances it just started and leaves managed DNS
 unchanged. If that compensating stop also fails, the API records the app as
