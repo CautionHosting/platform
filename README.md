@@ -124,7 +124,7 @@ provider teardown, Caution deletes the managed A record, waits for Route53 to
 report `INSYNC`, and drains its 60-second TTL. If DNS withdrawal cannot be
 proved, destruction stops and retains the IP. If provider teardown then fails,
 the normal destroy also reports failure and retains its state for retry;
-`caution apps destroy --force` can instead mark the app destroyed without
+`caution apps destroy --force-delete` can instead mark the app destroyed without
 proving that every provider resource was removed, so operators must reconcile
 possible leftovers. Redeploying the same app ID may allocate a different IP,
 but it reuses the same `DNS target`; Caution publishes that target to the new
