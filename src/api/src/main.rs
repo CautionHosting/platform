@@ -400,7 +400,7 @@ pub(crate) async fn wait_for_health(public_ip: &str, timeout_secs: u64) -> Resul
 
         if start.elapsed() >= timeout {
             return Err(format!(
-                "Attestation endpoint did not become healthy within {} seconds",
+                "Health endpoint did not become healthy within {} seconds",
                 timeout_secs
             ));
         }
@@ -436,7 +436,10 @@ mod deployment_health_tests {
         let error = wait_for_health(&address.to_string(), 0)
             .await
             .unwrap_err();
-        assert!(error.contains("did not become healthy"));
+        assert_eq!(
+            error,
+            "Health endpoint did not become healthy within 0 seconds"
+        );
         server.await.unwrap();
     }
 }
@@ -2926,7 +2929,7 @@ async fn deploy_logic(
 
     tracing::info!("Waiting for health endpoint to become healthy...");
     if let Err(e) = wait_for_health(&deployment_result.public_ip, health_timeout_secs).await {
-        tracing::error!("Attestation health check failed: {}", e);
+        tracing::error!("Health check failed: {}", e);
         if let Some(reservation) = capacity_reservation.as_ref() {
             fully_managed_capacity::release_reservation(&state.db, reservation).await;
         }
@@ -3192,66 +3195,6 @@ async fn reconcile_managed_dns(state: Arc<AppState>, managed_dns: managed_dns::M
             async move {
                 if let Err(error) = managed_dns.publish_resource(&db, resource_id).await {
                     tracing::warn!(resource_id = %resource_id, error = %error, "managed DNS publication will retry");
-                }
-            }
-        })
-        .await;
-
-    let backfill: Vec<(Uuid, String, Option<serde_json::Value>)> = match sqlx::query_as(
-        "SELECT id, public_ip, configuration
-             FROM compute_resources
-             WHERE destroyed_at IS NULL AND state = 'running' AND public_ip IS NOT NULL
-               AND dns_status = 'reserved'
-             ORDER BY updated_at ASC LIMIT 4",
-    )
-    .fetch_all(&state.db)
-    .await
-    {
-        Ok(resources) => resources,
-        Err(error) => {
-            tracing::error!(error = %error, "failed to list managed DNS backfill candidates");
-            return;
-        }
-    };
-    stream::iter(backfill)
-        .for_each_concurrent(4, |(resource_id, public_ip, configuration)| {
-            let state = state.clone();
-            let managed_dns = managed_dns.clone();
-            async move {
-                let timeout = deployment_health_timeout_secs();
-                let debug = configuration
-                    .as_ref()
-                    .and_then(|value| value.get("debug"))
-                    .and_then(|value| value.as_bool())
-                    .unwrap_or(false);
-                let readiness = match wait_for_health(&public_ip, timeout).await {
-                    Err(error) => Err(error),
-                    Ok(()) if debug => Ok(()),
-                    Ok(()) => wait_for_attestation_health(&public_ip, timeout).await,
-                };
-                if let Err(error) = readiness {
-                    let error = ("Managed DNS backfill readiness failed: ".to_string()
-                        + &error)
-                        .replace(['\r', '\n'], " ")
-                        .chars()
-                        .take(500)
-                        .collect::<String>();
-                    let _ = sqlx::query(
-                        "UPDATE compute_resources SET dns_error = $1, updated_at = NOW()
-                         WHERE id = $2 AND state = 'running' AND dns_status = 'reserved'",
-                    )
-                    .bind(error)
-                    .bind(resource_id)
-                    .execute(&state.db)
-                    .await;
-                    return;
-                }
-                if let Err(error) = managed_dns::mark_publishing(&state.db, resource_id).await {
-                    tracing::warn!(resource_id = %resource_id, error = %error, "failed to schedule managed DNS backfill");
-                    return;
-                }
-                if let Err(error) = managed_dns.publish_resource(&state.db, resource_id).await {
-                    tracing::warn!(resource_id = %resource_id, error = %error, "managed DNS backfill publication will retry");
                 }
             }
         })

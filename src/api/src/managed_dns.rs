@@ -459,22 +459,6 @@ pub(crate) async fn dns_snapshot(pool: &PgPool, resource_id: Uuid) -> Result<Dns
     Ok(DnsSnapshot { status, error })
 }
 
-pub(crate) async fn mark_publishing(pool: &PgPool, resource_id: Uuid) -> Result<()> {
-    let result = sqlx::query(
-        "UPDATE compute_resources
-         SET dns_status = 'publishing', dns_error = NULL, dns_change_id = NULL,
-             dns_release_not_before = NULL, updated_at = NOW()
-         WHERE id = $1 AND public_ip IS NOT NULL AND state = 'running'",
-    )
-    .bind(resource_id)
-    .execute(pool)
-    .await?;
-    if result.rows_affected() != 1 {
-        bail!("resource lifecycle changed before managed DNS publication");
-    }
-    Ok(())
-}
-
 pub(crate) async fn begin_termination(pool: &PgPool, resource_id: Uuid) -> Result<()> {
     let result = sqlx::query(
         "UPDATE compute_resources

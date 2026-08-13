@@ -119,6 +119,19 @@ def test_teardown_and_dns_reconciliation_are_independent():
     assert "MissedTickBehavior::Skip" in startup
 
 
+def test_dns_reconciliation_only_retries_publishing_rows():
+    api = (ROOT / "src" / "api" / "src" / "main.rs").read_text()
+    reconcile = api.split("async fn reconcile_managed_dns", 1)[1]
+    reconcile = reconcile.split("#[tokio::main]", 1)[0]
+
+    assert "dns_status = 'publishing'" in reconcile
+    assert "publish_resource(&db, resource_id)" in reconcile
+    assert "dns_status = 'reserved'" not in reconcile
+    assert "wait_for_health" not in reconcile
+    assert "wait_for_attestation_health" not in reconcile
+    assert "mark_publishing" not in reconcile
+
+
 def test_deploy_reporting_does_not_depend_on_post_commit_dns_reads():
     api = (ROOT / "src" / "api" / "src" / "main.rs").read_text()
     managed_dns = (ROOT / "src" / "api" / "src" / "managed_dns.rs").read_text()
@@ -143,6 +156,15 @@ def test_unsuspend_compensates_failed_readiness_without_publishing_dns():
     assert "degraded_readiness_error.is_none()" in unsuspend
     assert "recording app as running and metered" in unsuspend
     assert "WHEN $6::text IS NOT NULL THEN $6" in unsuspend
+
+
+def test_health_poller_timeout_reports_health_endpoint():
+    api = (ROOT / "src" / "api" / "src" / "main.rs").read_text()
+    health = api.split("pub(crate) async fn wait_for_health", 1)[1]
+    health = health.split("#[cfg(test)]", 1)[0]
+
+    assert "Health endpoint did not become healthy within {} seconds" in health
+    assert "Attestation endpoint did not become healthy within {} seconds" not in health
 
 
 def test_owned_tombstone_delete_is_idempotent_and_unknown_ids_stay_hidden():
