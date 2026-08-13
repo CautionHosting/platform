@@ -248,6 +248,7 @@ fn managed_onprem_uses_direct_customer_bucket(
             .starts_with(&format!("s3://{}/", managed_onprem.eif_bucket))
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<DeploymentResult> {
     tracing::info!(
         "Starting Nitro Enclave deployment for resource {} ({})",

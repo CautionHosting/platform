@@ -1053,6 +1053,7 @@ fn dedicated_builder_failure_includes_one_prefix_and_build_id() {
     assert!(!message.contains("Build failed: Build failed:"));
 }
 
+#[tracing::instrument(skip_all)]
 async fn recover_deploy_failure(
     state: &Arc<AppState>,
     org_id: Uuid,
@@ -1396,6 +1397,7 @@ async fn set_builder_config(
     Ok(Json(serde_json::json!({ "builder_size": builder_size })))
 }
 
+#[tracing::instrument(skip_all, fields(org_id = %req.org_id, app_id = %req.app_id))]
 async fn deploy_handler(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1918,6 +1920,7 @@ mod billing_url_tests {
     }
 }
 
+#[tracing::instrument(skip_all, fields(org_id = %req.org_id, app_id = %req.app_id, deploy_attempt_id = %deploy_attempt_id))]
 async fn deploy_logic(
     state: Arc<AppState>,
     auth: AuthContext,
