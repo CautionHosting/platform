@@ -5,10 +5,10 @@ use axum::http::HeaderValue;
 use axum::{extract::Request, middleware::Next, response::Response};
 
 const DASHBOARD_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.paddle.com https://*.paddle.com https://public.profitwell.com https://*.profitwell.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https://*.paddle.com https://public.profitwell.com https://*.profitwell.com; frame-src https://*.paddle.com";
-const VERIFIER_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https:; frame-src 'none'";
+const VERIFIER_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https:; worker-src 'self'; frame-src 'none'";
 
 fn content_security_policy(path: &str) -> &'static str {
-    if path == "/verify" {
+    if path == "/verify" || path == "/verify-e2ee" || path.starts_with("/verify-e2ee/") {
         VERIFIER_CSP
     } else {
         DASHBOARD_CSP
@@ -41,7 +41,6 @@ pub async fn security_headers_middleware(req: Request, next: Next) -> Response {
         "permissions-policy",
         HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
     );
-
     response
 }
 
@@ -56,8 +55,24 @@ mod tests {
     }
 
     #[test]
+    fn e2ee_verifier_csp_covers_pages_workers_and_wasm() {
+        for path in [
+            "/verify-e2ee",
+            "/verify-e2ee/",
+            "/verify-e2ee/client/version/enclave-sw.js",
+            "/verify-e2ee/client/version/xwing/client.wasm",
+            "/verify-e2ee/client/version/targets/hash/",
+        ] {
+            assert_eq!(content_security_policy(path), VERIFIER_CSP, "{path}");
+        }
+        assert!(VERIFIER_CSP.contains("worker-src 'self'"));
+        assert_eq!(content_security_policy("/verify-e2ee-other"), DASHBOARD_CSP);
+    }
+
+    #[test]
     fn dashboard_csp_remains_restricted() {
         assert_eq!(content_security_policy("/dashboard"), DASHBOARD_CSP);
         assert!(!DASHBOARD_CSP.contains("connect-src 'self' https:;"));
+        assert!(!DASHBOARD_CSP.contains("worker-src"));
     }
 }

@@ -31,6 +31,7 @@ import Dashboard from './views/Dashboard.vue'
 import QrLogin from './views/QrLogin.vue'
 import InviteAccept from './views/InviteAccept.vue'
 import PublicAttestation from './views/PublicAttestation.vue'
+import PublicE2ee from './views/PublicE2ee.vue'
 import LegalAcceptanceModal from './components/LegalAcceptanceModal.vue'
 import { authFetch, getCsrfToken } from './composables/useWebAuthn.js'
 
@@ -47,6 +48,7 @@ export default {
     QrLogin,
     InviteAccept,
     PublicAttestation,
+    PublicE2ee,
     LegalAcceptanceModal
   },
   setup() {
@@ -122,6 +124,11 @@ export default {
         title: 'Verify an application • Caution',
         description: 'Verify a Caution application enclave attestation in your browser.',
         path: '/verify'
+      },
+      '/verify-e2ee/': {
+        title: 'Test a STEVE encrypted session • Caution',
+        description: 'Establish and inspect a protected STEVE session in your browser.',
+        path: '/verify-e2ee/'
       }
     }
 
@@ -204,6 +211,10 @@ export default {
       return path === '/dashboard' || (path === '/' && isUserAuthenticated)
     }
 
+    const isPublicE2eeLocation = (path) => {
+      return path === '/verify-e2ee' || path.startsWith('/verify-e2ee/')
+    }
+
     const metaUrl = (path) => {
       return `${canonicalBaseUrl}${path === '/' ? '/' : path}`
     }
@@ -228,6 +239,9 @@ export default {
     const resolvePageMeta = (path, hash, isUserAuthenticated) => {
       if (isDashboardLocation(path, isUserAuthenticated)) {
         return dashboardPageMeta[dashboardHash(hash)]
+      }
+      if (isPublicE2eeLocation(path)) {
+        return pageMeta['/verify-e2ee/']
       }
       return pageMeta[path] || pageMeta['/']
     }
@@ -377,6 +391,9 @@ export default {
       } else if (path === '/verify') {
         // Public route - client-side enclave attestation verification
         return 'PublicAttestation'
+      } else if (isPublicE2eeLocation(path)) {
+        // Public route - client-side STEVE encrypted-session verification
+        return 'PublicE2ee'
       }
 
       // Unknown path - redirect to home
@@ -391,7 +408,7 @@ export default {
 
     onMounted(() => {
       // Public verification must not be gated by account or legal status.
-      if (window.location.pathname === '/verify') {
+      if (window.location.pathname === '/verify' || isPublicE2eeLocation(window.location.pathname)) {
         authChecked.value = true
       } else {
         checkAuth()

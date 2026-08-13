@@ -69,9 +69,12 @@ For the normal frontend development server:
 
 ```bash
 cd frontend
-npm install
+npm ci --allow-git=root
 npm run dev
 ```
+
+`allow-git=root` permits only the commit-pinned git dependencies declared by
+this package; npm 12 blocks git dependencies by default.
 
 Open `http://localhost:3000`. This remains authentication-gated and proxies API,
 authentication, health, and build-input requests to `VITE_PROXY_TARGET` (default
@@ -197,6 +200,67 @@ e2e_encryption {
 The platform health and attestation endpoints remain available outside the
 application route. In fail-closed mode the application HTTP port is not exposed
 through a host or enclave VSOCK proxy; STEVE reaches it over enclave-local TCP.
+
+#### Browser E2E verifier
+
+Open `/verify-e2ee`, enter the application's bare HTTPS origin, and select the
+exact key-exchange suite used by its deployment (`X25519` or
+`XWING-DRAFT10`). Choose the initial browser trust policy: `None` permits only
+acknowledged non-sensitive testing, `Pinned` requires an approved profile before
+connecting, and `TOFU` requires reviewing the first authenticated PCRs before
+the page installs them as a pinned SDK policy. The page then establishes an
+attestation-bound STEVE session and provides a small GET/POST tester. Request
+paths must begin with one `/`;
+attestation and STEVE protocol paths are blocked. POST bodies may be JSON or text
+up to 64 KiB. The tester rejects redirects and does not retry requests.
+
+The target card is a compact control center for session state, the active
+worker-enforced PCR policy, Nitro evidence, and session operations. The request
+tester uses the pinned SDK's explicit protected-send API; it does not depend on
+ordinary page fetch interception. Each result includes a collapsed SDK-recorded
+exchange view with the protocol, suite, PCR trust result, session and sequence,
+outer status, response headers, and record-size breakdown. It never exposes raw
+records or cryptographic secrets. Application body sizes and elapsed time are
+browser observations; the outer status is transport metadata. Its scoped URL
+includes the pinned STEVE client commit and a SHA-256 identifier for the
+normalized target-and-suite pair.
+Neither is a secret or session identifier; together they isolate service-worker
+clients.
+
+The deployment must allow the verifier's exact browser origin on the STEVE
+protocol endpoints. For the hosted verifier, configure `caution.hcl` with:
+
+```hcl
+e2e_encryption {
+  mode         = "steve"
+  key_exchange = "xwing-draft10"
+  cors_origins = ["https://dashboard.caution.co"]
+}
+```
+
+Use `key_exchange = "x25519"` when selecting `X25519`. A self-hosted verifier
+needs its own exact origin, including any non-default port; do not include
+`/verify-e2ee` in the origin. The STEVE target must use a different origin.
+Wildcard origins are rejected.
+
+The page can pin multiple complete PCR profiles for the exact target and suite.
+Each profile requires nonzero PCR0, PCR1, and PCR2 and may also pin authenticated
+PCR3 through PCR255. Profiles are alternatives: the SDK accepts one whole match
+and never combines values across profiles. Profiles may be imported, entered
+manually, or explicitly accepted after reviewing a current authenticated
+session. This reviewed first use is browser continuity, not independent
+deployment identity; observed PCRs are never enrolled automatically. The SDK
+stores and enforces the complete pinned policy inside the worker on every session
+and rotation. Platform local storage mirrors the profiles only to retain their
+source and timestamp for the UI; the worker policy remains authoritative.
+
+A mismatch or any zero-valued required PCR blocks requests. Without a pinned
+profile, the page requires explicitly enabling non-sensitive test-data mode. A
+successful session proves fresh Nitro-backed session and suite binding, not that
+this is the expected workload.
+The browser does not reproduce source, and its initial page, worker, and WASM
+delivery are not an independent trust root. Use `caution verify` for source
+reproduction and expected-PCR enforcement.
 
 ### 4. Verify a deployed app
 
