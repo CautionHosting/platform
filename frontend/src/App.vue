@@ -3,6 +3,9 @@
 
 <template>
   <div id="app">
+    <div v-if="showPreviewBanner" class="dashboard-preview-banner" role="status">
+      Read-only UI preview — fixture data only. State-changing requests are blocked.
+    </div>
     <component
       v-if="currentView"
       :is="currentView"
@@ -30,6 +33,9 @@ import InviteAccept from './views/InviteAccept.vue'
 import PublicAttestation from './views/PublicAttestation.vue'
 import LegalAcceptanceModal from './components/LegalAcceptanceModal.vue'
 import { authFetch, getCsrfToken } from './composables/useWebAuthn.js'
+
+const dashboardPreviewEnabled =
+  typeof __CAUTION_DASHBOARD_PREVIEW__ !== 'undefined' && __CAUTION_DASHBOARD_PREVIEW__
 
 export default {
   name: 'App',
@@ -378,6 +384,11 @@ export default {
       return isAuthenticated.value ? 'Dashboard' : 'Register'
     })
 
+    const showPreviewBanner = computed(() => {
+      if (!dashboardPreviewEnabled) return false
+      return currentView.value === 'Dashboard'
+    })
+
     onMounted(() => {
       // Public verification must not be gated by account or legal status.
       if (window.location.pathname === '/verify') {
@@ -402,6 +413,7 @@ export default {
       currentView,
       isAuthenticated,
       userStatus,
+      showPreviewBanner,
       showLegalModal,
       legalActionLoading,
       legalActionError,
@@ -628,5 +640,18 @@ body {
 
 #app {
   min-height: 100vh;
+}
+
+.dashboard-preview-banner {
+  position: sticky;
+  top: 0;
+  z-index: 10000;
+  padding: 10px 16px;
+  text-align: center;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--theme-warning, #92400e);
+  background: var(--theme-warning-bg, #fef3c7);
+  border-bottom: 1px solid var(--theme-warning-border, #fde68a);
 }
 </style>

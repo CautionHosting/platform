@@ -104,21 +104,25 @@
           <a href="https://caution.co/contact.html" class="btn-dark nav-cta">
             Talk to an Engineer
           </a>
+          <ThemeToggle />
         </div>
       </nav>
 
-      <button
-        class="mobile-menu-button"
-        @click="$emit('toggle-menu')"
-        :aria-expanded="mobileMenuOpen"
-        aria-label="Toggle menu"
-      >
-        <span class="hamburger">
-          <span class="hamburger-line"></span>
-          <span class="hamburger-line"></span>
-          <span class="hamburger-line"></span>
-        </span>
-      </button>
+      <div class="nav-mobile-tools">
+        <ThemeToggle />
+        <button
+          class="mobile-menu-button"
+          @click="$emit('toggle-menu')"
+          :aria-expanded="mobileMenuOpen"
+          aria-label="Toggle menu"
+        >
+          <span class="hamburger">
+            <span class="hamburger-line"></span>
+            <span class="hamburger-line"></span>
+            <span class="hamburger-line"></span>
+          </span>
+        </button>
+      </div>
     </div>
 
     <!-- Mobile menu -->
@@ -178,8 +182,13 @@
 </template>
 
 <script>
+import ThemeToggle from "./ThemeToggle.vue";
+
 export default {
   name: "SiteHeader",
+  components: {
+    ThemeToggle,
+  },
   props: {
     mobileMenuOpen: {
       type: Boolean,

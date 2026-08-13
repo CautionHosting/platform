@@ -59,250 +59,181 @@
           </button>
         </div>
 
-        <!-- Two-column layout: Main content + Sidebar -->
-        <div class="app-detail-layout">
-          <!-- Main Content -->
-          <div class="app-detail-main">
-            <!-- Infrastructure Section -->
-            <div class="app-detail-section">
-              <div class="app-detail-grid app-detail-grid--3col">
-                <!-- Row 1: Created, App ID (spans 2 cols) -->
-                <div class="app-detail-item">
-                  <span class="app-detail-label">Created</span>
-                  <span class="app-detail-value">{{ formatDateOnly(selectedApp.created_at) }}, {{ formatTimeWithTimezone(selectedApp.created_at) }}</span>
+        <section class="deployment-details" aria-labelledby="deployment-details-title">
+          <h3 id="deployment-details-title" class="app-detail-section-title">Deployment details</h3>
+          <p class="app-detail-helper-text">Runtime and network configuration for this application.</p>
+
+          <div class="deployment-details-panel">
+            <div class="deployment-details-grid">
+              <div class="deployment-detail-item">
+                <span class="deployment-detail-label">State</span>
+                <span :class="['app-status-badge', `status-${selectedApp.state.toLowerCase()}`]">
+                  {{ selectedApp.state }}
+                </span>
+              </div>
+
+              <div class="deployment-detail-item">
+                <span class="deployment-detail-label">Deployment</span>
+                <span class="deployment-detail-value">{{ getDeploymentLabel(selectedApp) }}</span>
+              </div>
+
+              <div class="deployment-detail-item">
+                <span class="deployment-detail-label">Region</span>
+                <span v-if="selectedApp.state === 'running'" class="deployment-detail-value">{{ selectedApp.region || 'Not set' }}</span>
+                <span v-else class="deployment-detail-value deployment-detail-value--muted">—</span>
+              </div>
+
+              <div class="deployment-detail-item">
+                <span class="deployment-detail-label">Runtime</span>
+                <span class="deployment-detail-value">{{ formatRuntimeSummary(selectedApp) }}</span>
+              </div>
+
+              <div class="deployment-detail-item">
+                <span class="deployment-detail-label">Instance type</span>
+                <span class="deployment-detail-value">{{ selectedApp.configuration?.instance_type || 'Not set' }}</span>
+              </div>
+
+              <div class="deployment-detail-item">
+                <span class="deployment-detail-label">Created</span>
+                <span v-if="selectedApp.created_at" class="deployment-detail-value">
+                  {{ formatDateOnly(selectedApp.created_at) }}, {{ formatTimeWithTimezone(selectedApp.created_at) }}
+                </span>
+                <span v-else class="deployment-detail-value deployment-detail-value--muted">—</span>
+              </div>
+
+              <div :class="['deployment-detail-item', { 'deployment-detail-item--span2': !selectedAppMonthlyCost }]">
+                <span class="deployment-detail-label">App ID</span>
+                <div class="deployment-detail-value-row">
+                  <span class="deployment-detail-value">{{ selectedApp.id }}</span>
+                  <button
+                    class="copy-inline-btn"
+                    @click="copyToClipboard(selectedApp.id, 'appId')"
+                    :title="copiedField === 'appId' ? 'Copied!' : 'Copy to clipboard'"
+                    :aria-label="copiedField === 'appId' ? 'Copied App ID' : 'Copy App ID to clipboard'"
+                  >
+                    <svg v-if="copiedField !== 'appId'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                    <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                      <polyline points="20 6 9 17 4 12"></polyline>
+                    </svg>
+                  </button>
                 </div>
-                <div class="app-detail-item app-detail-item--span2">
-                  <span class="app-detail-label">App ID</span>
-                  <div class="app-detail-value-with-copy">
-                    <span class="app-detail-value">{{ selectedApp.id }}</span>
+              </div>
+
+              <div v-if="selectedAppMonthlyCost" class="deployment-detail-item">
+                <span class="deployment-detail-label">Est. monthly cost</span>
+                <span class="deployment-detail-value">${{ selectedAppMonthlyCost }}</span>
+              </div>
+            </div>
+
+            <div class="deployment-details-divider" aria-hidden="true"></div>
+
+            <div class="deployment-details-grid">
+              <div class="deployment-detail-item">
+                <span class="deployment-detail-label">Public IP</span>
+                <div v-if="selectedApp.state === 'running' && selectedApp.public_ip" class="deployment-detail-value-row">
+                  <span class="deployment-detail-value">{{ selectedApp.public_ip }}</span>
+                  <button
+                    class="copy-inline-btn"
+                    @click="copyToClipboard(selectedApp.public_ip, 'publicIp')"
+                    :title="copiedField === 'publicIp' ? 'Copied!' : 'Copy to clipboard'"
+                    :aria-label="copiedField === 'publicIp' ? 'Copied IP address' : 'Copy IP address to clipboard'"
+                  >
+                    <svg v-if="copiedField !== 'publicIp'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                    <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                      <polyline points="20 6 9 17 4 12"></polyline>
+                    </svg>
+                  </button>
+                </div>
+                <span v-else class="deployment-detail-value deployment-detail-value--muted">—</span>
+              </div>
+
+              <div class="deployment-detail-item">
+                <span class="deployment-detail-label">Domain</span>
+                <div v-if="selectedApp.configuration?.domain" class="deployment-detail-value-row">
+                  <span class="deployment-detail-value">{{ selectedApp.configuration.domain }}</span>
+                  <button
+                    class="copy-inline-btn"
+                    @click="copyToClipboard(selectedApp.configuration.domain, 'domain')"
+                    :title="copiedField === 'domain' ? 'Copied!' : 'Copy to clipboard'"
+                    :aria-label="copiedField === 'domain' ? 'Copied domain' : 'Copy domain to clipboard'"
+                  >
+                    <svg v-if="copiedField !== 'domain'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                    <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                      <polyline points="20 6 9 17 4 12"></polyline>
+                    </svg>
+                  </button>
+                </div>
+                <span v-else class="deployment-detail-value deployment-detail-value--muted">Not set</span>
+              </div>
+
+              <div class="deployment-detail-item">
+                <span class="deployment-detail-label deployment-detail-label--with-help">
+                  DNS target
+                  <span
+                    v-if="getDnsGuidance(selectedApp)"
+                    ref="dnsTooltipRoot"
+                    :class="['dns-info-tooltip', { 'dns-info-tooltip--open': dnsTooltipOpen }]"
+                    @pointerenter="handleDnsTooltipPointerEnter"
+                    @pointerleave="handleDnsTooltipPointerLeave"
+                  >
                     <button
-                      class="copy-inline-btn"
-                      @click="copyToClipboard(selectedApp.id, 'appId')"
-                      :title="copiedField === 'appId' ? 'Copied!' : 'Copy to clipboard'"
-                      :aria-label="copiedField === 'appId' ? 'Copied App ID' : 'Copy App ID to clipboard'"
+                      type="button"
+                      class="dns-info-tooltip__trigger"
+                      :aria-expanded="dnsTooltipOpen ? 'true' : 'false'"
+                      aria-describedby="dns-target-tooltip"
+                      aria-controls="dns-target-tooltip"
+                      aria-label="Explain DNS target"
+                      @click.stop="toggleDnsTooltip"
+                      @focus="handleDnsTooltipFocus"
+                      @blur="handleDnsTooltipBlur"
+                      @keydown.esc.stop.prevent="handleDnsTooltipEscape"
                     >
-                      <svg v-if="copiedField !== 'appId'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                      </svg>
-                      <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                        <polyline points="20 6 9 17 4 12"></polyline>
-                      </svg>
+                      <img src="/assets/icons/info.svg" alt="" class="tooltip-icon dns-info-tooltip__icon" />
                     </button>
-                  </div>
-                </div>
-                <!-- Row 2: Deployment, Region, Instance type -->
-                <div class="app-detail-item">
-                  <span class="app-detail-label tooltip-wrapper">
-                    Deployment
-                    <button type="button" class="tooltip-trigger" aria-label="Learn more about deployment types">
-                      <img src="/assets/icons/info.svg" alt="" class="tooltip-icon" />
-                    </button>
-                    <span class="tooltip-content" role="tooltip">
-                      <template v-if="isManaged(selectedApp)">
-                        Workloads execute within the customer's infrastructure (on‑prem or cloud account) using customer‑owned credentials, while lifecycle management, configuration, and operational control of the service are performed by Caution.
-                      </template>
-                      <template v-else>
-                        Workloads execute in Caution‑operated infrastructure. Provisioning, patching, monitoring, and security controls are administered entirely by Caution.
-                      </template>
+                    <span id="dns-target-tooltip" class="dns-info-tooltip__content" role="tooltip">
+                      {{ getDnsGuidance(selectedApp) }}
                     </span>
                   </span>
-                  <span class="app-detail-value">{{ isManaged(selectedApp) ? 'Managed on-prem' : 'Fully managed' }}</span>
+                </span>
+                <div v-if="selectedApp.managed_hostname" class="deployment-detail-value-row">
+                  <span class="deployment-detail-value">{{ selectedApp.managed_hostname }}</span>
+                  <button
+                    class="copy-inline-btn"
+                    @click="copyToClipboard(selectedApp.managed_hostname, 'managedHostname')"
+                    :title="copiedField === 'managedHostname' ? 'Copied!' : 'Copy to clipboard'"
+                    :aria-label="copiedField === 'managedHostname' ? 'Copied DNS target' : 'Copy DNS target to clipboard'"
+                  >
+                    <svg v-if="copiedField !== 'managedHostname'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                    </svg>
+                    <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                      <polyline points="20 6 9 17 4 12"></polyline>
+                    </svg>
+                  </button>
                 </div>
-                <div class="app-detail-item">
-                  <span class="app-detail-label">Region</span>
-                  <span v-if="selectedApp.state === 'running'" class="app-detail-value">{{ selectedApp.region || 'Not set' }}</span>
-                  <span v-else class="app-detail-value app-detail-muted">-</span>
-                </div>
-                <div class="app-detail-item">
-                  <span class="app-detail-label">Instance type</span>
-                  <span class="app-detail-value">{{ selectedApp.configuration?.instance_type || 'Not set' }}</span>
-                </div>
-                <!-- Row 3: Public IP, Domain -->
-                <div class="app-detail-item">
-                  <span class="app-detail-label">Public IP</span>
-                  <div v-if="selectedApp.state === 'running' && selectedApp.public_ip" class="app-detail-value-with-copy">
-                    <span class="app-detail-value">{{ selectedApp.public_ip }}</span>
-                    <button
-                      class="copy-inline-btn"
-                      @click="copyToClipboard(selectedApp.public_ip, 'publicIp')"
-                      :title="copiedField === 'publicIp' ? 'Copied!' : 'Copy to clipboard'"
-                      :aria-label="copiedField === 'publicIp' ? 'Copied IP address' : 'Copy IP address to clipboard'"
-                    >
-                      <svg v-if="copiedField !== 'publicIp'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                      </svg>
-                      <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                        <polyline points="20 6 9 17 4 12"></polyline>
-                      </svg>
-                    </button>
-                  </div>
-                  <span v-else class="app-detail-value app-detail-muted">-</span>
-                </div>
-                <div class="app-detail-item app-detail-item--span2">
-                  <span class="app-detail-label">Domain</span>
-                  <div v-if="selectedApp.configuration?.domain" class="app-detail-value-with-copy">
-                    <span class="app-detail-value">{{ selectedApp.configuration.domain }}</span>
-                    <button
-                      class="copy-inline-btn"
-                      @click="copyToClipboard(selectedApp.configuration.domain, 'domain')"
-                      :title="copiedField === 'domain' ? 'Copied!' : 'Copy to clipboard'"
-                      :aria-label="copiedField === 'domain' ? 'Copied domain' : 'Copy domain to clipboard'"
-                    >
-                      <svg v-if="copiedField !== 'domain'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                      </svg>
-                      <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                        <polyline points="20 6 9 17 4 12"></polyline>
-                      </svg>
-                    </button>
-                 </div>
-                  <span v-else class="app-detail-value app-detail-muted">Not set</span>
-                </div>
-                <div class="app-detail-item app-detail-item--span2">
-                  <span class="app-detail-label">DNS target</span>
-                  <div v-if="selectedApp.managed_hostname" class="app-detail-value-with-copy">
-                    <span class="app-detail-value">{{ selectedApp.managed_hostname }}</span>
-                    <button
-                      class="copy-inline-btn"
-                      @click="copyToClipboard(selectedApp.managed_hostname, 'managedHostname')"
-                      :title="copiedField === 'managedHostname' ? 'Copied!' : 'Copy to clipboard'"
-                      :aria-label="copiedField === 'managedHostname' ? 'Copied DNS target' : 'Copy DNS target to clipboard'"
-                    >
-                      <svg v-if="copiedField !== 'managedHostname'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                      </svg>
-                      <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                        <polyline points="20 6 9 17 4 12"></polyline>
-                      </svg>
-                    </button>
-                  </div>
-                  <span v-else class="app-detail-value app-detail-muted">Unavailable</span>
-                  <span v-if="selectedApp.configuration?.domain && selectedApp.managed_hostname" class="app-detail-value app-detail-muted">
-                    Create a CNAME for {{ selectedApp.configuration.domain }} pointing to {{ selectedApp.managed_hostname }}.
-                  </span>
-                </div>
-                <div class="app-detail-item">
-                  <span class="app-detail-label">Managed DNS</span>
-                  <span class="app-detail-value">{{ selectedApp.dns_status || 'Unavailable' }}</span>
-                  <span v-if="selectedApp.dns_error" class="app-detail-value app-detail-muted">
-                    Retry error: {{ selectedApp.dns_error }}
-                  </span>
-                </div>
+                <span v-else class="deployment-detail-value deployment-detail-value--muted">Unavailable</span>
               </div>
-            </div>
 
-          </div>
-
-          <!-- Sidebar -->
-          <aside class="app-detail-sidebar">
-            <div class="sidebar-status">
-              <span class="app-detail-label">Status</span>
-              <span :class="['app-status-badge', `status-${selectedApp.state.toLowerCase()}`]">
-                {{ selectedApp.state }}
-              </span>
-            </div>
-            <div v-if="selectedApp.state === 'running'" class="sidebar-meta">
-              <div class="sidebar-meta-item">
-                <span class="app-detail-label">vCPUs</span>
-                <span class="app-detail-value">{{ selectedApp.configuration?.cpus || '-' }}</span>
-              </div>
-              <div class="sidebar-meta-item">
-                <span class="app-detail-label">RAM</span>
-                <span class="app-detail-value">{{ selectedApp.configuration?.memory_mb ? formatMemory(selectedApp.configuration.memory_mb) : '-' }}</span>
-              </div>
-            </div>
-            <div v-else class="sidebar-meta">
-              <div class="sidebar-meta-item">
-                <span class="app-detail-label">Runtime sizing</span>
-                <span class="app-detail-value app-detail-muted">Available after successful deployment</span>
-              </div>
-            </div>
-            <div v-if="selectedApp.state === 'running' && calculateAppMonthlyCost(selectedApp)" class="sidebar-cost">
-              <span class="app-detail-label">Est. monthly cost</span>
-              <span class="app-detail-value app-detail-value--cost">${{ calculateAppMonthlyCost(selectedApp) }}</span>
-            </div>
-          </aside>
-        </div>
-
-        <!-- AWS Infrastructure Details (only for managed on-prem apps) -->
-        <div v-if="isManaged(selectedApp) && selectedApp.configuration?.managed_onprem" class="app-detail-section app-detail-section--fullwidth app-detail-section--borderless">
-          <h3 class="app-detail-section-title">AWS Infrastructure</h3>
-          <p class="app-detail-helper-text">Your AWS infrastructure for this deployment.</p>
-          <div class="aws-details-grid">
-            <div class="aws-detail-item">
-              <span class="aws-detail-label">Account ID</span>
-              <div class="aws-detail-value-row">
-                <span class="aws-detail-value">{{ selectedApp.configuration.managed_onprem.aws_account_id || '-' }}</span>
-                <button
-                  v-if="selectedApp.configuration.managed_onprem.aws_account_id"
-                  class="copy-inline-btn"
-                  @click="copyToClipboard(selectedApp.configuration.managed_onprem.aws_account_id, 'awsAccountId')"
-                  :title="copiedField === 'awsAccountId' ? 'Copied!' : 'Copy to clipboard'"
-                  :aria-label="copiedField === 'awsAccountId' ? 'Copied AWS Account ID' : 'Copy AWS Account ID to clipboard'"
-                >
-                  <svg v-if="copiedField !== 'awsAccountId'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                  </svg>
-                  <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                    <polyline points="20 6 9 17 4 12"></polyline>
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <div class="aws-detail-item">
-              <span class="aws-detail-label">Region</span>
-              <span v-if="selectedApp.state === 'running'" class="aws-detail-value">{{ selectedApp.configuration.managed_onprem.aws_region || selectedApp.region || 'Not set' }}</span>
-              <span v-else class="aws-detail-value app-detail-muted">-</span>
-            </div>
-            <div class="aws-detail-item">
-              <span class="aws-detail-label">VPC ID</span>
-              <div class="aws-detail-value-row">
-                <span class="aws-detail-value">{{ selectedApp.configuration.managed_onprem.vpc_id || '-' }}</span>
-                <button
-                  v-if="selectedApp.configuration.managed_onprem.vpc_id"
-                  class="copy-inline-btn"
-                  @click="copyToClipboard(selectedApp.configuration.managed_onprem.vpc_id, 'vpcId')"
-                  :title="copiedField === 'vpcId' ? 'Copied!' : 'Copy to clipboard'"
-                  :aria-label="copiedField === 'vpcId' ? 'Copied VPC ID' : 'Copy VPC ID to clipboard'"
-                >
-                  <svg v-if="copiedField !== 'vpcId'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                  </svg>
-                  <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                    <polyline points="20 6 9 17 4 12"></polyline>
-                  </svg>
-                </button>
-              </div>
-            </div>
-            <div class="aws-detail-item">
-              <span class="aws-detail-label">Deployment ID</span>
-              <div class="aws-detail-value-row">
-                <span class="aws-detail-value">{{ selectedApp.configuration.managed_onprem.deployment_id || '-' }}</span>
-                <button
-                  v-if="selectedApp.configuration.managed_onprem.deployment_id"
-                  class="copy-inline-btn"
-                  @click="copyToClipboard(selectedApp.configuration.managed_onprem.deployment_id, 'deploymentId')"
-                  :title="copiedField === 'deploymentId' ? 'Copied!' : 'Copy to clipboard'"
-                  :aria-label="copiedField === 'deploymentId' ? 'Copied Deployment ID' : 'Copy Deployment ID to clipboard'"
-                >
-                  <svg v-if="copiedField !== 'deploymentId'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                  </svg>
-                  <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                    <polyline points="20 6 9 17 4 12"></polyline>
-                  </svg>
-                </button>
+              <div class="deployment-detail-item">
+                <span class="deployment-detail-label">Managed DNS</span>
+                <span class="deployment-detail-value">{{ formatStatusLabel(selectedApp.dns_status) }}</span>
+                <span v-if="selectedApp.dns_error" class="deployment-detail-note deployment-detail-note--error">
+                  Retry error: {{ selectedApp.dns_error }}
+                </span>
               </div>
             </div>
           </div>
-        </div>
+        </section>
 
         <!-- Builder Configuration -->
         <div class="app-detail-section app-detail-section--fullwidth app-detail-section--borderless">
@@ -401,7 +332,7 @@
                     </button>
                     <span class="tooltip-content" role="tooltip">
                       <strong>Fully managed:</strong> Workloads execute in Caution‑operated infrastructure. Provisioning, patching, monitoring, and security controls are administered entirely by Caution.<br><br>
-                      <strong>Managed on‑premises:</strong> Workloads execute within the customer's infrastructure (on‑prem or cloud account) using customer‑owned credentials, while lifecycle management, configuration, and operational control of the service are performed by Caution.
+                      <strong>Customer-managed:</strong> Workloads execute within the customer's infrastructure (on-premises or in a cloud account) using customer-owned credentials, while lifecycle management, configuration, and operational control of the service are performed by Caution.
                     </span>
                   </span>
                 </th>
@@ -423,7 +354,7 @@
                 </td>
                 <td class="app-type-cell">
                   <span :class="['app-type-badge', isManaged(app) ? 'type-managed' : 'type-hosted']">
-                    {{ isManaged(app) ? 'Managed on-prem' : 'Fully managed' }}
+                    {{ getDeploymentLabel(app) }}
                   </span>
                 </td>
                 <td class="app-region-cell">
@@ -2034,7 +1965,15 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import DashboardLayout from "../components/DashboardLayout.vue";
 import AttestationModal from "../components/AttestationModal.vue";
 import { authFetch } from "../composables/useWebAuthn.js";
+import {
+  formatRuntimeSummary,
+  formatStatusLabel,
+  getDeploymentLabel,
+  getDnsGuidance,
+  isManaged,
+} from "../utils/appDetails.js";
 import { formatLocalDate, formatLocalTime } from "../utils/dateTime.js";
+import { getCurrentTheme } from "../utils/theme.js";
 
 async function sha256Hex(message) {
   const msgBuffer = new TextEncoder().encode(message);
@@ -2149,6 +2088,66 @@ export default {
     const copiedField = ref(null);
     const appSearchQuery = ref('');
     const builderConfig = ref({ builder_size: 'small', options: [] });
+    const dnsTooltipRoot = ref(null);
+    const dnsTooltipPinned = ref(false);
+    const dnsTooltipHovered = ref(false);
+    const dnsTooltipFocused = ref(false);
+    const dnsTooltipDismissed = ref(false);
+    const dnsTooltipOpen = computed(() =>
+      !dnsTooltipDismissed.value && (
+        dnsTooltipPinned.value || dnsTooltipHovered.value || dnsTooltipFocused.value
+      )
+    );
+
+    const closeDnsTooltip = () => {
+      dnsTooltipPinned.value = false;
+      dnsTooltipHovered.value = false;
+      dnsTooltipFocused.value = false;
+      dnsTooltipDismissed.value = false;
+    };
+
+    const toggleDnsTooltip = () => {
+      dnsTooltipFocused.value = false;
+      if (dnsTooltipPinned.value) {
+        dnsTooltipPinned.value = false;
+        dnsTooltipDismissed.value = true;
+      } else {
+        dnsTooltipPinned.value = true;
+        dnsTooltipDismissed.value = false;
+      }
+    };
+
+    const handleDnsTooltipPointerEnter = (event) => {
+      if (event.pointerType === 'mouse') {
+        dnsTooltipHovered.value = true;
+        dnsTooltipDismissed.value = false;
+      }
+    };
+
+    const handleDnsTooltipPointerLeave = (event) => {
+      if (event.pointerType === 'mouse') {
+        dnsTooltipHovered.value = false;
+        dnsTooltipDismissed.value = false;
+      }
+    };
+
+    const handleDnsTooltipFocus = () => {
+      dnsTooltipFocused.value = true;
+      dnsTooltipDismissed.value = false;
+    };
+
+    const handleDnsTooltipBlur = () => {
+      dnsTooltipFocused.value = false;
+    };
+
+    const handleDnsTooltipEscape = (event) => {
+      closeDnsTooltip();
+      event.currentTarget.blur();
+    };
+
+    const handleDnsTooltipOutsideClick = (event) => {
+      if (!dnsTooltipRoot.value?.contains(event.target)) closeDnsTooltip();
+    };
 
     const filteredApps = computed(() => {
       if (!appSearchQuery.value.trim()) {
@@ -2204,6 +2203,7 @@ export default {
     const closeAppDetail = () => {
       selectedApp.value = null;
       copiedField.value = null;
+      closeDnsTooltip();
     };
 
     const copyToClipboard = async (text, fieldName) => {
@@ -3457,6 +3457,10 @@ export default {
 
     // Alias for template
     const calculateAppMonthlyCost = getAppEstimatedMonthlyCost;
+    const selectedAppMonthlyCost = computed(() => {
+      if (selectedApp.value?.state !== 'running') return null;
+      return calculateAppMonthlyCost(selectedApp.value);
+    });
 
     const loadUserEmail = async () => {
       try {
@@ -3986,7 +3990,7 @@ export default {
               settings: {
                 displayMode: 'overlay',
                 variant: 'one-page',
-                theme: 'light',
+                theme: getCurrentTheme(),
               },
             };
             if (result.customer_auth_token) {
@@ -4796,19 +4800,6 @@ export default {
       setupStep.value = 1;
     };
 
-    const formatMemory = (memoryMb) => {
-      if (!memoryMb) return '';
-      if (memoryMb >= 1024) {
-        const gb = memoryMb / 1024;
-        return gb % 1 === 0 ? `${gb} GB` : `${gb.toFixed(1)} GB`;
-      }
-      return `${memoryMb} MB`;
-    };
-
-    const isManaged = (app) => {
-      return app.configuration?.managed_onprem != null;
-    };
-
     const getAppUrl = (app) => {
       if (app.configuration?.domain) {
         return `https://${app.configuration.domain}`;
@@ -4980,6 +4971,7 @@ export default {
 
       // Add keyboard event listener
       window.addEventListener("keydown", handleKeyDown);
+      document.addEventListener("click", handleDnsTooltipOutsideClick);
       document.addEventListener("visibilitychange", handleVisibilityChange);
       window.addEventListener("popstate", handleHistoryNavigation);
       window.addEventListener("hashchange", handleHistoryNavigation);
@@ -5018,6 +5010,7 @@ export default {
 
     onUnmounted(() => {
       window.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("click", handleDnsTooltipOutsideClick);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("popstate", handleHistoryNavigation);
       window.removeEventListener("hashchange", handleHistoryNavigation);
@@ -5091,8 +5084,21 @@ export default {
       closeAppDetail,
       builderConfig,
       setBuilderSize,
+      selectedAppMonthlyCost,
       copiedField,
       copyToClipboard,
+      dnsTooltipRoot,
+      dnsTooltipOpen,
+      toggleDnsTooltip,
+      handleDnsTooltipPointerEnter,
+      handleDnsTooltipPointerLeave,
+      handleDnsTooltipFocus,
+      handleDnsTooltipBlur,
+      handleDnsTooltipEscape,
+      getDeploymentLabel,
+      formatRuntimeSummary,
+      getDnsGuidance,
+      formatStatusLabel,
       truncateGitUrl,
       showDestroyModal,
       appToDestroy,
@@ -5272,7 +5278,6 @@ export default {
       formatTimeWithTimezone,
       formatLastUsed,
       formatRelativeTime,
-      formatMemory,
       isManaged,
       getAppUrl,
       getRegionFlag,
@@ -5335,7 +5340,7 @@ export default {
 }
 
 .dashboard-tab-empty {
-  color: #9a9a9a;
+  color: var(--theme-text-faint);
   font-size: clamp(1rem, 2vw, 1.025rem);
   line-height: 1.5;
   text-align: center;
@@ -5348,13 +5353,13 @@ export default {
 .inline-form-panel {
   padding: 24px;
   border-radius: 8px;
-  background: #fafafa;
+  background: var(--theme-surface-subtle);
   box-shadow: 0 0 0 1px rgba(15, 15, 15, 0.025), 0 2px 6px rgba(15, 15, 15, 0.04);
 }
 
 .inline-form-panel-title {
   margin: 0 0 36px 0;
-  color: #0f0f0f;
+  color: var(--theme-text-primary);
   font-size: 1.05rem;
   font-weight: 600;
   line-height: 1.3;
@@ -5378,7 +5383,7 @@ export default {
 
 .content-subsection-title {
   margin: 0;
-  color: #0f0f0f;
+  color: var(--theme-text-primary);
   font-size: 1.05rem;
   font-weight: 600;
   line-height: 1.3;
@@ -5404,7 +5409,7 @@ export default {
 .cloud-credentials-description {
   max-width: 650px;
   margin: 0;
-  color: rgba(102, 102, 102, 0.875);
+  color: var(--theme-text-muted);
   font-size: clamp(1.05rem, 2vw, 1.095rem);
   line-height: 1.45;
 }
@@ -5418,7 +5423,7 @@ export default {
 }
 
 .cloud-credentials-description a:hover {
-  color: var(--color-pink);
+  color: var(--theme-brand-hover);
 }
 
 .cloud-credentials-header-action {
@@ -5469,7 +5474,7 @@ export default {
   width: 100%;
   min-height: 45px;
   margin-bottom: 0;
-  background: white;
+  background: var(--theme-surface);
 }
 
 .cloud-credential-checkbox {
@@ -5478,7 +5483,7 @@ export default {
   gap: 8px;
   width: max-content;
   margin: -4px 0 48px 0;
-  color: #0f0f0f;
+  color: var(--theme-text-primary);
   font-size: 1rem;
   line-height: 1.5;
   cursor: pointer;
@@ -5501,7 +5506,7 @@ export default {
 }
 
 .cloud-credential-submit-btn:disabled {
-  background: #8a8a8a;
+  background: var(--theme-text-faint);
   opacity: 1;
 }
 
@@ -5513,7 +5518,7 @@ export default {
   width: 100%;
   align-self: stretch;
   margin-top: 48px;
-  border-top: 1px solid #eee;
+  border-top: 1px solid var(--theme-border);
 }
 
 .cloud-credential-list-item {
@@ -5541,20 +5546,20 @@ export default {
   font-weight: 600;
   letter-spacing: 1px;
   text-transform: uppercase;
-  color: #666;
+  color: var(--theme-text-muted);
   margin-bottom: 16px;
 }
 
 .guide-intro-title {
   font-size: clamp(1.5rem, 3vw, 2.25rem);
   font-weight: 600;
-  color: #0f0f0f;
+  color: var(--theme-text-primary);
   line-height: 1.2;
 }
 
 .guide-intro-description {
   font-size: clamp(1.05rem, 2vw, 1.095rem);
-  color: rgba(15, 15, 15, 0.875);
+  color: var(--theme-text-secondary);
   margin: 0 auto;
   line-height: 1.6;
   max-width: 440px;
@@ -5564,14 +5569,14 @@ export default {
 .guide-completion-title {
   font-size: clamp(1.5rem, 3vw, 2.25rem);
   font-weight: 600;
-  color: #0f0f0f;
+  color: var(--theme-text-primary);
   line-height: 1.3;
   margin: 0;
 }
 
 .guide-completion-description {
   font-size: 1.1rem;
-  color: rgba(15, 15, 15, 0.75);
+  color: var(--theme-text-muted);
   margin: 24px auto 36px auto;
   line-height: 1.6;
   max-width: 500px;
@@ -5590,7 +5595,7 @@ export default {
   align-items: center;
   gap: 8px;
   font-size: 0.95rem;
-  color: #666;
+  color: var(--theme-text-muted);
 }
 
 .intro-meta-icon {
@@ -5600,7 +5605,7 @@ export default {
 .intro-meta-icon-svg {
   width: 18px;
   height: 18px;
-  stroke: #666;
+  stroke: var(--theme-text-muted);
   flex-shrink: 0;
 }
 
@@ -5628,7 +5633,7 @@ export default {
 .step-title {
   font-size: clamp(1.35rem, 3vw, 2rem);
   font-weight: 600;
-  color: #0f0f0f;
+  color: var(--theme-text-primary);
   margin: 0;
   line-height: 1.2;
   text-align: left;
@@ -5643,7 +5648,7 @@ export default {
 .step-time,
 .step-prereq {
   font-size: 0.875rem;
-  color: #666;
+  color: var(--theme-text-muted);
 }
 
 .step-time::before {
@@ -5658,7 +5663,7 @@ export default {
 
 /* Guide link styling */
 .guide-link {
-  color: #0f0f0f;
+  color: var(--theme-text-primary);
   font-weight: 500;
   text-decoration: underline dotted;
   transition: all 0.2s ease;
@@ -5666,7 +5671,7 @@ export default {
 
 .guide-link:hover,
 .guide-link:active {
-  color: #f048b5;
+  color: var(--theme-brand-hover);
 }
 
 /* Tooltip styling */
@@ -5691,7 +5696,7 @@ export default {
 }
 
 .tooltip-trigger:focus {
-  outline: 2px solid #0f0f0f;
+  outline: 2px solid var(--theme-text-primary);
   outline-offset: 2px;
 }
 
@@ -5700,7 +5705,7 @@ export default {
 }
 
 .tooltip-trigger:focus-visible {
-  outline: 2px solid #0f0f0f;
+  outline: 2px solid var(--theme-text-primary);
   outline-offset: 2px;
 }
 
@@ -5721,12 +5726,12 @@ export default {
   bottom: calc(100% + 8px);
   left: 20px;
   transform: translateX(0);
-  background: #161616;
-  background-color: #161616;
+  background: var(--theme-control);
+  background-color: var(--theme-control);
   color: white;
   padding: 12px 16px;
   border-radius: 8px;
-  border: 1px solid #161616;
+  border: 1px solid var(--theme-control);
   font-size: 0.95rem;
   font-weight: 400;
   line-height: 1.5;
@@ -5751,7 +5756,7 @@ export default {
   display: block;
   font-weight: 600;
   margin-bottom: 6px;
-  color: #f048b5;
+  color: var(--theme-brand);
   font-size: 0.85em;
   letter-spacing: 0.5px;
 }
@@ -5810,9 +5815,9 @@ export default {
   padding: 2px 6px;
   font-size: 0.75rem;
   font-weight: 500;
-  color: #666;
-  background: rgba(0, 0, 0, 0.05);
-  border: 1px solid rgba(0, 0, 0, 0.1);
+  color: var(--theme-text-muted);
+  background: var(--theme-hover);
+  border: 1px solid var(--theme-border);
   border-radius: 4px;
   font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
   min-width: 24px;
@@ -5829,7 +5834,7 @@ export default {
 }
 
 .code-comment {
-  color: #7c7c7c;
+  color: var(--theme-text-faint);
   font-style: italic;
 }
 
@@ -5857,7 +5862,8 @@ export default {
 }
 
 .modal-content {
-  background: white;
+  background: var(--theme-surface);
+  border: 1px solid var(--theme-border);
   border-radius: 16px;
   padding: 32px;
   max-width: 600px;
@@ -5865,6 +5871,111 @@ export default {
   max-height: 80vh;
   overflow-y: auto;
   position: relative;
+}
+
+.modal-description {
+  margin: 0 0 24px;
+  color: var(--theme-text-secondary);
+  line-height: 1.55;
+}
+
+.credit-packages {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.credit-package-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 16px;
+  color: var(--theme-text-secondary);
+  text-align: left;
+  background: var(--theme-surface-subtle);
+  border: 1px solid var(--theme-border);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.credit-package-card:hover,
+.credit-package-card--selected {
+  background: var(--theme-surface-muted);
+  border-color: var(--theme-border-strong);
+}
+
+.credit-package-card:focus-visible {
+  outline: 3px solid var(--theme-focus-ring);
+  outline-offset: 2px;
+}
+
+.credit-package-pay {
+  color: var(--theme-text-primary);
+  font-size: 1rem;
+  font-weight: 650;
+}
+
+.credit-package-get,
+.credit-package-bonus,
+.credit-custom-hint,
+.credit-custom-preview {
+  color: var(--theme-text-muted);
+  font-size: 0.8125rem;
+}
+
+.credit-package-bonus,
+.credit-custom-preview {
+  color: var(--theme-success);
+  font-weight: 600;
+}
+
+.credit-custom-amount {
+  margin-bottom: 24px;
+}
+
+.credit-custom-label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--theme-text-secondary);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.credit-custom-input-row {
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--theme-border);
+  border-radius: 8px;
+  background: var(--theme-surface);
+}
+
+.credit-custom-input-row:focus-within {
+  border-color: var(--theme-focus);
+  box-shadow: 0 0 0 3px var(--theme-focus-ring);
+}
+
+.credit-custom-prefix {
+  padding-left: 12px;
+  color: var(--theme-text-muted);
+}
+
+.credit-custom-input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px 10px 4px;
+  color: var(--theme-text-primary);
+  font: inherit;
+  background: transparent;
+  border: 0;
+  outline: 0;
+}
+
+.credit-custom-hint,
+.credit-custom-preview {
+  margin: 8px 0 0;
 }
 
 .modal-close {
@@ -5875,7 +5986,7 @@ export default {
   border: none;
   font-size: 24px;
   cursor: pointer;
-  color: #666;
+  color: var(--theme-text-muted);
   width: 32px;
   height: 32px;
   display: flex;
@@ -5885,8 +5996,18 @@ export default {
 }
 
 .modal-close:hover {
-  background: #f5f5f5;
-  color: #333;
+  background: var(--theme-surface-muted);
+  color: var(--theme-text-secondary);
+}
+
+@media (max-width: 560px) {
+  .modal-content {
+    padding: 24px;
+  }
+
+  .credit-packages {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Toast notification */
@@ -5899,7 +6020,7 @@ export default {
   gap: 12px;
   padding: 14px 20px;
   border-radius: 10px;
-  background: #0f0f0f;
+  background: var(--theme-control);
   color: white;
   font-size: 0.95rem;
   font-weight: 500;
@@ -5909,11 +6030,11 @@ export default {
 }
 
 .toast--success {
-  background: #0f0f0f;
+  background: var(--theme-control);
 }
 
 .toast--error {
-  background: #dc3545;
+  background: var(--theme-danger-strong);
 }
 
 .toast--info {
@@ -6002,22 +6123,22 @@ export default {
   font-family: inherit;
   font-size: 0.9rem;
   font-weight: 500;
-  color: #666;
+  color: var(--theme-text-muted);
   cursor: pointer;
   transition: color 0.15s ease;
 }
 
 .breadcrumb-link:hover {
-  color: #0f0f0f;
+  color: var(--theme-text-primary);
 }
 
 .breadcrumb-separator {
-  color: #ccc;
+  color: var(--theme-text-faint);
   font-weight: 400;
 }
 
 .breadcrumb-current {
-  color: #333;
+  color: var(--theme-text-secondary);
   font-weight: 500;
 }
 
@@ -6036,7 +6157,7 @@ export default {
 }
 
 .app-name-btn:hover {
-  color: #f048b5;
+  color: var(--theme-brand-hover);
 }
 
 /* App Detail View */
@@ -6060,7 +6181,7 @@ export default {
 .app-detail-title {
   font-size: clamp(1.5rem, 3vw, 2rem);
   font-weight: 600;
-  color: #0f0f0f;
+  color: var(--theme-text-primary);
   margin: 0;
   line-height: 1.2;
 }
@@ -6072,9 +6193,9 @@ export default {
   width: 40px;
   height: 40px;
   background: transparent;
-  border: 1px solid #e0e0e0;
+  border: 1px solid var(--theme-border);
   border-radius: 6px;
-  color: #888;
+  color: var(--theme-text-faint);
   cursor: pointer;
   transition: all 0.15s ease;
   text-decoration: none;
@@ -6082,8 +6203,8 @@ export default {
 }
 
 .app-open-icon-btn:hover {
-  background: #0f0f0f;
-  border-color: #0f0f0f;
+  background: var(--theme-control);
+  border-color: var(--theme-text-primary);
   color: #fff;
 }
 
@@ -6097,7 +6218,7 @@ export default {
   align-items: center;
   gap: 8px;
   padding: 12px 24px 12px 18px;
-  background: #0f0f0f;
+  background: var(--theme-control);
   border: none;
   border-radius: 8px;
   font-family: inherit;
@@ -6110,389 +6231,18 @@ export default {
 }
 
 .header-attestation-btn:hover {
-  background: #333;
+  background: var(--theme-control-hover);
 }
 
 .header-attestation-btn svg {
   color: #fff;
 }
 
-/* Highlighted deployment type text */
-.highlight-hosted {
-  background: #f3e8ff;
-  color: #7c3aed;
-  font-weight: 500;
-  padding: 3px 6px;
-  border-radius: 4px;
-  font-size: clamp(0.9rem, 2vw, 1rem);
-}
-
-.highlight-managed {
-  background: #dbeafe;
-  color: #2563eb;
-  font-weight: 500;
-  padding: 3px 6px;
-  border-radius: 4px;
-  font-size: clamp(0.9rem, 2vw, 1rem);
-}
-
-.app-detail-header-actions {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.app-detail-header-actions .btn-primary {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  text-decoration: none;
-}
-
-/* Two-column layout */
-.app-detail-layout {
-  display: grid;
-  grid-template-columns: 0.915fr auto;
-  gap: 42px;
-  align-items: start;
-}
-
-.app-detail-main {
-  min-width: 0;
-}
-
-/* Sidebar */
-.app-detail-sidebar {
-  position: sticky;
-  top: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-.sidebar-attestation {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-}
-
-.sidebar-attestation-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 16px 21px 16px 18px;
-  background: transparent;
-  border: 1px solid #e0e0e0;
-  border-radius: 6px;
-  font-size: 1.025rem;
-  font-weight: 500;
-  color: #555;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.sidebar-attestation-btn:hover {
-  background: #0f0f0f;
-  border-color: #0f0f0f;
-  color: #fff;
-}
-
-.sidebar-attestation-btn svg {
-  color: #888;
-  transition: color 0.15s ease;
-}
-
-.sidebar-attestation-btn:hover svg {
-  color: #fff;
-}
-
-.sidebar-status {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.sidebar-status .app-status-badge {
-  width: fit-content;
-}
-
-.sidebar-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.sidebar-meta-item {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.sidebar-cost {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding-top: 12px;
-  margin-top: 12px;
-  border-top: 1px solid #e5e7eb;
-}
-
-.app-detail-value--cost {
-  font-size: 1.25rem;
-  font-weight: 600;
-  color: #059669;
-}
-
-.sidebar-section {
-  padding-bottom: 20px;
-  margin-bottom: 20px;
-  border-bottom: 1px solid #f0f0f0;
-}
-
-.sidebar-section:last-child {
-  border-bottom: none;
-  margin-bottom: 0;
-  padding-bottom: 0;
-}
-
-.sidebar-section-title {
-  font-size: 0.8rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: #888;
-  margin: 0 0 12px 0;
-}
-
-.sidebar-info-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.sidebar-info-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 0.9rem;
-  color: #333;
-}
-
-.sidebar-info-item svg {
-  flex-shrink: 0;
-  color: #888;
-}
-
-.sidebar-info-item--copyable {
-  position: relative;
-}
-
-.sidebar-info-item--copyable .copy-inline-btn {
-  margin-left: auto;
-}
-
-.sidebar-info-mono {
-  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
-  font-size: 0.85rem;
-}
-
-/* Sidebar Info Blocks */
-.sidebar-info-block {
-  padding-bottom: 16px;
-  margin-bottom: 16px;
-  border-bottom: 1px solid #f0f0f0;
-}
-
-.sidebar-info-block:last-of-type {
-  border-bottom: none;
-  margin-bottom: 0;
-  padding-bottom: 0;
-}
-
-.sidebar-info-label {
-  display: block;
-  font-size: 0.95rem;
-  font-weight: 500;
-  color: #333;
-  margin-bottom: 4px;
-}
-
-.sidebar-info-value {
-  display: block;
-  font-size: 0.95rem;
-  color: #0f0f0f;
-  font-weight: 500;
-}
-
-.sidebar-info-value.sidebar-info-mono {
-  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
-  font-size: 0.85rem;
-}
-
-/* Inline sidebar info rows */
-.sidebar-info-list-inline {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.sidebar-info-row {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  font-size: 1rem;
-  line-height: 1.4;
-}
-
-.sidebar-info-inline-label {
-  color: #666;
-  white-space: nowrap;
-}
-
-.sidebar-info-inline-value {
-  color: #666;
-}
-
-.sidebar-info-inline-value.sidebar-info-mono {
-  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
-  font-size: 0.85rem;
-}
-
-.sidebar-info-value-secondary {
-  display: block;
-  font-size: 0.9rem;
-  color: #666;
-  margin-top: 2px;
-}
-
-.sidebar-info-value-with-copy {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.sidebar-info-value-with-copy .copy-inline-btn {
-  flex-shrink: 0;
-}
-
-/* Sidebar Actions */
-.sidebar-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.sidebar-action-btn {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 10px 12px;
-  font-size: 0.9rem;
-  font-weight: 500;
-  font-family: inherit;
-  color: #333;
-  background: #fafafa;
-  border: 1px solid #e8e8e8;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.sidebar-action-btn:hover:not(:disabled) {
-  background: #f0f0f0;
-  border-color: #ddd;
-}
-
-.sidebar-action-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.sidebar-action-btn svg {
-  flex-shrink: 0;
-  color: #666;
-}
-
-.sidebar-action-btn--start:not(:disabled) {
-  color: #166534;
-  background: #f0fdf4;
-  border-color: #bbf7d0;
-}
-
-.sidebar-action-btn--start:hover:not(:disabled) {
-  background: #dcfce7;
-}
-
-.sidebar-action-btn--start svg {
-  color: #166534;
-}
-
-.sidebar-action-btn--stop:not(:disabled) {
-  color: #92400e;
-  background: #fffbeb;
-  border-color: #fde68a;
-}
-
-.sidebar-action-btn--stop:hover:not(:disabled) {
-  background: #fef3c7;
-}
-
-.sidebar-action-btn--stop svg {
-  color: #92400e;
-}
-
-.sidebar-action-btn--primary {
-  color: #fff;
-  background: #0f0f0f;
-  border-color: #0f0f0f;
-  text-decoration: none;
-}
-
-.sidebar-action-btn--primary:hover {
-  background: #333;
-  border-color: #333;
-}
-
-.sidebar-action-btn--primary svg {
-  color: #fff;
-}
-
-.sidebar-action-btn--danger {
-  color: #dc3545;
-  background: #fff;
-  border-color: #f5c6cb;
-}
-
-.sidebar-action-btn--danger:hover:not(:disabled) {
-  background: #fff5f5;
-  border-color: #dc3545;
-}
-
-.sidebar-action-btn--danger svg {
-  color: #dc3545;
-}
-
-.sidebar-actions-divider {
-  height: 1px;
-  background: #f0f0f0;
-  margin: 8px 0;
-}
-
 /* Content sections */
-.app-detail-main .app-detail-section-title:first-child {
-  margin-top: 0;
-}
-
 .app-detail-section {
   margin: 0 0 24px 0;
   padding: 28px;
-  border: 1px solid #f0f0f0;
+  border: 1px solid var(--theme-border);
   border-radius: 12px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.06);
 }
@@ -6515,7 +6265,7 @@ export default {
 .app-detail-section-title {
   font-size: clamp(1.15rem, 2vw, 1.35rem);
   font-weight: 500;
-  color: #0f0f0f;
+  color: var(--theme-text-primary);
   margin: 24px 0 12px 0;
 }
 
@@ -6523,74 +6273,7 @@ export default {
   margin-top: 0;
 }
 
-.app-detail-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 36px;
-}
-
-/* 2-column grid variant */
-.app-detail-grid--2col {
-  grid-template-columns: 1fr 1.8fr;
-  gap: 28px 48px;
-}
-
-/* 3-column grid variant */
-.app-detail-grid--3col {
-  grid-template-columns: 1.15fr 0.925fr 0.925fr;
-  gap: 28px 36px;
-}
-
-.app-detail-item--span2 {
-  grid-column: span 2;
-}
-
-.app-detail-item {
-  display: flex;
-  flex-direction: column;
-}
-
-.app-detail-item-full {
-  grid-column: 1 / -1;
-}
-
-.app-detail-label {
-  font-size: clamp(1rem, 2vw, 1.05rem);
-  font-weight: 500;
-  color: #222;
-  letter-spacing: 0.3px;
-  margin-bottom: 2px;
-}
-
-.app-detail-value {
-  font-size: clamp(1rem, 2vw, 1.05rem);
-  color: #666;
-  word-break: break-all;
-  font-weight: 400;
-}
-
-.app-detail-mono {
-  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
-}
-
-.app-detail-uppercase {
-  text-transform: uppercase;
-}
-
-.app-detail-truncate {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
-
 /* Copy button inline */
-.app-detail-value-with-copy {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .copy-inline-btn {
   display: inline-flex;
   align-items: center;
@@ -6598,7 +6281,7 @@ export default {
   background: none;
   border: none;
   padding: 4px;
-  color: #999;
+  color: var(--theme-text-faint);
   cursor: pointer;
   border-radius: 4px;
   transition: all 0.15s ease;
@@ -6606,8 +6289,13 @@ export default {
 }
 
 .copy-inline-btn:hover {
-  background: #f0f0f0;
-  color: #333;
+  background: var(--theme-surface-muted);
+  color: var(--theme-text-secondary);
+}
+
+.copy-inline-btn:focus-visible {
+  outline: 2px solid var(--theme-focus);
+  outline-offset: 2px;
 }
 
 .copy-inline-btn svg {
@@ -6629,16 +6317,16 @@ export default {
 
 .app-detail-helper-text {
   font-size: clamp(1rem, 2vw, 1.05rem);
-  color: #666;
+  color: var(--theme-text-muted);
   margin: 0;
   line-height: 1.4;
 }
 
 .app-detail-git-url .app-detail-value-with-copy {
-  background: #f8f8f8;
+  background: var(--theme-surface-subtle);
   padding: 12px 14px;
   border-radius: 6px;
-  border: 1px solid #e8e8e8;
+  border: 1px solid var(--theme-border);
 }
 
 .app-detail-git-url .app-detail-value {
@@ -6651,7 +6339,7 @@ export default {
   display: flex;
   align-items: center;
   gap: 12px;
-  background: #f6f8fa;
+  background: var(--theme-surface-subtle);
   border-radius: 8px;
   padding: 12px 16px;
   margin-top: 12px;
@@ -6661,66 +6349,187 @@ export default {
   flex: 1;
   font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
   font-size: 0.95rem;
-  color: #333;
+  color: var(--theme-text-secondary);
   word-break: break-all;
 }
 
 .app-detail-command .copy-inline-btn {
   flex-shrink: 0;
-  color: #999;
+  color: var(--theme-text-faint);
 }
 
 .app-detail-command .copy-inline-btn:hover {
-  background: #e0e0e0;
-  color: #333;
+  background: var(--theme-surface-muted);
+  color: var(--theme-text-secondary);
 }
 
-/* AWS Infrastructure Details grid */
-.aws-details-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 16px 32px;
-  background: #f6f8fa;
-  border-radius: 8px;
-  padding: 20px 24px;
+/* Provider-neutral deployment details */
+.deployment-details-panel {
   margin-top: 12px;
+  padding: 28px 32px;
+  border-radius: 10px;
+  background: var(--theme-surface-subtle);
 }
 
-.aws-detail-item {
+.deployment-details-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 56px;
+  row-gap: 28px;
+}
+
+.deployment-detail-item {
   display: flex;
+  min-width: 0;
   flex-direction: column;
-  gap: 4px;
+  align-items: flex-start;
+  gap: 6px;
 }
 
-.aws-detail-label {
-  font-size: 0.85rem;
-  font-weight: 500;
-  color: #666;
+.deployment-detail-item--span2 {
+  grid-column: 1 / -1;
+}
+
+.deployment-detail-label {
+  color: var(--theme-text-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.075em;
+  line-height: 1.3;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
 }
 
-.aws-detail-value {
-  font-size: 0.95rem;
-  color: #333;
-  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
-  word-break: break-all;
-}
-
-.aws-detail-value-row {
-  display: flex;
+.deployment-detail-label--with-help {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
 }
 
-.aws-detail-value-row .copy-inline-btn {
-  flex-shrink: 0;
-  color: #999;
+.deployment-detail-value,
+.deployment-detail-note {
+  max-width: 100%;
+  color: var(--theme-text-secondary);
+  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
+  font-size: 0.95rem;
+  font-weight: 400;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
-.aws-detail-value-row .copy-inline-btn:hover {
-  background: #e0e0e0;
-  color: #333;
+.deployment-detail-value--muted {
+  color: var(--theme-text-faint);
+}
+
+.deployment-detail-note {
+  color: var(--theme-text-muted);
+  font-size: 0.82rem;
+}
+
+.deployment-detail-note--error {
+  color: var(--theme-danger);
+}
+
+.deployment-detail-value-row {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.deployment-detail-value-row .deployment-detail-value {
+  min-width: 0;
+}
+
+.deployment-detail-value-row .copy-inline-btn {
+  margin-top: -2px;
+}
+
+.deployment-details-divider {
+  height: 1px;
+  margin: 28px 0;
+  background: var(--theme-border);
+}
+
+.dns-info-tooltip {
+  position: relative;
+  display: inline-flex;
+}
+
+.dns-info-tooltip__trigger {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  margin: -4px;
+  padding: 4px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  cursor: help;
+}
+
+.dns-info-tooltip__trigger:focus-visible {
+  outline: 2px solid var(--theme-focus);
+  outline-offset: 2px;
+}
+
+.dns-info-tooltip__icon {
+  width: 14px;
+  height: 14px;
+  opacity: 0.55;
+  transition: opacity 0.15s ease;
+}
+
+.dns-info-tooltip--open .dns-info-tooltip__icon {
+  opacity: 1;
+}
+
+.dns-info-tooltip__content {
+  position: absolute;
+  z-index: 100;
+  bottom: calc(100% + 10px);
+  left: -8px;
+  width: 310px;
+  max-width: calc(100vw - 80px);
+  padding: 10px 12px;
+  border: 1px solid var(--theme-border-strong);
+  border-radius: 8px;
+  background: var(--theme-control);
+  box-shadow: var(--theme-shadow);
+  color: var(--theme-control-text);
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 400;
+  letter-spacing: normal;
+  line-height: 1.45;
+  opacity: 0;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  text-transform: none;
+  transform: translateY(4px);
+  transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s ease;
+  visibility: hidden;
+}
+
+.dns-info-tooltip__content::after {
+  position: absolute;
+  bottom: -5px;
+  left: 12px;
+  width: 8px;
+  height: 8px;
+  border-right: 1px solid var(--theme-border-strong);
+  border-bottom: 1px solid var(--theme-border-strong);
+  background: var(--theme-control);
+  content: "";
+  transform: rotate(45deg);
+}
+
+.dns-info-tooltip--open .dns-info-tooltip__content {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
 }
 
 /* Actions section */
@@ -6735,43 +6544,43 @@ export default {
   align-items: center;
   gap: 8px;
   padding: 12px 16px 12px 14px;
-  background: #f5f5f5;
-  border: 1px solid #e8e8e8;
+  background: var(--theme-surface-muted);
+  border: 1px solid var(--theme-border);
   border-radius: 8px;
   font-family: inherit;
   font-size: 0.95rem;
   font-weight: 500;
-  color: #333;
+  color: var(--theme-text-secondary);
   cursor: pointer;
   text-decoration: none;
   transition: all 0.15s ease;
 }
 
 .app-detail-action-btn:hover {
-  background: #eee;
-  border-color: #ddd;
+  background: var(--theme-surface-muted);
+  border-color: var(--theme-border-strong);
 }
 
 .app-detail-action-btn--start {
-  background: #f0fdf4;
-  border-color: #bbf7d0;
-  color: #16a34a;
+  background: var(--theme-success-bg);
+  border-color: var(--theme-success-border);
+  color: var(--theme-success);
 }
 
 .app-detail-action-btn--start:hover:not(:disabled) {
-  background: #dcfce7;
-  border-color: #86efac;
+  background: var(--theme-success-bg);
+  border-color: var(--theme-success-border);
 }
 
 .app-detail-action-btn--stop {
-  background: #fefce8;
-  border-color: #fef08a;
-  color: #ca8a04;
+  background: var(--theme-warning-bg);
+  border-color: var(--theme-warning-border);
+  color: var(--theme-warning);
 }
 
 .app-detail-action-btn--stop:hover:not(:disabled) {
-  background: #fef9c3;
-  border-color: #fde047;
+  background: var(--theme-warning-bg);
+  border-color: var(--theme-warning-border);
 }
 
 .app-detail-action-btn:disabled {
@@ -6780,14 +6589,14 @@ export default {
 }
 
 .app-detail-action-btn--danger {
-  background: #fff5f5;
-  border-color: #ffcdd2;
-  color: #dc3545;
+  background: var(--theme-danger-bg);
+  border-color: var(--theme-danger-border);
+  color: var(--theme-danger);
 }
 
 .app-detail-action-btn--danger:hover {
-  background: #ffebee;
-  border-color: #ef9a9a;
+  background: var(--theme-danger-bg);
+  border-color: var(--theme-danger-border);
 }
 
 .app-detail-action-btn--danger svg {
@@ -6797,8 +6606,8 @@ export default {
 
 /* Danger Zone */
 .app-detail-danger-zone {
-  background: #fffbfb;
-  border: 1px solid #fee2e2;
+  background: var(--theme-danger-bg);
+  border: 1px solid var(--theme-danger-border);
   border-radius: 12px;
   padding: 20px;
   margin-top: 32px;
@@ -6818,13 +6627,13 @@ export default {
 }
 
 .app-detail-section-title--danger {
-  color: #dc3545;
+  color: var(--theme-danger);
 }
 
 .app-detail-danger-content {
   margin-top: 0;
-  background: #fffbfb;
-  border: 1px solid #fee2e2;
+  background: var(--theme-danger-bg);
+  border: 1px solid var(--theme-danger-border);
   border-radius: 8px;
   padding: 20px;
 }
@@ -6846,36 +6655,13 @@ export default {
 .app-detail-danger-title {
   font-size: clamp(1rem, 2vw, 1.05rem);
   font-weight: 600;
-  color: #333;
+  color: var(--theme-text-secondary);
 }
 
 .app-detail-danger-description {
   font-size: clamp(1rem, 2vw, 1.05rem);
-  color: #666;
+  color: var(--theme-text-muted);
   line-height: 1.4;
-}
-
-/* Responsive adjustments */
-@media (max-width: 900px) {
-  .app-detail-layout {
-    grid-template-columns: 1fr;
-    gap: 24px;
-  }
-
-  .app-detail-sidebar {
-    position: static;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 24px;
-    padding-top: 24px;
-    border-top: 1px solid #f0f0f0;
-  }
-
-  .sidebar-section {
-    border-bottom: none;
-    padding-bottom: 0;
-    margin-bottom: 0;
-  }
 }
 
 @media (max-width: 768px) {
@@ -6883,18 +6669,21 @@ export default {
     flex-wrap: wrap;
   }
 
-  .app-detail-grid {
-    grid-template-columns: 1fr;
+  .deployment-details-panel {
+    padding: 22px 20px;
   }
 
-  .app-detail-item--span2 {
+  .deployment-details-grid {
+    grid-template-columns: 1fr;
+    row-gap: 22px;
+  }
+
+  .deployment-detail-item--span2 {
     grid-column: auto;
   }
-}
 
-@media (max-width: 600px) {
-  .app-detail-sidebar {
-    grid-template-columns: 1fr;
+  .deployment-details-divider {
+    margin: 24px 0;
   }
 }
 
@@ -6904,23 +6693,23 @@ export default {
   align-items: center;
   gap: 12px;
   padding: 12px 16px;
-  background: #fef3c7;
-  border: 1px solid #f59e0b;
+  background: var(--theme-warning-bg);
+  border: 1px solid var(--theme-warning-border);
   border-radius: 8px;
   margin-bottom: 20px;
-  color: #92400e;
+  color: var(--theme-warning);
   font-size: 14px;
 }
 
 .security-warning-banner svg {
   flex-shrink: 0;
-  color: #f59e0b;
+  color: var(--theme-warning);
 }
 
 .security-warning-link {
   background: none;
   border: none;
-  color: #d97706;
+  color: var(--theme-warning);
   text-decoration: underline;
   cursor: pointer;
   font-size: inherit;
@@ -6928,7 +6717,7 @@ export default {
 }
 
 .security-warning-link:hover {
-  color: #b45309;
+  color: var(--theme-warning);
 }
 
 /* Security Settings */
@@ -6945,8 +6734,8 @@ export default {
   align-items: flex-start;
   gap: 24px;
   padding: 20px;
-  background: #f9fafb;
-  border: 1px solid #e5e7eb;
+  background: var(--theme-surface-subtle);
+  border: 1px solid var(--theme-border);
   border-radius: 8px;
 }
 
@@ -6969,9 +6758,9 @@ export default {
 .passkey-flow-card {
   margin-bottom: 0;
   padding: 16px 18px;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--theme-border);
   border-radius: 12px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  background: linear-gradient(180deg, var(--theme-surface) 0%, var(--theme-surface-subtle) 100%);
 }
 
 .passkey-flow-steps {
@@ -6986,19 +6775,19 @@ export default {
   gap: 12px;
   padding: 12px 14px;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.75);
+  background: var(--theme-surface-translucent);
   border: 1px solid transparent;
 }
 
 .passkey-flow-step--active {
-  border-color: #111827;
-  background: #ffffff;
+  border-color: var(--theme-text-primary);
+  background: var(--theme-surface);
   box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
 }
 
 .passkey-flow-step--done {
-  border-color: #bbf7d0;
-  background: #f0fdf4;
+  border-color: var(--theme-success-border);
+  background: var(--theme-success-bg);
 }
 
 .passkey-flow-step-number {
@@ -7008,20 +6797,20 @@ export default {
   width: 26px;
   height: 26px;
   border-radius: 999px;
-  background: #e5e7eb;
-  color: #111827;
+  background: var(--theme-surface-muted);
+  color: var(--theme-text-primary);
   font-size: 13px;
   font-weight: 700;
   flex-shrink: 0;
 }
 
 .passkey-flow-step--active .passkey-flow-step-number {
-  background: #111827;
+  background: var(--theme-code);
   color: #ffffff;
 }
 
 .passkey-flow-step--done .passkey-flow-step-number {
-  background: #16a34a;
+  background: var(--theme-success-strong);
   color: #ffffff;
 }
 
@@ -7030,18 +6819,18 @@ export default {
   flex-direction: column;
   gap: 3px;
   font-size: 13px;
-  color: #4b5563;
+  color: var(--theme-text-secondary);
 }
 
 .passkey-flow-step-copy strong {
-  color: #111827;
+  color: var(--theme-text-primary);
   font-size: 14px;
 }
 
 .passkey-flow-message {
   margin: 12px 0 0;
   font-size: 13px;
-  color: #4b5563;
+  color: var(--theme-text-secondary);
 }
 
 .passkey-list {
@@ -7065,8 +6854,8 @@ export default {
   align-items: flex-start;
   gap: 20px;
   padding: 18px 20px;
-  background: #f9fafb;
-  border: 1px solid #e5e7eb;
+  background: var(--theme-surface-subtle);
+  border: 1px solid var(--theme-border);
   border-radius: 10px;
 }
 
@@ -7085,7 +6874,7 @@ export default {
 .passkey-title {
   font-size: 15px;
   font-weight: 600;
-  color: #111827;
+  color: var(--theme-text-primary);
 }
 
 .passkey-badges {
@@ -7098,16 +6887,16 @@ export default {
 .passkey-badge {
   padding: 4px 10px;
   border-radius: 999px;
-  background: #e5e7eb;
-  color: #374151;
+  background: var(--theme-surface-muted);
+  color: var(--theme-text-secondary);
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
 }
 
 .passkey-badge--current {
-  background: #dcfce7;
-  color: #166534;
+  background: var(--theme-success-bg);
+  color: var(--theme-success);
 }
 
 .passkey-meta {
@@ -7116,7 +6905,7 @@ export default {
   gap: 12px;
   margin-top: 12px;
   font-size: 13px;
-  color: #6b7280;
+  color: var(--theme-text-muted);
 }
 
 @media (max-width: 700px) {
@@ -7140,7 +6929,7 @@ export default {
   justify-content: space-between;
   align-items: center;
   padding: 1.5rem;
-  background: #f8f9fa;
+  background: var(--theme-surface-subtle);
   border-radius: 8px;
   margin-bottom: 2rem;
 }
@@ -7153,7 +6942,7 @@ export default {
 
 .billing-period-label {
   font-size: 0.75rem;
-  color: #6b7280;
+  color: var(--theme-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -7161,7 +6950,7 @@ export default {
 .billing-period-dates {
   font-size: 1rem;
   font-weight: 500;
-  color: #1f2937;
+  color: var(--theme-text-primary);
 }
 
 .billing-total {
@@ -7173,7 +6962,7 @@ export default {
 
 .billing-total-label {
   font-size: 0.75rem;
-  color: #6b7280;
+  color: var(--theme-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -7181,11 +6970,11 @@ export default {
 .billing-total-amount {
   font-size: 1.75rem;
   font-weight: 600;
-  color: #1f2937;
+  color: var(--theme-text-primary);
 }
 
 .billing-total-amount.billing-projected {
-  color: #6b7280;
+  color: var(--theme-text-muted);
 }
 
 .billing-section {
@@ -7195,7 +6984,7 @@ export default {
 .billing-section-title {
   font-size: 1rem;
   font-weight: 600;
-  color: #1f2937;
+  color: var(--theme-text-primary);
   margin-bottom: 1rem;
 }
 
@@ -7211,7 +7000,7 @@ export default {
 }
 
 .billing-table {
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--theme-border);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -7220,11 +7009,11 @@ export default {
   display: grid;
   grid-template-columns: 2fr 1fr 1fr 1fr;
   padding: 0.75rem 1rem;
-  background: #f9fafb;
-  border-bottom: 1px solid #e5e7eb;
+  background: var(--theme-surface-subtle);
+  border-bottom: 1px solid var(--theme-border);
   font-size: 0.75rem;
   font-weight: 600;
-  color: #6b7280;
+  color: var(--theme-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -7233,7 +7022,7 @@ export default {
   display: grid;
   grid-template-columns: 2fr 1fr 1fr 1fr;
   padding: 1rem;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid var(--theme-border);
   align-items: center;
 }
 
@@ -7249,19 +7038,19 @@ export default {
 
 .billing-resource-name {
   font-weight: 500;
-  color: #1f2937;
+  color: var(--theme-text-primary);
 }
 
 .billing-resource-type {
   font-size: 0.75rem;
-  color: #6b7280;
+  color: var(--theme-text-muted);
 }
 
 .billing-col-usage,
 .billing-col-rate,
 .billing-col-cost {
   font-size: 0.875rem;
-  color: #374151;
+  color: var(--theme-text-secondary);
 }
 
 .billing-col-cost {
@@ -7270,7 +7059,7 @@ export default {
 
 .billing-info {
   padding: 1.5rem;
-  background: #f8f9fa;
+  background: var(--theme-surface-subtle);
   border-radius: 8px;
 }
 
@@ -7284,25 +7073,25 @@ export default {
   display: flex;
   justify-content: space-between;
   padding: 0.75rem;
-  background: white;
+  background: var(--theme-surface);
   border-radius: 6px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--theme-border);
 }
 
 .billing-pricing-resource {
   font-size: 0.875rem;
-  color: #374151;
+  color: var(--theme-text-secondary);
 }
 
 .billing-pricing-rate {
   font-size: 0.875rem;
   font-weight: 500;
-  color: #1f2937;
+  color: var(--theme-text-primary);
 }
 
 .billing-pricing-note {
   font-size: 0.875rem;
-  color: #6b7280;
+  color: var(--theme-text-muted);
   margin-bottom: 1rem;
 }
 
@@ -7318,16 +7107,16 @@ export default {
   align-items: center;
   justify-content: space-between;
   padding: 1rem;
-  background: white;
-  border: 1px solid #e5e7eb;
+  background: var(--theme-surface);
+  border: 1px solid var(--theme-border);
   border-radius: 8px;
 }
 
 .payment-method-badge {
   font-size: 0.75rem;
   font-weight: 500;
-  color: #059669;
-  background: #ecfdf5;
+  color: var(--theme-success);
+  background: var(--theme-success-bg);
   padding: 0.125rem 0.5rem;
   border-radius: 9999px;
 }
@@ -7339,11 +7128,11 @@ export default {
 }
 
 .btn-danger-text {
-  color: #dc2626;
+  color: var(--theme-danger);
 }
 
 .btn-danger-text:hover {
-  color: #b91c1c;
+  color: var(--theme-danger);
 }
 
 .security-setting-info {
@@ -7353,14 +7142,14 @@ export default {
 .security-setting-title {
   font-size: 16px;
   font-weight: 600;
-  color: #111827;
+  color: var(--theme-text-primary);
   margin: 0 0 8px 0;
 }
 
 .security-setting-description {
   max-width: 750px;
   font-size: 14px;
-  color: #6b7280;
+  color: var(--theme-text-muted);
   margin: 0;
   line-height: 1.5;
 }
@@ -7390,7 +7179,7 @@ export default {
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: #d1d5db;
+  background-color: var(--theme-surface-muted);
   transition: 0.3s;
   border-radius: 26px;
 }
@@ -7402,14 +7191,14 @@ export default {
   width: 20px;
   left: 3px;
   bottom: 3px;
-  background-color: white;
+  background-color: var(--theme-surface);
   transition: 0.3s;
   border-radius: 50%;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
 .toggle-switch input:checked + .toggle-slider {
-  background-color: #10b981;
+  background-color: var(--theme-success-strong);
 }
 
 .toggle-switch input:checked + .toggle-slider:before {
@@ -7424,7 +7213,7 @@ export default {
 /* Quorum bundle cards */
 .bundle-card {
   padding: 16px 20px;
-  border-bottom: 1px solid #eee;
+  border-bottom: 1px solid var(--theme-border);
 }
 
 .bundle-card:last-child {
@@ -7452,14 +7241,14 @@ export default {
 
 .bundle-label {
   font-size: 0.8rem;
-  color: #666;
+  color: var(--theme-text-muted);
 }
 
 .bundle-hash {
   font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
   font-size: 0.8rem;
-  color: #333;
-  background: #f5f5f5;
+  color: var(--theme-text-secondary);
+  background: var(--theme-surface-muted);
   padding: 2px 6px;
   border-radius: 3px;
 }
@@ -7475,16 +7264,16 @@ export default {
   gap: 4px;
   padding: 4px 10px;
   font-size: 0.8rem;
-  color: #555;
-  background: #fff;
-  border: 1px solid #ccc;
+  color: var(--theme-text-muted);
+  background: var(--theme-surface);
+  border: 1px solid var(--theme-border);
   border-radius: 4px;
   cursor: pointer;
 }
 .btn-download:hover {
-  border-color: #999;
-  color: #333;
-  background: #f8f8f8;
+  border-color: var(--theme-text-faint);
+  color: var(--theme-text-secondary);
+  background: var(--theme-surface-subtle);
 }
 
 .bundle-name-display {
@@ -7502,19 +7291,19 @@ export default {
 .bundle-name-input {
   padding: 4px 8px;
   font-size: 0.9rem;
-  border: 1px solid #ccc;
+  border: 1px solid var(--theme-border);
   border-radius: 4px;
   outline: none;
   width: 200px;
 }
 
 .bundle-name-input:focus {
-  border-color: #666;
+  border-color: var(--theme-text-muted);
 }
 
 .item-meta-id {
   font-size: 0.75rem;
-  color: #999;
+  color: var(--theme-text-faint);
   font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
 }
 
@@ -7523,13 +7312,13 @@ export default {
   border: none;
   cursor: pointer;
   padding: 2px;
-  color: #999;
+  color: var(--theme-text-faint);
   display: flex;
   align-items: center;
 }
 
 .btn-icon:hover {
-  color: #333;
+  color: var(--theme-text-secondary);
 }
 
 .bundle-labels {
@@ -7541,11 +7330,11 @@ export default {
 
 .bundle-label-tag {
   font-size: 0.75rem;
-  background: #f0f0f0;
-  color: #555;
+  background: var(--theme-surface-muted);
+  color: var(--theme-text-muted);
   padding: 2px 8px;
   border-radius: 10px;
-  border: 1px solid #e0e0e0;
+  border: 1px solid var(--theme-border);
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -7555,24 +7344,24 @@ export default {
   background: none;
   border: none;
   cursor: pointer;
-  color: #999;
+  color: var(--theme-text-faint);
   font-size: 0.85rem;
   padding: 0 2px;
   margin-left: 2px;
   line-height: 1;
 }
-.label-remove-btn:hover { color: #dc3545; }
+.label-remove-btn:hover { color: var(--theme-danger); }
 
 .bundle-label-add {
   font-size: 0.75rem;
-  color: #999;
+  color: var(--theme-text-faint);
   background: none;
-  border: 1px dashed #ccc;
+  border: 1px dashed var(--theme-border);
   border-radius: 10px;
   padding: 2px 8px;
   cursor: pointer;
 }
-.bundle-label-add:hover { color: #333; border-color: #999; }
+.bundle-label-add:hover { color: var(--theme-text-secondary); border-color: var(--theme-text-faint); }
 
 .label-add-form {
   display: flex;
@@ -7583,11 +7372,11 @@ export default {
 .label-input {
   padding: 2px 6px;
   font-size: 0.75rem;
-  border: 1px solid #ccc;
+  border: 1px solid var(--theme-border);
   border-radius: 4px;
   width: 80px;
 }
-.label-input:focus { border-color: #666; outline: none; }
+.label-input:focus { border-color: var(--theme-text-muted); outline: none; }
 
 .btn-sm {
   padding: 4px 10px;
@@ -7604,31 +7393,31 @@ export default {
 
 .payment-method-type {
   font-weight: 500;
-  color: #1f2937;
+  color: var(--theme-text-primary);
   text-transform: capitalize;
 }
 
 .payment-method-details {
   font-size: 0.875rem;
-  color: #6b7280;
+  color: var(--theme-text-muted);
 }
 
 .payment-method-empty {
   padding: 1.5rem;
-  background: #f9fafb;
-  border: 1px dashed #d1d5db;
+  background: var(--theme-surface-subtle);
+  border: 1px dashed var(--theme-border);
   border-radius: 8px;
   text-align: center;
 }
 
 .payment-method-empty p {
-  color: #6b7280;
+  color: var(--theme-text-muted);
   margin-bottom: 1rem;
 }
 
 /* Invoice styles */
 .invoices-list {
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--theme-border);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -7638,8 +7427,8 @@ export default {
   align-items: center;
   justify-content: space-between;
   padding: 1rem;
-  border-bottom: 1px solid #e5e7eb;
-  background: white;
+  border-bottom: 1px solid var(--theme-border);
+  background: var(--theme-surface);
 }
 
 .invoice-item:last-child {
@@ -7654,12 +7443,12 @@ export default {
 
 .invoice-number {
   font-weight: 500;
-  color: #1f2937;
+  color: var(--theme-text-primary);
 }
 
 .invoice-date {
   font-size: 0.875rem;
-  color: #6b7280;
+  color: var(--theme-text-muted);
 }
 
 .invoice-amount {
@@ -7677,23 +7466,23 @@ export default {
 }
 
 .invoice-status.status-paid {
-  background: #d1fae5;
-  color: #065f46;
+  background: var(--theme-success-bg);
+  color: var(--theme-success);
 }
 
 .invoice-status.status-pending {
-  background: #fef3c7;
-  color: #92400e;
+  background: var(--theme-warning-bg);
+  color: var(--theme-warning);
 }
 
 .invoice-status.status-overdue {
-  background: #fee2e2;
-  color: #991b1b;
+  background: var(--theme-danger-bg);
+  color: var(--theme-danger);
 }
 
 .invoice-total {
   font-weight: 500;
-  color: #1f2937;
+  color: var(--theme-text-primary);
 }
 
 /* Card form styles */
@@ -7719,45 +7508,45 @@ export default {
   display: block;
   font-size: 0.875rem;
   font-weight: 500;
-  color: #374151;
+  color: var(--theme-text-secondary);
   margin-bottom: 0.5rem;
 }
 
 .card-field {
   height: 42px;
   padding: 0.5rem 0.75rem;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--theme-border);
   border-radius: 6px;
-  background: white;
+  background: var(--theme-surface);
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
 .card-field:focus-within {
-  border-color: #0f0f0f;
-  box-shadow: 0 0 0 3px rgba(15, 15, 15, 0.1);
+  border-color: var(--theme-text-primary);
+  box-shadow: 0 0 0 3px var(--theme-focus-ring);
 }
 
 .card-error {
   padding: 0.75rem;
   margin-bottom: 1rem;
-  background: #fef2f2;
-  border: 1px solid #fecaca;
+  background: var(--theme-danger-bg);
+  border: 1px solid var(--theme-danger-border);
   border-radius: 6px;
-  color: #dc2626;
+  color: var(--theme-danger);
   font-size: 0.875rem;
 }
 
 .card-privacy-notice {
   margin-top: 1rem;
   padding-top: 1rem;
-  border-top: 1px solid #e5e7eb;
+  border-top: 1px solid var(--theme-border);
   font-size: 0.75rem;
-  color: #6b7280;
+  color: var(--theme-text-muted);
   text-align: center;
 }
 
 .card-privacy-notice a {
-  color: #4b5563;
+  color: var(--theme-text-secondary);
   text-decoration: underline;
 }
 
@@ -7772,20 +7561,20 @@ export default {
   align-items: center;
   gap: 0.5rem;
   padding: 0.75rem 1rem;
-  background: #fef3c7;
+  background: var(--theme-warning-bg);
   border-radius: 6px;
   margin-top: 1rem;
 }
 
 .app-estimated-cost-label {
   font-size: 0.875rem;
-  color: #92400e;
+  color: var(--theme-warning);
 }
 
 .app-estimated-cost-value {
   font-size: 0.875rem;
   font-weight: 600;
-  color: #92400e;
+  color: var(--theme-warning);
 }
 
 @media (max-width: 768px) {
@@ -7856,7 +7645,7 @@ export default {
 .account-settings-description {
   margin: 0;
   max-width: 420px;
-  color: var(--color-text-secondary, #666);
+  color: var(--theme-text-muted);
   font-size: clamp(1rem, 2vw, 1.05rem);
   line-height: 1.55;
 }
@@ -7871,22 +7660,22 @@ export default {
   gap: 0.5rem;
   max-width: 100%;
   padding: 12px 18px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--theme-border);
   border-radius: 8px;
-  background: #f9fafb;
+  background: var(--theme-surface-subtle);
 }
 
 .account-id-value {
   min-width: 0;
   overflow-wrap: anywhere;
-  color: #111827;
+  color: var(--theme-text-primary);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
   font-size: 0.95rem;
   line-height: 1.4;
 }
 
 .account-id-value--muted {
-  color: var(--color-text-secondary, #666);
+  color: var(--theme-text-muted);
   font-family: inherit;
 }
 
@@ -7915,16 +7704,16 @@ export default {
   justify-content: space-between;
   gap: 1rem;
   padding: 12px 18px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--theme-border);
   border-radius: 8px;
-  background: #f9fafb;
+  background: var(--theme-surface-subtle);
   color: inherit;
   text-decoration: none;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .legal-settings-row:hover {
-  border-color: #d1d5db;
+  border-color: var(--theme-border-strong);
   box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
 }
 
@@ -7942,7 +7731,7 @@ export default {
 .legal-settings-name {
   font-size: clamp(0.95rem, 2vw, 1rem);
   font-weight: 500;
-  color: #111827;
+  color: var(--theme-text-primary);
 }
 
 .legal-settings-meta {
@@ -7951,7 +7740,7 @@ export default {
   gap: 0.25rem;
   flex-wrap: nowrap;
   font-size: clamp(0.85rem, 2vw, 0.9rem);
-  color: #6b7280;
+  color: var(--theme-text-muted);
   white-space: nowrap;
 }
 
@@ -7963,13 +7752,13 @@ export default {
   width: 1.2rem;
   height: 1.2rem;
   flex-shrink: 0;
-  color: #6b7280;
+  color: var(--theme-text-muted);
   opacity: 0.78;
   transition: color 0.15s ease, opacity 0.15s ease;
 }
 
 .legal-settings-row:hover .legal-settings-link-icon {
-  color: #0f0f0f;
+  color: var(--theme-text-primary);
   opacity: 1;
 }
 
@@ -7980,7 +7769,7 @@ export default {
 
 .email-settings-description {
   margin: 0;
-  color: var(--color-text-secondary, #666);
+  color: var(--theme-text-muted);
   font-size: 0.95rem;
   line-height: 1.55;
 }
@@ -7999,21 +7788,21 @@ export default {
 }
 
 .email-status-pill--neutral {
-  color: #6b7280;
-  background: #f9fafb;
-  border-color: #d1d5db;
+  color: var(--theme-text-muted);
+  background: var(--theme-surface-subtle);
+  border-color: var(--theme-border-strong);
 }
 
 .email-status-pill--warning {
-  color: #7a4f00;
-  background: #fff8e6;
-  border-color: #f5d99a;
+  color: var(--theme-warning);
+  background: var(--theme-warning-bg);
+  border-color: var(--theme-warning-border);
 }
 
 .email-status-pill--success {
-  color: var(--color-success, #2e7d32);
-  background: var(--color-success-bg, #e8f5e9);
-  border-color: #c8e6c9;
+  color: var(--theme-success);
+  background: var(--theme-success-bg);
+  border-color: var(--theme-success-border);
 }
 
 .email-settings-controls {
@@ -8024,7 +7813,7 @@ export default {
 .email-settings-label {
   display: block;
   margin: 0 0 12px 0;
-  color: #1f2937;
+  color: var(--theme-text-primary);
   font-size: 0.95rem;
   font-weight: 600;
   line-height: 1.3;
@@ -8042,10 +7831,10 @@ export default {
   min-width: 0;
   min-height: 54px;
   padding: 0 14px 2px 18px;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--theme-border);
   border-radius: 6px;
-  background: white;
-  color: #1f2937;
+  background: var(--theme-surface);
+  color: var(--theme-text-primary);
   font-family: inherit;
   font-size: 1rem;
   box-sizing: border-box;
@@ -8053,27 +7842,27 @@ export default {
 }
 
 .email-input::placeholder {
-  color: #8a8f98;
+  color: var(--theme-text-faint);
 }
 
 .email-input:focus {
   outline: none;
-  border-color: #0f0f0f;
-  box-shadow: 0 0 0 3px rgba(15, 15, 15, 0.08);
+  border-color: var(--theme-text-primary);
+  box-shadow: 0 0 0 3px var(--theme-focus-ring);
 }
 
 .email-input--readonly {
-  background: #f9fafb;
+  background: var(--theme-surface-subtle);
   cursor: default;
 }
 
 .email-input--readonly:focus {
-  border-color: #d1d5db;
+  border-color: var(--theme-border-strong);
   box-shadow: none;
 }
 
 .email-input:disabled {
-  background: #f5f5f5;
+  background: var(--theme-surface-muted);
   cursor: not-allowed;
 }
 
@@ -8091,7 +7880,7 @@ export default {
 
 .email-settings-helper {
   font-size: 0.85rem;
-  color: #666;
+  color: var(--theme-text-muted);
   margin: 8px 0 0 2px;
   line-height: 1.4;
 }
@@ -8128,8 +7917,8 @@ export default {
 
 /* Prepaid Credits */
 .credits-balance-card {
-  background: #f0fdf4;
-  border: 1px solid #bbf7d0;
+  background: var(--theme-success-bg);
+  border: 1px solid var(--theme-success-border);
   border-radius: 8px;
   padding: 1rem 1.25rem;
 }
@@ -8149,17 +7938,17 @@ export default {
 .credits-balance-amount {
   font-size: 1.5rem;
   font-weight: 700;
-  color: #15803d;
+  color: var(--theme-success);
 }
 
 .credits-balance-label {
   font-size: 0.875rem;
-  color: #4b5563;
+  color: var(--theme-text-secondary);
 }
 
 .credits-hint {
   font-size: 0.8rem;
-  color: #6b7280;
+  color: var(--theme-text-muted);
   margin-top: 0.5rem;
 }
 
@@ -8180,7 +7969,7 @@ export default {
 .redeem-code-input {
   flex: 1;
   padding: 0.4rem 0.6rem;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--theme-border);
   border-radius: 6px;
   font-size: 0.875rem;
   font-family: monospace;
@@ -8189,13 +7978,14 @@ export default {
 
 .redeem-code-input:focus {
   outline: none;
-  border-color: var(--color-primary, #000);
+  border-color: var(--theme-focus);
+  box-shadow: 0 0 0 3px var(--theme-focus-ring);
 }
 
 /* Subscription */
 .subscription-card {
-  background: #f9fafb;
-  border: 1px solid #e5e7eb;
+  background: var(--theme-surface-subtle);
+  border: 1px solid var(--theme-border);
   border-radius: 8px;
   padding: 1rem;
 }
@@ -8210,7 +8000,7 @@ export default {
 .subscription-tier-name {
   font-weight: 600;
   font-size: 1.125rem;
-  color: #111827;
+  color: var(--theme-text-primary);
 }
 
 .subscription-status {
@@ -8222,18 +8012,18 @@ export default {
 }
 
 .subscription-status.status-active {
-  background: #dcfce7;
-  color: #16a34a;
+  background: var(--theme-success-bg);
+  color: var(--theme-success);
 }
 
 .subscription-status.status-past_due {
-  background: #fef3c7;
-  color: #d97706;
+  background: var(--theme-warning-bg);
+  color: var(--theme-warning);
 }
 
 .subscription-status.status-canceled {
-  background: #f3f4f6;
-  color: #6b7280;
+  background: var(--theme-surface-muted);
+  color: var(--theme-text-muted);
 }
 
 .subscription-details {
@@ -8251,20 +8041,20 @@ export default {
 
 .subscription-detail-label {
   font-size: 0.75rem;
-  color: #6b7280;
+  color: var(--theme-text-muted);
 }
 
 .subscription-detail-value {
   font-size: 0.875rem;
-  color: #111827;
+  color: var(--theme-text-primary);
   font-weight: 500;
 }
 
 .subscription-cancel-notice {
   font-size: 0.8125rem;
-  color: #d97706;
-  background: #fffbeb;
-  border: 1px solid #fef3c7;
+  color: var(--theme-warning);
+  background: var(--theme-warning-bg);
+  border: 1px solid var(--theme-warning-border);
   border-radius: 4px;
   padding: 0.5rem;
   margin-bottom: 0.75rem;
@@ -8276,7 +8066,7 @@ export default {
 }
 
 .subscription-empty {
-  color: #6b7280;
+  color: var(--theme-text-muted);
   font-size: 0.875rem;
 }
 
@@ -8296,78 +8086,100 @@ export default {
   flex-direction: column;
   gap: 0.375rem;
   padding: 1rem;
-  border: 2px solid #e5e7eb;
+  border: 2px solid var(--theme-border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--theme-surface);
   cursor: pointer;
   transition: border-color 0.15s;
   text-align: left;
 }
 
 .tier-card:hover {
-  border-color: #9ca3af;
+  border-color: var(--theme-border-strong);
 }
 
 .tier-card--selected {
-  border-color: #111827;
-  background: #f9fafb;
+  border-color: var(--theme-text-primary);
+  background: var(--theme-surface-subtle);
 }
 
 .tier-card-name {
   font-weight: 600;
   font-size: 0.9375rem;
-  color: #111827;
+  color: var(--theme-text-primary);
 }
 
 .tier-card-price {
   font-weight: 700;
   font-size: 1.125rem;
-  color: #111827;
+  color: var(--theme-text-primary);
 }
 
 .tier-card-period {
   font-weight: 400;
   font-size: 0.8125rem;
-  color: #6b7280;
+  color: var(--theme-text-muted);
 }
 
 .tier-card-limits {
   font-size: 0.8125rem;
-  color: #6b7280;
+  color: var(--theme-text-muted);
 }
 
 /* Builder size selector */
 .builder-size-options {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.75rem;
+  margin-top: 1rem;
 }
 .builder-size-btn {
-  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 0.25rem;
   padding: 0.75rem 1rem;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--theme-border);
   border-radius: 0.5rem;
-  background: #fff;
+  background: var(--theme-surface);
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
 }
 .builder-size-btn:hover {
-  border-color: #9ca3af;
+  border-color: var(--theme-border-strong);
 }
 .builder-size-btn--active {
-  border-color: #111827;
-  background: #f9fafb;
+  border-color: var(--theme-text-primary);
+  background: var(--theme-surface-subtle);
 }
 .builder-size-label {
   font-weight: 600;
   font-size: 0.875rem;
-  color: #111827;
+  color: var(--theme-text-primary);
 }
 .builder-size-specs {
   font-size: 0.75rem;
-  color: #6b7280;
+  color: var(--theme-text-muted);
+}
+
+.app-detail-dns-target {
+  min-width: 0;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+.app-detail-dns-helper {
+  max-width: 34rem;
+  margin-top: 4px;
+  font-size: 0.95rem;
+  line-height: 1.45;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .builder-size-options {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

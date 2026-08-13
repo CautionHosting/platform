@@ -63,6 +63,39 @@ Start the platform services:
 make up
 ```
 
+#### Frontend development
+
+For the normal frontend development server:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000`. This remains authentication-gated and proxies API,
+authentication, health, and build-input requests to `VITE_PROXY_TARGET` (default
+`http://localhost:8000`), so the platform stack must be running for a real login.
+
+To inspect the populated dashboard without creating an account:
+
+```bash
+npm run dev:dashboard
+```
+
+This command binds to `127.0.0.1` and enables a Vite-server-only, read-only fixture.
+The page displays a preview banner, state-changing requests return `405`, and unknown
+API or authentication requests return `404` instead of reaching a backend. It does
+not add a frontend authentication bypass, cookie, test account, gateway route, or
+production behavior. A production build always disables preview mode.
+The provider-neutral app detail fixture covers complete and sparse deployment states;
+provider-specific identifiers are intentionally not shown.
+
+The fixture is UI evidence only. For an authenticated smoke test, use a Linux/x86_64
+host, run `npm run build`, rebuild the gateway image (which bakes in the frontend),
+start the real stack with `make up`, generate an access code with
+`bash utils/generate-beta-codes.sh 1`, and register at `http://localhost:8000`.
+
 ### 3. Deploy an app
 
 1. Register using Passkey (via terminal or web browser):
@@ -126,7 +159,7 @@ network {
 }
 ```
 
-Create a CNAME for this subdomain pointing to the app's `DNS target` shown by
+Point the subdomain's CNAME record at the app's `DNS target` shown by
 the CLI or dashboard. Zone-apex domains are not supported. The HTTP port must have
 an ingress rule, and outbound egress is required for Let's Encrypt. Disable any
 CDN or proxy TLS termination. Caddy publishes the verified leaf certificate
@@ -168,6 +201,13 @@ Use the public `/verify` page to authenticate fresh nonce-bound Nitro evidence
 and inspect its PCR0, PCR1, and PCR2 values without an account. Browser targets
 must use an HTTPS domain, and their `/attestation` endpoint must permit
 cross-origin POST requests. HTTP and raw-IP endpoints require the CLI.
+
+Every first-party frontend route uses the light theme by default and provides a
+header control for dark mode. An explicit choice is stored as `caution-theme` in
+browser `localStorage`, applies before first paint, and synchronizes across routes,
+reloads, and other open tabs. Missing, invalid, or unavailable storage falls back
+to light. The preference is browser-local; it is not inferred from the operating
+system, stored in a cookie, or synchronized with an account.
 
 The browser does not authenticate the sibling response manifest, reproduce the
 application source, establish a STEVE encrypted session, or automatically

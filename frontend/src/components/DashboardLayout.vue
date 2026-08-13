@@ -64,6 +64,7 @@
       </button>
       <h2 v-if="showTitle" class="page-title">{{ title }}</h2>
       <div class="header-actions">
+        <ThemeToggle />
         <button
           :class="['header-action-button', { active: activeTab === 'account' }]"
           :aria-current="activeTab === 'account' ? 'page' : undefined"
@@ -397,11 +398,13 @@ import {
   dismissDevelopmentBannerForSession,
   isDevelopmentBannerDismissed,
 } from "../utils/developmentBanner.js";
+import ThemeToggle from "./ThemeToggle.vue";
 
 const TOOL_ORDER = ["platform", "enclaveos", "bootproof", "steve", "locksmith"];
 
 export default {
   name: "DashboardLayout",
+  components: { ThemeToggle },
   props: {
     title: {
       type: String,

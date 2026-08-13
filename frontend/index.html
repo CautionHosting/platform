@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -16,8 +16,8 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline' https://cdn.paddle.com https://*.paddle.com https://public.profitwell.com https://*.profitwell.com; style-src 'self' 'unsafe-inline' https://cdn.paddle.com; frame-src 'self' https://*.paddle.com https://sandbox-checkout.paddle.com https://checkout.paddle.com; connect-src 'self' https:; img-src 'self' data: https://*.paddle.com https://public.profitwell.com https://*.profitwell.com;">
 
     <!-- Theme color for mobile browsers -->
-    <meta name="theme-color" content="#0f0f0f">
-    <meta name="msapplication-TileColor" content="#0f0f0f">
+    <meta name="theme-color" content="#e8f4fc">
+    <meta name="msapplication-TileColor" content="#e8f4fc">
 
     <!-- Search engine directives -->
     <meta name="robots" content="noindex, nofollow">
@@ -38,6 +38,29 @@
     <meta name="twitter:description" content="Create a Caution account with an access code and passkey.">
     <meta name="twitter:image" content="https://dashboard.caution.co/thumbnail.png">
     <meta name="twitter:image:alt" content="Caution dashboard preview">
+
+    <script>
+      (() => {
+        const key = 'caution-theme'
+        const storedTheme = (() => {
+          try {
+            return window.localStorage.getItem(key)
+          } catch {
+            return null
+          }
+        })()
+        const theme = storedTheme === 'dark' || storedTheme === 'light' ? storedTheme : 'light'
+        const color = theme === 'dark' ? '#090d12' : '#e8f4fc'
+        document.documentElement.dataset.theme = theme
+        document.documentElement.style.colorScheme = theme
+        for (const selector of ['meta[name="theme-color"]', 'meta[name="msapplication-TileColor"]']) {
+          const element = document.querySelector(selector)
+          if (element) {
+            element.setAttribute('content', color)
+          }
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="app"></div>
