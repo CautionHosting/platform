@@ -4,6 +4,7 @@
 export const THEME_STORAGE_KEY = 'caution-theme'
 export const THEME_CHANGE_EVENT = 'caution:theme-change'
 export const DEFAULT_THEME = 'light'
+export const SYSTEM_THEME_QUERY = '(prefers-color-scheme: dark)'
 export const THEME_META_COLORS = {
   light: '#e8f4fc',
   dark: '#090d12',
@@ -11,10 +12,21 @@ export const THEME_META_COLORS = {
 
 const VALID_THEMES = new Set(['light', 'dark'])
 let storageListenerWindow = null
+let systemListenerWindow = null
 
-export const resolveTheme = (storedTheme) => {
+export const resolveTheme = (storedTheme, systemTheme = DEFAULT_THEME) => {
   if (VALID_THEMES.has(storedTheme)) return storedTheme
+  if (VALID_THEMES.has(systemTheme)) return systemTheme
   return DEFAULT_THEME
+}
+
+export const getSystemTheme = (windowRef = window) => {
+  try {
+    if (typeof windowRef.matchMedia !== 'function') return DEFAULT_THEME
+    return windowRef.matchMedia(SYSTEM_THEME_QUERY).matches ? 'dark' : 'light'
+  } catch {
+    return DEFAULT_THEME
+  }
 }
 
 export const readStoredTheme = (windowRef = window) => {
@@ -76,11 +88,45 @@ export const handleStorageChange = (event, { windowRef = window, documentRef = d
       return
     }
   }
-  applyTheme(resolveTheme(event.newValue), { source: 'storage', windowRef, documentRef })
+  applyTheme(resolveTheme(event.newValue, getSystemTheme(windowRef)), {
+    source: 'storage',
+    windowRef,
+    documentRef,
+  })
+}
+
+export const handleSystemThemeChange = (
+  event,
+  { windowRef = window, documentRef = document } = {},
+) => {
+  if (VALID_THEMES.has(readStoredTheme(windowRef))) return
+  applyTheme(event.matches ? 'dark' : 'light', { source: 'system', windowRef, documentRef })
+}
+
+const listenForSystemThemeChanges = (windowRef, documentRef) => {
+  if (systemListenerWindow === windowRef) return
+
+  let mediaQuery
+  try {
+    if (typeof windowRef.matchMedia !== 'function') return
+    mediaQuery = windowRef.matchMedia(SYSTEM_THEME_QUERY)
+  } catch {
+    return
+  }
+
+  const listener = (event) => handleSystemThemeChange(event, { windowRef, documentRef })
+  if (typeof mediaQuery.addEventListener === 'function') {
+    mediaQuery.addEventListener('change', listener)
+  } else if (typeof mediaQuery.addListener === 'function') {
+    mediaQuery.addListener(listener)
+  } else {
+    return
+  }
+  systemListenerWindow = windowRef
 }
 
 export const initializeTheme = ({ windowRef = window, documentRef = document } = {}) => {
-  const theme = applyTheme(resolveTheme(readStoredTheme(windowRef)), {
+  const theme = applyTheme(resolveTheme(readStoredTheme(windowRef), getSystemTheme(windowRef)), {
     emit: false,
     windowRef,
     documentRef,
@@ -90,6 +136,7 @@ export const initializeTheme = ({ windowRef = window, documentRef = document } =
     windowRef.addEventListener('storage', (event) => handleStorageChange(event, { windowRef, documentRef }))
     storageListenerWindow = windowRef
   }
+  listenForSystemThemeChanges(windowRef, documentRef)
 
   return theme
 }

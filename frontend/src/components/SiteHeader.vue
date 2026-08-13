@@ -109,7 +109,6 @@
       </nav>
 
       <div class="nav-mobile-tools">
-        <ThemeToggle />
         <button
           class="mobile-menu-button"
           @click="$emit('toggle-menu')"
@@ -122,6 +121,7 @@
             <span class="hamburger-line"></span>
           </span>
         </button>
+        <ThemeToggle />
       </div>
     </div>
 

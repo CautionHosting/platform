@@ -205,12 +205,13 @@ and inspect its PCR0, PCR1, and PCR2 values without an account. Browser targets
 must use an HTTPS domain, and their `/attestation` endpoint must permit
 cross-origin POST requests. HTTP and raw-IP endpoints require the CLI.
 
-Every first-party frontend route uses the light theme by default and provides a
-header control for dark mode. An explicit choice is stored as `caution-theme` in
-browser `localStorage`, applies before first paint, and synchronizes across routes,
-reloads, and other open tabs. Missing, invalid, or unavailable storage falls back
-to light. The preference is browser-local; it is not inferred from the operating
-system, stored in a cookie, or synchronized with an account.
+Every first-party frontend route follows the operating-system light or dark
+preference by default and provides a header control for an explicit override. A
+choice is stored as `caution-theme` in browser `localStorage`, applies before first
+paint, and synchronizes across routes, reloads, and other open tabs. Without a
+valid stored choice, the theme follows operating-system changes and falls back to
+light when the system preference is unavailable. The preference is browser-local;
+it is not stored in a cookie or synchronized with an account.
 
 The browser does not authenticate the sibling response manifest, reproduce the
 application source, establish a STEVE encrypted session, or automatically

@@ -20,8 +20,14 @@ class CustomEventStub {
   }
 }
 
-const createEnvironment = ({ storedTheme = null, storageThrows = false } = {}) => {
+const createEnvironment = ({
+  storedTheme = null,
+  storageThrows = false,
+  systemDark = false,
+  matchMediaUnavailable = false,
+} = {}) => {
   const listeners = new Map()
+  const mediaListeners = []
   const metaElements = new Map([
     ['meta[name="theme-color"]', { content: '', setAttribute(name, value) { this[name] = value } }],
     ['meta[name="msapplication-TileColor"]', { content: '', setAttribute(name, value) { this[name] = value } }],
@@ -59,6 +65,15 @@ const createEnvironment = ({ storedTheme = null, storageThrows = false } = {}) =
       }
     },
   }
+  const mediaQuery = {
+    matches: systemDark,
+    addEventListener(type, listener) {
+      if (type === 'change') mediaListeners.push(listener)
+    },
+  }
+  if (!matchMediaUnavailable) {
+    windowRef.matchMedia = () => mediaQuery
+  }
 
   const documentRef = {
     documentElement: {
@@ -72,7 +87,12 @@ const createEnvironment = ({ storedTheme = null, storageThrows = false } = {}) =
 
   globalThis.CustomEvent = CustomEventStub
 
-  return { documentRef, metaElements, storage, windowRef }
+  const setSystemDark = (matches) => {
+    mediaQuery.matches = matches
+    for (const listener of mediaListeners) listener({ matches })
+  }
+
+  return { documentRef, metaElements, setSystemDark, storage, windowRef }
 }
 
 test('stored valid theme is restored', () => {
@@ -80,13 +100,32 @@ test('stored valid theme is restored', () => {
   assert.equal(resolveTheme('dark'), 'dark')
 })
 
-test('light is the default without a valid stored theme', () => {
+test('system theme is the default without a valid stored theme', () => {
   assert.equal(resolveTheme(null), 'light')
-  assert.equal(resolveTheme('invalid'), 'light')
+  assert.equal(resolveTheme(null, 'dark'), 'dark')
+  assert.equal(resolveTheme('invalid', 'dark'), 'dark')
 })
 
-test('initializeTheme falls back to light when storage is unavailable', () => {
-  const { documentRef, windowRef } = createEnvironment({ storageThrows: true })
+test('initializeTheme follows the system when storage is unavailable', () => {
+  const { documentRef, windowRef } = createEnvironment({ storageThrows: true, systemDark: true })
+
+  const theme = initializeTheme({ windowRef, documentRef })
+
+  assert.equal(theme, 'dark')
+  assert.equal(documentRef.documentElement.dataset.theme, 'dark')
+})
+
+test('initializeTheme ignores an invalid stored value and follows the system', () => {
+  const { documentRef, windowRef } = createEnvironment({ storedTheme: 'invalid', systemDark: true })
+
+  const theme = initializeTheme({ windowRef, documentRef })
+
+  assert.equal(theme, 'dark')
+  assert.equal(documentRef.documentElement.dataset.theme, 'dark')
+})
+
+test('initializeTheme falls back to light when matchMedia is unavailable', () => {
+  const { documentRef, windowRef } = createEnvironment({ matchMediaUnavailable: true })
 
   const theme = initializeTheme({ windowRef, documentRef })
 
@@ -105,8 +144,8 @@ test('initializeTheme applies the stored theme before mount state', () => {
   assert.equal(metaElements.get('meta[name="theme-color"]').content, THEME_META_COLORS.dark)
 })
 
-test('toggleTheme persists and emits the selected theme', () => {
-  const { documentRef, storage, windowRef } = createEnvironment({ storedTheme: 'light' })
+test('toggleTheme persists the opposite of the system-resolved theme and emits it', () => {
+  const { documentRef, storage, windowRef } = createEnvironment({ systemDark: true })
   initializeTheme({ windowRef, documentRef })
 
   let emittedTheme = null
@@ -116,9 +155,9 @@ test('toggleTheme persists and emits the selected theme', () => {
 
   const nextTheme = toggleTheme({ windowRef, documentRef })
 
-  assert.equal(nextTheme, 'dark')
-  assert.equal(storage.get('caution-theme'), 'dark')
-  assert.equal(emittedTheme, 'dark')
+  assert.equal(nextTheme, 'light')
+  assert.equal(storage.get('caution-theme'), 'light')
+  assert.equal(emittedTheme, 'light')
 })
 
 test('applyTheme still works when storage is unavailable', () => {
@@ -143,14 +182,39 @@ test('storage events synchronize theme changes across tabs', () => {
   assert.equal(metaElements.get('meta[name="theme-color"]').content, THEME_META_COLORS.dark)
 })
 
-test('invalid storage event values safely fall back to light', () => {
-  const { documentRef, windowRef } = createEnvironment({ storedTheme: 'dark' })
+test('cleared or invalid storage values return to the system theme', () => {
+  const { documentRef, windowRef } = createEnvironment({ storedTheme: 'light', systemDark: true })
 
   initializeTheme({ windowRef, documentRef })
+  handleStorageChange(
+    { key: 'caution-theme', newValue: null },
+    { windowRef, documentRef },
+  )
+
+  assert.equal(documentRef.documentElement.dataset.theme, 'dark')
+
   handleStorageChange(
     { key: 'caution-theme', newValue: 'bogus' },
     { windowRef, documentRef },
   )
+
+  assert.equal(documentRef.documentElement.dataset.theme, 'dark')
+})
+
+test('system changes update automatic mode', () => {
+  const { documentRef, setSystemDark, windowRef } = createEnvironment()
+
+  initializeTheme({ windowRef, documentRef })
+  setSystemDark(true)
+
+  assert.equal(documentRef.documentElement.dataset.theme, 'dark')
+})
+
+test('system changes do not override an explicit theme', () => {
+  const { documentRef, setSystemDark, windowRef } = createEnvironment({ storedTheme: 'light' })
+
+  initializeTheme({ windowRef, documentRef })
+  setSystemDark(true)
 
   assert.equal(documentRef.documentElement.dataset.theme, 'light')
 })

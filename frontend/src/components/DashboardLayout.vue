@@ -64,7 +64,6 @@
       </button>
       <h2 v-if="showTitle" class="page-title">{{ title }}</h2>
       <div class="header-actions">
-        <ThemeToggle />
         <button
           :class="['header-action-button', { active: activeTab === 'account' }]"
           :aria-current="activeTab === 'account' ? 'page' : undefined"
@@ -108,6 +107,7 @@
           </svg>
           <span>Log out</span>
         </button>
+        <ThemeToggle />
       </div>
     </div>
 
