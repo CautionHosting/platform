@@ -103,6 +103,37 @@ make up
    Long-running builds use protocol-level SSH keepalives so quiet deployment
    phases do not require client-side keepalive configuration.
 
+#### Stable DNS targets and Elastic IP lifecycle
+
+After a successful deployment, the CLI and dashboard show a stable `DNS target`
+such as `<app-id>.apps.caution.sh`. Caution owns an A record for that target and
+updates it to the deployment's current Elastic IP. To use a customer subdomain,
+create a CNAME at its DNS provider:
+
+```dns
+app.example.com. CNAME <app-id>.apps.caution.sh.
+```
+
+The CNAME is a DNS alias, not an HTTP redirect. Caution does not create or
+delete customer-owned CNAME records. The application must still be configured
+for `app.example.com` when its HTTP or TLS routing depends on that hostname.
+Zone-apex domains generally cannot use a CNAME and are not supported.
+
+A normal successful app destroy releases its Elastic IP. Before attempting
+provider teardown, Caution deletes the managed A record, waits for Route53 to
+report `INSYNC`, and drains its 60-second TTL. If DNS withdrawal cannot be
+proved, destruction stops and retains the IP. If provider teardown then fails,
+the normal destroy also reports failure and retains its state for retry;
+`caution apps destroy --force` can instead mark the app destroyed without
+proving that every provider resource was removed, so operators must reconcile
+possible leftovers. Redeploying the same app ID may allocate a different IP,
+but it reuses the same `DNS target`; Caution publishes that target to the new
+IP, so the customer CNAME does not need to change. Suspending an app is
+different from destroying it: resumption reattaches the Elastic IP retained for
+that app. After permanent destruction, the customer-owned CNAME remains in its
+DNS provider and becomes dangling until the customer removes it or points it at
+another target.
+
 #### Enclave-terminated HTTPS (TLS mode, implemented by Caddy)
 
 To terminate standard HTTPS inside the enclave without changing clients, select
@@ -126,10 +157,9 @@ network {
 }
 ```
 
-Create a CNAME for this subdomain pointing to the app's `DNS target` shown by
-the CLI or dashboard. Zone-apex domains are not supported. The HTTP port must have
-an ingress rule, and outbound egress is required for Let's Encrypt. Disable any
-CDN or proxy TLS termination. Caddy publishes the verified leaf certificate
+Create the customer CNAME as described above. The HTTP port must have an ingress
+rule, and outbound egress is required for Let's Encrypt. Disable any CDN or
+proxy TLS termination. Caddy publishes the verified leaf certificate
 SHA-256 fingerprint in authenticated Nitro `user_data`. For a source-backed
 `mode = "tls"` deployment, `caution verify` validates the fresh Nitro evidence
 and expected PCRs, compares that fingerprint with the live WebPKI-validated

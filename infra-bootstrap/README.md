@@ -195,7 +195,17 @@ readiness check publishes the recovered IP.
 
 Existing customers must replace a direct A record with the returned CNAME and
 wait the former A record's TTL once. This is a customer-DNS migration, not a
-per-app AWS administrator action.
+per-app AWS administrator action. The customer CNAME is not an HTTP redirect
+and remains owned by the customer's DNS provider; the platform neither creates
+nor deletes it. Caution manages only the `<app-id>.apps.caution.sh` A record.
+A normal successful app destruction withdraws that managed record, waits for
+Route53 `INSYNC` and the 60-second TTL drain, then releases the Elastic IP. A DNS
+withdrawal failure retains the IP and blocks teardown. A later provider-teardown
+failure is retryable unless a force destroy marks the app destroyed, in which
+case operators must reconcile possible provider leftovers. Redeploying the same
+app ID can receive a new IP while retaining the same managed hostname, so the
+customer CNAME does not need to change. Permanent destruction leaves the
+customer-owned CNAME dangling until the customer removes or repoints it.
 
 To view the credentials after the fact:
 ```bash
