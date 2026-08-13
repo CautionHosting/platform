@@ -361,6 +361,7 @@ async fn build_inputs() -> impl IntoResponse {
     })
 }
 
+#[tracing::instrument(skip_all)]
 pub(crate) fn deployment_health_timeout_secs() -> u64 {
     std::env::var("DEPLOYMENT_HEALTH_TIMEOUT_SECS")
         .ok()
@@ -369,6 +370,7 @@ pub(crate) fn deployment_health_timeout_secs() -> u64 {
         .unwrap_or(DEFAULT_DEPLOYMENT_HEALTH_TIMEOUT_SECS)
 }
 
+#[tracing::instrument(skip_all, err)]
 pub(crate) async fn wait_for_health(public_ip: &str, timeout_secs: u64) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -441,6 +443,7 @@ mod deployment_health_tests {
     }
 }
 
+#[tracing::instrument(skip_all, err)]
 pub(crate) async fn wait_for_attestation_health(
     public_ip: &str,
     timeout_secs: u64,
@@ -498,6 +501,7 @@ pub(crate) async fn wait_for_attestation_health(
     }
 }
 
+#[tracing::instrument(skip_all, err)]
 async fn get_commit_sha(
     app_name: &str,
     branch: &str,
@@ -526,6 +530,7 @@ async fn get_commit_sha(
     Ok(commit_sha)
 }
 
+#[tracing::instrument(skip_all, err)]
 fn select_deploy_commit_sha(
     branch: &str,
     resolved_commit_sha: &str,
@@ -1024,10 +1029,12 @@ async fn create_managed_onprem_resource(
     }
 }
 
+#[tracing::instrument(skip_all)]
 fn milestone(msg: &str) -> bytes::Bytes {
     bytes::Bytes::from(format!("STEP:{}\n", msg))
 }
 
+#[tracing::instrument(skip_all)]
 fn milestone_done(msg: &str) -> bytes::Bytes {
     bytes::Bytes::from(format!("{}\n", msg))
 }
@@ -1036,6 +1043,7 @@ fn milestone_error(msg: &str) -> bytes::Bytes {
     bytes::Bytes::from(format!("error: {}\n", msg))
 }
 
+#[tracing::instrument(skip_all)]
 fn dedicated_builder_failure_message(build_id: Uuid, error: &str) -> String {
     format!("Build {build_id} failed: {error}")
 }
@@ -1114,6 +1122,7 @@ async fn recover_deploy_failure(
     }
 }
 
+#[tracing::instrument(skip_all)]
 async fn restore_pending_deploy_rejection(
     state: &Arc<AppState>,
     org_id: Uuid,
@@ -1167,6 +1176,7 @@ struct ResolvedBuilderTarget {
     cache_app_id: Option<Uuid>,
 }
 
+#[tracing::instrument(skip_all)]
 fn aws_credentials_from_managed_onprem(
     credential: &cloud_credentials::ManagedOnPremCredentialData,
 ) -> deployment::AwsCredentials {
@@ -1177,6 +1187,7 @@ fn aws_credentials_from_managed_onprem(
     }
 }
 
+#[tracing::instrument(skip_all)]
 fn managed_onprem_config_from_credential(
     credential: &cloud_credentials::ManagedOnPremCredentialData,
 ) -> deployment::ManagedOnPremConfig {
@@ -1195,6 +1206,7 @@ fn managed_onprem_config_from_credential(
 
 /// Overlay fields from the HCL `provider {}` block onto a managed on-prem
 /// deployment config. Inline fields take precedence over credential defaults.
+#[tracing::instrument(skip_all)]
 fn merge_provider_into_onprem(
     provider: &config::Provider,
     onprem: &mut deployment::ManagedOnPremConfig,
@@ -1217,6 +1229,7 @@ fn platform_builder_credentials() -> deployment::AwsCredentials {
     }
 }
 
+#[tracing::instrument(skip_all)]
 async fn s3_client_for_credentials(credentials: &deployment::AwsCredentials) -> aws_sdk_s3::Client {
     let creds = aws_sdk_s3::config::Credentials::new(
         &credentials.access_key_id,
@@ -1235,6 +1248,7 @@ async fn s3_client_for_credentials(credentials: &deployment::AwsCredentials) -> 
     aws_sdk_s3::Client::new(&config)
 }
 
+#[tracing::instrument(skip_all)]
 async fn cached_object_exists(s3: &aws_sdk_s3::Client, bucket: &str, key: &str) -> bool {
     match s3.head_object().bucket(bucket).key(key).send().await {
         Ok(_) => true,
@@ -1250,6 +1264,7 @@ async fn cached_object_exists(s3: &aws_sdk_s3::Client, bucket: &str, key: &str) 
     }
 }
 
+#[tracing::instrument(skip_all, err(Debug))]
 async fn resolve_builder_target(
     default_config: &builder::BuilderConfig,
     managed_onprem: Option<&deployment::ManagedOnPremConfig>,
@@ -1531,6 +1546,7 @@ async fn validate_explicit_containerfile_for_deploy(
     Ok(Some(containerfile))
 }
 
+#[tracing::instrument(skip_all, err(Debug))]
 async fn load_build_config_for_deploy(
     git_dir: &str,
     commit_sha: &str,
@@ -1608,6 +1624,7 @@ async fn load_build_config_for_deploy(
     Ok((procfile_content, config_file))
 }
 
+#[tracing::instrument(skip_all, err(Debug))]
 async fn resolve_containerfile_for_deploy(
     git_dir: &str,
     commit_sha: &str,

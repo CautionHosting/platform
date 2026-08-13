@@ -201,6 +201,7 @@ impl ManagedDns {
         }))
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub(crate) async fn publish_resource(
         &self,
         pool: &PgPool,
@@ -414,6 +415,7 @@ impl ManagedDns {
     }
 }
 
+#[tracing::instrument(skip_all)]
 pub(crate) fn managed_hostname(resource_id: Uuid) -> String {
     let suffix = configured_dns_suffix().expect("managed DNS suffix was validated at startup");
     managed_hostname_for_suffix(resource_id, &suffix)

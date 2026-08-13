@@ -7,6 +7,7 @@ use uuid::Uuid;
 /// Upsert a tracked resource row for a compute resource that should accrue
 /// real-time metering. If a stopped row is resumed, reset billing timestamps so
 /// downtime is not charged.
+#[tracing::instrument(skip_all, err)]
 pub async fn upsert_tracked_resource(
     state: &crate::AppState,
     resource_id: &str,

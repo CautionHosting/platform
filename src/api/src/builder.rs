@@ -259,6 +259,7 @@ pub async fn resolve_managed_onprem_builder_config(
 }
 
 /// Compute a cache key from all inputs that affect the EIF output.
+#[tracing::instrument(skip_all)]
 pub fn compute_cache_key(
     commit_sha: &str,
     enclaveos_commit: &str,
@@ -310,6 +311,7 @@ pub fn compute_cache_key(
     format!("{:x}", hasher.finalize())
 }
 
+#[tracing::instrument(skip_all, err)]
 pub fn require_platform_framework_commit(platform_git_sha: Option<&str>) -> Result<String> {
     let commit = platform_git_sha
         .filter(|value| !value.is_empty())
@@ -322,6 +324,7 @@ pub fn require_platform_framework_commit(platform_git_sha: Option<&str>) -> Resu
 }
 
 /// Check if a completed build exists in the cache for this org + cache_key.
+#[tracing::instrument(skip_all, err)]
 pub async fn check_build_cache(
     db: &PgPool,
     org_id: Uuid,
@@ -367,6 +370,7 @@ pub async fn check_build_cache(
 
 /// Archive the source at a given commit and upload to S3 for the builder.
 /// Returns the uploaded artifact metadata.
+#[tracing::instrument(skip_all, err)]
 pub async fn upload_source_archive(
     s3: &aws_sdk_s3::Client,
     bucket: &str,
@@ -505,6 +509,7 @@ async fn ensure_managed_onprem_builder_security_group(
 /// 3. Poll S3 for status updates until completion or timeout
 /// 4. Record results in DB
 /// 5. Terminate builder instance
+#[tracing::instrument(skip_all, err)]
 pub async fn execute_remote_build(
     db: &PgPool,
     ec2: &Ec2Client,

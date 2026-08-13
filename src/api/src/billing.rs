@@ -184,6 +184,7 @@ pub(crate) fn build_credit_packages(
         .collect()
 }
 
+#[tracing::instrument(skip_all, err)]
 pub async fn get_ledger_balance_cents<'e, E>(
     executor: E,
     organization_id: Uuid,
