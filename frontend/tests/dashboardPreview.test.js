@@ -35,10 +35,18 @@ test('dashboard preview serves representative app and builder fixtures', () => {
   assert.equal(apps[1].configuration.memory_mb, undefined)
   assert.equal(apps[1].dns_status, 'publishing')
   assert.equal(Boolean(apps[1].dns_error), true)
+  assert.deepEqual(
+    [...new Set(apps.map((app) => app.state))].sort(),
+    ['failed', 'pending', 'running', 'stopped', 'terminated', 'terminating'],
+  )
 
   const builder = parse(resolveDashboardPreviewRequest('GET', `/api/resources/${apps[0].id}/builder-config`))
   assert.equal(builder.builder_size, 'medium')
   assert.equal(builder.options.length, 3)
+  assert.equal(
+    resolveDashboardPreviewRequest('GET', `/api/resources/${apps.at(-1).id}/builder-config`).status,
+    200,
+  )
 })
 
 test('dashboard preview serves the authenticated account fixture shape', () => {

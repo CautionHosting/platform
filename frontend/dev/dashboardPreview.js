@@ -69,6 +69,54 @@ const previewApps = [
       domain: 'hello.preview.caution.sh',
     },
   },
+  {
+    id: 'app_preview_3',
+    resource_name: 'analytics-bootstrap',
+    state: 'pending',
+    region: 'eu-west-1',
+    public_ip: null,
+    managed_hostname: '',
+    dns_status: 'reserved',
+    git_url: 'git@codeberg.org:caution/preview-analytics.git',
+    created_at: '2026-08-13T07:45:00Z',
+    configuration: { instance_type: 'm5.large' },
+  },
+  {
+    id: 'app_preview_4',
+    resource_name: 'image-processor',
+    state: 'failed',
+    region: 'us-east-1',
+    public_ip: null,
+    managed_hostname: '',
+    dns_status: 'unavailable',
+    git_url: 'git@codeberg.org:caution/preview-image-processor.git',
+    created_at: '2026-08-12T17:20:00Z',
+    configuration: { instance_type: 'c6i.large' },
+  },
+  {
+    id: 'app_preview_5',
+    resource_name: 'reports-service',
+    state: 'terminating',
+    region: 'eu-central-1',
+    public_ip: null,
+    managed_hostname: '',
+    dns_status: 'unavailable',
+    git_url: 'git@codeberg.org:caution/preview-reports.git',
+    created_at: '2026-08-11T11:10:00Z',
+    configuration: { instance_type: 'm5.large' },
+  },
+  {
+    id: 'app_preview_6',
+    resource_name: 'legacy-api',
+    state: 'terminated',
+    region: 'us-west-2',
+    public_ip: null,
+    managed_hostname: '',
+    dns_status: 'unavailable',
+    git_url: 'git@codeberg.org:caution/preview-legacy-api.git',
+    created_at: '2026-08-09T14:30:00Z',
+    configuration: { instance_type: 'm5.large' },
+  },
 ]
 
 const previewBuilderConfig = {
@@ -305,8 +353,9 @@ export const resolveDashboardPreviewRequest = (input, rawUrl) => {
     })
   }
   if (path === '/api/resources') return jsonResponse(200, previewApps)
-  if (path === `/api/resources/${previewApps[0].id}/builder-config`) return jsonResponse(200, previewBuilderConfig)
-  if (path === `/api/resources/${previewApps[1].id}/builder-config`) return jsonResponse(200, previewBuilderConfig)
+  if (previewApps.some((app) => path === `/api/resources/${app.id}/builder-config`)) {
+    return jsonResponse(200, previewBuilderConfig)
+  }
   if (path === '/ssh-keys') return jsonResponse(200, previewSshKeys)
   if (path === '/pgp-keys') return jsonResponse(200, previewPgpKeys)
   if (path === '/api/credentials') return jsonResponse(200, previewCredentials)

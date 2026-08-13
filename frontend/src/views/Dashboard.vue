@@ -305,44 +305,128 @@
               Applications running in secure enclaves.
             </p>
           </div>
-          <div class="apps-search-container">
-            <svg class="apps-search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="11" cy="11" r="8"/>
-              <path d="m21 21-4.34-4.34"/>
-            </svg>
-            <input
-              v-model="appSearchQuery"
-              type="text"
-              class="apps-search-input"
-              placeholder="Search apps..."
-            />
+          <div class="apps-list-controls">
+            <label class="apps-terminated-filter">
+              <input
+                type="checkbox"
+                :checked="hideTerminatedApps"
+                @change="setHideTerminatedApps($event.target.checked)"
+              />
+              <span>Hide terminated ({{ terminatedAppsCount }})</span>
+            </label>
+            <div class="apps-search-container">
+              <svg class="apps-search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="8"/>
+                <path d="m21 21-4.34-4.34"/>
+              </svg>
+              <input
+                v-model="appSearchQuery"
+                type="search"
+                class="apps-search-input"
+                placeholder="Search apps..."
+                aria-label="Search applications"
+              />
+            </div>
           </div>
         </div>
         <div class="apps-table-container">
           <table class="apps-table">
             <thead>
               <tr>
-                <th class="col-name">Name</th>
-                <th class="col-status">Status</th>
-                <th class="col-deployment">
-                  <span class="tooltip-wrapper">
-                    Deployment
-                    <button type="button" class="tooltip-trigger" aria-label="Learn more about deployment types">
-                      <img src="/assets/icons/info.svg" alt="" class="tooltip-icon" />
+                <th class="col-name" :aria-sort="getAppSortAria('name')">
+                  <button
+                    type="button"
+                    class="apps-sort-button"
+                    :aria-label="getAppSortButtonLabel('name', 'Name')"
+                    @click="sortAppsBy('name')"
+                  >
+                    Name
+                    <span class="apps-sort-indicator" :class="{ active: appSortColumn === 'name' }" aria-hidden="true">
+                      {{ getAppSortIndicator('name') }}
+                    </span>
+                  </button>
+                </th>
+                <th class="col-status" :aria-sort="getAppSortAria('status')">
+                  <button
+                    type="button"
+                    class="apps-sort-button"
+                    :aria-label="getAppSortButtonLabel('status', 'Status')"
+                    @click="sortAppsBy('status')"
+                  >
+                    Status
+                    <span class="apps-sort-indicator" :class="{ active: appSortColumn === 'status' }" aria-hidden="true">
+                      {{ getAppSortIndicator('status') }}
+                    </span>
+                  </button>
+                </th>
+                <th class="col-deployment" :aria-sort="getAppSortAria('deployment')">
+                  <span class="apps-table-heading-row">
+                    <button
+                      type="button"
+                      class="apps-sort-button"
+                      :aria-label="getAppSortButtonLabel('deployment', 'Deployment')"
+                      @click="sortAppsBy('deployment')"
+                    >
+                      Deployment
+                      <span class="apps-sort-indicator" :class="{ active: appSortColumn === 'deployment' }" aria-hidden="true">
+                        {{ getAppSortIndicator('deployment') }}
+                      </span>
                     </button>
-                    <span class="tooltip-content" role="tooltip">
-                      <strong>Fully managed:</strong> Workloads execute in Caution‑operated infrastructure. Provisioning, patching, monitoring, and security controls are administered entirely by Caution.<br><br>
-                      <strong>Customer-managed:</strong> Workloads execute within the customer's infrastructure (on-premises or in a cloud account) using customer-owned credentials, while lifecycle management, configuration, and operational control of the service are performed by Caution.
+                    <span class="tooltip-wrapper">
+                      <button type="button" class="tooltip-trigger" aria-label="Learn more about deployment types">
+                        <img src="/assets/icons/info.svg" alt="" class="tooltip-icon" />
+                      </button>
+                      <span class="tooltip-content" role="tooltip">
+                        <strong>Fully managed:</strong> Workloads execute in Caution‑operated infrastructure. Provisioning, patching, monitoring, and security controls are administered entirely by Caution.<br><br>
+                        <strong>Customer-managed:</strong> Workloads execute within the customer's infrastructure (on-premises or in a cloud account) using customer-owned credentials, while lifecycle management, configuration, and operational control of the service are performed by Caution.
+                      </span>
                     </span>
                   </span>
                 </th>
-                <th class="col-region">Region</th>
+                <th class="col-region" :aria-sort="getAppSortAria('region')">
+                  <button
+                    type="button"
+                    class="apps-sort-button"
+                    :aria-label="getAppSortButtonLabel('region', 'Region')"
+                    @click="sortAppsBy('region')"
+                  >
+                    Region
+                    <span class="apps-sort-indicator" :class="{ active: appSortColumn === 'region' }" aria-hidden="true">
+                      {{ getAppSortIndicator('region') }}
+                    </span>
+                  </button>
+                </th>
                 <th class="col-attestation">Attestation</th>
-                <th class="col-created">Created</th>
+                <th class="col-created" :aria-sort="getAppSortAria('created')">
+                  <button
+                    type="button"
+                    class="apps-sort-button"
+                    :aria-label="getAppSortButtonLabel('created', 'Created')"
+                    @click="sortAppsBy('created')"
+                  >
+                    Created
+                    <span class="apps-sort-indicator" :class="{ active: appSortColumn === 'created' }" aria-hidden="true">
+                      {{ getAppSortIndicator('created') }}
+                    </span>
+                  </button>
+                </th>
                 <th class="col-chevron"></th>
               </tr>
             </thead>
             <tbody>
+              <tr v-if="filteredApps.length === 0">
+                <td colspan="7" class="apps-table-empty">
+                  <span>No applications match the current search and filter.</span>
+                  <button
+                    v-if="hideTerminatedApps && !appSearchQuery.trim() && terminatedAppsCount"
+                    type="button"
+                    class="apps-table-empty-action"
+                    @click="setHideTerminatedApps(false)"
+                  >
+                    Show terminated
+                  </button>
+                </td>
+              </tr>
               <tr v-for="app in filteredApps" :key="app.id" class="apps-table-row" @click="openAppDetail(app)">
                 <td class="app-name-cell">
                   <span class="app-name-text">{{ app.resource_name || "Unnamed App" }}</span>
@@ -1972,6 +2056,14 @@ import {
   getDnsGuidance,
   isManaged,
 } from "../utils/appDetails.js";
+import {
+  countTerminatedApps,
+  filterAndSortApps,
+  getAppListPreferencesFromStorageEvent,
+  getNextAppListPreferences,
+  persistAppListPreferences,
+  readAppListPreferences,
+} from "../utils/appList.js";
 import { formatLocalDate, formatLocalTime } from "../utils/dateTime.js";
 import { getCurrentTheme } from "../utils/theme.js";
 
@@ -2087,6 +2179,11 @@ export default {
     const copiedAppId = ref(null);
     const copiedField = ref(null);
     const appSearchQuery = ref('');
+    const appListPreferences = ref(readAppListPreferences());
+    const hideTerminatedApps = computed(() => appListPreferences.value.hideTerminated);
+    const appSortColumn = computed(() => appListPreferences.value.sortColumn);
+    const appSortDirection = computed(() => appListPreferences.value.sortDirection);
+    const terminatedAppsCount = computed(() => countTerminatedApps(apps.value));
     const builderConfig = ref({ builder_size: 'small', options: [] });
     const dnsTooltipRoot = ref(null);
     const dnsTooltipPinned = ref(false);
@@ -2149,23 +2246,45 @@ export default {
       if (!dnsTooltipRoot.value?.contains(event.target)) closeDnsTooltip();
     };
 
-    const filteredApps = computed(() => {
-      if (!appSearchQuery.value.trim()) {
-        return apps.value;
+    const filteredApps = computed(() => filterAndSortApps(
+      apps.value,
+      appSearchQuery.value,
+      appListPreferences.value,
+    ));
+
+    const setAppListPreferences = (preferences) => {
+      appListPreferences.value = persistAppListPreferences(preferences);
+    };
+
+    const setHideTerminatedApps = (hideTerminated) => {
+      setAppListPreferences({ ...appListPreferences.value, hideTerminated });
+    };
+
+    const sortAppsBy = (sortColumn) => {
+      setAppListPreferences(getNextAppListPreferences(appListPreferences.value, sortColumn));
+    };
+
+    const getAppSortAria = (sortColumn) => {
+      if (appSortColumn.value !== sortColumn) return undefined;
+      return appSortDirection.value === 'asc' ? 'ascending' : 'descending';
+    };
+
+    const getAppSortIndicator = (sortColumn) => {
+      if (appSortColumn.value !== sortColumn) return '↕';
+      return appSortDirection.value === 'asc' ? '↑' : '↓';
+    };
+
+    const getAppSortButtonLabel = (sortColumn, label) => {
+      if (appSortColumn.value !== sortColumn) {
+        return `Sort by ${label}, ${sortColumn === 'created' ? 'newest first' : 'ascending'}`;
       }
-      const query = appSearchQuery.value.toLowerCase().trim();
-      return apps.value.filter(app =>
-        app.resource_name?.toLowerCase().includes(query) ||
-        app.id?.toLowerCase().includes(query) ||
-        app.region?.toLowerCase().includes(query) ||
-        app.state?.toLowerCase().includes(query) ||
-        app.public_ip?.toLowerCase().includes(query) ||
-        app.managed_hostname?.toLowerCase().includes(query) ||
-        app.dns_status?.toLowerCase().includes(query) ||
-        app.configuration?.domain?.toLowerCase().includes(query) ||
-        app.configuration?.instance_type?.toLowerCase().includes(query)
-      );
-    });
+      return `Sort by ${label}, ${appSortDirection.value === 'asc' ? 'descending' : 'ascending'}`;
+    };
+
+    const handleAppListStorageChange = (event) => {
+      const preferences = getAppListPreferencesFromStorageEvent(event);
+      if (preferences) appListPreferences.value = preferences;
+    };
 
     const openAppDetail = async (app) => {
       selectedApp.value = app;
@@ -4975,6 +5094,7 @@ export default {
       document.addEventListener("visibilitychange", handleVisibilityChange);
       window.addEventListener("popstate", handleHistoryNavigation);
       window.addEventListener("hashchange", handleHistoryNavigation);
+      window.addEventListener("storage", handleAppListStorageChange);
 
       await Promise.all([
         loadApps(),
@@ -5014,6 +5134,7 @@ export default {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("popstate", handleHistoryNavigation);
       window.removeEventListener("hashchange", handleHistoryNavigation);
+      window.removeEventListener("storage", handleAppListStorageChange);
       stopBalancePolling();
     });
 
@@ -5076,6 +5197,14 @@ export default {
       apps,
       filteredApps,
       appSearchQuery,
+      hideTerminatedApps,
+      terminatedAppsCount,
+      appSortColumn,
+      setHideTerminatedApps,
+      sortAppsBy,
+      getAppSortAria,
+      getAppSortIndicator,
+      getAppSortButtonLabel,
       loadingApps,
       destroyingApp,
       attestationApp,

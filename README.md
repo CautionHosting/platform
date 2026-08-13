@@ -90,6 +90,9 @@ not add a frontend authentication bypass, cookie, test account, gateway route, o
 production behavior. A production build always disables preview mode.
 The provider-neutral app detail fixture covers complete and sparse deployment states;
 provider-specific identifiers are intentionally not shown.
+The applications fixture covers active, failed, stopped, terminating, and terminated
+states. Its sortable columns and `Hide terminated` control persist browser-local choices
+under `caution-apps-list-preferences`; search text is intentionally not persisted.
 
 The fixture is UI evidence only. For an authenticated smoke test, use a Linux/x86_64
 host, run `npm run build`, rebuild the gateway image (which bakes in the frontend),
