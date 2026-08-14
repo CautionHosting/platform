@@ -11,17 +11,32 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc, TimeDelta};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::{
-    deployment::{AwsCredentials, ManagedOnPremConfig},
-    ec2::{Ec2Client, RunInstancesParams},
     AppliedPricing,
+    deployment::{AwsCredentials, ManagedOnPremConfig},
+    ec2::{Ec2Client, Filter, RunInstancesParams},
 };
 
 const REMOTE_BUILDER_HELPER: &str = "remote-build-helper";
 const MANAGED_ONPREM_DEPLOYMENT_TAG_KEY: &str = "caution:deployment-id";
+
+/// Tag key on EC2 instances holding the UUID of the owning organization.
+/// Build runners are tagged with their owning organization at launch.
+const ORG_ID_TAG: &str = "org_id";
+/// Tag key marking the entity that created an EC2 instance.
+const MANAGED_BY_TAG: &str = "ManagedBy";
+/// Value of [`MANAGED_BY_TAG`] on build runner instances.
+const MANAGED_BY_BUILDER: &str = "caution-builder";
+/// Tag key on build runner instances holding the build UUID.
+const BUILD_ID_TAG: &str = "BuildId";
+/// Tag key used by AWS for the instance display name.
+const NAME_TAG: &str = "Name";
+/// Prefix of the `Name` tag on build runner instances.
+const BUILDER_NAME_PREFIX: &str = "caution-builder-";
 
 /// Specification for a builder instance size, loaded from config.json.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -1228,10 +1243,9 @@ pub async fn reap_orphaned_builders(
     ec2: &Ec2Client,
     instance_pricing: impl Fn(&str) -> Option<AppliedPricing>,
 ) {
-    let rows = match sqlx::query_as::<_, (Uuid, Option<String>, Uuid, Option<Uuid>, Option<String>, Option<chrono::DateTime<chrono::Utc>>)>(
-        "SELECT id, builder_instance_id, organization_id, app_id, builder_instance_type, started_at FROM eif_builds
-         WHERE status IN ('pending', 'building')
-         AND created_at < NOW() - INTERVAL '30 minutes'"
+    let rows = match sqlx::query_as::<_, (Uuid, Option<String>, Uuid, Option<Uuid>, Option<String>, Option<chrono::DateTime<chrono::Utc>>, String)>(
+        "SELECT id, builder_instance_id, organization_id, app_id, builder_instance_type, started_at, status FROM eif_builds
+         WHERE created_at < NOW() - INTERVAL '30 minutes'"
     )
     .fetch_all(db)
     .await {
@@ -1242,58 +1256,314 @@ pub async fn reap_orphaned_builders(
         }
     };
 
-    for (build_id, instance_id, org_id, app_id, instance_type, started_at) in rows {
-        tracing::warn!(
-            "Reaping orphaned build {} (instance: {:?})",
-            build_id,
-            instance_id
-        );
+    let mut orphaned_per_org: HashMap<Uuid, usize> = HashMap::new();
+    for (build_id, instance_id, org_id, app_id, instance_type, started_at, status) in rows {
+        // Every build older than 30 minutes is a candidate regardless of build
+        // status: a builder instance can be left behind by a timeout, a
+        // failure, or even a successful build. Only builds still stuck in
+        // pending/building get the metering/timeout treatment; anything else
+        // just gets its still-existing instance terminated.
+        let stuck = status == "pending" || status == "building";
+        if stuck {
+            tracing::warn!(
+                "Reaping orphaned build {} (instance: {:?})",
+                build_id,
+                instance_id
+            );
 
-        if let Some(ref iid) = instance_id {
-            // Check if this builder was tracked by the metering collection loop
-            let was_tracked: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM tracked_resources WHERE resource_id = $1)",
-            )
-            .bind(iid)
-            .fetch_one(db)
-            .await
-            .unwrap_or(false);
-
-            if was_tracked {
-                // Stop metering — the collection loop already billed for runtime
-                let _ = sqlx::query(
-                    "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
+            if let Some(ref iid) = instance_id {
+                // Check if this builder was tracked by the metering collection loop
+                let was_tracked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM tracked_resources WHERE resource_id = $1)",
                 )
                 .bind(iid)
-                .execute(db)
-                .await;
-            } else if let (Some(itype), Some(started)) = (&instance_type, started_at) {
-                // Fallback: metering tracking failed, bill directly for the full duration
-                if let Some(pricing) = instance_pricing(itype) {
-                    bill_builder_usage(db, build_id, iid, org_id, app_id, itype, started, pricing)
-                        .await;
-                } else {
-                    tracing::error!(
-                        "Cannot bill orphaned builder {} for build {}: unknown instance type {}",
-                        iid,
-                        build_id,
-                        itype
-                    );
+                .fetch_one(db)
+                .await
+                .unwrap_or(false);
+
+                if was_tracked {
+                    // Stop metering — the collection loop already billed for runtime
+                    let _ = sqlx::query(
+                        "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
+                    )
+                    .bind(iid)
+                    .execute(db)
+                    .await;
+                } else if let (Some(itype), Some(started)) = (&instance_type, started_at) {
+                    // Fallback: metering tracking failed, bill directly for the full duration
+                    if let Some(pricing) = instance_pricing(itype) {
+                        bill_builder_usage(db, build_id, iid, org_id, app_id, itype, started, pricing)
+                            .await;
+                    } else {
+                        tracing::error!(
+                            "Cannot bill orphaned builder {} for build {}: unknown instance type {}",
+                            iid,
+                            build_id,
+                            itype
+                        );
+                    }
                 }
             }
 
-            if let Err(e) = ec2.terminate_instances(&[iid.clone()]).await {
-                tracing::error!("Failed to terminate orphaned builder {}: {}", iid, e);
-            }
+            let _ = sqlx::query(
+                "UPDATE eif_builds SET status = 'timeout', error_message = 'Build timed out (reaped)', completed_at = NOW()
+                 WHERE id = $1"
+            )
+            .bind(build_id)
+            .execute(db)
+            .await;
         }
 
-        let _ = sqlx::query(
-            "UPDATE eif_builds SET status = 'timeout', error_message = 'Build timed out (reaped)', completed_at = NOW()
-             WHERE id = $1"
-        )
-        .bind(build_id)
-        .execute(db)
-        .await;
+        // Terminate the builder only if the instance still exists; a build in
+        // a terminal state, or one reaped on an earlier pass, has no instance
+        // left to clean up.
+        let Some(iid) = instance_id else { continue };
+        let still_exists = match ec2
+            .describe_instances(&[Filter::new("instance-id", &[iid.as_str()])])
+            .await
+        {
+            Ok(instances) => !instances.is_empty(),
+            Err(e) => {
+                tracing::error!(
+                    "Failed to check instance {} existence for build {}: {}",
+                    iid,
+                    build_id,
+                    e
+                );
+                continue;
+            }
+        };
+        if !still_exists {
+            tracing::debug!(
+                "Skipping build {} (instance {} no longer exists)",
+                build_id,
+                iid
+            );
+            continue;
+        }
+
+        *orphaned_per_org.entry(org_id).or_default() += 1;
+        if let Err(e) = ec2.terminate_instances(std::slice::from_ref(&iid)).await {
+            tracing::error!("Failed to terminate orphaned builder {}: {}", iid, e);
+        }
+    }
+
+    if !orphaned_per_org.is_empty() {
+        tracing::info!(
+            "Found {} orphaned builder(s) across {} organization(s)",
+            orphaned_per_org.values().sum::<usize>(),
+            orphaned_per_org.len()
+        );
+        let mut orgs: Vec<&Uuid> = orphaned_per_org.keys().collect();
+        orgs.sort_unstable();
+        for org_id in orgs {
+            tracing::info!(
+                "Found {} orphaned builder(s) in organization {}",
+                orphaned_per_org[org_id],
+                org_id
+            );
+        }
+    }
+}
+
+/// Whether an EC2 instance's tags identify it as a Caution build machine.
+///
+/// Builders launched by [`execute_remote_build`] carry `ManagedBy:
+/// caution-builder`, a `BuildId` tag, and a `Name` tag prefixed with
+/// `caution-builder-`. Any of the three markers is sufficient, mirroring the
+/// drift detector's builder classification.
+fn is_caution_builder(tags: &HashMap<String, String>) -> bool {
+    tags.get(MANAGED_BY_TAG)
+        .is_some_and(|value| value == MANAGED_BY_BUILDER)
+        || tags.contains_key(BUILD_ID_TAG)
+        || tags
+            .get(NAME_TAG)
+            .is_some_and(|value| value.starts_with(BUILDER_NAME_PREFIX))
+}
+
+/// Whether an instance's `org_id` tag names one of the active organizations.
+///
+/// A missing, unparseable, or stale `org_id` tag means the instance has no
+/// organization attached, matching how the drift detector attributes
+/// instances to the active organizations it scans.
+fn attached_to_active_org(tags: &HashMap<String, String>, active_orgs: &HashSet<Uuid>) -> bool {
+    tags.get(ORG_ID_TAG)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .is_some_and(|org_id| active_orgs.contains(&org_id))
+}
+
+/// Terminate build machines running with no organization attached.
+///
+/// Build runners are tagged with their owning organization (`org_id`) at
+/// launch, so a running instance recognized as a Caution builder whose
+/// `org_id` tag is missing, unparseable, or names an organization that no
+/// longer exists is a leak (typically a manually launched instance or one
+/// stranded by a failed launch). This complements [`reap_orphaned_builders`]:
+/// that reaper handles builds stuck in `pending`/`building` for over 30
+/// minutes, while this one sweeps up instances that can never be attributed
+/// to an organization at all.
+///
+/// Every enabled AWS region is swept (falling back to the client's configured
+/// region when discovery fails), so a builder stranded in any region is found
+/// and terminated from within that region.
+///
+/// Instances whose `BuildId` tag (or instance ID) matches an in-flight build
+/// are left for [`reap_orphaned_builders`]: terminating them here would
+/// strand the `eif_builds` row in `building` and wedge the app's build slot
+/// until the timeout reaper runs.
+pub async fn reap_unattributed_builders(db: &PgPool, ec2: &Ec2Client) {
+    let active_orgs: HashSet<Uuid> =
+        match sqlx::query_scalar("SELECT id FROM organizations WHERE is_active = true")
+            .fetch_all(db)
+            .await
+        {
+            Ok(ids) => ids.into_iter().collect(),
+            Err(e) => {
+                tracing::error!(
+                    "Failed to load active organizations for unattributed builder reaping: {}",
+                    e
+                );
+                return;
+            }
+        };
+
+    // Builders backing an in-flight build are owned by that build; skip them
+    // so a missing `org_id` tag can never abort a live build.
+    let in_flight_build_ids: HashSet<Uuid> = match sqlx::query_scalar(
+        "SELECT id FROM eif_builds WHERE status IN ('pending', 'building')",
+    )
+    .fetch_all(db)
+    .await
+    {
+        Ok(ids) => ids.into_iter().collect(),
+        Err(e) => {
+            tracing::error!(
+                "Failed to load in-flight builds for unattributed builder reaping: {}",
+                e
+            );
+            return;
+        }
+    };
+    let in_flight_instance_ids: HashSet<String> = match sqlx::query_scalar::<
+        sqlx::Postgres,
+        Option<String>,
+    >(
+        "SELECT builder_instance_id FROM eif_builds
+             WHERE status IN ('pending', 'building') AND builder_instance_id IS NOT NULL",
+    )
+    .fetch_all(db)
+    .await
+    {
+        Ok(ids) => ids.into_iter().flatten().collect(),
+        Err(e) => {
+            tracing::error!(
+                "Failed to load in-flight builder instances for unattributed builder reaping: {}",
+                e
+            );
+            return;
+        }
+    };
+
+    // Sweep every enabled region: a builder stranded in a region other than
+    // the API's configured region would otherwise leak forever.
+    let regions = match ec2.describe_regions(false).await {
+        Ok(regions) if !regions.is_empty() => regions
+            .into_iter()
+            .map(|region| region.name)
+            .collect::<Vec<_>>(),
+        Ok(_) => {
+            tracing::warn!(
+                "No enabled AWS regions discovered; falling back to configured region {}",
+                ec2.region()
+            );
+            vec![ec2.region().to_string()]
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to discover AWS regions; falling back to configured region {}: {}",
+                ec2.region(),
+                e
+            );
+            vec![ec2.region().to_string()]
+        }
+    };
+
+    let mut found_unattributed = 0usize;
+    let mut terminated = 0usize;
+    for region in regions {
+        tracing::debug!(region, "Searching for instances");
+        let region_ec2 = ec2.for_region(&region);
+        let instances = match region_ec2.describe_instances(&[]).await {
+            Ok(instances) => instances,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to describe instances in region {} for unattributed builder reaping: {:?}",
+                    region,
+                    e
+                );
+                continue;
+            }
+        };
+        for instance in instances {
+            tracing::debug!(
+                "Found AWS instance {} (region: {}, org_id tag: {:?})",
+                instance.instance_id,
+                region,
+                instance.tags.get(ORG_ID_TAG)
+            );
+            if !is_caution_builder(&instance.tags) {
+                continue;
+            }
+            if attached_to_active_org(&instance.tags, &active_orgs) {
+                continue;
+            }
+            found_unattributed += 1;
+
+            let build_id = instance
+                .tags
+                .get(BUILD_ID_TAG)
+                .and_then(|value| Uuid::parse_str(value).ok());
+            if in_flight_instance_ids.contains(&instance.instance_id)
+                || build_id.is_some_and(|id| in_flight_build_ids.contains(&id))
+            {
+                tracing::warn!(
+                    "Skipping unattributed builder {} (build {:?} is in flight)",
+                    instance.instance_id,
+                    build_id.map(|id| id.to_string())
+                );
+                continue;
+            }
+
+            tracing::warn!(
+                "Terminating build machine {} with no organization attached (region: {}, tags: {:?})",
+                instance.instance_id,
+                region,
+                instance.tags
+            );
+            if let Err(e) = region_ec2
+                .terminate_instances(std::slice::from_ref(&instance.instance_id))
+                .await
+            {
+                tracing::error!(
+                    "Failed to terminate unattributed build machine {}: {}",
+                    instance.instance_id,
+                    e
+                );
+                continue;
+            }
+            terminated += 1;
+        }
+    }
+
+    tracing::info!(
+        "Found {} unattributed Caution builder(s) with no organization attached",
+        found_unattributed
+    );
+    if terminated > 0 {
+        tracing::info!(
+            "Terminated {} build machine(s) with no organization attached",
+            terminated
+        );
     }
 }
 
@@ -1308,6 +1578,70 @@ mod tests {
             build_phase_milestone("docker_built"),
             Some("Docker image built, building EIF...")
         );
+    }
+
+    // --- unattributed builder classification ---
+
+    fn tags(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn test_is_caution_builder_recognizes_launch_tags() {
+        let launch_tags = tags(&[
+            ("Name", "caution-builder-12345678"),
+            ("org_id", "550e8400-e29b-41d4-a716-446655440000"),
+            ("ManagedBy", "caution-builder"),
+            ("BuildId", "12345678-1234-1234-1234-123456789abc"),
+        ]);
+
+        assert!(is_caution_builder(&launch_tags));
+    }
+
+    #[test]
+    fn test_is_caution_builder_requires_caution_marker() {
+        let unrelated = tags(&[
+            ("Name", "web-1"),
+            ("ManagedBy", "CloudFormation"),
+            ("org_id", "550e8400-e29b-41d4-a716-446655440000"),
+        ]);
+
+        assert!(!is_caution_builder(&unrelated));
+        assert!(!is_caution_builder(&HashMap::new()));
+    }
+
+    #[test]
+    fn test_is_caution_builder_accepts_each_marker_independently() {
+        let by_managed_by = tags(&[("ManagedBy", "caution-builder")]);
+        let by_build_id = tags(&[("BuildId", "b-123")]);
+        let by_name_prefix = tags(&[("Name", "caution-builder-abc12345")]);
+        let foreign_managed_by = tags(&[("ManagedBy", "CloudFormation")]);
+        let non_prefixed_name = tags(&[("Name", "caution-builder")]);
+
+        assert!(is_caution_builder(&by_managed_by));
+        assert!(is_caution_builder(&by_build_id));
+        assert!(is_caution_builder(&by_name_prefix));
+        assert!(!is_caution_builder(&foreign_managed_by));
+        assert!(!is_caution_builder(&non_prefixed_name));
+    }
+
+    #[test]
+    fn test_attached_to_active_org_matches_org_id_tag() {
+        let org_id = Uuid::new_v4();
+        let active: HashSet<Uuid> = [org_id].into_iter().collect();
+
+        let attached = tags(&[("org_id", &org_id.to_string())]);
+        let missing = tags(&[]);
+        let unparseable = tags(&[("org_id", "not-a-uuid")]);
+        let stale = tags(&[("org_id", &Uuid::new_v4().to_string())]);
+
+        assert!(attached_to_active_org(&attached, &active));
+        assert!(!attached_to_active_org(&missing, &active));
+        assert!(!attached_to_active_org(&unparseable, &active));
+        assert!(!attached_to_active_org(&stale, &active));
     }
 
     // --- compute_cache_key ---

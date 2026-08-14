@@ -3561,7 +3561,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reaper_state = state.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            info!("Builder orphan reaper starting scan");
             let platform_creds = crate::deployment::AwsCredentials {
                 access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
                 secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),
@@ -3572,6 +3572,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 reaper_state.pricing.instance_pricing(itype)
             })
             .await;
+            builder::reap_unattributed_builders(&reaper_state.db, &ec2).await;
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
         }
     });
     info!("Builder orphan reaper started (runs every 5 minutes)");
