@@ -4,6 +4,7 @@ FROM stagex/core-git@sha256:ecd1de421f467072a76de5a38fce61dd0afb2ddd2c48d73c21ef
 FROM stagex/core-curl@sha256:fa58ff1a1c32677ce3034e69a2ee40081c799d6df68a7b1d5d480501de779030 AS curl
 FROM stagex/core-busybox@sha256:e4a30addc8939c8e232472de904d1d9e97fc2e735fca9a9701ce49db04c6c181 AS busybox
 FROM stagex/core-libzstd@sha256:bfe96f975a2a2a7a48aeb418b44accc79dd26d601a94d9f02b0562eaa0f89fdd AS libzstd
+FROM stagex/pallet-gcc-gnu-busybox@sha256:67f4a035c680065fc0278517594ab07bf1b9416dc054508a8893ca20df04e415 AS gcc
 
 FROM pallet-nodejs AS frontend-deps
 
@@ -12,6 +13,7 @@ COPY --from=git . /
 COPY --from=curl . /
 COPY --from=libzstd . /
 COPY --from=busybox . /
+COPY --from=gcc /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
 
 WORKDIR /app
 

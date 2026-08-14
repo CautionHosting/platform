@@ -67,6 +67,7 @@ COPY --from=git . /
 COPY --from=busybox . /
 COPY --from=curl . /
 COPY --from=libzstd . /
+COPY --from=gcc /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
 
 WORKDIR /app
 
