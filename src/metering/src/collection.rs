@@ -279,7 +279,7 @@ pub(crate) async fn collect_resource_usage(
     // Collect network egress via CloudWatch (best-effort, don't block compute billing)
     if let Err(e) = collect_network_egress(state, &resource, last_billed, now).await {
         tracing::warn!(
-            "Failed to collect network egress for {}: {}",
+            "Failed to collect network egress for {}: {:?}",
             resource_id,
             e
         );
