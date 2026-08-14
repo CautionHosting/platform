@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Caution SEZC
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-FROM stagex/pallet-rust@sha256:4062550919db682ebaeea07661551b5b89b3921e3f3a2b0bc665ddea7f6af1ca AS pallet-rust
-FROM stagex/core-ca-certificates@sha256:d135f1189e9b232eb7316626bf7858534c5540b2fc53dced80a4c9a95f26493e AS ca-certificates
+FROM stagex/pallet-rust@sha256:abe9b95c93a5afa271f69fcd5eb18c8cd405fe5df6491a63c9418e3a170573dc AS pallet-rust
+FROM stagex/core-ca-certificates@sha256:8390dff73a4502614411e2b2ecb4e4e33b6cc10dc26cf2c6a46e5df71f4c4b03 AS ca-certificates
 
 FROM pallet-rust AS builder
 
