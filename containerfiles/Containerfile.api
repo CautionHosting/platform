@@ -15,6 +15,7 @@ FROM stagex/user-nettle@sha256:110504b49f494b06121d1816eaa18aae2b772761e6748229d
 FROM stagex/core-gmp@sha256:f90653ed07062074363542a77e26a2d16a142f9be5ebf6900b53f4ab8a82d39d AS gmp
 FROM stagex/pallet-gcc-gnu-busybox@sha256:67f4a035c680065fc0278517594ab07bf1b9416dc054508a8893ca20df04e415 AS gcc
 FROM stagex/core-zlib@sha256:5a21327b58c2ceeb3283a960540e19d9c35944961c68a7254e36056bf6f7d2d9 AS zlib
+FROM stagex/core-libzstd@sha256:bfe96f975a2a2a7a48aeb418b44accc79dd26d601a94d9f02b0562eaa0f89fdd AS libzstd
 
 # StageX EIF build tools (replaces nitro-cli)
 FROM stagex/user-eif_build@sha256:8bbd8fb500322e719063645460f3942d04ca99048089adea237026443c9517b7 AS eif-build
@@ -74,6 +75,7 @@ COPY --from=ca-certificates . /
 COPY --from=openssl . /
 COPY --from=zlib . /
 COPY --from=curl . /
+COPY --from=libzstd . /
 COPY --from=git . /
 COPY --from=tofu . /
 COPY --from=docker . /

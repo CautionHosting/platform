@@ -15,6 +15,7 @@ FROM stagex/pallet-nodejs@sha256:5c96b25c18713976497a21c770057f2179c5014c5a025a0
 FROM stagex/core-npm@sha256:fa8e48af8e76931eadb68acd610358363095eb393c607672570b15746d796a39 AS npm
 FROM stagex/core-curl@sha256:fa58ff1a1c32677ce3034e69a2ee40081c799d6df68a7b1d5d480501de779030 AS curl
 FROM stagex/core-busybox@sha256:e4a30addc8939c8e232472de904d1d9e97fc2e735fca9a9701ce49db04c6c181 AS busybox
+FROM stagex/core-libzstd@sha256:bfe96f975a2a2a7a48aeb418b44accc79dd26d601a94d9f02b0562eaa0f89fdd AS libzstd
 FROM gcc AS gitconfig-builder
 RUN mkdir -p /root && \
     echo '[safe]' > /root/.gitconfig && \
@@ -65,6 +66,7 @@ COPY --from=npm . /
 COPY --from=git . /
 COPY --from=busybox . /
 COPY --from=curl . /
+COPY --from=libzstd . /
 
 WORKDIR /app
 
