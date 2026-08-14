@@ -18,6 +18,7 @@ pub(crate) const LOCK_SUBSCRIPTION_BILLING: i64 = 1003;
 
 /// Try to acquire an advisory lock, run the closure, and release the lock.
 /// Returns None if the lock is already held by another instance.
+#[tracing::instrument(skip_all)]
 pub(crate) async fn try_advisory_lock(pool: &sqlx::PgPool, lock_id: i64) -> bool {
     sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
         .bind(lock_id)
@@ -26,6 +27,7 @@ pub(crate) async fn try_advisory_lock(pool: &sqlx::PgPool, lock_id: i64) -> bool
         .unwrap_or(false)
 }
 
+#[tracing::instrument(skip_all)]
 pub(crate) async fn advisory_unlock(pool: &sqlx::PgPool, lock_id: i64) {
     let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(lock_id)
@@ -33,6 +35,7 @@ pub(crate) async fn advisory_unlock(pool: &sqlx::PgPool, lock_id: i64) {
         .await;
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn trigger_collection(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Bypass advisory lock for explicitly triggered collections — the lock only
     // prevents duplicate background loop runs, not manual API invocations.
@@ -48,6 +51,7 @@ pub async fn trigger_collection(State(state): State<Arc<AppState>>) -> impl Into
     }
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn run_collection_loop(state: Arc<AppState>, interval_secs: u64) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
 
@@ -59,6 +63,7 @@ pub async fn run_collection_loop(state: Arc<AppState>, interval_secs: u64) {
     }
 }
 
+#[tracing::instrument(skip_all, err)]
 async fn run_collection_cycle(state: &AppState) -> Result<usize> {
     if !try_advisory_lock(&state.pool, LOCK_COLLECTION).await {
         tracing::debug!("Collection cycle skipped — another instance holds the lock");
@@ -69,6 +74,7 @@ async fn run_collection_cycle(state: &AppState) -> Result<usize> {
     result
 }
 
+#[tracing::instrument(skip_all, err)]
 pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize> {
     tracing::info!("Running metering collection cycle");
 
@@ -153,6 +159,7 @@ pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize
 }
 
 /// Returns true when enough time has elapsed to collect usage for a resource.
+#[tracing::instrument(skip_all)]
 fn should_collect_usage(
     last_billed: time::OffsetDateTime,
     now: time::OffsetDateTime,
@@ -163,6 +170,7 @@ fn should_collect_usage(
 
 /// Collect usage for a resource and record billable debits.
 /// Returns Ok(true) if billable usage was recorded, Ok(false) otherwise.
+#[tracing::instrument(skip_all, fields(resource_id = %resource_id), err)]
 pub(crate) async fn collect_resource_usage(
     state: &AppState,
     resource_id: &str,
@@ -281,6 +289,7 @@ pub(crate) async fn collect_resource_usage(
 }
 
 /// Query CloudWatch for NetworkOut bytes and bill for egress.
+#[tracing::instrument(skip_all, fields(organization_id = %resource.organization_id, application_id = ?resource.application_id), err)]
 async fn collect_network_egress(
     state: &AppState,
     resource: &TrackedResource,
