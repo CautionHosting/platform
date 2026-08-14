@@ -693,7 +693,7 @@ mod tests {
         assert!(user_data.contains(r#"%{ if e2e_mode == "tls" ~}"#));
         assert!(user_data.contains(r#"standard_ports="$standard_ports 443""#));
         assert!(user_data.contains(
-            r#"%{ if http_port != 0 && e2e_mode != "tls" ~}"#
+            r#"%{ if http_port != 0 && e2e_mode == "disabled" ~}"#
         ));
         assert!(user_data.contains("TLS :443 is forwarded into the enclave"));
         assert!(user_data.contains("respond \"OK\" 200"));
@@ -713,16 +713,19 @@ mod tests {
     }
 
     #[test]
-    fn test_http_port_proxy_is_loopback_only() {
+    fn test_http_port_proxy_is_loopback_only_and_omitted_for_e2e() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let user_data = std::fs::read_to_string(
             manifest_dir.join("../../terraform/modules/aws/nitro-enclave/user-data.sh"),
         )
         .unwrap();
 
-        assert!(user_data.contains(
-            r#"%{ if http_port != 0 && e2e_mode != "tls" ~}"#
-        ));
+        assert_eq!(
+            user_data
+                .matches(r#"%{ if http_port != 0 && e2e_mode == "disabled" ~}"#)
+                .count(),
+            3
+        );
         assert!(user_data.contains(
             "ExecStart=/usr/bin/socat TCP-LISTEN:${http_port},bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:16:${http_port}"
         ));

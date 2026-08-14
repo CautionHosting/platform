@@ -216,9 +216,9 @@ WantedBy=multi-user.target
 EOF
 done
 
-# Create a host-local vsock proxy for host-terminated HTTP ingress. Enclave
-# Caddy reaches the application directly and must not expose this plaintext path.
-%{ if http_port != 0 && e2e_mode != "tls" ~}
+# Create a host-local vsock proxy only for unprotected HTTP ingress. Enclave
+# TLS and STEVE reach the application directly and must not expose this path.
+%{ if http_port != 0 && e2e_mode == "disabled" ~}
 cat > /etc/systemd/system/vsock-proxy-http.service <<EOF
 [Unit]
 Description=VSock Proxy for HTTP Gateway Port ${http_port}
@@ -263,7 +263,7 @@ systemctl enable nitro-enclave-console.service
 for port in $standard_ports; do
 systemctl enable vsock-proxy-$port.service
 done
-%{ if http_port != 0 && e2e_mode != "tls" ~}
+%{ if http_port != 0 && e2e_mode == "disabled" ~}
 systemctl enable vsock-proxy-http.service
 %{ endif ~}
 %{ for port in ports ~}
@@ -281,7 +281,7 @@ sleep 15
 for port in $standard_ports; do
 systemctl start vsock-proxy-$port.service
 done
-%{ if http_port != 0 && e2e_mode != "tls" ~}
+%{ if http_port != 0 && e2e_mode == "disabled" ~}
 systemctl start vsock-proxy-http.service
 %{ endif ~}
 %{ for port in ports ~}

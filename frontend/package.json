@@ -5,10 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "dev:dashboard": "CAUTION_DASHBOARD_PREVIEW=1 vite",
+    "build": "vite build",
+    "test": "node --test tests/*.test.js"
   },
   "dependencies": {
-    "attestation-widget": "git+https://git.distrust.co/public/attestation-widget.git#2a9111cdc9b1bfa855fc48032b4ffd013162fb42",
+    "attestation-widget": "git+https://git.distrust.co/public/attestation-widget.git#47b24ef7e3fd8d51982678b78cd0c62afb31e4f3",
     "tee-attestation-js": "git+https://git.distrust.co/public/tee-attestation-js.git#ba0d0c57de673c8576c91a8730775a87575f5c10",
     "vue": "3.5.34"
   },

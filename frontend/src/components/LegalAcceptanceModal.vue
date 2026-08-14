@@ -225,15 +225,15 @@ export default {
   max-height: calc(100vh - 48px);
   overflow-y: auto;
   padding: 42px 36px 24px 36px;
-  border: 1px solid rgba(15, 15, 15, 0.08);
+  border: 1px solid var(--theme-border);
   border-radius: 20px;
-  background: #ffffff;
+  background: var(--theme-surface);
   box-shadow: 0 30px 80px rgba(8, 17, 28, 0.22);
 }
 
 .legal-modal-title {
   margin: 0;
-  color: #0f0f0f;
+  color: var(--theme-text-primary);
   font-size: clamp(1.5rem, 3vw, 1.95rem);
   line-height: 1.3;
   text-align: center;
@@ -245,7 +245,7 @@ export default {
 
 .legal-modal-copy {
   margin: 20px 0 0;
-  color: #56636f;
+  color: var(--theme-text-muted);
   font-size: clamp(1rem, 2vw, 1.05rem);
   line-height: 1.6;
   text-align: start;
@@ -278,19 +278,19 @@ export default {
 .legal-modal-error {
   margin-top: 20px;
   padding: 14px 16px;
-  border: 1px solid #f3b8bf;
+  border: 1px solid var(--theme-danger-border);
   border-radius: 14px;
-  background: #fff4f5;
-  color: #a23240;
+  background: var(--theme-danger-bg);
+  color: var(--theme-danger);
   font-size: 0.92rem;
 }
 
 .legal-document-card {
   width: 100%;
   padding: 18px;
-  border: 1px solid #ececec;
+  border: 1px solid var(--theme-border);
   border-radius: 12px;
-  background: #fafafa;
+  background: var(--theme-surface-subtle);
 }
 
 .legal-document-list {
@@ -310,14 +310,14 @@ export default {
 
 .legal-document-title {
   margin: 0;
-  color: #232b2b;
+  color: var(--theme-text-secondary);
   font-size: 1.05rem;
   font-weight: 600;
 }
 
 .legal-document-meta {
   margin: 0;
-  color: #56636f;
+  color: var(--theme-text-muted);
   font-size: 0.9rem;
 }
 
@@ -325,7 +325,7 @@ export default {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  color: #0f0f0f;
+  color: var(--theme-text-primary);
   font-size: 1.05rem;
   font-weight: 600;
   text-decoration: none;
@@ -338,7 +338,7 @@ export default {
 }
 
 .legal-document-link:hover {
-  color: var(--color-pink);
+  color: var(--theme-brand-hover);
 }
 
 .legal-modal-actions {
@@ -407,7 +407,7 @@ export default {
 }
 
 .legal-document-button--primary:hover:not(:disabled) {
-  color: var(--color-pink, #f048b5);
+  color: var(--theme-brand-hover);
   box-shadow:
     inset 0 1px 0 0 rgba(255, 255, 255, 0.12),
     inset 0 0 20px 0 rgba(255, 255, 255, 0.05);
@@ -417,7 +417,7 @@ export default {
   padding: 0;
   border-radius: 0;
   background: transparent;
-  color: #778390;
+  color: var(--theme-text-muted);
   font-size: clamp(1rem, 1.8vw, 1.035rem);
   font-weight: 400;
   text-align: left;
@@ -426,15 +426,15 @@ export default {
 .legal-document-button--quiet:hover:not(:disabled) {
   transform: none;
   background: transparent;
-  color: #394552;
+  color: var(--theme-text-secondary);
 }
 
 .legal-document-button--quiet-danger {
-  color: #b15c68;
+  color: var(--theme-danger);
 }
 
 .legal-document-button--quiet-danger:hover:not(:disabled) {
-  color: #b53a4b;
+  color: var(--theme-danger-strong);
 }
 
 @media (max-width: 640px) {

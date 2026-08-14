@@ -450,15 +450,13 @@ postgres: network volume
 
 migrate: postgres
 	@echo "Running migrations..."
-	@for migration in src/api/migrations/*.sql; do \
-		echo "Applying $$(basename $$migration)..."; \
-		docker run --rm \
-			--network $(NETWORK) \
-			-v $(PWD)/src/api/migrations:/migrations:ro \
-			--env-file $(HOME)/.config/caution/.env \
-			postgres:16-alpine \
-			psql -h postgres -U postgres -d caution -f /migrations/$$(basename $$migration) || true; \
-	done
+	docker run --rm \
+		--network $(NETWORK) \
+		-v $(PWD)/src/api/migrations:/migrations:ro \
+		-v $(PWD)/utils/makefile-run-migrations.sh:/makefile-run-migrations.sh:ro \
+		--env-file $(HOME)/.config/caution/.env \
+		postgres:16-alpine \
+		sh /makefile-run-migrations.sh
 	@echo "Migrations complete"
 
 run-api: guard-direct-api network postgres
@@ -622,14 +620,15 @@ postgres-test: network
 
 migrate-test: postgres-test
 	@echo "Running migrations on test DB..."
-	@for migration in src/api/migrations/*.sql; do \
-		docker run --rm \
-			--network $(NETWORK) \
-			-v $(PWD)/src/api/migrations:/migrations:ro \
-			-e PGPASSWORD=postgres \
-			postgres:16-alpine \
-			psql -h $(TEST_DB_HOST) -U postgres -d $(TEST_DB_NAME) -f /migrations/$$(basename $$migration) 2>&1 | grep -v "^$$" || true; \
-	done
+	@docker run --rm \
+		--network $(NETWORK) \
+		-v $(PWD)/src/api/migrations:/migrations:ro \
+		-v $(PWD)/utils/makefile-run-migrations.sh:/makefile-run-migrations.sh:ro \
+		-e PGPASSWORD=postgres \
+		-e MIGRATION_DB_HOST=$(TEST_DB_HOST) \
+		-e MIGRATION_DB_NAME=$(TEST_DB_NAME) \
+		postgres:16-alpine \
+		sh /makefile-run-migrations.sh
 	@echo "Test migrations complete"
 
 run-api-test: network

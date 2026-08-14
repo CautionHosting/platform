@@ -3,16 +3,16 @@
 -- acceptance records point to an exact legal_documents row.
 
 ALTER TABLE legal_documents
-    ADD COLUMN source_commit_sha TEXT,
-    ADD COLUMN source_path TEXT,
-    ADD COLUMN content_sha256 TEXT;
+    ADD COLUMN IF NOT EXISTS source_commit_sha TEXT,
+    ADD COLUMN IF NOT EXISTS source_path TEXT,
+    ADD COLUMN IF NOT EXISTS content_sha256 TEXT;
 
-CREATE UNIQUE INDEX idx_legal_documents_type_content_sha
+CREATE UNIQUE INDEX IF NOT EXISTS idx_legal_documents_type_content_sha
     ON legal_documents (document_type, content_sha256)
     WHERE content_sha256 IS NOT NULL;
 
 ALTER TABLE user_legal_events
-    ADD COLUMN legal_document_id UUID;
+    ADD COLUMN IF NOT EXISTS legal_document_id UUID;
 
 UPDATE user_legal_events ule
 SET legal_document_id = ld.id
@@ -24,10 +24,15 @@ WHERE ld.document_type = ule.document_type
 ALTER TABLE user_legal_events
     ALTER COLUMN legal_document_id SET NOT NULL;
 
-ALTER TABLE user_legal_events
-    ADD CONSTRAINT fk_user_legal_events_legal_document_id
-        FOREIGN KEY (legal_document_id)
-        REFERENCES legal_documents(id);
+DO
+$$BEGIN
+    ALTER TABLE user_legal_events
+        ADD CONSTRAINT fk_user_legal_events_legal_document_id
+            FOREIGN KEY (legal_document_id)
+            REFERENCES legal_documents(id);
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END;$$;
 
-CREATE INDEX idx_user_legal_events_document_id
+CREATE INDEX IF NOT EXISTS idx_user_legal_events_document_id
     ON user_legal_events (legal_document_id);

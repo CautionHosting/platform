@@ -2,51 +2,56 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial -->
 
 <template>
-  <div class="onboarding-container">
-    <div class="onboarding-card">
-      <div v-if="error" class="error-message">{{ error }}</div>
+  <div class="onboarding-page">
+    <CompactPageHeader />
+    <main class="onboarding-container">
+      <div class="onboarding-card">
+        <div v-if="error" class="error-message">{{ error }}</div>
 
-      <!-- Email Verification -->
-      <div v-if="step === 1">
-        <h1>Verify your email</h1>
-        <p>Enter your email address to receive a verification link.</p>
+        <!-- Email Verification -->
+        <div v-if="step === 1">
+          <h1>Verify your email</h1>
+          <p>Enter your email address to receive a verification link.</p>
 
-        <form @submit.prevent="submitEmail">
-          <label for="email">Email</label>
-          <input
-            id="email"
-            v-model="email"
-            type="email"
-            placeholder="you@example.com"
-            required
-            :disabled="emailSent"
-          />
+          <form @submit.prevent="submitEmail">
+            <label for="email">Email</label>
+            <input
+              id="email"
+              v-model="email"
+              type="email"
+              placeholder="you@example.com"
+              required
+              :disabled="emailSent"
+            />
 
-          <button type="submit" class="btn-primary" :disabled="loading || emailSent">
-            {{ emailSent ? 'Check your inbox' : 'Send verification link' }}
-          </button>
-        </form>
+            <button type="submit" class="btn-primary" :disabled="loading || emailSent">
+              {{ emailSent ? 'Check your inbox' : 'Send verification link' }}
+            </button>
+          </form>
 
-        <p v-if="emailSent" class="info-message">
-          We sent a verification link to <strong>{{ email }}</strong>.
-        </p>
+          <p v-if="emailSent" class="info-message">
+            We sent a verification link to <strong>{{ email }}</strong>.
+          </p>
+        </div>
+
+        <!-- Verified -->
+        <div v-if="step === 2" class="verified">
+          <h1>Your email has been successfully verified.</h1>
+          <button class="btn-primary" @click="goToDashboard">Go to Dashboard</button>
+        </div>
       </div>
-
-      <!-- Verified -->
-      <div v-if="step === 2" class="verified">
-        <h1>Your email has been successfully verified.</h1>
-        <button @click="goToDashboard" class="btn-primary">Go to Dashboard</button>
-      </div>
-    </div>
+    </main>
   </div>
 </template>
 
 <script>
 import { ref, onMounted } from 'vue'
+import CompactPageHeader from '../components/CompactPageHeader.vue'
 import { authFetch } from '../composables/useWebAuthn.js'
 
 export default {
   name: 'Onboarding',
+  components: { CompactPageHeader },
   setup() {
     const step = ref(0)
     const email = ref('')
@@ -122,32 +127,38 @@ export default {
 </script>
 
 <style scoped>
+.onboarding-page {
+  min-height: 100vh;
+  color: var(--theme-text-primary);
+}
+
 .onboarding-container {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 80vh;
+  min-height: calc(100vh - 92px);
   padding: 2rem;
 }
 
 .onboarding-card {
-  background: white;
+  background: var(--theme-surface);
   border-radius: 12px;
   padding: 3rem;
   max-width: 440px;
   width: 100%;
-  border: 1px solid var(--border-color-light, #eee);
+  border: 1px solid var(--theme-border);
+  box-shadow: var(--theme-shadow);
 }
 
 h1 {
   font-size: 1.25rem;
   font-weight: 600;
-  color: var(--color-text-primary, #0f0f0f);
+  color: var(--theme-text-primary);
   margin-bottom: 0.5rem;
 }
 
 p {
-  color: var(--color-text-secondary, #666);
+  color: var(--theme-text-muted);
   font-size: 0.9rem;
   line-height: 1.5;
   margin-bottom: 1.5rem;
@@ -157,15 +168,17 @@ label {
   display: block;
   font-size: 0.85rem;
   font-weight: 500;
-  color: var(--color-text-primary, #0f0f0f);
+  color: var(--theme-text-primary);
   margin-bottom: 0.4rem;
 }
 
 input {
   width: 100%;
   padding: 0.7rem 0.85rem;
-  border: 1px solid var(--border-color-medium, #ddd);
+  border: 1px solid var(--theme-border-strong);
   border-radius: 8px;
+  background: var(--theme-surface);
+  color: var(--theme-text-primary);
   font-size: 0.9rem;
   font-family: inherit;
   margin-bottom: 1rem;
@@ -174,20 +187,24 @@ input {
 }
 
 input:focus {
-  outline: none;
-  border-color: var(--color-primary-black, #0f0f0f);
+  outline: 3px solid var(--theme-focus-ring);
+  border-color: var(--theme-focus);
 }
 
 input:disabled {
-  background: var(--gray-100, #f5f5f5);
+  background: var(--theme-surface-muted);
   cursor: not-allowed;
+}
+
+input::placeholder {
+  color: var(--theme-text-faint);
 }
 
 .btn-primary {
   width: 100%;
   padding: 0.7rem 1.5rem;
-  background: var(--color-primary-black, #0f0f0f);
-  color: white;
+  background: var(--theme-control);
+  color: var(--theme-control-text);
   border: none;
   border-radius: 8px;
   font-family: inherit;
@@ -198,7 +215,12 @@ input:disabled {
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: #333;
+  background: var(--theme-control-hover);
+}
+
+.btn-primary:focus-visible {
+  outline: 3px solid var(--theme-focus-ring);
+  outline-offset: 2px;
 }
 
 .btn-primary:disabled {
@@ -207,20 +229,20 @@ input:disabled {
 }
 
 .error-message {
-  background: var(--color-danger-bg, #fff5f5);
-  border: 1px solid var(--color-danger-border, #ffcdd2);
+  background: var(--theme-danger-bg);
+  border: 1px solid var(--theme-danger-border);
   border-radius: 8px;
   padding: 0.7rem 1rem;
-  color: var(--color-danger, #dc3545);
+  color: var(--theme-danger);
   margin-bottom: 1rem;
   font-size: 0.85rem;
 }
 
 .info-message {
-  background: var(--color-info-bg, #e3f2fd);
+  background: var(--theme-info-bg);
   border-radius: 8px;
   padding: 0.7rem 1rem;
-  color: var(--color-info, #1976d2);
+  color: var(--theme-info);
   font-size: 0.85rem;
   margin-top: 0.5rem;
   margin-bottom: 0;
@@ -232,5 +254,16 @@ input:disabled {
 
 .verified h1 {
   margin-bottom: 1.5rem;
+}
+
+@media (max-width: 600px) {
+  .onboarding-container {
+    min-height: calc(100vh - 76px);
+    padding: 12px;
+  }
+
+  .onboarding-card {
+    padding: 2rem 1.5rem;
+  }
 }
 </style>

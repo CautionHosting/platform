@@ -90,6 +90,7 @@ enum ArchivePreflightStatus {
 fn classify_archive_preflight(
     status: reqwest::StatusCode,
     attempt: usize,
+    attempts: usize,
 ) -> ArchivePreflightStatus {
     if status.is_success() {
         ArchivePreflightStatus::Passed
@@ -98,7 +99,7 @@ fn classify_archive_preflight(
         reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
     ) {
         ArchivePreflightStatus::Missing
-    } else if attempt < ARCHIVE_PREFLIGHT_ATTEMPTS
+    } else if attempt < attempts
         && (matches!(
             status,
             reqwest::StatusCode::REQUEST_TIMEOUT | reqwest::StatusCode::TOO_MANY_REQUESTS
@@ -107,6 +108,14 @@ fn classify_archive_preflight(
         ArchivePreflightStatus::Retry
     } else {
         ArchivePreflightStatus::Failed
+    }
+}
+
+fn archive_preflight_urls(url: &str, use_platform_mirror: bool) -> Vec<String> {
+    if use_platform_mirror {
+        enclave_builder::archive_url_candidates(url)
+    } else {
+        vec![url.to_string()]
     }
 }
 
@@ -1139,10 +1148,14 @@ fn is_pin_related_error(error: &anyhow::Error) -> bool {
 
 /// Egress is enabled iff the (single) enclave's network block declares >=1 egress rule.
 /// Derived solely from the parsed HCL config — never from a manifest.
+fn configured_enclave(
+    cfg: &caution_config::ConfigurationFile,
+) -> Option<&caution_config::EnclaveConfig> {
+    cfg.enclave.as_ref().and_then(|enclaves| enclaves.values().next())
+}
+
 fn config_egress_enabled(cfg: &caution_config::ConfigurationFile) -> bool {
-    cfg.enclave
-        .as_ref()
-        .and_then(|e| e.values().next())
+    configured_enclave(cfg)
         .and_then(|enc| enc.network.as_ref())
         .map(|n| n.egress_enabled())
         .unwrap_or(false)
@@ -1343,12 +1356,13 @@ enum Commands {
     Login {
         #[arg(
             long,
-            help = "Use QR code for cross-device authentication (no local security key needed)"
+            help = "Use QR code for cross-device authentication (--username required; no local security key needed)"
         )]
         qr: bool,
         #[arg(
             long,
-            help = "Username to log in with (prompted interactively if omitted; --qr uses discoverable credentials by default and skips this prompt)"
+            required_if_eq("qr", "true"),
+            help = "Username to log in with (required when using --qr; prompted interactively otherwise)"
         )]
         username: Option<String>,
     },
@@ -1535,7 +1549,7 @@ enum AppCommands {
         force: bool,
         #[arg(
             long,
-            help = "Force delete from database even if cloud resource cleanup fails"
+            help = "After managed DNS withdrawal, delete from the database even if cloud cleanup fails"
         )]
         force_delete: bool,
         #[arg(
@@ -1960,6 +1974,12 @@ pub struct App {
     pub provider_resource_id: String,
     pub public_ip: Option<String>,
     pub domain: Option<String>,
+    #[serde(default)]
+    pub managed_hostname: Option<String>,
+    #[serde(default)]
+    pub dns_status: Option<String>,
+    #[serde(default)]
+    pub dns_error: Option<String>,
     pub configuration: Option<serde_json::Value>,
     #[serde(default)]
     pub git_url: String,
@@ -1971,6 +1991,33 @@ pub struct CreateAppResponse {
     pub resource_name: String,
     pub git_url: String,
     pub state: String,
+    #[serde(default)]
+    pub managed_hostname: Option<String>,
+    #[serde(default)]
+    pub dns_status: Option<String>,
+    #[serde(default)]
+    pub dns_error: Option<String>,
+}
+
+fn print_managed_dns_details(
+    hostname: Option<&str>,
+    status: Option<&str>,
+    error: Option<&str>,
+    domain: Option<&str>,
+) {
+    let Some(hostname) = hostname else {
+        return;
+    };
+    output::status(["DNS target: ", hostname].concat());
+    if let Some(status) = status {
+        output::status(["Managed DNS: ", status].concat());
+    }
+    if let Some(error) = error {
+        output::warning(["Managed DNS retry error: ", error].concat());
+    }
+    if let Some(domain) = domain {
+        output::status(["Create a CNAME for ", domain, " pointing to ", hostname].concat());
+    }
 }
 
 /// Minimal deployment info stored locally in .caution file
@@ -2029,6 +2076,99 @@ struct LegalAcceptanceRequiredError {
 #[derive(Debug, Deserialize)]
 struct UsernameRequiredError {
     error: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublicBuildInputs {
+    platform: Option<PublicBuildInput>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublicBuildInput {
+    commit: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Invalid Platform framework commit {commit:?}; expected a 40-character Git SHA [{location}]"
+)]
+struct PinPlatformFrameworkSourceError {
+    commit: String,
+    location: &'static Location<'static>,
+}
+
+#[track_caller]
+fn pinned_platform_framework_source(
+    commit: &str,
+) -> std::result::Result<String, PinPlatformFrameworkSourceError> {
+    let normalized = commit.trim();
+    if normalized.len() != 40 || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(PinPlatformFrameworkSourceError {
+            commit: commit.to_string(),
+            location: Location::caller(),
+        });
+    }
+    Ok(enclave_builder::pin_archive_url_to_commit(
+        enclave_builder::FRAMEWORK_SOURCE,
+        &normalized.to_ascii_lowercase(),
+    ))
+}
+
+#[derive(Debug)]
+enum CurrentPlatformFrameworkSourceErrorKind {
+    InvalidServerUrl,
+    FetchBuildInputs,
+    BuildInputsStatus,
+    DecodeBuildInputs,
+    MissingPlatformCommit,
+    PinFrameworkSource,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Public build-input endpoint returned HTTP {status}")]
+struct PublicBuildInputsStatusError {
+    status: reqwest::StatusCode,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Unable to resolve the current Platform framework source from {endpoint}: {kind:?} [{location}]"
+)]
+pub(crate) struct CurrentPlatformFrameworkSourceError {
+    kind: CurrentPlatformFrameworkSourceErrorKind,
+    endpoint: String,
+    location: &'static Location<'static>,
+
+    #[source]
+    source: Option<Box<dyn StdError + Send + Sync + 'static>>,
+}
+
+impl CurrentPlatformFrameworkSourceError {
+    #[track_caller]
+    fn new(kind: CurrentPlatformFrameworkSourceErrorKind, endpoint: impl Into<String>) -> Self {
+        Self {
+            kind,
+            endpoint: endpoint.into(),
+            location: Location::caller(),
+            source: None,
+        }
+    }
+
+    fn with_source<E>(mut self, source: E) -> Self
+    where
+        E: StdError + Send + Sync + 'static,
+    {
+        self.source = Some(Box::new(source));
+        self
+    }
+}
+
+fn framework_cache_key(source_key: &str, framework_commit: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(source_key.as_bytes());
+    hasher.update(b"|framework|");
+    hasher.update(framework_commit.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 struct StagedSource {
@@ -2264,6 +2404,9 @@ pub(crate) enum BuildLocalError {
     #[error("failed to read deployment config")]
     ReadConfig(#[source] anyhow::Error),
 
+    #[error("failed to resolve the Platform framework build input")]
+    BuildInput(#[source] CurrentPlatformFrameworkSourceError),
+
     #[error("failed to build Docker image")]
     BuildDockerImage(#[source] anyhow::Error),
 
@@ -2415,6 +2558,71 @@ impl ApiClient {
 
     fn api_base_url(&self) -> &str {
         &self.base_url
+    }
+
+    async fn current_platform_framework_source(
+        &self,
+    ) -> std::result::Result<(String, String), CurrentPlatformFrameworkSourceError> {
+        let mut endpoint = reqwest::Url::parse(&self.base_url).map_err(|source| {
+            CurrentPlatformFrameworkSourceError::new(
+                CurrentPlatformFrameworkSourceErrorKind::InvalidServerUrl,
+                &self.base_url,
+            )
+            .with_source(source)
+        })?;
+        endpoint.set_path("/.well-known/caution/build-inputs");
+        endpoint.set_query(None);
+        endpoint.set_fragment(None);
+        let response = self
+            .client
+            .get(endpoint.clone())
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|source| {
+                CurrentPlatformFrameworkSourceError::new(
+                    CurrentPlatformFrameworkSourceErrorKind::FetchBuildInputs,
+                    endpoint.as_str(),
+                )
+                .with_source(source)
+            })?;
+        if !response.status().is_success() {
+            return Err(CurrentPlatformFrameworkSourceError::new(
+                CurrentPlatformFrameworkSourceErrorKind::BuildInputsStatus,
+                endpoint.as_str(),
+            )
+            .with_source(PublicBuildInputsStatusError {
+                status: response.status(),
+            }));
+        }
+        let inputs: PublicBuildInputs = response
+            .json()
+            .await
+            .map_err(|source| {
+                CurrentPlatformFrameworkSourceError::new(
+                    CurrentPlatformFrameworkSourceErrorKind::DecodeBuildInputs,
+                    endpoint.as_str(),
+                )
+                .with_source(source)
+            })?;
+        let commit = inputs
+            .platform
+            .ok_or_else(|| {
+                CurrentPlatformFrameworkSourceError::new(
+                    CurrentPlatformFrameworkSourceErrorKind::MissingPlatformCommit,
+                    endpoint.as_str(),
+                )
+            })?
+            .commit;
+        let source = pinned_platform_framework_source(&commit).map_err(|source| {
+            CurrentPlatformFrameworkSourceError::new(
+                CurrentPlatformFrameworkSourceErrorKind::PinFrameworkSource,
+                endpoint.as_str(),
+            )
+            .with_source(source)
+        })?;
+        let commit = commit.trim().to_ascii_lowercase();
+        Ok((commit, source))
     }
 
     /// Get deployment path, creating .caution directory if needed
@@ -3217,8 +3425,9 @@ enclave "default" {{
     #   port   = 8080
     #   e2e_encryption {{
     #     enabled      = true
-    #     cors_origins = ["*"]
+    #     cors_origins = ["https://app.example.com"]
     #     key_exchange = "x25519"
+    #     allow_plaintext_fallback = false
     #   }}
     # }}
   }}
@@ -4595,6 +4804,12 @@ enclave "default" {{
         output::status(format!("Name: {}", create_response.resource_name));
         output::status(format!("State: {}", create_response.state));
         output::status(format!("Git URL: {}", create_response.git_url));
+        print_managed_dns_details(
+            create_response.managed_hostname.as_deref(),
+            create_response.dns_status.as_deref(),
+            create_response.dns_error.as_deref(),
+            None,
+        );
 
         output::verbose(self.verbose, "Setting git remote...");
         self.set_git_remote(&create_response.git_url)?;
@@ -4639,6 +4854,9 @@ enclave "default" {{
 
                 if let Some(ip) = &app.public_ip {
                     details.push(ip.clone());
+                }
+                if let Some(dns_status) = &app.dns_status {
+                    details.push(["dns:", dns_status].concat());
                 }
 
                 output::status(format!("  {} - {} ({})", app.id, name, details.join(", ")));
@@ -4782,6 +5000,13 @@ enclave "default" {{
             output::status(format!("  Attestation: http://{}/attestation", ip));
         }
 
+        print_managed_dns_details(
+            app.managed_hostname.as_deref(),
+            app.dns_status.as_deref(),
+            app.dns_error.as_deref(),
+            app.domain.as_deref(),
+        );
+
         Ok(())
     }
 
@@ -4818,7 +5043,7 @@ enclave "default" {{
             if force_delete {
                 output::status("");
                 output::warning(
-                    "  WARNING: --force-delete will remove from database even if cloud cleanup fails!"
+                    "  WARNING: --force-delete may bypass cloud cleanup failure only after managed DNS is withdrawn and drained."
                 );
             }
             output::status("");
@@ -5060,6 +5285,13 @@ enclave "default" {{
         output::status(format!("Name: {}", create_response.resource_name));
         output::status(format!("State: {}", create_response.state));
         output::status(format!("Git URL: {}", create_response.git_url));
+
+        print_managed_dns_details(
+            create_response.managed_hostname.as_deref(),
+            create_response.dns_status.as_deref(),
+            create_response.dns_error.as_deref(),
+            None,
+        );
 
         output::verbose(self.verbose, "Saving deployment info...");
         self.save_deployment(&create_response.id)?;
@@ -5742,6 +5974,10 @@ enclave "default" {{
                 )
             })?;
 
+        resource_id.as_ref().context(
+            "Caution app ID is unavailable; AWS teardown was not started and local BYOC state was preserved",
+        )?;
+
         // Destroy Caution resource first
         if let Some(ref rid) = resource_id {
             output::status("\nDestroying Caution app...");
@@ -5752,7 +5988,6 @@ enclave "default" {{
                 .client
                 .delete(format!("{}/api/resources/{}", self.base_url, rid))
                 .header("X-Session-ID", &auth_config.session_id)
-                .query(&[("force_delete", "true")])
                 .send()
                 .await;
 
@@ -5763,11 +5998,19 @@ enclave "default" {{
                     output::success("Caution app destroyed");
                 }
                 Ok(resp) => {
+                    let status = resp.status();
                     let error = resp.text().await.unwrap_or_default();
-                    output::warning(format!("Warning: Failed to destroy Caution app: {}", error));
+                    bail!(
+                        "Caution app deletion is unresolved (status {}): {}. AWS teardown was not started and local BYOC state was preserved.",
+                        status,
+                        error
+                    );
                 }
                 Err(e) => {
-                    output::warning(format!("Warning: Failed to destroy Caution app: {}", e));
+                    bail!(
+                        "Caution app deletion is unresolved: {}. AWS teardown was not started and local BYOC state was preserved.",
+                        e
+                    );
                 }
             }
         }
@@ -5817,8 +6060,10 @@ enclave "default" {{
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            output::warning(format!("Warning: AWS teardown may have failed: {}", stderr));
-            output::warning("You may need to manually clean up resources in AWS console.");
+            bail!(
+                "AWS teardown failed; local BYOC state was preserved for retry: {}",
+                stderr.trim()
+            );
         } else {
             output::success("AWS infrastructure destroyed");
         }
@@ -5865,6 +6110,11 @@ enclave "default" {{
     async fn build_local(&self, no_cache: bool) -> Result<(), BuildLocalError> {
         output::status("Building EIF locally for inspection...");
 
+        let (framework_commit, framework_source) = self
+            .current_platform_framework_source()
+            .await
+            .map_err(BuildLocalError::BuildInput)?;
+
         let app_commit = Command::new("git")
             .args(&["rev-parse", "HEAD"])
             .output()
@@ -5892,8 +6142,8 @@ enclave "default" {{
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let cfg = self.read_config().map_err(|e| BuildLocalError::ReadConfig(e.into()))?;
-        let default_enclave = cfg.enclave.as_ref().and_then(|e| e.get("default"));
-        let e2e_config = default_enclave
+        let enclave = configured_enclave(&cfg);
+        let e2e_config = enclave
             .and_then(|e| e.network.as_ref())
             .and_then(|n| n.http.as_ref())
             .and_then(|h| h.e2e_encryption.as_ref());
@@ -5901,10 +6151,12 @@ enclave "default" {{
         let e2e = e2e_mode == Some(caution_config::E2eMode::Steve);
         let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
         let steve_commit = e2e.then(enclave_builder::build::resolve_steve_commit);
-        let cache_key = measured_build_cache_key(&source_cache_key, &cfg, steve_commit.as_deref())
+        let measured_cache_key =
+            measured_build_cache_key(&source_cache_key, &cfg, steve_commit.as_deref())
             .map_err(BuildLocalError::CacheKey)?;
+        let cache_key = framework_cache_key(&measured_cache_key, &framework_commit);
 
-        let config_no_cache = default_enclave
+        let config_no_cache = enclave
             .and_then(|e| e.build.as_ref())
             .and_then(|b| b.cache)
             .map(|c| !c)
@@ -5920,7 +6172,7 @@ enclave "default" {{
         let builder = enclave_builder::EnclaveBuilder::new_with_cache(
             enclave_builder::enclave_source_url(&enclave_builder::build::resolve_enclaveos_commit()),
             "unused",
-            enclave_builder::FRAMEWORK_SOURCE,
+            &framework_source,
             "local",
             &cache_key,
             enclave_builder::CacheType::Build,
@@ -5935,19 +6187,19 @@ enclave "default" {{
             reference: image_ref.clone(),
         };
 
-        let run_command = default_enclave
+        let run_command = enclave
             .and_then(|e| e.unit.as_ref())
             .and_then(|u| u.values().next())
             .map(|u| u.run_command_string())
             .transpose()
             .map_err(BuildLocalError::ParseRunCommand)?;
 
-        let app_source_urls_opt = default_enclave
+        let app_source_urls_opt = enclave
             .and_then(|e| e.build.as_ref())
             .map(|b| b.app_sources.clone())
             .filter(|s| !s.is_empty());
 
-        let ports: Vec<u16> = default_enclave
+        let ports: Vec<u16> = enclave
             .and_then(|e| e.network.as_ref())
             .map(|n| {
                 n.ingress
@@ -5960,13 +6212,13 @@ enclave "default" {{
             })
             .unwrap_or_default();
 
-        let http_port = default_enclave
+        let http_port = enclave
             .and_then(|config| config.network.as_ref())
             .and_then(|network| network.http.as_ref())
             .map(|http| http.port);
         output::verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
 
-        let domain = default_enclave
+        let domain = enclave
             .and_then(|config| config.network.as_ref())
             .and_then(|network| network.http.as_ref())
             .and_then(|http| http.domain.clone());
@@ -5974,6 +6226,9 @@ enclave "default" {{
         let e2e_key_exchange = e2e_config
             .map(|ee| ee.key_exchange().steve_env_value())
             .unwrap_or(caution_config::KeyExchange::X25519.steve_env_value());
+        let allow_plaintext_fallback = e2e_config
+            .map(|ee| ee.allow_plaintext_fallback())
+            .unwrap_or(false);
         output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = cfg.has_vault_env();
@@ -5986,7 +6241,7 @@ enclave "default" {{
             .and_then(|e2e| e2e.cors_origins.as_ref())
             .map(|origins| origins.join(","));
 
-        let http_upstream_protocol = default_enclave
+        let http_upstream_protocol = enclave
             .and_then(|config| config.network.as_ref())
             .and_then(|network| network.http.as_ref())
             .and_then(|http| http.upstream_protocol)
@@ -6014,6 +6269,7 @@ enclave "default" {{
                 e2e,
                 e2e_mode_value,
                 e2e_key_exchange,
+                allow_plaintext_fallback,
                 domain.as_deref(),
                 http_upstream_protocol,
                 locksmith,
@@ -6058,6 +6314,11 @@ enclave "default" {{
         no_cache: bool,
         local_source: Option<&StagedSource>,
     ) -> Result<ReproductionResult> {
+        let public_framework = if external_manifest.is_none() {
+            Some(self.current_platform_framework_source().await?)
+        } else {
+            None
+        };
         let no_cache = if let Some(source) = local_source {
             no_cache
                 || self
@@ -6115,7 +6376,11 @@ enclave "default" {{
                 }
             }
         } else {
-            enclave_builder::FRAMEWORK_SOURCE.to_string()
+            public_framework
+                .as_ref()
+                .expect("manifestless builds resolve public framework input")
+                .1
+                .clone()
         };
 
         let source_cache_key = if let Some(source) = local_source {
@@ -6125,7 +6390,13 @@ enclave "default" {{
                 let manifest_hash = hex::encode(Sha256::digest(&manifest_json));
                 format!("{}-{}", source.cache_key, &manifest_hash[..16])
             } else {
-                source.cache_key.clone()
+                framework_cache_key(
+                    &source.cache_key,
+                    &public_framework
+                        .as_ref()
+                        .expect("manifestless builds resolve public framework input")
+                        .0,
+                )
             }
         } else if let Some(ref manifest) = external_manifest {
             let manifest_json = serde_json::to_vec(manifest)
@@ -6137,7 +6408,7 @@ enclave "default" {{
                 format!("manifest-{}", &manifest_hash[..16])
             }
         } else {
-            Command::new("git")
+            let source_key = Command::new("git")
                 .args(&["rev-parse", "HEAD"])
                 .output()
                 .ok()
@@ -6148,7 +6419,14 @@ enclave "default" {{
                         None
                     }
                 })
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            framework_cache_key(
+                &source_key,
+                &public_framework
+                    .as_ref()
+                    .expect("manifestless builds resolve public framework input")
+                    .0,
+            )
         };
 
         let app_source_dir = if let Some(source) = local_source {
@@ -6253,9 +6531,9 @@ enclave "default" {{
         // user-filesystem extraction (minutes in). Only meaningful when
         // reproducing from a manifest.
         if external_manifest.is_some() {
-            self.preflight_archive_url("Enclave source", &enclave_source)
+            self.preflight_archive_url("Enclave source", &enclave_source, false)
                 .await?;
-            self.preflight_archive_url("Framework source", &framework_source)
+            self.preflight_archive_url("Framework source", &framework_source, true)
                 .await?;
         }
 
@@ -6309,15 +6587,15 @@ enclave "default" {{
             } else {
                 let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
                 let cfg = self.read_config_from_dir(config_dir)?;
-                let default_enclave = cfg.enclave.as_ref().and_then(|e| e.get("default"));
+                let enclave = configured_enclave(&cfg);
 
                 let binary = None;
-                let run_cmd = default_enclave
+                let run_cmd = enclave
                     .and_then(|e| e.unit.as_ref())
                     .and_then(|u| u.values().next())
                     .map(|u| u.run_command_string())
                     .transpose()?;
-                let source_urls = default_enclave
+                let source_urls = enclave
                     .and_then(|e| e.build.as_ref())
                     .map(|b| b.app_sources.clone())
                     .filter(|s| !s.is_empty());
@@ -6436,6 +6714,15 @@ enclave "default" {{
                         caution_config::KeyExchange::X25519.steve_env_value().to_string()
                     })
             });
+        let allow_plaintext_fallback = e2e_config
+            .as_ref()
+            .map(|e2e| e2e.allow_plaintext_fallback())
+            .unwrap_or_else(|| {
+                external_manifest
+                    .as_ref()
+                    .map(|manifest| manifest.steve_allow_plaintext_fallback)
+                    .unwrap_or(false)
+            });
         output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
 
         let locksmith = if let Some(ref app_dir) = app_source_dir {
@@ -6503,6 +6790,7 @@ enclave "default" {{
                     e2e,
                     e2e_mode_value,
                     &e2e_key_exchange,
+                    allow_plaintext_fallback,
                     domain.as_deref(),
                     http_upstream_protocol,
                     locksmith,
@@ -6527,6 +6815,7 @@ enclave "default" {{
                     e2e,
                     e2e_mode_value,
                     &e2e_key_exchange,
+                    allow_plaintext_fallback,
                     domain.as_deref(),
                     http_upstream_protocol,
                     locksmith,
@@ -7462,85 +7751,131 @@ enclave "default" {{
     }
 
     /// Fail-fast reachability check for an enclave/framework source archive.
-    /// Retry a transient HEAD failure once, then stop before the expensive build.
-    async fn preflight_archive_url(&self, label: &str, url: &str) -> Result<()> {
+    /// Try configured mirrors in order, then stop before the expensive build.
+    async fn preflight_archive_url(
+        &self,
+        label: &str,
+        url: &str,
+        use_platform_mirror: bool,
+    ) -> Result<()> {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Ok(());
+        }
+
+        let candidates = archive_preflight_urls(url, use_platform_mirror);
+        self.preflight_archive_urls(label, &candidates).await
+    }
+
+    async fn preflight_archive_urls(&self, label: &str, urls: &[String]) -> Result<()> {
+        if urls.is_empty() {
+            bail!("No archive URLs provided for {label}");
         }
 
         output::status(format_args!(
             "\nChecking {} is reachable on remote...",
             label.to_lowercase()
         ));
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
+        let mut client = reqwest::Client::builder();
+        if urls.len() == 1 {
+            client = client.redirect(reqwest::redirect::Policy::none());
+        }
+        let client = client
             .build()
             .context("Failed to create archive preflight client")?;
-        for attempt in 1..=ARCHIVE_PREFLIGHT_ATTEMPTS {
-            match client
-                .head(url)
-                .timeout(ARCHIVE_PREFLIGHT_TIMEOUT)
-                .send()
-                .await
-            {
-                Ok(response) => match classify_archive_preflight(response.status(), attempt) {
-                    ArchivePreflightStatus::Passed => {
-                        output::verbose(
-                            self.verbose,
-                            format_args!(
-                                "{} reachable (HTTP {})",
+        let attempts = ARCHIVE_PREFLIGHT_ATTEMPTS;
+        let mut failures = Vec::new();
+
+        for url in urls {
+            for attempt in 1..=attempts {
+                match client
+                    .head(url)
+                    .timeout(ARCHIVE_PREFLIGHT_TIMEOUT)
+                    .send()
+                    .await
+                {
+                    Ok(response) => match classify_archive_preflight(
+                        response.status(),
+                        attempt,
+                        attempts,
+                    ) {
+                        ArchivePreflightStatus::Passed => {
+                            output::verbose(
+                                self.verbose,
+                                format_args!(
+                                    "{} reachable via {} (HTTP {})",
+                                    label,
+                                    url,
+                                    response.status().as_u16()
+                                ),
+                            );
+                            output::status(format_args!("  {} preflight passed ✓", label));
+                            return Ok(());
+                        }
+                        ArchivePreflightStatus::Missing if urls.len() == 1 => {
+                            bail!(
+                                "{label} archive is not available on the remote (HTTP {code}):\n  \
+                                 {url}\n\n\
+                                 The deployed enclave references a {lower} commit that the remote \
+                                 no longer serves — it may have been garbage-collected, or the \
+                                 manifest is stale. This build cannot be reproduced from the \
+                                 remote manifest.",
+                                label = label,
+                                lower = label.to_lowercase(),
+                                code = response.status().as_u16(),
+                                url = url,
+                            );
+                        }
+                        ArchivePreflightStatus::Retry => {
+                            output::warning(format_args!(
+                                "  {} preflight returned HTTP {}; retrying once",
                                 label,
                                 response.status().as_u16()
-                            ),
-                        );
-                        output::status(format_args!("  {} preflight passed ✓", label));
-                        return Ok(());
-                    }
-                    ArchivePreflightStatus::Missing => {
-                        bail!(
-                            "{label} archive is not available on the remote (HTTP {code}):\n  \
-                             {url}\n\n\
-                             The deployed enclave references a {lower} commit that the remote no \
-                             longer serves — it may have been garbage-collected, or the manifest \
-                             is stale. This build cannot be reproduced from the remote manifest.",
-                            label = label,
-                            lower = label.to_lowercase(),
-                            code = response.status().as_u16(),
-                            url = url,
-                        );
-                    }
-                    ArchivePreflightStatus::Retry => {
+                            ));
+                        }
+                        ArchivePreflightStatus::Failed if urls.len() == 1 => {
+                            bail!(
+                                "{label} preflight failed (HTTP {code}):\n  {url}\n\n\
+                                 Refusing to start the reproduction build.",
+                                code = response.status().as_u16(),
+                            );
+                        }
+                        ArchivePreflightStatus::Missing | ArchivePreflightStatus::Failed => {
+                            let code = response.status().as_u16().to_string();
+                            failures.push([url.as_str(), ": HTTP ", code.as_str()].concat());
+                            break;
+                        }
+                    },
+                    Err(error) if attempt < attempts => {
                         output::warning(format_args!(
-                            "  {} preflight returned HTTP {}; retrying once",
-                            label,
-                            response.status().as_u16()
+                            "  {} preflight failed: {}; retrying once",
+                            label, error
                         ));
                     }
-                    ArchivePreflightStatus::Failed => {
+                    Err(error) if urls.len() == 1 => {
                         bail!(
-                            "{label} preflight failed (HTTP {code}):\n  {url}\n\n\
-                             Refusing to start the reproduction build.",
-                            code = response.status().as_u16(),
+                            "{label} preflight failed after {attempts} attempts:\n  {url}\n  \
+                             {error}\n\nRefusing to start the reproduction build.",
                         );
                     }
-                },
-                Err(error) if attempt < ARCHIVE_PREFLIGHT_ATTEMPTS => {
-                    output::warning(format_args!(
-                        "  {} preflight failed: {}; retrying once",
-                        label, error
-                    ));
-                }
-                Err(error) => {
-                    bail!(
-                        "{label} preflight failed after {attempts} attempts:\n  {url}\n  \
-                         {error}\n\nRefusing to start the reproduction build.",
-                        attempts = ARCHIVE_PREFLIGHT_ATTEMPTS,
-                    );
+                    Err(error) => {
+                        let details = error.to_string();
+                        failures.push([url.as_str(), ": ", details.as_str()].concat());
+                        break;
+                    }
                 }
             }
         }
 
-        unreachable!("archive preflight attempt loop is non-empty")
+        let failures = failures.join("\n  ");
+        let lower_label = label.to_lowercase();
+        Err(anyhow::anyhow!([
+            "All ",
+            lower_label.as_str(),
+            " archive preflights failed:\n  ",
+            failures.as_str(),
+            "\n\nRefusing to start the reproduction build.",
+        ]
+        .concat()))
     }
 
     /// Cheap network preflight: confirm the app source branch is present on the
@@ -9604,20 +9939,20 @@ mod tests {
     use super::openpgp;
     use super::{
         AccountCommands, ApiClient, ArchivePreflightStatus, Cli, Commands, LoginUsernameError,
-        MAX_ATTESTATION_RESPONSE_BYTES, PgpKeyCommands, RegisterUsernameError, RunError,
-        TlsConnection, TlsExpectation, TrustedHashes, TrustedTls,
-        append_attestation_response_chunk, attestation_inspection_json, attestation_user_data,
-        classify_archive_preflight, display_user_data, dns_answer_is_absent,
+        ARCHIVE_PREFLIGHT_ATTEMPTS, MAX_ATTESTATION_RESPONSE_BYTES, PgpKeyCommands,
+        RegisterUsernameError, RunError, TlsConnection, TlsExpectation, TrustedHashes, TrustedTls,
+        append_attestation_response_chunk, archive_preflight_urls, attestation_inspection_json,
+        attestation_user_data, classify_archive_preflight, configured_enclave, display_user_data,
+        dns_answer_is_absent,
         dns_contains_deployment_ip, encrypt_env_file, encrypt_secret_value,
         keymaker_cert_eligibility, load_recipient_cert, login_begin_request_body,
-        measured_build_cache_key, normalize_keyring, parse_env_assignments,
-        persist_trusted_hashes, persist_trusted_hashes_with_backup,
-        prepare_pgp_public_key_for_upload, prompt_line_from, prompt_optional_line_from,
-        reproduction_uses_steve,
-        resolve_local_build_command_from_dir, resolve_login_username,
-        resolve_procfile_build_command, resolve_quorum_parameters, resolve_register_username,
-        resolve_reproduction_e2e_mode, tls_connection, tls_expectation_from_config,
-        validate_attested_tls, validate_global_qr, verify_deprecation_warnings,
+        measured_build_cache_key, normalize_keyring, parse_env_assignments, persist_trusted_hashes,
+        persist_trusted_hashes_with_backup, prepare_pgp_public_key_for_upload, prompt_line_from,
+        prompt_optional_line_from, reproduction_uses_steve, resolve_local_build_command_from_dir,
+        resolve_login_username, resolve_procfile_build_command, resolve_quorum_parameters,
+        resolve_register_username, resolve_reproduction_e2e_mode, tls_connection,
+        tls_expectation_from_config, validate_attested_tls, validate_global_qr,
+        verify_deprecation_warnings,
     };
     use caution_config::{ConfigurationFile, E2eEncryption, E2eMode};
     use clap::Parser;
@@ -9631,6 +9966,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::PathBuf;
     use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn reproduction_e2e_mode_preserves_explicit_config_and_manifest_fallback() {
@@ -9639,6 +9975,7 @@ mod tests {
             mode,
             cors_origins: None,
             key_exchange: None,
+            allow_plaintext_fallback: None,
         };
         let disabled = config(Some(false), None);
         let legacy_steve = config(Some(true), None);
@@ -10089,6 +10426,7 @@ enclave "main" {{
             mode,
             cors_origins: None,
             key_exchange: None,
+            allow_plaintext_fallback: None,
         };
         let disabled = config(Some(false), None);
         let legacy_steve = config(Some(true), None);
@@ -10113,6 +10451,47 @@ enclave "main" {{
             qr: false,
             workdir: None,
         }
+    }
+
+    async fn serve_preflight_responses(
+        responses: Vec<(reqwest::StatusCode, Option<String>)>,
+    ) -> (String, tokio::task::JoinHandle<usize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut requests = 0;
+            for (status, location) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = socket.read(&mut request).await.unwrap();
+                requests += 1;
+
+                let code = status.as_u16().to_string();
+                let mut response = [
+                    "HTTP/1.1 ",
+                    code.as_str(),
+                    " ",
+                    status.canonical_reason().unwrap_or(""),
+                    "\r\nContent-Length: 0\r\nConnection: close\r\n",
+                ]
+                .concat();
+                if let Some(location) = location {
+                    response.push_str("Location: ");
+                    response.push_str(&location);
+                    response.push_str("\r\n");
+                }
+                response.push_str("\r\n");
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let address = address.to_string();
+        (
+            ["http://", address.as_str(), "/archive.tar.gz"].concat(),
+            handle,
+        )
     }
 
     #[test]
@@ -10486,6 +10865,24 @@ containerfile: Missing.Containerfile\n",
     }
 
     #[test]
+    fn configured_enclave_accepts_non_default_label() {
+        let config = ConfigurationFile::from_str(
+            r#"
+enclave "main" {
+  resources {
+    cpu = 2
+    memory_mb = 2048
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let enclave = configured_enclave(&config).expect("single enclave");
+        assert_eq!(enclave.resources.as_ref().unwrap().memory_mb, 2048);
+    }
+
+    #[test]
     fn measured_build_cache_key_changes_with_configuration() {
         let e2e_enabled = ConfigurationFile::from_str(
             r#"
@@ -10665,8 +11062,80 @@ enclave "default" {
             (reqwest::StatusCode::SERVICE_UNAVAILABLE, 1, ArchivePreflightStatus::Retry),
             (reqwest::StatusCode::SERVICE_UNAVAILABLE, 2, ArchivePreflightStatus::Failed),
         ] {
-            assert_eq!(classify_archive_preflight(status, attempt), expected);
+            assert_eq!(
+                classify_archive_preflight(status, attempt, ARCHIVE_PREFLIGHT_ATTEMPTS),
+                expected
+            );
         }
+    }
+
+    #[test]
+    fn archive_preflight_mirrors_framework_but_not_enclave_source() {
+        let url = "https://codeberg.org/caution/platform/archive/abc123.tar.gz";
+
+        assert_eq!(archive_preflight_urls(url, false), vec![url.to_string()]);
+        assert_eq!(
+            archive_preflight_urls(url, true),
+            vec![
+                url.to_string(),
+                "https://github.com/CautionHosting/platform/archive/abc123.tar.gz".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_preflight_falls_back_and_follows_redirects() {
+        let (target, target_server) =
+            serve_preflight_responses(vec![(reqwest::StatusCode::OK, None)]).await;
+        let (mirror, mirror_server) =
+            serve_preflight_responses(vec![(reqwest::StatusCode::FOUND, Some(target))]).await;
+        let (primary, primary_server) =
+            serve_preflight_responses(vec![(reqwest::StatusCode::SERVICE_UNAVAILABLE, None)]).await;
+        let client = test_api_client();
+
+        client
+            .preflight_archive_urls("Framework source", &[primary, mirror])
+            .await
+            .unwrap();
+
+        assert_eq!(primary_server.await.unwrap(), 1);
+        assert_eq!(mirror_server.await.unwrap(), 1);
+        assert_eq!(target_server.await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn archive_preflight_retries_transient_primary_before_mirror() {
+        let (primary, primary_server) = serve_preflight_responses(vec![
+            (reqwest::StatusCode::SERVICE_UNAVAILABLE, None),
+            (reqwest::StatusCode::OK, None),
+        ])
+        .await;
+        let mirror = "http://127.0.0.1:1/archive.tar.gz".to_string();
+        let client = test_api_client();
+
+        client
+            .preflight_archive_urls("Framework source", &[primary, mirror])
+            .await
+            .unwrap();
+
+        assert_eq!(primary_server.await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn archive_preflight_retries_a_single_unmapped_url() {
+        let (url, server) = serve_preflight_responses(vec![
+            (reqwest::StatusCode::SERVICE_UNAVAILABLE, None),
+            (reqwest::StatusCode::OK, None),
+        ])
+        .await;
+        let client = test_api_client();
+
+        client
+            .preflight_archive_urls("Enclave source", &[url])
+            .await
+            .unwrap();
+
+        assert_eq!(server.await.unwrap(), 2);
     }
 
     #[test]
@@ -10817,9 +11286,12 @@ enclave "default" {
     }
 
     #[test]
-    fn global_qr_is_allowed_for_non_register_commands() {
-        let cli = Cli::try_parse_from(["caution", "login", "--qr"]).unwrap();
-        assert!(validate_global_qr(&cli.command, cli.qr).is_ok());
+    fn global_qr_requires_username_for_login() {
+        // --qr now requires --username on login
+        let result = Cli::try_parse_from(["caution", "login", "--qr"]);
+        assert!(result.is_err());
+        let err_str = format!("{:?}", result);
+        assert!(err_str.contains("--username") || err_str.contains("MissingRequiredArgument"));
     }
 
     #[test]

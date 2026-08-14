@@ -1,3 +1,4 @@
+use anyhow::Context;
 use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
@@ -5,7 +6,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
+use sqlx::{Connection, FromRow, PgConnection};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -31,6 +32,8 @@ pub struct ComputeResource {
     pub region: Option<String>,
     pub public_ip: Option<String>,
     pub domain: Option<String>,
+    pub dns_status: String,
+    pub dns_error: Option<String>,
     pub billing_tag: Option<String>,
     pub configuration: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
@@ -177,6 +180,9 @@ pub async fn create_resource(
         git_url,
         state: resource_state.as_str().to_string(),
         created_at,
+        managed_hostname: crate::managed_dns::managed_hostname(resource_id),
+        dns_status: "reserved".to_string(),
+        dns_error: None,
     }))
 }
 
@@ -200,7 +206,7 @@ pub async fn list_resources(
         "SELECT id, organization_id, provider_account_id, resource_type_id,
                 provider_resource_id, resource_name, state::text as state,
                 region, public_ip, configuration->>'domain' as domain,
-                billing_tag, configuration, created_at, updated_at
+                dns_status, dns_error, billing_tag, configuration, created_at, updated_at
          FROM compute_resources
          WHERE organization_id = $1",
     )
@@ -227,6 +233,10 @@ pub async fn list_resources(
             let mut value = serde_json::to_value(&resource).unwrap_or_default();
             if let Some(obj) = value.as_object_mut() {
                 obj.insert("git_url".to_string(), serde_json::json!(git_url));
+                obj.insert(
+                    "managed_hostname".to_string(),
+                    serde_json::json!(crate::managed_dns::managed_hostname(resource.id)),
+                );
             }
             value
         })
@@ -257,7 +267,8 @@ pub async fn get_resource(
         "SELECT cr.id, cr.organization_id, cr.provider_account_id, cr.resource_type_id,
                 cr.provider_resource_id, cr.resource_name, cr.state::text as state,
                 cr.region, cr.public_ip, cr.configuration->>'domain' as domain,
-                cr.billing_tag, cr.configuration, cr.created_at, cr.updated_at
+                cr.dns_status, cr.dns_error, cr.billing_tag, cr.configuration,
+                cr.created_at, cr.updated_at
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
          WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL",
@@ -279,6 +290,10 @@ pub async fn get_resource(
     let mut response = serde_json::to_value(&resource).unwrap_or_default();
     if let Some(obj) = response.as_object_mut() {
         obj.insert("git_url".to_string(), serde_json::json!(git_url));
+        obj.insert(
+            "managed_hostname".to_string(),
+            serde_json::json!(crate::managed_dns::managed_hostname(resource_id)),
+        );
     }
 
     Ok(Json(response))
@@ -435,7 +450,7 @@ pub async fn rename_resource(
          RETURNING id, organization_id, provider_account_id, resource_type_id,
                    provider_resource_id, resource_name, state::text as state,
                    region, public_ip, configuration->>'domain' as domain,
-                   billing_tag, configuration, created_at, updated_at",
+                   dns_status, dns_error, billing_tag, configuration, created_at, updated_at",
     )
     .bind(&payload.name)
     .bind(resource_id)
@@ -493,7 +508,7 @@ pub async fn delete_resource(
     Extension(auth): Extension<AuthContext>,
     Path(resource_id): Path<Uuid>,
     query: axum::extract::Query<DeleteResourceQuery>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, (StatusCode, String)> {
     tracing::info!(
         "delete_resource called: resource_id={}, user_id={}, force={}",
         resource_id,
@@ -506,12 +521,11 @@ pub async fn delete_resource(
         auth.user_id,
         resource_id
     );
-    let resource: Option<(Uuid, Uuid, String, Option<String>, String, Option<String>)> = sqlx::query_as(
-        "SELECT cr.id, cr.organization_id, cr.resource_name, pa.role_arn, cr.provider_resource_id, cr.region
+    let resource: Option<(Uuid, bool)> = sqlx::query_as(
+        "SELECT cr.id, cr.destroyed_at IS NOT NULL
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
-         INNER JOIN provider_accounts pa ON cr.provider_account_id = pa.id
-         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL",
+         WHERE cr.id = $1 AND om.user_id = $2",
     )
     .bind(resource_id)
     .bind(auth.user_id)
@@ -519,151 +533,68 @@ pub async fn delete_resource(
     .await
     .map_err(|e| {
         tracing::error!("Database query failed in delete_resource: {:?}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to read app state".to_string(),
+        )
     })?;
 
-    let Some((_, org_id, resource_name, _role_arn_opt, tracked_resource_id, resource_region)) =
-        resource
-    else {
+    let Some((resource_id, destroyed)) = resource else {
         tracing::warn!(
             "Resource {} not found or user {} has no access",
             resource_id,
             auth.user_id
         );
-        return Err(StatusCode::NOT_FOUND);
+        return Err((StatusCode::NOT_FOUND, "App not found".to_string()));
     };
-
-    tracing::info!(
-        "Destroying resource {} (id: {})",
-        resource_name,
-        resource_id
-    );
-
-    let resource_region = resource_region
-        .or_else(|| std::env::var("AWS_REGION").ok())
-        .unwrap_or_else(|| "us-west-2".to_string());
-
-    let (aws_credentials, asg_name) = if let Some(encryptor) = state.encryptor.as_ref() {
-        if let Ok(Some(credential)) =
-            cloud_credentials::get_credential_by_resource(&state.db, org_id, resource_id).await
-        {
-            if credential.managed_on_prem {
-                if let Ok(Some(secrets)) = cloud_credentials::get_credential_secrets(
-                    &state.db,
-                    encryptor,
-                    org_id,
-                    credential.id,
-                )
-                .await
-                {
-                    let region = credential.config["aws_region"]
-                        .as_str()
-                        .map(|s| s.to_string())
-                        .or_else(|| std::env::var("AWS_REGION").ok())
-                        .unwrap_or_else(|| "us-west-2".to_string());
-                    let asg = credential.config["asg_name"]
-                        .as_str()
-                        .map(|s| s.to_string());
-                    (
-                        Some(deployment::AwsCredentials {
-                            access_key_id: secrets["aws_access_key_id"]
-                                .as_str()
-                                .unwrap_or("")
-                                .to_string(),
-                            secret_access_key: secrets["aws_secret_access_key"]
-                                .as_str()
-                                .unwrap_or("")
-                                .to_string(),
-                            region,
-                        }),
-                        asg,
-                    )
-                } else {
-                    (None, None)
-                }
-            } else {
-                (
-                    Some(
-                        crate::fully_managed_capacity::platform_credentials_for_region(
-                            &resource_region,
-                        ),
-                    ),
-                    None,
-                )
-            }
-        } else {
-            (
-                Some(
-                    crate::fully_managed_capacity::platform_credentials_for_region(
-                        &resource_region,
-                    ),
-                ),
-                None,
-            )
-        }
-    } else {
-        (
-            Some(crate::fully_managed_capacity::platform_credentials_for_region(&resource_region)),
-            None,
-        )
-    };
-
-    let terraform_result = deployment::destroy_app_with_credentials(
-        org_id,
-        resource_id,
-        resource_name.clone(),
-        aws_credentials,
-        asg_name,
-    )
-    .await;
-
-    if let Err(ref e) = terraform_result {
-        tracing::error!(
-            "Terraform destroy failed for resource {}: {}",
-            resource_id,
-            e
-        );
-        if !query.force {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-        tracing::warn!("Force flag set - marking resource as destroyed despite Terraform failure. AWS resources may still exist!");
+    if destroyed {
+        return Ok(StatusCode::NO_CONTENT);
     }
 
+    // An explicit user delete takes precedence over a crash-safe deploy rollback
+    // which is already terminating under its retained attempt marker.
     sqlx::query(
-        "UPDATE compute_resources
-         SET destroyed_at = NOW(), state = $1, public_ip = NULL, region = NULL
-         WHERE id = $2 AND organization_id = $3",
+        "UPDATE compute_resources SET deploy_attempt_id = NULL
+         WHERE id = $1 AND state = 'terminating' AND deploy_attempt_id IS NOT NULL",
     )
-    .bind(types::ResourceState::Terminated)
     .bind(resource_id)
-    .bind(org_id)
     .execute(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|error| {
+        tracing::error!(resource_id = %resource_id, error = %error, "failed to claim terminating app for explicit deletion");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to update app deletion state".to_string(),
+        )
+    })?;
 
-    // Stop metering for the destroyed resource
-    match crate::metering::stop_tracked_resource(
-        state.internal_service_secret.as_deref(),
-        &tracked_resource_id,
-    )
-    .await
-    {
-        Ok(()) => {
-            tracing::info!("Stopped metering for resource {}", resource_id);
+    if let Err(error) = destroy_resource_by_id(&state, resource_id, query.force).await {
+        let destroyed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                 SELECT 1 FROM compute_resources cr
+                 INNER JOIN organization_members om ON cr.organization_id = om.organization_id
+                 WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NOT NULL
+             )",
+        )
+        .bind(resource_id)
+        .bind(auth.user_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(false);
+        if destroyed {
+            return Ok(StatusCode::NO_CONTENT);
         }
-        Err(e) => {
-            tracing::error!(
-                "Failed to stop metering for resource {} via metering service: {}",
-                resource_id,
-                e
-            );
-            let _ = sqlx::query(
-                "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
-            )
-            .bind(&tracked_resource_id)
-            .execute(&state.db)
-            .await;
-        }
+
+        tracing::error!(resource_id = %resource_id, error = %error, "app destroy failed");
+        let message = error.to_string();
+        let status = if message == "resource is deploying" {
+            StatusCode::CONFLICT
+        } else if message == "resource no longer exists" {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
+        return Err((status, message));
     }
 
     tracing::info!(
@@ -673,4 +604,195 @@ pub async fn delete_resource(
     );
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn destroy_resource_by_id(
+    state: &Arc<AppState>,
+    resource_id: Uuid,
+    force: bool,
+) -> anyhow::Result<()> {
+    crate::managed_dns::begin_termination(&state.db, resource_id).await?;
+
+    let _teardown_slot = state
+        .teardown_slots
+        .acquire()
+        .await
+        .map_err(|_| anyhow::anyhow!("teardown concurrency limiter closed"))?;
+
+    if let Some(managed_dns) = state.managed_dns.as_ref() {
+        managed_dns
+            .ensure_safe_to_release(&state.db, resource_id)
+            .await
+            .context("Managed DNS withdrawal is incomplete; the Elastic IP was retained")?;
+    } else {
+        let dns = crate::managed_dns::dns_snapshot(&state.db, resource_id).await?;
+        if dns.status != "reserved" {
+            anyhow::bail!(
+                "Managed DNS is disabled while this app has published DNS state; the Elastic IP was retained"
+            );
+        }
+    }
+
+    let resource: Option<(Uuid, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT organization_id, resource_name, provider_resource_id, region
+         FROM compute_resources
+         WHERE id = $1 AND destroyed_at IS NULL AND state = 'terminating'",
+    )
+    .bind(resource_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((org_id, resource_name, tracked_resource_id, resource_region)) = resource else {
+        return Ok(());
+    };
+
+    let resource_region = resource_region
+        .or_else(|| std::env::var("AWS_REGION").ok())
+        .unwrap_or_else(|| "us-west-2".to_string());
+    let destroy_credentials =
+        destroy_credentials(state, org_id, resource_id, &resource_region).await;
+
+    // Use a dedicated session lock so OpenTofu cannot consume the API pool or
+    // hold a database transaction open. Closing the connection releases it.
+    let mut lock_connection = PgConnection::connect(&state.database_url).await?;
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 1))")
+        .bind(resource_id.to_string())
+        .execute(&mut lock_connection)
+        .await?;
+
+    let still_terminating: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM compute_resources
+             WHERE id = $1 AND destroyed_at IS NULL AND state = 'terminating'
+         )",
+    )
+    .bind(resource_id)
+    .fetch_one(&mut lock_connection)
+    .await?;
+    if !still_terminating {
+        release_teardown_lock(&mut lock_connection, resource_id).await;
+        return Ok(());
+    }
+
+    let terraform_result =
+        match destroy_credentials {
+            Ok((aws_credentials, asg_name)) => {
+                deployment::destroy_app_with_credentials(
+                    org_id,
+                    resource_id,
+                    resource_name,
+                    aws_credentials,
+                    asg_name,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+    if let Err(error) = terraform_result {
+        tracing::error!(resource_id = %resource_id, error = %error, "OpenTofu destroy failed");
+        if !force {
+            anyhow::bail!("OpenTofu destroy failed after safe DNS withdrawal: {error}");
+        }
+        tracing::warn!(resource_id = %resource_id, "force enabled after DNS withdrawal; marking app destroyed despite OpenTofu failure");
+    }
+
+    sqlx::query(
+        "UPDATE compute_resources
+         SET destroyed_at = CASE WHEN deploy_attempt_id IS NULL THEN NOW() ELSE NULL END,
+             state = CASE
+                 WHEN deploy_attempt_id IS NULL THEN 'terminated'::resource_state
+                 ELSE 'failed'::resource_state
+             END,
+             public_ip = NULL, region = NULL, deploy_attempt_id = NULL,
+             dns_status = 'reserved', dns_error = NULL, dns_change_id = NULL,
+             dns_release_not_before = NULL, updated_at = NOW()
+         WHERE id = $1 AND organization_id = $2 AND state = 'terminating'",
+    )
+    .bind(resource_id)
+    .bind(org_id)
+    .execute(&mut lock_connection)
+    .await?;
+    release_teardown_lock(&mut lock_connection, resource_id).await;
+    drop(lock_connection);
+
+    if let Err(error) = crate::metering::stop_tracked_resource(
+        state.internal_service_secret.as_deref(),
+        &tracked_resource_id,
+    )
+    .await
+    {
+        tracing::error!(resource_id = %resource_id, error = %error, "failed to stop metering after app destroy");
+        let _ = sqlx::query(
+            "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW()
+             WHERE resource_id = $1 AND status = 'running'",
+        )
+        .bind(&tracked_resource_id)
+        .execute(&state.db)
+        .await;
+    }
+
+    Ok(())
+}
+
+async fn release_teardown_lock(connection: &mut PgConnection, resource_id: Uuid) {
+    if let Err(error) = sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 1))")
+        .bind(resource_id.to_string())
+        .execute(connection)
+        .await
+    {
+        tracing::warn!(resource_id = %resource_id, error = %error, "failed to explicitly release teardown advisory lock; closing its connection");
+    }
+}
+
+async fn destroy_credentials(
+    state: &Arc<AppState>,
+    org_id: Uuid,
+    resource_id: Uuid,
+    resource_region: &str,
+) -> anyhow::Result<(Option<deployment::AwsCredentials>, Option<String>)> {
+    let credential = cloud_credentials::get_credential_by_resource(&state.db, org_id, resource_id)
+        .await
+        .map_err(|(_, message)| anyhow::anyhow!(message))?;
+
+    if let Some(credential) = credential
+        && credential.managed_on_prem
+    {
+        let encryptor = state
+            .encryptor
+            .as_ref()
+            .context("BYOC teardown requires the configured credential encryptor")?;
+        let secrets =
+            cloud_credentials::get_credential_secrets(&state.db, encryptor, org_id, credential.id)
+                .await
+                .map_err(|(_, message)| anyhow::anyhow!(message))?
+                .context("BYOC credentials are unavailable; infrastructure was preserved")?;
+        let access_key_id = secrets["aws_access_key_id"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .context("BYOC access key is unavailable")?
+            .to_string();
+        let secret_access_key = secrets["aws_secret_access_key"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .context("BYOC secret key is unavailable")?
+            .to_string();
+        let region = credential.config["aws_region"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| std::env::var("AWS_REGION").ok())
+            .unwrap_or_else(|| "us-west-2".to_string());
+        let asg_name = credential.config["asg_name"].as_str().map(str::to_string);
+        return Ok((
+            Some(deployment::AwsCredentials {
+                access_key_id,
+                secret_access_key,
+                region,
+            }),
+            asg_name,
+        ));
+    }
+
+    Ok((
+        Some(crate::fully_managed_capacity::platform_credentials_for_region(resource_region)),
+        None,
+    ))
 }

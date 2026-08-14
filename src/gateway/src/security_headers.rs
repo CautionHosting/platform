@@ -4,7 +4,19 @@
 use axum::http::HeaderValue;
 use axum::{extract::Request, middleware::Next, response::Response};
 
+const DASHBOARD_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.paddle.com https://*.paddle.com https://public.profitwell.com https://*.profitwell.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https://*.paddle.com https://public.profitwell.com https://*.profitwell.com; frame-src https://*.paddle.com";
+const VERIFIER_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https:; frame-src 'none'";
+
+fn content_security_policy(path: &str) -> &'static str {
+    if path == "/verify" {
+        VERIFIER_CSP
+    } else {
+        DASHBOARD_CSP
+    }
+}
+
 pub async fn security_headers_middleware(req: Request, next: Next) -> Response {
+    let content_security_policy = content_security_policy(req.uri().path());
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
 
@@ -23,7 +35,7 @@ pub async fn security_headers_middleware(req: Request, next: Next) -> Response {
     );
     headers.insert(
         "content-security-policy",
-        HeaderValue::from_static("default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://cdn.paddle.com https://*.paddle.com https://public.profitwell.com https://*.profitwell.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https://*.paddle.com https://public.profitwell.com https://*.profitwell.com; frame-src https://*.paddle.com"),
+        HeaderValue::from_static(content_security_policy),
     );
     headers.insert(
         "permissions-policy",
@@ -31,4 +43,21 @@ pub async fn security_headers_middleware(req: Request, next: Next) -> Response {
     );
 
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verifier_csp_allows_https_attestation_endpoints() {
+        assert_eq!(content_security_policy("/verify"), VERIFIER_CSP);
+        assert!(VERIFIER_CSP.contains("connect-src 'self' https:"));
+    }
+
+    #[test]
+    fn dashboard_csp_remains_restricted() {
+        assert_eq!(content_security_policy("/dashboard"), DASHBOARD_CSP);
+        assert!(!DASHBOARD_CSP.contains("connect-src 'self' https:;"));
+    }
 }

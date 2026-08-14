@@ -3,6 +3,8 @@
 
 const ENCLAVE_SOURCE_BASE: &str = "https://git.distrust.co/public/enclaveos/archive";
 pub const FRAMEWORK_SOURCE: &str = "https://codeberg.org/caution/platform/archive/main.tar.gz";
+const PLATFORM_CODEBERG_ARCHIVE_PREFIX: &str = "https://codeberg.org/caution/platform/archive/";
+const PLATFORM_GITHUB_ARCHIVE_PREFIX: &str = "https://github.com/CautionHosting/platform/archive/";
 
 pub fn enclave_source_url(commit: &str) -> String {
     format!("{}/{}.tar.gz", ENCLAVE_SOURCE_BASE, commit)
@@ -14,6 +16,17 @@ pub fn pin_archive_url_to_commit(url: &str, commit: &str) -> String {
     } else {
         url.to_string()
     }
+}
+
+/// Return the canonical archive URL followed by any explicitly configured mirrors.
+pub fn archive_url_candidates(url: &str) -> Vec<String> {
+    let mut candidates = vec![url.to_string()];
+
+    if let Some(archive_name) = url.strip_prefix(PLATFORM_CODEBERG_ARCHIVE_PREFIX) {
+        candidates.push([PLATFORM_GITHUB_ARCHIVE_PREFIX, archive_name].concat());
+    }
+
+    candidates
 }
 
 /// Classify `enclave_source` (archive URL, git URL, or local path) into the
@@ -284,8 +297,12 @@ impl EnclaveBuilder {
             tracing::info!("Extracting specific files: {:?}", files);
             extract::extract_specific_files(&image.reference, &files, &self.work_dir).await
         } else {
-            tracing::info!("Extracting full filesystem");
-            extract::extract_image_filesystem(&image.reference, &self.work_dir).await
+            // Hand the build the export tar rather than an unpacked directory:
+            // unpacking here would drop case-colliding entries on macOS and
+            // silently change PCR0/PCR1 (issue #401). `stage_eif_components`
+            // recognises a `.tar` and lets the Linux builder unpack it.
+            tracing::info!("Exporting full filesystem as tar");
+            extract::export_image_filesystem_tar(&image.reference, &self.work_dir).await
         }
     }
 
@@ -312,6 +329,7 @@ impl EnclaveBuilder {
         e2e: bool,
         e2e_mode: &str,
         e2e_key_exchange: &str,
+        allow_plaintext_fallback: bool,
         domain: Option<&str>,
         http_upstream_protocol: &str,
         locksmith: bool,
@@ -334,6 +352,7 @@ impl EnclaveBuilder {
             e2e,
             e2e_mode,
             e2e_key_exchange,
+            allow_plaintext_fallback,
             domain,
             http_upstream_protocol,
             locksmith,
@@ -381,6 +400,11 @@ impl EnclaveBuilder {
             tracing::info!("Extracted git_url={}, ref_name={}", git_url, ref_name);
 
             if !ref_name.is_empty() {
+                if ref_name.len() == 40
+                    && ref_name.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Some(ref_name.to_ascii_lowercase());
+                }
                 tracing::info!("Resolving framework ref '{}' to commit SHA", ref_name);
                 if let Some(sha) = compile::resolve_ref_to_commit(&git_url, ref_name).await {
                     tracing::info!("Resolved framework '{}' to commit {}", ref_name, sha);
@@ -413,6 +437,7 @@ impl EnclaveBuilder {
         e2e: bool,
         e2e_mode: &str,
         e2e_key_exchange: &str,
+        allow_plaintext_fallback: bool,
         domain: Option<&str>,
         http_upstream_protocol: &str,
         locksmith: bool,
@@ -535,6 +560,7 @@ impl EnclaveBuilder {
                 e2e,
                 e2e_mode,
                 e2e_key_exchange,
+                allow_plaintext_fallback,
                 domain,
                 http_upstream_protocol,
                 locksmith,
@@ -575,6 +601,7 @@ impl EnclaveBuilder {
         e2e: bool,
         e2e_mode: &str,
         e2e_key_exchange: &str,
+        allow_plaintext_fallback: bool,
         domain: Option<&str>,
         http_upstream_protocol: &str,
         locksmith: bool,
@@ -681,6 +708,7 @@ impl EnclaveBuilder {
                 e2e,
                 e2e_mode,
                 e2e_key_exchange,
+                allow_plaintext_fallback,
                 domain,
                 http_upstream_protocol,
                 locksmith,
@@ -722,6 +750,7 @@ impl EnclaveBuilder {
         e2e: bool,
         e2e_mode: &str,
         e2e_key_exchange: &str,
+        allow_plaintext_fallback: bool,
         domain: Option<&str>,
         http_upstream_protocol: &str,
         locksmith: bool,
@@ -778,6 +807,7 @@ impl EnclaveBuilder {
                 e2e,
                 e2e_mode,
                 e2e_key_exchange,
+                allow_plaintext_fallback,
                 domain,
                 http_upstream_protocol,
                 locksmith,
@@ -801,6 +831,7 @@ impl EnclaveBuilder {
                 e2e,
                 e2e_mode,
                 e2e_key_exchange,
+                allow_plaintext_fallback,
                 domain,
                 http_upstream_protocol,
                 locksmith,
@@ -916,6 +947,27 @@ mod tests {
             pin_archive_url_to_commit(url, "abc123"),
             "https://codeberg.org/caution/platform/archive/abc123.tar.gz"
         );
+    }
+
+    #[test]
+    fn test_archive_url_candidates_adds_platform_mirror() {
+        for archive_name in ["main.tar.gz", "abc123.tar.gz"] {
+            let codeberg = [PLATFORM_CODEBERG_ARCHIVE_PREFIX, archive_name].concat();
+            let github = [PLATFORM_GITHUB_ARCHIVE_PREFIX, archive_name].concat();
+
+            assert_eq!(archive_url_candidates(&codeberg), vec![codeberg, github]);
+        }
+    }
+
+    #[test]
+    fn test_archive_url_candidates_ignores_unconfigured_repositories() {
+        for url in [
+            "https://codeberg.org/caution/locksmith/archive/abc123.tar.gz",
+            "https://codeberg.org/caution/platform-extra/archive/abc123.tar.gz",
+            "https://example.com/caution/platform/archive/abc123.tar.gz",
+        ] {
+            assert_eq!(archive_url_candidates(url), vec![url.to_string()]);
+        }
     }
 
     #[test]

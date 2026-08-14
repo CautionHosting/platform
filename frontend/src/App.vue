@@ -3,6 +3,9 @@
 
 <template>
   <div id="app">
+    <div v-if="showPreviewBanner" class="dashboard-preview-banner" role="status">
+      Read-only UI preview — fixture data only. State-changing requests are blocked.
+    </div>
     <component
       v-if="currentView"
       :is="currentView"
@@ -27,8 +30,12 @@ import AuthLogin from './views/AuthLogin.vue'
 import Dashboard from './views/Dashboard.vue'
 import QrLogin from './views/QrLogin.vue'
 import InviteAccept from './views/InviteAccept.vue'
+import PublicAttestation from './views/PublicAttestation.vue'
 import LegalAcceptanceModal from './components/LegalAcceptanceModal.vue'
 import { authFetch, getCsrfToken } from './composables/useWebAuthn.js'
+
+const dashboardPreviewEnabled =
+  typeof __CAUTION_DASHBOARD_PREVIEW__ !== 'undefined' && __CAUTION_DASHBOARD_PREVIEW__
 
 export default {
   name: 'App',
@@ -39,6 +46,7 @@ export default {
     Dashboard,
     QrLogin,
     InviteAccept,
+    PublicAttestation,
     LegalAcceptanceModal
   },
   setup() {
@@ -109,6 +117,11 @@ export default {
         title: 'CLI signing • Caution',
         description: 'Approve a Caution CLI signing request.',
         path: '/qr-sign'
+      },
+      '/verify': {
+        title: 'Verify an application • Caution',
+        description: 'Verify a Caution application enclave attestation in your browser.',
+        path: '/verify'
       }
     }
 
@@ -361,6 +374,9 @@ export default {
         // Public route - QR code CLI signing (no auth required)
         // Same component as QrLogin — it detects sign vs login from the path
         return 'QrLogin'
+      } else if (path === '/verify') {
+        // Public route - client-side enclave attestation verification
+        return 'PublicAttestation'
       }
 
       // Unknown path - redirect to home
@@ -368,9 +384,18 @@ export default {
       return isAuthenticated.value ? 'Dashboard' : 'Register'
     })
 
+    const showPreviewBanner = computed(() => {
+      if (!dashboardPreviewEnabled) return false
+      return currentView.value === 'Dashboard'
+    })
+
     onMounted(() => {
-      // Check authentication on mount
-      checkAuth()
+      // Public verification must not be gated by account or legal status.
+      if (window.location.pathname === '/verify') {
+        authChecked.value = true
+      } else {
+        checkAuth()
+      }
 
       // Handle browser back/forward buttons and dashboard hash changes
       window.addEventListener('popstate', refreshCurrentLocation)
@@ -388,6 +413,7 @@ export default {
       currentView,
       isAuthenticated,
       userStatus,
+      showPreviewBanner,
       showLegalModal,
       legalActionLoading,
       legalActionError,
@@ -403,7 +429,7 @@ export default {
 /* Plus Jakarta Sans */
 @font-face {
   font-family: 'Plus Jakarta Sans';
-  src: url('./assets/fonts/PlusJakartaSans-ExtraLight.otf') format('opentype');
+  src: url('/assets/fonts/PlusJakartaSans-ExtraLight.otf') format('opentype');
   font-weight: 200;
   font-style: normal;
   font-display: swap;
@@ -411,7 +437,7 @@ export default {
 
 @font-face {
   font-family: 'Plus Jakarta Sans';
-  src: url('./assets/fonts/PlusJakartaSans-Light.otf') format('opentype');
+  src: url('/assets/fonts/PlusJakartaSans-Light.otf') format('opentype');
   font-weight: 300;
   font-style: normal;
   font-display: swap;
@@ -419,7 +445,7 @@ export default {
 
 @font-face {
   font-family: 'Plus Jakarta Sans';
-  src: url('./assets/fonts/PlusJakartaSans-Regular.otf') format('opentype');
+  src: url('/assets/fonts/PlusJakartaSans-Regular.otf') format('opentype');
   font-weight: 400;
   font-style: normal;
   font-display: swap;
@@ -427,7 +453,7 @@ export default {
 
 @font-face {
   font-family: 'Plus Jakarta Sans';
-  src: url('./assets/fonts/PlusJakartaSans-Medium.otf') format('opentype');
+  src: url('/assets/fonts/PlusJakartaSans-Medium.otf') format('opentype');
   font-weight: 500;
   font-style: normal;
   font-display: swap;
@@ -435,7 +461,7 @@ export default {
 
 @font-face {
   font-family: 'Plus Jakarta Sans';
-  src: url('./assets/fonts/PlusJakartaSans-SemiBold.otf') format('opentype');
+  src: url('/assets/fonts/PlusJakartaSans-SemiBold.otf') format('opentype');
   font-weight: 600;
   font-style: normal;
   font-display: swap;
@@ -443,7 +469,7 @@ export default {
 
 @font-face {
   font-family: 'Plus Jakarta Sans';
-  src: url('./assets/fonts/PlusJakartaSans-Bold.otf') format('opentype');
+  src: url('/assets/fonts/PlusJakartaSans-Bold.otf') format('opentype');
   font-weight: 700;
   font-style: normal;
   font-display: swap;
@@ -451,7 +477,7 @@ export default {
 
 @font-face {
   font-family: 'Plus Jakarta Sans';
-  src: url('./assets/fonts/PlusJakartaSans-ExtraBold.otf') format('opentype');
+  src: url('/assets/fonts/PlusJakartaSans-ExtraBold.otf') format('opentype');
   font-weight: 800;
   font-style: normal;
   font-display: swap;
@@ -460,7 +486,7 @@ export default {
 /* IBM Plex Sans */
 @font-face {
   font-family: 'IBM Plex Sans';
-  src: url('./assets/fonts/IBMPlexSans-Light.woff2') format('woff2');
+  src: url('/assets/fonts/IBMPlexSans-Light.woff2') format('woff2');
   font-weight: 300;
   font-style: normal;
   font-display: swap;
@@ -468,7 +494,7 @@ export default {
 
 @font-face {
   font-family: 'IBM Plex Sans';
-  src: url('./assets/fonts/IBMPlexSans-Regular.woff2') format('woff2');
+  src: url('/assets/fonts/IBMPlexSans-Regular.woff2') format('woff2');
   font-weight: 400;
   font-style: normal;
   font-display: swap;
@@ -476,7 +502,7 @@ export default {
 
 @font-face {
   font-family: 'IBM Plex Sans';
-  src: url('./assets/fonts/IBMPlexSans-Medium.woff2') format('woff2');
+  src: url('/assets/fonts/IBMPlexSans-Medium.woff2') format('woff2');
   font-weight: 500;
   font-style: normal;
   font-display: swap;
@@ -484,7 +510,7 @@ export default {
 
 @font-face {
   font-family: 'IBM Plex Sans';
-  src: url('./assets/fonts/IBMPlexSans-SemiBold.woff2') format('woff2');
+  src: url('/assets/fonts/IBMPlexSans-SemiBold.woff2') format('woff2');
   font-weight: 600;
   font-style: normal;
   font-display: swap;
@@ -492,7 +518,7 @@ export default {
 
 @font-face {
   font-family: 'IBM Plex Sans';
-  src: url('./assets/fonts/IBMPlexSans-Bold.woff2') format('woff2');
+  src: url('/assets/fonts/IBMPlexSans-Bold.woff2') format('woff2');
   font-weight: 700;
   font-style: normal;
   font-display: swap;
@@ -614,5 +640,18 @@ body {
 
 #app {
   min-height: 100vh;
+}
+
+.dashboard-preview-banner {
+  position: sticky;
+  top: 0;
+  z-index: 10000;
+  padding: 10px 16px;
+  text-align: center;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--theme-warning, #92400e);
+  background: var(--theme-warning-bg, #fef3c7);
+  border-bottom: 1px solid var(--theme-warning-border, #fde68a);
 }
 </style>

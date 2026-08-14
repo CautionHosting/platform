@@ -3,53 +3,58 @@
 
 <template>
   <div class="qr-login">
-    <div class="qr-card">
-      <h2 class="qr-title">{{ title }}</h2>
+    <CompactPageHeader />
+    <main class="qr-content">
+      <div class="qr-card">
+        <h2 class="qr-title">{{ title }}</h2>
 
-      <div v-if="state === 'ready'">
-        <p v-if="!isSign" class="qr-warning">
-          Cross-device authentication increases phishing risk. Only continue if you personally started this CLI login from a device you control.
-        </p>
-        <p class="qr-description">
-          {{ description }}
-        </p>
-        <button @click="authenticate" class="btn-dark btn qr-btn">
-          Authenticate with security key
-        </button>
-      </div>
+        <div v-if="state === 'ready'">
+          <p v-if="!isSign" class="qr-warning">
+            Cross-device authentication increases phishing risk. Only continue if you personally started this CLI login from a device you control.
+          </p>
+          <p class="qr-description">
+            {{ description }}
+          </p>
+          <button class="btn-dark btn qr-btn" @click="authenticate">
+            Authenticate with security key
+          </button>
+        </div>
 
-      <div v-else-if="state === 'authenticating'">
-        <p class="qr-status">Tap your security key...</p>
-      </div>
+        <div v-else-if="state === 'authenticating'">
+          <p class="qr-status">Tap your security key...</p>
+        </div>
 
-      <div v-else-if="state === 'completing'">
-        <p class="qr-status">Completing authentication...</p>
-      </div>
+        <div v-else-if="state === 'completing'">
+          <p class="qr-status">Completing authentication...</p>
+        </div>
 
-      <div v-else-if="state === 'success'">
-        <p class="qr-success">{{ successMessage }}</p>
-      </div>
+        <div v-else-if="state === 'success'">
+          <p class="qr-success">{{ successMessage }}</p>
+        </div>
 
-      <div v-else-if="state === 'error'">
-        <p class="qr-error">{{ errorMessage }}</p>
-        <button @click="reset" class="btn-dark btn qr-btn">
-          Try again
-        </button>
-      </div>
+        <div v-else-if="state === 'error'">
+          <p class="qr-error">{{ errorMessage }}</p>
+          <button class="btn-dark btn qr-btn" @click="reset">
+            Try again
+          </button>
+        </div>
 
-      <div v-else-if="state === 'invalid'">
-        <p class="qr-error">{{ invalidMessage }}</p>
+        <div v-else-if="state === 'invalid'">
+          <p class="qr-error">{{ invalidMessage }}</p>
+        </div>
       </div>
-    </div>
+    </main>
   </div>
 </template>
 
 <script>
 import { ref, onMounted } from 'vue'
+import CompactPageHeader from '../components/CompactPageHeader.vue'
 import { base64urlToUint8Array, uint8ArrayToBase64url } from '../composables/useWebAuthn.js'
 
 export default {
   name: 'QrLogin',
+  components: { CompactPageHeader },
   setup() {
     const state = ref('ready')
     const errorMessage = ref('')
@@ -197,6 +202,7 @@ export default {
       errorMessage,
       title,
       description,
+      isSign,
       successMessage,
       invalidMessage,
       authenticate,
@@ -208,15 +214,21 @@ export default {
 
 <style scoped>
 .qr-login {
+  min-height: 100vh;
+  color: var(--theme-text-primary);
+}
+
+.qr-content {
   display: flex;
   justify-content: center;
   align-items: center;
-  min-height: 100vh;
+  min-height: calc(100vh - 92px);
   padding: var(--spacing3);
 }
 
 .qr-card {
-  background: white;
+  background: var(--theme-surface);
+  border: 1px solid var(--theme-border);
   border-radius: var(--radius-lg);
   padding: var(--spacing5);
   max-width: 420px;
@@ -229,19 +241,19 @@ export default {
   font-size: var(--heading3-font-size);
   font-weight: var(--heading3-font-weight);
   margin-bottom: var(--spacing3);
-  color: var(--color-dark);
+  color: var(--theme-text-primary);
 }
 
 .qr-description {
   font-size: var(--body-font-size);
-  color: var(--color-grey);
+  color: var(--theme-text-muted);
   margin-bottom: var(--spacing4);
   line-height: var(--body-line-height);
 }
 
 .qr-warning {
   font-size: var(--body-font-size);
-  color: #8a3b00;
+  color: var(--theme-warning);
   font-weight: 600;
   margin-bottom: var(--spacing3);
   line-height: var(--body-line-height);
@@ -259,31 +271,47 @@ export default {
 }
 
 .btn-dark {
-  background: var(--color-dark);
-  color: white;
+  background: var(--theme-control);
+  color: var(--theme-control-text);
 }
 
 .btn-dark:hover {
-  opacity: 0.9;
+  background: var(--theme-control-hover);
+}
+
+.qr-btn:focus-visible {
+  outline: 3px solid var(--theme-focus-ring);
+  outline-offset: 2px;
 }
 
 .qr-status {
   font-size: var(--body-font-size);
-  color: var(--color-grey);
+  color: var(--theme-text-muted);
   padding: var(--spacing4) 0;
 }
 
 .qr-success {
   font-size: var(--body-font-size);
-  color: var(--color-accent-green);
+  color: var(--theme-success);
   font-weight: 500;
   padding: var(--spacing4) 0;
 }
 
 .qr-error {
   font-size: var(--body-font-size);
-  color: #d32f2f;
+  color: var(--theme-danger);
   margin-bottom: var(--spacing3);
   line-height: var(--body-line-height);
+}
+
+@media (max-width: 600px) {
+  .qr-content {
+    min-height: calc(100vh - 76px);
+    padding: 12px;
+  }
+
+  .qr-card {
+    padding: 32px 24px;
+  }
 }
 </style>

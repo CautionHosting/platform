@@ -257,7 +257,8 @@ export default {
 }
 
 .modal-content {
-  background: white;
+  background: var(--theme-surface);
+  color: var(--theme-text-primary);
   border-radius: 12px;
   width: 90%;
   max-width: 700px;
@@ -272,7 +273,7 @@ export default {
   justify-content: space-between;
   align-items: center;
   padding: 20px 24px;
-  border-bottom: 1px solid #eee;
+  border-bottom: 1px solid var(--theme-border);
 }
 
 .modal-header h2 {
@@ -285,14 +286,14 @@ export default {
   background: none;
   border: none;
   font-size: 24px;
-  color: #999;
+  color: var(--theme-text-faint);
   cursor: pointer;
   padding: 0;
   line-height: 1;
 }
 
 .btn-close:hover {
-  color: #333;
+  color: var(--theme-text-secondary);
 }
 
 .modal-body {
@@ -306,11 +307,11 @@ export default {
   justify-content: flex-end;
   gap: 12px;
   padding: 16px 24px;
-  border-top: 1px solid #eee;
+  border-top: 1px solid var(--theme-border);
 }
 
 .endpoint-info {
-  background: #f8f9fa;
+  background: var(--theme-surface-subtle);
   padding: 12px 16px;
   border-radius: 8px;
   margin-bottom: 20px;
@@ -318,18 +319,18 @@ export default {
 }
 
 .endpoint-info .label {
-  color: #666;
+  color: var(--theme-text-muted);
   margin-right: 8px;
 }
 
 .endpoint-info code {
   font-family: 'Monaco', monospace;
-  color: #333;
+  color: var(--theme-text-secondary);
 }
 
 .endpoint-info p {
   margin: 8px 0 0;
-  color: #666;
+  color: var(--theme-text-muted);
   line-height: 1.4;
 }
 
@@ -339,7 +340,7 @@ export default {
   justify-content: center;
   gap: 12px;
   padding: 40px 20px;
-  color: #666;
+  color: var(--theme-text-muted);
 }
 
 .loading-text {
@@ -365,15 +366,15 @@ export default {
 }
 
 .check-item.success .check-icon {
-  color: #2e7d32;
+  color: var(--theme-success);
 }
 
 .check-item.error .check-icon {
-  color: #c62828;
+  color: var(--theme-danger);
 }
 
 .check-item.pending .check-icon {
-  color: #999;
+  color: var(--theme-text-faint);
 }
 
 .check-message {
@@ -391,13 +392,13 @@ export default {
 }
 
 .result-banner.success {
-  background: #e8f5e9;
-  color: #2e7d32;
+  background: var(--theme-success-bg);
+  color: var(--theme-success);
 }
 
 .result-banner.error {
-  background: #ffebee;
-  color: #c62828;
+  background: var(--theme-danger-bg);
+  color: var(--theme-danger);
 }
 
 .expandable-sections {
@@ -407,18 +408,18 @@ export default {
 }
 
 .expandable-section {
-  border: 1px solid #e0e0e0;
+  border: 1px solid var(--theme-border);
   border-radius: 8px;
   overflow: hidden;
 }
 
 .expandable-section summary {
   padding: 12px 16px;
-  background: #f8f9fa;
+  background: var(--theme-surface-subtle);
   cursor: pointer;
   font-weight: 600;
   font-size: 14px;
-  color: #333;
+  color: var(--theme-text-secondary);
   list-style: none;
   display: flex;
   align-items: center;
@@ -440,18 +441,18 @@ export default {
 }
 
 .expandable-section summary:hover {
-  background: #f0f0f0;
+  background: var(--theme-surface-muted);
 }
 
 .section-content {
   padding: 16px;
-  border-top: 1px solid #e0e0e0;
+  border-top: 1px solid var(--theme-border);
 }
 
 .raw-json {
   margin: 0;
   padding: 12px;
-  background: #f8f9fa;
+  background: var(--theme-surface-subtle);
   border-radius: 6px;
   font-family: 'Monaco', monospace;
   font-size: 11px;
@@ -482,14 +483,14 @@ export default {
 }
 
 .pcr-label {
-  color: #666;
+  color: var(--theme-text-muted);
   min-width: 50px;
 }
 
 .pcr-value {
   font-family: 'Monaco', monospace;
   word-break: break-all;
-  color: #333;
+  color: var(--theme-text-secondary);
 }
 
 .source-item {
@@ -497,12 +498,12 @@ export default {
   align-items: baseline;
   gap: 12px;
   padding: 8px 12px;
-  background: #f8f9fa;
+  background: var(--theme-surface-subtle);
   border-radius: 6px;
 }
 
 .source-label {
-  color: #666;
+  color: var(--theme-text-muted);
   font-weight: 500;
   min-width: 80px;
   flex-shrink: 0;
@@ -519,7 +520,7 @@ export default {
 }
 
 .source-link {
-  color: #667eea;
+  color: var(--theme-info);
   text-decoration: none;
 }
 
@@ -528,24 +529,24 @@ export default {
 }
 
 .source-value {
-  color: #333;
+  color: var(--theme-text-secondary);
 }
 
 .source-meta {
-  color: #888;
+  color: var(--theme-text-faint);
   font-size: 11px;
 }
 
 .source-branch {
-  color: #2e7d32;
+  color: var(--theme-success);
   font-size: 11px;
 }
 
 .btn-secondary {
   padding: 10px 20px;
-  background: #f5f5f5;
-  color: #666;
-  border: 1px solid #ddd;
+  background: var(--theme-surface-muted);
+  color: var(--theme-text-muted);
+  border: 1px solid var(--theme-border);
   border-radius: 8px;
   font-size: 14px;
   cursor: pointer;
@@ -553,7 +554,7 @@ export default {
 }
 
 .btn-secondary:hover {
-  background: #eee;
-  color: #333;
+  background: var(--theme-border);
+  color: var(--theme-text-secondary);
 }
 </style>

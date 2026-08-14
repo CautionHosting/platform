@@ -11,13 +11,23 @@ ALTER TABLE organizations
   ADD COLUMN IF NOT EXISTS credit_suspended_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_billing_config_auto_topup
-  ON billing_config(user_id) WHERE auto_topup_enabled = true;
+  ON billing_config(organization_id) WHERE auto_topup_enabled = true;
 
 -- Safety constraints
-ALTER TABLE billing_config
-  ADD CONSTRAINT chk_auto_topup_amount
-  CHECK (auto_topup_amount_dollars >= 0 AND auto_topup_amount_dollars <= 10000);
+DO
+$$BEGIN
+    ALTER TABLE billing_config
+        ADD CONSTRAINT chk_auto_topup_amount
+        CHECK (auto_topup_amount_dollars >= 0 AND auto_topup_amount_dollars <= 10000);
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END;$$;
 
-ALTER TABLE wallet_balance
-  ADD CONSTRAINT chk_balance_non_negative
-  CHECK (balance_cents >= 0);
+DO
+$$BEGIN
+    ALTER TABLE wallet_balance
+        ADD CONSTRAINT chk_balance_non_negative
+        CHECK (balance_cents >= 0);
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END;$$;

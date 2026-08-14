@@ -213,6 +213,25 @@ impl Ec2Client {
         Ok(parse_tag_values(&body, "publicIp").len() as u32)
     }
 
+    pub async fn associate_app_address(
+        &self,
+        resource_id: &str,
+        instance_id: &str,
+    ) -> Result<String> {
+        let params = vec![
+            ("Action".to_string(), "DescribeAddresses".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+            ("Filter.1.Name".to_string(), "tag:ResourceId".to_string()),
+            ("Filter.1.Value.1".to_string(), resource_id.to_string()),
+        ];
+        let body = self.signed_request(&params).await?;
+        let (allocation_id, public_ip, attached_instance_id) = parse_app_address(&body)?;
+        if attached_instance_id.as_deref() != Some(instance_id) {
+            self.associate_address(&allocation_id, instance_id).await?;
+        }
+        Ok(public_ip)
+    }
+
     pub async fn active_instance_types(&self) -> Result<Vec<String>, ActiveInstanceTypesError> {
         let instances = self
             .describe_instances(&[Filter::new("instance-state-name", &["pending", "running"])])
@@ -732,6 +751,19 @@ fn parse_instance_ids(xml: &str) -> Vec<Instance> {
         .collect()
 }
 
+fn parse_app_address(xml: &str) -> Result<(String, String, Option<String>)> {
+    let allocation_ids = parse_tag_values(xml, "allocationId");
+    let public_ips = parse_tag_values(xml, "publicIp");
+    if allocation_ids.len() != 1 || public_ips.len() != 1 {
+        bail!("expected exactly one Elastic IP tagged for app");
+    }
+    Ok((
+        allocation_ids[0].clone(),
+        public_ips[0].clone(),
+        parse_first_tag_value(xml, "instanceId"),
+    ))
+}
+
 fn parse_first_tag_value(xml: &str, tag_name: &str) -> Option<String> {
     parse_tag_values(xml, tag_name).into_iter().next()
 }
@@ -841,6 +873,16 @@ mod tests {
 
         let instances = parse_instance_ids(xml);
         assert!(instances.is_empty());
+    }
+
+    #[test]
+    fn test_parse_app_address() {
+        let xml = "<item><allocationId>eipalloc-123</allocationId><publicIp>198.51.100.42</publicIp><instanceId>i-123</instanceId></item>";
+        let address = parse_app_address(xml).unwrap();
+
+        assert_eq!(address.0, "eipalloc-123");
+        assert_eq!(address.1, "198.51.100.42");
+        assert_eq!(address.2.as_deref(), Some("i-123"));
     }
 
     #[test]

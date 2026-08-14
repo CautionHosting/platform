@@ -105,11 +105,12 @@ async fn main() -> Result<()> {
         }
     });
     let e2e_key_exchange = key_exchange_from_env()?;
+    let allow_plaintext_fallback = env_flag("CAUTION_ALLOW_PLAINTEXT_FALLBACK");
     let domain = std::env::var("CAUTION_DOMAIN")
         .ok()
         .filter(|s| !s.is_empty());
-    let http_upstream_protocol = std::env::var("CAUTION_HTTP_UPSTREAM_PROTOCOL")
-        .unwrap_or_else(|_| "http".to_string());
+    let http_upstream_protocol =
+        std::env::var("CAUTION_HTTP_UPSTREAM_PROTOCOL").unwrap_or_else(|_| "http".to_string());
     let locksmith = env_flag("CAUTION_LOCKSMITH");
     let e2e_cors_origins = std::env::var("CAUTION_CORS_ORIGINS")
         .ok()
@@ -173,6 +174,7 @@ async fn main() -> Result<()> {
                 e2e,
                 &e2e_mode,
                 &e2e_key_exchange,
+                allow_plaintext_fallback,
                 domain.as_deref(),
                 &http_upstream_protocol,
                 locksmith,
@@ -196,6 +198,7 @@ async fn main() -> Result<()> {
                 e2e,
                 &e2e_mode,
                 &e2e_key_exchange,
+                allow_plaintext_fallback,
                 domain.as_deref(),
                 &http_upstream_protocol,
                 locksmith,

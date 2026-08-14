@@ -1206,7 +1206,7 @@ pub async fn create_qr_login_token(
     requestee_token: &str,
     ip_address: Option<&str>,
     expires_at: OffsetDateTime,
-    username: Option<&str>,
+    username: &str,
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO qr_login_tokens (token, requestee_token, status, ip_address, expires_at, username)

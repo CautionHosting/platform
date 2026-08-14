@@ -107,6 +107,7 @@
           </svg>
           <span>Log out</span>
         </button>
+        <ThemeToggle />
       </div>
     </div>
 
@@ -397,11 +398,13 @@ import {
   dismissDevelopmentBannerForSession,
   isDevelopmentBannerDismissed,
 } from "../utils/developmentBanner.js";
+import ThemeToggle from "./ThemeToggle.vue";
 
 const TOOL_ORDER = ["platform", "enclaveos", "bootproof", "steve", "locksmith"];
 
 export default {
   name: "DashboardLayout",
+  components: { ThemeToggle },
   props: {
     title: {
       type: String,

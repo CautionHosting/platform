@@ -29,7 +29,7 @@ An enclave is **verifiable** when you can independently confirm that the code ru
 
 ### 1. Bootstrap AWS infrastructure
 
-Follow the [bootstrapping guide](infra-bootstrap/README.md) to create the required AWS infrastructure (S3 buckets, IAM user, DynamoDB table).
+Follow the [bootstrapping guide](infra-bootstrap/README.md) to create the required AWS infrastructure (S3 buckets, IAM user, DynamoDB table, and the delegated `apps.caution.sh` Route53 zone).
 
 ### 2. Run the platform
 
@@ -63,6 +63,42 @@ Start the platform services:
 make up
 ```
 
+#### Frontend development
+
+For the normal frontend development server:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000`. This remains authentication-gated and proxies API,
+authentication, health, and build-input requests to `VITE_PROXY_TARGET` (default
+`http://localhost:8000`), so the platform stack must be running for a real login.
+
+To inspect the populated dashboard without creating an account:
+
+```bash
+npm run dev:dashboard
+```
+
+This command binds to `127.0.0.1` and enables a Vite-server-only, read-only fixture.
+The page displays a preview banner, state-changing requests return `405`, and unknown
+API or authentication requests return `404` instead of reaching a backend. It does
+not add a frontend authentication bypass, cookie, test account, gateway route, or
+production behavior. A production build always disables preview mode.
+The provider-neutral app detail fixture covers complete and sparse deployment states;
+provider-specific identifiers are intentionally not shown.
+The applications fixture covers active, failed, stopped, terminating, and terminated
+states. Its sortable columns and `Hide terminated` control persist browser-local choices
+under `caution-apps-list-preferences`; search text is intentionally not persisted.
+
+The fixture is UI evidence only. For an authenticated smoke test, use a Linux/x86_64
+host, run `npm run build`, rebuild the gateway image (which bakes in the frontend),
+start the real stack with `make up`, generate an access code with
+`bash utils/generate-beta-codes.sh 1`, and register at `http://localhost:8000`.
+
 ### 3. Deploy an app
 
 1. Register using Passkey (via terminal or web browser):
@@ -89,6 +125,9 @@ make up
    repo-root `Containerfile`, then a repo-root `Dockerfile`. Put setup,
    compilation, asset builds, and runtime packaging in that Containerfile or
    Dockerfile so the build inputs are explicit and reproducible.
+   Application images may use the conventional relative merged-/usr links
+   `/bin -> usr/bin` and `/lib -> usr/lib`; other `/bin` or `/lib` symlink
+   layouts are rejected during EIF assembly.
 
    The <a href="https://codeberg.org/Caution/hello-world-enclave" target="_blank">hello-world-enclave</a> repo is a good test app to deploy.
 
@@ -96,6 +135,9 @@ make up
    ```bash
    git push caution main
    ```
+
+   Long-running builds use protocol-level SSH keepalives so quiet deployment
+   phases do not require client-side keepalive configuration.
 
 #### Enclave-terminated HTTPS (TLS mode, implemented by Caddy)
 
@@ -120,7 +162,8 @@ network {
 }
 ```
 
-The domain must resolve directly to the deployed host, the HTTP port must have
+Point the subdomain's CNAME record at the app's `DNS target` shown by
+the CLI or dashboard. Zone-apex domains are not supported. The HTTP port must have
 an ingress rule, and outbound egress is required for Let's Encrypt. Disable any
 CDN or proxy TLS termination. Caddy publishes the verified leaf certificate
 SHA-256 fingerprint in authenticated Nitro `user_data`. For a source-backed
@@ -140,9 +183,68 @@ This checks HTTPS, redirects, health, Nitro authenticity, and the signed
 certificate binding. It does not establish workload identity; use
 `caution verify` with independently trusted source or PCRs for that.
 
+For STEVE-protected HTTP deployments, plaintext application routing is denied
+by default. Legacy fallback requires an explicit opt-in:
+
+```hcl
+e2e_encryption {
+  enabled                  = true
+  key_exchange             = "xwing-draft10"
+  allow_plaintext_fallback = true
+}
+```
+
+The platform health and attestation endpoints remain available outside the
+application route. In fail-closed mode the application HTTP port is not exposed
+through a host or enclave VSOCK proxy; STEVE reaches it over enclave-local TCP.
+
 ### 4. Verify a deployed app
 
-You can verify an enclave's attestation in two ways:
+Use the public `/verify` page to authenticate fresh nonce-bound Nitro evidence
+and inspect its PCR0, PCR1, and PCR2 values without an account. Browser targets
+must use an HTTPS domain, and their `/attestation` endpoint must permit
+cross-origin POST requests. HTTP and raw-IP endpoints require the CLI.
+
+Every first-party frontend route follows the operating-system light or dark
+preference by default and provides a header control for an explicit override. A
+choice is stored as `caution-theme` in browser `localStorage`, applies before first
+paint, and synchronizes across routes, reloads, and other open tabs. Without a
+valid stored choice, the theme follows operating-system changes and falls back to
+light when the system preference is unavailable. The preference is browser-local;
+it is not stored in a cookie or synchronized with an account.
+
+The browser does not authenticate the sibling response manifest, reproduce the
+application source, establish a STEVE encrypted session, or automatically
+identify the expected deployment. Compare PCRs only with values reviewed through
+an independent trusted source.
+
+The verification summary marks authenticated Nitro evidence in green and keeps
+the expected deployment neutral until independently reviewed PCRs are supplied.
+It turns green when PCR0, PCR1, and PCR2 all match and red for a mismatch.
+Attestations with all-zero PCR0, PCR1, and PCR2 are identified as debug enclaves
+and cannot be used for workload identity. The page reports when fresh
+nonce-bound evidence was verified in the browser, supports explicit
+re-verification, and reports each PCR comparison separately.
+
+Expected PCRs can be imported from an `enclave.pcrs` produced by
+`caution apps build --no-cache` from a reviewed checkout, or from the
+`.caution/trusted_hashes.json` written by a successful CLI verification. Files
+are read only in the browser and are not uploaded; both formats remain unsigned
+and editable, so importing one does not authenticate its source. Manual entry is
+available under the advanced control.
+
+After an exact match, the page saves PCR0, PCR1, and PCR2 for that exact
+attestation endpoint and compares them with fresh evidence on later visits. The
+page labels saved values as browser continuity and provides explicit replace and
+forget controls. This browser storage is not an independent trust root:
+same-origin code or the local user can change or clear it.
+
+The default Bootproof pin includes the required attestation CORS policy. An
+operator override through `BOOTPROOF_COMMIT` takes precedence. Pin changes apply
+only to newly built EIFs; existing applications must be rebuilt and redeployed,
+and their expected PCRs reviewed again.
+
+For source reproduction or expected-PCR enforcement, use the CLI:
 
 **Option A: Reproduce and verify (recommended)**
 
@@ -155,9 +257,13 @@ caution verify --attestation-url <attestation-url>
 Local source is the default. If the deployment manifest has no app commit, the
 CLI uses the current checkout at `HEAD`.
 
-Source-archive preflights use at most two five-second HEAD requests. If the
-remote remains unavailable, verification stops before starting the expensive
-reproduction build.
+Source-archive preflights use five-second HEAD requests. The Platform framework
+archive is checked on Codeberg first, then on the configured GitHub mirror; each
+candidate is retried once for transient failures, while missing archives advance
+to the next candidate immediately. The canonical Codeberg URL remains in the
+measured manifest. If every candidate remains unavailable, verification stops
+before starting the expensive reproduction build. Mirrors improve availability
+but do not independently prove that an archive matches its claimed Git commit.
 
 **Option B: Verify against known PCR hashes**
 
@@ -175,6 +281,11 @@ caution verify --pcrs pcrs.txt
 
 This is explicitly PCR-only: it does not verify TLS certificate binding, and
 the persisted trusted state contains no `tls` object.
+
+### Credit suspension recovery
+
+Resuming a fully managed app starts the same instance and reattaches the
+Elastic IP tagged to that app. Redeployment is not required.
 
 ## Reference
 

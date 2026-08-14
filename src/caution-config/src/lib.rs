@@ -135,11 +135,16 @@ pub struct E2eEncryption {
     pub mode: Option<E2eMode>,
     pub cors_origins: Option<Vec<String>>,
     pub key_exchange: Option<KeyExchange>,
+    pub allow_plaintext_fallback: Option<bool>,
 }
 
 impl E2eEncryption {
     pub fn key_exchange(&self) -> KeyExchange {
         self.key_exchange.unwrap_or_default()
+    }
+
+    pub fn allow_plaintext_fallback(&self) -> bool {
+        self.allow_plaintext_fallback.unwrap_or(false)
     }
 }
 
@@ -695,6 +700,7 @@ impl ConfigurationFile {
             mode: None,
             cors_origins: None,
             key_exchange: None,
+            allow_plaintext_fallback: None,
         });
 
         validate_domain(domain.as_deref()).map_err(FromProcfileError::InvalidDomain)?;
@@ -963,6 +969,7 @@ mod tests {
                                 mode: None,
                                 cors_origins: Some(vec!["*".into()]),
                                 key_exchange: Some(KeyExchange::X25519),
+                                allow_plaintext_fallback: None,
                             }),
                         }),
                     }),
@@ -2668,6 +2675,24 @@ enclave "main" {{
             parse_config_with_e2e(r#"mode = "caddy""#),
             Err(FromStrError::HclParse(_))
         ));
+    }
+
+    #[test]
+    fn e2e_plaintext_fallback_defaults_closed_and_accepts_explicit_opt_in() {
+        let default = hcl::from_str::<E2eEncryption>("enabled = true").unwrap();
+        assert!(!default.allow_plaintext_fallback());
+
+        let enabled = hcl::from_str::<E2eEncryption>(
+            "enabled = true\nallow_plaintext_fallback = true",
+        )
+        .unwrap();
+        assert!(enabled.allow_plaintext_fallback());
+
+        let disabled = hcl::from_str::<E2eEncryption>(
+            "enabled = true\nallow_plaintext_fallback = false",
+        )
+        .unwrap();
+        assert!(!disabled.allow_plaintext_fallback());
     }
 
     #[test]

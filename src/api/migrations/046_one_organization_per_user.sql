@@ -13,5 +13,5 @@ BEGIN
     END IF;
 END $$;
 
-CREATE UNIQUE INDEX idx_org_members_one_org_per_user
+CREATE UNIQUE INDEX IF NOT EXISTS idx_org_members_one_org_per_user
     ON organization_members (user_id);
