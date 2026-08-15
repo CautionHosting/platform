@@ -42,8 +42,6 @@ guard-direct-email:
 guard-direct-metering:
 	$(call refuse_mixed_service_management,metering,caution-metering.service)
 
-
-
 ifdef NOCACHE
 	NO_CACHE := --no-cache
 endif
@@ -57,9 +55,21 @@ build-gateway:
 	@docker build -t caution-gateway -f ./containerfiles/Containerfile.gateway .
 	@echo "Gateway image build complete"
 
-build-api:
+# NOTE: Tofu is currently broke in stagex.
+# This should be removed once it's fixed.
+
+TOFU_VERSION ?= 1.12.4
+TOFU_HASH ?= 170a9c143a35fe0ef8a9ae02c3bb1585e669f0cd6934da6c421e4cdd4403ffb0
+
+fetch/opentofu-$(TOFU_VERSION).tar.gz:
+	mkdir -p "$(shell dirname $@)" /tmp/"$(shell dirname $@)"
+	wget -O- https://github.com/opentofu/opentofu/archive/refs/tags/v1.12.4.tar.gz > /tmp/$@
+	echo "$(TOFU_HASH) /tmp/$@" | sha256sum -c
+	mv /tmp/$@ $@
+
+build-api: fetch/opentofu-$(TOFU_VERSION).tar.gz
 	@echo "Building API service..."
-	@docker build -t caution-api --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) -f ./containerfiles/Containerfile.api .
+	@docker build -t caution-api --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) -f ./containerfiles/Containerfile.api .
 	@echo "API service image built: caution-api"
 
 build-email:

@@ -1,4 +1,7 @@
+ARG TOFU_VERSION
+
 FROM stagex/pallet-rust@sha256:abe9b95c93a5afa271f69fcd5eb18c8cd405fe5df6491a63c9418e3a170573dc AS pallet-rust
+FROM stagex/pallet-go@sha256:35d936e6fcbd73efc2dc3471a015b1ac5a5bb6d2c0eae6e84550f6352857457d AS pallet-go
 FROM stagex/core-musl@sha256:42fd2ed18ac4d6336f08f1b6345e0bb7bc5570450a40e7255b6da79868bd2d6b AS musl
 FROM stagex/core-libunwind@sha256:08cd9e229ef1b4f547c25436d06a2f893f252fc1c1d8b86affbaa91b0be05cef AS libunwind
 FROM stagex/core-ca-certificates@sha256:8390dff73a4502614411e2b2ecb4e4e33b6cc10dc26cf2c6a46e5df71f4c4b03 AS ca-certificates
@@ -65,6 +68,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
       && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/remote-build-helper /usr/local/bin/remote-build-helper \
       && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/hcl-patcher /usr/local/bin/hcl-patcher
 
+FROM pallet-go AS build-tofu
+ARG TOFU_VERSION
+ENV CGO_ENABLED=0
+ADD fetch/opentofu-${TOFU_VERSION}.tar.gz /build
+WORKDIR /build/opentofu-${TOFU_VERSION}
+RUN go build -trimpath -o /rootfs/usr/bin/tofu -ldflags "-X github.com/opentofu/opentofu/dev.version=no" ./cmd/tofu
+
+FROM scratch AS package-tofu
+COPY --from=build-tofu /rootfs /
+
 FROM scratch AS runtime
 COPY --from=user-runtime . /
 COPY --from=gcc . /
@@ -77,7 +90,7 @@ COPY --from=zlib . /
 COPY --from=curl . /
 COPY --from=libzstd . /
 COPY --from=git . /
-COPY --from=tofu . /
+COPY --from=package-tofu . /
 COPY --from=docker . /
 COPY --from=docker-cli . /
 COPY --from=eif-build . /
