@@ -13,8 +13,10 @@ import {
   STEVE_REGISTER_PATH,
   STEVE_WORKER_PATH,
   SteveSessionAdapter,
+  buildE2eeChooserUrl,
   buildControlledTesterTarget,
   buildSteveCorsExample,
+  classifyE2eePcrs,
   compareSessionPcrProfiles,
   connectSteveSession,
   createE2eePcrProfile,
@@ -28,6 +30,7 @@ import {
   normalizeE2eePcrs,
   normalizeProtectedPath,
   normalizeSteveOrigin,
+  parseE2eeChooserDefaults,
   parseE2eePcrProfile,
   prepareProtectedRequest,
   protectedRequestGate,
@@ -125,6 +128,18 @@ test('builds and verifies a deterministic isolated tester URL', async () => {
   )
 })
 
+test('validates chooser prefill and preserves the effective trust mode', () => {
+  const href = buildE2eeChooserUrl('https://example.com', 'XWING-DRAFT10', 'pinned')
+  assert.deepEqual(parseE2eeChooserDefaults(href.slice(href.indexOf('?')), 'http://127.0.0.1:3000'), {
+    origin: 'https://example.com',
+    suite: 'XWING-DRAFT10',
+    trust: 'pinned',
+  })
+  assert.equal(parseE2eeChooserDefaults('', 'http://127.0.0.1:3000'), null)
+  assert.throws(() => parseE2eeChooserDefaults('?origin=https://example.com&suite=X25519&trust=invalid', 'http://127.0.0.1:3000'))
+  assert.throws(() => parseE2eeChooserDefaults('?origin=http://example.com&suite=X25519&trust=none', 'http://127.0.0.1:3000'))
+})
+
 test('renders the exact-origin caution.hcl CORS configuration', () => {
   assert.match(buildSteveCorsExample('https://dashboard.caution.co', 'X25519'), /key_exchange = "x25519"/u)
   assert.match(buildSteveCorsExample('http://127.0.0.1:3000', 'XWING-DRAFT10'), /cors_origins = \["http:\/\/127\.0\.0\.1:3000"\]/u)
@@ -178,6 +193,20 @@ test('normalizes complete profiles with optional PCRs and rejects every zero val
   assert.throws(() => normalizeE2eePcrs({ PCR0: '0'.repeat(96), PCR1: PCRS.PCR1, PCR2: PCRS.PCR2 }), /PCR0/u)
   assert.throws(() => normalizeE2eePcrs({ ...PCRS, PCR3: '0'.repeat(96) }), /PCR3/u)
   assert.throws(() => normalizeE2eePcrs({ PCR0: PCRS.PCR0, PCR1: PCRS.PCR1 }), /PCR2/u)
+})
+
+test('classifies required, optional, zero, and malformed PCR evidence', () => {
+  const classified = classifyE2eePcrs({
+    ...PCRS,
+    PCR3: 'd'.repeat(96),
+    PCR8: '0'.repeat(96),
+    PCR9: 'not-a-pcr',
+  })
+  assert.deepEqual(classified.required.map(({ name }) => name), ['PCR0', 'PCR1', 'PCR2'])
+  assert.deepEqual(classified.optional.map(({ name }) => name), ['PCR3'])
+  assert.deepEqual(classified.zero.map(({ name }) => name), ['PCR8'])
+  assert.deepEqual(classified.malformed.map(({ name }) => name), ['PCR9'])
+  assert.throws(() => normalizeE2eePcrs({ ...PCRS, PCR8: '0'.repeat(96) }), /PCR8/u)
 })
 
 test('fingerprints and de-duplicates whole profiles without mixing values', async () => {
@@ -255,13 +284,22 @@ test('uses worker PCR trust as the protected-request authority', async () => {
   assert.equal(protectedRequestGate(readyStatus({ ...PCRS, PCR1: '0'.repeat(96) }), 0, true).allowed, false)
   assert.equal(hasDebugPcrs({ ...PCRS, PCR2: '0'.repeat(96) }), true)
   assert.equal(compareSessionPcrProfiles(readyStatus(PCRS), [profile]).state, 'matched')
+  assert.deepEqual(
+    protectedRequestGate(null, 1, false, { code: 'PCR_POLICY_MISMATCH' }),
+    {
+      allowed: false,
+      reason: 'Pinned PCR policy mismatch. Add an independently approved profile before sending a request.',
+    },
+  )
 })
 
 test('describes SDK-authoritative trust states without claiming independent identity', () => {
   assert.equal(describeSteveTrustState(readyStatus(PCRS, 'pinned'), 2).title, 'Browser PCR policy matched')
   assert.equal(describeSteveTrustState(readyStatus(PCRS), 0).badge, 'Not checked')
   assert.equal(describeSteveTrustState(null, 0, { sdkReady: true }).badge, 'Ready')
-  assert.equal(describeSteveTrustState(null, 1, { error: { code: 'PCR_POLICY_MISMATCH' } }).title, 'Browser PCR policy did not match')
+  const mismatch = describeSteveTrustState(null, 1, { error: { code: 'PCR_POLICY_MISMATCH' } })
+  assert.equal(mismatch.title, 'Pinned PCR policy mismatch')
+  assert.match(mismatch.message, /Nitro evidence authenticated/u)
 })
 
 test('adapter delegates lifecycle, policy, and protected requests to the SDK', async () => {

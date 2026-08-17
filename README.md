@@ -245,19 +245,24 @@ Wildcard origins are rejected.
 
 The page can pin multiple complete PCR profiles for the exact target and suite.
 Each profile requires nonzero PCR0, PCR1, and PCR2 and may also pin authenticated
-PCR3 through PCR255. Profiles are alternatives: the SDK accepts one whole match
-and never combines values across profiles. Profiles may be imported, entered
-manually, or explicitly accepted after reviewing a current authenticated
-session. This reviewed first use is browser continuity, not independent
-deployment identity; observed PCRs are never enrolled automatically. The SDK
-stores and enforces the complete pinned policy inside the worker on every session
-and rotation. Platform local storage mirrors the profiles only to retain their
-source and timestamp for the UI; the worker policy remains authoritative.
+nonzero PCR3 through PCR255. Authenticated zero-valued optional PCRs are grouped
+in the evidence view and remain non-pinnable. Profiles are alternatives: the SDK
+accepts one whole match and never combines values across profiles. Profiles may
+be imported, entered manually, or explicitly accepted after reviewing a current
+authenticated session. This reviewed first use is browser continuity, not
+independent deployment identity; observed PCRs are never enrolled automatically.
+The SDK stores and enforces the complete pinned policy inside the worker on every
+session and rotation. Platform local storage mirrors the profiles only to retain
+their source and timestamp for the UI; the worker policy remains authoritative.
+When restored worker profiles override a `None` or `TOFU` URL choice, the page
+reflects the effective `Pinned` mode in the URL and target chooser.
 
-A mismatch or any zero-valued required PCR blocks requests. Without a pinned
-profile, the page requires explicitly enabling non-sensitive test-data mode. A
-successful session proves fresh Nitro-backed session and suite binding, not that
-this is the expected workload.
+A pinned mismatch blocks requests and opens the approved-profile controls; add
+an independently approved complete profile rather than reconnecting. Any
+zero-valued required PCR also blocks requests. Without a pinned profile, the page
+requires explicitly enabling non-sensitive test-data mode. A successful session
+proves fresh Nitro-backed session and suite binding, not that this is the expected
+workload.
 The browser does not reproduce source, and its initial page, worker, and WASM
 delivery are not an independent trust root. Use `caution verify` for source
 reproduction and expected-PCR enforcement.

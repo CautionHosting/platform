@@ -92,7 +92,7 @@
             </div>
             <div class="target-heading__actions">
               <span class="suite-pill">{{ target.suite }}</span>
-              <a class="text-link" href="/verify-e2ee/">Change</a>
+              <a class="text-link" :href="changeTargetHref">Change</a>
             </div>
           </div>
 
@@ -195,6 +195,14 @@
                     <dd><code>{{ sessionStatus.attestation?.pcrs?.[name] }}</code></dd>
                   </div>
                 </dl>
+                <details v-if="authenticatedZeroPcrNames.length" class="pcr-classification">
+                  <summary>Zero PCRs — not pinnable <code>{{ authenticatedZeroPcrNames.join(', ') }}</code></summary>
+                  <p>Zero measurements are shown for completeness and cannot be included in a pinned profile.</p>
+                </details>
+                <details v-if="authenticatedMalformedPcrNames.length" class="pcr-classification">
+                  <summary>Malformed PCR values <code>{{ authenticatedMalformedPcrNames.join(', ') }}</code></summary>
+                  <p>Malformed values are ignored by this display and cannot be pinned.</p>
+                </details>
               </details>
             </template>
             <p v-else class="small-note">Establish a session to inspect authenticated evidence.</p>
@@ -213,12 +221,10 @@
                 <p class="metadata-label">Trust policy</p>
                 <h3>Browser PCR profiles</h3>
               </div>
-              <span class="status-pill status-pill--neutral">
-                {{ activeTrustLabel }}<template v-if="pcrProfiles.length"> · {{ pcrProfiles.length }} {{ pcrProfiles.length === 1 ? 'profile' : 'profiles' }}</template>
-              </span>
             </div>
             <p class="small-note">
               Each profile is one indivisible alternative. The SDK accepts one whole match and never mixes PCR values.
+              Optional nonzero PCR3–PCR255 can narrow a profile; every included value must be nonzero.
             </p>
 
             <div v-if="reviewSnapshot" class="review-card">
@@ -247,6 +253,14 @@
                   </button>
                 </div>
               </div>
+              <details v-if="reviewZeroPcrNames.length" class="pcr-classification">
+                <summary>Zero PCRs — not pinnable <code>{{ reviewZeroPcrNames.join(', ') }}</code></summary>
+                <p>These authenticated zero measurements will not be added to the profile.</p>
+              </details>
+              <details v-if="reviewMalformedPcrNames.length" class="pcr-classification">
+                <summary>Malformed PCR values <code>{{ reviewMalformedPcrNames.join(', ') }}</code></summary>
+                <p>These values cannot be added to the profile.</p>
+              </details>
               <div class="button-row">
                 <button type="button" class="secondary" :disabled="profileBusy" @click="cancelPcrReview">Cancel</button>
                 <button type="button" :disabled="profileBusy" @click="pinReviewedProfile">
@@ -267,25 +281,37 @@
               <div v-for="(profile, index) in pcrProfiles" :key="profile.fingerprint" class="profile-row">
                 <details>
                   <summary>
-                    <span>
+                    <span class="profile-chevron" aria-hidden="true">›</span>
+                    <span class="profile-summary-copy">
                       <b>Profile {{ index + 1 }}</b>
                       <small>{{ profileSourceLabel(profile) }} · {{ formatTimestamp(profile.addedAt) }}</small>
                     </span>
                     <span v-if="profile.fingerprint === matchedProfileFingerprint" class="status-pill status-pill--success">Matched</span>
                   </summary>
-                  <p class="profile-fingerprint"><code>{{ profile.fingerprint }}</code></p>
+                  <p class="profile-fingerprint"><span>Fingerprint</span><code>{{ profile.fingerprint }}</code></p>
                   <dl class="pcr-value-list">
                     <div v-for="name in profilePcrNames(profile)" :key="name">
                       <dt>{{ name }}</dt><dd><code>{{ profile.pcrs[name] }}</code></dd>
                     </div>
                   </dl>
                 </details>
-                <button type="button" class="remove-button" :disabled="profileBusy" @click="removeProfile(profile.fingerprint)">Remove</button>
+                <div class="profile-actions">
+                  <template v-if="pendingRemovalFingerprint === profile.fingerprint">
+                    <span>Remove?</span>
+                    <button type="button" class="secondary compact-button" :disabled="profileBusy" @click="cancelProfileRemoval">Cancel</button>
+                    <button type="button" class="remove-button" :disabled="profileBusy" @click="removeProfile(profile, index)">Confirm</button>
+                  </template>
+                  <button v-else type="button" class="remove-button" :disabled="profileBusy" @click="requestProfileRemoval(profile.fingerprint)">Remove</button>
+                </div>
               </div>
             </div>
             <p v-else-if="!reviewSnapshot" class="empty-state">No browser PCR profiles are pinned.</p>
 
-            <details class="profile-additions" :open="trustIntent === 'pinned' && !pcrProfiles.length">
+            <details
+              class="profile-additions"
+              :open="profileAdditionsOpen"
+              @toggle="profileAdditionsOpen = $event.currentTarget.open"
+            >
               <summary>{{ profileAdditionsLabel }}</summary>
               <div class="profile-additions__content">
                 <div class="pcr-import" @dragover.prevent @drop.prevent="handlePcrDrop">
@@ -315,6 +341,7 @@
               </div>
             </details>
             <p v-if="profileError" class="form-error" role="alert">{{ profileError }}</p>
+            <p v-if="profileWarning" class="form-error" role="alert">{{ profileWarning }}</p>
             <p v-if="profileNotice" class="small-note" aria-live="polite">{{ profileNotice }}</p>
           </section>
         </section>
@@ -477,8 +504,10 @@ import {
   REQUIRED_PCRS,
   STEVE_CLIENT_COMMIT,
   STEVE_SUITES,
+  buildE2eeChooserUrl,
   buildControlledTesterTarget,
   buildSteveCorsExample,
+  classifyE2eePcrs,
   compareSessionPcrProfiles,
   connectSteveSession,
   createE2eePcrProfile,
@@ -487,10 +516,12 @@ import {
   externalSteveOrigin,
   hasDebugPcrs,
   isAuthenticatedSteveStatus,
+  isPcrPolicyMismatch,
   loadE2eePcrProfiles,
   normalizeE2eePcrProfiles,
   normalizeE2eePcrs,
   parseE2eePcrProfile,
+  parseE2eeChooserDefaults,
   protectedRequestGate,
   reconcileE2eePcrProfiles,
   resolveControlledTesterTarget,
@@ -552,13 +583,17 @@ export default {
     const sessionStatus = ref(null)
     let adapter = null
     let stopAdapterEvents = null
+    let profileNoticeTimer = null
 
     const evidenceOpen = ref(false)
     const trustPolicyOpen = ref(false)
     const pcrProfiles = ref([])
     const profileBusy = ref(false)
     const profileError = ref('')
+    const profileWarning = ref('')
     const profileNotice = ref('')
+    const profileAdditionsOpen = ref(false)
+    const pendingRemovalFingerprint = ref('')
     const pcrInput = ref('')
     const reviewSnapshot = ref(null)
     const selectedAdditionalPcrs = ref([])
@@ -575,11 +610,25 @@ export default {
     const targetHostname = computed(() => new URL(target.value.origin).hostname)
     const sessionAuthenticated = computed(() => isAuthenticatedSteveStatus(sessionStatus.value))
     const isDebugSession = computed(() => hasDebugPcrs(sessionStatus.value?.attestation?.pcrs))
+    const pcrPolicyMismatch = computed(() => isPcrPolicyMismatch(sessionError.value))
     const pcrComparison = computed(() => compareSessionPcrProfiles(sessionStatus.value, pcrProfiles.value))
     const matchedProfileFingerprint = computed(() => pcrComparison.value?.profileFingerprint || '')
-    const authenticatedPcrNames = computed(() => sortedPcrNames(sessionStatus.value?.attestation?.pcrs))
-    const reviewPcrNames = computed(() => sortedPcrNames(reviewSnapshot.value?.pcrs))
+    const authenticatedPcrs = computed(() => classifyE2eePcrs(sessionStatus.value?.attestation?.pcrs))
+    const authenticatedPcrNames = computed(() =>
+      [...authenticatedPcrs.value.required, ...authenticatedPcrs.value.optional].map(({ name }) => name),
+    )
+    const authenticatedZeroPcrNames = computed(() => authenticatedPcrs.value.zero.map(({ name }) => name))
+    const authenticatedMalformedPcrNames = computed(() => authenticatedPcrs.value.malformed.map(({ name }) => name))
+    const reviewPcrs = computed(() => classifyE2eePcrs(reviewSnapshot.value?.pcrs))
+    const reviewPcrNames = computed(() =>
+      [...reviewPcrs.value.required, ...reviewPcrs.value.optional].map(({ name }) => name),
+    )
+    const reviewZeroPcrNames = computed(() => reviewPcrs.value.zero.map(({ name }) => name))
+    const reviewMalformedPcrNames = computed(() => reviewPcrs.value.malformed.map(({ name }) => name))
     const canReviewCurrent = computed(() => sessionAuthenticated.value && !isDebugSession.value)
+    const changeTargetHref = computed(() =>
+      target.value ? buildE2eeChooserUrl(target.value.origin, target.value.suite, activeTrustLabel.value.toLowerCase()) : '/verify-e2ee/',
+    )
     const showFirstUseCallout = computed(() =>
       trustIntent.value === 'tofu' && canReviewCurrent.value && pcrProfiles.value.length === 0,
     )
@@ -596,6 +645,7 @@ export default {
         sessionStatus.value,
         pcrProfiles.value.length,
         nonSensitiveAcknowledged.value,
+        sessionError.value,
       )
     })
     const showTestDataModeWarning = computed(() =>
@@ -609,6 +659,7 @@ export default {
     ))
     const primarySessionAction = computed(() => {
       if (sessionAuthenticated.value) return null
+      if (pcrPolicyMismatch.value) return null
       if (trustIntent.value === 'pinned' && pcrProfiles.value.length === 0) return null
       return sessionStatus.value?.state === 'error' || sessionStatus.value?.initialized
         ? { action: 'reconnect', label: 'Reconnect' }
@@ -645,11 +696,12 @@ export default {
       return { tofu: 'TOFU', pinned: 'Pinned', none: 'None' }[trustIntent.value]
     })
     const profileAdditionsLabel = computed(() => {
+      if (pcrPolicyMismatch.value) return 'Add an independently approved profile'
       if (pcrProfiles.value.length) return 'Add another profile'
       return trustIntent.value === 'pinned' ? 'Add an approved profile' : 'Use an existing profile instead'
     })
     const sessionErrorMessage = computed(() =>
-      sessionError.value ? describeSteveError(sessionError.value, pageOrigin) : '',
+      sessionError.value && !pcrPolicyMismatch.value ? describeSteveError(sessionError.value, pageOrigin) : '',
     )
     const protocolName = computed(() => {
       const protocol = sessionStatus.value?.protocol
@@ -679,6 +731,28 @@ export default {
 
     function profilePcrNames(profile) {
       return sortedPcrNames(profile.pcrs)
+    }
+
+    function showProfileNotice(message) {
+      window.clearTimeout(profileNoticeTimer)
+      profileNotice.value = message
+      profileNoticeTimer = window.setTimeout(() => { profileNotice.value = '' }, 5_000)
+    }
+
+    function canonicalizeTrustMode() {
+      if (!target.value) return
+      const current = new URL(window.location.href)
+      if (current.searchParams.get('trust') === trustIntent.value) return
+      current.searchParams.set('trust', trustIntent.value)
+      window.history.replaceState(window.history.state, '', `${current.pathname}${current.search}`)
+    }
+
+    function acceptSessionError(error) {
+      sessionError.value = error
+      if (isPcrPolicyMismatch(error)) {
+        trustPolicyOpen.value = true
+        profileAdditionsOpen.value = true
+      }
     }
 
     async function submitTarget() {
@@ -719,8 +793,7 @@ export default {
       try {
         acceptStatus(await adapter[action]())
       } catch (error) {
-        sessionError.value = error
-        if (error?.code?.startsWith('PCR_')) trustPolicyOpen.value = true
+        acceptSessionError(error)
         try { sessionStatus.value = await adapter.status() } catch { /* operation error is displayed */ }
       } finally {
         sessionBusy.value = false
@@ -736,7 +809,7 @@ export default {
           pcrProfiles.value,
         )
       } catch {
-        profileNotice.value = 'The SDK policy is active, but profile metadata could not be saved locally.'
+        profileWarning.value = 'The SDK policy is active, but profile metadata could not be saved locally.'
       }
     }
 
@@ -744,7 +817,9 @@ export default {
       if (!adapter || profileBusy.value) return
       profileBusy.value = true
       profileError.value = ''
+      profileWarning.value = ''
       profileNotice.value = ''
+      window.clearTimeout(profileNoticeTimer)
       const reestablish = Boolean(sessionStatus.value?.initialized || sessionStatus.value?.session)
       try {
         const normalized = await normalizeE2eePcrProfiles(nextProfiles)
@@ -752,14 +827,17 @@ export default {
         pcrProfiles.value = normalized
         acceptStatus(status)
         await persistProfiles()
-        profileNotice.value ||= notice
+        showProfileNotice(notice)
         reviewSnapshot.value = null
         selectedAdditionalPcrs.value = []
+        pendingRemovalFingerprint.value = ''
         resetRequestState()
         if (reestablish) acceptStatus(await adapter.establish())
+        return true
       } catch (error) {
         profileError.value = describeSteveError(error, pageOrigin)
-        sessionError.value = error?.code?.startsWith('PCR_') ? error : sessionError.value
+        if (error?.code?.startsWith('PCR_')) acceptSessionError(error)
+        return false
       } finally {
         profileBusy.value = false
       }
@@ -768,11 +846,20 @@ export default {
     async function addProfile(pcrs, source) {
       const profile = await createE2eePcrProfile(pcrs, source)
       if (pcrProfiles.value.some((existing) => existing.fingerprint === profile.fingerprint)) {
-        profileNotice.value = 'That complete profile is already pinned.'
-        return
+        showProfileNotice('That complete profile is already pinned.')
+        return false
       }
-      await applyProfiles([...pcrProfiles.value, profile], 'Added a worker-enforced browser profile.')
-      trustIntent.value = 'pinned'
+      const notice = source === 'first-use'
+        ? 'Pinned the reviewed first-use profile.'
+        : source === 'manual'
+          ? 'Added the manually entered profile.'
+          : 'Imported an approved PCR profile.'
+      if (await applyProfiles([...pcrProfiles.value, profile], notice)) {
+        trustIntent.value = 'pinned'
+        canonicalizeTrustMode()
+        return true
+      }
+      return false
     }
 
     async function importExpectedPcrFile(file) {
@@ -814,12 +901,7 @@ export default {
         const required = Object.fromEntries(REQUIRED_PCRS.map((name) => [name, status.attestation.pcrs?.[name]]))
         normalizeE2eePcrs(required)
         const reviewPcrs = Object.fromEntries(
-          sortedPcrNames(status.attestation.pcrs)
-            .filter((name) => {
-              const value = String(status.attestation.pcrs[name] || '').toLowerCase()
-              return REQUIRED_PCRS.includes(name) || (/^[0-9a-f]{96}$/u.test(value) && value !== '0'.repeat(96))
-            })
-            .map((name) => [name, status.attestation.pcrs[name]]),
+          sortedPcrNames(status.attestation.pcrs).map((name) => [name, status.attestation.pcrs[name]]),
         )
         reviewSnapshot.value = { sessionId: status.session.id, pcrs: reviewPcrs }
         selectedAdditionalPcrs.value = []
@@ -866,10 +948,18 @@ export default {
       }
     }
 
-    async function removeProfile(fingerprint) {
+    function requestProfileRemoval(fingerprint) {
+      pendingRemovalFingerprint.value = fingerprint
+    }
+
+    function cancelProfileRemoval() {
+      pendingRemovalFingerprint.value = ''
+    }
+
+    async function removeProfile(profile, index) {
       await applyProfiles(
-        pcrProfiles.value.filter((profile) => profile.fingerprint !== fingerprint),
-        'Removed the browser profile.',
+        pcrProfiles.value.filter((candidate) => candidate.fingerprint !== profile.fingerprint),
+        `Removed Profile ${index + 1}.`,
       )
     }
 
@@ -910,6 +1000,16 @@ export default {
         return
       }
       if (!target.value) {
+        try {
+          const defaults = parseE2eeChooserDefaults(window.location.search, pageOrigin)
+          if (defaults) {
+            targetInput.value = defaults.origin
+            selectedSuite.value = defaults.suite
+            trustIntent.value = defaults.trust
+          }
+        } catch (error) {
+          inputError.value = error.message
+        }
         mode.value = 'chooser'
         return
       }
@@ -920,11 +1020,12 @@ export default {
       const requestedTrust = new URLSearchParams(window.location.search).get('trust')
       trustIntent.value = ['none', 'pinned', 'tofu'].includes(requestedTrust) ? requestedTrust : 'tofu'
       trustPolicyOpen.value = trustIntent.value !== 'none'
+      profileAdditionsOpen.value = trustIntent.value === 'pinned'
       let storedProfiles = []
       try {
         storedProfiles = await loadE2eePcrProfiles(window.localStorage, target.value.origin, target.value.suite)
       } catch {
-        profileNotice.value = 'Browser profile metadata is unavailable.'
+        profileWarning.value = 'Browser profile metadata is unavailable.'
       }
 
       try {
@@ -934,27 +1035,35 @@ export default {
         if (pcrProfiles.value.length) {
           trustIntent.value = 'pinned'
           trustPolicyOpen.value = false
+          canonicalizeTrustMode()
         }
         if (reconciliation.replaceWorkerPolicy) {
           acceptStatus((await adapter.replacePcrProfiles(pcrProfiles.value)).status)
         }
         if (pcrProfiles.value.length) await persistProfiles()
-        stopAdapterEvents = adapter.onChange(acceptStatus, (error) => { sessionError.value = error })
+        stopAdapterEvents = adapter.onChange(acceptStatus, acceptSessionError)
         acceptStatus(await adapter.status())
         sdkReady.value = true
       } catch (error) {
-        sessionError.value = error
+        acceptSessionError(error)
       }
     })
 
-    onUnmounted(() => stopAdapterEvents?.())
+    onUnmounted(() => {
+      stopAdapterEvents?.()
+      window.clearTimeout(profileNoticeTimer)
+    })
 
     return {
       addManualProfile,
       activeTrustLabel,
+      authenticatedMalformedPcrNames,
       authenticatedPcrNames,
+      authenticatedZeroPcrNames,
       beginPcrReview,
       cancelPcrReview,
+      cancelProfileRemoval,
+      changeTargetHref,
       corsExample,
       corsTroubleshootingNeeded,
       evidenceOpen,
@@ -972,12 +1081,15 @@ export default {
       pageOrigin,
       pcrInput,
       pcrProfiles,
+      pendingRemovalFingerprint,
       pinReviewedProfile,
       primarySessionAction,
       profileBusy,
       profileAdditionsLabel,
+      profileAdditionsOpen,
       profileError,
       profileNotice,
+      profileWarning,
       profilePcrNames,
       profileSourceLabel,
       pcrTrustLabel,
@@ -991,10 +1103,13 @@ export default {
       requestMethod,
       requestPath,
       requestResult,
+      requestProfileRemoval,
       requiredPcrNames,
       responsePreviewOpen,
       reviewPcrNames,
+      reviewMalformedPcrNames,
       reviewSnapshot,
+      reviewZeroPcrNames,
       runSessionAction,
       sdkReady,
       selectedAdditionalPcrs,
@@ -1530,6 +1645,25 @@ code {
   font-weight: 400;
 }
 
+.pcr-classification {
+  margin-top: 10px;
+  border-top: 1px solid var(--e2ee-border);
+  padding-top: 10px;
+  color: var(--e2ee-muted);
+  font-size: 0.82rem;
+}
+
+.pcr-classification summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.pcr-classification summary code { font-weight: 400; }
+.pcr-classification p { margin: 8px 0 0; }
+
 .review-card {
   display: grid;
   gap: 14px;
@@ -1612,7 +1746,7 @@ button.selection-pill {
 .profile-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
+  align-items: start;
   gap: 10px;
   border: 1px solid var(--e2ee-border);
   border-radius: 10px;
@@ -1620,21 +1754,20 @@ button.selection-pill {
   background: var(--e2ee-surface);
 }
 
-.profile-row:has(details[open]) {
-  align-items: start;
-}
+.profile-row details { min-width: 0; }
 
 .profile-row summary {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 9px;
+  min-height: 34px;
   list-style: none;
 }
 
 .profile-row summary::-webkit-details-marker { display: none; }
 
-.profile-row summary > span:first-child {
+.profile-summary-copy {
   display: grid;
   gap: 2px;
 }
@@ -1644,15 +1777,40 @@ button.selection-pill {
   font-weight: 400;
 }
 
+.profile-chevron {
+  color: var(--e2ee-muted);
+  font-size: 1.2rem;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+
+.profile-row details[open] .profile-chevron { transform: rotate(90deg); }
+
 .profile-fingerprint {
-  margin: 10px 0 0;
+  display: grid;
+  gap: 3px;
+  margin: 10px 0 0 21px;
   color: var(--e2ee-muted);
   font-size: 0.76rem;
+}
+
+.profile-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  color: var(--e2ee-muted);
+  font-size: 0.78rem;
 }
 
 .remove-button {
   padding: 6px 10px;
   color: var(--e2ee-danger);
+  font-size: 0.78rem;
+}
+
+.compact-button {
+  padding: 6px 10px;
   font-size: 0.78rem;
 }
 
@@ -1975,5 +2133,7 @@ button.selection-pill {
   .profile-row {
     grid-template-columns: 1fr;
   }
+
+  .profile-actions { margin-left: 21px; }
 }
 </style>

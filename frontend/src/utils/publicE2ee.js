@@ -16,6 +16,7 @@ export const MAX_REQUEST_BODY_BYTES = 64 * 1024
 export const MAX_RESPONSE_PREVIEW_BYTES = 32 * 1024
 
 export const REQUIRED_PCRS = ['PCR0', 'PCR1', 'PCR2']
+export const E2EE_TRUST_MODES = ['none', 'pinned', 'tofu']
 const ZERO_PCR = '0'.repeat(96)
 const PROFILE_STORAGE_PREFIX = 'caution.verify-e2ee.pcr-profiles.v2:'
 const LEGACY_PROFILE_STORAGE_PREFIX = 'caution.verify-e2ee.expected-pcrs.v1:'
@@ -23,6 +24,13 @@ const LEGACY_PROFILE_STORAGE_PREFIX = 'caution.verify-e2ee.expected-pcrs.v1:'
 function requireSuite(value) {
   if (!STEVE_SUITES.includes(value)) {
     throw new Error('Choose X25519 or XWING-DRAFT10.')
+  }
+  return value
+}
+
+function requireTrustMode(value) {
+  if (!E2EE_TRUST_MODES.includes(value)) {
+    throw new Error('Choose None, Pinned, or TOFU browser trust.')
   }
   return value
 }
@@ -79,6 +87,25 @@ export async function buildControlledTesterTarget(origin, suite, cryptoObject = 
     hash,
     scope,
     url: `${scope}?${query}`,
+  }
+}
+
+export function buildE2eeChooserUrl(origin, suite, trust) {
+  const query = new URLSearchParams({
+    origin: normalizeSteveOrigin(origin),
+    suite: requireSuite(suite),
+    trust: requireTrustMode(trust),
+  })
+  return `/verify-e2ee/?${query}`
+}
+
+export function parseE2eeChooserDefaults(search, testerOrigin) {
+  const params = new URLSearchParams(search)
+  if (!params.has('origin') && !params.has('suite') && !params.has('trust')) return null
+  return {
+    origin: externalSteveOrigin(params.get('origin'), testerOrigin),
+    suite: requireSuite(params.get('suite')),
+    trust: requireTrustMode(params.get('trust')),
   }
 }
 
@@ -310,6 +337,34 @@ function pcrIndex(name) {
   return Number(match[1])
 }
 
+export function classifyE2eePcrs(pcrs) {
+  const classified = { required: [], optional: [], zero: [], malformed: [] }
+  for (const [rawName, rawValue] of Object.entries(pcrs || {})) {
+    const index = pcrIndex(rawName)
+    const name = index === null ? String(rawName) : `PCR${index}`
+    const value = String(rawValue || '').trim().replace(/^0x/iu, '').toLowerCase()
+    if (index === null || !/^[0-9a-f]{96}$/u.test(value)) {
+      classified.malformed.push({ name, value })
+    } else if (value === ZERO_PCR) {
+      classified.zero.push({ name, value })
+    } else {
+      classified[REQUIRED_PCRS.includes(name) ? 'required' : 'optional'].push({ name, value })
+    }
+  }
+  const sort = (left, right) => {
+    const leftIndex = pcrIndex(left.name)
+    const rightIndex = pcrIndex(right.name)
+    if (leftIndex === null || rightIndex === null) return left.name.localeCompare(right.name)
+    return leftIndex - rightIndex
+  }
+  for (const entries of Object.values(classified)) entries.sort(sort)
+  return classified
+}
+
+export function isPcrPolicyMismatch(error) {
+  return ['PCR_POLICY_MISMATCH', 'PCR_TRUST_MISMATCH'].includes(error?.code)
+}
+
 export function normalizeE2eePcrs(pcrs) {
   if (!pcrs || typeof pcrs !== 'object' || Array.isArray(pcrs)) {
     throw new Error('A PCR profile must be an object.')
@@ -513,13 +568,13 @@ export function describeSteveTrustState(
     }
   }
   if (error || status?.state === 'error') {
-    const mismatch = ['PCR_POLICY_MISMATCH', 'PCR_TRUST_MISMATCH'].includes(error?.code)
+    const mismatch = isPcrPolicyMismatch(error)
     return {
       badge: 'Blocked',
       tone: 'danger',
-      title: mismatch ? 'Browser PCR policy did not match' : 'Session authentication failed',
+      title: mismatch ? 'Pinned PCR policy mismatch' : 'Session authentication failed',
       message: mismatch
-        ? 'Authenticated evidence did not match any complete pinned profile.'
+        ? 'Nitro evidence authenticated, but no complete pinned profile matched. Add an independently approved profile before sending a request.'
         : 'No authenticated STEVE channel is available.',
     }
   }
@@ -568,7 +623,13 @@ export function describeSteveTrustState(
   }
 }
 
-export function protectedRequestGate(status, profileCount, acknowledged) {
+export function protectedRequestGate(status, profileCount, acknowledged, error = null) {
+  if (isPcrPolicyMismatch(error)) {
+    return {
+      allowed: false,
+      reason: 'Pinned PCR policy mismatch. Add an independently approved profile before sending a request.',
+    }
+  }
   if (!isAuthenticatedSteveStatus(status)) {
     return { allowed: false, reason: 'Establish an authenticated STEVE session first.' }
   }
