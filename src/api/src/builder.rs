@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{
@@ -792,14 +793,99 @@ struct BuildStatus {
     error: Option<String>,
 }
 
-fn build_phase_milestone(phase: &str) -> Option<&str> {
+fn build_phase_milestone(phase: &str) -> Option<&'static str> {
     match phase {
-        "starting" => Some("Builder ready, downloading source..."),
-        "docker_built" => Some("Docker image built, building EIF..."),
-        "eif_built" => Some("EIF built, uploading to S3..."),
+        "launching-builder" => Some("Builder instance booting and installing dependencies..."),
+        "downloading-source" => Some("Downloading source and build dependencies..."),
+        "building-application" => Some("Building application Docker image..."),
+        "building-enclave" => Some("Docker image built, building EIF..."),
+        "uploading-enclave" => Some("EIF built, uploading to S3..."),
         "completed" => Some("Cleaning up builder..."),
         "failed" => None,
-        _ => Some(phase),
+        _ => None,
+    }
+}
+
+/// Linear ordered list of all known build phases in sequence.
+const BUILD_PHASES: &[&str] = &[
+    "launching-builder",
+    "downloading-source",
+    "building-application",
+    "building-enclave",
+    "uploading-enclave",
+    "completed",
+];
+
+/// A status message emitted by the state machine.
+struct StatusMessage {
+    phase: &'static str,
+    milestone: Option<&'static str>,
+    elapsed_since_update: Option<Duration>,
+}
+
+/// Linear state machine tracking build phases to catch skipped statuses
+/// during polling gaps. When `increment` is called with a new status, it
+/// returns all milestone messages for every phase traversed since the last call.
+struct BuildPhaseStateMachine {
+    /// Index into BUILD_PHASES of the next un-emitted phase (0 = not started).
+    current_index: usize,
+    /// Timestamp from S3 status.json when we last saw an update (for first message in batch).
+    last_timestamp: Option<DateTime<Utc>>,
+}
+
+impl BuildPhaseStateMachine {
+    fn new() -> Self {
+        Self {
+            current_index: 0,
+            last_timestamp: None,
+        }
+    }
+
+    /// Returns all milestone messages for phases traversed since the last call.
+    /// For the first message in a batch, includes elapsed time from S3 timestamp.
+    fn increment(&mut self, latest_status: &BuildStatus) -> Result<Vec<StatusMessage>> {
+        // "failed" is terminal and has no progress milestone — emit nothing.
+        if latest_status.phase == "failed" {
+            return Ok(vec![]);
+        }
+
+        let target_idx = BUILD_PHASES
+            .iter()
+            .position(|&p| p == latest_status.phase)
+            .context("Unknown build phase in status")?;
+
+        if target_idx < self.current_index {
+            bail!(
+                "Phase regression: {} -> {}",
+                BUILD_PHASES[self.current_index.saturating_sub(1)],
+                latest_status.phase
+            );
+        }
+
+        let mut messages = Vec::new();
+
+        for i in self.current_index..=target_idx {
+            // Only the first message in this batch carries elapsed time.
+            let elapsed = if messages.is_empty() && self.last_timestamp.is_some() {
+                Some(
+                    latest_status.timestamp.signed_duration_since(self.last_timestamp.expect("checked above"))
+                        .to_std().unwrap_or(Duration::ZERO),
+                )
+            } else {
+                None
+            };
+
+            messages.push(StatusMessage {
+                phase: BUILD_PHASES[i],
+                milestone: build_phase_milestone(BUILD_PHASES[i]),
+                elapsed_since_update: elapsed,
+            });
+        }
+
+        self.current_index = target_idx + 1; // Move past the latest phase.
+        self.last_timestamp = Some(latest_status.timestamp);
+
+        Ok(messages)
     }
 }
 
@@ -815,7 +901,7 @@ async fn poll_build_status(
     let timeout = std::time::Duration::from_secs(timeout_secs);
     let stalled_timeout = TimeDelta::new(120, 0).expect("const timedelta is always valid");
     let poll_interval = std::time::Duration::from_secs(10);
-    let mut last_phase = String::new();
+    let mut phase_sm = BuildPhaseStateMachine::new();
 
     loop {
         if start.elapsed() > timeout {
@@ -850,14 +936,14 @@ async fn poll_build_status(
                     bail!("Build timed out after {elapsed}: {status:?}");
                 }
 
-                // Send milestone if phase changed
-                if status.phase != last_phase {
-                    if let Some(msg) = build_phase_milestone(&status.phase) {
+                // Send milestone messages for all phases traversed since last poll.
+                let messages = phase_sm.increment(&status)?;
+                for message in messages {
+                    if let Some(msg) = message.milestone {
                         let _ = tx
                             .send(Ok(bytes::Bytes::from(format!("STEP:{}\n", msg))))
                             .await;
                     }
-                    last_phase = status.phase.clone();
                 }
 
                 match status.phase.as_str() {
@@ -1036,7 +1122,7 @@ set_phase() {{
 }}
 
 set_template "{{}}"
-set_phase "starting"
+set_phase "launching-builder"
 
 # Run heartbeat periodically to ensure timestamp is always fresh
 (
@@ -1064,8 +1150,6 @@ dnf install -y docker
 systemctl start docker
 systemctl enable docker
 
-set_phase "starting"
-
 # Download source archive from S3
 echo "Downloading source archive..."
 mkdir -p /build/repo
@@ -1073,21 +1157,24 @@ aws s3 cp "s3://$S3_BUCKET/$SOURCE_S3_KEY" /build/source.tar.gz
 echo "$SOURCE_SHA256  /build/source.tar.gz" | sha256sum -c -
 tar -xzf /build/source.tar.gz -C /build/repo
 
+set_phase "downloading-source"
+
 echo "Downloading remote build helper..."
 aws s3 cp "s3://$S3_BUCKET/$HELPER_S3_KEY" /usr/local/bin/remote-build-helper
 echo "$HELPER_SHA256  /usr/local/bin/remote-build-helper" | sha256sum -c -
 chmod +x /usr/local/bin/remote-build-helper
 
-# Build Docker image
-echo "Building Docker image..."
+# Build Docker image, then build EIF via remote-build-helper using that image
 cd /build/repo
+set_phase "building-application"
 docker build -f "$CONTAINERFILE" -t app-image .
-set_phase "docker_built"
 
 # Write manifest for remote-build-helper
 cat > /build/manifest.json << 'MANIFEST_EOF'
 {manifest_json}
 MANIFEST_EOF
+
+set_phase "building-enclave"
 
 echo "Building EIF via remote-build-helper..."
 mkdir -p /build/output
@@ -1122,7 +1209,7 @@ if [ ! -f "$EIF_PATH" ]; then
     fail "EIF file not found after build"
 fi
 
-set_phase "eif_built"
+set_phase "uploading-enclave"
 
 # Compute SHA256
 EIF_SHA256=$(sha256sum "$EIF_PATH" | awk '{{print $1}}')
@@ -1580,9 +1667,144 @@ mod tests {
     fn failed_build_phase_is_not_a_progress_milestone() {
         assert_eq!(build_phase_milestone("failed"), None);
         assert_eq!(
-            build_phase_milestone("docker_built"),
-            Some("Docker image built, building EIF...")
+            build_phase_milestone("launching-builder"),
+            Some("Builder instance booting and installing dependencies...")
         );
+        assert_eq!(
+            build_phase_milestone("downloading-source"),
+            Some("Downloading source and build dependencies...")
+        );
+        assert_eq!(
+            build_phase_milestone("building-application"),
+            Some("Building application Docker image...")
+        );
+    }
+
+    // --- BuildPhaseStateMachine tests ---
+
+    fn make_status(phase: &str, timestamp: DateTime<Utc>) -> BuildStatus {
+        BuildStatus {
+            phase: phase.to_string(),
+            timestamp,
+            eif_sha256: String::new(),
+            eif_size_bytes: 0,
+            pcrs: serde_json::Value::Null,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn state_machine_emits_all_skipped_phases() {
+        let ts = Utc::now();
+        // Builder jumps from launching-builder to building-enclave (skipping downloading-source + building-application)
+        let mut sm = BuildPhaseStateMachine::new();
+
+        // First poll: builder reports "building-enclave" immediately.
+        let status = make_status("building-enclave", ts);
+        let messages = sm.increment(&status).unwrap();
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].phase, "launching-builder");
+        assert_eq!(messages[1].phase, "downloading-source");
+        assert_eq!(messages[2].phase, "building-application");
+        assert_eq!(messages[3].phase, "building-enclave");
+        // First ever poll: no previous timestamp, so first message has no elapsed time.
+        assert!(messages[0].elapsed_since_update.is_none());
+        assert!(messages[1].elapsed_since_update.is_none());
+        assert!(messages[2].elapsed_since_update.is_none());
+    }
+
+    #[test]
+    fn state_machine_single_step_no_elapsed_on_first() {
+        let ts = Utc::now();
+        let mut sm = BuildPhaseStateMachine::new();
+
+        // First poll: builder reports "launching-builder". No previous timestamp, so no elapsed.
+        let status = make_status("launching-builder", ts);
+        let messages = sm.increment(&status).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].phase, "launching-builder");
+        assert!(messages[0].elapsed_since_update.is_none());
+    }
+
+    #[test]
+    fn state_machine_elapsed_time_on_subsequent_polls() {
+        let ts1 = Utc::now();
+        let mut sm = BuildPhaseStateMachine::new();
+
+        // First poll: launching-builder (no elapsed since no prior timestamp)
+        let status1 = make_status("launching-builder", ts1);
+        let messages1 = sm.increment(&status1).unwrap();
+        assert!(messages1[0].elapsed_since_update.is_none());
+
+        // Second poll 5 seconds later: building-application (skipped downloading-source)
+        let ts2 = ts1 + TimeDelta::seconds(5);
+        let status2 = make_status("building-application", ts2);
+        let messages2 = sm.increment(&status2).unwrap();
+
+        assert_eq!(messages2.len(), 2); // launching-builder already emitted, so downloading-source + building-application
+        assert_eq!(messages2[0].phase, "downloading-source");
+        assert_eq!(messages2[1].phase, "building-application");
+        // First message in batch has elapsed time.
+        assert!(messages2[0].elapsed_since_update.is_some());
+        let elapsed = messages2[0].elapsed_since_update.unwrap();
+        assert!(elapsed >= Duration::from_secs(5));
+    }
+
+    #[test]
+    fn state_machine_failed_returns_empty() {
+        let ts = Utc::now();
+        let mut sm = BuildPhaseStateMachine::new();
+
+        // Poll with "building-enclave" first to set some state.
+        let status1 = make_status("building-enclave", ts);
+        sm.increment(&status1).unwrap();
+
+        // Then poll with "failed".
+        let status2 = make_status("failed", ts + TimeDelta::seconds(10));
+        let messages = sm.increment(&status2).unwrap();
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn state_machine_detects_phase_regression() {
+        let ts = Utc::now();
+        let mut sm = BuildPhaseStateMachine::new();
+
+        // First poll: building-enclave (index 3)
+        let status1 = make_status("building-enclave", ts);
+        sm.increment(&status1).unwrap();
+
+        // Second poll: downloading-source (index 1 — regression!)
+        let status2 = make_status("downloading-source", ts + TimeDelta::seconds(5));
+        assert!(sm.increment(&status2).is_err());
+    }
+
+    #[test]
+    fn state_machine_completed_emits_final_milestone() {
+        let ts = Utc::now();
+        let mut sm = BuildPhaseStateMachine::new();
+
+        // Jump from launching-builder to completed (skipping everything)
+        let status = make_status("completed", ts);
+        let messages = sm.increment(&status).unwrap();
+
+        assert_eq!(messages.len(), 6); // All phases including "completed"
+        assert_eq!(messages[5].phase, "completed");
+        assert_eq!(
+            messages[5].milestone,
+            Some("Cleaning up builder...")
+        );
+    }
+
+    #[test]
+    fn state_machine_unknown_phase_errors() {
+        let ts = Utc::now();
+        let mut sm = BuildPhaseStateMachine::new();
+
+        let status = make_status("unknown-phase", ts);
+        assert!(sm.increment(&status).is_err());
     }
 
     // --- unattributed builder classification ---
