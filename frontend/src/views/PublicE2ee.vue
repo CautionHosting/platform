@@ -14,7 +14,7 @@
 
       <section v-if="mode === 'error'" class="card error-card">
         <p class="metadata-label">Tester error</p>
-        <h2>Unable to open this isolated tester</h2>
+        <h2>Unable to open this tester</h2>
         <p class="form-error" role="alert">{{ pageError }}</p>
         <a class="text-link" href="/verify-e2ee/">Choose another target</a>
       </section>
@@ -71,15 +71,16 @@
               </label>
             </div>
           </fieldset>
+          <div class="chooser-setup">
+            <p class="metadata-label">Required CORS configuration</p>
+            <p>Allow this page’s exact origin in <code>caution.hcl</code>, then redeploy the target.</p>
+            <pre><code>{{ chooserCorsExample }}</code></pre>
+          </div>
           <p v-if="inputError" class="form-error" role="alert">{{ inputError }}</p>
           <button type="submit" :disabled="targetBusy">
             {{ targetBusy ? 'Opening tester…' : 'Open tester' }}
           </button>
         </form>
-        <details class="quiet-disclosure">
-          <summary>How target isolation works</summary>
-          <p>Each origin-and-suite pair uses a deterministic narrow service-worker scope.</p>
-        </details>
       </section>
 
       <template v-else-if="mode === 'tester' && target">
@@ -196,23 +197,28 @@
                   </div>
                 </dl>
                 <details v-if="authenticatedZeroPcrNames.length" class="pcr-classification">
-                  <summary>Zero PCRs — not pinnable <code>{{ authenticatedZeroPcrNames.join(', ') }}</code></summary>
-                  <p>Zero measurements are shown for completeness and cannot be included in a pinned profile.</p>
+                  <summary>
+                    <span>Zero PCRs — not pinnable</span>
+                    <span class="pcr-classification__count">{{ authenticatedZeroPcrNames.length }}</span>
+                  </summary>
+                  <div class="pcr-classification__content">
+                    <code>{{ authenticatedZeroPcrNames.join(', ') }}</code>
+                    <p>Zero measurements are shown for completeness and cannot be included in a pinned profile.</p>
+                  </div>
                 </details>
                 <details v-if="authenticatedMalformedPcrNames.length" class="pcr-classification">
-                  <summary>Malformed PCR values <code>{{ authenticatedMalformedPcrNames.join(', ') }}</code></summary>
-                  <p>Malformed values are ignored by this display and cannot be pinned.</p>
+                  <summary>
+                    <span>Malformed PCR values</span>
+                    <span class="pcr-classification__count">{{ authenticatedMalformedPcrNames.length }}</span>
+                  </summary>
+                  <div class="pcr-classification__content">
+                    <code>{{ authenticatedMalformedPcrNames.join(', ') }}</code>
+                    <p>Malformed values are ignored by this display and cannot be pinned.</p>
+                  </div>
                 </details>
               </details>
             </template>
             <p v-else class="small-note">Establish a session to inspect authenticated evidence.</p>
-            <details class="diagnostic">
-              <summary>Tester isolation</summary>
-              <dl class="diagnostic-list">
-                <div><dt>Pinned client</dt><dd><code>{{ steveClientCommit }}</code></dd></div>
-                <div><dt>Target scope</dt><dd><code>{{ target.hash }}</code></dd></div>
-              </dl>
-            </details>
           </section>
 
           <section v-if="trustPolicyOpen" class="embedded-panel" aria-label="Browser PCR policy">
@@ -254,12 +260,24 @@
                 </div>
               </div>
               <details v-if="reviewZeroPcrNames.length" class="pcr-classification">
-                <summary>Zero PCRs — not pinnable <code>{{ reviewZeroPcrNames.join(', ') }}</code></summary>
-                <p>These authenticated zero measurements will not be added to the profile.</p>
+                <summary>
+                  <span>Zero PCRs — not pinnable</span>
+                  <span class="pcr-classification__count">{{ reviewZeroPcrNames.length }}</span>
+                </summary>
+                <div class="pcr-classification__content">
+                  <code>{{ reviewZeroPcrNames.join(', ') }}</code>
+                  <p>These authenticated zero measurements will not be added to the profile.</p>
+                </div>
               </details>
               <details v-if="reviewMalformedPcrNames.length" class="pcr-classification">
-                <summary>Malformed PCR values <code>{{ reviewMalformedPcrNames.join(', ') }}</code></summary>
-                <p>These values cannot be added to the profile.</p>
+                <summary>
+                  <span>Malformed PCR values</span>
+                  <span class="pcr-classification__count">{{ reviewMalformedPcrNames.length }}</span>
+                </summary>
+                <div class="pcr-classification__content">
+                  <code>{{ reviewMalformedPcrNames.join(', ') }}</code>
+                  <p>These values cannot be added to the profile.</p>
+                </div>
               </details>
               <div class="button-row">
                 <button type="button" class="secondary" :disabled="profileBusy" @click="cancelPcrReview">Cancel</button>
@@ -407,40 +425,36 @@
             <div class="response-summary">
               <span class="status-pill status-pill--success">STEVE protected</span>
               <span>HTTP {{ requestResult.status }}</span>
-              <span>{{ Math.round(requestResult.durationMs) }} ms</span>
+              <span>Round trip {{ Math.round(requestResult.durationMs) }} ms</span>
               <span>{{ requestResult.contentType }}</span>
             </div>
-            <details v-if="requestResult.exchange" class="response-exchange">
+            <details
+              v-if="requestResult.exchange"
+              class="response-exchange"
+              :open="responseExchangeOpen"
+              @toggle="responseExchangeOpen = $event.currentTarget.open"
+            >
               <summary>Exchange details</summary>
               <div class="response-exchange__content">
                 <dl class="exchange-list">
                   <div>
                     <dt>Inner request</dt>
-                    <dd>{{ requestResult.method }} {{ requestResult.path }} · HTTP {{ requestResult.status }}</dd>
+                    <dd>{{ requestResult.method }} {{ requestResult.path }}</dd>
                   </div>
                   <div>
-                    <dt>Outer request</dt>
+                    <dt>Outer exchange</dt>
                     <dd>POST /e2p/v2/request · application/cbor · HTTP {{ requestResult.exchange.outerStatus }}</dd>
                   </div>
                   <div>
-                    <dt>Transport</dt>
-                    <dd>HTTPS + STEVE</dd>
-                  </div>
-                  <div>
-                    <dt>Session</dt>
-                    <dd>{{ requestResult.exchange.keyExchange }} · {{ pcrTrustLabel(requestResult.exchange.pcrTrust) }}</dd>
-                  </div>
-                  <div>
                     <dt>Protection</dt>
-                    <dd>{{ requestResult.exchange.protocolName }} · {{ requestResult.exchange.protection }}</dd>
+                    <dd>
+                      {{ requestResult.exchange.protocolName }} · {{ requestResult.exchange.protection }} ·
+                      {{ requestResult.exchange.keyExchange }} · {{ pcrTrustLabel(requestResult.exchange.pcrTrust) }}
+                    </dd>
                   </div>
                   <div>
-                    <dt>Session ID</dt>
-                    <dd>{{ requestResult.exchange.sessionId }}</dd>
-                  </div>
-                  <div>
-                    <dt>Sequence binding</dt>
-                    <dd>request {{ requestResult.exchange.sequence }} · response {{ requestResult.exchange.sequence }} matched</dd>
+                    <dt>Binding</dt>
+                    <dd>session {{ requestResult.exchange.sessionId }} · sequence {{ requestResult.exchange.sequence }} authenticated</dd>
                   </div>
                   <div>
                     <dt>Request sizes</dt>
@@ -461,16 +475,21 @@
                     </dd>
                   </div>
                 </dl>
-                <p class="exchange-note">
-                  Recorded by the SDK after response authentication. Outer HTTP status and elapsed time are transport observations.
-                </p>
-                <details class="response-headers">
+                <details
+                  class="response-headers"
+                  :open="responseHeadersOpen"
+                  @toggle="responseHeadersOpen = $event.currentTarget.open"
+                >
                   <summary>Response headers ({{ requestResult.responseHeaders.length }})</summary>
                   <pre>{{ formatResponseHeaders(requestResult.responseHeaders) }}</pre>
                 </details>
               </div>
             </details>
-            <details class="response-preview" :open="responsePreviewOpen">
+            <details
+              class="response-preview"
+              :open="responseBodyOpen"
+              @toggle="responseBodyOpen = $event.currentTarget.open"
+            >
               <summary>Response body{{ requestResult.truncated ? ' (truncated)' : '' }}</summary>
               <pre>{{ requestResult.preview || '(empty body)' }}</pre>
             </details>
@@ -502,7 +521,6 @@ import CompactPageHeader from '../components/CompactPageHeader.vue'
 import { readExpectedPcrFile } from '../utils/publicAttestation.js'
 import {
   REQUIRED_PCRS,
-  STEVE_CLIENT_COMMIT,
   STEVE_SUITES,
   buildE2eeChooserUrl,
   buildControlledTesterTarget,
@@ -606,6 +624,10 @@ export default {
     const requestBusy = ref(false)
     const requestError = ref('')
     const requestResult = ref(null)
+    const responseExchangeOpen = ref(false)
+    const responseHeadersOpen = ref(false)
+    const responseBodyOpen = ref(false)
+    let responseDisclosuresInitialized = false
 
     const targetHostname = computed(() => new URL(target.value.origin).hostname)
     const sessionAuthenticated = computed(() => isAuthenticatedSteveStatus(sessionStatus.value))
@@ -654,9 +676,6 @@ export default {
         pcrProfiles.value.length === 0 &&
         !isDebugSession.value,
     )
-    const responsePreviewOpen = computed(() => Boolean(
-      requestResult.value && !requestResult.value.truncated && requestResult.value.preview.length <= 2048,
-    ))
     const primarySessionAction = computed(() => {
       if (sessionAuthenticated.value) return null
       if (pcrPolicyMismatch.value) return null
@@ -712,6 +731,7 @@ export default {
       ['TRANSPORT', 'TIMEOUT', 'HTTP_STATUS'].includes(sessionError.value?.code),
     )
     const corsExample = computed(() => buildSteveCorsExample(pageOrigin, target.value.suite))
+    const chooserCorsExample = computed(() => buildSteveCorsExample(pageOrigin, selectedSuite.value))
 
     function formatTimestamp(value) {
       if (!value) return 'Unavailable'
@@ -772,16 +792,24 @@ export default {
       }
     }
 
-    function resetRequestState() {
+    function resetRequestState({ preserveDisclosures = false } = {}) {
       requestResult.value = null
       requestError.value = ''
       nonSensitiveAcknowledged.value = false
+      if (!preserveDisclosures) {
+        responseExchangeOpen.value = false
+        responseHeadersOpen.value = false
+        responseBodyOpen.value = false
+        responseDisclosuresInitialized = false
+      }
     }
 
-    function acceptStatus(status) {
+    function acceptStatus(status, preserveDisclosures = requestBusy.value) {
       const previousSessionId = sessionStatus.value?.session?.id
       sessionStatus.value = status
-      if (previousSessionId && previousSessionId !== status?.session?.id) resetRequestState()
+      if (previousSessionId && previousSessionId !== status?.session?.id) {
+        resetRequestState({ preserveDisclosures })
+      }
       if (status?.state !== 'error') sessionError.value = null
     }
 
@@ -981,9 +1009,14 @@ export default {
             body: requestBody.value,
           },
         )
-        acceptStatus(status)
+        if (!responseDisclosuresInitialized) {
+          responseBodyOpen.value = !result.truncated && result.preview.length <= 2048
+          responseDisclosuresInitialized = true
+        }
+        acceptStatus(status, true)
         requestResult.value = result
       } catch (error) {
+        requestResult.value = null
         requestError.value = describeSteveError(error, pageOrigin)
       } finally {
         requestBusy.value = false
@@ -1064,6 +1097,7 @@ export default {
       cancelPcrReview,
       cancelProfileRemoval,
       changeTargetHref,
+      chooserCorsExample,
       corsExample,
       corsTroubleshootingNeeded,
       evidenceOpen,
@@ -1105,7 +1139,9 @@ export default {
       requestResult,
       requestProfileRemoval,
       requiredPcrNames,
-      responsePreviewOpen,
+      responseBodyOpen,
+      responseExchangeOpen,
+      responseHeadersOpen,
       reviewPcrNames,
       reviewMalformedPcrNames,
       reviewSnapshot,
@@ -1122,7 +1158,6 @@ export default {
       sessionStatus,
       showFirstUseCallout,
       showTestDataModeWarning,
-      steveClientCommit: STEVE_CLIENT_COMMIT,
       submitTarget,
       suites,
       target,
@@ -1344,8 +1379,7 @@ code {
 
 .small-note,
 .gate-message,
-.empty-state,
-.exchange-note {
+.empty-state {
   margin: 0;
   color: var(--e2ee-muted);
   font-size: 0.87rem;
@@ -1404,16 +1438,27 @@ code {
   box-shadow: inset 0 0 0 1px var(--e2ee-focus);
 }
 
-.quiet-disclosure {
-  margin-top: 18px;
-  padding-top: 16px;
-  border-top: 1px solid var(--e2ee-border);
-  color: var(--e2ee-muted);
-  font-size: 0.87rem;
+.chooser-setup {
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--e2ee-border);
+  border-radius: 10px;
+  padding: 13px 14px;
+  background: var(--e2ee-subtle);
 }
 
-.quiet-disclosure p {
-  margin: 8px 0 0;
+.chooser-setup p {
+  margin: 0;
+}
+
+.chooser-setup pre {
+  overflow: auto;
+  margin: 2px 0 0;
+  border-radius: 8px;
+  padding: 12px;
+  color: var(--e2ee-code-text);
+  background: var(--e2ee-code);
+  white-space: pre-wrap;
 }
 
 .control-center {
@@ -1616,8 +1661,7 @@ code {
 
 .diagnostic summary,
 .manual-pcr summary,
-.profile-row summary,
-.quiet-disclosure summary {
+.profile-row summary {
   cursor: pointer;
   font-weight: 600;
 }
@@ -1655,14 +1699,35 @@ code {
 
 .pcr-classification summary {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   cursor: pointer;
   font-weight: 600;
 }
 
-.pcr-classification summary code { font-weight: 400; }
-.pcr-classification p { margin: 8px 0 0; }
+.pcr-classification__count {
+  min-width: 24px;
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: var(--e2ee-muted-surface);
+  text-align: center;
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.pcr-classification__content {
+  display: grid;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.pcr-classification__content code {
+  color: var(--e2ee-muted);
+  font-size: 0.76rem;
+}
+
+.pcr-classification__content p { margin: 0; }
 
 .review-card {
   display: grid;
@@ -1746,7 +1811,7 @@ button.selection-pill {
 .profile-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
+  align-items: center;
   gap: 10px;
   border: 1px solid var(--e2ee-border);
   border-radius: 10px;
@@ -1754,7 +1819,14 @@ button.selection-pill {
   background: var(--e2ee-surface);
 }
 
-.profile-row details { min-width: 0; }
+.profile-row details {
+  min-width: 0;
+}
+
+.profile-row:has(details[open]) .profile-actions {
+  align-self: start;
+  margin-top: 10px;
+}
 
 .profile-row summary {
   display: grid;
@@ -1976,10 +2048,6 @@ button.selection-pill {
   font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.79rem;
   font-weight: 400;
-}
-
-.exchange-note {
-  margin-top: 10px;
 }
 
 .response-headers {

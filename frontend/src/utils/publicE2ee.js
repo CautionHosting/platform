@@ -130,15 +130,15 @@ export async function resolveControlledTesterTarget(
   const match = pathname.match(
     new RegExp(`^${STEVE_TARGETS_ROOT}/([0-9a-f]{64})/$`),
   )
-  if (!match) throw new Error('This is not a valid isolated STEVE tester URL.')
+  if (!match) throw new Error('This is not a valid STEVE tester URL.')
 
   const params = new URLSearchParams(search)
   const origin = params.get('origin')
   const suite = params.get('suite')
-  if (!origin || !suite) throw new Error('The isolated tester URL is missing its origin or suite.')
+  if (!origin || !suite) throw new Error('The tester URL is missing its origin or suite.')
   const target = await buildControlledTesterTarget(origin, suite, cryptoObject)
   if (match[1] !== target.hash) {
-    throw new Error('The isolated tester URL does not match its origin and suite.')
+    throw new Error('The tester URL does not match its origin and suite.')
   }
   return target
 }
@@ -612,7 +612,7 @@ export function describeSteveTrustState(
       badge: 'Loading',
       tone: 'neutral',
       title: 'Loading the pinned STEVE client',
-      message: 'Session controls will appear when the isolated client is ready.',
+      message: 'Session controls will appear when the client is ready.',
     }
   }
   return {

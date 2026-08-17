@@ -217,18 +217,18 @@ up to 64 KiB. The tester rejects redirects and does not retry requests.
 The target card is a compact control center for session state, the active
 worker-enforced PCR policy, Nitro evidence, and session operations. The request
 tester uses the pinned SDK's explicit protected-send API; it does not depend on
-ordinary page fetch interception. Each result includes a collapsed SDK-recorded
-exchange view with the protocol, suite, PCR trust result, session and sequence,
-outer status, response headers, and record-size breakdown. It never exposes raw
-records or cryptographic secrets. Application body sizes and elapsed time are
-browser observations; the outer status is transport metadata. Its scoped URL
-includes the pinned STEVE client commit and a SHA-256 identifier for the
-normalized target-and-suite pair.
-Neither is a secret or session identifier; together they isolate service-worker
-clients.
+ordinary page fetch interception. Each result includes an initially collapsed
+SDK-recorded exchange disclosure with the protocol, suite, PCR trust result,
+session and sequence, outer status, response headers, and record-size breakdown.
+It never exposes raw
+records or cryptographic secrets. The result labels browser-observed round-trip
+time explicitly, and preserves open response disclosures across successive
+requests. Application body sizes and elapsed time are browser observations; the
+outer status is transport metadata.
 
 The deployment must allow the verifier's exact browser origin on the STEVE
-protocol endpoints. For the hosted verifier, configure `caution.hcl` with:
+protocol endpoints. The landing page shows the exact configuration before it
+attempts a connection. For the hosted verifier, configure `caution.hcl` with:
 
 ```hcl
 e2e_encryption {
@@ -246,8 +246,9 @@ Wildcard origins are rejected.
 The page can pin multiple complete PCR profiles for the exact target and suite.
 Each profile requires nonzero PCR0, PCR1, and PCR2 and may also pin authenticated
 nonzero PCR3 through PCR255. Authenticated zero-valued optional PCRs are grouped
-in the evidence view and remain non-pinnable. Profiles are alternatives: the SDK
-accepts one whole match and never combines values across profiles. Profiles may
+behind a compact count disclosure and remain non-pinnable. Profiles are
+alternatives: the SDK accepts one whole match and never combines values across
+profiles. Profiles may
 be imported, entered manually, or explicitly accepted after reviewing a current
 authenticated session. This reviewed first use is browser continuity, not
 independent deployment identity; observed PCRs are never enrolled automatically.
@@ -255,7 +256,8 @@ The SDK stores and enforces the complete pinned policy inside the worker on ever
 session and rotation. Platform local storage mirrors the profiles only to retain
 their source and timestamp for the UI; the worker policy remains authoritative.
 When restored worker profiles override a `None` or `TOFU` URL choice, the page
-reflects the effective `Pinned` mode in the URL and target chooser.
+reflects the effective `Pinned` mode in the URL and target chooser. Removing a
+profile requires inline confirmation before the worker policy changes.
 
 A pinned mismatch blocks requests and opens the approved-profile controls; add
 an independently approved complete profile rather than reconnecting. Any
