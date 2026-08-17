@@ -126,6 +126,7 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
 }
 
 /// Run a command with a timeout. Kills the process if deadline expires.
+#[tracing::instrument(skip_all, err)]
 fn run_with_timeout(cmd: &mut Command, timeout_secs: u64) -> Result<std::process::Output> {
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
@@ -141,8 +142,21 @@ fn run_with_timeout(cmd: &mut Command, timeout_secs: u64) -> Result<std::process
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
-                    let _ = child.wait();
-                    bail!("Command timed out after {}s", timeout_secs);
+                    match child.wait_with_output() {
+                        Ok(output) => {
+                            let stdout = String::from_utf8_lossy(&output.stdout);
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            bail!(
+                                "Command timed out after {}s\nstdout: {}\nstderr: {}",
+                                timeout_secs,
+                                stdout,
+                                stderr
+                            );
+                        }
+                        Err(e) => {
+                            bail!("Command timed out after {}s; failed to read output: {}", timeout_secs, e);
+                        }
+                    }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
@@ -248,6 +262,7 @@ fn managed_onprem_uses_direct_customer_bucket(
             .starts_with(&format!("s3://{}/", managed_onprem.eif_bucket))
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<DeploymentResult> {
     tracing::info!(
         "Starting Nitro Enclave deployment for resource {} ({})",
@@ -873,7 +888,12 @@ async fn generate_backend_config(
     Ok(())
 }
 
-async fn run_tofu_init(work_dir: &Path, lockfile_path: Option<&Path>, credentials: Option<&AwsCredentials>) -> Result<()> {
+#[tracing::instrument(skip_all, err)]
+async fn run_tofu_init(
+    work_dir: &Path,
+    lockfile_path: Option<&Path>,
+    credentials: Option<&AwsCredentials>,
+) -> Result<()> {
     tracing::info!("Running tofu init in {}...", work_dir.display());
 
     // Copy lockfile into work dir if provided
@@ -915,6 +935,7 @@ async fn run_tofu_init(work_dir: &Path, lockfile_path: Option<&Path>, credential
     Ok(())
 }
 
+#[tracing::instrument(skip_all, err)]
 fn run_tofu_apply_with_provider_creds(
     work_dir: &Path,
     resource_name: &str,
@@ -1212,6 +1233,7 @@ async fn associate_eip_with_instance(
     Ok(())
 }
 
+#[tracing::instrument(skip_all, err)]
 fn run_tofu_destroy(
     work_dir: &Path,
     resource_name: &str,

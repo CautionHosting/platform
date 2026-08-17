@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: 2026 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+FROM stagex/pallet-rust@sha256:abe9b95c93a5afa271f69fcd5eb18c8cd405fe5df6491a63c9418e3a170573dc AS pallet-rust
+FROM stagex/core-ca-certificates@sha256:8390dff73a4502614411e2b2ecb4e4e33b6cc10dc26cf2c6a46e5df71f4c4b03 AS ca-certificates
+
+FROM pallet-rust AS builder
+
+ENV SOURCE_DATE_EPOCH=1
+ENV CARGO_HOME=/usr/local/cargo
+
+WORKDIR /build
+
+COPY . .
+
+ENV RUST_BACKTRACE=1
+# crt-static on the musl target produces a fully static binary; the build
+# fails closed below if the linked ELF is anything other than ET_EXEC.
+ENV RUSTFLAGS="-C codegen-units=1"
+ENV RUSTFLAGS="${RUSTFLAGS} -C target-feature=+crt-static"
+ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=-Wl,--build-id=none"
+ENV TARGET_ARCH="x86_64-unknown-linux-musl"
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo fetch --locked --target $TARGET_ARCH
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,id=drift-detector-target,target=/build/target \
+    --network=none \
+    cargo build --release --frozen \
+      --bin drift-detector \
+      --target ${TARGET_ARCH} \
+      && install -D -m 0755 /build/target/${TARGET_ARCH}/release/drift-detector /usr/local/bin/drift-detector
+
+FROM scratch AS runtime
+
+COPY --from=ca-certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /usr/local/bin/drift-detector /usr/local/bin/drift-detector
+
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV RUST_LOG=info
+
+WORKDIR /app
+
+ENTRYPOINT ["/usr/local/bin/drift-detector"]

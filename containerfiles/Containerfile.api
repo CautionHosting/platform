@@ -1,26 +1,30 @@
-FROM stagex/pallet-rust@sha256:4062550919db682ebaeea07661551b5b89b3921e3f3a2b0bc665ddea7f6af1ca AS pallet-rust
-FROM stagex/core-musl@sha256:d9af23284cca2e1002cd53159ada469dfe6d6791814e72d6163c7de18d4ae701 AS musl
-FROM stagex/core-libunwind@sha256:eb66122d8fc543f5e2f335bb1616f8c3a471604383e2c0a9df4a8e278505d3bc AS libunwind
-FROM stagex/core-ca-certificates@sha256:d135f1189e9b232eb7316626bf7858534c5540b2fc53dced80a4c9a95f26493e AS ca-certificates
-FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769ff3b37239f3d0 AS git
-FROM stagex/user-docker@sha256:8b9055def1d305374d4f895386339c37a3c922420b148c266c2447fb9186c712 AS docker
-FROM stagex/user-docker-cli-buildx@sha256:e417fa8cc1665e51f4bf1c9f688e8b3b55097afdb1017f96642fd4ca73290519 AS docker-cli
-FROM stagex/core-bash@sha256:c9a256e6e9da26f1e66e5d493e35da70dbb7b03e60d92e721bf469b6cadba73d AS bash
-FROM stagex/core-curl@sha256:bc8bab43d96a9167fbb85022ea773644a45ef335e7a9b747f203078973fa988e AS curl
-FROM stagex/core-user-runtime@sha256:055ae534e1e01259449fb4e0226f035a7474674c7371a136298e8bdac65d90bb AS user-runtime
-FROM stagex/user-opentofu@sha256:81b8970e2b660a44e2074389fa8cd56299522a457e8c27fe512d982d16536673 AS tofu
-FROM stagex/core-openssl@sha256:d6487f0cb15f4ee02b420c717cb9abd85d73043c0bb3a2c6ce07688b23c1df07 AS openssl
-FROM stagex/user-pcsc-lite@sha256:2e0bb1cbeb9dd97be4e0594bd712dc138ee2710668281d3faa1a18d99a50979d AS pcsc-lite
-FROM stagex/user-nettle@sha256:3b883ec8fb6781acff2517e7485d7e8f79f147f8fa2b3b644cb96da495af52e7 AS nettle
-FROM stagex/core-gmp@sha256:35f1f6f285efd438e7d985dc0538b7a5ca1a228e69f50d39de2bcafe830b4beb AS gmp
-FROM stagex/pallet-gcc-gnu-busybox@sha256:9f5f67721dacece876a5312d63fe727bbf176461cca73b77a531b3f1b96f8f66 AS gcc
-FROM stagex/core-zlib@sha256:06f5168e20d85d1eb1d19836cdf96addc069769b40f8f0f4a7a70b2f49fc18f8 AS zlib
+ARG TOFU_VERSION
+
+FROM stagex/pallet-rust@sha256:abe9b95c93a5afa271f69fcd5eb18c8cd405fe5df6491a63c9418e3a170573dc AS pallet-rust
+FROM stagex/pallet-go@sha256:35d936e6fcbd73efc2dc3471a015b1ac5a5bb6d2c0eae6e84550f6352857457d AS pallet-go
+FROM stagex/core-musl@sha256:42fd2ed18ac4d6336f08f1b6345e0bb7bc5570450a40e7255b6da79868bd2d6b AS musl
+FROM stagex/core-libunwind@sha256:08cd9e229ef1b4f547c25436d06a2f893f252fc1c1d8b86affbaa91b0be05cef AS libunwind
+FROM stagex/core-ca-certificates@sha256:8390dff73a4502614411e2b2ecb4e4e33b6cc10dc26cf2c6a46e5df71f4c4b03 AS ca-certificates
+FROM stagex/core-git@sha256:ecd1de421f467072a76de5a38fce61dd0afb2ddd2c48d73c21effb5ad76342fb AS git
+FROM stagex/user-docker@sha256:b6ae60ae47490c4b358b7dca2e5e50fa0e6853bf03245b3e422087d450edf332 AS docker
+FROM stagex/user-docker-cli-buildx@sha256:74b6b0ccdea32074665ca145a37bee9631fddbcd8e9574296c753a6407787120 AS docker-cli
+FROM stagex/core-bash@sha256:9f5225101befc12a2f23729f7c9858d1778e25c7a9c1a0dbfbe87034e2e8da8b AS bash
+FROM stagex/core-curl@sha256:fa58ff1a1c32677ce3034e69a2ee40081c799d6df68a7b1d5d480501de779030 AS curl
+FROM stagex/core-user-runtime@sha256:1694accf42714684f8ebefed165dd202efb474d53cafbd47b63f93b47c999cad AS user-runtime
+FROM stagex/user-opentofu@sha256:e1c7fffa227c425f2a85395bcb2f2ecfae069327076696773de75654323d8f49 AS tofu
+FROM stagex/core-openssl@sha256:04a0d15071ca64b6f4855bb7790a306caa33b6259b522c44898a41975a67562e AS openssl
+FROM stagex/user-pcsc-lite@sha256:58e5846a6c0aa394d55f00a8bf743aab41e024449c31d199af868f012accc326 AS pcsc-lite
+FROM stagex/user-nettle@sha256:110504b49f494b06121d1816eaa18aae2b772761e6748229d5bff1260a0f9860 AS nettle
+FROM stagex/core-gmp@sha256:f90653ed07062074363542a77e26a2d16a142f9be5ebf6900b53f4ab8a82d39d AS gmp
+FROM stagex/pallet-gcc-gnu-busybox@sha256:67f4a035c680065fc0278517594ab07bf1b9416dc054508a8893ca20df04e415 AS gcc
+FROM stagex/core-zlib@sha256:5a21327b58c2ceeb3283a960540e19d9c35944961c68a7254e36056bf6f7d2d9 AS zlib
+FROM stagex/core-libzstd@sha256:bfe96f975a2a2a7a48aeb418b44accc79dd26d601a94d9f02b0562eaa0f89fdd AS libzstd
 
 # StageX EIF build tools (replaces nitro-cli)
-FROM stagex/user-eif_build@sha256:c1d030fcaa20d26cd144ce992ba4b77665a0e9683f01a92960f9823d39401e41 AS eif-build
-FROM stagex/linux-nitro@sha256:073c4603686e3bdc0ed6755fee3203f6f6f1512e0ded09eaea8866b002b04264 AS linux-nitro
-FROM stagex/user-cpio@sha256:2695e1b42f93ec3ea0545e270f0fda4adca3cb48d0526da01954efae1bce95c4 AS cpio
-FROM stagex/user-socat@sha256:acef3dacc5b805d0eaaae0c2d13f567bf168620aea98c8d3e60ea5fd4e8c3108 AS socat
+FROM stagex/user-eif_build@sha256:8bbd8fb500322e719063645460f3942d04ca99048089adea237026443c9517b7 AS eif-build
+FROM stagex/linux-nitro@sha256:31a41bc241c8279b5b40926b84e331ee8e63a7304bdb662140b8b7355d74343c AS linux-nitro
+FROM stagex/user-cpio@sha256:46ca4a247908c502e31a26842925b02cc7133fec619b19e0d5c3833f6d073d8e AS cpio
+FROM stagex/user-socat@sha256:70b21dec5de83d366babfa90215ce510118df88b798d4106f429bde3bf55973a AS socat
 
 FROM pallet-rust AS builder
 
@@ -64,6 +68,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
       && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/remote-build-helper /usr/local/bin/remote-build-helper \
       && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/hcl-patcher /usr/local/bin/hcl-patcher
 
+FROM pallet-go AS build-tofu
+ARG TOFU_VERSION
+ENV CGO_ENABLED=0
+ADD fetch/opentofu-${TOFU_VERSION}.tar.gz /build
+WORKDIR /build/opentofu-${TOFU_VERSION}
+RUN go build -trimpath -o /rootfs/usr/bin/tofu -ldflags "-X github.com/opentofu/opentofu/dev.version=no" ./cmd/tofu
+
+FROM scratch AS package-tofu
+COPY --from=build-tofu /rootfs /
+
 FROM scratch AS runtime
 COPY --from=user-runtime . /
 COPY --from=gcc . /
@@ -74,8 +88,9 @@ COPY --from=ca-certificates . /
 COPY --from=openssl . /
 COPY --from=zlib . /
 COPY --from=curl . /
+COPY --from=libzstd . /
 COPY --from=git . /
-COPY --from=tofu . /
+COPY --from=package-tofu . /
 COPY --from=docker . /
 COPY --from=docker-cli . /
 COPY --from=eif-build . /

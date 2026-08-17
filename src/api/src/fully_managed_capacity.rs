@@ -33,6 +33,7 @@ pub(crate) struct DeploymentRequirements {
 }
 
 impl DeploymentRequirements {
+    #[tracing::instrument(skip_all, err)]
     pub(crate) fn for_enclave(
         cpus: u32,
         memory_mb: u32,
@@ -153,6 +154,7 @@ impl IntoResponse for CapacityError {
     }
 }
 
+#[tracing::instrument(skip_all, err)]
 pub(crate) async fn reserve_capacity(
     pool: &PgPool,
     org_id: Uuid,
@@ -277,6 +279,7 @@ pub(crate) async fn reserve_capacity(
     }
 }
 
+#[tracing::instrument(skip_all)]
 pub(crate) async fn release_reservation(pool: &PgPool, reservation: &CapacityReservation) {
     let Some(reservation_id) = reservation.id else {
         return;

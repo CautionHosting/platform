@@ -3,7 +3,7 @@
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install-cli install-cli-stagex install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-live-caddy-nitro test-cli-install test-e2e test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e
+.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install-cli install-cli-stagex install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-live-caddy-nitro test-cli-install test-e2e test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e build-drift-detector run-drift-detector
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -42,8 +42,6 @@ guard-direct-email:
 guard-direct-metering:
 	$(call refuse_mixed_service_management,metering,caution-metering.service)
 
-
-
 ifdef NOCACHE
 	NO_CACHE := --no-cache
 endif
@@ -57,9 +55,21 @@ build-gateway:
 	@docker build -t caution-gateway -f ./containerfiles/Containerfile.gateway .
 	@echo "Gateway image build complete"
 
-build-api:
+# NOTE: Tofu is currently broke in stagex.
+# This should be removed once it's fixed.
+
+TOFU_VERSION ?= 1.12.4
+TOFU_HASH ?= 170a9c143a35fe0ef8a9ae02c3bb1585e669f0cd6934da6c421e4cdd4403ffb0
+
+fetch/opentofu-$(TOFU_VERSION).tar.gz:
+	mkdir -p "$(shell dirname $@)" /tmp/"$(shell dirname $@)"
+	wget -O- https://github.com/opentofu/opentofu/archive/refs/tags/v1.12.4.tar.gz > /tmp/$@
+	echo "$(TOFU_HASH) /tmp/$@" | sha256sum -c
+	mv /tmp/$@ $@
+
+build-api: fetch/opentofu-$(TOFU_VERSION).tar.gz
 	@echo "Building API service..."
-	@docker build -t caution-api --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) -f ./containerfiles/Containerfile.api .
+	@docker build -t caution-api --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) -f ./containerfiles/Containerfile.api .
 	@echo "API service image built: caution-api"
 
 build-email:
@@ -100,6 +110,11 @@ build-metering:
 	@echo "Building Metering service..."
 	@docker build -t caution-metering -f ./containerfiles/Containerfile.metering .
 	@echo "Metering service image built: caution-metering"
+
+build-drift-detector:
+	@echo "Building drift-detector image..."
+	@docker build --platform linux/amd64 -t caution-drift-detector -f ./containerfiles/Containerfile.drift-detector .
+	@echo "Drift-detector image built: caution-drift-detector"
 
 build-frontend-dist:
 	@echo "Building Frontend static assets..."
@@ -516,6 +531,19 @@ run-metering: guard-direct-metering network postgres
 		-e METERING_INTERVAL_SECS=60 \
 		caution-metering
 	@echo "Metering service started (internal port 8083)"
+
+DRIFT_DETECTOR_ORG_ID ?=
+DRIFT_DETECTOR_MIN_SEVERITY ?= info
+
+run-drift-detector: network
+	@docker rm -f drift-detector 2>/dev/null || true
+	@docker run --rm \
+		--name drift-detector \
+		--network $(NETWORK) \
+		--env-file $(HOME)/.config/caution/.env \
+		caution-drift-detector \
+		$(if $(DRIFT_DETECTOR_ORG_ID),$(DRIFT_DETECTOR_ORG_ID) $(DRIFT_DETECTOR_MIN_SEVERITY))
+	@echo "Drift detection complete"
 
 # =============================================================================
 # =============================================================================

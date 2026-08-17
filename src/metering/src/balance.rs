@@ -11,6 +11,7 @@ use crate::AppState;
 const LOW_BALANCE_WARNING_CENTS: i64 = 2_500;
 
 /// After deducting credits, check if the org's balance requires action.
+#[tracing::instrument(skip_all, fields(org_id = %org_id), err)]
 pub(crate) async fn check_balance_thresholds(state: &AppState, org_id: uuid::Uuid) -> Result<()> {
     let balance_cents = get_ledger_balance_cents(&state.pool, org_id).await?;
 

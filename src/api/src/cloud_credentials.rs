@@ -596,6 +596,7 @@ fn managed_onprem_credential_data(
     }
 }
 
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn get_managed_onprem_credential(
     pool: &PgPool,
     encryptor: &Encryptor,
@@ -651,6 +652,7 @@ pub async fn list_managed_onprem_credentials(
     Ok(rows)
 }
 
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn get_credential_by_resource(
     pool: &PgPool,
     org_id: Uuid,

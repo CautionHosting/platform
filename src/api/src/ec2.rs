@@ -4,7 +4,7 @@
 //! Minimal AWS clients using direct HTTP calls with SigV4 signing.
 //! Replaces aws-sdk-ec2 and aws-sdk-autoscaling to avoid compiling massive generated SDKs.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use thiserror::Error;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -38,6 +38,7 @@ pub struct Filter {
 pub struct Instance {
     pub instance_id: String,
     pub instance_type: Option<String>,
+    pub tags: std::collections::HashMap<String, String>,
 }
 
 pub struct Image {
@@ -165,6 +166,24 @@ fn run_instances_request_params(params: &RunInstancesParams) -> Vec<(String, Str
     req_params
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum Ec2SignedRequestError {
+    #[error("EC2 API request failed")]
+    Request(#[source] SignedRequestError),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum DescribeInstancesError {
+    #[error("EC2 DescribeInstances request failed")]
+    Request(#[source] Ec2SignedRequestError),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum TerminateInstancesError {
+    #[error("EC2 TerminateInstances request failed")]
+    Request(#[source] Ec2SignedRequestError),
+}
+
 impl Ec2Client {
     pub fn new(credentials: &AwsCredentials) -> Self {
         Self {
@@ -175,7 +194,26 @@ impl Ec2Client {
         }
     }
 
-    pub async fn describe_instances(&self, filters: &[Filter]) -> Result<Vec<Instance>> {
+    /// The region this client is pinned to.
+    pub fn region(&self) -> &str {
+        &self.region
+    }
+
+    /// A client with the same credentials and HTTP connection pool, targeting
+    /// another region.
+    pub fn for_region(&self, region: &str) -> Self {
+        Self {
+            access_key_id: self.access_key_id.clone(),
+            secret_access_key: self.secret_access_key.clone(),
+            region: region.to_string(),
+            http: self.http.clone(),
+        }
+    }
+
+    pub async fn describe_instances(
+        &self,
+        filters: &[Filter],
+    ) -> Result<Vec<Instance>, DescribeInstancesError> {
         let mut params = vec![
             ("Action".to_string(), "DescribeInstances".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -189,7 +227,10 @@ impl Ec2Client {
             }
         }
 
-        let body = self.signed_request(&params).await?;
+        let body = self
+            .signed_request(&params)
+            .await
+            .map_err(DescribeInstancesError::Request)?;
         Ok(parse_instance_ids(&body))
     }
 
@@ -199,7 +240,10 @@ impl Ec2Client {
             ("Version".to_string(), "2016-11-15".to_string()),
         ];
 
-        let body = self.signed_request(&params).await.map_err(CountVpcsError::Request)?;
+        let body = self
+            .signed_request(&params)
+            .await
+            .map_err(|e| CountVpcsError::Request(anyhow::Error::new(e)))?;
         Ok(parse_tag_values(&body, "vpcId").len() as u32)
     }
 
@@ -209,7 +253,10 @@ impl Ec2Client {
             ("Version".to_string(), "2016-11-15".to_string()),
         ];
 
-        let body = self.signed_request(&params).await.map_err(CountElasticIpsError::Request)?;
+        let body = self
+            .signed_request(&params)
+            .await
+            .map_err(|e| CountElasticIpsError::Request(anyhow::Error::new(e)))?;
         Ok(parse_tag_values(&body, "publicIp").len() as u32)
     }
 
@@ -236,7 +283,7 @@ impl Ec2Client {
         let instances = self
             .describe_instances(&[Filter::new("instance-state-name", &["pending", "running"])])
             .await
-            .map_err(ActiveInstanceTypesError::Describe)?;
+            .map_err(|e| ActiveInstanceTypesError::Describe(anyhow::Error::new(e)))?;
 
         Ok(instances
             .into_iter()
@@ -254,7 +301,10 @@ impl Ec2Client {
             params.push(("AllRegions".to_string(), "true".to_string()));
         }
 
-        let body = self.signed_request(&params).await.map_err(DescribeRegionsError::Request)?;
+        let body = self
+            .signed_request(&params)
+            .await
+            .map_err(|e| DescribeRegionsError::Request(anyhow::Error::new(e)))?;
         Ok(parse_regions(&body))
     }
 
@@ -270,7 +320,10 @@ impl Ec2Client {
             ("Filter.1.Value.1".to_string(), instance_type.to_string()),
         ];
 
-        let body = self.signed_request(&params).await.map_err(InstanceTypeOfferedError::Request)?;
+        let body = self
+            .signed_request(&params)
+            .await
+            .map_err(|e| InstanceTypeOfferedError::Request(anyhow::Error::new(e)))?;
         Ok(!parse_tag_values(&body, "instanceType").is_empty())
     }
 
@@ -394,7 +447,10 @@ impl Ec2Client {
         })
     }
 
-    pub async fn terminate_instances(&self, instance_ids: &[String]) -> Result<()> {
+    pub async fn terminate_instances(
+        &self,
+        instance_ids: &[String],
+    ) -> Result<(), TerminateInstancesError> {
         let mut params = vec![
             ("Action".to_string(), "TerminateInstances".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -402,7 +458,9 @@ impl Ec2Client {
         for (i, id) in instance_ids.iter().enumerate() {
             params.push((format!("InstanceId.{}", i + 1), id.clone()));
         }
-        self.signed_request(&params).await?;
+        self.signed_request(&params)
+            .await
+            .map_err(TerminateInstancesError::Request)?;
         Ok(())
     }
 
@@ -418,7 +476,10 @@ impl Ec2Client {
         Ok(())
     }
 
-    async fn signed_request(&self, params: &[(String, String)]) -> Result<String> {
+    async fn signed_request(
+        &self,
+        params: &[(String, String)],
+    ) -> Result<String, Ec2SignedRequestError> {
         signed_request(
             &self.http,
             &self.access_key_id,
@@ -428,6 +489,7 @@ impl Ec2Client {
             params,
         )
         .await
+        .map_err(Ec2SignedRequestError::Request)
     }
 }
 
@@ -537,7 +599,18 @@ impl AsgClient {
             params,
         )
         .await
+        .map_err(anyhow::Error::new)
     }
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum SignedRequestError {
+    #[error("{1} API request failed")]
+    Http(#[source] reqwest::Error, String),
+    #[error("{0} API returned {1}")]
+    NonSuccess(String, u16),
+    #[error("Failed to read {1} response")]
+    ReadResponse(#[source] reqwest::Error, String),
 }
 
 async fn signed_request(
@@ -547,7 +620,7 @@ async fn signed_request(
     region: &str,
     service: &str,
     params: &[(String, String)],
-) -> Result<String> {
+) -> Result<String, SignedRequestError> {
     let host = format!("{}.{}.amazonaws.com", service, region);
     let url = format!("https://{}/", host);
     let body = encode_form(params);
@@ -598,16 +671,19 @@ async fn signed_request(
         .body(body)
         .send()
         .await
-        .context(format!("{} API request failed", service))?;
+        .map_err(|e| SignedRequestError::Http(e, service.to_string()))?;
 
     let status = response.status();
     let text = response
         .text()
         .await
-        .context(format!("Failed to read {} response", service))?;
+        .map_err(|e| SignedRequestError::ReadResponse(e, service.to_string()))?;
 
     if !status.is_success() {
-        bail!("{} API returned {}: {}", service, status, text);
+        return Err(SignedRequestError::NonSuccess(
+            service.to_string(),
+            status.as_u16(),
+        ));
     }
 
     Ok(text)
@@ -736,19 +812,78 @@ fn derive_signing_key(secret: &str, date_stamp: &str, region: &str, service: &st
     hmac_sha256(&k_service, b"aws4_request")
 }
 
-/// Extract instance IDs from EC2 DescribeInstances XML response.
+/// Extract instances from EC2 DescribeInstances XML response.
+///
+/// Each `<instancesSet>` is walked item-by-item so tags stay grouped with
+/// their owning instance; a flat scan of tag names would mix tags from
+/// different instances together.
 fn parse_instance_ids(xml: &str) -> Vec<Instance> {
-    let instance_ids = parse_tag_values(xml, "instanceId");
-    let instance_types = parse_tag_values(xml, "instanceType");
+    let mut instances = Vec::new();
 
-    instance_ids
-        .into_iter()
-        .enumerate()
-        .map(|(index, instance_id)| Instance {
-            instance_id,
-            instance_type: instance_types.get(index).cloned(),
-        })
-        .collect()
+    for set in top_level_blocks(xml, "<instancesSet>", "</instancesSet>") {
+        for item in top_level_blocks(set, "<item>", "</item>") {
+            let Some(instance_id) = parse_first_tag_value(item, "instanceId") else {
+                continue;
+            };
+            instances.push(Instance {
+                instance_id,
+                instance_type: parse_first_tag_value(item, "instanceType"),
+                tags: parse_tag_set(item),
+            });
+        }
+    }
+
+    instances
+}
+
+/// Return the contents of each top-level `<open>`...`</open>` element in
+/// `xml`, tracking one level of nesting so a nested occurrence of the same
+/// tag (e.g. `tagSet` `<item>`s inside an instance `<item>`) does not
+/// truncate a block early.
+fn top_level_blocks<'a>(xml: &'a str, open: &str, close: &str) -> Vec<&'a str> {
+    let mut blocks = Vec::new();
+    let mut depth = 0usize;
+    let mut block_start = 0usize;
+    let mut pos = 0usize;
+
+    while pos < xml.len() {
+        let rest = &xml[pos..];
+        if rest.starts_with(open) {
+            if depth == 0 {
+                block_start = pos + open.len();
+            }
+            depth += 1;
+            pos += open.len();
+        } else if rest.starts_with(close) {
+            if depth == 1 {
+                blocks.push(&xml[block_start..pos]);
+            }
+            depth = depth.saturating_sub(1);
+            pos += close.len();
+        } else {
+            pos += 1;
+        }
+    }
+
+    blocks
+}
+
+/// Parse the `<tagSet>` of an instance item into a key/value map.
+///
+/// Tags missing a key or value are omitted.
+fn parse_tag_set(instance_item: &str) -> std::collections::HashMap<String, String> {
+    let mut tags = std::collections::HashMap::new();
+
+    for tag_item in top_level_blocks(instance_item, "<item>", "</item>") {
+        if let (Some(key), Some(value)) = (
+            parse_first_tag_value(tag_item, "key"),
+            parse_first_tag_value(tag_item, "value"),
+        ) {
+            tags.insert(key, value);
+        }
+    }
+
+    tags
 }
 
 fn parse_app_address(xml: &str) -> Result<(String, String, Option<String>)> {
@@ -873,6 +1008,80 @@ mod tests {
 
         let instances = parse_instance_ids(xml);
         assert!(instances.is_empty());
+    }
+
+    #[test]
+    fn test_parse_instance_tags_grouped_per_instance() {
+        let xml = r#"
+        <DescribeInstancesResponse>
+          <reservationSet>
+            <item>
+              <instancesSet>
+                <item>
+                  <instanceId>i-aaaa1111</instanceId>
+                  <instanceType>c5.xlarge</instanceType>
+                  <tagSet>
+                    <item><key>Name</key><value>caution-builder-aaaa1111</value></item>
+                    <item><key>org_id</key><value>11111111-1111-1111-1111-111111111111</value></item>
+                  </tagSet>
+                </item>
+                <item>
+                  <instanceId>i-bbbb2222</instanceId>
+                  <instanceType>m5.large</instanceType>
+                  <tagSet>
+                    <item><key>Name</key><value>caution-builder-bbbb2222</value></item>
+                  </tagSet>
+                </item>
+              </instancesSet>
+            </item>
+          </reservationSet>
+        </DescribeInstancesResponse>"#;
+
+        let instances = parse_instance_ids(xml);
+        assert_eq!(instances.len(), 2);
+
+        assert_eq!(instances[0].instance_id, "i-aaaa1111");
+        assert_eq!(instances[0].instance_type.as_deref(), Some("c5.xlarge"));
+        assert_eq!(
+            instances[0].tags.get("org_id").map(String::as_str),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        assert_eq!(
+            instances[0].tags.get("Name").map(String::as_str),
+            Some("caution-builder-aaaa1111")
+        );
+
+        assert_eq!(instances[1].instance_id, "i-bbbb2222");
+        assert_eq!(
+            instances[1].tags.get("Name").map(String::as_str),
+            Some("caution-builder-bbbb2222")
+        );
+        assert!(
+            instances[1].tags.get("org_id").is_none(),
+            "tags from one instance must not bleed into another"
+        );
+    }
+
+    #[test]
+    fn test_parse_instance_without_tags() {
+        let xml = r#"
+        <DescribeInstancesResponse>
+          <reservationSet>
+            <item>
+              <instancesSet>
+                <item>
+                  <instanceId>i-cccc3333</instanceId>
+                  <tagSet/>
+                </item>
+              </instancesSet>
+            </item>
+          </reservationSet>
+        </DescribeInstancesResponse>"#;
+
+        let instances = parse_instance_ids(xml);
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].instance_id, "i-cccc3333");
+        assert!(instances[0].tags.is_empty());
     }
 
     #[test]
