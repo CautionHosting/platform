@@ -278,9 +278,16 @@ impl CostCalculator {
 
     pub fn calculate_pricing(&self, usage: &ResourceUsage) -> Option<PricingBreakdown> {
         let base_rate = self.find_rate(usage)?;
+        // Network egress is passed through at the configured provider rate
+        // rather than receiving the platform compute margin.
+        let margin_percent = if usage.resource_type == ResourceType::Network {
+            0.0
+        } else {
+            self.pricing.margin_percent
+        };
         Some(PricingBreakdown {
             base_unit_cost_usd: base_rate,
-            margin_percent: self.pricing.margin_percent,
+            margin_percent,
         })
     }
 
@@ -511,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn test_aws_network_pricing() {
+    fn test_aws_network_pricing_has_no_platform_margin() {
         let calculator = CostCalculator::new(default_rules_with_margin(75.0));
 
         let usage = make_usage(
@@ -521,10 +528,38 @@ mod tests {
             serde_json::json!({}),
         );
 
-        let cost = calculator.calculate_cost(&usage).expect("known pricing");
+        let pricing = calculator.calculate_pricing(&usage).expect("known pricing");
 
-        // $0.09/GB * 100 GB * 1.75 = $15.75
-        assert!((cost - 15.75).abs() < 0.001);
+        assert!((pricing.base_unit_cost_usd - 0.09).abs() < 0.000001);
+        assert_eq!(pricing.margin_percent, 0.0);
+        // $0.09/GB * 100 GB, with no platform margin.
+        assert!((pricing.total_cost_usd(usage.quantity) - 9.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_non_aws_network_pricing_has_no_platform_margin() {
+        let mut rules = default_rules_with_margin(75.0);
+        rules.rates.push(PricingRate {
+            provider: Provider::Gcp,
+            resource_type: ResourceType::Network,
+            instance_type: None,
+            region: None,
+            rate_per_unit: 0.12,
+        });
+        let calculator = CostCalculator::new(rules);
+
+        let usage = make_usage(
+            Provider::Gcp,
+            ResourceType::Network,
+            100.0,
+            serde_json::json!({}),
+        );
+
+        let pricing = calculator.calculate_pricing(&usage).expect("known pricing");
+
+        assert!((pricing.base_unit_cost_usd - 0.12).abs() < 0.000001);
+        assert_eq!(pricing.margin_percent, 0.0);
+        assert!((pricing.total_cost_usd(usage.quantity) - 12.0).abs() < 0.001);
     }
 
     #[test]
