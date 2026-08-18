@@ -854,10 +854,13 @@ impl BuildPhaseStateMachine {
             .position(|&p| p == latest_status.phase)
             .context("Unknown build phase in status")?;
 
-        if target_idx < self.current_index {
+        // Only flag a true regression — going back to an earlier phase.
+        // current_index points to the next un-emitted phase, so the last emitted
+        // was at index (current_index - 1). If target_idx is before that, it's a real regression.
+        if self.current_index > 0 && target_idx < self.current_index - 1 {
             bail!(
                 "Phase regression: {} -> {}",
-                BUILD_PHASES[self.current_index.saturating_sub(1)],
+                BUILD_PHASES[self.current_index - 1],
                 latest_status.phase
             );
         }
@@ -1779,6 +1782,22 @@ mod tests {
         // Second poll: downloading-source (index 1 — regression!)
         let status2 = make_status("downloading-source", ts + TimeDelta::seconds(5));
         assert!(sm.increment(&status2).is_err());
+    }
+
+    #[test]
+    fn state_machine_same_phase_does_not_trigger_regression() {
+        let ts = Utc::now();
+        let mut sm = BuildPhaseStateMachine::new();
+
+        // First poll: building-application (index 2)
+        let status1 = make_status("building-application", ts);
+        let messages1 = sm.increment(&status1).unwrap();
+        assert_eq!(messages1.len(), 3); // launching-builder + downloading-source + building-application
+
+        // Second poll: same phase — should return no new messages, not error.
+        let status2 = make_status("building-application", ts + TimeDelta::seconds(5));
+        let messages2 = sm.increment(&status2).unwrap();
+        assert!(messages2.is_empty());
     }
 
     #[test]
