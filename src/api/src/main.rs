@@ -1224,6 +1224,30 @@ fn merge_provider_into_onprem(
     }
 }
 
+fn provider_requires_linked_byoc(
+    config_file: &config::ConfigurationFile,
+    has_linked_byoc: bool,
+) -> bool {
+    config_file
+        .caution
+        .as_ref()
+        .and_then(|caution| caution.provider.as_ref())
+        .is_some()
+        && !has_linked_byoc
+}
+
+fn deployment_target_milestone(capacity: &str, aws_account: &str, region: &str) -> String {
+    [
+        "Deployment target: capacity=",
+        capacity,
+        ", aws_account=",
+        aws_account,
+        ", region=",
+        region,
+    ]
+    .concat()
+}
+
 fn platform_builder_credentials() -> deployment::AwsCredentials {
     deployment::AwsCredentials {
         access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
@@ -1716,6 +1740,34 @@ mod build_inputs_tests {
                 "missing {tool}.repo"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod deployment_target_tests {
+    use super::{deployment_target_milestone, provider_requires_linked_byoc};
+    use crate::config;
+
+    #[test]
+    fn provider_requires_linked_credentials() {
+        let with_provider = config::ConfigurationFile::from_str(
+            "caution {\n provider {\n type = \"aws\"\n region = \"us-east-1\"\n }\n }\n\
+             enclave \"main\" {\n unit \"default\" {\n command = \"/app\"\n }\n }",
+        ).unwrap();
+        let managed = config::ConfigurationFile::from_str(
+            "enclave \"main\" {\n unit \"default\" {\n command = \"/app\"\n }\n }",
+        ).unwrap();
+        assert!(provider_requires_linked_byoc(&with_provider, false));
+        assert!(!provider_requires_linked_byoc(&with_provider, true));
+        assert!(!provider_requires_linked_byoc(&managed, false));
+    }
+
+    #[test]
+    fn target_milestone_is_exact() {
+        assert_eq!(
+            deployment_target_milestone("BYOC", "123456789012", "us-east-1"),
+            "Deployment target: capacity=BYOC, aws_account=123456789012, region=us-east-1"
+        );
     }
 }
 
@@ -2533,6 +2585,27 @@ async fn deploy_logic(
         .as_ref()
         .map(managed_onprem_config_from_credential);
 
+    if provider_requires_linked_byoc(&config_file, managed_onprem_config.is_some()) {
+        restore_pending_deploy_rejection(
+            &state,
+            req.org_id,
+            resource_id,
+            deploy_attempt_id,
+            previous_state,
+            was_destroyed,
+        )
+        .await;
+        return Err((
+            StatusCode::BAD_REQUEST,
+            [
+                "caution.hcl declares AWS BYOC, but app ",
+                app_id_str.as_str(),
+                " has no linked BYOC credentials. Refusing Caution-managed deployment. Reuse the original BYOC app and remote, or run `caution init --byoc` for a new BYOC app; `caution apps create` is managed capacity.",
+            ]
+            .concat(),
+        ));
+    }
+
     // Overlay inline provider config from caution.hcl onto DB credential defaults.
     // Fields specified in the provider block take precedence.
     if let Some(ref provider) = config_file
@@ -2870,6 +2943,19 @@ async fn deploy_logic(
                 "No deployment region resolved".to_string(),
             )
         })?;
+
+    let (capacity, target_account) = if managed_onprem_config.is_some() {
+        let account = cred
+            .as_ref()
+            .and_then(|credential| credential.config.get("aws_account_id"))
+            .and_then(|account| account.as_str())
+            .unwrap_or("unknown");
+        ("BYOC", account)
+    } else {
+        ("Caution-managed", aws_account_id.as_str())
+    };
+    let target = deployment_target_milestone(capacity, target_account, &deployed_region);
+    let _ = tx.send(Ok(milestone(&target))).await;
 
     let nitro_request = deployment::NitroDeploymentRequest {
         org_id: req.org_id,

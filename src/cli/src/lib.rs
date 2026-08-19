@@ -1408,6 +1408,13 @@ enum Commands {
             help = "Path to encrypted credentials file from manual BYOC setup"
         )]
         config: Option<PathBuf>,
+        #[arg(
+            long,
+            requires = "bring_your_own_cloud",
+            conflicts_with = "config",
+            help = "Skip the BYOC provisioning confirmation"
+        )]
+        yes: bool,
     },
     #[command(about = "Tear down a bring-your-own-compute (BYOC) deployment")]
     Teardown {
@@ -1527,7 +1534,7 @@ enum AccountCommands {
 
 #[derive(Subcommand, Debug)]
 enum AppCommands {
-    #[command(about = "Create a new application")]
+    #[command(about = "Create a new Caution-managed application")]
     Create,
     #[command(about = "List all applications")]
     List,
@@ -2025,6 +2032,123 @@ fn print_managed_dns_details(
 #[derive(Serialize, Deserialize, Debug)]
 struct DeploymentInfo {
     resource_id: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CheckoutLink {
+    deployment_file_exists: bool,
+    resource_id: Option<String>,
+    caution_remote: Option<String>,
+    byoc_provider: bool,
+}
+
+impl CheckoutLink {
+    fn is_linked(&self) -> bool {
+        self.deployment_file_exists || self.caution_remote.is_some()
+    }
+
+    fn blocks_managed_creation(&self) -> bool {
+        self.is_linked() || self.byoc_provider
+    }
+}
+
+fn inspect_checkout_link(
+    deployment_path: &Path,
+    repo_dir: &Path,
+    config: Option<&caution_config::ConfigurationFile>,
+) -> Result<CheckoutLink> {
+    let deployment_file_exists = deployment_path.exists();
+    let resource_id = if deployment_file_exists {
+        fs::read_to_string(deployment_path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<DeploymentInfo>(&contents).ok())
+            .map(|deployment| deployment.resource_id)
+    } else {
+        None
+    };
+    let remote = Command::new("git")
+        .arg("-C")
+        .arg(repo_dir)
+        .args(["remote", "get-url", "caution"])
+        .output()
+        .context("Failed to check existing git remote")?;
+    let caution_remote = remote.status.success().then(|| {
+        String::from_utf8_lossy(&remote.stdout)
+            .trim()
+            .to_string()
+    });
+    let byoc_provider = config
+        .and_then(|config| config.caution.as_ref())
+        .and_then(|caution| caution.provider.as_ref())
+        .is_some();
+
+    Ok(CheckoutLink {
+        deployment_file_exists,
+        resource_id,
+        caution_remote,
+        byoc_provider,
+    })
+}
+
+fn linked_checkout_error(link: &CheckoutLink) -> String {
+    let mut message = String::from(
+        "Refusing to create a separate app because this checkout records an app identity or BYOC intent.",
+    );
+    if let Some(resource_id) = link.resource_id.as_deref() {
+        message.push_str("\nLinked app: ");
+        message.push_str(resource_id);
+    } else if link.deployment_file_exists {
+        message.push_str("\n.caution/deployment.json exists but is unreadable; preserve and inspect it.");
+    }
+    if let Some(remote) = link.caution_remote.as_deref() {
+        message.push_str("\nExisting caution remote: ");
+        message.push_str(remote);
+    }
+    if link.byoc_provider {
+        message.push_str("\ncaution.hcl declares BYOC with caution.provider.");
+    }
+    message.push_str(
+        "\nFor a redeploy: `caution apps destroy <app-id>`, then `git push caution HEAD:main`. Do not run `caution apps create`, plain `caution init`, or `caution teardown --byoc`.",
+    );
+    message
+}
+
+fn deployment_target_summary(capacity: &str, aws_account: &str, region: &str) -> String {
+    [
+        "Deployment target: capacity=",
+        capacity,
+        ", aws_account=",
+        aws_account,
+        ", region=",
+        region,
+    ]
+    .concat()
+}
+
+fn print_destroy_redeploy_guidance(app: &App) {
+    output::status("The app ID, Git repository, managed hostname, and BYOC linkage were retained.");
+    output::status("Redeploy with: git push caution HEAD:main");
+    if !app.git_url.is_empty() {
+        output::status(["Existing Git URL: ", app.git_url.as_str()].concat());
+    }
+    output::warning(
+        "Do not run `caution apps create`, plain `caution init`, or `caution teardown --byoc` for this redeploy.",
+    );
+}
+
+fn aws_credentials_error(profile: &str, action: &str) -> String {
+    [
+        "AWS credentials not found for profile \"",
+        profile,
+        "\". The CLI reads environment credentials and static keys from ~/.aws/credentials. For assume-role, SSO, or credential_process profiles, export AWS CLI v2 credentials:\n\n  aws sso login --profile ",
+        profile,
+        "  # SSO only\n  eval \"$(aws configure export-credentials --profile ",
+        profile,
+        " --format env)\"\n  aws sts get-caller-identity\n\nThen rerun `",
+        action,
+        "`. Export immediately before the operation; temporary credentials must remain valid until it completes. Required permissions: ec2:*, autoscaling:*, s3:*, iam:*, and sts:GetCallerIdentity.",
+    ]
+    .concat()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -4737,17 +4861,26 @@ enclave "default" {{
     }
 
     async fn create_app(&self) -> Result<()> {
-        output::status("Creating new app...");
+        output::status("Creating new Caution-managed app...");
 
         output::verbose(self.verbose, "Checking git repository...");
         self.check_git_repo()?;
         output::success("Git repository found");
 
         output::verbose(self.verbose, "Reading configuration...");
-        let _config_file = self.read_config()?;
+        let config_file = self.read_config()?;
         let cmd = resolve_local_build_command_from_dir(Path::new("."), false)?;
         output::success("Configuration found");
         output::status(&format!("Build command: {}", cmd));
+
+        let checkout_link = inspect_checkout_link(
+            self.get_deployment_path()?,
+            Path::new("."),
+            Some(&config_file),
+        )?;
+        if checkout_link.blocks_managed_creation() {
+            bail!(linked_checkout_error(&checkout_link));
+        }
 
         let config = self.ensure_authenticated().await?;
 
@@ -4804,6 +4937,11 @@ enclave "default" {{
         output::status(format!("Name: {}", create_response.resource_name));
         output::status(format!("State: {}", create_response.state));
         output::status(format!("Git URL: {}", create_response.git_url));
+        output::status(deployment_target_summary(
+            "Caution-managed",
+            "platform-managed",
+            "pending",
+        ));
         print_managed_dns_details(
             create_response.managed_hostname.as_deref(),
             create_response.dns_status.as_deref(),
@@ -5040,6 +5178,12 @@ enclave "default" {{
             if let Some(ip) = &app.public_ip {
                 output::status(format!("  Public IP: {}", ip));
             }
+            output::warning(
+                "  WARNING: Destroy causes downtime and temporarily withdraws managed DNS.",
+            );
+            output::status(
+                "  The app ID, Git repository, managed hostname, and BYOC linkage will be retained.",
+            );
             if force_delete {
                 output::status("");
                 output::warning(
@@ -5066,6 +5210,7 @@ enclave "default" {{
         {
             loader.finish();
             output::success(format!("App {} ({}) destroyed", name, app.id));
+            print_destroy_redeploy_guidance(&app);
             Ok(())
         } else {
             let config = self.ensure_authenticated().await?;
@@ -5099,6 +5244,7 @@ enclave "default" {{
             if response.status().is_success() {
                 loader.finish();
                 output::success(format!("App {} ({}) destroyed", name, app.id));
+                print_destroy_redeploy_guidance(&app);
                 Ok(())
             } else {
                 let status = response.status();
@@ -5157,11 +5303,12 @@ enclave "default" {{
         region: Option<String>,
         local: bool,
         config_path: Option<PathBuf>,
+        yes: bool,
     ) -> Result<()> {
         // If --byoc without --config, use the interactive flow.
         // Keep the longer bring-your-own-compute spelling working via a clap alias.
         if bring_your_own_cloud && config_path.is_none() {
-            return self.init_byoc_interactive(name, region, local).await;
+            return self.init_byoc_interactive(name, region, local, yes).await;
         }
 
         output::status("Initializing new deployment...");
@@ -5177,24 +5324,30 @@ enclave "default" {{
         self.create_config_file_if_needed(bring_your_own_cloud)?;
 
         output::verbose(self.verbose, "Reading configuration...");
-        let _config = self.read_config()?;
+        let config_file = self.read_config()?;
         let cmd = resolve_local_build_command_from_dir(Path::new("."), false)?;
         output::success("Configuration found");
         output::status(&format!("Build command: {}", cmd));
 
+        let checkout_link = inspect_checkout_link(
+            self.get_deployment_path()?,
+            Path::new("."),
+            Some(&config_file),
+        )?;
+        if checkout_link.resource_id.is_none() && checkout_link.blocks_managed_creation() {
+            bail!(linked_checkout_error(&checkout_link));
+        }
+
         let config = self.ensure_authenticated().await?;
 
         // Check if there's an existing deployment with a resource ID
-        if let Ok(deployment) = self.load_deployment() {
+        if let Some(resource_id) = checkout_link.resource_id.as_deref() {
             output::verbose(
                 self.verbose,
-                &format!(
-                    "Found existing deployment with ID: {}",
-                    deployment.resource_id
-                ),
+                &["Found existing deployment with ID: ", resource_id].concat(),
             );
 
-            if let Ok(app) = self.fetch_app(&deployment.resource_id).await {
+            if let Ok(app) = self.fetch_app(resource_id).await {
                 let name = app.resource_name.as_deref().unwrap_or("unnamed");
                 output::status("App already exists!");
                 output::status(format!("ID: {}", app.id));
@@ -5211,10 +5364,7 @@ enclave "default" {{
                 output::status("  git push caution main");
                 return Ok(());
             } else {
-                output::verbose(
-                    self.verbose,
-                    "Previous resource no longer exists, creating new one...",
-                );
+                bail!(linked_checkout_error(&checkout_link));
             }
         }
 
@@ -5285,6 +5435,11 @@ enclave "default" {{
         output::status(format!("Name: {}", create_response.resource_name));
         output::status(format!("State: {}", create_response.state));
         output::status(format!("Git URL: {}", create_response.git_url));
+        output::status(deployment_target_summary(
+            "Caution-managed",
+            "platform-managed",
+            "pending",
+        ));
 
         print_managed_dns_details(
             create_response.managed_hostname.as_deref(),
@@ -5454,6 +5609,12 @@ enclave "default" {{
             .unwrap_or("unnamed");
         let git_url = create_response["git_url"].as_str().unwrap_or("");
         let state = create_response["state"].as_str().unwrap_or("unknown");
+        let aws_account = create_response["managed_onprem"]["aws_account_id"]
+            .as_str()
+            .unwrap_or("unknown");
+        let aws_region = create_response["managed_onprem"]["aws_region"]
+            .as_str()
+            .unwrap_or("unknown");
 
         if is_update {
             output::success("Bring-your-own-compute resource updated");
@@ -5464,6 +5625,7 @@ enclave "default" {{
         output::status(&format!("Name: {}", resource_name));
         output::status(&format!("State: {}", state));
         output::status(&format!("Git URL: {}", git_url));
+        output::status(deployment_target_summary("BYOC", aws_account, aws_region));
 
         output::verbose(self.verbose, "Saving deployment info...");
         self.save_deployment(id)?;
@@ -5595,11 +5757,19 @@ enclave "default" {{
         name: Option<String>,
         region: Option<String>,
         local: bool,
+        yes: bool,
     ) -> Result<()> {
 
         output::status("\n╔══════════════════════════════════════════════════════════════════╗");
         output::status("║          Bring-Your-Own-Compute Deployment Setup (AWS)           ║");
         output::status("╚══════════════════════════════════════════════════════════════════╝\n");
+
+        self.check_git_repo()?;
+        let checkout_link =
+            inspect_checkout_link(self.get_deployment_path()?, Path::new("."), None)?;
+        if checkout_link.is_linked() {
+            bail!(linked_checkout_error(&checkout_link));
+        }
 
         // Check for Docker
         let docker_check = Command::new("docker").arg("--version").output();
@@ -5633,26 +5803,7 @@ enclave "default" {{
         let aws_profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".to_string());
         let (aws_key, aws_secret, detected_region, aws_session_token) =
             Self::detect_aws_credentials().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "AWS credentials not found.\n\n\
-                Please set up AWS credentials using one of these methods:\n\
-                1. Set environment variables:\n\
-                   export AWS_ACCESS_KEY_ID=your_key\n\
-                   export AWS_SECRET_ACCESS_KEY=your_secret\n\
-                   export AWS_REGION=us-west-2\n\n\
-                2. Configure ~/.aws/credentials:\n\
-                   [default]\n\
-                   aws_access_key_id = your_key\n\
-                   aws_secret_access_key = your_secret\n\n\
-                3. Use a named profile:\n\
-                   export AWS_PROFILE=my-profile\n\n\
-                Required IAM policies:\n\
-                • ec2:* (VPC, subnets, security groups)\n\
-                • autoscaling:* (Auto Scaling Groups, launch templates)\n\
-                • s3:* (bucket creation and management)\n\
-                • iam:* (create user, role, instance profile)\n\
-                • sts:GetCallerIdentity"
-                )
+                anyhow::anyhow!(aws_credentials_error(&aws_profile, "caution init --byoc"))
             })?;
 
         let aws_region = region
@@ -5667,6 +5818,11 @@ enclave "default" {{
             output::status(format!("AWS credentials detected (profile: {})", aws_profile));
         }
         output::status(format!("Region: {}", aws_region));
+        output::status(deployment_target_summary(
+            "BYOC",
+            "current-credentials",
+            &aws_region,
+        ));
 
         // Display what will be created
         output::status("\nThis will create the following AWS resources:");
@@ -5677,11 +5833,15 @@ enclave "default" {{
         output::status("  • IAM role and instance profile for EC2");
         output::status("\nAll resources will be tagged for easy identification and cleanup.\n");
 
-        let confirmed = prompt::confirm("Do you want to proceed? [y/N]: ")?;
-        if !confirmed {
-            output::status("Aborted.");
-            return Ok(());
+        if !yes {
+            let confirmed = prompt::confirm("Do you want to proceed? [y/N]: ")?;
+            if !confirmed {
+                output::status("Aborted.");
+                return Ok(());
+            }
         }
+
+        let auth_config = self.ensure_authenticated().await?;
 
         // Pull the provisioner image (unless --local is set)
         if local {
@@ -5766,9 +5926,9 @@ enclave "default" {{
         let deployment_id = credentials_json["deployment_id"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing deployment_id in provisioner output"))?;
-
-        // Authenticate with Caution
-        let auth_config = self.ensure_authenticated().await?;
+        let aws_account_id = credentials_json["aws_account_id"]
+            .as_str()
+            .unwrap_or("unknown");
 
         let create_cmd = resolve_local_build_command_from_dir(Path::new("."), true)?;
 
@@ -5877,6 +6037,11 @@ enclave "default" {{
         output::status(format!("Resource ID: {}", resource_id));
         output::status(format!("Deployment ID: {}", deployment_id));
         output::status(format!("Git URL: {}", git_url));
+        output::status(deployment_target_summary(
+            "BYOC",
+            aws_account_id,
+            &aws_region,
+        ));
         output::status(format!("\nState saved to: {}", caution_dir.display()));
         output::status("\nNext steps:");
         output::status("  1. Create your Procfile with 'run:' and optional 'containerfile:'");
@@ -5966,12 +6131,13 @@ enclave "default" {{
         }
 
         // Check AWS credentials for teardown
+        let aws_profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".to_string());
         let (aws_key, aws_secret, _, aws_session_token) = Self::detect_aws_credentials()
             .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "AWS credentials required for teardown.\n\
-                 Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables."
-                )
+                anyhow::anyhow!(aws_credentials_error(
+                    &aws_profile,
+                    "caution teardown --byoc"
+                ))
             })?;
 
         resource_id.as_ref().context(
@@ -9698,6 +9864,7 @@ pub async fn run() -> Result<(), RunError> {
             region,
             local,
             config,
+            yes,
         } => {
             if bring_your_own_cloud && platform != "aws" {
                 return Err(RunError::ArgValidation(
@@ -9705,7 +9872,7 @@ pub async fn run() -> Result<(), RunError> {
                 ));
             }
             client
-                .init(bring_your_own_cloud, name, region, local, config)
+                .init(bring_your_own_cloud, name, region, local, config, yes)
                 .await
                 .map_err(RunError::CommandDispatch)?;
         }
@@ -9952,7 +10119,8 @@ mod tests {
         resolve_login_username, resolve_procfile_build_command, resolve_quorum_parameters,
         resolve_register_username, resolve_reproduction_e2e_mode, tls_connection,
         tls_expectation_from_config, validate_attested_tls, validate_global_qr,
-        verify_deprecation_warnings,
+        verify_deprecation_warnings, aws_credentials_error, deployment_target_summary,
+        inspect_checkout_link, linked_checkout_error,
     };
     use caution_config::{ConfigurationFile, E2eEncryption, E2eMode};
     use clap::Parser;
@@ -9964,7 +10132,7 @@ mod tests {
     use std::collections::HashMap;
     use std::io::{self, Cursor};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -10984,6 +11152,73 @@ enclave "default" {
         ConfigurationFile::from_str(&hcl).unwrap();
     }
 
+    fn init_test_git_repo(path: &Path) {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .arg("init")
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+
+    #[test]
+    fn linked_checkout_preflight_matrix() {
+        let work_dir = tempdir().unwrap();
+        init_test_git_repo(work_dir.path());
+        let deployment_path = work_dir.path().join(".caution/deployment.json");
+        assert!(!inspect_checkout_link(&deployment_path, work_dir.path(), None)
+            .unwrap()
+            .blocks_managed_creation());
+
+        let provider = ConfigurationFile::from_str(
+            "caution {\n provider {\n type = \"aws\"\n region = \"us-east-1\"\n }\n }\n\
+             enclave \"main\" {\n unit \"default\" {\n command = \"/app\"\n }\n }",
+        ).unwrap();
+        assert!(inspect_checkout_link(&deployment_path, work_dir.path(), Some(&provider))
+            .unwrap()
+            .blocks_managed_creation());
+
+        std::fs::create_dir_all(deployment_path.parent().unwrap()).unwrap();
+        for contents in [r#"{"resource_id":"existing-app"}"#, "not json"] {
+            std::fs::write(&deployment_path, contents).unwrap();
+            assert!(inspect_checkout_link(&deployment_path, work_dir.path(), None)
+                .unwrap()
+                .blocks_managed_creation());
+        }
+        std::fs::remove_file(&deployment_path).unwrap();
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(work_dir.path())
+            .args(["remote", "add", "caution", "git@example.test:app.git"])
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let remote = inspect_checkout_link(&deployment_path, work_dir.path(), None).unwrap();
+        assert!(remote.blocks_managed_creation());
+        assert!(linked_checkout_error(&remote).contains("git push caution HEAD:main"));
+    }
+
+    #[test]
+    fn byoc_yes_and_target_help_are_explicit() {
+        assert!(matches!(
+            Cli::try_parse_from(["caution", "init", "--byoc", "--yes"]).unwrap().command,
+            Commands::Init { yes: true, .. }
+        ));
+        assert!(Cli::try_parse_from(["caution", "init", "--yes"]).is_err());
+        assert!(Cli::try_parse_from([
+            "caution", "init", "--byoc", "--config", "credentials.json", "--yes"
+        ]).is_err());
+        assert_eq!(
+            deployment_target_summary("BYOC", "123456789012", "us-east-1"),
+            "Deployment target: capacity=BYOC, aws_account=123456789012, region=us-east-1"
+        );
+        let error = aws_credentials_error("production", "caution init --byoc");
+        assert!(error.contains("aws configure export-credentials --profile production --format env"));
+    }
+
     #[tokio::test]
     async fn init_byoc_requires_login_before_reading_credentials_file() {
         let work_dir = tempdir().unwrap();
@@ -11290,7 +11525,10 @@ enclave "default" {
         // --qr now requires --username on login
         let result = Cli::try_parse_from(["caution", "login", "--qr"]);
         assert!(result.is_err());
-        let err_str = format!("{:?}", result);
+        let err_str = match result {
+            Err(error) => error.to_string(),
+            Ok(_) => unreachable!(),
+        };
         assert!(err_str.contains("--username") || err_str.contains("MissingRequiredArgument"));
     }
 
