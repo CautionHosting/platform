@@ -2047,6 +2047,10 @@ impl CheckoutLink {
         self.deployment_file_exists || self.caution_remote.is_some()
     }
 
+    fn blocks_explicit_byoc_creation(&self) -> bool {
+        self.resource_id.is_none() && self.is_linked()
+    }
+
     fn blocks_managed_creation(&self) -> bool {
         self.is_linked() || self.byoc_provider
     }
@@ -2108,7 +2112,7 @@ fn linked_checkout_error(link: &CheckoutLink) -> String {
         message.push_str("\ncaution.hcl declares BYOC with caution.provider.");
     }
     message.push_str(
-        "\nFor a redeploy: `caution apps destroy <app-id>`, then `git push caution HEAD:main`. Do not run `caution apps create`, plain `caution init`, or `caution teardown --byoc`.",
+        "\nFor a redeploy: `caution apps destroy <app-id>`, then `git push caution HEAD:main`. Do not run `caution apps create` or plain `caution init`. For BYOC apps, do not run `caution teardown --byoc`.",
     );
     message
 }
@@ -2126,13 +2130,15 @@ fn deployment_target_summary(capacity: &str, aws_account: &str, region: &str) ->
 }
 
 fn print_destroy_redeploy_guidance(app: &App) {
-    output::status("The app ID, Git repository, managed hostname, and BYOC linkage were retained.");
+    output::status(
+        "The app ID, Git repository, and managed hostname were retained. Any linked BYOC credential was also retained.",
+    );
     output::status("Redeploy with: git push caution HEAD:main");
     if !app.git_url.is_empty() {
         output::status(["Existing Git URL: ", app.git_url.as_str()].concat());
     }
     output::warning(
-        "Do not run `caution apps create`, plain `caution init`, or `caution teardown --byoc` for this redeploy.",
+        "Do not run `caution apps create` or plain `caution init` for this redeploy. For BYOC apps, do not run `caution teardown --byoc`.",
     );
 }
 
@@ -5182,7 +5188,7 @@ enclave "default" {{
                 "  WARNING: Destroy causes downtime and temporarily withdraws managed DNS.",
             );
             output::status(
-                "  The app ID, Git repository, managed hostname, and BYOC linkage will be retained.",
+                "  The app ID, Git repository, and managed hostname will be retained. Any linked BYOC credential will also be retained.",
             );
             if force_delete {
                 output::status("");
@@ -5318,6 +5324,11 @@ enclave "default" {{
         output::success("Git repository found");
 
         if let Some(ref path) = config_path {
+            let checkout_link =
+                inspect_checkout_link(self.get_deployment_path()?, Path::new("."), None)?;
+            if checkout_link.blocks_explicit_byoc_creation() {
+                bail!(linked_checkout_error(&checkout_link));
+            }
             return self.init_byoc(path).await;
         }
 
@@ -5347,25 +5358,31 @@ enclave "default" {{
                 &["Found existing deployment with ID: ", resource_id].concat(),
             );
 
-            if let Ok(app) = self.fetch_app(resource_id).await {
-                let name = app.resource_name.as_deref().unwrap_or("unnamed");
-                output::status("App already exists!");
-                output::status(format!("ID: {}", app.id));
-                output::status(format!("Name: {}", name));
-                output::status(format!("State: {}", app.state));
-                output::status(format!("Git URL: {}", app.git_url));
+            let app = self.fetch_app(resource_id).await.map_err(|error| {
+                error.context(
+                    [
+                        "Unable to verify linked app ",
+                        resource_id,
+                        "; refusing to create a successor. Restore authentication or connectivity and retry.",
+                    ]
+                    .concat(),
+                )
+            })?;
+            let name = app.resource_name.as_deref().unwrap_or("unnamed");
+            output::status("App already exists!");
+            output::status(format!("ID: {}", app.id));
+            output::status(format!("Name: {}", name));
+            output::status(format!("State: {}", app.state));
+            output::status(format!("Git URL: {}", app.git_url));
 
-                self.save_deployment(&app.id)?;
+            self.save_deployment(&app.id)?;
 
-                output::verbose(self.verbose, "Updating git remote...");
-                self.set_git_remote(&app.git_url)?;
+            output::verbose(self.verbose, "Updating git remote...");
+            self.set_git_remote(&app.git_url)?;
 
-                output::status("\nYou can now push to 'caution' remote:");
-                output::status("  git push caution main");
-                return Ok(());
-            } else {
-                bail!(linked_checkout_error(&checkout_link));
-            }
+            output::status("\nYou can now push to 'caution' remote:");
+            output::status("  git push caution main");
+            return Ok(());
         }
 
         let app_name = name.unwrap_or_else(|| {
@@ -11168,25 +11185,31 @@ enclave "default" {
         let work_dir = tempdir().unwrap();
         init_test_git_repo(work_dir.path());
         let deployment_path = work_dir.path().join(".caution/deployment.json");
-        assert!(!inspect_checkout_link(&deployment_path, work_dir.path(), None)
-            .unwrap()
-            .blocks_managed_creation());
+        let fresh = inspect_checkout_link(&deployment_path, work_dir.path(), None).unwrap();
+        assert!(!fresh.blocks_managed_creation());
+        assert!(!fresh.blocks_explicit_byoc_creation());
 
         let provider = ConfigurationFile::from_str(
             "caution {\n provider {\n type = \"aws\"\n region = \"us-east-1\"\n }\n }\n\
              enclave \"main\" {\n unit \"default\" {\n command = \"/app\"\n }\n }",
         ).unwrap();
-        assert!(inspect_checkout_link(&deployment_path, work_dir.path(), Some(&provider))
-            .unwrap()
-            .blocks_managed_creation());
+        let provider_only =
+            inspect_checkout_link(&deployment_path, work_dir.path(), Some(&provider)).unwrap();
+        assert!(provider_only.blocks_managed_creation());
+        assert!(!provider_only.blocks_explicit_byoc_creation());
 
         std::fs::create_dir_all(deployment_path.parent().unwrap()).unwrap();
-        for contents in [r#"{"resource_id":"existing-app"}"#, "not json"] {
-            std::fs::write(&deployment_path, contents).unwrap();
-            assert!(inspect_checkout_link(&deployment_path, work_dir.path(), None)
-                .unwrap()
-                .blocks_managed_creation());
-        }
+        std::fs::write(&deployment_path, r#"{"resource_id":"existing-app"}"#).unwrap();
+        let valid_state = inspect_checkout_link(&deployment_path, work_dir.path(), None).unwrap();
+        assert!(valid_state.blocks_managed_creation());
+        assert!(!valid_state.blocks_explicit_byoc_creation());
+
+        std::fs::write(&deployment_path, "not json").unwrap();
+        let malformed_state =
+            inspect_checkout_link(&deployment_path, work_dir.path(), None).unwrap();
+        assert!(malformed_state.blocks_managed_creation());
+        assert!(malformed_state.blocks_explicit_byoc_creation());
+
         std::fs::remove_file(&deployment_path).unwrap();
         assert!(std::process::Command::new("git")
             .arg("-C")
@@ -11198,6 +11221,7 @@ enclave "default" {
             .success());
         let remote = inspect_checkout_link(&deployment_path, work_dir.path(), None).unwrap();
         assert!(remote.blocks_managed_creation());
+        assert!(remote.blocks_explicit_byoc_creation());
         assert!(linked_checkout_error(&remote).contains("git push caution HEAD:main"));
     }
 

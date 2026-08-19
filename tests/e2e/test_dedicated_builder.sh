@@ -18,7 +18,7 @@
 #   6. Verify EIF in the fully managed S3 bucket
 #   7. Verify eif_builds DB row
 #   8. Verify builder instance terminated
-#   9. Redeploy same commit — verify cache hit (no new builder)
+#   9. Verify a running app rejects in-place redeploy with safe guidance
 #  10. Cleanup
 
 set -euo pipefail
@@ -373,6 +373,10 @@ STEP_NUM=10
 echo "── Step $STEP_NUM: Running-app redeploy guidance ──"
 
 cd "$WORK_DIR/demo"
+RESOURCE_STATE=$(query_db "SELECT state::text FROM compute_resources WHERE id = '$RESOURCE_ID'" || true)
+if [ "$RESOURCE_STATE" != "running" ]; then
+    step_fail "expected resource state running before rejection check, got: $RESOURCE_STATE"
+fi
 git commit --allow-empty -m "trigger redeploy" 2>/dev/null
 set +e
 REDEPLOY_OUTPUT=$(git push caution main 2>&1)

@@ -115,8 +115,8 @@ Linked checkouts fail closed to prevent accidental successor apps. To redeploy a
 running or stopped app, run `caution apps destroy <app-id>`, wait for teardown,
 then run `git push caution HEAD:main` against the existing remote. This causes
 downtime and temporarily withdraws managed DNS, but retains the app ID,
-repository, managed hostname, and BYOC linkage. Do not use `apps create`, plain
-`init`, or `teardown --byoc` for that redeploy.
+repository, managed hostname, and any BYOC linkage. Do not use `apps create` or
+plain `init`; BYOC apps must also not use `teardown --byoc` for that redeploy.
 
 ### Account PGP Keys
 

@@ -2542,20 +2542,6 @@ async fn deploy_logic(
         })
         .unwrap_or_default();
 
-    if !is_managed_onprem && cpu_count > fully_managed_capacity::MAX_FULLY_MANAGED_ENCLAVE_VCPUS {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "Fully managed deployments support up to {} enclave vCPUs. Contact support for larger requests.",
-                fully_managed_capacity::MAX_FULLY_MANAGED_ENCLAVE_VCPUS
-            ),
-        ));
-    }
-
-    let deployment_requirements =
-        fully_managed_capacity::DeploymentRequirements::for_enclave(cpu_count, memory_mb)
-            .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
-
     let managed_onprem_credential = if let Some(credential) = cred
         .as_ref()
         .filter(|credential| credential.managed_on_prem)
@@ -2605,6 +2591,20 @@ async fn deploy_logic(
             .concat(),
         ));
     }
+
+    if !is_managed_onprem && cpu_count > fully_managed_capacity::MAX_FULLY_MANAGED_ENCLAVE_VCPUS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Fully managed deployments support up to {} enclave vCPUs. Contact support for larger requests.",
+                fully_managed_capacity::MAX_FULLY_MANAGED_ENCLAVE_VCPUS
+            ),
+        ));
+    }
+
+    let deployment_requirements =
+        fully_managed_capacity::DeploymentRequirements::for_enclave(cpu_count, memory_mb)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
 
     // Overlay inline provider config from caution.hcl onto DB credential defaults.
     // Fields specified in the provider block take precedence.

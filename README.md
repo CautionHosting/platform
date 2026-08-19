@@ -140,12 +140,13 @@ start the real stack with `make up`, generate an access code with
    phases do not require client-side keepalive configuration.
 
    Caution reports the selected capacity, AWS account, and region before
-   launch. A running or stopped app cannot be redeployed in place. Run
+   enclave launch. A running or stopped app cannot be redeployed in place. Run
    `caution apps destroy <app-id>`, wait for teardown, then run
    `git push caution HEAD:main` from the existing checkout. Teardown causes
    downtime and temporarily withdraws managed DNS, but retains the app ID,
-   repository, managed hostname, and BYOC linkage. Do not run `apps create`,
-   plain `init`, or `teardown --byoc` as part of this redeploy sequence.
+   repository, managed hostname, and any BYOC linkage. Do not run `apps create`
+   or plain `init`; BYOC apps must also not run `teardown --byoc` as part of
+   this redeploy sequence.
 
 #### Enclave-terminated HTTPS (TLS mode, implemented by Caddy)
 

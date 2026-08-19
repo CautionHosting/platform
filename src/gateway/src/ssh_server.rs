@@ -551,7 +551,7 @@ fn running_app_redeploy_error(app_id: &str, state: &str) -> String {
     [
         "App '", app_id, "' is in state '", state,
         "'. In-place redeploy is not supported. `caution apps destroy ", app_id,
-        "` causes downtime and temporarily withdraws managed DNS. After destroy completes, redeploy the same app ID, BYOC linkage, and managed hostname with `git push caution HEAD:main` using the existing remote. Do not run `caution apps create`, plain `caution init`, or `caution teardown --byoc`.",
+        "` causes downtime and temporarily withdraws managed DNS. After destroy completes, redeploy the same app ID, managed hostname, and any BYOC linkage with `git push caution HEAD:main` using the existing remote. Do not run `caution apps create` or plain `caution init`. For BYOC apps, do not run `caution teardown --byoc`.",
     ].concat()
 }
 
@@ -1296,7 +1296,7 @@ mod tests {
         let message = running_app_redeploy_error("app-id", "running");
         assert!(message.contains("caution apps destroy app-id"));
         assert!(message.contains("git push caution HEAD:main"));
-        assert!(message.contains("same app ID, BYOC linkage, and managed hostname"));
+        assert!(message.contains("same app ID, managed hostname, and any BYOC linkage"));
         assert!(message.contains("Do not run `caution apps create`"));
     }
 
