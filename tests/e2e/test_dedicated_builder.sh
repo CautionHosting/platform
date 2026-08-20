@@ -12,14 +12,14 @@
 # Tests:
 #   1. Health check
 #   2. Create test user
-#   3. Push demo app
-#   4. Verify builder EC2 instance was launched
-#   5. Wait for build completion
-#   6. Verify EIF in the fully managed S3 bucket
-#   7. Verify eif_builds DB row
-#   8. Verify builder instance terminated
-#   9. Verify a running app rejects in-place redeploy with safe guidance
-#  10. Cleanup
+#   3. Add SSH key
+#   4. Clone, initialize, and push demo app
+#   5. Verify builder EC2 instance was launched
+#   6. Wait for build completion
+#   7. Verify EIF in the fully managed S3 bucket
+#   8. Verify eif_builds DB row
+#   9. Verify builder instance terminated
+#  10. Verify a running app rejects in-place redeploy with safe guidance
 
 set -euo pipefail
 

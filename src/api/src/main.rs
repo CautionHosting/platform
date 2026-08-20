@@ -2586,13 +2586,22 @@ async fn deploy_logic(
             [
                 "caution.hcl declares AWS BYOC, but app ",
                 app_id_str.as_str(),
-                " has no linked BYOC credentials. Refusing Caution-managed deployment. Reuse the original BYOC app and remote, or run `caution init --byoc` for a new BYOC app; `caution apps create` is managed capacity.",
+                " has no linked BYOC credentials. Refusing Caution-managed deployment. Reuse the original BYOC app and remote. To attach BYOC credentials to this linked app, run `caution init --byoc --config <decrypted-json>`. For a new BYOC app, use a fresh unlinked checkout and run `caution init --byoc`; `caution apps create` is managed capacity.",
             ]
             .concat(),
         ));
     }
 
     if !is_managed_onprem && cpu_count > fully_managed_capacity::MAX_FULLY_MANAGED_ENCLAVE_VCPUS {
+        restore_pending_deploy_rejection(
+            &state,
+            req.org_id,
+            resource_id,
+            deploy_attempt_id,
+            previous_state,
+            was_destroyed,
+        )
+        .await;
         return Err((
             StatusCode::BAD_REQUEST,
             format!(
@@ -2603,8 +2612,21 @@ async fn deploy_logic(
     }
 
     let deployment_requirements =
-        fully_managed_capacity::DeploymentRequirements::for_enclave(cpu_count, memory_mb)
-            .map_err(|error| (StatusCode::BAD_REQUEST, error.to_string()))?;
+        match fully_managed_capacity::DeploymentRequirements::for_enclave(cpu_count, memory_mb) {
+            Ok(requirements) => requirements,
+            Err(error) => {
+                restore_pending_deploy_rejection(
+                    &state,
+                    req.org_id,
+                    resource_id,
+                    deploy_attempt_id,
+                    previous_state,
+                    was_destroyed,
+                )
+                .await;
+                return Err((StatusCode::BAD_REQUEST, error.to_string()));
+            }
+        };
 
     // Overlay inline provider config from caution.hcl onto DB credential defaults.
     // Fields specified in the provider block take precedence.

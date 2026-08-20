@@ -2112,10 +2112,20 @@ fn linked_checkout_error(link: &CheckoutLink) -> String {
     if link.byoc_provider {
         message.push_str("\ncaution.hcl declares BYOC with caution.provider.");
     }
-    message.push_str(
-        "\nFor a redeploy: `caution apps destroy <app-id>`, then `git push caution HEAD:main`. Do not run `caution apps create` or plain `caution init`. For BYOC apps, do not run `caution teardown --byoc`.",
-    );
+    if link.is_linked() {
+        message.push_str(
+            "\nFor a redeploy: `caution apps destroy <app-id>`, then `git push caution HEAD:main`. Do not run `caution apps create` or plain `caution init`. For BYOC apps, do not run `caution teardown --byoc`.",
+        );
+    } else if link.byoc_provider {
+        message.push_str(
+            "\nUse `caution init --byoc`; `caution apps create` is managed capacity.",
+        );
+    }
     message
+}
+
+fn linked_encrypted_byoc_config(is_encrypted: bool, resource_id: Option<&str>) -> bool {
+    is_encrypted && resource_id.is_some()
 }
 
 fn deployment_target_summary(capacity: &str, aws_account: &str, region: &str) -> String {
@@ -5509,6 +5519,16 @@ enclave "default" {{
             .trim()
             .starts_with("-----BEGIN PGP MESSAGE-----");
         let is_gpg_encrypted = has_gpg_extension || has_gpg_header;
+        let existing_resource_id = self.load_deployment().ok().map(|d| d.resource_id);
+
+        if linked_encrypted_byoc_config(is_gpg_encrypted, existing_resource_id.as_deref()) {
+            bail!([
+                "Refusing encrypted BYOC config update for linked app ",
+                existing_resource_id.as_deref().unwrap_or("unknown"),
+                ": the CLI cannot verify or inject its resource ID into ciphertext. Decrypt the config and retry with `caution init --byoc --config <decrypted-json>`.",
+            ]
+            .concat());
+        }
 
         let request_body = if is_gpg_encrypted {
             output::verbose(
@@ -5517,20 +5537,11 @@ enclave "default" {{
             );
             output::status("Detected GPG-encrypted config file");
 
-            let existing_resource_id = self.load_deployment().ok().map(|d| d.resource_id);
-            if let Some(ref id) = existing_resource_id {
-                output::status(format!("Found existing deployment: {}", id));
-                output::status(
-                    "Note: For updates with encrypted config, ensure resource_id is in the decrypted JSON"
-                );
-            }
-
             config_content
         } else {
             let mut config_json: serde_json::Value = serde_json::from_str(&config_content)
                 .context("Failed to parse config file as JSON")?;
 
-            let existing_resource_id = self.load_deployment().ok().map(|d| d.resource_id);
             if let Some(ref id) = existing_resource_id {
                 output::status(format!("Found existing deployment: {}", id));
                 output::status("Updating existing resource with new configuration...");
@@ -5588,7 +5599,6 @@ enclave "default" {{
         let _config = self.read_config()?;
         output::success("Configuration found");
 
-        let existing_resource_id = self.load_deployment().ok().map(|d| d.resource_id);
         let is_update = existing_resource_id.is_some();
         let loader_msg = if is_update {
             "Updating bring-your-own-compute resource"
@@ -6026,6 +6036,16 @@ enclave "default" {{
             );
         }
 
+        let registered_app_data = match register_response.json::<serde_json::Value>().await {
+            Ok(data) => data,
+            Err(_) => {
+                output::verbose(
+                    self.verbose,
+                    "Could not parse the BYOC registration response; using initial DNS details",
+                );
+                app_data.clone()
+            }
+        };
         loader.finish();
 
         // Save local state
@@ -6071,9 +6091,9 @@ enclave "default" {{
             &aws_region,
         ));
         print_managed_dns_details(
-            app_data["managed_hostname"].as_str(),
-            app_data["dns_status"].as_str(),
-            app_data["dns_error"].as_str(),
+            registered_app_data["managed_hostname"].as_str(),
+            registered_app_data["dns_status"].as_str(),
+            registered_app_data["dns_error"].as_str(),
             None,
         );
         output::status(format!("\nState saved to: {}", caution_dir.display()));
@@ -10157,7 +10177,7 @@ mod tests {
         resolve_register_username, resolve_reproduction_e2e_mode, tls_connection,
         tls_expectation_from_config, validate_attested_tls, validate_global_qr,
         verify_deprecation_warnings, aws_credentials_error, deployment_target_summary,
-        inspect_checkout_link, linked_checkout_error,
+        inspect_checkout_link, linked_checkout_error, linked_encrypted_byoc_config,
     };
     use caution_config::{ConfigurationFile, E2eEncryption, E2eMode};
     use clap::Parser;
@@ -11217,6 +11237,9 @@ enclave "default" {
             inspect_checkout_link(&deployment_path, work_dir.path(), Some(&provider)).unwrap();
         assert!(provider_only.blocks_managed_creation());
         assert!(!provider_only.blocks_explicit_byoc_creation());
+        let provider_error = linked_checkout_error(&provider_only);
+        assert!(provider_error.contains("caution init --byoc"));
+        assert!(!provider_error.contains("apps destroy"));
 
         std::fs::create_dir_all(deployment_path.parent().unwrap()).unwrap();
         std::fs::write(&deployment_path, r#"{"resource_id":"existing-app"}"#).unwrap();
@@ -11243,6 +11266,13 @@ enclave "default" {
         assert!(remote.blocks_managed_creation());
         assert!(remote.blocks_explicit_byoc_creation());
         assert!(linked_checkout_error(&remote).contains("git push caution HEAD:main"));
+    }
+
+    #[test]
+    fn linked_encrypted_byoc_config_requires_decrypted_update() {
+        assert!(linked_encrypted_byoc_config(true, Some("existing-app")));
+        assert!(!linked_encrypted_byoc_config(false, Some("existing-app")));
+        assert!(!linked_encrypted_byoc_config(true, None));
     }
 
     #[test]

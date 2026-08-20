@@ -117,6 +117,9 @@ then run `git push caution HEAD:main` against the existing remote. This causes
 downtime and temporarily withdraws managed DNS, but retains the app ID,
 repository, managed hostname, and any BYOC linkage. Do not use `apps create` or
 plain `init`; BYOC apps must also not use `teardown --byoc` for that redeploy.
+Linked `init --byoc --config` updates require decrypted JSON so the CLI can bind
+the update to the recorded app ID; encrypted config remains available for fresh,
+unlinked BYOC creation.
 
 ### Account PGP Keys
 
