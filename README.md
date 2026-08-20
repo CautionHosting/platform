@@ -120,11 +120,13 @@ start the real stack with `make up`, generate an access code with
    ```
 
    This writes a `caution.hcl` template when one does not already exist and
-   configures the `caution` git remote. Caution remote builds run Docker from
-   the repository root, using `build.containerfile` when configured, then a
-   repo-root `Containerfile`, then a repo-root `Dockerfile`. Put setup,
-   compilation, asset builds, and runtime packaging in that Containerfile or
-   Dockerfile so the build inputs are explicit and reproducible.
+   configures the `caution` git remote. Successful app creation also records the
+   current app ID in `.caution/deployment.json` and prints the managed DNS target
+   when one is available, including for BYOC initialization. Caution remote
+   builds run Docker from the repository root, using `build.containerfile` when
+   configured, then a repo-root `Containerfile`, then a repo-root `Dockerfile`.
+   Put setup, compilation, asset builds, and runtime packaging in that
+   Containerfile or Dockerfile so the build inputs are explicit and reproducible.
    Application images may use the conventional relative merged-/usr links
    `/bin -> usr/bin` and `/lib -> usr/lib`; other `/bin` or `/lib` symlink
    layouts are rejected during EIF assembly.

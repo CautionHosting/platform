@@ -60,6 +60,7 @@ mod attestation;
 
 const BYOC_PROVISIONER_IMAGE: &str =
     "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest";
+const CREDENTIALS_API_PATH: &str = "/api/credentials";
 const BYOC_STATE_FILE_NAME: &str = "bring-your-own-compute.json";
 // Legacy state file name, kept for backward compatibility so that deployments
 // created before the bring-your-own-cloud -> bring-your-own-compute rename can
@@ -4955,6 +4956,10 @@ enclave "default" {{
             None,
         );
 
+        output::verbose(self.verbose, "Saving deployment info...");
+        self.save_deployment(&create_response.id)?;
+        output::verbose(self.verbose, "Saved deployment info");
+
         output::verbose(self.verbose, "Setting git remote...");
         self.set_git_remote(&create_response.git_url)?;
 
@@ -5643,6 +5648,12 @@ enclave "default" {{
         output::status(&format!("State: {}", state));
         output::status(&format!("Git URL: {}", git_url));
         output::status(deployment_target_summary("BYOC", aws_account, aws_region));
+        print_managed_dns_details(
+            create_response["managed_hostname"].as_str(),
+            create_response["dns_status"].as_str(),
+            create_response["dns_error"].as_str(),
+            None,
+        );
 
         output::verbose(self.verbose, "Saving deployment info...");
         self.save_deployment(id)?;
@@ -6059,6 +6070,12 @@ enclave "default" {{
             aws_account_id,
             &aws_region,
         ));
+        print_managed_dns_details(
+            app_data["managed_hostname"].as_str(),
+            app_data["dns_status"].as_str(),
+            app_data["dns_error"].as_str(),
+            None,
+        );
         output::status(format!("\nState saved to: {}", caution_dir.display()));
         output::status("\nNext steps:");
         output::status("  1. Create your Procfile with 'run:' and optional 'containerfile:'");
@@ -9035,7 +9052,7 @@ enclave "default" {{
 
         let response = self
             .client
-            .post(format!("{}/credentials", self.base_url))
+            .post(format!("{}{}", self.base_url, CREDENTIALS_API_PATH))
             .header("X-Session-ID", &config.session_id)
             .json(&request_body)
             .send()
@@ -9063,7 +9080,7 @@ enclave "default" {{
         let credentials: Vec<serde_json::Value> = self
             .get_protected_json(
                 &config.session_id,
-                "/credentials",
+                CREDENTIALS_API_PATH,
                 "Failed to list credentials"
             )
             .await?;
@@ -9105,7 +9122,7 @@ enclave "default" {{
         let cred: serde_json::Value = self
             .get_protected_json(
                 &config.session_id,
-                &format!("/credentials/{}", credential_id),
+                &format!("{}/{}", CREDENTIALS_API_PATH, credential_id),
                 "Failed to fetch credential"
             )
             .await?;
@@ -9127,7 +9144,10 @@ enclave "default" {{
 
         let response = self
             .client
-            .delete(format!("{}/credentials/{}", self.base_url, credential_id))
+            .delete(format!(
+                "{}{}/{}",
+                self.base_url, CREDENTIALS_API_PATH, credential_id
+            ))
             .header("X-Session-ID", &config.session_id)
             .send()
             .await?;
@@ -9150,8 +9170,8 @@ enclave "default" {{
         let response = self
             .client
             .post(format!(
-                "{}/credentials/{}/default",
-                self.base_url, credential_id
+                "{}{}/{}/default",
+                self.base_url, CREDENTIALS_API_PATH, credential_id
             ))
             .header("X-Session-ID", &config.session_id)
             .send()

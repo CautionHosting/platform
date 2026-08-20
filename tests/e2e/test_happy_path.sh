@@ -9,7 +9,7 @@
 #   1. Create test user via e2e-login endpoint
 #   2. Add SSH key via gateway API (FIDO2 sign bypassed)
 #   3. Clone demo app
-#   4. caution init (creates app, sets git remote)
+#   4. caution apps create (creates app, saves local state, sets git remote)
 #   5. git push caution main (triggers enclave build)
 #   6. Wait for deployment
 #   7. caution verify (attestation + reproduction)
@@ -160,6 +160,16 @@ INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description
 VALUES ('$ORG_ID', 10000, 'purchase', 'e2e deploy gate seed');
 " >/dev/null 2>&1 || log "  Warning: could not seed credits"
 
+CREDENTIALS_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" credentials list 2>&1) || {
+    echo "$CREDENTIALS_OUTPUT"
+    step_fail "Credentials list through gateway"
+}
+if ! echo "$CREDENTIALS_OUTPUT" | grep -q "No cloud credentials found"; then
+    echo "$CREDENTIALS_OUTPUT"
+    step_fail "Credentials list through gateway"
+fi
+log "Cloud credentials endpoint is reachable through the gateway"
+
 # ── Step 3: Add SSH Key ──────────────────────────────────────────────
 
 STEP_NUM=3
@@ -195,26 +205,31 @@ git -c user.email="e2e@caution.dev" -c user.name="Caution E2E" add .
 git -c user.email="e2e@caution.dev" -c user.name="Caution E2E" commit -m "Initial commit" --quiet
 step_pass "Copy and init demo app fixture"
 
-# ── Step 5: caution init ────────────────────────────────────────────
+# ── Step 5: caution apps create ─────────────────────────────────────
 
 STEP_NUM=5
-log "Running caution init..."
-INIT_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" init --name "e2e-test-$(date +%s)" 2>&1)
+log "Running caution apps create..."
+CREATE_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps create 2>&1)
 
 # Extract resource ID from .caution/deployment.json
 if [ -f ".caution/deployment.json" ]; then
     RESOURCE_ID=$(jq -r '.resource_id' .caution/deployment.json)
 else
-    echo "$INIT_OUTPUT"
-    step_fail "caution init (no .caution/deployment.json)"
+    echo "$CREATE_OUTPUT"
+    step_fail "caution apps create (no .caution/deployment.json)"
+fi
+CREATED_ID=$(echo "$CREATE_OUTPUT" | sed -n 's/^ID: //p' | tail -1)
+if [ -z "$CREATED_ID" ] || [ "$RESOURCE_ID" != "$CREATED_ID" ]; then
+    echo "$CREATE_OUTPUT"
+    step_fail "caution apps create (saved app ID does not match response)"
 fi
 
 # Verify git remote was set
 GIT_URL=$(git remote get-url caution 2>/dev/null || true)
-if [ -z "$GIT_URL" ]; then
-    step_fail "caution init (git remote not set)"
+if [ -z "$GIT_URL" ] || [[ "$GIT_URL" != *"$RESOURCE_ID"* ]]; then
+    step_fail "caution apps create (git remote not set)"
 fi
-step_pass "caution init (app: $RESOURCE_ID)"
+step_pass "caution apps create (app: $RESOURCE_ID)"
 
 # ── Step 6: git push ────────────────────────────────────────────────
 

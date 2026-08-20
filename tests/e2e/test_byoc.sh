@@ -312,6 +312,11 @@ if ! echo "$INIT_OUTPUT" | grep -Eq "Deployment target: capacity=BYOC, aws_accou
     step_fail "caution init --byoc (exact deployment target not reported)"
 fi
 
+if ! echo "$INIT_OUTPUT" | grep -Eq 'DNS target: [^[:space:]]+\.apps\.caution\.sh'; then
+    echo "$INIT_OUTPUT"
+    step_fail "caution init --byoc (managed DNS target not reported)"
+fi
+
 # Extract resource ID from .caution/deployment.json
 if [ -f ".caution/deployment.json" ]; then
     RESOURCE_ID=$(jq -r '.resource_id' .caution/deployment.json)
