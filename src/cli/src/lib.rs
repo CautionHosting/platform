@@ -2069,21 +2069,40 @@ fn inspect_checkout_link(
         fs::read_to_string(deployment_path)
             .ok()
             .and_then(|contents| serde_json::from_str::<DeploymentInfo>(&contents).ok())
-            .map(|deployment| deployment.resource_id)
+            .and_then(|deployment| {
+                uuid::Uuid::parse_str(&deployment.resource_id)
+                    .ok()
+                    .map(|id| id.to_string())
+            })
     } else {
         None
     };
-    let remote = Command::new("git")
+    let remotes = Command::new("git")
         .arg("-C")
         .arg(repo_dir)
-        .args(["remote", "get-url", "caution"])
+        .arg("remote")
         .output()
         .context("Failed to check existing git remote")?;
-    let caution_remote = remote.status.success().then(|| {
-        String::from_utf8_lossy(&remote.stdout)
-            .trim()
-            .to_string()
-    });
+    if !remotes.status.success() {
+        bail!("Failed to list git remotes");
+    }
+    let has_caution_remote = String::from_utf8_lossy(&remotes.stdout)
+        .lines()
+        .any(|remote| remote.trim() == "caution");
+    let caution_remote = if has_caution_remote {
+        let remote = Command::new("git")
+            .arg("-C")
+            .arg(repo_dir)
+            .args(["remote", "get-url", "caution"])
+            .output()
+            .context("Failed to read existing caution git remote")?;
+        if !remote.status.success() {
+            bail!("Failed to read existing caution git remote");
+        }
+        Some(String::from_utf8_lossy(&remote.stdout).trim().to_string())
+    } else {
+        None
+    };
     let byoc_provider = config
         .and_then(|config| config.caution.as_ref())
         .and_then(|caution| caution.provider.as_ref())
@@ -2138,26 +2157,54 @@ fn linked_encrypted_byoc_config(is_encrypted: bool, resource_id: Option<&str>) -
 /// attempt to re-link an app when only the git remote is set (no local
 /// `.caution/deployment.json`).
 fn extract_resource_id_from_git_url(url: &str) -> Option<String> {
-    let stripped = url.strip_suffix(".git")?;
-
-    if stripped.starts_with("ssh://") || stripped.starts_with("https://") || stripped.starts_with("http://") {
-        return stripped.rsplit('/').next().and_then(|candidate| {
-            uuid::Uuid::parse_str(candidate).ok()?;
-            Some(candidate.to_string())
-        });
-    }
-
-    if let Some(after_at) = stripped.strip_prefix("git@") {
-        if let Some(colon_pos) = after_at.find(':') {
-            let path_part = &after_at[colon_pos + 1..];
-            return path_part.rsplit('/').next().and_then(|candidate| {
-                uuid::Uuid::parse_str(candidate).ok()?;
-                Some(candidate.to_string())
-            });
+    if url.starts_with("ssh://") {
+        let parsed = url::Url::parse(url).ok()?;
+        if parsed.scheme() != "ssh" || parsed.username() != "git" || parsed.password().is_some() {
+            return None;
         }
+        let mut segments = parsed.path_segments()?;
+        let candidate = segments.next()?.strip_suffix(".git")?;
+        if segments.next().is_some() {
+            return None;
+        }
+        return uuid::Uuid::parse_str(candidate)
+            .ok()
+            .map(|id| id.to_string());
     }
 
-    None
+    let after_at = url.strip_prefix("git@")?;
+    let (host, path) = after_at.split_once(':')?;
+    if host.is_empty() || path.contains('/') {
+        return None;
+    }
+    let candidate = path.strip_suffix(".git")?;
+    uuid::Uuid::parse_str(candidate)
+        .ok()
+        .map(|id| id.to_string())
+}
+
+fn relink_candidate(checkout_link: &CheckoutLink) -> Result<Option<(String, bool)>> {
+    if let Some(resource_id) = checkout_link.resource_id.as_ref() {
+        return Ok(Some((resource_id.clone(), false)));
+    }
+
+    if let Some(remote_url) = checkout_link.caution_remote.as_deref() {
+        let resource_id = extract_resource_id_from_git_url(remote_url).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Caution git remote is set to '{}' but does not contain a valid Caution app ID. Preserve and inspect the remote; refusing to create a successor.",
+                remote_url
+            )
+        })?;
+        return Ok(Some((resource_id, true)));
+    }
+
+    if checkout_link.deployment_file_exists {
+        bail!(
+            ".caution/deployment.json exists but does not contain a valid resource_id. Preserve and inspect it; refusing to create a successor."
+        );
+    }
+
+    Ok(None)
 }
 
 fn deployment_target_summary(capacity: &str, aws_account: &str, region: &str) -> String {
@@ -4929,14 +4976,7 @@ enclave "default" {{
         )?;
 
         if checkout_link.blocks_managed_creation() {
-            output::error(linked_checkout_error(&checkout_link));
-            std::process::exit(1);
-        }
-
-        if self.try_relink(&checkout_link).await? {
-            output::status("\nYou can now push to 'caution' remote:");
-            output::status("  git push caution main");
-            return Ok(());
+            bail!(linked_checkout_error(&checkout_link));
         }
 
         let config = self.ensure_authenticated().await?;
@@ -5359,104 +5399,66 @@ enclave "default" {{
 
     /// Attempt to re-link an existing app based on local checkout state.
     ///
-    /// Follows two rules consistently across all `init` code paths:
-    /// 1. If a valid resource_id exists in `.caution/deployment.json`, verify it
-    ///    via the API and ensure local deployment info + git remote are correct.
-    /// 2. If no resource_id but a `caution` git remote is set, extract the UUID
-    ///    from the remote URL and try to verify via the API. Exit with an error
-    ///    if the app cannot be resolved or verified.
+    /// A valid resource ID in `.caution/deployment.json` takes precedence;
+    /// otherwise a UUID is read from the `caution` SSH remote. The selected app
+    /// is verified through the API before local state or the remote is changed.
     ///
     /// Returns `Ok(true)` when the checkout was successfully re-linked (the
     /// caller should short-circuit), `Ok(false)` when no linkage state exists at
-    /// all (proceed with creation), or bails on error per rule 2.
+    /// all (proceed with creation), or returns an error for unverifiable state.
     async fn try_relink(&self, checkout_link: &CheckoutLink) -> Result<bool> {
-        if let Some(resource_id) = checkout_link.resource_id.as_deref() {
+        let Some((resource_id, from_remote)) = relink_candidate(checkout_link)? else {
+            return Ok(false);
+        };
+
+        if from_remote {
+            output::status(&format!(
+                "Attempting to re-link app from git remote (ID: {})...",
+                resource_id
+            ));
+        } else {
             output::verbose(
                 self.verbose,
-                &["Found existing deployment with ID: ", resource_id].concat(),
+                &["Found existing deployment with ID: ", &resource_id].concat(),
             );
-
-            let app = self.fetch_app(resource_id).await.map_err(|error| {
-                error.context(format!(
-                    "Unable to verify linked app {}; refusing to create a successor. \
-                     Restore authentication or connectivity and retry.",
-                    resource_id
-                ))
-            })?;
-
-            let name = app.resource_name.as_deref().unwrap_or("unnamed");
-            output::status("App already exists!");
-            output::status(format!("ID: {}", app.id));
-            output::status(format!("Name: {}", name));
-            output::status(format!("State: {}", app.state));
-            if !app.git_url.is_empty() {
-                output::status(format!("Git URL: {}", app.git_url));
-            }
-
-            self.save_deployment(&app.id)?;
-
-            if !app.git_url.is_empty() {
-                output::verbose(self.verbose, "Updating git remote...");
-                self.set_git_remote(&app.git_url)?;
-            }
-
-            return Ok(true);
         }
 
-        if let Some(remote_url) = checkout_link.caution_remote.as_deref() {
-            output::verbose(
-                self.verbose,
-                &format!("Caution git remote found: {}", remote_url),
+        let app = self.fetch_app(&resource_id).await.map_err(|error| {
+            error.context(format!(
+                "Unable to verify linked app {}; refusing to create a successor. Preserve the caution remote and restore authentication or connectivity before retrying.",
+                resource_id
+            ))
+        })?;
+        if app.id != resource_id {
+            bail!(
+                "API returned app {} while verifying {}; refusing to change the checkout link",
+                app.id,
+                resource_id
             );
-
-            match extract_resource_id_from_git_url(remote_url) {
-                Some(extracted_id) => {
-                    output::status(&format!(
-                        "Attempting to re-link app from git remote (ID: {})...",
-                        extracted_id
-                    ));
-
-                    let app = self.fetch_app(&extracted_id).await.map_err(|error| {
-                        error.context(format!(
-                            "Caution git remote is set but could not verify linked app {}; \
-                             refusing to create a successor. Restore authentication or \
-                             connectivity and retry, or remove the caution remote: \
-                             `git remote remove caution`",
-                            extracted_id
-                        ))
-                    })?;
-
-                    let name = app.resource_name.as_deref().unwrap_or("unnamed");
-                    output::status("App re-linked successfully!");
-                    output::status(format!("ID: {}", app.id));
-                    output::status(format!("Name: {}", name));
-                    output::status(format!("State: {}", app.state));
-                    if !app.git_url.is_empty() {
-                        output::status(format!("Git URL: {}", app.git_url));
-                    }
-
-                    self.save_deployment(&app.id)?;
-
-                    if !app.git_url.is_empty() {
-                        output::verbose(self.verbose, "Updating git remote...");
-                        self.set_git_remote(&app.git_url)?;
-                    }
-
-                    return Ok(true);
-                }
-                None => {
-                    bail!(
-                        "Caution git remote is set to '{}' but no resource ID could be \
-                         extracted from the URL. Unable to verify linked app.\n\
-                         If this checkout should not be linked, remove the caution remote: \
-                         `git remote remove caution`",
-                        remote_url
-                    );
-                }
-            }
+        }
+        if app.git_url.is_empty() {
+            bail!(
+                "App {} was verified but the API returned no Git URL; refusing to report a successful re-link",
+                app.id
+            );
         }
 
-        Ok(false)
+        let name = app.resource_name.as_deref().unwrap_or("unnamed");
+        output::status(if from_remote {
+            "App re-linked successfully!"
+        } else {
+            "App already exists!"
+        });
+        output::status(format!("ID: {}", app.id));
+        output::status(format!("Name: {}", name));
+        output::status(format!("State: {}", app.state));
+        output::status(format!("Git URL: {}", app.git_url));
+
+        self.save_deployment(&app.id)?;
+        output::verbose(self.verbose, "Updating git remote...");
+        self.set_git_remote(&app.git_url)?;
+
+        Ok(true)
     }
 
     async fn init(
@@ -5468,24 +5470,31 @@ enclave "default" {{
         config_path: Option<PathBuf>,
         yes: bool,
     ) -> Result<()> {
-        if bring_your_own_cloud && config_path.is_none() {
-            return self.init_byoc_interactive(name, region, local, yes).await;
-        }
-
         output::status("Initializing new deployment...");
 
         output::verbose(self.verbose, "Checking git repository...");
         self.check_git_repo()?;
         output::success("Git repository found");
 
+        let mut checkout_link =
+            inspect_checkout_link(self.get_deployment_path()?, Path::new("."), None)?;
+        let relinked = self.try_relink(&checkout_link).await?;
+
         if let Some(ref path) = config_path {
-            let checkout_link =
-                inspect_checkout_link(self.get_deployment_path()?, Path::new("."), None)?;
-            self.try_relink(&checkout_link).await?;
             return self.init_byoc(path).await;
         }
 
-        self.create_config_file_if_needed(bring_your_own_cloud)?;
+        if relinked {
+            output::status("\nYou can now push to 'caution' remote:");
+            output::status("  git push caution main");
+            return Ok(());
+        }
+
+        if bring_your_own_cloud {
+            return self.init_byoc_interactive(name, region, local, yes).await;
+        }
+
+        self.create_config_file_if_needed(false)?;
 
         output::verbose(self.verbose, "Reading configuration...");
         let config_file = self.read_config()?;
@@ -5493,21 +5502,14 @@ enclave "default" {{
         output::success("Configuration found");
         output::status(&format!("Build command: {}", cmd));
 
-        let checkout_link = inspect_checkout_link(
-            self.get_deployment_path()?,
-            Path::new("."),
-            Some(&config_file),
-        )?;
+        checkout_link.byoc_provider = config_file
+            .caution
+            .as_ref()
+            .and_then(|caution| caution.provider.as_ref())
+            .is_some();
 
         if checkout_link.blocks_managed_creation() {
-            output::error(linked_checkout_error(&checkout_link));
-            std::process::exit(1);
-        }
-
-        if self.try_relink(&checkout_link).await? {
-            output::status("\nYou can now push to 'caution' remote:");
-            output::status("  git push caution main");
-            return Ok(());
+            bail!(linked_checkout_error(&checkout_link));
         }
 
         let config = self.ensure_authenticated().await?;
@@ -5913,16 +5915,6 @@ enclave "default" {{
         output::status("\n╔══════════════════════════════════════════════════════════════════╗");
         output::status("║          Bring-Your-Own-Compute Deployment Setup (AWS)           ║");
         output::status("╚══════════════════════════════════════════════════════════════════╝\n");
-
-        self.check_git_repo()?;
-        let checkout_link =
-            inspect_checkout_link(self.get_deployment_path()?, Path::new("."), None)?;
-
-        if self.try_relink(&checkout_link).await? {
-            output::status("\nYou can now push to 'caution' remote:");
-            output::status("  git push caution main");
-            return Ok(());
-        }
 
         // Check for Docker
         let docker_check = Command::new("docker").arg("--version").output();
@@ -10293,7 +10285,7 @@ mod tests {
         tls_expectation_from_config, validate_attested_tls, validate_global_qr,
         verify_deprecation_warnings, aws_credentials_error, deployment_target_summary,
         extract_resource_id_from_git_url, inspect_checkout_link, linked_checkout_error,
-        linked_encrypted_byoc_config,
+        linked_encrypted_byoc_config, relink_candidate,
     };
     use caution_config::{ConfigurationFile, E2eEncryption, E2eMode};
     use clap::Parser;
@@ -11338,12 +11330,15 @@ enclave "default" {
 
     #[test]
     fn linked_checkout_preflight_matrix() {
+        let state_id = "550e8400-e29b-41d4-a716-446655440000";
+        let remote_id = "123e4567-e89b-12d3-a456-426614174000";
         let work_dir = tempdir().unwrap();
         init_test_git_repo(work_dir.path());
         let deployment_path = work_dir.path().join(".caution/deployment.json");
         let fresh = inspect_checkout_link(&deployment_path, work_dir.path(), None).unwrap();
         assert!(!fresh.blocks_managed_creation());
         assert!(!fresh.blocks_explicit_byoc_creation());
+        assert_eq!(relink_candidate(&fresh).unwrap(), None);
 
         let provider = ConfigurationFile::from_str(
             "caution {\n provider {\n type = \"aws\"\n region = \"us-east-1\"\n }\n }\n\
@@ -11358,22 +11353,40 @@ enclave "default" {
         assert!(!provider_error.contains("apps destroy"));
 
         std::fs::create_dir_all(deployment_path.parent().unwrap()).unwrap();
-        std::fs::write(&deployment_path, r#"{"resource_id":"existing-app"}"#).unwrap();
+        std::fs::write(
+            &deployment_path,
+            format!(r#"{{"resource_id":"{}"}}"#, state_id),
+        )
+        .unwrap();
         let valid_state = inspect_checkout_link(&deployment_path, work_dir.path(), None).unwrap();
         assert!(valid_state.blocks_managed_creation());
         assert!(!valid_state.blocks_explicit_byoc_creation());
+        assert_eq!(
+            relink_candidate(&valid_state).unwrap(),
+            Some((state_id.to_string(), false))
+        );
 
         std::fs::write(&deployment_path, "not json").unwrap();
         let malformed_state =
             inspect_checkout_link(&deployment_path, work_dir.path(), None).unwrap();
         assert!(malformed_state.blocks_managed_creation());
         assert!(malformed_state.blocks_explicit_byoc_creation());
+        assert!(relink_candidate(&malformed_state).is_err());
+
+        std::fs::write(&deployment_path, r#"{"resource_id":"not-a-uuid"}"#).unwrap();
+        let invalid_state = inspect_checkout_link(&deployment_path, work_dir.path(), None).unwrap();
+        assert!(relink_candidate(&invalid_state).is_err());
 
         std::fs::remove_file(&deployment_path).unwrap();
         assert!(std::process::Command::new("git")
             .arg("-C")
             .arg(work_dir.path())
-            .args(["remote", "add", "caution", "git@example.test:app.git"])
+            .args([
+                "remote",
+                "add",
+                "caution",
+                &format!("git@example.test:{}.git", remote_id),
+            ])
             .output()
             .unwrap()
             .status
@@ -11382,6 +11395,43 @@ enclave "default" {
         assert!(remote.blocks_managed_creation());
         assert!(remote.blocks_explicit_byoc_creation());
         assert!(linked_checkout_error(&remote).contains("git push caution HEAD:main"));
+        assert_eq!(
+            relink_candidate(&remote).unwrap(),
+            Some((remote_id.to_string(), true))
+        );
+
+        std::fs::create_dir_all(deployment_path.parent().unwrap()).unwrap();
+        std::fs::write(&deployment_path, "not json").unwrap();
+        let malformed_state_with_remote =
+            inspect_checkout_link(&deployment_path, work_dir.path(), None).unwrap();
+        assert_eq!(
+            relink_candidate(&malformed_state_with_remote).unwrap(),
+            Some((remote_id.to_string(), true))
+        );
+
+        std::fs::write(
+            &deployment_path,
+            format!(r#"{{"resource_id":"{}"}}"#, state_id),
+        )
+        .unwrap();
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(work_dir.path())
+            .args(["remote", "set-url", "caution", "git@example.test:not-an-id.git"])
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let state_precedes_remote =
+            inspect_checkout_link(&deployment_path, work_dir.path(), None).unwrap();
+        assert_eq!(
+            relink_candidate(&state_precedes_remote).unwrap(),
+            Some((state_id.to_string(), false))
+        );
+
+        std::fs::remove_file(&deployment_path).unwrap();
+        let invalid_remote = inspect_checkout_link(&deployment_path, work_dir.path(), None).unwrap();
+        assert!(relink_candidate(&invalid_remote).is_err());
     }
 
     #[test]
@@ -11406,10 +11456,26 @@ enclave "default" {
     }
 
     #[test]
-    fn extract_resource_id_from_git_url_parses_https_format() {
+    fn extract_resource_id_from_git_url_rejects_unsupported_formats() {
         let uuid = "550e8400-e29b-41d4-a716-446655440000";
-        let url = format!("https://codeberg.org/caution/{}.git", uuid);
-        assert_eq!(extract_resource_id_from_git_url(&url), Some(uuid.to_string()));
+        assert_eq!(
+            extract_resource_id_from_git_url(&format!(
+                "https://codeberg.org/caution/{}.git",
+                uuid
+            )),
+            None
+        );
+        assert_eq!(
+            extract_resource_id_from_git_url(&format!("ssh://deploy@example.test/{}.git", uuid)),
+            None
+        );
+        assert_eq!(
+            extract_resource_id_from_git_url(&format!(
+                "ssh://git@example.test/apps/{}.git",
+                uuid
+            )),
+            None
+        );
     }
 
     #[test]
@@ -11431,6 +11497,53 @@ enclave "default" {
             extract_resource_id_from_git_url(&format!("git@codeberg.org:{}", uuid)),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn relink_api_failures_preserve_local_state() {
+        let resource_id = "550e8400-e29b-41d4-a716-446655440000";
+
+        for status in [
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let work_dir = tempdir().unwrap();
+            let deployment_path = work_dir.path().join("deployment.json");
+            let deployment = format!(r#"{{"resource_id":"{}"}}"#, resource_id);
+            std::fs::write(&deployment_path, &deployment).unwrap();
+
+            let (url, server) = serve_preflight_responses(vec![(status, None)]).await;
+            let base_url = url.trim_end_matches("/archive.tar.gz").to_string();
+            let config_path = work_dir.path().join("config.json");
+            std::fs::write(
+                &config_path,
+                serde_json::json!({
+                    "session_id": "test-session",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "server_url": &base_url,
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+            let client = ApiClient {
+                base_url,
+                config_path,
+                deployment_path: Some(deployment_path.clone()),
+                ..test_api_client()
+            };
+            let checkout_link = super::CheckoutLink {
+                deployment_file_exists: true,
+                resource_id: Some(resource_id.to_string()),
+                caution_remote: None,
+                byoc_provider: false,
+            };
+
+            let error = client.try_relink(&checkout_link).await.unwrap_err();
+            assert!(error.to_string().contains("refusing to create a successor"));
+            assert_eq!(std::fs::read_to_string(&deployment_path).unwrap(), deployment);
+            assert_eq!(server.await.unwrap(), 1);
+        }
     }
 
     #[test]

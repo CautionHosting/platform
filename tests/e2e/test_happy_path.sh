@@ -9,7 +9,7 @@
 #   1. Create test user via e2e-login endpoint
 #   2. Add SSH key via gateway API (FIDO2 sign bypassed)
 #   3. Clone demo app
-#   4. caution apps create (creates app, saves local state, sets git remote)
+#   4. caution apps create, then recover local state from the git remote
 #   5. git push caution main (triggers enclave build)
 #   6. Wait for deployment
 #   7. caution verify (attestation + reproduction)
@@ -229,7 +229,29 @@ GIT_URL=$(git remote get-url caution 2>/dev/null || true)
 if [ -z "$GIT_URL" ] || [[ "$GIT_URL" != *"$RESOURCE_ID"* ]]; then
     step_fail "caution apps create (git remote not set)"
 fi
-step_pass "caution apps create (app: $RESOURCE_ID)"
+
+# Verify plain init restores missing local state from the existing remote without
+# creating a successor app.
+rm .caution/deployment.json
+RELINK_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" init 2>&1) || {
+    echo "$RELINK_OUTPUT"
+    step_fail "caution init remote-only re-link"
+}
+if ! echo "$RELINK_OUTPUT" | grep -q "App re-linked successfully"; then
+    echo "$RELINK_OUTPUT"
+    step_fail "caution init remote-only re-link (missing success output)"
+fi
+RELINKED_ID=$(jq -r '.resource_id' .caution/deployment.json 2>/dev/null || true)
+if [ "$RELINKED_ID" != "$RESOURCE_ID" ]; then
+    step_fail "caution init remote-only re-link (wrong app ID)"
+fi
+APP_COUNT=$(docker exec postgres-test psql -U postgres -d caution_test -t -A -c "
+SELECT COUNT(*) FROM compute_resources WHERE organization_id = '$ORG_ID';
+" 2>/dev/null | tr -d ' \n')
+if [ "$APP_COUNT" != "1" ]; then
+    step_fail "caution init remote-only re-link (created a successor app)"
+fi
+step_pass "caution apps create and remote-only re-link (app: $RESOURCE_ID)"
 
 # ── Step 6: git push ────────────────────────────────────────────────
 

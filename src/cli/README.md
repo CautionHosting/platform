@@ -111,15 +111,18 @@ eval "$(aws configure export-credentials --profile <profile> --format env)"
 aws sts get-caller-identity
 ```
 
-Linked checkouts fail closed to prevent accidental successor apps. To redeploy a
-running or stopped app, run `caution apps destroy <app-id>`, wait for teardown,
-then run `git push caution HEAD:main` against the existing remote. This causes
-downtime and temporarily withdraws managed DNS, but retains the app ID,
-repository, managed hostname, and any BYOC linkage. Do not use `apps create` or
-plain `init`; BYOC apps must also not use `teardown --byoc` for that redeploy.
-Linked `init --byoc --config` updates require decrypted JSON so the CLI can bind
-the update to the recorded app ID; encrypted config remains available for fresh,
-unlinked BYOC creation.
+For an active app, `caution init` verifies the app ID recorded in
+`.caution/deployment.json` or the `caution` SSH remote and restores the canonical
+local state and remote. Ambiguous or unverifiable identity fails closed rather
+than creating a successor app. Linked `init --byoc --config` updates require
+decrypted JSON so the CLI can bind the update to the verified app ID; encrypted
+config remains available for fresh, unlinked BYOC creation.
+
+To redeploy a running or stopped app, run `caution apps destroy <app-id>`, wait
+for teardown, then run `git push caution HEAD:main` against the existing remote.
+This causes downtime and temporarily withdraws managed DNS, but retains the app
+ID, repository, managed hostname, and any BYOC linkage. Do not use `apps create`
+or plain `init`; BYOC apps must also not use `teardown --byoc` for that redeploy.
 
 ### Account PGP Keys
 

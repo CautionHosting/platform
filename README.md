@@ -125,6 +125,9 @@ start the real stack with `make up`, generate an access code with
    when one is available, including for BYOC initialization. Caution remote
    builds run Docker from the repository root, using `build.containerfile` when
    configured, then a repo-root `Containerfile`, then a repo-root `Dockerfile`.
+   For an active app, rerunning `caution init` verifies the app ID in deployment
+   state or the `caution` SSH remote and restores both local links. Ambiguous or
+   unverifiable identity fails closed rather than creating a successor app.
    Put setup, compilation, asset builds, and runtime packaging in that
    Containerfile or Dockerfile so the build inputs are explicit and reproducible.
    Application images may use the conventional relative merged-/usr links
