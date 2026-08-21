@@ -547,6 +547,14 @@ fn resource_state_allows_noop_redeploy(state: &str) -> bool {
     matches!(state, "initialized" | "terminated" | "failed")
 }
 
+fn running_app_redeploy_error(app_id: &str, state: &str) -> String {
+    [
+        "App '", app_id, "' is in state '", state,
+        "'. In-place redeploy is not supported. `caution apps destroy ", app_id,
+        "` causes downtime and temporarily withdraws managed DNS. After destroy completes, redeploy the same app ID, managed hostname, and any BYOC linkage with `git push caution HEAD:main` using the existing remote. Do not run `caution apps create` or plain `caution init`. For BYOC apps, do not run `caution teardown --byoc`.",
+    ].concat()
+}
+
 async fn handle_git_push(
     pool: &PgPool,
     api_service_url: &str,
@@ -574,12 +582,7 @@ async fn handle_git_push(
     let resource_state = match existing {
         Some((state,)) => {
             if state == "running" || state == "stopped" {
-                bail!(
-                    "App '{}' already exists in state '{}'. Use 'caution apps destroy {}' to destroy it first.",
-                    app_id,
-                    state,
-                    app_id
-                );
+                bail!(running_app_redeploy_error(app_id, &state));
             }
             tracing::info!(
                 "App '{}' exists in state '{}', allowing push",
@@ -1100,8 +1103,8 @@ mod tests {
     use super::{
         contains_non_line_terminal_control, deploy_progress_completed_message,
         deploy_progress_finished_message, deploy_progress_started_message, managed_dns_note,
-        parse_pushed_branch_ref, resource_state_allows_noop_redeploy, PushedBranchSelection,
-        ZERO_SHA1,
+        parse_pushed_branch_ref, resource_state_allows_noop_redeploy,
+        running_app_redeploy_error, PushedBranchSelection, ZERO_SHA1,
     };
 
     const OLD_SHA: &str = "1111111111111111111111111111111111111111";
@@ -1286,6 +1289,15 @@ mod tests {
         assert!(!resource_state_allows_noop_redeploy("pending"));
         assert!(!resource_state_allows_noop_redeploy("running"));
         assert!(!resource_state_allows_noop_redeploy("stopped"));
+    }
+
+    #[test]
+    fn running_app_error_preserves_identity_instructions() {
+        let message = running_app_redeploy_error("app-id", "running");
+        assert!(message.contains("caution apps destroy app-id"));
+        assert!(message.contains("git push caution HEAD:main"));
+        assert!(message.contains("same app ID, managed hostname, and any BYOC linkage"));
+        assert!(message.contains("Do not run `caution apps create`"));
     }
 
     #[test]

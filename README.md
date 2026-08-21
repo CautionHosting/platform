@@ -120,11 +120,16 @@ start the real stack with `make up`, generate an access code with
    ```
 
    This writes a `caution.hcl` template when one does not already exist and
-   configures the `caution` git remote. Caution remote builds run Docker from
-   the repository root, using `build.containerfile` when configured, then a
-   repo-root `Containerfile`, then a repo-root `Dockerfile`. Put setup,
-   compilation, asset builds, and runtime packaging in that Containerfile or
-   Dockerfile so the build inputs are explicit and reproducible.
+   configures the `caution` git remote. Successful app creation also records the
+   current app ID in `.caution/deployment.json` and prints the managed DNS target
+   when one is available, including for BYOC initialization. Caution remote
+   builds run Docker from the repository root, using `build.containerfile` when
+   configured, then a repo-root `Containerfile`, then a repo-root `Dockerfile`.
+   For an active app, rerunning `caution init` verifies the app ID in deployment
+   state or the `caution` SSH remote and restores both local links. Ambiguous or
+   unverifiable identity fails closed rather than creating a successor app.
+   Put setup, compilation, asset builds, and runtime packaging in that
+   Containerfile or Dockerfile so the build inputs are explicit and reproducible.
    Application images may use the conventional relative merged-/usr links
    `/bin -> usr/bin` and `/lib -> usr/lib`; other `/bin` or `/lib` symlink
    layouts are rejected during EIF assembly.
@@ -138,6 +143,15 @@ start the real stack with `make up`, generate an access code with
 
    Long-running builds use protocol-level SSH keepalives so quiet deployment
    phases do not require client-side keepalive configuration.
+
+   Caution reports the selected capacity, AWS account, and region before
+   enclave launch. A running or stopped app cannot be redeployed in place. Run
+   `caution apps destroy <app-id>`, wait for teardown, then run
+   `git push caution HEAD:main` from the existing checkout. Teardown causes
+   downtime and temporarily withdraws managed DNS, but retains the app ID,
+   repository, managed hostname, and any BYOC linkage. Do not run `apps create`
+   or plain `init`; BYOC apps must also not run `teardown --byoc` as part of
+   this redeploy sequence.
 
 #### Enclave-terminated HTTPS (TLS mode, implemented by Caddy)
 

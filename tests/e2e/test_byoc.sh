@@ -290,14 +290,14 @@ step_pass "Copy and init demo app fixture"
 
 STEP_NUM=5
 APP_NAME="e2e-byoc-$(date +%s)"
-INIT_ARGS=(-u "$GATEWAY_URL" init --byoc --region "$ONPREM_TEST_REGION" --name "$APP_NAME")
+INIT_ARGS=(-u "$GATEWAY_URL" init --byoc --yes --region "$ONPREM_TEST_REGION" --name "$APP_NAME")
 if [ "$ONPREM_LOCAL_PROVISIONER" = "1" ]; then
     INIT_ARGS+=(--local)
     log "Using local BYOC provisioner image for caution init..."
 fi
 log "Running caution init --byoc --region $ONPREM_TEST_REGION --name $APP_NAME..."
 set +e
-INIT_OUTPUT=$(echo y | "$CAUTION_BIN" "${INIT_ARGS[@]}" 2>&1)
+INIT_OUTPUT=$("$CAUTION_BIN" "${INIT_ARGS[@]}" </dev/null 2>&1)
 INIT_STATUS=$?
 set -e
 PROVISIONER_DEPLOYMENT_ID=$(echo "$INIT_OUTPUT" | grep -oE 'Deployment ID: [a-f0-9]+' | tail -1 | awk '{print $3}')
@@ -305,6 +305,16 @@ PROVISIONER_DEPLOYMENT_ID=$(echo "$INIT_OUTPUT" | grep -oE 'Deployment ID: [a-f0
 if [ $INIT_STATUS -ne 0 ]; then
     echo "$INIT_OUTPUT"
     step_fail "caution init --byoc (exit code $INIT_STATUS)"
+fi
+
+if ! echo "$INIT_OUTPUT" | grep -Eq "Deployment target: capacity=BYOC, aws_account=[0-9]{12}, region=$ONPREM_TEST_REGION"; then
+    echo "$INIT_OUTPUT"
+    step_fail "caution init --byoc (exact deployment target not reported)"
+fi
+
+if ! echo "$INIT_OUTPUT" | grep -Eq 'DNS target: [^[:space:]]+\.apps\.caution\.sh'; then
+    echo "$INIT_OUTPUT"
+    step_fail "caution init --byoc (managed DNS target not reported)"
 fi
 
 # Extract resource ID from .caution/deployment.json

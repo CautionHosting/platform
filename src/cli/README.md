@@ -98,6 +98,32 @@ the normal login flow. If `CAUTION_SSH_SIGNING_KEY` is unset, the CLI checks
 `GIT_SSH_COMMAND`, `git config core.sshCommand`, and then default `~/.ssh/id_*`
 keys when a `caution` git remote exists.
 
+### BYOC Initialization and Redeployment
+
+`caution init --byoc --yes` skips only the AWS resource confirmation; login and
+all validation still run before provisioning. If an SSO, assume-role, or
+`credential_process` profile is not available as static credentials, export its
+short-lived values with AWS CLI v2 immediately before init or teardown:
+
+```sh
+aws sso login --profile <profile> # SSO only
+eval "$(aws configure export-credentials --profile <profile> --format env)"
+aws sts get-caller-identity
+```
+
+For an active app, `caution init` verifies the app ID recorded in
+`.caution/deployment.json` or the `caution` SSH remote and restores the canonical
+local state and remote. Ambiguous or unverifiable identity fails closed rather
+than creating a successor app. Linked `init --byoc --config` updates require
+decrypted JSON so the CLI can bind the update to the verified app ID; encrypted
+config remains available for fresh, unlinked BYOC creation.
+
+To redeploy a running or stopped app, run `caution apps destroy <app-id>`, wait
+for teardown, then run `git push caution HEAD:main` against the existing remote.
+This causes downtime and temporarily withdraws managed DNS, but retains the app
+ID, repository, managed hostname, and any BYOC linkage. Do not use `apps create`
+or plain `init`; BYOC apps must also not use `teardown --byoc` for that redeploy.
+
 ### Account PGP Keys
 
 Export an armored OpenPGP public certificate and associate it with your Caution

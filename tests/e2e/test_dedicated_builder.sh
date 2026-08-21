@@ -12,14 +12,14 @@
 # Tests:
 #   1. Health check
 #   2. Create test user
-#   3. Push demo app
-#   4. Verify builder EC2 instance was launched
-#   5. Wait for build completion
-#   6. Verify EIF in the fully managed S3 bucket
-#   7. Verify eif_builds DB row
-#   8. Verify builder instance terminated
-#   9. Redeploy same commit — verify cache hit (no new builder)
-#  10. Cleanup
+#   3. Add SSH key
+#   4. Clone, initialize, and push demo app
+#   5. Verify builder EC2 instance was launched
+#   6. Wait for build completion
+#   7. Verify EIF in the fully managed S3 bucket
+#   8. Verify eif_builds DB row
+#   9. Verify builder instance terminated
+#  10. Verify a running app rejects in-place redeploy with safe guidance
 
 set -euo pipefail
 
@@ -368,28 +368,34 @@ else
     step_warn "No instance ID to check"
 fi
 
-# ── Step 10: Redeploy same commit — verify cache hit ──────────────────
+# ── Step 10: Running-app redeploy is rejected with safe guidance ──────
 STEP_NUM=10
-echo "── Step $STEP_NUM: Redeploy same commit (should cache hit) ──"
+echo "── Step $STEP_NUM: Running-app redeploy guidance ──"
 
-BUILDS_BEFORE=$(query_db "SELECT COUNT(*) FROM eif_builds" || echo "0")
-
-# Trigger another deploy of the same commit
 cd "$WORK_DIR/demo"
-# Make an empty commit to trigger a new push
-git commit --allow-empty -m "trigger redeploy" 2>/dev/null
-git push caution main 2>&1 || true
-
-sleep 10
-
-BUILDS_AFTER=$(query_db "SELECT COUNT(*) FROM eif_builds" || echo "0")
-
-if [ "$BUILDS_AFTER" -eq "$BUILDS_BEFORE" ]; then
-    step_pass "Cache hit — no new eif_builds row created"
-else
-    # An empty commit changes the SHA, so a new build is expected
-    step_warn "New build row created (empty commit changed SHA — expected)"
+RESOURCE_STATE=$(query_db "SELECT state::text FROM compute_resources WHERE id = '$RESOURCE_ID'" || true)
+if [ "$RESOURCE_STATE" != "running" ]; then
+    step_fail "expected resource state running before rejection check, got: $RESOURCE_STATE"
 fi
+git commit --allow-empty -m "trigger redeploy" 2>/dev/null
+set +e
+REDEPLOY_OUTPUT=$(git push caution main 2>&1)
+REDEPLOY_STATUS=$?
+set -e
+
+if [ "$REDEPLOY_STATUS" -eq 0 ]; then
+    echo "$REDEPLOY_OUTPUT"
+    step_fail "running-app push unexpectedly succeeded"
+fi
+if ! echo "$REDEPLOY_OUTPUT" | grep -Fq "git push caution HEAD:main"; then
+    echo "$REDEPLOY_OUTPUT"
+    step_fail "running-app rejection omitted same-ID redeploy command"
+fi
+if ! echo "$REDEPLOY_OUTPUT" | grep -Fq 'Do not run `caution apps create`'; then
+    echo "$REDEPLOY_OUTPUT"
+    step_fail "running-app rejection omitted successor-app warning"
+fi
+step_pass "running-app push rejected with same-ID redeploy guidance"
 
 echo ""
 echo "=== Test complete ==="
