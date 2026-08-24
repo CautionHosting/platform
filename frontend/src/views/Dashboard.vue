@@ -1678,7 +1678,11 @@ make build-cli
 
       <!-- Subscription Section -->
       <div class="billing-section">
-        <h3 class="billing-section-title" style="margin-top: 2rem;">Managed enclaves subscription</h3>
+        <h3 class="billing-section-title" style="margin-top: 2rem;">BYOC subscription</h3>
+        <p class="billing-section-description">
+          For enclaves deployed in your AWS account. AWS infrastructure is billed separately by AWS.
+          <a href="https://docs.caution.co/reference/byoc/" target="_blank" rel="noopener noreferrer">How BYOC works</a>
+        </p>
         <div v-if="subscription" class="subscription-card">
           <div class="subscription-info">
             <div class="subscription-tier-name">{{ subscription.tier_name }}</div>
@@ -1686,53 +1690,68 @@ make build-cli
           </div>
           <div class="subscription-details">
             <div class="subscription-detail-item">
-              <span class="subscription-detail-label">Price</span>
-              <span class="subscription-detail-value">${{ (subscription.price_cents_per_cycle / 100).toLocaleString() }}/mo</span>
+              <span class="subscription-detail-label">Plan price</span>
+              <span class="subscription-detail-value">{{ formatSubscriptionMonthlyPrice(subscription) }}</span>
+            </div>
+            <div v-if="subscription.hourly_rate_usd != null" class="subscription-detail-item">
+              <span class="subscription-detail-label">Hourly accrual</span>
+              <span class="subscription-detail-value">${{ formatBillingRate(subscription.hourly_rate_usd) }}/hour</span>
             </div>
             <div class="subscription-detail-item">
-              <span class="subscription-detail-label">Managed enclaves</span>
-              <span class="subscription-detail-value">{{ subscription.enclaves ?? subscription.max_apps }}</span>
+              <span class="subscription-detail-label">Included enclaves</span>
+              <span class="subscription-detail-value">{{ subscription.enclave_limit ?? subscription.enclaves ?? subscription.max_apps }}</span>
+            </div>
+            <div class="subscription-detail-item">
+              <span class="subscription-detail-label">Allocated enclaves</span>
+              <span class="subscription-detail-value">{{ subscription.allocated_enclaves ?? 0 }} of {{ subscription.enclave_limit ?? subscription.enclaves ?? subscription.max_apps }}</span>
             </div>
             <div class="subscription-detail-item">
               <span class="subscription-detail-label">Started</span>
               <span class="subscription-detail-value">{{ formatDate(subscription.started_at) }}</span>
             </div>
           </div>
+          <p v-if="subscription.hourly_rate_usd != null" class="subscription-note">
+            Charges accrue against prepaid credits from activation until cancellation. The monthly price is the 730-hour equivalent of the hourly rate.
+          </p>
           <div class="subscription-actions">
             <button @click="showSelectPlanModal = true" class="btn-secondary btn-small">Change plan</button>
             <button @click="cancelSubscription" class="btn-secondary btn-small btn-danger-text">Cancel</button>
           </div>
         </div>
         <div v-else class="subscription-empty">
-          <p>No active managed enclaves subscription.</p>
-          <button @click="showSelectPlanModal = true" class="btn-primary btn-small">Choose a plan</button>
+          <p>No active BYOC subscription. Choose a plan to deploy enclaves in your AWS account.</p>
+          <button @click="showSelectPlanModal = true" class="btn-primary btn-small">Choose a BYOC plan</button>
         </div>
       </div>
 
       <!-- Billing Section -->
-      <h3 class="billing-section-title" style="margin-top: 2rem;">Billing</h3>
+      <h3 class="billing-section-title" style="margin-top: 2rem;">This month</h3>
 
+      <div v-if="loadingBilling" class="list-item-empty dashboard-tab-empty">Loading billing data...</div>
+      <div v-else-if="billingError" class="list-item-empty dashboard-tab-empty">{{ billingError }}</div>
       <!-- Current Period Summary -->
-      <div class="billing-summary">
+      <div v-if="!loadingBilling && !billingError" class="billing-summary">
         <div class="billing-period">
           <span class="billing-period-label">Current period</span>
           <span class="billing-period-dates">{{ currentBillingPeriod }}</span>
         </div>
         <div class="billing-total">
-          <span class="billing-total-label">Total debits</span>
-          <span class="billing-total-amount">${{ billingData.totalCost?.toFixed(2) || '0.00' }}</span>
+          <span class="billing-total-label">Charges this month</span>
+          <span class="billing-total-amount">${{ billingData.totalCost.toFixed(2) }}</span>
         </div>
         <div class="billing-total">
-          <span class="billing-total-label">Projected by period end</span>
-          <span class="billing-total-amount billing-projected">${{ billingData.projectedCost?.toFixed(2) || '0.00' }}</span>
+          <span class="billing-total-label">Projected by month end</span>
+          <span class="billing-total-amount billing-projected">${{ billingData.projectedCost.toFixed(2) }}</span>
         </div>
       </div>
+      <p v-if="!loadingBilling && !billingError" class="billing-lifetime-total">
+        All-time charges: {{ formatBillingCurrency(billingData.lifetimeCost) }}
+      </p>
 
       <!-- Usage Breakdown -->
-      <div class="billing-section">
+      <div v-if="!loadingBilling && !billingError" class="billing-section">
         <h3 class="billing-section-title">Managed Resource Usage Breakdown</h3>
-        <div v-if="loadingBilling" class="list-item-empty">Loading billing data...</div>
-        <div v-else-if="billingData.items?.length === 0" class="list-item-empty dashboard-tab-empty">
+        <div v-if="billingData.items.length === 0" class="list-item-empty dashboard-tab-empty">
           No usage this billing period.
         </div>
         <div v-else class="billing-table">
@@ -1745,22 +1764,21 @@ make build-cli
           <div v-for="item in billingData.items" :key="item.id" class="billing-table-row">
             <span class="billing-col-resource">
               <span class="billing-resource-name">{{ item.resourceName }}</span>
-              <span class="billing-resource-type">{{ item.resourceType }}</span>
+              <span class="billing-resource-type">
+                {{ item.resourceType }}<template v-if="item.region"> &middot; {{ item.region }}</template>
+              </span>
+              <span class="billing-resource-recorded">Last metered {{ formatBillingTimestamp(item.lastRecordedAt) }}</span>
             </span>
             <span class="billing-col-usage">{{ formatBillingUsage(item.usage, item.unit) }} {{ item.unit }}</span>
-            <span class="billing-col-rate">${{ item.rate }}/{{ item.unit }}</span>
+            <span class="billing-col-rate">${{ formatBillingRate(item.rate) }}/{{ formatBillingRateUnit(item.unit) }}</span>
             <span class="billing-col-cost">${{ item.cost.toFixed(2) }}</span>
           </div>
         </div>
       </div>
 
-      <div class="billing-section">
-        <h3 class="billing-section-title">Subscription Spend</h3>
-        <div v-if="loadingBilling" class="list-item-empty">Loading billing data...</div>
-        <div v-else-if="billingData.subscriptionItems?.length === 0" class="list-item-empty dashboard-tab-empty">
-          No subscription charges this billing period.
-        </div>
-        <div v-else class="billing-table">
+      <div v-if="!loadingBilling && !billingError && billingData.subscriptionItems.length > 0" class="billing-section">
+        <h3 class="billing-section-title">BYOC subscription usage</h3>
+        <div class="billing-table">
           <div class="billing-table-header">
             <span class="billing-col-resource">Subscription</span>
             <span class="billing-col-usage">Usage</span>
@@ -1773,7 +1791,7 @@ make build-cli
               <span class="billing-resource-type">{{ item.resourceType }}</span>
             </span>
             <span class="billing-col-usage">{{ formatBillingUsage(item.usage, item.unit) }} {{ item.unit }}</span>
-            <span class="billing-col-rate">${{ item.rate }}/{{ item.unit }}</span>
+            <span class="billing-col-rate">${{ formatBillingRate(item.rate) }}/{{ formatBillingRateUnit(item.unit) }}</span>
             <span class="billing-col-cost">${{ item.cost.toFixed(2) }}</span>
           </div>
         </div>
@@ -1846,8 +1864,8 @@ make build-cli
     <!-- Select Plan Modal -->
     <div v-if="showSelectPlanModal" class="modal-overlay" @click="showSelectPlanModal = false">
       <div class="modal-content modal-content--wide" @click.stop>
-        <h3 class="modal-title">Choose a plan</h3>
-        <p class="modal-description">Select how many enclaves you want Caution to manage for this organization.</p>
+        <h3 class="modal-title">Choose a BYOC plan</h3>
+        <p class="modal-description">Select how many enclaves you want to deploy in your AWS account. Charged hourly against prepaid credits; monthly prices are 730-hour equivalents.</p>
 
         <div class="tier-cards">
           <button
@@ -1859,7 +1877,7 @@ make build-cli
           >
             <span class="tier-card-name">{{ tier.name }}</span>
             <span class="tier-card-price">{{ formatTierPrice(tier) }}<span class="tier-card-period">/mo</span></span>
-            <span class="tier-card-limits">{{ tier.enclaves }} managed {{ tier.enclaves === 1 ? 'enclave' : 'enclaves' }}</span>
+            <span class="tier-card-limits">{{ tier.enclaves }} included {{ tier.enclaves === 1 ? 'enclave' : 'enclaves' }}</span>
           </button>
         </div>
 
@@ -2050,6 +2068,7 @@ import DashboardLayout from "../components/DashboardLayout.vue";
 import AttestationModal from "../components/AttestationModal.vue";
 import { authFetch } from "../composables/useWebAuthn.js";
 import {
+  getAppEstimatedMonthlyCost,
   formatRuntimeSummary,
   formatStatusLabel,
   getDeploymentLabel,
@@ -3051,8 +3070,17 @@ export default {
     };
 
     // Billing state
-    const billingData = ref({ totalCost: 0, projectedCost: 0, items: [], subscriptionItems: [] });
+    const billingData = ref({
+      totalCost: 0,
+      lifetimeCost: 0,
+      projectedCost: 0,
+      billingPeriodStart: '',
+      billingPeriodEnd: '',
+      items: [],
+      subscriptionItems: [],
+    });
     const loadingBilling = ref(false);
+    const billingError = ref('');
     // Credits state
     const creditBalance = ref({ balance_cents: 0, balance_display: '$0.00' });
     const creditPackages = ref([]);
@@ -3213,12 +3241,26 @@ export default {
       return "We couldn't update your email. Try again.";
     };
 
+    const parseBillingUtcDate = (value) => {
+      if (!value) return null;
+      const normalized = /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00Z` : value;
+      const date = new Date(normalized);
+      return Number.isNaN(date.getTime()) ? null : date;
+    };
+
+    const billingPeriodDateFormatter = new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      day: 'numeric',
+      timeZone: 'UTC',
+    });
+
     const currentBillingPeriod = computed(() => {
-      const now = new Date();
-      const start = new Date(now.getFullYear(), now.getMonth(), 1);
-      const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-      const options = { month: 'short', day: 'numeric' };
-      return `${formatLocalDate(start, options)} - ${formatLocalDate(end, options)}, ${now.getFullYear()}`;
+      const start = parseBillingUtcDate(billingData.value.billingPeriodStart);
+      const exclusiveEnd = parseBillingUtcDate(billingData.value.billingPeriodEnd);
+      if (!start || !exclusiveEnd || exclusiveEnd <= start) return 'Unavailable';
+
+      const inclusiveEnd = new Date(exclusiveEnd.getTime() - 1);
+      return `${billingPeriodDateFormatter.format(start)} - ${billingPeriodDateFormatter.format(inclusiveEnd)}, ${inclusiveEnd.getUTCFullYear()}`;
     });
 
     const usdFormatter = new Intl.NumberFormat('en-US', {
@@ -3227,6 +3269,8 @@ export default {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     });
+
+    const formatBillingCurrency = (value) => usdFormatter.format(value ?? 0);
 
     const formatBillingUsage = (usage, unit) => {
       if (unit !== 'hours') {
@@ -3239,6 +3283,28 @@ export default {
       }
 
       return numericUsage.toFixed(2);
+    };
+
+    const formatBillingRate = (rate) => {
+      const numericRate = Number(rate ?? 0);
+      return Number.isFinite(numericRate) ? numericRate.toFixed(4) : '0.0000';
+    };
+
+    const formatBillingRateUnit = (unit) => unit === 'hours' ? 'hour' : unit;
+
+    const billingTimestampFormatter = new Intl.DateTimeFormat('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+      timeZone: 'UTC',
+    });
+
+    const formatBillingTimestamp = (value) => {
+      const timestamp = parseBillingUtcDate(value);
+      return timestamp ? `${billingTimestampFormatter.format(timestamp)} UTC` : 'Unavailable';
     };
 
     const pageTitle = computed(() => {
@@ -3465,6 +3531,7 @@ export default {
       if (billingData.value.items.length === 0) {
         loadingBilling.value = true;
       }
+      billingError.value = '';
 
       try {
         const response = await authFetch("/api/billing/usage");
@@ -3472,112 +3539,48 @@ export default {
         if (response.ok) {
           const data = await response.json();
           billingData.value = {
-            totalCost: data.total_cost ?? 0,
-            projectedCost: data.projected_cost ?? 0,
+            totalCost: Number(data.total_cost ?? 0),
+            lifetimeCost: Number(data.lifetime_cost ?? 0),
+            projectedCost: Number(data.projected_cost ?? 0),
             billingPeriodStart: data.billing_period_start ?? '',
             billingPeriodEnd: data.billing_period_end ?? '',
             items: (data.items || []).map(item => ({
-              id: item.id || item.resource_id,
+              id: item.id,
+              applicationId: item.application_id ?? null,
               resourceName: item.resource_name ?? item.resource_id,
               resourceType: item.resource_type ?? 'compute',
-              usage: item.quantity ?? 0,
+              region: item.region ?? '',
+              lastRecordedAt: item.last_recorded_at ?? '',
+              usage: Number(item.quantity ?? 0),
               unit: item.unit ?? 'hours',
-              rate: item.rate ?? '0.00',
-              cost: item.cost ?? 0,
-              projectedCost: item.projected_cost ?? 0,
+              rate: Number(item.rate ?? 0),
+              cost: Number(item.cost ?? 0),
+              projectedCost: Number(item.projected_cost ?? 0),
             })),
             subscriptionItems: (data.subscription_items || []).map(item => ({
-              id: item.id || item.subscription_id,
+              id: item.id,
               resourceName: item.resource_name ?? item.tier ?? 'Subscription',
               resourceType: item.resource_type ?? 'subscription',
-              usage: item.quantity ?? 0,
+              usage: Number(item.quantity ?? 0),
               unit: item.unit ?? 'hours',
-              rate: item.rate ?? '0.00',
-              cost: item.cost ?? 0,
-              projectedCost: item.projected_cost ?? 0,
+              rate: Number(item.rate ?? 0),
+              cost: Number(item.cost ?? 0),
+              projectedCost: Number(item.projected_cost ?? 0),
             })),
           };
         } else if (response.status === 401) {
           window.location.href = "/login";
         } else {
-          // API might not exist yet, use placeholder data from apps
-          billingData.value = calculateBillingFromApps();
+          billingError.value = 'Billing data is temporarily unavailable. Try again later.';
         }
       } catch (err) {
-        // Fallback: calculate billing from running apps
-        billingData.value = calculateBillingFromApps();
+        billingError.value = 'Billing data is temporarily unavailable. Try again later.';
       } finally {
         loadingBilling.value = false;
       }
     };
 
-    const calculateBillingFromApps = () => {
-      // Base AWS rates (from metering/calculator.rs)
-      const baseRates = {
-        'm5.xlarge': 0.192,
-        'm5.2xlarge': 0.384,
-        'r6i.xlarge': 0.252,
-        'r6i.2xlarge': 0.504,
-        'r6i.4xlarge': 1.008,
-        'r6i.8xlarge': 2.016,
-        'r6i.12xlarge': 3.024,
-        'c5.xlarge': 0.17,
-        'c6i.xlarge': 0.17,
-        'c6a.xlarge': 0.153,
-        'default': 0.20,
-      };
-
-      // Margin for verifiable compute (55% markup)
-      const marginPercent = 55;
-
-      // const runningApps = apps.value.filter(app => app.state === 'running');
-      const items = apps.map(app => {
-        const hoursRunning = app.created_at
-          ? Math.ceil((Date.now() - new Date(app.created_at).getTime()) / (1000 * 60 * 60))
-          : 0;
-
-        const instanceType = app.configuration?.instance_type || 'default';
-        const baseRate = baseRates[instanceType] || baseRates['default'];
-        const hourlyRate = baseRate * (1 + marginPercent / 100);
-        const cost = hoursRunning * hourlyRate;
-
-        return {
-          id: app.id,
-          resourceName: app.resource_name || 'Unnamed App',
-          resourceType: 'Compute',
-          usage: hoursRunning,
-          unit: 'hours',
-          rate: hourlyRate.toFixed(2),
-          cost: cost,
-        };
-      });
-      return {
-        totalCost: items.reduce((sum, item) => sum + item.cost, 0),
-        projectedCost: items.reduce((sum, item) => sum + item.cost, 0),
-        items,
-        subscriptionItems: [],
-      };
-    };
-
-    const getAppEstimatedMonthlyCost = (app) => {
-      // Get the hourly rate from billing data if available
-      const billingItem = billingData.value.items?.find(item => item.id === app.id);
-      if (billingItem && billingItem.rate) {
-        const hourlyRate = parseFloat(billingItem.rate);
-        const hoursPerMonth = 730;
-        return (hourlyRate * hoursPerMonth).toFixed(2);
-      }
-
-      // Fallback: show estimated_monthly_cost from resource if available
-      if (app.estimated_monthly_cost) {
-        return app.estimated_monthly_cost.toFixed(2);
-      }
-
-      return null;
-    };
-
-    // Alias for template
-    const calculateAppMonthlyCost = getAppEstimatedMonthlyCost;
+    const calculateAppMonthlyCost = (app) => getAppEstimatedMonthlyCost(app, billingData.value.items);
     const selectedAppMonthlyCost = computed(() => {
       if (selectedApp.value?.state !== 'running') return null;
       return calculateAppMonthlyCost(selectedApp.value);
@@ -3982,6 +3985,11 @@ export default {
       return `$${(cents / 100).toLocaleString()}`;
     };
 
+    const formatSubscriptionMonthlyPrice = (value) => {
+      const cents = value?.monthly_price_cents ?? value?.price_cents_per_cycle;
+      return cents == null ? 'Custom' : `${usdFormatter.format(cents / 100)}/month equivalent`;
+    };
+
     const doSubscribe = async () => {
       if (!selectedTier.value) return;
       subscribing.value = true;
@@ -4015,7 +4023,7 @@ export default {
     };
 
     const cancelSubscription = async () => {
-      if (!confirm('Cancel your subscription immediately?')) return;
+      if (!confirm('Cancel this BYOC subscription now? Charges will stop immediately.')) return;
       try {
         const response = await authFetch('/api/billing/subscription/cancel', { method: 'POST' });
         if (response.ok) {
@@ -5334,8 +5342,13 @@ export default {
       cancelInvitation,
       billingData,
       loadingBilling,
+      billingError,
       currentBillingPeriod,
+      formatBillingCurrency,
       formatBillingUsage,
+      formatBillingRate,
+      formatBillingRateUnit,
+      formatBillingTimestamp,
       loadBilling,
       creditBalance,
       creditPackages,
@@ -5366,6 +5379,7 @@ export default {
       loadSubscription,
       loadSubscriptionTiers,
       formatTierPrice,
+      formatSubscriptionMonthlyPrice,
       doSubscribe,
       cancelSubscription,
       userEmail,
@@ -7063,7 +7077,14 @@ export default {
   padding: 1.5rem;
   background: var(--theme-surface-subtle);
   border-radius: 8px;
-  margin-bottom: 2rem;
+  margin-bottom: 0.5rem;
+}
+
+.billing-lifetime-total {
+  margin: 0 0 2rem;
+  color: var(--theme-text-muted);
+  font-size: 0.8rem;
+  text-align: right;
 }
 
 .billing-period {
@@ -7118,6 +7139,17 @@ export default {
   font-weight: 600;
   color: var(--theme-text-primary);
   margin-bottom: 1rem;
+}
+
+.billing-section-description {
+  margin: -0.5rem 0 1rem;
+  color: var(--theme-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.billing-section-description a {
+  color: inherit;
 }
 
 .billing-section-heading {
@@ -7176,6 +7208,11 @@ export default {
 .billing-resource-type {
   font-size: 0.75rem;
   color: var(--theme-text-muted);
+}
+
+.billing-resource-recorded {
+  font-size: 0.75rem;
+  color: var(--theme-text-faint);
 }
 
 .billing-col-usage,
@@ -7720,6 +7757,10 @@ export default {
     align-items: flex-start;
   }
 
+  .billing-lifetime-total {
+    text-align: left;
+  }
+
   .billing-table-header,
   .billing-table-row {
     grid-template-columns: 1fr 1fr;
@@ -8180,6 +8221,13 @@ export default {
   font-size: 0.875rem;
   color: var(--theme-text-primary);
   font-weight: 500;
+}
+
+.subscription-note {
+  margin: 0 0 0.75rem;
+  color: var(--theme-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
 }
 
 .subscription-cancel-notice {

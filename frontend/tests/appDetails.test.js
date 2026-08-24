@@ -6,6 +6,7 @@ import test from 'node:test'
 import {
   formatRuntimeSummary,
   formatStatusLabel,
+  getAppEstimatedMonthlyCost,
   getDeploymentLabel,
   getDnsGuidance,
   isManaged,
@@ -61,6 +62,31 @@ test('DNS guidance is present only when both domain and target are available', (
   assert.equal(getDnsGuidance({ configuration: { domain: 'payments.example.com' } }), '')
   assert.equal(getDnsGuidance({ managed_hostname: 'app-123.apps.caution.example' }), '')
   assert.equal(getDnsGuidance(undefined), '')
+})
+
+test('monthly estimates use the newest compute-hour rate and accept zero', () => {
+  const app = { id: 'app-1', estimated_monthly_cost: 99 }
+  const items = [
+    {
+      applicationId: 'app-1', resourceType: 'network', unit: 'gb', rate: 9,
+      lastRecordedAt: '2026-08-21T12:00:00Z',
+    },
+    {
+      applicationId: 'app-1', resourceType: 'compute', unit: 'hours', rate: 0.2,
+      lastRecordedAt: '2026-08-20T12:00:00Z',
+    },
+    {
+      applicationId: 'app-1', resourceType: 'compute', unit: 'hours', rate: 0.3,
+      lastRecordedAt: '2026-08-21T12:00:00Z',
+    },
+  ]
+
+  assert.equal(getAppEstimatedMonthlyCost(app, items), '219.00')
+  assert.equal(getAppEstimatedMonthlyCost(app, [{
+    applicationId: 'app-1', resourceType: 'compute', unit: 'hours', rate: 0,
+    lastRecordedAt: '2026-08-21T12:00:00Z',
+  }]), '0.00')
+  assert.equal(getAppEstimatedMonthlyCost(app, []), '99.00')
 })
 
 test('status labels format DNS states and missing values for display', () => {

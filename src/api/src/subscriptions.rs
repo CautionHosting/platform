@@ -134,27 +134,6 @@ pub(crate) fn tier_display_name(id: &str) -> String {
         .join(" ")
 }
 
-fn resolved_subscription_values(
-    pricing: &crate::PricingConfig,
-    tier_id: &str,
-    stored_max_apps: i32,
-    stored_price_cents: i64,
-) -> (String, i32, i64) {
-    if let Some(tier) = pricing.subscription_tiers.get(tier_id) {
-        (
-            tier_display_name(tier_id),
-            tier.enclaves,
-            tier.monthly_cents(),
-        )
-    } else {
-        (
-            tier_display_name(tier_id),
-            stored_max_apps,
-            stored_price_cents,
-        )
-    }
-}
-
 async fn close_open_subscription_segment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     subscription_id: Uuid,
@@ -219,6 +198,14 @@ pub async fn get_subscription(
                 s.started_at, s.current_period_start, s.current_period_end, s.canceled_at,
                 s.cancel_at_period_end, s.last_billed_at, s.next_billing_at, s.created_at,
                 s.updated_at,
+                CASE WHEN s.billing_source = 'legacy_credits' THEN (
+                    SELECT sl.cost_hourly::double precision
+                    FROM subscription_ledger sl
+                    WHERE sl.subscription_id = s.id
+                      AND sl.billing_period_end IS NULL
+                    ORDER BY sl.billing_period_start DESC
+                    LIMIT 1
+                ) ELSE NULL END AS hourly_rate_usd,
                 (SELECT COUNT(*) FROM compute_resources cr
                  JOIN cloud_credentials cc ON cc.resource_id = cr.id
                  WHERE cr.organization_id = s.organization_id
@@ -244,12 +231,9 @@ pub async fn get_subscription(
     };
 
     let tier: String = row.get("tier");
-    let (tier_name, max_apps, price_cents_per_cycle) = resolved_subscription_values(
-        &state.pricing,
-        &tier,
-        row.get("max_apps"),
-        row.get("price_cents_per_cycle"),
-    );
+    let tier_name = tier_display_name(&tier);
+    let max_apps: i32 = row.get("max_apps");
+    let price_cents_per_cycle: i64 = row.get("price_cents_per_cycle");
 
     let billing_source: String = row.get("billing_source");
     let pending_tier: Option<String> = row.get("pending_tier");
@@ -282,6 +266,7 @@ pub async fn get_subscription(
             "price_cents_per_cycle": monthly_price,
             "monthly_price_cents": monthly_price,
             "total_price_cents_per_cycle": monthly_price,
+            "hourly_rate_usd": row.get::<Option<f64>, _>("hourly_rate_usd"),
             "status": row.get::<String, _>("status"),
             "catalog_valid": row.get::<bool, _>("catalog_valid"),
             "enterprise_expires_at": row.get::<Option<DateTime<Utc>>, _>("enterprise_expires_at"),

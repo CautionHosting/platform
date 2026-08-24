@@ -101,6 +101,17 @@ test('dashboard preview serves organization and billing fixtures with the expect
   const usage = parse(resolveDashboardPreviewRequest('GET', '/api/billing/usage'))
   assert.equal(usage.items.length >= 2, true)
   assert.equal(usage.subscription_items.length >= 1, true)
+  assert.equal(usage.billing_period_start, '2026-08-01')
+  assert.equal(usage.billing_period_end, '2026-09-01')
+  assert.equal(usage.lifetime_cost > usage.total_cost, true)
+  assert.equal(new Set(usage.items.map((item) => item.id)).size, usage.items.length)
+  assert.equal(usage.items.every((item) => typeof item.rate === 'number'), true)
+  assert.equal(usage.items.every((item) => Boolean(item.region)), true)
+  assert.equal(usage.items.every((item) => !Number.isNaN(Date.parse(item.last_recorded_at))), true)
+
+  const actualTotal = [...usage.items, ...usage.subscription_items]
+    .reduce((sum, item) => sum + item.cost, 0)
+  assert.equal(Number(actualTotal.toFixed(2)), usage.total_cost)
 
   const balance = parse(resolveDashboardPreviewRequest('GET', '/api/billing/credits/balance'))
   assert.equal(balance.balance_display, '$1,842.50')
@@ -110,6 +121,9 @@ test('dashboard preview serves organization and billing fixtures with the expect
 
   const subscription = parse(resolveDashboardPreviewRequest('GET', '/api/billing/subscription'))
   assert.equal(subscription.subscription.status, 'active')
+  assert.equal(subscription.subscription.allocated_enclaves, 3)
+  assert.equal(subscription.subscription.enclave_limit, 4)
+  assert.equal(subscription.subscription.hourly_rate_usd > 0, true)
 
   const tiers = parse(resolveDashboardPreviewRequest('GET', '/api/billing/subscription/tiers'))
   assert.equal(tiers.tiers.length, 3)

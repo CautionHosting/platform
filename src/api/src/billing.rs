@@ -1,7 +1,7 @@
 use axum::{
+    Json,
     extract::{Extension, Path, State},
     http::StatusCode,
-    Json,
 };
 use chrono::{DateTime, Datelike, Utc};
 use hmac::{Hmac, Mac};
@@ -14,7 +14,7 @@ use std::{
 };
 use uuid::Uuid;
 
-use crate::{get_user_primary_org, AppState, AuthContext, PricingConfig};
+use crate::{AppState, AuthContext, PricingConfig, get_user_primary_org};
 
 /// Base AWS on-demand rates by instance type (USD/hr, us-west-2).
 /// Used by both compute metering and builder billing.
@@ -47,14 +47,16 @@ use serde::Serialize;
 
 #[derive(Debug, sqlx::FromRow)]
 struct BillingUsageRow {
-    id: Option<Uuid>,
+    application_id: Option<Uuid>,
     resource_id: String,
     resource_name: String,
     resource_type: String,
+    region: Option<String>,
+    last_recorded_at: DateTime<Utc>,
     quantity: f64,
     unit: String,
     rate: f64,
-    cost: f64,
+    cost_cents: i64,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -63,8 +65,43 @@ struct SubscriptionSpendRow {
     tier: String,
     quantity: f64,
     rate: f64,
-    cost: f64,
-    projected_cost: f64,
+    cost_cents: i64,
+    future_cost: f64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ActiveRunnerProjectionRow {
+    resource_id: String,
+    instance_type: Option<String>,
+    last_billed_at: DateTime<Utc>,
+    latest_rate: Option<f64>,
+}
+
+fn usage_row_id(row: &BillingUsageRow) -> String {
+    let owner = row
+        .application_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| row.resource_id.clone());
+    format!(
+        "usage:{owner}:{}:{}:{}:{}:{}:{:.10}",
+        row.resource_id,
+        row.resource_name,
+        row.resource_type,
+        row.unit,
+        row.region.as_deref().unwrap_or(""),
+        row.rate,
+    )
+}
+
+fn projected_runner_cost(
+    last_billed_at: DateTime<Utc>,
+    month_start: DateTime<Utc>,
+    month_end: DateTime<Utc>,
+    hourly_rate: f64,
+) -> f64 {
+    let projection_start = last_billed_at.max(month_start);
+    let seconds = (month_end - projection_start).num_seconds().max(0) as f64;
+    seconds / 3600.0 * hourly_rate
 }
 
 #[derive(Debug, Deserialize)]
@@ -242,21 +279,9 @@ pub async fn get_billing_usage(
     } else {
         chrono::NaiveDate::from_ymd_opt(now.year(), now.month() + 1, 1).unwrap()
     };
-    let days_in_month = next_month_naive
-        .signed_duration_since(first_of_month_naive)
-        .num_days() as f64;
     let next_month_dt = next_month_naive.and_hms_opt(0, 0, 0).unwrap().and_utc();
-    let billing_period_seconds = next_month_dt
-        .signed_duration_since(first_of_month_dt)
-        .num_seconds();
-    let elapsed_seconds = now.signed_duration_since(first_of_month_dt).num_seconds();
-    let projection_multiplier = if elapsed_seconds > 0 {
-        billing_period_seconds as f64 / elapsed_seconds as f64
-    } else {
-        days_in_month * 24.0
-    };
 
-    let total_debits_cents = get_debit_balance_cents(&state.db, org_id)
+    let lifetime_debits_cents = get_debit_balance_cents(&state.db, org_id)
         .await
         .map_err(|e| {
             (
@@ -269,7 +294,7 @@ pub async fn get_billing_usage(
         r#"
         WITH monthly_usage AS (
             SELECT
-                ul.application_id AS id,
+                ul.application_id,
                 ul.resource_id,
                 COALESCE(
                     NULLIF(cr.resource_name, ''),
@@ -277,42 +302,54 @@ pub async fn get_billing_usage(
                     ul.resource_id
                 ) AS resource_name,
                 ul.resource_type,
+                COALESCE(
+                    NULLIF(ul.metadata->>'region', ''),
+                    NULLIF(cr.region, ''),
+                    NULLIF(tr.region, '')
+                ) AS region,
+                ul.recorded_at,
                 ul.unit,
                 (
                     COALESCE(ul.base_unit_cost_usd, 0)
                     * (1 + COALESCE(ul.margin_percent, 0) / 100.0)
                 )::double precision AS rate,
                 ul.quantity::double precision AS quantity,
-                (
+                ROUND((
                     ul.quantity
                     * COALESCE(ul.base_unit_cost_usd, 0)
                     * (1 + COALESCE(ul.margin_percent, 0) / 100.0)
-                )::double precision AS cost
+                ) * 100)::bigint AS cost_cents
             FROM usage_ledger ul
             LEFT JOIN compute_resources cr
                 ON cr.id = ul.application_id
                AND cr.organization_id = ul.organization_id
+            LEFT JOIN tracked_resources tr
+                ON tr.resource_id = ul.resource_id
+               AND tr.organization_id = ul.organization_id
             WHERE ul.organization_id = $1
               AND ul.recorded_at >= $2
               AND ul.recorded_at < $3
+              AND ul.resource_type NOT IN ('monthly_total', 'aws_cost_explorer')
         )
         SELECT
-            id,
-            MIN(resource_id) AS resource_id,
+            application_id,
+            resource_id,
             resource_name,
             resource_type,
+            region,
+            MAX(recorded_at) AS last_recorded_at,
             SUM(quantity)::double precision AS quantity,
             unit,
             rate,
-            SUM(cost)::double precision AS cost
+            SUM(cost_cents)::bigint AS cost_cents
         FROM monthly_usage
-        GROUP BY id, resource_name, resource_type, unit, rate
-        ORDER BY cost DESC, resource_name ASC, resource_type ASC
+        GROUP BY application_id, resource_id, resource_name, resource_type, region, unit, rate
+        ORDER BY cost_cents DESC, resource_name ASC, resource_type ASC
         "#,
     )
     .bind(org_id)
     .bind(first_of_month_dt)
-    .bind(next_month_dt)
+    .bind(now)
     .fetch_all(&state.db)
     .await
     .map_err(|e| {
@@ -337,7 +374,7 @@ pub async fn get_billing_usage(
                     0
                 )::double precision AS quantity,
                 sl.cost_hourly::double precision AS rate,
-                GREATEST(
+                ROUND(GREATEST(
                     EXTRACT(
                         EPOCH FROM
                             LEAST(COALESCE(sl.billing_period_end, $3), $3)
@@ -345,17 +382,21 @@ pub async fn get_billing_usage(
                     ) / 3600.0
                     * sl.cost_hourly,
                     0
-                )::double precision AS cost,
-                GREATEST(
-                    EXTRACT(
-                        EPOCH FROM
-                            LEAST(COALESCE(sl.billing_period_end, $4), $4)
-                            - GREATEST(sl.billing_period_start, $2)
-                    ) / 3600.0
-                    * sl.cost_hourly,
-                    0
-                )::double precision AS projected_cost
+                ) * 100)::bigint AS cost_cents,
+                CASE
+                    WHEN sl.billing_period_end IS NULL
+                     AND s.billing_source = 'legacy_credits'
+                     AND s.status IN ('active', 'past_due')
+                    THEN GREATEST(
+                        EXTRACT(
+                            EPOCH FROM $4 - GREATEST(sl.billing_period_start, $2, $3)
+                        ) / 3600.0 * sl.cost_hourly,
+                        0
+                    )::double precision
+                    ELSE 0::double precision
+                END AS future_cost
             FROM subscription_ledger sl
+            JOIN subscriptions s ON s.id = sl.subscription_id
             WHERE sl.organization_id = $1
               AND sl.billing_period_start < $4
               AND COALESCE(sl.billing_period_end, $4) > $2
@@ -365,12 +406,12 @@ pub async fn get_billing_usage(
             tier,
             SUM(quantity)::double precision AS quantity,
             rate,
-            SUM(cost)::double precision AS cost,
-            SUM(projected_cost)::double precision AS projected_cost
+            SUM(cost_cents)::bigint AS cost_cents,
+            SUM(future_cost)::double precision AS future_cost
         FROM monthly_subscription_spend
         GROUP BY subscription_id, tier, rate
-        HAVING SUM(cost) > 0 OR SUM(projected_cost) > 0
-        ORDER BY cost DESC, tier ASC
+        HAVING SUM(cost_cents) > 0 OR SUM(future_cost) > 0
+        ORDER BY cost_cents DESC, tier ASC
         "#,
     )
     .bind(org_id)
@@ -386,31 +427,122 @@ pub async fn get_billing_usage(
         )
     })?;
 
-    let total_cost = total_debits_cents as f64 / 100.0;
-    let mut total_projected = total_cost;
+    let active_runners: Vec<ActiveRunnerProjectionRow> = sqlx::query_as(
+        r#"
+        SELECT
+            tr.resource_id,
+            tr.instance_type,
+            tr.last_billed_at,
+            latest.latest_rate
+        FROM tracked_resources tr
+        LEFT JOIN LATERAL (
+            SELECT
+                (
+                    ul.base_unit_cost_usd * (1 + ul.margin_percent / 100.0)
+                )::double precision AS latest_rate
+            FROM usage_ledger ul
+            WHERE ul.organization_id = tr.organization_id
+              AND ul.resource_id = tr.resource_id
+              AND ul.resource_type = 'compute'
+              AND ul.base_unit_cost_usd IS NOT NULL
+              AND ul.margin_percent IS NOT NULL
+            ORDER BY ul.recorded_at DESC, ul.created_at DESC, ul.id DESC
+            LIMIT 1
+        ) latest ON true
+        WHERE tr.organization_id = $1
+          AND tr.provider = 'aws'
+          AND tr.status = 'running'
+          AND COALESCE(tr.metadata->>'resource_type', '') <> 'builder'
+          AND NOT (tr.metadata ? 'build_id')
+        "#,
+    )
+    .bind(org_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )
+    })?;
+
+    let mut future_runner_costs = HashMap::new();
+    for runner in active_runners {
+        let hourly_rate = if let Some(rate) = runner.latest_rate {
+            rate
+        } else {
+            let Some(instance_type) = runner.instance_type.as_deref() else {
+                continue;
+            };
+            let Some(pricing) = state.pricing.instance_pricing(instance_type) else {
+                continue;
+            };
+            pricing.unit_cost_usd()
+        };
+        future_runner_costs.insert(
+            runner.resource_id,
+            projected_runner_cost(
+                runner.last_billed_at,
+                first_of_month_dt,
+                next_month_dt,
+                hourly_rate,
+            ),
+        );
+    }
+
+    let usage_cost_cents: i64 = usage_rows.iter().map(|row| row.cost_cents).sum();
+    let subscription_cost_cents: i64 = subscription_rows.iter().map(|row| row.cost_cents).sum();
+    let total_cost = (usage_cost_cents + subscription_cost_cents) as f64 / 100.0;
+    let future_runner_cost: f64 = future_runner_costs.values().copied().sum();
+    let future_subscription_cost: f64 = subscription_rows.iter().map(|row| row.future_cost).sum();
+    let total_projected = total_cost + future_runner_cost + future_subscription_cost;
+
+    let latest_compute_record = usage_rows
+        .iter()
+        .filter(|row| row.resource_type == "compute")
+        .fold(
+            HashMap::<String, DateTime<Utc>>::new(),
+            |mut latest, row| {
+                latest
+                    .entry(row.resource_id.clone())
+                    .and_modify(|recorded_at| {
+                        *recorded_at = (*recorded_at).max(row.last_recorded_at)
+                    })
+                    .or_insert(row.last_recorded_at);
+                latest
+            },
+        );
     let mut items = Vec::new();
     let mut subscription_items = Vec::new();
 
     for row in usage_rows {
-        let projected_cost = row.cost * projection_multiplier.max(1.0);
-
-        total_projected += (projected_cost - row.cost).max(0.0);
+        let cost = row.cost_cents as f64 / 100.0;
+        let future_cost = if row.resource_type == "compute"
+            && latest_compute_record.get(&row.resource_id) == Some(&row.last_recorded_at)
+        {
+            future_runner_costs.remove(&row.resource_id).unwrap_or(0.0)
+        } else {
+            0.0
+        };
 
         items.push(serde_json::json!({
-            "id": row.id,
+            "id": usage_row_id(&row),
+            "application_id": row.application_id,
             "resource_id": row.resource_id,
             "resource_name": row.resource_name,
             "resource_type": row.resource_type,
+            "region": row.region,
+            "last_recorded_at": row.last_recorded_at,
             "quantity": row.quantity,
             "unit": row.unit,
-            "rate": format!("{:.2}", row.rate),
-            "cost": row.cost,
-            "projected_cost": projected_cost,
+            "rate": row.rate,
+            "cost": cost,
+            "projected_cost": cost + future_cost,
         }));
     }
 
     for row in subscription_rows {
-        total_projected += (row.projected_cost - row.cost).max(0.0);
+        let cost = row.cost_cents as f64 / 100.0;
 
         subscription_items.push(serde_json::json!({
             "id": format!("{}:{}:{:.6}", row.subscription_id, row.tier, row.rate),
@@ -420,14 +552,15 @@ pub async fn get_billing_usage(
             "resource_type": "subscription",
             "quantity": row.quantity,
             "unit": "hours",
-            "rate": format!("{:.2}", row.rate),
-            "cost": row.cost,
-            "projected_cost": row.projected_cost,
+            "rate": row.rate,
+            "cost": cost,
+            "projected_cost": cost + row.future_cost,
         }));
     }
 
     Ok(Json(serde_json::json!({
         "total_cost": total_cost,
+        "lifetime_cost": lifetime_debits_cents as f64 / 100.0,
         "projected_cost": total_projected,
         "currency": "USD",
         "billing_period_start": first_of_month_naive.to_string(),
@@ -2529,15 +2662,13 @@ pub async fn apply_credit(
 
     Ok(new_balance)
 }
-
-
 #[cfg(test)]
 mod tests {
     use super::{
-        build_paddle_checkout_custom_data, extract_paddle_payment_method_id,
-        resolve_credit_purchase_request, transaction_contains_price_id,
-        validate_credit_purchase_transaction, validate_paddle_checkout_binding,
-        validate_paddle_setup_transaction, CreditPackage, PurchaseCreditsRequest,
+        CreditPackage, PurchaseCreditsRequest, build_paddle_checkout_custom_data,
+        extract_paddle_payment_method_id, resolve_credit_purchase_request,
+        transaction_contains_price_id, validate_credit_purchase_transaction,
+        validate_paddle_checkout_binding, validate_paddle_setup_transaction,
     };
     use axum::http::StatusCode;
     use uuid::Uuid;

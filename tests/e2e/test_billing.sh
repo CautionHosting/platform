@@ -40,6 +40,9 @@
 #  32. Credit purchase webhook refuses to mint without an intent row
 #  33. Credit purchase webhook is idempotent on duplicate delivery
 #  34. credit_ledger UNIQUE(paddle_transaction_id) one-grant invariant
+#  35. Dashboard current-month totals exclude historical aggregate entries
+#  36. Dashboard projection uses valid ledger rates and configured fallback
+#  37. Subscription API projects live past-due credit subscriptions
 
 set -euo pipefail
 
@@ -1448,6 +1451,164 @@ if echo "$DUP_PLAIN" | grep -qi "duplicate key" \
     step_pass "credit_ledger UNIQUE(paddle_transaction_id): duplicate rejected, ON CONFLICT no-op"
 else
     step_fail "credit_ledger unique constraint (plain='$DUP_PLAIN', onconflict='$DUP_ONCONFLICT', rows=$CONSTRAINT_ROWS)"
+fi
+
+# ── Step 35: Dashboard month and lifetime totals are distinct ────────
+
+STEP_NUM=35
+log "Testing dashboard current-month totals and per-entry cent rounding..."
+
+# Billing endpoints use the user's oldest organization membership.
+ORG_ID=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -A -c "
+SELECT organization_id
+FROM organization_members
+WHERE user_id = '$USER_ID'
+ORDER BY created_at ASC, id ASC
+LIMIT 1;
+" 2>/dev/null | head -1 | tr -d ' \n')
+
+docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
+DELETE FROM subscription_ledger WHERE organization_id = '$ORG_ID';
+DELETE FROM subscription_intents WHERE organization_id = '$ORG_ID';
+DELETE FROM subscriptions WHERE organization_id = '$ORG_ID';
+DELETE FROM tracked_resources WHERE organization_id = '$ORG_ID';
+DELETE FROM usage_ledger WHERE organization_id = '$ORG_ID';
+
+INSERT INTO usage_ledger (
+    organization_id, resource_id, provider, resource_type, quantity, unit,
+    base_unit_cost_usd, margin_percent, recorded_at, metadata
+) VALUES
+    ('$ORG_ID', 'dashboard-prior', 'aws', 'compute', 5, 'hours', 1, 0,
+     date_trunc('month', NOW()) - INTERVAL '1 second', '{\"region\":\"us-east-1\"}'),
+    ('$ORG_ID', 'dashboard-current', 'aws', 'compute', 2, 'hours', 1, 0,
+     NOW(), '{\"resource_name\":\"dashboard-runner\",\"region\":\"eu-west-1\"}'),
+    ('$ORG_ID', 'dashboard-fraction-a', 'aws', 'compute', 1, 'hours', 0.0049, 0,
+     NOW(), '{}'),
+    ('$ORG_ID', 'dashboard-fraction-b', 'aws', 'compute', 1, 'hours', 0.0049, 0,
+     NOW(), '{}'),
+    ('$ORG_ID', 'dashboard-catch-up', 'aws', 'monthly_total', 11, 'usd', 1, 0,
+     NOW(), '{}'),
+    ('$ORG_ID', 'dashboard-cost-sync', 'aws', 'aws_cost_explorer', 13, 'usd', 1, 0,
+     NOW(), '{}'),
+    ('$ORG_ID', 'dashboard-renamed', 'aws', 'compute', 0, 'hours', 1, 0,
+     NOW(), '{"resource_name":"dashboard-name-a"}'),
+    ('$ORG_ID', 'dashboard-renamed', 'aws', 'compute', 0, 'hours', 1, 0,
+     NOW(), '{"resource_name":"dashboard-name-b"}');
+" >/dev/null 2>&1
+
+DASHBOARD_USAGE=$(curl -sf "$GATEWAY_URL/api/billing/usage" -H "X-Session-ID: $SESSION_ID")
+if jq -e '
+    .total_cost == 2 and
+    .lifetime_cost == 31 and
+    .projected_cost == 2 and
+    all(.items[]; .resource_type != "monthly_total" and .resource_type != "aws_cost_explorer") and
+    ([.items[] | select(.resource_id == "dashboard-renamed") | .id] | length == 2 and (unique | length) == 2) and
+    any(.items[];
+        .resource_id == "dashboard-current" and
+        .region == "eu-west-1" and
+        (.last_recorded_at | type) == "string" and
+        (.rate | type) == "number" and
+        (.id | startswith("usage:")))
+' <<<"$DASHBOARD_USAGE" >/dev/null; then
+    step_pass "Dashboard reports current-month actual separately from lifetime debit"
+else
+    step_fail "Dashboard month/lifetime response: $DASHBOARD_USAGE"
+fi
+
+# ── Step 36: Projection uses only active non-builder runners ─────────
+
+STEP_NUM=36
+log "Testing dashboard projection resource filtering..."
+
+docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
+INSERT INTO tracked_resources (
+    resource_id, organization_id, provider, instance_type, region, metadata,
+    status, started_at, stopped_at, last_billed_at
+) VALUES
+    ('dashboard-running-$ORG_ID', '$ORG_ID', 'aws', 'm5.xlarge', 'eu-west-1', '{}',
+     'running', date_trunc('month', NOW()), NULL, date_trunc('month', NOW())),
+    ('dashboard-unmetered-$ORG_ID', '$ORG_ID', 'aws', 'm5.xlarge', 'eu-west-1', '{}',
+     'running', date_trunc('month', NOW()), NULL, date_trunc('month', NOW())),
+    ('dashboard-stopped-$ORG_ID', '$ORG_ID', 'aws', 'm5.xlarge', 'eu-west-1', '{}',
+     'stopped', date_trunc('month', NOW()), NOW(), date_trunc('month', NOW())),
+    ('dashboard-builder-$ORG_ID', '$ORG_ID', 'aws', 'm5.xlarge', 'eu-west-1',
+     '{\"resource_type\":\"builder\",\"build_id\":\"dashboard-test\"}',
+     'running', date_trunc('month', NOW()), NULL, date_trunc('month', NOW()));
+
+INSERT INTO usage_ledger (
+    organization_id, resource_id, provider, resource_type, quantity, unit,
+    base_unit_cost_usd, margin_percent, recorded_at, metadata
+) VALUES
+    ('$ORG_ID', 'dashboard-running-$ORG_ID', 'aws', 'compute', 0, 'hours', 0.1, 0,
+     date_trunc('month', NOW()) - INTERVAL '3 seconds', '{}'),
+    ('$ORG_ID', 'dashboard-running-$ORG_ID', 'aws', 'compute', 0, 'hours', 0.4, 25,
+     date_trunc('month', NOW()) - INTERVAL '2 seconds', '{}'),
+    ('$ORG_ID', 'dashboard-running-$ORG_ID', 'aws', 'compute', 0, 'hours', NULL, NULL,
+     date_trunc('month', NOW()) - INTERVAL '1 second', '{}');
+" >/dev/null 2>&1
+
+EXPECTED_PROJECTION=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -A -c "
+SELECT 2 + EXTRACT(EPOCH FROM (
+    date_trunc('month', NOW()) + INTERVAL '1 month' - date_trunc('month', NOW())
+)) / 3600 * (0.5 + 0.192);
+" 2>/dev/null | head -1 | tr -d ' \n')
+DASHBOARD_USAGE=$(curl -sf "$GATEWAY_URL/api/billing/usage" -H "X-Session-ID: $SESSION_ID")
+if jq -e --argjson expected "$EXPECTED_PROJECTION" '
+    .total_cost == 2 and
+    ((.projected_cost - $expected) as $difference |
+        ($difference * $difference) < 0.00000001)
+' <<<"$DASHBOARD_USAGE" >/dev/null; then
+    step_pass "Projection uses the latest valid rate and fallback, excluding stopped runners and builders"
+else
+    step_fail "Dashboard projection response: expected=$EXPECTED_PROJECTION response=$DASHBOARD_USAGE"
+fi
+
+# ── Step 37: Subscription response uses persisted commercial terms ──
+
+STEP_NUM=37
+log "Testing stored subscription terms and active ledger rate..."
+
+SUB_ID=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -A -c "
+INSERT INTO subscriptions (
+    user_id, organization_id, tier, billing_period, max_vcpus, max_apps,
+    price_cents_per_cycle, status, started_at, current_period_start,
+    current_period_end, next_billing_at, created_at, updated_at
+) VALUES (
+    '$USER_ID', '$ORG_ID', '1_enclave', 'monthly', 0, 7,
+    12345, 'past_due', NOW(), NOW(), NOW(),
+    TIMESTAMPTZ '9999-12-31 23:59:59+00', NOW(), NOW()
+) RETURNING id;
+" 2>/dev/null | head -1 | tr -d ' \n')
+
+docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
+INSERT INTO subscription_ledger (
+    subscription_id, organization_id, billing_period_start, billing_period_end,
+    tier, cost_hourly, status
+) VALUES (
+    '$SUB_ID', '$ORG_ID', NOW() - INTERVAL '1 hour', NULL,
+    '1_enclave', 0.342466, 'credits_covered'
+);
+" >/dev/null 2>&1
+
+SUBSCRIPTION_RESPONSE=$(curl -sf "$GATEWAY_URL/api/billing/subscription" -H "X-Session-ID: $SESSION_ID")
+SUBSCRIPTION_USAGE=$(curl -sf "$GATEWAY_URL/api/billing/usage" -H "X-Session-ID: $SESSION_ID")
+if jq -e '
+    .subscription.max_apps == 7 and
+    .subscription.enclave_limit == 7 and
+    .subscription.status == "past_due" and
+    .subscription.price_cents_per_cycle == 12345 and
+    .subscription.monthly_price_cents == 12345 and
+    .subscription.hourly_rate_usd == 0.342466
+' <<<"$SUBSCRIPTION_RESPONSE" >/dev/null \
+    && jq -e '
+        any(.subscription_items[];
+            .rate == 0.342466 and
+            .cost >= 0.34 and .cost <= 0.35 and
+            .projected_cost > .cost)
+    ' <<<"$SUBSCRIPTION_USAGE" >/dev/null; then
+    step_pass "Subscription API returns stored terms and projects the open legacy segment"
+else
+    step_fail "Subscription responses: terms=$SUBSCRIPTION_RESPONSE usage=$SUBSCRIPTION_USAGE"
 fi
 
 # ── Final: Database summary ──────────────────────────────────────────

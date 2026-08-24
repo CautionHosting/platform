@@ -34,6 +34,27 @@ export const getDnsGuidance = (app) => {
   return `Point ${domain} to this target with a CNAME record.`
 }
 
+export const getAppEstimatedMonthlyCost = (app, billingItems = []) => {
+  const billingItem = billingItems
+    .filter((item) =>
+      item.applicationId === app?.id
+      && item.resourceType === 'compute'
+      && item.unit === 'hours'
+      && item.rate != null
+      && Number.isFinite(Number(item.rate)))
+    .reduce((latest, item) => {
+      if (!latest) return item
+      return Date.parse(item.lastRecordedAt) > Date.parse(latest.lastRecordedAt) ? item : latest
+    }, null)
+
+  if (billingItem) return (Number(billingItem.rate) * 730).toFixed(2)
+
+  const fallback = Number(app?.estimated_monthly_cost)
+  return app?.estimated_monthly_cost != null && Number.isFinite(fallback)
+    ? fallback.toFixed(2)
+    : null
+}
+
 export const formatStatusLabel = (status) => {
   if (typeof status !== 'string' || !status.trim()) return 'Unavailable'
 
