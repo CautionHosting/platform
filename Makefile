@@ -91,7 +91,7 @@ build-api-dev:
 
 build-api-e2e:
 	@echo "Building API service (e2e test mode)..."
-	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.api .
+	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.api .
 	@echo "API e2e image build complete"
 
 build-email-dev:
@@ -676,6 +676,7 @@ run-api-test: network
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
 		-e BYOC_PADDLE_SUBSCRIPTIONS_ENABLED \
+		-e E2E_SELF_MANAGED_TERMINATION_FORCE=$(E2E_SELF_MANAGED_TERMINATION_FORCE) \
 		-e GIT_HOSTNAME=localhost \
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
@@ -748,7 +749,7 @@ up-test-billing: down-test-billing migrate-test
 	@echo "Building test images for billing e2e..."
 	@$(MAKE) build-api-e2e build-email-dev build-metering
 	@$(MAKE) build-gateway-e2e
-	@$(MAKE) run-email-test run-metering-test run-api-test
+	@E2E_SELF_MANAGED_TERMINATION_FORCE=true $(MAKE) run-email-test run-metering-test run-api-test
 	@echo "Waiting for API to be ready..."
 	@sleep 2
 	@$(MAKE) run-gateway-test

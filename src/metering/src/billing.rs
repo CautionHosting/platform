@@ -311,7 +311,7 @@ async fn run_subscription_maintenance(state: &AppState) -> Result<()> {
 async fn run_subscription_maintenance_inner(state: &AppState) -> Result<()> {
     let subs = sqlx::query(
         r#"
-        SELECT id, organization_id, status, cancel_at_period_end
+        SELECT id, organization_id
         FROM subscriptions
         WHERE billing_source = 'legacy_credits'
           AND status IN ('active', 'past_due')
@@ -329,8 +329,6 @@ async fn run_subscription_maintenance_inner(state: &AppState) -> Result<()> {
     for row in &subs {
         let sub_id: uuid::Uuid = row.get("id");
         let org_id: uuid::Uuid = row.get("organization_id");
-        let status: String = row.get("status");
-        let cancel_at_end: bool = row.get("cancel_at_period_end");
 
         if let Err(e) = check_balance_thresholds(state, org_id).await {
             tracing::error!(
@@ -340,13 +338,58 @@ async fn run_subscription_maintenance_inner(state: &AppState) -> Result<()> {
             );
         }
 
+        let mut tx = state.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(org_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        // Match pre-plan rolling binaries: ledger projection, then subscription,
+        // then the authoritative plan row.
+        sqlx::query(
+            "SELECT id FROM subscription_ledger
+             WHERE subscription_id = $1 AND billing_period_end IS NULL
+             ORDER BY id FOR UPDATE",
+        )
+        .bind(sub_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let locked: Option<(String, bool, uuid::Uuid)> = sqlx::query_as(
+            "SELECT status, cancel_at_period_end, self_managed_plan_id
+             FROM subscriptions
+             WHERE id = $1 AND organization_id = $2
+               AND billing_source = 'legacy_credits'
+               AND status IN ('active', 'past_due')
+               AND self_managed_plan_id IS NOT NULL
+             FOR UPDATE",
+        )
+        .bind(sub_id)
+        .bind(org_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((status, cancel_at_end, plan_id)) = locked else {
+            tx.commit().await?;
+            continue;
+        };
+        let plan_still_legacy: Option<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT id FROM self_managed_plans
+             WHERE id = $1 AND organization_id = $2 AND source = 'legacy'
+             FOR UPDATE",
+        )
+        .bind(plan_id)
+        .bind(org_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if plan_still_legacy.is_none() {
+            tx.commit().await?;
+            continue;
+        }
+
         let balance_cents = get_ledger_balance_cents(&state.pool, org_id).await?;
 
         if cancel_at_end || balance_cents <= 0 {
             let now = chrono::Utc::now();
-            let mut tx = state.pool.begin().await?;
             close_open_subscription_segment(&mut tx, sub_id, now).await?;
-            sqlx::query(
+            let updated = sqlx::query(
                 "UPDATE subscriptions SET
                  status = 'canceled',
                  canceled_at = COALESCE(canceled_at, NOW()),
@@ -354,10 +397,31 @@ async fn run_subscription_maintenance_inner(state: &AppState) -> Result<()> {
                  current_period_end = $1,
                  next_billing_at = TIMESTAMPTZ '9999-12-31 23:59:59+00',
                  updated_at = NOW()
-                 WHERE id = $2",
+                 WHERE id = $2 AND organization_id = $3
+                   AND billing_source = 'legacy_credits'
+                   AND status IN ('active', 'past_due')
+                   AND self_managed_plan_id = $4",
             )
             .bind(now)
             .bind(sub_id)
+            .bind(org_id)
+            .bind(plan_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if updated != 1 {
+                tx.rollback().await?;
+                continue;
+            }
+            sqlx::query(
+                "UPDATE self_managed_plans
+                 SET enclave_limit = 0, terminated_at = COALESCE(terminated_at, $1),
+                     updated_at = NOW()
+                 WHERE id = $2 AND organization_id = $3 AND source = 'legacy'",
+            )
+            .bind(now)
+            .bind(plan_id)
+            .bind(org_id)
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;
@@ -376,13 +440,19 @@ async fn run_subscription_maintenance_inner(state: &AppState) -> Result<()> {
 
         if status == "past_due" {
             sqlx::query(
-                "UPDATE subscriptions SET status = 'active', updated_at = NOW() WHERE id = $1",
+                "UPDATE subscriptions SET status = 'active', updated_at = NOW()
+                 WHERE id = $1 AND organization_id = $2
+                   AND billing_source = 'legacy_credits' AND status = 'past_due'
+                   AND self_managed_plan_id = $3",
             )
             .bind(sub_id)
-            .execute(&state.pool)
+            .bind(org_id)
+            .bind(plan_id)
+            .execute(&mut *tx)
             .await?;
             tracing::info!("Subscription {} restored to active", sub_id);
         }
+        tx.commit().await?;
     }
 
     Ok(())

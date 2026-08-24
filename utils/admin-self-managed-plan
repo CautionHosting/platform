@@ -1,0 +1,294 @@
+# SPDX-FileCopyrightText: 2026 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+cmd_set_self_managed_plan() {
+    local target="${1:-}"
+    if [[ "$target" == "--help" || "$target" == "-h" ]]; then
+        cat <<'EOF'
+Usage: ./utils/admin set-self-managed-plan <org-uuid|user-email>
+  (--unlimited | --enclaves <positive integer>)
+  (--expires-at <RFC3339 timestamp> | --never-expires)
+  --operator <name-or-email> --reason <contract-or-ticket>
+  [--detach-paddle] [--confirm]
+
+The command is a dry run unless --confirm is supplied. An active Paddle BYOC
+subscription requires --detach-paddle and is canceled immediately; its billing
+record and provider identifiers are retained while its plan link is removed.
+EOF
+        return
+    fi
+    [[ -n "$target" ]] || { echo "Error: Missing organization UUID or user email"; exit 1; }
+    shift
+
+    local limit_mode="" enclave_limit="" expiration_mode="" expires_at=""
+    local operator="" reason="" detach_paddle="false" confirm="false"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --unlimited)
+                [[ -z "$limit_mode" ]] || { echo "Error: Specify exactly one enclave limit"; exit 1; }
+                limit_mode="unlimited"; enclave_limit=""; shift ;;
+            --enclaves)
+                [[ $# -ge 2 && "$2" != --* ]] || { echo "Error: --enclaves requires a positive integer"; exit 1; }
+                [[ -z "$limit_mode" ]] || { echo "Error: Specify exactly one enclave limit"; exit 1; }
+                [[ "$2" =~ ^[1-9][0-9]*$ ]] && (( 10#$2 <= 2147483647 )) || {
+                    echo "Error: --enclaves must be between 1 and 2147483647"; exit 1;
+                }
+                limit_mode="finite"; enclave_limit="$((10#$2))"; shift 2 ;;
+            --expires-at)
+                [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { echo "Error: --expires-at requires a timestamp"; exit 1; }
+                [[ -z "$expiration_mode" ]] || { echo "Error: Specify exactly one expiration policy"; exit 1; }
+                expiration_mode="expires"; expires_at="$2"; shift 2 ;;
+            --never-expires)
+                [[ -z "$expiration_mode" ]] || { echo "Error: Specify exactly one expiration policy"; exit 1; }
+                expiration_mode="never"; shift ;;
+            --operator) [[ $# -ge 2 && -n "$2" ]] || { echo "Error: --operator requires a value"; exit 1; }; operator="$2"; shift 2 ;;
+            --reason) [[ $# -ge 2 && -n "$2" ]] || { echo "Error: --reason requires a value"; exit 1; }; reason="$2"; shift 2 ;;
+            --detach-paddle) detach_paddle="true"; shift ;;
+            --confirm) confirm="true"; shift ;;
+            --help|-h) cmd_set_self_managed_plan --help; return ;;
+            *) echo "Error: Unknown option: $1"; exit 1 ;;
+        esac
+    done
+
+    [[ -n "$limit_mode" ]] || { echo "Error: Specify --unlimited or --enclaves"; exit 1; }
+    [[ -n "$expiration_mode" ]] || { echo "Error: Specify --expires-at or --never-expires"; exit 1; }
+    [[ -n "$operator" ]] || { echo "Error: --operator is required"; exit 1; }
+    [[ -n "$reason" ]] || { echo "Error: --reason is required"; exit 1; }
+    (( ${#operator} <= 200 )) || { echo "Error: --operator is too long"; exit 1; }
+    (( ${#reason} <= 1000 )) || { echo "Error: --reason is too long"; exit 1; }
+    if [[ "$operator" =~ [[:cntrl:]] || "$reason" =~ [[:cntrl:]] ]]; then
+        echo "Error: --operator and --reason cannot contain control characters"; exit 1
+    fi
+    if [[ "$expiration_mode" == "expires" ]]; then
+        [[ "$expires_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$ ]] || {
+            echo "Error: --expires-at must be an RFC3339 timestamp"; exit 1;
+        }
+    fi
+
+    local org_id org_matches
+    if [[ "$target" =~ $UUID_REGEX ]]; then
+        org_id="$target"
+    elif [[ "$target" == *@* ]]; then
+        org_matches=$(printf '%s\n' "SELECT om.organization_id FROM users u
+            JOIN organization_members om ON om.user_id = u.id
+            WHERE lower(u.email) = lower(:'email') ORDER BY om.created_at, om.organization_id;" \
+            | psql_cmd -X -v ON_ERROR_STOP=1 -v email="$target")
+        [[ -n "$org_matches" ]] || { echo "Error: No organization found for user: $target"; exit 1; }
+        [[ "$(printf '%s\n' "$org_matches" | wc -l)" == "1" ]] || {
+            echo "Error: User belongs to multiple organizations; use the organization UUID"; exit 1;
+        }
+        org_id="$org_matches"
+    else
+        echo "Error: Target must be an organization UUID or user email"; exit 1
+    fi
+
+    local org_row current provider_id
+    org_row=$(printf '%s\n' "SELECT id || '|' || name FROM organizations WHERE id = :'id'::uuid;" \
+        | psql_cmd -X -v ON_ERROR_STOP=1 -v id="$org_id")
+    [[ -n "$org_row" ]] || { echo "Error: Organization not found: $org_id"; exit 1; }
+    if [[ -n "$expires_at" ]]; then
+        local valid_expiration
+        valid_expiration=$(printf '%s\n' "SELECT :'value'::timestamptz > NOW();" \
+            | psql_cmd -X -v ON_ERROR_STOP=1 -v value="$expires_at")
+        [[ "$valid_expiration" == "t" ]] || { echo "Error: --expires-at must be in the future"; exit 1; }
+    fi
+
+    current=$(printf '%s\n' "SELECT p.source || '|' || COALESCE(p.enclave_limit::text, 'unlimited') || '|' ||
+        COALESCE(p.expires_at::text, 'never') || '|' || COALESCE(s.paddle_subscription_id, '')
+        FROM self_managed_plans p LEFT JOIN subscriptions s
+          ON s.self_managed_plan_id = p.id AND s.billing_source = 'paddle' AND s.status <> 'canceled'
+        WHERE p.organization_id = :'id'::uuid;" \
+        | psql_cmd -X -v ON_ERROR_STOP=1 -v id="$org_id")
+    provider_id=$(printf '%s\n' "$current" | while IFS='|' read -r _ _ _ provider; do printf '%s' "$provider"; done)
+    if [[ -n "$provider_id" && "$detach_paddle" != "true" ]]; then
+        echo "Error: Active Paddle BYOC subscription requires --detach-paddle"; exit 1
+    fi
+    if [[ -z "$provider_id" && "$detach_paddle" == "true" ]]; then
+        local applied_detachment
+        applied_detachment=$(printf '%s\n' "SELECT EXISTS (
+            SELECT 1 FROM self_managed_plan_changes c
+            JOIN subscriptions s ON s.id = c.subscription_id AND s.organization_id = c.organization_id
+            WHERE c.organization_id = :'organization_id'::uuid
+              AND c.status = 'applied' AND s.billing_source = 'paddle'
+              AND s.self_managed_plan_id IS NULL
+              AND c.requested_enclave_limit IS NOT DISTINCT FROM NULLIF(:'enclave_limit', '')::integer
+              AND c.requested_expires_at IS NOT DISTINCT FROM NULLIF(:'expires_at', '')::timestamptz
+              AND c.operator_identity = :'operator_identity'
+              AND c.operator_reason = :'operator_reason'
+        );" | psql_cmd -X -v ON_ERROR_STOP=1 \
+            -v organization_id="$org_id" -v enclave_limit="$enclave_limit" -v expires_at="$expires_at" \
+            -v operator_identity="$operator" -v operator_reason="$reason")
+        [[ "$applied_detachment" == "t" ]] || {
+            echo "Error: --detach-paddle requires an active Paddle BYOC subscription or an exact applied detachment retry"; exit 1;
+        }
+    fi
+
+    echo "=== Self-managed plan change ==="
+    echo "Organization:       $org_row"
+    echo "Current plan:       ${current:-none}"
+    echo "New enclave limit:  ${enclave_limit:-unlimited}"
+    echo "Expires:            ${expires_at:-never}"
+    echo "Operator:           $operator"
+    echo "Reason:             $reason"
+    [[ -n "$provider_id" ]] && echo "Paddle action:      cancel $provider_id immediately; retain billing row and identifiers" || echo "Paddle action:      none"
+    echo "Resource authority: self_managed_plans"
+    echo "Fully managed:      prepaid credits and metering remain unchanged"
+    if [[ "$confirm" != "true" ]]; then
+        echo "Dry run only. Re-run with --confirm to apply."; return
+    fi
+
+    local prepared change_id prepared_provider prepared_status
+    prepared=$(psql_cmd -X -q -v ON_ERROR_STOP=1 \
+        -v organization_id="$org_id" -v enclave_limit="$enclave_limit" -v expires_at="$expires_at" \
+        -v operator_identity="$operator" -v operator_reason="$reason" -v detach_paddle="$detach_paddle" \
+        < "$SCRIPT_DIR/admin-self-managed-plan-prepare.sql")
+    prepared=$(printf '%s\n' "$prepared" | while IFS= read -r line; do [[ "$line" == *"|"* ]] && printf '%s\n' "$line"; done | tail -n 1)
+    IFS='|' read -r change_id prepared_provider prepared_status <<<"$prepared"
+    [[ -n "$prepared_status" ]] || { echo "Error: Failed to prepare self-managed plan change"; exit 1; }
+    if [[ "$prepared_status" == "applied" ]]; then
+        echo "Self-managed plan applied."; return
+    fi
+
+    admin_cancel_self_managed_paddle "$change_id" "$prepared_provider"
+    psql_cmd -X -q -v ON_ERROR_STOP=1 -v organization_id="$org_id" -v change_id="$change_id" \
+        < "$SCRIPT_DIR/admin-self-managed-plan-apply.sql" >/dev/null
+    echo "Self-managed plan applied; Paddle billing record retained and detached."
+}
+
+cmd_list_self_managed_termination_jobs() {
+    local organization_id="${1:-}"
+    if [[ -n "$organization_id" ]]; then
+        validate_uuid "$organization_id"
+    fi
+    psql_pretty -v ON_ERROR_STOP=1 -v organization_id="$organization_id" -c "
+        SELECT j.id, j.organization_id, j.resource_id, cr.resource_name,
+               j.status, j.attempt_count, j.next_attempt_at, j.last_error,
+               j.recovery_action, j.recovery_operator, j.recovery_reason, j.recovered_at
+        FROM self_managed_termination_jobs j
+        JOIN compute_resources cr
+          ON cr.id = j.resource_id AND cr.organization_id = j.organization_id
+        WHERE NULLIF(:'organization_id', '') IS NULL
+           OR j.organization_id = NULLIF(:'organization_id', '')::uuid
+        ORDER BY j.created_at, j.id;"
+}
+
+cmd_recover_self_managed_termination() {
+    local action="$1" job_id="${2:-}"
+    [[ "$action" == "retry" || "$action" == "resolve" ]] || {
+        echo "Error: Recovery action must be retry or resolve"; exit 1;
+    }
+    [[ -n "$job_id" ]] || { echo "Error: Missing termination job UUID"; exit 1; }
+    validate_uuid "$job_id"
+    shift 2
+    local operator="" reason="" confirm="false"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --operator) [[ $# -ge 2 && -n "$2" ]] || { echo "Error: --operator requires a value"; exit 1; }; operator="$2"; shift 2 ;;
+            --reason) [[ $# -ge 2 && -n "$2" ]] || { echo "Error: --reason requires a value"; exit 1; }; reason="$2"; shift 2 ;;
+            --confirm) confirm="true"; shift ;;
+            *) echo "Error: Unknown option: $1"; exit 1 ;;
+        esac
+    done
+    [[ -n "$operator" ]] || { echo "Error: --operator is required"; exit 1; }
+    [[ -n "$reason" ]] || { echo "Error: --reason is required"; exit 1; }
+    (( ${#operator} <= 200 )) || { echo "Error: --operator is too long"; exit 1; }
+    (( ${#reason} <= 1000 )) || { echo "Error: --reason is too long"; exit 1; }
+    if [[ "$operator" =~ [[:cntrl:]] || "$reason" =~ [[:cntrl:]] ]]; then
+        echo "Error: --operator and --reason cannot contain control characters"; exit 1
+    fi
+
+    local job
+    job=$(printf '%s\n' "SELECT j.id || '|' || j.organization_id || '|' || j.resource_id || '|' ||
+        cr.resource_name || '|' || j.status || '|' || cr.state || '|' ||
+        COALESCE(cr.destroyed_at::text, '') || '|' || COALESCE(j.last_error, '')
+        FROM self_managed_termination_jobs j
+        JOIN compute_resources cr ON cr.id = j.resource_id AND cr.organization_id = j.organization_id
+        WHERE j.id = :'job_id'::uuid;" | psql_cmd -X -v ON_ERROR_STOP=1 -v job_id="$job_id")
+    [[ -n "$job" ]] || { echo "Error: Termination job not found: $job_id"; exit 1; }
+    echo "=== Self-managed termination recovery ==="
+    echo "Action:   $action"
+    echo "Job:      $job"
+    echo "Operator: $operator"
+    echo "Reason:   $reason"
+    if [[ "$confirm" != "true" ]]; then
+        echo "Dry run only. Re-run with --confirm to apply."; return
+    fi
+
+    local updated
+    if [[ "$action" == "retry" ]]; then
+        updated=$(printf '%s\n' "UPDATE self_managed_termination_jobs j
+            SET status = 'retry', attempt_count = 0, next_attempt_at = NOW(),
+                lease_expires_at = NULL, lease_token = NULL, last_error = NULL,
+                recovery_action = 'retry', recovery_operator = :'operator',
+                recovery_reason = :'reason', recovered_at = NOW(), updated_at = NOW()
+            FROM self_managed_plans p, subscriptions s, compute_resources cr
+            WHERE j.id = :'job_id'::uuid AND j.status = 'dead_letter'
+              AND p.id = j.self_managed_plan_id AND p.organization_id = j.organization_id
+              AND p.source = 'paddle' AND p.enclave_limit = 0 AND p.terminated_at IS NOT NULL
+              AND s.id = j.subscription_id AND s.organization_id = j.organization_id
+              AND s.billing_source = 'paddle' AND s.status = 'canceled'
+              AND cr.id = j.resource_id AND cr.organization_id = j.organization_id
+              AND cr.destroyed_at IS NULL
+            RETURNING j.id;" | psql_cmd -X -q -v ON_ERROR_STOP=1 \
+                -v job_id="$job_id" -v operator="$operator" -v reason="$reason")
+    else
+        updated=$(printf '%s\n' "UPDATE self_managed_termination_jobs j
+            SET status = 'completed', completed_at = NOW(), next_attempt_at = NOW(),
+                lease_expires_at = NULL, lease_token = NULL,
+                recovery_action = 'resolve', recovery_operator = :'operator',
+                recovery_reason = :'reason', recovered_at = NOW(), updated_at = NOW()
+            FROM compute_resources cr
+            WHERE j.id = :'job_id'::uuid AND j.status = 'dead_letter'
+              AND cr.id = j.resource_id AND cr.organization_id = j.organization_id
+              AND (cr.destroyed_at IS NOT NULL OR cr.state = 'terminated')
+            RETURNING j.id;" | psql_cmd -X -q -v ON_ERROR_STOP=1 \
+                -v job_id="$job_id" -v operator="$operator" -v reason="$reason")
+    fi
+    [[ "$updated" == "$job_id" ]] || {
+        echo "Error: Recovery preconditions failed; only dead-letter jobs with provably safe resource state can be changed"; exit 1;
+    }
+    echo "Termination job $action applied."
+}
+
+admin_cancel_self_managed_paddle() {
+    local change_id="$1" paddle_subscription_id="$2"
+    command -v curl >/dev/null || { echo "Error: curl is required"; exit 1; }
+    command -v jq >/dev/null || { echo "Error: jq is required"; exit 1; }
+    [[ "$paddle_subscription_id" =~ ^sub_[A-Za-z0-9]+$ ]] || { echo "Error: Invalid Paddle subscription mapping"; exit 1; }
+    [[ -n "${PADDLE_API_KEY:-}" ]] || { echo "Error: PADDLE_API_KEY is required"; exit 1; }
+    [[ ! "$PADDLE_API_KEY" =~ [[:cntrl:]] ]] || { echo "Error: PADDLE_API_KEY is malformed"; exit 1; }
+    case "${PADDLE_API_URL:-}" in
+        https://api.paddle.com|https://sandbox-api.paddle.com) ;;
+        *) echo "Error: PADDLE_API_URL must be an approved Paddle API origin"; exit 1 ;;
+    esac
+
+    local response_file config_file http_status provider_status escaped_api_key
+    response_file=$(mktemp); config_file=$(mktemp); chmod 600 "$config_file"
+    escaped_api_key=${PADDLE_API_KEY//\\/\\\\}
+    escaped_api_key=${escaped_api_key//\"/\\\"}
+    printf 'header = "Authorization: Bearer %s"\n' "$escaped_api_key" >"$config_file"
+    trap 'rm -f "$response_file" "$config_file"' EXIT
+    http_status=$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+        --config "$config_file" --output "$response_file" --write-out '%{http_code}' \
+        -H 'Accept: application/json' "$PADDLE_API_URL/subscriptions/$paddle_subscription_id") || {
+        echo "Error: Unable to verify Paddle; durable change remains retryable"; exit 1;
+    }
+    provider_status=$(jq -r '.data.status // empty' "$response_file")
+    [[ "$http_status" == "200" && -n "$provider_status" ]] || {
+        echo "Error: Paddle lookup failed with HTTP $http_status; durable change remains retryable"; exit 1;
+    }
+    if [[ "$provider_status" != "canceled" ]]; then
+        http_status=$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+            --config "$config_file" --output "$response_file" --write-out '%{http_code}' -X POST \
+            -H 'Accept: application/json' -H 'Content-Type: application/json' \
+            -H "Paddle-Idempotency-Key: $change_id" --data '{"effective_from":"immediately"}' \
+            "$PADDLE_API_URL/subscriptions/$paddle_subscription_id/cancel") || {
+            echo "Error: Paddle cancellation is ambiguous; reconcile and retry"; exit 1;
+        }
+        provider_status=$(jq -r '.data.status // empty' "$response_file")
+        [[ "$http_status" == "200" && "$provider_status" == "canceled" ]] || {
+            echo "Error: Paddle did not confirm cancellation (HTTP $http_status)"; exit 1;
+        }
+    fi
+    rm -f "$response_file" "$config_file"; trap - EXIT
+}

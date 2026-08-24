@@ -421,19 +421,68 @@ pub async fn delete_credential(
     org_id: Uuid,
     credential_id: Uuid,
 ) -> Result<bool, (StatusCode, String)> {
-    let result =
-        sqlx::query("DELETE FROM cloud_credentials WHERE organization_id = $1 AND id = $2")
-            .bind(org_id)
-            .bind(credential_id)
-            .execute(pool)
-            .await
-            .map_err(|e| {
-                tracing::error!("Database error: {:?}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal database error".to_string(),
-                )
-            })?;
+    let result = sqlx::query(
+        "DELETE FROM cloud_credentials cc
+         WHERE cc.organization_id = $1 AND cc.id = $2
+           AND NOT EXISTS (
+               SELECT 1 FROM compute_resources cr
+               WHERE cr.id = cc.resource_id AND cr.organization_id = cc.organization_id
+                 AND cr.destroyed_at IS NULL
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM self_managed_termination_jobs j
+               WHERE j.resource_id = cc.resource_id AND j.organization_id = cc.organization_id
+                 AND j.status <> 'completed'
+           )",
+    )
+    .bind(org_id)
+    .bind(credential_id)
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!("Database error: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal database error".to_string(),
+        )
+    })?;
+
+    if result.rows_affected() == 0 {
+        let blocked: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                 SELECT 1 FROM cloud_credentials cc
+                 WHERE cc.organization_id = $1 AND cc.id = $2
+                   AND (
+                       EXISTS (
+                           SELECT 1 FROM compute_resources cr
+                           WHERE cr.id = cc.resource_id AND cr.organization_id = cc.organization_id
+                             AND cr.destroyed_at IS NULL
+                       ) OR EXISTS (
+                           SELECT 1 FROM self_managed_termination_jobs j
+                           WHERE j.resource_id = cc.resource_id AND j.organization_id = cc.organization_id
+                             AND j.status <> 'completed'
+                       )
+                   )
+             )",
+        )
+        .bind(org_id)
+        .bind(credential_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal database error".to_string(),
+            )
+        })?;
+        if blocked {
+            return Err((
+                StatusCode::CONFLICT,
+                "Credential is required by a live or terminating resource".to_string(),
+            ));
+        }
+    }
 
     Ok(result.rows_affected() > 0)
 }

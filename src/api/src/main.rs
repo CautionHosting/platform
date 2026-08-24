@@ -38,7 +38,6 @@ fn billing_url_for_domain(caution_domain: &str) -> String {
 
 mod billing;
 mod builder;
-#[cfg(feature = "e2e-testing-unsafe")]
 mod cleanup;
 mod cloud_credentials;
 mod config;
@@ -419,9 +418,7 @@ mod deployment_health_tests {
 
     #[tokio::test]
     async fn health_check_rejects_error_responses() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -435,9 +432,7 @@ mod deployment_health_tests {
                 .unwrap();
         });
 
-        let error = wait_for_health(&address.to_string(), 0)
-            .await
-            .unwrap_err();
+        let error = wait_for_health(&address.to_string(), 0).await.unwrap_err();
         assert_eq!(
             error,
             "Health endpoint did not become healthy within 0 seconds"
@@ -1467,7 +1462,7 @@ async fn deploy_handler(
                     "UPDATE compute_resources
                      SET state = $1, deploy_attempt_id = NULL
                      WHERE id = $2 AND organization_id = $3 AND state = $4
-                       AND deploy_attempt_id = $5"
+                       AND deploy_attempt_id = $5",
                 )
                 .bind(types::ResourceState::Failed)
                 .bind(app_id_for_recovery)
@@ -1475,7 +1470,8 @@ async fn deploy_handler(
                 .bind(types::ResourceState::Pending)
                 .bind(deploy_attempt_id)
                 .execute(&db_for_recovery)
-                .await {
+                .await
+                {
                     tracing::error!("Failed to reset resource state after deploy error: {}", e);
                 }
 
@@ -1753,10 +1749,12 @@ mod deployment_target_tests {
         let with_provider = config::ConfigurationFile::from_str(
             "caution {\n provider {\n type = \"aws\"\n region = \"us-east-1\"\n }\n }\n\
              enclave \"main\" {\n unit \"default\" {\n command = \"/app\"\n }\n }",
-        ).unwrap();
+        )
+        .unwrap();
         let managed = config::ConfigurationFile::from_str(
             "enclave \"main\" {\n unit \"default\" {\n command = \"/app\"\n }\n }",
-        ).unwrap();
+        )
+        .unwrap();
         assert!(provider_requires_linked_byoc(&with_provider, false));
         assert!(!provider_requires_linked_byoc(&with_provider, true));
         assert!(!provider_requires_linked_byoc(&managed, false));
@@ -1992,6 +1990,37 @@ mod billing_url_tests {
     }
 }
 
+fn byoc_capacity_permits_new_deployment(enclave_limit: Option<i32>, current_apps: i64) -> bool {
+    enclave_limit.is_none_or(|limit| limit > 0 && current_apps < i64::from(limit))
+}
+
+fn enforce_generic_resource_limit(self_managed_capacity_reserved: bool) -> bool {
+    !self_managed_capacity_reserved
+}
+
+#[cfg(test)]
+mod self_managed_plan_capacity_tests {
+    use super::{byoc_capacity_permits_new_deployment, enforce_generic_resource_limit};
+
+    #[test]
+    fn finite_limit_is_enforced_at_the_boundary() {
+        assert!(byoc_capacity_permits_new_deployment(Some(3), 2));
+        assert!(!byoc_capacity_permits_new_deployment(Some(3), 3));
+    }
+
+    #[test]
+    fn null_is_unlimited_and_zero_is_disabled() {
+        assert!(byoc_capacity_permits_new_deployment(None, i64::MAX));
+        assert!(!byoc_capacity_permits_new_deployment(Some(0), 0));
+    }
+
+    #[test]
+    fn reserved_self_managed_capacity_bypasses_the_generic_limit() {
+        assert!(!enforce_generic_resource_limit(true));
+        assert!(enforce_generic_resource_limit(false));
+    }
+}
+
 #[tracing::instrument(skip_all, fields(org_id = %req.org_id, app_id = %req.app_id, deploy_attempt_id = %deploy_attempt_id))]
 async fn deploy_logic(
     state: Arc<AppState>,
@@ -2162,6 +2191,7 @@ async fn deploy_logic(
         cloud_credentials::get_credential_by_resource(&state.db, req.org_id, resource_id).await?;
     let is_managed_onprem = cred.as_ref().map(|c| c.managed_on_prem).unwrap_or(false);
 
+    let mut self_managed_capacity_reserved = false;
     if is_managed_onprem {
         // Managed on-prem: resolve the stored entitlement under an organization lock.
         let mut entitlement_tx = state.db.begin().await.map_err(|e| {
@@ -2183,70 +2213,33 @@ async fn deploy_logic(
                 )
             })?;
 
-        let sub: Option<(
-            Uuid,
-            i32,
-            Option<i32>,
-            String,
-            String,
-            bool,
-            Option<DateTime<Utc>>,
-        )> = sqlx::query_as(
-            "SELECT id, max_apps, pending_max_apps, billing_source, status,
-                    catalog_valid, enterprise_expires_at
-             FROM subscriptions
-             WHERE organization_id = $1 AND status <> 'canceled'
-             LIMIT 1
+        let plan: Option<(Uuid, Option<i32>, Option<DateTime<Utc>>, String)> = sqlx::query_as(
+            "SELECT id, enclave_limit, expires_at, source
+             FROM self_managed_plans
+             WHERE organization_id = $1
              FOR UPDATE",
         )
         .bind(req.org_id)
         .fetch_optional(&mut *entitlement_tx)
         .await
         .map_err(|e| {
-            tracing::error!(error = %e, "failed to read deployment entitlement");
+            tracing::error!(error = %e, "failed to read self-managed plan");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Unable to check deployment entitlement".to_string(),
             )
         })?;
 
-        let Some((
-            sub_id,
-            stored_max_apps,
-            pending_max_apps,
-            billing_source,
-            subscription_status,
-            catalog_valid,
-            enterprise_expires_at,
-        )) = sub
-        else {
-            return Err((StatusCode::PAYMENT_REQUIRED,
-                "Managed on-premises deployment requires an active subscription. Choose a plan in Settings at https://dashboard.caution.co".to_string()));
-        };
-
-        let status_permits_deploy = match billing_source.as_str() {
-            "legacy_credits" => matches!(subscription_status.as_str(), "active" | "past_due"),
-            "paddle" => subscription_status == "active" && catalog_valid,
-            "enterprise" => {
-                subscription_status == "active"
-                    && enterprise_expires_at.is_none_or(|expires_at| expires_at > Utc::now())
-            }
-            _ => false,
-        };
-        if !status_permits_deploy {
+        let Some((plan_id, enclave_limit, expires_at, plan_source)) = plan else {
             return Err((
                 StatusCode::PAYMENT_REQUIRED,
-                "Managed on-premises subscription is not active".to_string(),
+                "Managed on-premises deployment requires an active self-managed plan. Choose a plan in Settings at https://dashboard.caution.co".to_string(),
             ));
-        }
-
-        let max_apps = pending_max_apps
-            .map(|pending| pending.min(stored_max_apps))
-            .unwrap_or(stored_max_apps);
-        if max_apps <= 0 {
+        };
+        if enclave_limit == Some(0) || expires_at.is_some_and(|value| value <= Utc::now()) {
             return Err((
                 StatusCode::PAYMENT_REQUIRED,
-                "Managed on-premises subscription has no deployment capacity".to_string(),
+                "Managed on-premises plan is not active".to_string(),
             ));
         }
 
@@ -2271,16 +2264,43 @@ async fn deploy_logic(
             )
         })?;
 
-        if current_apps + 1 > max_apps as i64 {
+        if !byoc_capacity_permits_new_deployment(enclave_limit, current_apps) {
             return Err((
                 StatusCode::PAYMENT_REQUIRED,
                 format!(
-                    "App limit reached ({}/{}). Upgrade your plan in Settings at https://dashboard.caution.co",
+                    "Enclave limit reached ({}/{}). Upgrade your plan in Settings at https://dashboard.caution.co",
                     current_apps + 1,
-                    max_apps
+                    enclave_limit.unwrap_or_default()
                 ),
             ));
         }
+
+        let reserved = sqlx::query(
+            "UPDATE compute_resources
+             SET destroyed_at = NULL, state = $1, deploy_attempt_id = $2
+             WHERE id = $3 AND organization_id = $4
+               AND state != $1 AND state <> 'terminating'",
+        )
+        .bind(types::ResourceState::Pending)
+        .bind(deploy_attempt_id)
+        .bind(resource_id)
+        .bind(req.org_id)
+        .execute(&mut *entitlement_tx)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to reserve self-managed resource capacity: {}", e),
+            )
+        })?;
+        if reserved.rows_affected() != 1 {
+            return Err((
+                StatusCode::CONFLICT,
+                "A deployment is already in progress for this app. Please wait for it to complete."
+                    .to_string(),
+            ));
+        }
+        self_managed_capacity_reserved = true;
         entitlement_tx.commit().await.map_err(|e| {
             tracing::error!(error = %e, "failed to commit entitlement check");
             (
@@ -2290,10 +2310,11 @@ async fn deploy_logic(
         })?;
 
         tracing::info!(
-            "Billing gate passed: managed on-prem app {}/{}, sub={}",
+            "Self-managed plan gate passed: allocated={}, limit={:?}, plan={}, source={}",
             current_apps + 1,
-            max_apps,
-            sub_id
+            enclave_limit,
+            plan_id,
+            plan_source
         );
     } else {
         // Fully managed: require >= $25 in derived org credits
@@ -2349,39 +2370,40 @@ async fn deploy_logic(
         );
     }
 
-    // --- Resource limit check (both paths) ---
-    let active_resources: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM compute_resources
-         WHERE organization_id = $1 AND state NOT IN ('terminated', 'failed')
-           AND destroyed_at IS NULL AND id != $2",
-    )
-    .bind(req.org_id)
-    .bind(resource_id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
+    if enforce_generic_resource_limit(self_managed_capacity_reserved) {
+        // --- Resource limit check (both paths) ---
+        let active_resources: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compute_resources
+             WHERE organization_id = $1 AND state NOT IN ('terminated', 'failed')
+               AND destroyed_at IS NULL AND id != $2",
         )
-    })?;
+        .bind(req.org_id)
+        .bind(resource_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            )
+        })?;
 
-    let max_resources = state.builder_sizes.max_resources_per_org as i64;
-    if active_resources + 1 > max_resources {
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            format!(
-                "Resource limit reached ({}/{}). Destroy unused resources or contact support.",
-                active_resources + 1,
-                max_resources
-            ),
-        ));
-    }
+        let max_resources = state.builder_sizes.max_resources_per_org as i64;
+        if active_resources + 1 > max_resources {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                format!(
+                    "Resource limit reached ({}/{}). Destroy unused resources or contact support.",
+                    active_resources + 1,
+                    max_resources
+                ),
+            ));
+        }
 
-    // Atomically transition to Pending — rejects concurrent deploys via the check above
-    if was_destroyed {
-        tracing::info!("Reactivating previously destroyed resource {}", resource_id);
-        let updated = sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1, deploy_attempt_id = $2 WHERE id = $3 AND organization_id = $4 AND state != $1 AND state <> 'terminating'")
+        // Atomically transition to Pending — rejects concurrent deploys via the check above
+        if was_destroyed {
+            tracing::info!("Reactivating previously destroyed resource {}", resource_id);
+            let updated = sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1, deploy_attempt_id = $2 WHERE id = $3 AND organization_id = $4 AND state != $1 AND state <> 'terminating'")
             .bind(types::ResourceState::Pending)
             .bind(deploy_attempt_id)
             .bind(resource_id)
@@ -2390,36 +2412,41 @@ async fn deploy_logic(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to reactivate resource: {}", e)))?;
 
-        if updated.rows_affected() == 0 {
-            return Err((
-                StatusCode::CONFLICT,
-                "A deployment is already in progress for this app. Please wait for it to complete."
-                    .to_string(),
-            ));
-        }
-    } else {
-        // Mark as Pending so concurrent pushes are rejected
-        let updated = sqlx::query(
-            "UPDATE compute_resources SET state = $1, deploy_attempt_id = $2
-             WHERE id = $3 AND organization_id = $4 AND state != $1 AND state <> 'terminating'"
-        )
-        .bind(types::ResourceState::Pending)
-        .bind(deploy_attempt_id)
-        .bind(resource_id)
-        .bind(req.org_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update resource state: {}", e)))?;
+            if updated.rows_affected() == 0 {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "A deployment is already in progress for this app. Please wait for it to complete."
+                        .to_string(),
+                ));
+            }
+        } else {
+            // Mark as Pending so concurrent pushes are rejected
+            let updated = sqlx::query(
+                "UPDATE compute_resources SET state = $1, deploy_attempt_id = $2
+                 WHERE id = $3 AND organization_id = $4 AND state != $1 AND state <> 'terminating'",
+            )
+            .bind(types::ResourceState::Pending)
+            .bind(deploy_attempt_id)
+            .bind(resource_id)
+            .bind(req.org_id)
+            .execute(&state.db)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to update resource state: {}", e),
+                )
+            })?;
 
-        if updated.rows_affected() == 0 {
-            return Err((
-                StatusCode::CONFLICT,
-                "A deployment is already in progress for this app. Please wait for it to complete."
-                    .to_string(),
-            ));
+            if updated.rows_affected() == 0 {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "A deployment is already in progress for this app. Please wait for it to complete."
+                        .to_string(),
+                ));
+            }
         }
     }
-
     tracing::info!("Deploying branch: {}", req.branch);
 
     let resolved_commit_sha = match get_commit_sha(&app_id_str, &req.branch, &state.data_dir).await
@@ -2513,13 +2540,8 @@ async fn deploy_logic(
         .map(|e| e.allow_plaintext_fallback())
         .unwrap_or(false);
 
-    let no_cache = ec_build
-        .and_then(|b| b.cache)
-        .map(|c| !c)
-        .unwrap_or(false);
-    let app_sources = ec_build
-        .map(|b| b.app_sources.clone())
-        .unwrap_or_default();
+    let no_cache = ec_build.and_then(|b| b.cache).map(|c| !c).unwrap_or(false);
+    let app_sources = ec_build.map(|b| b.app_sources.clone()).unwrap_or_default();
     let egress = ec_network.map(|n| n.egress_enabled()).unwrap_or(false);
 
     let ingress_ports: Vec<u16> = ec_network
@@ -3657,6 +3679,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/internal/org/{org_id}/unsuspend",
             post(suspension::unsuspend_org_resources),
+        )
+        .route(
+            "/internal/self-managed-termination-jobs/{job_id}/resources/{resource_id}/terminate",
+            post(cleanup::terminate_self_managed_resource),
         )
         .route(
             "/internal/legal-notices/send",

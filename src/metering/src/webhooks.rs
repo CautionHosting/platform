@@ -19,7 +19,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::credits::{credit_ledger_once, CreditOutcome};
+use crate::credits::{CreditOutcome, credit_ledger_once};
 
 /// Paddle webhook payload
 #[derive(Debug, Deserialize, Serialize)]
@@ -215,6 +215,19 @@ async fn handle_subscription_event(
         _ => return Err(anyhow::anyhow!("unsupported Paddle subscription status")),
     };
 
+    // Historical canceled subscriptions must remain terminable after their price
+    // is removed from the current catalog. Read the persisted projection first;
+    // authority is re-locked and revalidated in the transaction below.
+    let existing_projection: Option<(Uuid, String, i32, i64, Option<String>, i32)> =
+        sqlx::query_as(
+            "SELECT organization_id, tier, max_apps, price_cents_per_cycle,
+                    paddle_price_id, catalog_version
+             FROM subscriptions WHERE paddle_subscription_id = $1",
+        )
+        .bind(paddle_subscription_id)
+        .fetch_optional(&state.pool)
+        .await?;
+
     let price_ids: Vec<&str> = data["items"]
         .as_array()
         .into_iter()
@@ -231,14 +244,50 @@ async fn handle_subscription_event(
                 .is_some_and(|price_id| price_ids.contains(&price_id))
         })
         .collect();
-    let (tier_id, tier) = match matched_tiers.as_slice() {
-        [(tier_id, tier)] if price_ids.len() == 1 => ((*tier_id).clone(), *tier),
-        _ => {
-            return Err(anyhow::anyhow!(
-                "subscription event does not contain exactly one configured tier price"
-            ));
-        }
-    };
+    let (tier_id, tier_enclaves, tier_monthly_cents, tier_price_id, catalog_version) =
+        match matched_tiers.as_slice() {
+            [(tier_id, tier)] if price_ids.len() == 1 => (
+                (*tier_id).clone(),
+                tier.enclaves,
+                tier.monthly_cents(),
+                tier.paddle_price_id.clone(),
+                i32::try_from(
+                    state
+                        .pricing
+                        .paddle_catalog
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Paddle catalog is not configured"))?
+                        .version,
+                )
+                .map_err(|_| anyhow::anyhow!("Paddle catalog version is too large"))?,
+            ),
+            _ if status == "canceled" && price_ids.len() == 1 => {
+                let Some((_, tier_id, max_apps, monthly_cents, stored_price_id, version)) =
+                    existing_projection.as_ref()
+                else {
+                    return Err(anyhow::anyhow!(
+                        "canceled subscription has no persisted local projection"
+                    ));
+                };
+                if stored_price_id.as_deref() != Some(price_ids[0]) {
+                    return Err(anyhow::anyhow!(
+                        "canceled subscription price does not match its persisted projection"
+                    ));
+                }
+                (
+                    tier_id.clone(),
+                    *max_apps,
+                    *monthly_cents,
+                    stored_price_id.clone(),
+                    *version,
+                )
+            }
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "subscription event does not contain exactly one configured tier price"
+                ));
+            }
+        };
 
     let period_start = data["current_billing_period"]["starts_at"]
         .as_str()
@@ -255,109 +304,210 @@ async fn handle_subscription_event(
     }
     let cancel_at_period_end = data["scheduled_change"]["action"].as_str() == Some("cancel");
 
+    // Resolve the tenant before taking row locks so every provider/admin path
+    // acquires the organization advisory lock first.
+    let existing_organization_id = existing_projection.as_ref().map(|projection| projection.0);
+    let mapped_organization_id = existing_organization_id.or_else(|| {
+        data["custom_data"]["caution_organization_id"]
+            .as_str()
+            .and_then(|value| Uuid::parse_str(value).ok())
+    });
+    let lock_organization_id = mapped_organization_id
+        .ok_or_else(|| anyhow::anyhow!("subscription event is missing organization mapping"))?;
+
     let mut tx = state.pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(paddle_subscription_id)
+        .bind(lock_organization_id.to_string())
         .execute(&mut *tx)
         .await?;
 
     let existing = sqlx::query(
-        "SELECT id, organization_id, user_id, current_period_start, current_period_end
+        "SELECT id, organization_id, user_id, current_period_start, current_period_end,
+                self_managed_plan_id
          FROM subscriptions WHERE paddle_subscription_id = $1 FOR UPDATE",
     )
     .bind(paddle_subscription_id)
     .fetch_optional(&mut *tx)
     .await?;
 
-    let (subscription_id, organization_id, user_id, effective_start, effective_end) =
-        if let Some(row) = existing {
-            let current_start: DateTime<Utc> = row.get("current_period_start");
-            let current_end: DateTime<Utc> = row.get("current_period_end");
-            (
-                row.get::<Uuid, _>("id"),
-                row.get::<Uuid, _>("organization_id"),
-                row.get::<Uuid, _>("user_id"),
-                period_start.unwrap_or(current_start),
-                period_end.unwrap_or(current_end),
-            )
-        } else {
-            let custom_data = data["custom_data"]
-                .as_object()
-                .ok_or_else(|| anyhow::anyhow!("new subscription is missing custom_data"))?;
-            let organization_id = custom_data
-                .get("caution_organization_id")
-                .and_then(|value| value.as_str())
-                .and_then(|value| Uuid::parse_str(value).ok())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("new subscription is missing organization mapping")
-                })?;
-            let intent_id = custom_data
-                .get("caution_checkout_intent_id")
-                .and_then(|value| value.as_str())
-                .and_then(|value| Uuid::parse_str(value).ok())
-                .ok_or_else(|| anyhow::anyhow!("new subscription is missing checkout intent"))?;
-            let intent = sqlx::query(
-                "SELECT requested_by_user_id, new_tier, new_limit
+    let existing_subscription = existing.is_some();
+    let (
+        subscription_id,
+        organization_id,
+        user_id,
+        effective_start,
+        effective_end,
+        existing_plan_id,
+    ) = if let Some(row) = existing {
+        let current_start: DateTime<Utc> = row.get("current_period_start");
+        let current_end: DateTime<Utc> = row.get("current_period_end");
+        (
+            row.get::<Uuid, _>("id"),
+            row.get::<Uuid, _>("organization_id"),
+            row.get::<Uuid, _>("user_id"),
+            period_start.unwrap_or(current_start),
+            period_end.unwrap_or(current_end),
+            row.get::<Option<Uuid>, _>("self_managed_plan_id"),
+        )
+    } else {
+        let custom_data = data["custom_data"]
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("new subscription is missing custom_data"))?;
+        let organization_id = lock_organization_id;
+        let intent_id = custom_data
+            .get("caution_checkout_intent_id")
+            .and_then(|value| value.as_str())
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .ok_or_else(|| anyhow::anyhow!("new subscription is missing checkout intent"))?;
+        let intent = sqlx::query(
+            "SELECT requested_by_user_id, new_tier, new_limit
                  FROM subscription_intents
                  WHERE id = $1 AND organization_id = $2
                    AND operation = 'subscribe'
                    AND status IN ('pending', 'provider_pending')
                  FOR UPDATE",
-            )
-            .bind(intent_id)
-            .bind(organization_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("new subscription checkout intent is not valid"))?;
-            if intent.get::<Option<String>, _>("new_tier").as_deref() != Some(tier_id.as_str())
-                || intent.get::<Option<i32>, _>("new_limit") != Some(tier.enclaves)
-            {
-                return Err(anyhow::anyhow!(
-                    "new subscription does not match its checkout intent"
-                ));
-            }
-            let conflicting_source: Option<String> = sqlx::query_scalar(
-                "SELECT billing_source FROM subscriptions
+        )
+        .bind(intent_id)
+        .bind(organization_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("new subscription checkout intent is not valid"))?;
+        if intent.get::<Option<String>, _>("new_tier").as_deref() != Some(tier_id.as_str())
+            || intent.get::<Option<i32>, _>("new_limit") != Some(tier_enclaves)
+        {
+            return Err(anyhow::anyhow!(
+                "new subscription does not match its checkout intent"
+            ));
+        }
+        let conflicting_source: Option<String> = sqlx::query_scalar(
+            "SELECT billing_source FROM subscriptions
                  WHERE organization_id = $1 AND status <> 'canceled' FOR UPDATE",
+        )
+        .bind(organization_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if conflicting_source.is_some() {
+            return Err(anyhow::anyhow!(
+                "organization already has a non-canceled subscription"
+            ));
+        }
+        (
+            Uuid::new_v4(),
+            organization_id,
+            intent.get::<Uuid, _>("requested_by_user_id"),
+            period_start
+                .ok_or_else(|| anyhow::anyhow!("new subscription is missing period start"))?,
+            period_end.ok_or_else(|| anyhow::anyhow!("new subscription is missing period end"))?,
+            None,
+        )
+    };
+
+    if organization_id != lock_organization_id {
+        return Err(anyhow::anyhow!("subscription organization mapping changed"));
+    }
+    if !existing_subscription {
+        let teardown_in_progress: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                 SELECT 1 FROM self_managed_termination_jobs
+                 WHERE organization_id = $1 AND status <> 'completed'
+             )",
+        )
+        .bind(organization_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if teardown_in_progress {
+            return Err(anyhow::anyhow!(
+                "self-managed resource termination is still in progress"
+            ));
+        }
+    }
+
+    let self_managed_plan_id: Option<Uuid> = if existing_subscription {
+        if let Some(plan_id) = existing_plan_id {
+            let source: Option<String> = sqlx::query_scalar(
+                "SELECT source FROM self_managed_plans
+                 WHERE id = $1 AND organization_id = $2 FOR UPDATE",
             )
+            .bind(plan_id)
             .bind(organization_id)
             .fetch_optional(&mut *tx)
             .await?;
-            if conflicting_source.is_some() {
-                return Err(anyhow::anyhow!(
-                    "organization already has a non-canceled subscription"
-                ));
+            match source.as_deref() {
+                Some("paddle") => Some(plan_id),
+                Some(_) => {
+                    return Err(anyhow::anyhow!(
+                        "linked self-managed plan is not controlled by Paddle"
+                    ));
+                }
+                None => None,
             }
-            (
-                Uuid::new_v4(),
-                organization_id,
-                intent.get::<Uuid, _>("requested_by_user_id"),
-                period_start
-                    .ok_or_else(|| anyhow::anyhow!("new subscription is missing period start"))?,
-                period_end
-                    .ok_or_else(|| anyhow::anyhow!("new subscription is missing period end"))?,
-            )
-        };
-
-    let catalog_version = i32::try_from(
-        state
-            .pricing
-            .paddle_catalog
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Paddle catalog is not configured"))?
-            .version,
+        } else {
+            // Historical or manually detached Paddle rows never regain plan authority.
+            None
+        }
+    } else if let Some(plan) = sqlx::query(
+        "SELECT id, source FROM self_managed_plans
+         WHERE organization_id = $1 FOR UPDATE",
     )
-    .map_err(|_| anyhow::anyhow!("Paddle catalog version is too large"))?;
+    .bind(organization_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    {
+        if plan.get::<String, _>("source") == "paddle" {
+            Some(plan.get::<Uuid, _>("id"))
+        } else {
+            return Err(anyhow::anyhow!(
+                "organization self-managed plan is not controlled by Paddle"
+            ));
+        }
+    } else {
+        Some(
+            sqlx::query_scalar(
+                "INSERT INTO self_managed_plans
+                 (organization_id, tier, enclave_limit, source)
+                 VALUES ($1, $2, $3, 'paddle') RETURNING id",
+            )
+            .bind(organization_id)
+            .bind(&tier_id)
+            .bind(if status == "canceled" {
+                0
+            } else {
+                tier_enclaves
+            })
+            .fetch_one(&mut *tx)
+            .await?,
+        )
+    };
+
+    if existing_subscription && existing_plan_id.is_none() {
+        // A detached provider row is immutable billing history. Recording the
+        // event timestamp prevents replay churn, but it must never become an
+        // active local controller or collide with a replacement subscription.
+        sqlx::query(
+            "UPDATE subscriptions
+             SET provider_occurred_at = GREATEST(provider_occurred_at, $1),
+                 updated_at = NOW()
+             WHERE id = $2",
+        )
+        .bind(occurred_at)
+        .bind(subscription_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        return Ok(());
+    }
+
     let projection = sqlx::query(
         "INSERT INTO subscriptions
          (id, user_id, organization_id, tier, max_vcpus, max_apps,
           price_cents_per_cycle, status, billing_source, paddle_customer_id,
           paddle_subscription_id, paddle_price_id, catalog_version, catalog_valid,
           current_period_start, current_period_end, next_billing_at,
-          cancel_at_period_end, canceled_at, provider_occurred_at)
+          cancel_at_period_end, canceled_at, provider_occurred_at,
+          self_managed_plan_id)
          VALUES ($1, $2, $3, $4, 0, $5, $6, $7, 'paddle', $8, $9, $10,
                  $11, true, $12, $13, $13, $14,
-                 CASE WHEN $7 = 'canceled' THEN $15 ELSE NULL END, $15)
+                 CASE WHEN $7 = 'canceled' THEN $15 ELSE NULL END, $15, $16)
          ON CONFLICT (paddle_subscription_id) WHERE paddle_subscription_id IS NOT NULL
          DO UPDATE SET tier = EXCLUDED.tier,
                        max_apps = EXCLUDED.max_apps,
@@ -373,45 +523,177 @@ async fn handle_subscription_event(
                        cancel_at_period_end = EXCLUDED.cancel_at_period_end,
                        canceled_at = EXCLUDED.canceled_at,
                        provider_occurred_at = EXCLUDED.provider_occurred_at,
+                       self_managed_plan_id = COALESCE(
+                           subscriptions.self_managed_plan_id,
+                           EXCLUDED.self_managed_plan_id
+                       ),
                        updated_at = NOW()
-         WHERE subscriptions.provider_occurred_at IS NULL
-            OR subscriptions.provider_occurred_at < EXCLUDED.provider_occurred_at
-            OR (
-                subscriptions.provider_occurred_at = EXCLUDED.provider_occurred_at
-                AND CASE EXCLUDED.status
-                    WHEN 'canceled' THEN 4
-                    WHEN 'paused' THEN 3
-                    WHEN 'past_due' THEN 2
-                    WHEN 'active' THEN 1
-                    ELSE 0
-                END > CASE subscriptions.status
-                    WHEN 'canceled' THEN 4
-                    WHEN 'paused' THEN 3
-                    WHEN 'past_due' THEN 2
-                    WHEN 'active' THEN 1
-                    ELSE 0
-                END
-            )",
+         WHERE subscriptions.billing_source = 'paddle'
+           AND (
+                subscriptions.provider_occurred_at IS NULL
+                OR subscriptions.provider_occurred_at < EXCLUDED.provider_occurred_at
+                OR (
+                    subscriptions.provider_occurred_at = EXCLUDED.provider_occurred_at
+                    AND CASE EXCLUDED.status
+                        WHEN 'canceled' THEN 4
+                        WHEN 'paused' THEN 3
+                        WHEN 'past_due' THEN 2
+                        WHEN 'active' THEN 1
+                        ELSE 0
+                    END > CASE subscriptions.status
+                        WHEN 'canceled' THEN 4
+                        WHEN 'paused' THEN 3
+                        WHEN 'past_due' THEN 2
+                        WHEN 'active' THEN 1
+                        ELSE 0
+                    END
+                )
+           )",
     )
     .bind(subscription_id)
     .bind(user_id)
     .bind(organization_id)
     .bind(&tier_id)
-    .bind(tier.enclaves)
-    .bind(tier.monthly_cents())
+    .bind(tier_enclaves)
+    .bind(tier_monthly_cents)
     .bind(status)
     .bind(paddle_customer_id)
     .bind(paddle_subscription_id)
-    .bind(tier.paddle_price_id.as_deref())
+    .bind(tier_price_id.as_deref())
     .bind(catalog_version)
     .bind(effective_start)
     .bind(effective_end)
     .bind(cancel_at_period_end)
     .bind(occurred_at)
+    .bind(self_managed_plan_id)
     .execute(&mut *tx)
     .await?;
     if projection.rows_affected() == 0 {
         return Ok(());
+    }
+
+    if let Some(self_managed_plan_id) = self_managed_plan_id {
+        if status == "active" {
+            let effective_limit: i32 = sqlx::query_scalar(
+                "SELECT CASE WHEN pending_max_apps IS NULL THEN max_apps
+                             ELSE LEAST(max_apps, pending_max_apps) END
+                 FROM subscriptions WHERE id = $1",
+            )
+            .bind(subscription_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE self_managed_plans SET
+                    tier = $1, enclave_limit = $2, expires_at = NULL,
+                    terminated_at = NULL, updated_at = NOW()
+                 WHERE id = $3 AND source = 'paddle'",
+            )
+            .bind(&tier_id)
+            .bind(effective_limit)
+            .bind(self_managed_plan_id)
+            .execute(&mut *tx)
+            .await?;
+        } else if status == "canceled" {
+            let manual_change = sqlx::query(
+                "SELECT id, requested_enclave_limit, requested_expires_at,
+                        operator_identity, operator_reason
+                 FROM self_managed_plan_changes
+                 WHERE organization_id = $1 AND subscription_id = $2
+                   AND status = 'provider_pending'
+                 ORDER BY created_at LIMIT 1 FOR UPDATE",
+            )
+            .bind(organization_id)
+            .bind(subscription_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            if let Some(change) = manual_change {
+                let change_id: Uuid = change.get("id");
+                sqlx::query(
+                    "UPDATE self_managed_plans SET
+                        tier = 'enterprise_contract', enclave_limit = $1,
+                        source = 'manual', expires_at = $2,
+                        operator_identity = $3, operator_reason = $4,
+                        terminated_at = NULL, updated_at = NOW()
+                     WHERE id = $5 AND source = 'paddle'",
+                )
+                .bind(change.get::<Option<i32>, _>("requested_enclave_limit"))
+                .bind(change.get::<Option<DateTime<Utc>>, _>("requested_expires_at"))
+                .bind(change.get::<String, _>("operator_identity"))
+                .bind(change.get::<String, _>("operator_reason"))
+                .bind(self_managed_plan_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "UPDATE subscriptions SET self_managed_plan_id = NULL, updated_at = NOW()
+                     WHERE id = $1 AND self_managed_plan_id = $2",
+                )
+                .bind(subscription_id)
+                .bind(self_managed_plan_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "UPDATE self_managed_plan_changes
+                     SET status = 'applied', applied_at = NOW(), updated_at = NOW()
+                     WHERE id = $1 AND status = 'provider_pending'",
+                )
+                .bind(change_id)
+                .execute(&mut *tx)
+                .await?;
+            } else {
+                sqlx::query(
+                    "UPDATE self_managed_plans SET enclave_limit = 0,
+                            terminated_at = COALESCE(terminated_at, $1), updated_at = NOW()
+                     WHERE id = $2 AND source = 'paddle'",
+                )
+                .bind(occurred_at)
+                .bind(self_managed_plan_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "INSERT INTO self_managed_termination_jobs
+                        (organization_id, self_managed_plan_id, subscription_id,
+                         resource_id, provider_occurred_at)
+                     SELECT $4, $1, $2, cr.id, $3
+                     FROM compute_resources cr
+                     WHERE cr.organization_id = $4 AND cr.destroyed_at IS NULL
+                       AND EXISTS (
+                           SELECT 1 FROM cloud_credentials cc
+                           WHERE cc.resource_id = cr.id
+                             AND cc.organization_id = $4
+                             AND cc.managed_on_prem = true
+                       )
+                     ON CONFLICT (subscription_id, resource_id)
+                     DO NOTHING",
+                )
+                .bind(self_managed_plan_id)
+                .bind(subscription_id)
+                .bind(occurred_at)
+                .bind(organization_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "UPDATE subscriptions
+                     SET self_managed_plan_id = NULL, updated_at = NOW()
+                     WHERE id = $1 AND self_managed_plan_id = $2",
+                )
+                .bind(subscription_id)
+                .bind(self_managed_plan_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+        } else {
+            // Paused and past-due provider rows remain billing history but do
+            // not authorize new self-managed deployments.
+            sqlx::query(
+                "UPDATE self_managed_plans
+                 SET enclave_limit = 0, terminated_at = NULL, updated_at = NOW()
+                 WHERE id = $1 AND source = 'paddle'",
+            )
+            .bind(self_managed_plan_id)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     if let Some(intent_id) = data["custom_data"]["caution_checkout_intent_id"]
@@ -437,21 +719,37 @@ async fn handle_subscription_event(
         let applied = sqlx::query(
             "UPDATE subscription_intents SET status = 'applied', applied_at = NOW(), updated_at = NOW()
              WHERE id = $1 AND organization_id = $2 AND subscription_id = $3
-               AND operation IN ('upgrade', 'downgrade') AND status = 'provider_pending'",
+               AND operation IN ('upgrade', 'downgrade') AND status = 'provider_pending'
+               AND new_tier = $4 AND new_limit = $5 AND provider_price_id = $6
+               AND paddle_subscription_id = $7",
         )
         .bind(intent_id)
         .bind(organization_id)
         .bind(subscription_id)
+        .bind(&tier_id)
+        .bind(tier_enclaves)
+        .bind(tier_price_id.as_deref())
+        .bind(paddle_subscription_id)
         .execute(&mut *tx)
         .await?;
         if applied.rows_affected() == 1 {
-            sqlx::query(
+            let cleared = sqlx::query(
                 "UPDATE subscriptions SET pending_tier = NULL, pending_max_apps = NULL, updated_at = NOW()
-                 WHERE id = $1",
+                 WHERE id = $1 AND organization_id = $2
+                   AND pending_tier = $3 AND pending_max_apps = $4",
             )
             .bind(subscription_id)
+            .bind(organization_id)
+            .bind(&tier_id)
+            .bind(tier_enclaves)
             .execute(&mut *tx)
-            .await?;
+            .await?
+            .rows_affected();
+            if cleared != 1 {
+                return Err(anyhow::anyhow!(
+                    "tier intent no longer owns the pending subscription projection"
+                ));
+            }
         }
     }
     if cancel_at_period_end || status == "canceled" {
@@ -478,7 +776,6 @@ async fn handle_subscription_event(
     tx.commit().await?;
     Ok(())
 }
-
 
 async fn clear_credit_suspension_if_needed(
     state: &AppState,
@@ -774,6 +1071,9 @@ async fn handle_payment_failed(
 ) -> anyhow::Result<()> {
     let transaction_id = payload.data["id"].as_str().unwrap_or_default();
     let customer_id = payload.data["customer_id"].as_str().unwrap_or_default();
+    let occurred_at = DateTime::parse_from_rfc3339(&payload.occurred_at)
+        .map_err(|_| anyhow::anyhow!("payment failure event has an invalid occurred_at"))?
+        .with_timezone(&Utc);
 
     tracing::warn!(
         "Transaction payment failed: {} for customer {}",
@@ -811,28 +1111,69 @@ async fn handle_payment_failed(
     .execute(&state.pool)
     .await?;
 
-    // Mark subscription as past_due if this was a subscription payment
-    if let Err(e) = sqlx::query(
+    // Mark an authoritative subscription past due under the same organization
+    // serialization and provider ordering used by subscription webhooks.
+    let mut authority_tx = state.pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(org_id.to_string())
+        .execute(&mut *authority_tx)
+        .await?;
+    let affected: Option<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
         r#"
-        UPDATE subscriptions SET status = 'past_due', updated_at = NOW()
-        WHERE id IN (
-            SELECT sl.subscription_id
-            FROM subscription_ledger sl
-            JOIN invoices i ON sl.invoice_id = i.id
-            WHERE i.paddle_transaction_id = $1
-        )
+        SELECT s.id, s.self_managed_plan_id
+        FROM subscriptions s
+        JOIN subscription_ledger sl ON sl.subscription_id = s.id
+        JOIN invoices i ON i.id = sl.invoice_id
+        WHERE i.paddle_transaction_id = $1
+          AND s.organization_id = $2
+          AND s.billing_source = 'paddle' AND s.status <> 'canceled'
+          AND s.self_managed_plan_id IS NOT NULL
+          AND (s.provider_occurred_at IS NULL OR s.provider_occurred_at <= $3)
+        FOR UPDATE OF s
         "#,
     )
     .bind(transaction_id)
-    .execute(&state.pool)
-    .await
-    {
-        tracing::error!(
-            "Failed to mark subscription as past_due for txn {}: {}",
-            transaction_id,
-            e
-        );
+    .bind(org_id)
+    .bind(occurred_at)
+    .fetch_optional(&mut *authority_tx)
+    .await?;
+    if let Some((subscription_id, plan_id)) = affected {
+        let plan: Option<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT id FROM self_managed_plans
+             WHERE id = $1 AND organization_id = $2 AND source = 'paddle'
+             FOR UPDATE",
+        )
+        .bind(plan_id)
+        .bind(org_id)
+        .fetch_optional(&mut *authority_tx)
+        .await?;
+        if plan.is_some() {
+            sqlx::query(
+                "UPDATE subscriptions
+                 SET status = 'past_due', provider_occurred_at = $1, updated_at = NOW()
+                 WHERE id = $2 AND organization_id = $3
+                   AND billing_source = 'paddle' AND status <> 'canceled'
+                   AND self_managed_plan_id = $4
+                   AND (provider_occurred_at IS NULL OR provider_occurred_at <= $1)",
+            )
+            .bind(occurred_at)
+            .bind(subscription_id)
+            .bind(org_id)
+            .bind(plan_id)
+            .execute(&mut *authority_tx)
+            .await?;
+            sqlx::query(
+                "UPDATE self_managed_plans
+                 SET enclave_limit = 0, terminated_at = NULL, updated_at = NOW()
+                 WHERE id = $1 AND organization_id = $2 AND source = 'paddle'",
+            )
+            .bind(plan_id)
+            .bind(org_id)
+            .execute(&mut *authority_tx)
+            .await?;
+        }
     }
+    authority_tx.commit().await?;
 
     // Mark the billing event as failed
     if let Err(e) = sqlx::query(
