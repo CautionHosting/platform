@@ -1872,7 +1872,7 @@ make build-cli
             class="btn-primary"
             :disabled="subscribing"
           >
-            {{ subscribing ? 'Processing...' : 'Subscribe now' }}
+            {{ subscribing ? 'Processing...' : subscriptionPlanAction.buttonLabel }}
           </button>
           <button @click="showSelectPlanModal = false; subscribeError = ''" class="btn-secondary">Cancel</button>
         </div>
@@ -2065,6 +2065,7 @@ import {
   readAppListPreferences,
 } from "../utils/appList.js";
 import { formatLocalDate, formatLocalTime } from "../utils/dateTime.js";
+import { getSubscriptionPlanAction } from "../utils/subscriptionPlan.js";
 import { getCurrentTheme } from "../utils/theme.js";
 
 async function sha256Hex(message) {
@@ -3066,6 +3067,7 @@ export default {
 
     // Subscription state
     const subscription = ref(null);
+    const subscriptionPlanAction = computed(() => getSubscriptionPlanAction(subscription.value));
     const subscriptionTiers = ref([]);
     const showSelectPlanModal = ref(false);
     const selectedTier = ref(null);
@@ -3985,7 +3987,7 @@ export default {
       subscribing.value = true;
       subscribeError.value = '';
       try {
-        const response = await authFetch('/api/billing/subscription/subscribe', {
+        const response = await authFetch(subscriptionPlanAction.value.endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -3993,7 +3995,7 @@ export default {
           }),
         });
         if (response.ok) {
-          showToast('Subscription activated!');
+          showToast(subscriptionPlanAction.value.successMessage);
           showSelectPlanModal.value = false;
           await loadSubscription();
           await loadCreditBalance();
@@ -5355,6 +5357,7 @@ export default {
       redeemingCode,
       redeemCreditCode,
       subscription,
+      subscriptionPlanAction,
       subscriptionTiers,
       showSelectPlanModal,
       selectedTier,
