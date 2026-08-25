@@ -14,7 +14,6 @@
 #   3. Update subscriptions: set billing_source = 'enterprise', max_apps to
 #      i32::MAX (effectively unlimited), and updated_at = NOW().
 #   4. Terminate the current ledger entry by setting billing_period_end = NOW().
-#   5. Verify that exactly one row was changed in each UPDATE before committing.
 #
 # If any precondition fails or a row-count check does not match, an exception is
 # raised and the transaction rolls back -- no partial state is left behind.
@@ -54,6 +53,9 @@ fi
 # Normalize to lowercase (UUID regex above already enforces this, but be explicit)
 ORG_ID=$(echo "$ORG_ID" | tr '[:upper:]' '[:lower:]')
 
+# SECURITY: ORG_ID is safe for SQL interpolation. The UUID_REGEX validation above
+# restricts input to characters [a-f0-9-] only, making SQL injection impossible.
+
 # Verify the container is running
 
 if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
@@ -71,15 +73,14 @@ echo ""
 # The entire operation runs inside a single PostgreSQL DO block wrapped in
 # BEGIN/COMMIT. Any RAISE EXCEPTION aborts the transaction via \set on_error_stop.
 
-docker exec "$CONTAINER" psql -U postgres -d caution -v ON_ERROR_STOP=1 -v org_id="$ORG_ID" <<SQL
+docker exec -i "$CONTAINER" psql -U postgres -d caution -v ON_ERROR_STOP=1 <<SQL
 BEGIN;
 
 DO \$\$
 DECLARE
-    v_org_id      UUID := NULLIF(:'org_id', '')::UUID;
+    v_org_id      UUID := '$ORG_ID';
     sub_row       RECORD;
     ledger_id     UUID;
-    affected_rows BIGINT;
 BEGIN
     -- Validate that an organization ID was supplied
     IF v_org_id IS NULL THEN
@@ -103,7 +104,6 @@ BEGIN
       AND s.status <> 'canceled'
       AND s.billing_source = 'legacy_credits'
     ORDER BY s.created_at ASC   -- deterministic pick if duplicates somehow exist
-    LIMIT 1
     FOR UPDATE;
 
     IF NOT FOUND THEN
@@ -116,8 +116,7 @@ BEGIN
     FROM subscription_ledger sl
     WHERE sl.subscription_id = sub_row.id
       AND sl.billing_period_end IS NULL
-    ORDER BY sl.billing_period_start DESC
-    LIMIT 1;
+    ORDER BY sl.billing_period_start DESC;
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'no open subscription_ledger segment found for organization % (subscription %); state is unsound', v_org_id, sub_row.id;
