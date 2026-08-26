@@ -40,7 +40,10 @@ pub fn text(prompt: &str) -> io::Result<String> {
 /// Use this for prompts that display a default value (e.g. `"Port [22]: "`).
 /// Pressing Enter returns the provided default. If the user enters text, it is
 /// parsed as `T` via `FromStr`. Returns an error on EOF or parse failure.
-pub fn text_or_default<T: FromStr>(prompt: &str, default: T) -> io::Result<T> {
+pub fn text_or_default<T: FromStr>(prompt: &str, default: T) -> io::Result<T>
+where
+    <T as FromStr>::Err: std::error::Error + Send + Sync + 'static,
+{
     write_prompt(prompt)?;
     let mut input = String::new();
     let n = io::stdin().read_line(&mut input)?;
@@ -53,7 +56,7 @@ pub fn text_or_default<T: FromStr>(prompt: &str, default: T) -> io::Result<T> {
     }
     trimmed
         .parse::<T>()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid input"))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
 }
 
 /// Prompt for a y/N confirmation. Returns true only for "y" or "Y".
@@ -73,7 +76,7 @@ pub fn confirm(label: &str) -> io::Result<bool> {
 /// Writes the prompt label to stderr, then reads from stdin with echo suppressed.
 pub fn password(prompt: &str) -> io::Result<String> {
     write_prompt(prompt)?;
-    rpassword::read_password().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    rpassword::read_password().map_err(std::io::Error::other)
 }
 
 /// Prompt for a numeric selection from a list of items.
@@ -88,8 +91,8 @@ pub fn select(prompt: &str) -> io::Result<usize> {
     if n == 0 {
         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF"));
     }
-    input
-        .trim()
+    let trimmed = input.trim();
+    trimmed
         .parse::<usize>()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
 }

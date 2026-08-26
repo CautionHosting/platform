@@ -14,6 +14,7 @@ path = "src/bin/caution.rs"
 # Workspace dependencies
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+dterror = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json.workspace = true

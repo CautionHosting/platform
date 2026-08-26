@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use clap::Args;
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::output;
 use crate::ApiClient;
+use crate::output;
 
 #[derive(Args, Debug)]
 pub(crate) struct DownloadEif {
@@ -23,40 +24,95 @@ pub(crate) struct DownloadEif {
     pub(crate) force: bool,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum DownloadEifError {
-    #[error("no deployment found; run 'init' first or provide an app ID")]
-    NoDeployment,
+    #[error("no deployment found; run 'init' first or provide an app ID [{location:?}]")]
+    NoDeployment {
+        #[location]
+        location: Location,
 
-    #[error("authentication failed")]
-    Auth(#[source] anyhow::Error),
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("HTTP request failed")]
-    Http(#[source] reqwest::Error),
+    #[error("authentication failed [{location:?}]")]
+    Auth {
+        #[location]
+        location: Location,
 
-    #[error("unauthorized")]
-    Unauthorized,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("forbidden")]
-    Forbidden,
+    #[error("HTTP request failed [{location:?}]")]
+    Http {
+        #[location]
+        location: Location,
 
-    #[error("resource not found")]
-    NotFound,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("HTTP status {0}")]
-    HttpStatus(u16),
+    #[error("unauthorized [{location:?}]")]
+    Unauthorized {
+        #[location]
+        location: Location,
+    },
 
-    #[error("output file already exists: {0}; use --force to overwrite")]
-    FileExists(PathBuf),
+    #[error("forbidden [{location:?}]")]
+    Forbidden {
+        #[location]
+        location: Location,
+    },
 
-    #[error("failed to write to file")]
-    WriteError(#[source] std::io::Error),
+    #[error("resource not found [{location:?}]")]
+    NotFound {
+        #[location]
+        location: Location,
+    },
 
-    #[error("stream error")]
-    StreamError(#[source] reqwest::Error),
+    #[error("HTTP status {status} [{location:?}]")]
+    HttpStatus {
+        status: u16,
 
-    #[error("download idle timeout (no data received for 30s)")]
-    IdleTimeout,
+        #[location]
+        location: Location,
+    },
+
+    #[error("output file already exists: {path}; use --force to overwrite [{location:?}]")]
+    FileExists {
+        path: PathBuf,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("failed to write to file [{location:?}]")]
+    WriteError {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("stream error [{location:?}]")]
+    StreamError {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("download idle timeout (no data received for 30s) [{location:?}]")]
+    IdleTimeout {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
 }
 
 struct PartFileGuard {
@@ -102,12 +158,14 @@ pub(crate) async fn download_eif(
     client: &ApiClient,
     args: &DownloadEif,
 ) -> Result<(), DownloadEifError> {
+    use DownloadEifErrorCtx as Ctx;
+
     let resource_id = match &args.id {
         Some(id) => id.clone(),
         None => {
             client
                 .load_deployment()
-                .map_err(|_| DownloadEifError::NoDeployment)?
+                .with_context(Ctx::no_deployment())?
                 .resource_id
         }
     };
@@ -115,7 +173,7 @@ pub(crate) async fn download_eif(
     let config = client
         .ensure_authenticated()
         .await
-        .map_err(DownloadEifError::Auth)?;
+        .with_context(Ctx::auth())?;
 
     let mut response = client
         .http_client()
@@ -127,15 +185,24 @@ pub(crate) async fn download_eif(
         .header("X-Session-ID", config.session_id())
         .send()
         .await
-        .map_err(DownloadEifError::Http)?;
+        .with_context(Ctx::http())?;
 
     let status = response.status();
     if !status.is_success() {
         return Err(match status.as_u16() {
-            401 => DownloadEifError::Unauthorized,
-            403 => DownloadEifError::Forbidden,
-            404 => DownloadEifError::NotFound,
-            code => DownloadEifError::HttpStatus(code),
+            401 => DownloadEifError::Unauthorized {
+                location: std::panic::Location::caller(),
+            },
+            403 => DownloadEifError::Forbidden {
+                location: std::panic::Location::caller(),
+            },
+            404 => DownloadEifError::NotFound {
+                location: std::panic::Location::caller(),
+            },
+            code => DownloadEifError::HttpStatus {
+                status: code,
+                location: std::panic::Location::caller(),
+            },
         });
     }
 
@@ -150,7 +217,10 @@ pub(crate) async fn download_eif(
     };
 
     if output_path.exists() && !args.force {
-        return Err(DownloadEifError::FileExists(output_path));
+        return Err(DownloadEifError::FileExists {
+            path: output_path,
+            location: std::panic::Location::caller(),
+        });
     }
 
     let part_path = {
@@ -198,18 +268,17 @@ pub(crate) async fn download_eif(
     };
 
     {
-        let mut file = fs::File::create(&part_path).map_err(DownloadEifError::WriteError)?;
+        let mut file = fs::File::create(&part_path).with_context(Ctx::write_error())?;
 
         loop {
             let chunk = tokio::time::timeout(Duration::from_secs(30), response.chunk())
                 .await
-                .map_err(|_| DownloadEifError::IdleTimeout)?
-                .map_err(DownloadEifError::StreamError)?;
+                .with_context(Ctx::idle_timeout())?
+                .with_context(Ctx::stream_error())?;
 
             match chunk {
                 Some(bytes) => {
-                    file.write_all(&bytes)
-                        .map_err(DownloadEifError::WriteError)?;
+                    file.write_all(&bytes).with_context(Ctx::write_error())?;
                     pb.inc(bytes.len() as u64);
                 }
                 None => break,
@@ -219,7 +288,7 @@ pub(crate) async fn download_eif(
 
     pb.finish_and_clear();
 
-    fs::rename(&part_path, &output_path).map_err(DownloadEifError::WriteError)?;
+    fs::rename(&part_path, &output_path).with_context(Ctx::write_error())?;
     guard.disarm();
 
     let file_size = fs::metadata(&output_path).map_or(0, |m| m.len());
