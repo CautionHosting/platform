@@ -80,3 +80,6 @@ missing resource as an empty relationship.
 
 This pilot does not replace `utils/admin`. Continue using that script for legal
 document and other mutating administration workflows.
+
+The implementation keeps database resource queries, relationship traversal,
+row decoding, terminal control, and Ratatui rendering in small focused modules.
