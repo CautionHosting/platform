@@ -11,6 +11,7 @@ members = [
     "src/metering",
     "src/environment-heuristics",
     "src/caution-config", 
+    "src/caution-admin",
     "src/hcl-patcher",
     "src/drift-detector",
 ]

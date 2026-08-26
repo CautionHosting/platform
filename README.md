@@ -63,6 +63,9 @@ Start the platform services:
 make up
 ```
 
+The experimental development-server admin explorer is documented in
+[docs/admin.md](docs/admin.md).
+
 #### Frontend development
 
 For the normal frontend development server:

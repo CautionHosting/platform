@@ -3,7 +3,7 @@
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install-cli install-cli-stagex install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-live-caddy-nitro test-cli-install test-e2e test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e build-drift-detector run-drift-detector
+.PHONY: admin build-admin build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install-cli install-cli-stagex install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-live-caddy-nitro test-cli-install test-e2e test-e2e-admin test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e build-drift-detector run-drift-detector
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -614,6 +614,22 @@ status:
 	@echo "\n=== Network Status ==="
 	@docker network ls --filter "name=$(NETWORK)"
 
+build-admin:
+	@cargo build --release -p caution-admin
+
+admin: build-admin
+	@if [ -n "$${DATABASE_URL:-}" ]; then \
+		environment="$${ENVIRONMENT:-development}"; \
+		database_url="$$DATABASE_URL"; \
+	elif docker inspect -f '{{.State.Running}}' api 2>/dev/null | grep -qx true; then \
+		environment=$$(docker exec api printenv ENVIRONMENT); \
+		database_url=$$(docker exec api printenv DATABASE_URL | sed 's/@postgres:/@127.0.0.1:/'); \
+	else \
+		echo "Error: set DATABASE_URL or start the local api container"; \
+		exit 1; \
+	fi; \
+	ENVIRONMENT="$$environment" DATABASE_URL="$$database_url" ./target/release/caution-admin $(ADMIN_ARGS)
+
 # ── E2E test infrastructure ──────────────────────────────────────────
 # Uses a separate postgres instance and ephemeral volume so dev data is untouched.
 
@@ -897,6 +913,13 @@ test-e2e-legal:
 	status=$$?; \
 	$(MAKE) down-test; \
 	exit $$status
+
+test-e2e-admin:
+	@set -e; \
+	trap '$(MAKE) down-test' EXIT; \
+	$(MAKE) migrate-test; \
+	$(MAKE) build-admin; \
+	bash tests/e2e/test_admin.sh
 
 test-e2e-byoc:
 	@flock "$(E2E_LOCK_FILE)" /bin/bash -lc '\
