@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use std::{env, io, io::IsTerminal as _, io::Write as _};
+use std::{env, error::Error, fmt, io, io::IsTerminal as _, io::Write as _, process::ExitCode};
 
-use anyhow::{Context as _, Result, bail};
 use caution_admin::{
     db::Database,
     model::{RelatedResource, Relation, Resource, ResourceKind, ResourceSummary},
     tui,
 };
 use clap::{Parser, Subcommand};
+use dterror::{FromContext, ResultExt as _};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -66,25 +66,43 @@ enum Command {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
+    match run_admin().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            report_error(&error);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run_admin() -> Result<(), RunAdminError> {
+    use RunAdminErrorCtx as Ctx;
+
     let cli = Cli::parse();
-    require_development()?;
-    let database_url = env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
-    let database = Database::connect_read_only(&database_url).await?;
+    require_development().with_context(Ctx::new(RunAdminStage::CheckEnvironment))?;
+    let database_url =
+        env::var("DATABASE_URL").with_context(Ctx::new(RunAdminStage::ReadDatabaseUrl))?;
+    let database = Database::connect_read_only(&database_url)
+        .await
+        .with_context(Ctx::new(RunAdminStage::ConnectDatabase))?;
 
     match cli.command {
         None | Some(Command::Browse) => {
             if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-                bail!(
-                    "the terminal explorer requires a TTY; use list, show, or follow for headless access"
-                );
+                return Err(TtyRequiredError).with_context(Ctx::new(RunAdminStage::Browse));
             }
-            tui::run(database, env::var("PLATFORM_GIT_SHA").ok()).await
+            tui::run(database, env::var("PLATFORM_GIT_SHA").ok())
+                .await
+                .with_context(Ctx::new(RunAdminStage::Browse))
         }
         Some(Command::Search { query, json }) => {
-            let resources = database.search(&query).await?;
+            let resources = database
+                .search(&query)
+                .await
+                .with_context(Ctx::new(RunAdminStage::Search))?;
             if json {
-                print_json(&resources)
+                print_json(&resources).with_context(Ctx::new(RunAdminStage::PrintJson))
             } else {
                 print_summaries(&resources);
                 Ok(())
@@ -96,9 +114,12 @@ async fn main() -> Result<()> {
             offset,
             json,
         }) => {
-            let page = database.list(kind, offset, limit).await?;
+            let page = database
+                .list(kind, offset, limit)
+                .await
+                .with_context(Ctx::new(RunAdminStage::List))?;
             if json {
-                print_json(&page)
+                print_json(&page).with_context(Ctx::new(RunAdminStage::PrintJson))
             } else {
                 print_summaries(&page.items);
                 Ok(())
@@ -107,9 +128,10 @@ async fn main() -> Result<()> {
         Some(Command::Show { kind, id, json }) => {
             let resource = database
                 .show(caution_admin::model::ResourceRef { kind, id })
-                .await?;
+                .await
+                .with_context(Ctx::new(RunAdminStage::Show))?;
             if json {
-                print_json(&resource)
+                print_json(&resource).with_context(Ctx::new(RunAdminStage::PrintJson))
             } else {
                 print_resource(&resource);
                 Ok(())
@@ -123,7 +145,8 @@ async fn main() -> Result<()> {
             offset,
             json,
         }) => {
-            let relation = Relation::parse(kind, &relation)?;
+            let relation = Relation::parse(kind, &relation)
+                .with_context(Ctx::new(RunAdminStage::ParseRelation))?;
             let page = database
                 .follow(
                     caution_admin::model::ResourceRef { kind, id },
@@ -131,9 +154,10 @@ async fn main() -> Result<()> {
                     offset,
                     limit,
                 )
-                .await?;
+                .await
+                .with_context(Ctx::new(RunAdminStage::Follow))?;
             if json {
-                print_json(&page)
+                print_json(&page).with_context(Ctx::new(RunAdminStage::PrintJson))
             } else {
                 print_related(&page.items);
                 Ok(())
@@ -142,24 +166,112 @@ async fn main() -> Result<()> {
     }
 }
 
-fn require_development() -> Result<()> {
-    let environment = env::var("ENVIRONMENT").context("ENVIRONMENT must be set to development")?;
+fn require_development() -> Result<(), RequireDevelopmentError> {
+    let environment = env::var("ENVIRONMENT").map_err(RequireDevelopmentError::Missing)?;
     if environment != "development" {
-        bail!("caution-admin is a development pilot and refuses to run outside development");
+        return Err(RequireDevelopmentError::OutsideDevelopment);
     }
     Ok(())
 }
 
-fn print_json(value: &impl Serialize) -> Result<()> {
+fn print_json(value: &impl Serialize) -> Result<(), PrintJsonError> {
+    use PrintJsonErrorCtx as Ctx;
+
     let stdout = io::stdout();
     let mut output = stdout.lock();
-    serde_json::to_writer_pretty(&mut output, value)?;
-    writeln!(output)?;
+    serde_json::to_writer_pretty(&mut output, value)
+        .with_context(Ctx::new(PrintJsonStage::Serialize))?;
+    writeln!(output).with_context(Ctx::new(PrintJsonStage::WriteNewline))?;
     Ok(())
 }
 
+fn report_error(error: &dyn Error) {
+    eprintln!("Error: {error}");
+    let mut source = error.source();
+    while let Some(cause) = source {
+        eprintln!("  caused by: {cause}");
+        source = cause.source();
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunAdminStage {
+    CheckEnvironment,
+    ReadDatabaseUrl,
+    ConnectDatabase,
+    Browse,
+    Search,
+    List,
+    Show,
+    ParseRelation,
+    Follow,
+    PrintJson,
+}
+
+impl fmt::Display for RunAdminStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::CheckEnvironment => "checking the environment",
+            Self::ReadDatabaseUrl => "reading DATABASE_URL",
+            Self::ConnectDatabase => "connecting to PostgreSQL",
+            Self::Browse => "running the terminal explorer",
+            Self::Search => "searching resources",
+            Self::List => "listing resources",
+            Self::Show => "showing a resource",
+            Self::ParseRelation => "parsing a relationship",
+            Self::Follow => "following a relationship",
+            Self::PrintJson => "writing JSON output",
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("caution-admin failed while {stage}")]
+struct RunAdminError {
+    stage: RunAdminStage,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum RequireDevelopmentError {
+    #[error("ENVIRONMENT must be set to development")]
+    Missing(#[source] env::VarError),
+    #[error("caution-admin is a development pilot and refuses to run outside development")]
+    OutsideDevelopment,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "the terminal explorer requires a TTY; use search, list, show, or follow for headless access"
+)]
+struct TtyRequiredError;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrintJsonStage {
+    Serialize,
+    WriteNewline,
+}
+
+impl fmt::Display for PrintJsonStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Serialize => "serializing the value",
+            Self::WriteNewline => "finishing the output",
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("JSON output failed while {stage}")]
+struct PrintJsonError {
+    stage: PrintJsonStage,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
+}
+
 fn print_summaries(resources: &[ResourceSummary]) {
-    println!("TYPE\tID\tNAME\tCONTEXT");
+    println!("TYPE\tID\tNAME\tDETAILS");
     for resource in resources {
         println!(
             "{}\t{}\t{}\t{}",
@@ -179,7 +291,7 @@ fn print_resource(resource: &Resource) {
 }
 
 fn print_related(resources: &[RelatedResource]) {
-    println!("TYPE\tID\tNAME\tCONTEXT\tROLE\tVIA");
+    println!("TYPE\tID\tNAME\tDETAILS\tROLE\tVIA");
     for related in resources {
         println!(
             "{}\t{}\t{}\t{}\t{}\t{}",
@@ -199,9 +311,13 @@ fn print_related(resources: &[RelatedResource]) {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser as _;
+    use std::{error::Error as _, io};
 
-    use super::{Cli, Command};
+    use caution_admin::db::{SearchError, SearchErrorCtx};
+    use clap::Parser as _;
+    use dterror::ResultExt as _;
+
+    use super::{Cli, Command, RunAdminError, RunAdminErrorCtx, RunAdminStage};
 
     #[test]
     fn no_arguments_selects_the_tui() {
@@ -224,5 +340,25 @@ mod tests {
             cli.command,
             Some(Command::Follow { json: true, .. })
         ));
+    }
+
+    #[test]
+    fn typed_errors_preserve_the_source_chain() {
+        let search_error: SearchError = Err::<(), _>(io::Error::other("query failed"))
+            .with_context(SearchErrorCtx::new("querying PostgreSQL"))
+            .expect_err("search must fail");
+        let error: RunAdminError = Err::<(), _>(search_error)
+            .with_context(RunAdminErrorCtx::new(RunAdminStage::Search))
+            .expect_err("admin command must fail");
+
+        let search_source = error.source().expect("search source");
+        assert_eq!(
+            search_source.to_string(),
+            "resource search failed while querying PostgreSQL"
+        );
+        assert_eq!(
+            search_source.source().map(ToString::to_string).as_deref(),
+            Some("query failed")
+        );
     }
 }

@@ -619,7 +619,11 @@ build-admin:
 
 admin: build-admin
 	@if [ -n "$${DATABASE_URL:-}" ]; then \
-		environment="$${ENVIRONMENT:-development}"; \
+		if [ "$${ENVIRONMENT:-}" != "development" ]; then \
+			echo "Error: set ENVIRONMENT=development when DATABASE_URL is set"; \
+			exit 1; \
+		fi; \
+		environment="$$ENVIRONMENT"; \
 		database_url="$$DATABASE_URL"; \
 	elif docker inspect -f '{{.State.Running}}' api 2>/dev/null | grep -qx true; then \
 		environment=$$(docker exec api printenv ENVIRONMENT); \
@@ -915,11 +919,12 @@ test-e2e-legal:
 	exit $$status
 
 test-e2e-admin:
-	@set -e; \
-	trap '$(MAKE) down-test' EXIT; \
-	$(MAKE) migrate-test; \
-	$(MAKE) build-admin; \
-	bash tests/e2e/test_admin.sh
+	@flock "$(E2E_LOCK_FILE)" /bin/bash -lc '\
+		set -e; \
+		trap '"'"'$(MAKE) down-test'"'"' EXIT; \
+		$(MAKE) migrate-test; \
+		$(MAKE) build-admin; \
+		bash tests/e2e/test_admin.sh'
 
 test-e2e-byoc:
 	@flock "$(E2E_LOCK_FILE)" /bin/bash -lc '\

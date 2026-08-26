@@ -117,6 +117,33 @@ VALUES (
 );
 " >/dev/null
 
+if MAKE_ERROR=$(env -u ENVIRONMENT DATABASE_URL="$DATABASE_URL" \
+    make --no-print-directory admin ADMIN_ARGS='list user --json' 2>&1); then
+    echo "make admin accepted DATABASE_URL without ENVIRONMENT=development" >&2
+    exit 1
+fi
+grep -Fq 'set ENVIRONMENT=development when DATABASE_URL is set' <<<"$MAKE_ERROR"
+
+LIST_HEADER=$(admin list user --limit 1 | sed -n '1p')
+if [[ "$LIST_HEADER" != $'TYPE\tID\tNAME\tDETAILS' ]]; then
+    echo "unexpected list header: $LIST_HEADER" >&2
+    exit 1
+fi
+
+FOLLOW_HEADER=$(admin follow user "$USER_ID" apps --limit 1 | sed -n '1p')
+if [[ "$FOLLOW_HEADER" != $'TYPE\tID\tNAME\tDETAILS\tROLE\tVIA' ]]; then
+    echo "unexpected follow header: $FOLLOW_HEADER" >&2
+    exit 1
+fi
+
+if SEARCH_ERROR=$(admin search a --json 2>&1); then
+    echo "caution-admin accepted a one-character search" >&2
+    exit 1
+fi
+grep -Fq 'caution-admin failed while searching resources' <<<"$SEARCH_ERROR"
+grep -Fq 'resource search failed while validating the search query' <<<"$SEARCH_ERROR"
+grep -Fq 'search requires at least two characters or an exact UUID' <<<"$SEARCH_ERROR"
+
 USER_SEARCH=$(admin search admin-pilot-alice@example.com --json)
 jq -e --arg id "$USER_ID" '
     .[] | select(.kind == "user" and .id == $id and

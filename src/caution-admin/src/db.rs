@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+use std::error::Error;
+
 use chrono::{DateTime, Utc};
+use dterror::{FromContext, ResultExt as _};
 use sqlx::{FromRow, PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
@@ -19,7 +22,9 @@ pub struct Database {
 }
 
 impl Database {
-    pub async fn connect_read_only(database_url: &str) -> Result<Self, DatabaseError> {
+    pub async fn connect_read_only(database_url: &str) -> Result<Self, ConnectReadOnlyError> {
+        use ConnectReadOnlyErrorCtx as Ctx;
+
         let pool = PgPoolOptions::new()
             .max_connections(2)
             .after_connect(|connection, _metadata| {
@@ -38,20 +43,24 @@ impl Database {
             })
             .connect(database_url)
             .await
-            .map_err(DatabaseError::Connect)?;
+            .with_context(Ctx::new("connecting and configuring the pool"))?;
 
         let read_only: String = sqlx::query_scalar("SHOW default_transaction_read_only")
             .fetch_one(&pool)
-            .await?;
+            .await
+            .with_context(Ctx::new("verifying read-only mode"))?;
         if read_only != "on" {
-            return Err(DatabaseError::ReadWriteSession);
+            return Err(ReadWriteSessionError).with_context(Ctx::new("verifying read-only mode"));
         }
 
         Ok(Self { pool })
     }
 
-    pub async fn search(&self, query: &str) -> Result<Vec<ResourceSummary>, DatabaseError> {
-        let (pattern, exact) = search_parameters(query)?;
+    pub async fn search(&self, query: &str) -> Result<Vec<ResourceSummary>, SearchError> {
+        use SearchErrorCtx as Ctx;
+
+        let (pattern, exact) =
+            search_parameters(query).with_context(Ctx::new("validating the search query"))?;
 
         let rows = sqlx::query_as::<_, SummaryRow>(
             "SELECT kind, id, label, context
@@ -92,9 +101,13 @@ impl Database {
         .bind(exact)
         .bind(SEARCH_LIMIT)
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .with_context(Ctx::new("querying PostgreSQL"))?;
 
-        rows.into_iter().map(TryInto::try_into).collect()
+        rows.into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(Ctx::new("decoding search results"))
     }
 
     pub async fn list(
@@ -102,8 +115,10 @@ impl Database {
         kind: ResourceKind,
         offset: u32,
         limit: u32,
-    ) -> Result<Page<ResourceSummary>, DatabaseError> {
-        validate_page(limit)?;
+    ) -> Result<Page<ResourceSummary>, ListError> {
+        use ListErrorCtx as Ctx;
+
+        validate_page(limit).with_context(Ctx::new(kind, "validating pagination"))?;
         let fetch_limit = i64::from(limit) + 1;
         let offset = i64::from(offset);
 
@@ -122,7 +137,8 @@ impl Database {
                 .bind(fetch_limit)
                 .bind(offset)
                 .fetch_all(&self.pool)
-                .await?
+                .await
+                .with_context(Ctx::new(kind, "querying PostgreSQL"))?
             }
             ResourceKind::Organization => {
                 sqlx::query_as::<_, SummaryRow>(
@@ -140,7 +156,8 @@ impl Database {
                 .bind(fetch_limit)
                 .bind(offset)
                 .fetch_all(&self.pool)
-                .await?
+                .await
+                .with_context(Ctx::new(kind, "querying PostgreSQL"))?
             }
             ResourceKind::App => {
                 sqlx::query_as::<_, SummaryRow>(
@@ -156,29 +173,44 @@ impl Database {
                 .bind(fetch_limit)
                 .bind(offset)
                 .fetch_all(&self.pool)
-                .await?
+                .await
+                .with_context(Ctx::new(kind, "querying PostgreSQL"))?
             }
         };
 
         let items = rows
             .into_iter()
             .map(TryInto::try_into)
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(Ctx::new(kind, "decoding database rows"))?;
         Ok(Page::from_extra(items, offset as u32, limit))
     }
 
-    pub async fn show(&self, reference: ResourceRef) -> Result<Resource, DatabaseError> {
+    pub async fn show(&self, reference: ResourceRef) -> Result<Resource, ShowError> {
+        use ShowErrorCtx as Ctx;
+
         match reference.kind {
-            ResourceKind::User => self.show_user(reference.id).await,
-            ResourceKind::Organization => self.show_organization(reference.id).await,
-            ResourceKind::App => self.show_app(reference.id).await,
+            ResourceKind::User => self
+                .show_user(reference.id)
+                .await
+                .with_context(Ctx::new(reference.kind, reference.id)),
+            ResourceKind::Organization => self
+                .show_organization(reference.id)
+                .await
+                .with_context(Ctx::new(reference.kind, reference.id)),
+            ResourceKind::App => self
+                .show_app(reference.id)
+                .await
+                .with_context(Ctx::new(reference.kind, reference.id)),
         }
     }
 
     pub async fn relation_summaries(
         &self,
         reference: ResourceRef,
-    ) -> Result<Vec<RelationSummary>, DatabaseError> {
+    ) -> Result<Vec<RelationSummary>, RelationSummariesError> {
+        use RelationSummariesErrorCtx as Ctx;
+
         let counts: (i64, i64) = match reference.kind {
             ResourceKind::User => {
                 sqlx::query_as(
@@ -191,7 +223,8 @@ impl Database {
                 )
                 .bind(reference.id)
                 .fetch_one(&self.pool)
-                .await?
+                .await
+                .with_context(Ctx::new(reference.kind, reference.id))?
             }
             ResourceKind::Organization => {
                 sqlx::query_as(
@@ -201,7 +234,8 @@ impl Database {
                 )
                 .bind(reference.id)
                 .fetch_one(&self.pool)
-                .await?
+                .await
+                .with_context(Ctx::new(reference.kind, reference.id))?
             }
             ResourceKind::App => {
                 sqlx::query_as(
@@ -214,7 +248,8 @@ impl Database {
                 )
                 .bind(reference.id)
                 .fetch_one(&self.pool)
-                .await?
+                .await
+                .with_context(Ctx::new(reference.kind, reference.id))?
             }
         };
         let relations = Relation::for_kind(reference.kind);
@@ -236,14 +271,27 @@ impl Database {
         relation: Relation,
         offset: u32,
         limit: u32,
-    ) -> Result<Page<RelatedResource>, DatabaseError> {
+    ) -> Result<Page<RelatedResource>, FollowError> {
+        use FollowErrorCtx as Ctx;
+
         if relation.source_kind() != source.kind {
-            return Err(DatabaseError::RelationSourceMismatch {
+            return Err(RelationSourceMismatchError {
                 relation,
                 kind: source.kind,
-            });
+            })
+            .with_context(Ctx::new(
+                source.kind,
+                source.id,
+                relation,
+                "validating the relationship",
+            ));
         }
-        validate_page(limit)?;
+        validate_page(limit).with_context(Ctx::new(
+            source.kind,
+            source.id,
+            relation,
+            "validating pagination",
+        ))?;
         let fetch_limit = i64::from(limit) + 1;
         let offset_value = i64::from(offset);
 
@@ -266,7 +314,13 @@ impl Database {
                 .bind(fetch_limit)
                 .bind(offset_value)
                 .fetch_all(&self.pool)
-                .await?
+                .await
+                .with_context(Ctx::new(
+                    source.kind,
+                    source.id,
+                    relation,
+                    "querying PostgreSQL",
+                ))?
             }
             Relation::UserApps => {
                 sqlx::query_as::<_, RelatedRow>(
@@ -287,7 +341,13 @@ impl Database {
                 .bind(fetch_limit)
                 .bind(offset_value)
                 .fetch_all(&self.pool)
-                .await?
+                .await
+                .with_context(Ctx::new(
+                    source.kind,
+                    source.id,
+                    relation,
+                    "querying PostgreSQL",
+                ))?
             }
             Relation::OrganizationUsers => {
                 sqlx::query_as::<_, RelatedRow>(
@@ -308,7 +368,13 @@ impl Database {
                 .bind(fetch_limit)
                 .bind(offset_value)
                 .fetch_all(&self.pool)
-                .await?
+                .await
+                .with_context(Ctx::new(
+                    source.kind,
+                    source.id,
+                    relation,
+                    "querying PostgreSQL",
+                ))?
             }
             Relation::OrganizationApps => {
                 sqlx::query_as::<_, RelatedRow>(
@@ -327,7 +393,13 @@ impl Database {
                 .bind(fetch_limit)
                 .bind(offset_value)
                 .fetch_all(&self.pool)
-                .await?
+                .await
+                .with_context(Ctx::new(
+                    source.kind,
+                    source.id,
+                    relation,
+                    "querying PostgreSQL",
+                ))?
             }
             Relation::AppOrganization => {
                 sqlx::query_as::<_, RelatedRow>(
@@ -346,7 +418,13 @@ impl Database {
                 .bind(fetch_limit)
                 .bind(offset_value)
                 .fetch_all(&self.pool)
-                .await?
+                .await
+                .with_context(Ctx::new(
+                    source.kind,
+                    source.id,
+                    relation,
+                    "querying PostgreSQL",
+                ))?
             }
             Relation::AppUsers => {
                 sqlx::query_as::<_, RelatedRow>(
@@ -369,7 +447,13 @@ impl Database {
                 .bind(fetch_limit)
                 .bind(offset_value)
                 .fetch_all(&self.pool)
-                .await?
+                .await
+                .with_context(Ctx::new(
+                    source.kind,
+                    source.id,
+                    relation,
+                    "querying PostgreSQL",
+                ))?
             }
         };
 
@@ -383,7 +467,9 @@ impl Database {
         Ok(Page::from_extra(items, offset, limit))
     }
 
-    async fn show_user(&self, id: Uuid) -> Result<Resource, DatabaseError> {
+    async fn show_user(&self, id: Uuid) -> Result<Resource, ShowUserError> {
+        use ShowUserErrorCtx as Ctx;
+
         let row = sqlx::query_as::<_, UserRow>(
             "SELECT id, username, email, is_active, created_at, updated_at
              FROM users
@@ -391,16 +477,20 @@ impl Database {
         )
         .bind(id)
         .fetch_optional(&self.pool)
-        .await?
-        .ok_or(DatabaseError::NotFound {
+        .await
+        .with_context(Ctx::new(id))?
+        .ok_or(ResourceNotFoundError {
             kind: ResourceKind::User,
             id,
-        })?;
+        })
+        .with_context(Ctx::new(id))?;
 
         Ok(row.into_resource())
     }
 
-    async fn show_organization(&self, id: Uuid) -> Result<Resource, DatabaseError> {
+    async fn show_organization(&self, id: Uuid) -> Result<Resource, ShowOrganizationError> {
+        use ShowOrganizationErrorCtx as Ctx;
+
         let row = sqlx::query_as::<_, OrganizationRow>(
             "SELECT o.id,
                     o.name,
@@ -433,16 +523,20 @@ impl Database {
         )
         .bind(id)
         .fetch_optional(&self.pool)
-        .await?
-        .ok_or(DatabaseError::NotFound {
+        .await
+        .with_context(Ctx::new(id))?
+        .ok_or(ResourceNotFoundError {
             kind: ResourceKind::Organization,
             id,
-        })?;
+        })
+        .with_context(Ctx::new(id))?;
 
         Ok(row.into_resource())
     }
 
-    async fn show_app(&self, id: Uuid) -> Result<Resource, DatabaseError> {
+    async fn show_app(&self, id: Uuid) -> Result<Resource, ShowAppError> {
+        use ShowAppErrorCtx as Ctx;
+
         let row = sqlx::query_as::<_, AppRow>(
             "SELECT cr.id,
                     cr.resource_name,
@@ -474,56 +568,151 @@ impl Database {
         )
         .bind(id)
         .fetch_optional(&self.pool)
-        .await?
-        .ok_or(DatabaseError::NotFound {
+        .await
+        .with_context(Ctx::new(id))?
+        .ok_or(ResourceNotFoundError {
             kind: ResourceKind::App,
             id,
-        })?;
+        })
+        .with_context(Ctx::new(id))?;
 
         Ok(row.into_resource())
     }
 }
 
-fn search_parameters(query: &str) -> Result<(String, String), DatabaseError> {
+fn search_parameters(query: &str) -> Result<(String, String), SearchParametersError> {
     let exact = query.trim().to_string();
     if exact.len() < 2 && Uuid::parse_str(&exact).is_err() {
-        return Err(DatabaseError::SearchTooShort);
+        return Err(SearchParametersError);
     }
     Ok((["%", &exact, "%"].concat(), exact))
 }
 
-fn validate_page(limit: u32) -> Result<(), DatabaseError> {
+fn validate_page(limit: u32) -> Result<(), ValidatePageError> {
     if (1..=MAX_PAGE_SIZE).contains(&limit) {
         Ok(())
     } else {
-        Err(DatabaseError::InvalidLimit {
+        Err(ValidatePageError {
             limit,
             max: MAX_PAGE_SIZE,
         })
     }
 }
 
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("failed to establish a read-only PostgreSQL session while {operation}")]
+pub struct ConnectReadOnlyError {
+    operation: &'static str,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
+}
+
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("resource search failed while {operation}")]
+pub struct SearchError {
+    operation: &'static str,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
+}
+
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("failed to list {kind} resources while {operation}")]
+pub struct ListError {
+    kind: ResourceKind,
+    operation: &'static str,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
+}
+
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("failed to show {kind} {id}")]
+pub struct ShowError {
+    kind: ResourceKind,
+    id: Uuid,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
+}
+
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("failed to load relationships for {kind} {id}")]
+pub struct RelationSummariesError {
+    kind: ResourceKind,
+    id: Uuid,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
+}
+
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("failed to follow {relation:?} from {kind} {id} while {operation}")]
+pub struct FollowError {
+    kind: ResourceKind,
+    id: Uuid,
+    relation: Relation,
+    operation: &'static str,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
+}
+
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("failed to load user {id}")]
+struct ShowUserError {
+    id: Uuid,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
+}
+
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("failed to load organization {id}")]
+struct ShowOrganizationError {
+    id: Uuid,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
+}
+
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("failed to load app {id}")]
+struct ShowAppError {
+    id: Uuid,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
+}
+
 #[derive(Debug, thiserror::Error)]
-pub enum DatabaseError {
-    #[error("failed to connect to PostgreSQL")]
-    Connect(#[source] sqlx::Error),
-    #[error("PostgreSQL connection is not read-only")]
-    ReadWriteSession,
-    #[error("search requires at least two characters or an exact UUID")]
-    SearchTooShort,
-    #[error("{kind} {id} was not found")]
-    NotFound { kind: ResourceKind, id: Uuid },
-    #[error("relation {relation:?} cannot be followed from {kind}")]
-    RelationSourceMismatch {
-        relation: Relation,
-        kind: ResourceKind,
-    },
-    #[error("limit must be between 1 and {max}, got {limit}")]
-    InvalidLimit { limit: u32, max: u32 },
-    #[error("database query failed")]
-    Query(#[from] sqlx::Error),
-    #[error("database returned an unknown resource kind `{0}`")]
-    UnknownResourceKind(String),
+#[error("search requires at least two characters or an exact UUID")]
+struct SearchParametersError;
+
+#[derive(Debug, thiserror::Error)]
+#[error("limit must be between 1 and {max}, got {limit}")]
+struct ValidatePageError {
+    limit: u32,
+    max: u32,
+}
+
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("failed to decode database resource kind `{kind}`")]
+struct SummaryRowError {
+    #[context(borrow = str)]
+    kind: String,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("PostgreSQL connection is not read-only")]
+struct ReadWriteSessionError;
+
+#[derive(Debug, thiserror::Error)]
+#[error("{kind} {id} was not found")]
+struct ResourceNotFoundError {
+    kind: ResourceKind,
+    id: Uuid,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("relation {relation:?} cannot be followed from {kind}")]
+struct RelationSourceMismatchError {
+    relation: Relation,
+    kind: ResourceKind,
 }
 
 #[derive(FromRow)]
@@ -535,13 +724,12 @@ struct SummaryRow {
 }
 
 impl TryFrom<SummaryRow> for ResourceSummary {
-    type Error = DatabaseError;
+    type Error = SummaryRowError;
 
     fn try_from(row: SummaryRow) -> Result<Self, Self::Error> {
-        let kind = row
-            .kind
-            .parse()
-            .map_err(|_| DatabaseError::UnknownResourceKind(row.kind))?;
+        use SummaryRowErrorCtx as Ctx;
+
+        let kind = row.kind.parse().with_context(Ctx::new(&row.kind))?;
         Ok(Self {
             kind,
             id: row.id,
@@ -927,6 +1115,12 @@ mod tests {
             )
         );
         assert!(search_parameters("a").is_err());
+        assert_eq!(
+            search_parameters("a")
+                .expect_err("short search must fail")
+                .to_string(),
+            "search requires at least two characters or an exact UUID"
+        );
     }
 
     #[test]

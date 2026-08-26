@@ -1,15 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use std::{io, time::Duration};
+use std::{error::Error, fmt, io, time::Duration};
 
-use anyhow::Result;
 use crossterm::{
     cursor::{Hide, Show},
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use dterror::{FromContext, ResultExt as _};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -30,17 +30,20 @@ use crate::{
 
 const TUI_PAGE_SIZE: u32 = 50;
 
-pub async fn run(database: Database, platform_sha: Option<String>) -> Result<()> {
-    let mut session = TerminalSession::new()?;
+pub async fn run(database: Database, platform_sha: Option<String>) -> Result<(), RunTuiError> {
+    use RunTuiErrorCtx as Ctx;
+
+    let mut session = TerminalSession::new().with_context(Ctx::new(RunTuiStage::Initialize))?;
     let mut state = AppState::new();
 
     while !state.should_quit {
         session
             .terminal
-            .draw(|frame| render(frame, &mut state, platform_sha.as_deref()))?;
+            .draw(|frame| render(frame, &mut state, platform_sha.as_deref()))
+            .with_context(Ctx::new(RunTuiStage::Draw))?;
 
-        if event::poll(Duration::from_millis(250))?
-            && let Event::Key(key) = event::read()?
+        if event::poll(Duration::from_millis(250)).with_context(Ctx::new(RunTuiStage::Poll))?
+            && let Event::Key(key) = event::read().with_context(Ctx::new(RunTuiStage::ReadEvent))?
             && key.kind == KeyEventKind::Press
         {
             handle_key(&database, &mut state, key).await;
@@ -48,6 +51,33 @@ pub async fn run(database: Database, platform_sha: Option<String>) -> Result<()>
     }
 
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunTuiStage {
+    Initialize,
+    Draw,
+    Poll,
+    ReadEvent,
+}
+
+impl fmt::Display for RunTuiStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Initialize => "initializing the terminal",
+            Self::Draw => "drawing the screen",
+            Self::Poll => "polling for input",
+            Self::ReadEvent => "reading terminal input",
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("terminal explorer failed while {stage}")]
+pub struct RunTuiError {
+    stage: RunTuiStage,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
 }
 
 async fn handle_key(database: &Database, state: &mut AppState, key: KeyEvent) {
@@ -91,6 +121,17 @@ async fn handle_key(database: &Database, state: &mut AppState, key: KeyEvent) {
     }
 }
 
+fn error_message(error: &dyn Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
+}
+
 async fn run_search(database: &Database, state: &mut AppState) {
     let query = state.current.query.trim().to_string();
     if query.is_empty() {
@@ -100,7 +141,7 @@ async fn run_search(database: &Database, state: &mut AppState) {
 
     match database.search(&query).await {
         Ok(resources) => state.open_search(query, None, resources),
-        Err(error) => state.set_status(error.to_string()),
+        Err(error) => state.set_status(error_message(&error)),
     }
 }
 
@@ -109,7 +150,7 @@ async fn open_selected(database: &Database, state: &mut AppState) {
     match selected {
         Some(Row::Browse(kind)) => match database.list(kind, 0, TUI_PAGE_SIZE).await {
             Ok(page) => state.open_search(String::new(), Some(kind), page.items),
-            Err(error) => state.set_status(error.to_string()),
+            Err(error) => state.set_status(error_message(&error)),
         },
         Some(Row::Resource(summary)) => open_resource(database, state, summary).await,
         Some(Row::Related(related)) => open_resource(database, state, related.resource).await,
@@ -123,7 +164,7 @@ async fn open_selected(database: &Database, state: &mut AppState) {
                 .await
             {
                 Ok(page) => state.open_related(source, relation.relation, page),
-                Err(error) => state.set_status(error.to_string()),
+                Err(error) => state.set_status(error_message(&error)),
             }
         }
         None => state.set_status("nothing to open"),
@@ -134,9 +175,9 @@ async fn open_resource(database: &Database, state: &mut AppState, summary: Resou
     match database.show(summary.reference()).await {
         Ok(resource) => match database.relation_summaries(resource.reference()).await {
             Ok(relations) => state.open_resource(resource, relations),
-            Err(error) => state.set_status(error.to_string()),
+            Err(error) => state.set_status(error_message(&error)),
         },
-        Err(error) => state.set_status(error.to_string()),
+        Err(error) => state.set_status(error_message(&error)),
     }
 }
 
@@ -149,25 +190,25 @@ async fn refresh(database: &Database, state: &mut AppState) {
             kind: Some(kind),
         } => match database.list(kind, 0, TUI_PAGE_SIZE).await {
             Ok(page) => state.replace_resources(page.items),
-            Err(error) => state.set_status(error.to_string()),
+            Err(error) => state.set_status(error_message(&error)),
         },
         Screen::Search { query, kind: None } => match database.search(&query).await {
             Ok(resources) => state.replace_resources(resources),
-            Err(error) => state.set_status(error.to_string()),
+            Err(error) => state.set_status(error_message(&error)),
         },
         Screen::Resource(resource) => match database.show(resource.reference()).await {
             Ok(resource) => match database.relation_summaries(resource.reference()).await {
                 Ok(relations) => state.replace_resource(resource, relations),
-                Err(error) => state.set_status(error.to_string()),
+                Err(error) => state.set_status(error_message(&error)),
             },
-            Err(error) => state.set_status(error.to_string()),
+            Err(error) => state.set_status(error_message(&error)),
         },
         Screen::Related { source, relation } => match database
             .follow(source.reference(), relation, 0, TUI_PAGE_SIZE)
             .await
         {
             Ok(page) => state.replace_related(page),
-            Err(error) => state.set_status(error.to_string()),
+            Err(error) => state.set_status(error_message(&error)),
         },
     }
 }
@@ -587,12 +628,15 @@ struct TerminalSession {
 }
 
 impl TerminalSession {
-    fn new() -> io::Result<Self> {
-        enable_raw_mode()?;
+    fn new() -> Result<Self, NewTerminalSessionError> {
+        use NewTerminalSessionErrorCtx as Ctx;
+
+        enable_raw_mode().with_context(Ctx::new(NewTerminalSessionStage::EnableRawMode))?;
         let mut stdout = io::stdout();
         if let Err(error) = execute!(stdout, EnterAlternateScreen, Hide) {
             let _ = disable_raw_mode();
-            return Err(error);
+            return Err(error)
+                .with_context(Ctx::new(NewTerminalSessionStage::EnterAlternateScreen));
         }
         let terminal = match Terminal::new(CrosstermBackend::new(stdout)) {
             Ok(terminal) => terminal,
@@ -600,11 +644,36 @@ impl TerminalSession {
                 let _ = disable_raw_mode();
                 let mut stdout = io::stdout();
                 let _ = execute!(stdout, LeaveAlternateScreen, Show);
-                return Err(error);
+                return Err(error).with_context(Ctx::new(NewTerminalSessionStage::CreateTerminal));
             }
         };
         Ok(Self { terminal })
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NewTerminalSessionStage {
+    EnableRawMode,
+    EnterAlternateScreen,
+    CreateTerminal,
+}
+
+impl fmt::Display for NewTerminalSessionStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::EnableRawMode => "enabling raw mode",
+            Self::EnterAlternateScreen => "entering the alternate screen",
+            Self::CreateTerminal => "creating the terminal backend",
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("terminal initialization failed while {stage}")]
+struct NewTerminalSessionError {
+    stage: NewTerminalSessionStage,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
 }
 
 impl Drop for TerminalSession {
@@ -617,10 +686,16 @@ impl Drop for TerminalSession {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
+    use dterror::ResultExt as _;
     use ratatui::{Terminal, backend::TestBackend};
     use uuid::Uuid;
 
-    use super::{breadcrumb_text, details_line, render, status_style};
+    use super::{
+        RunTuiError, RunTuiErrorCtx, RunTuiStage, breadcrumb_text, details_line, error_message,
+        render, status_style,
+    };
     use crate::{
         model::{
             Field, Page, RelatedResource, Relation, RelationSummary, Resource, ResourceKind,
@@ -856,5 +931,17 @@ mod tests {
         );
         assert_eq!(details.spans[1].style.fg, None);
         assert_eq!(details.spans[2].style.fg, None);
+    }
+
+    #[test]
+    fn terminal_errors_show_their_actionable_cause() {
+        let error: RunTuiError = Err::<(), _>(io::Error::other("draw failed"))
+            .with_context(RunTuiErrorCtx::new(RunTuiStage::Draw))
+            .expect_err("terminal draw must fail");
+
+        assert_eq!(
+            error_message(&error),
+            "terminal explorer failed while drawing the screen: draw failed"
+        );
     }
 }

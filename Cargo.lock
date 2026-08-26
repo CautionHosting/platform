@@ -1586,10 +1586,10 @@ dependencies = [
 name = "caution-admin"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "chrono",
  "clap",
  "crossterm",
+ "dterror 0.2.0",
  "ratatui",
  "serde",
  "serde_json",
@@ -2671,6 +2671,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e05ee8f3f4ed77223f1ff7b12051ec44fc36d3e67ea217452dc8434559df9ded"
 
 [[package]]
+name = "dterror"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81a3413aa4bd8522428021633e155d4d091a9592c31f6663d9081882b26ac62c"
+dependencies = [
+ "dterror-derive",
+]
+
+[[package]]
+name = "dterror-derive"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "393f0040da310432e6ede30499b8dee5d592edf01fc7e82118e3fd5b2cf70d95"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3227,7 +3248,7 @@ dependencies = [
  "bytes",
  "cookie",
  "dotenvy",
- "dterror",
+ "dterror 0.1.0",
  "futures",
  "hex",
  "hmac 0.12.1",
@@ -4631,7 +4652,7 @@ dependencies = [
  "card-backend-pcsc",
  "cfg-if",
  "daemonize",
- "dterror",
+ "dterror 0.1.0",
  "ed25519-dalek 2.2.0",
  "hkdf 0.12.4",
  "keyfork-derive-openpgp",

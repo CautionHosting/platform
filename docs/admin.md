@@ -12,13 +12,16 @@ running, build and launch it from the server checkout:
 make admin
 ```
 
-If `DATABASE_URL` is already set, `make admin` uses it directly and does not
-require an API container. Otherwise it discovers the development environment
-and database URL from a running local `api` container. For example, after
-opening an SSH tunnel to the development database:
+If `DATABASE_URL` and `ENVIRONMENT=development` are explicitly set, `make
+admin` uses the URL directly and does not require an API container. Otherwise
+it discovers the development environment and database URL from a running local
+`api` container. For example, after opening an SSH tunnel to the development
+database:
 
 ```bash
-DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:15432/caution' make admin
+ENVIRONMENT=development \
+DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:15432/caution' \
+make admin
 ```
 
 Use the development database credentials for `USER` and `PASSWORD`; do not put
@@ -68,6 +71,7 @@ make admin ADMIN_ARGS='follow user <uuid> apps --json'
 
 `list` and `follow` accept `--limit` (1 to 200) and `--offset`. Human-readable
 tabular output is the default; `--json` produces machine-readable output.
+Failures identify the operation and print their complete source chain.
 
 This pilot does not replace `utils/admin`. Continue using that script for legal
 document and other mutating administration workflows.
