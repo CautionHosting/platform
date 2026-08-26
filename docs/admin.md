@@ -28,9 +28,10 @@ Use the development database credentials for `USER` and `PASSWORD`; do not put
 them in the repository.
 
 Press `/` to search by username, email, organization name, app name, or exact
-UUID. Select a result with the arrow keys or `j`/`k`, press Enter to open it,
-and follow its listed relationships. Backspace returns to the exact previous
-screen. Press `?` for the complete key reference.
+UUID; valid UUID representations are normalized before lookup. Select a result
+with the arrow keys or `j`/`k`, press Enter to open it, and follow its listed
+relationships. Backspace returns to the exact previous screen. Press `?` for
+the complete key reference.
 
 The header shows the path used to reach the current resource, for example
 `Search “alice” › User alice › Apps via organizations › App alice-api`.
@@ -39,6 +40,8 @@ states red; the status text is always shown as well as its colour.
 Summary rows show status first, followed by email, app count, organization, or
 relationship provenance as applicable. Users without an email show `no email`.
 Panel content has a one-cell left inset; rows remain single-height.
+Long detail values are shown with an ellipsis so later fields remain visible;
+use the headless JSON commands to retrieve their full allowlisted values.
 
 The pilot exposes these relationships:
 
@@ -71,7 +74,9 @@ make admin ADMIN_ARGS='follow user <uuid> apps --json'
 
 `list` and `follow` accept `--limit` (1 to 200) and `--offset`. Human-readable
 tabular output is the default; `--json` produces machine-readable output.
-Failures identify the operation and print their complete source chain.
+Failures identify the operation and print their complete source chain. `show`
+and `follow` fail when their source UUID does not exist rather than treating a
+missing resource as an empty relationship.
 
 This pilot does not replace `utils/admin`. Continue using that script for legal
 document and other mutating administration workflows.

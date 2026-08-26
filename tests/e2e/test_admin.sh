@@ -233,6 +233,23 @@ if admin show user 00000000-0000-0000-0000-000000000000 --json >/dev/null 2>&1; 
     exit 1
 fi
 
+assert_missing_follow() {
+    local kind="$1"
+    local relation="$2"
+    local missing_id="00000000-0000-0000-0000-000000000000"
+    local error
+
+    if error=$(admin follow "$kind" "$missing_id" "$relation" --json 2>&1); then
+        echo "caution-admin followed $relation from a missing $kind" >&2
+        exit 1
+    fi
+    grep -Fq "$kind $missing_id was not found" <<<"$error"
+}
+
+assert_missing_follow user apps
+assert_missing_follow organization users
+assert_missing_follow app organization
+
 if ENVIRONMENT=production DATABASE_URL="$DATABASE_URL" \
     "$ADMIN_BINARY" list user --json >/dev/null 2>&1; then
     echo "caution-admin did not refuse production" >&2

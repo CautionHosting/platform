@@ -409,15 +409,21 @@ fn summary_row(
 }
 
 fn details_line(details: String) -> Line<'static> {
-    if let Some((status, rest)) = details.split_once(" · ") {
-        Line::from(vec![
-            Span::styled(status.to_string(), status_style(status)),
+    Line::from(status_spans(details))
+}
+
+fn status_spans(value: String) -> Vec<Span<'static>> {
+    if let Some(index) = value.find(" · ") {
+        let status = value[..index].to_string();
+        let rest = value[index + " · ".len()..].to_string();
+        vec![
+            Span::styled(status.clone(), status_style(&status)),
             Span::raw(" · "),
-            Span::raw(rest.to_string()),
-        ])
+            Span::raw(rest),
+        ]
     } else {
-        let style = status_style(&details);
-        Line::from(Span::styled(details, style))
+        let style = status_style(&value);
+        vec![Span::styled(value, style)]
     }
 }
 
@@ -445,20 +451,20 @@ fn render_resource(
             Style::default().fg(Color::DarkGray),
         ),
     ])];
-    lines.extend(
-        visible_fields
-            .into_iter()
-            .map(|field| detail_line(field.label, field.value.clone())),
-    );
+    let detail_width = usize::from(areas[0].width.saturating_sub(3));
+    lines.extend(visible_fields.into_iter().map(|field| {
+        detail_line(
+            field.label,
+            truncate_detail_value(field.label, &field.value, detail_width),
+        )
+    }));
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .padding(Padding::left(1))
-                    .title(resource_title(&resource)),
-            )
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .padding(Padding::left(1))
+                .title(resource_title(&resource)),
+        ),
         areas[0],
     );
 
@@ -491,18 +497,48 @@ fn detail_line(label: &'static str, value: String) -> Line<'static> {
     let value_style = match label {
         "Credit balance" if value.starts_with('-') => Style::default().fg(Color::Red),
         "Credit balance" => Style::default().fg(Color::Green),
-        "Credit state" | "Subscription status" | "DNS" => status_style(&value),
         "Pending change" => Style::default().fg(Color::Yellow),
         _ if value == "—" => Style::default().fg(Color::DarkGray),
         _ => Style::default(),
     };
-    Line::from(vec![
-        Span::styled(
-            [label, ": "].concat(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(value, value_style),
-    ])
+    let mut spans = vec![Span::styled(
+        [label, ": "].concat(),
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
+    if matches!(label, "Credit state" | "Subscription status" | "DNS") {
+        spans.extend(status_spans(value));
+    } else {
+        spans.push(Span::styled(value, value_style));
+    }
+    Line::from(spans)
+}
+
+fn truncate_detail_value(label: &str, value: &str, line_width: usize) -> String {
+    let prefix_width = Span::raw([label, ": "].concat()).width();
+    let available = line_width.saturating_sub(prefix_width);
+    if Span::raw(value).width() <= available {
+        return value.to_string();
+    }
+
+    let ellipsis = "…";
+    let ellipsis_width = Span::raw(ellipsis).width();
+    if available < ellipsis_width {
+        return String::new();
+    }
+
+    let mut truncated = String::new();
+    let mut width = 0;
+    for character in value.chars() {
+        let character = character.to_string();
+        let character_width = Span::raw(character.as_str()).width();
+        if width + character_width + ellipsis_width > available {
+            break;
+        }
+        truncated.push_str(&character);
+        width += character_width;
+    }
+    truncated.push_str(ellipsis);
+    truncated
 }
 
 fn resource_title(resource: &crate::model::Resource) -> Line<'static> {
@@ -552,7 +588,7 @@ fn status_style(value: &str) -> Style {
     let color = match token.as_str() {
         "active" | "running" | "ready" | "validated" | "clear" => Some(Color::Green),
         "pending" | "trialing" | "past_due" | "paused" | "stopped" | "terminating" | "reserved"
-        | "publishing" | "withdrawing" => Some(Color::Yellow),
+        | "publishing" | "withdrawing" | "warning" | "reminder" => Some(Color::Yellow),
         "inactive" | "failed" | "terminated" | "suspended" | "canceled" | "invalid" => {
             Some(Color::Red)
         }
@@ -635,6 +671,7 @@ impl TerminalSession {
         let mut stdout = io::stdout();
         if let Err(error) = execute!(stdout, EnterAlternateScreen, Hide) {
             let _ = disable_raw_mode();
+            let _ = leave_alternate_screen(&mut stdout);
             return Err(error)
                 .with_context(Ctx::new(NewTerminalSessionStage::EnterAlternateScreen));
         }
@@ -643,7 +680,7 @@ impl TerminalSession {
             Err(error) => {
                 let _ = disable_raw_mode();
                 let mut stdout = io::stdout();
-                let _ = execute!(stdout, LeaveAlternateScreen, Show);
+                let _ = leave_alternate_screen(&mut stdout);
                 return Err(error).with_context(Ctx::new(NewTerminalSessionStage::CreateTerminal));
             }
         };
@@ -676,11 +713,18 @@ struct NewTerminalSessionError {
     source: Box<dyn Error + Send + Sync + 'static>,
 }
 
+fn leave_alternate_screen(output: &mut impl io::Write) -> Result<(), LeaveAlternateScreenError> {
+    execute!(output, LeaveAlternateScreen, Show).map_err(LeaveAlternateScreenError)
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("failed to leave the alternate terminal screen")]
+struct LeaveAlternateScreenError(#[source] io::Error);
+
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen, Show);
-        let _ = self.terminal.show_cursor();
+        let _ = leave_alternate_screen(self.terminal.backend_mut());
     }
 }
 
@@ -694,7 +738,7 @@ mod tests {
 
     use super::{
         RunTuiError, RunTuiErrorCtx, RunTuiStage, breadcrumb_text, details_line, error_message,
-        render, status_style,
+        leave_alternate_screen, render, status_style,
     };
     use crate::{
         model::{
@@ -750,12 +794,33 @@ mod tests {
                     value: "$80.00".to_string(),
                 },
                 Field {
+                    label: "Credit state",
+                    value: "warning · dunning warning sent".to_string(),
+                },
+                Field {
                     label: "BYOC plan",
                     value: "3 Enclaves".to_string(),
                 },
                 Field {
+                    label: "Subscription status",
+                    value: "active".to_string(),
+                },
+                Field {
+                    label: "Billing source",
+                    value: "Credits".to_string(),
+                },
+                Field {
                     label: "BYOC capacity",
                     value: "1 / 2 used".to_string(),
+                },
+                Field {
+                    label: "Pending change",
+                    value: "A deliberately long pending subscription change that must be truncated"
+                        .to_string(),
+                },
+                Field {
+                    label: "Created",
+                    value: "2026-08-25T10:00:00Z".to_string(),
                 },
                 Field {
                     label: "Updated",
@@ -785,11 +850,38 @@ mod tests {
                 },
                 Field {
                     label: "Provider",
-                    value: "AWS · production · EC2 Instance".to_string(),
+                    value: "AWS · a deliberately long provider account name that cannot fit · EC2 Instance"
+                        .to_string(),
+                },
+                Field {
+                    label: "Provider resource",
+                    value: "i-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .to_string(),
+                },
+                Field {
+                    label: "Region",
+                    value: "eu-central-1".to_string(),
+                },
+                Field {
+                    label: "Public IP",
+                    value: "203.0.113.10".to_string(),
+                },
+                Field {
+                    label: "Domain",
+                    value: "a-deliberately-long-managed-application-domain.example.caution.co"
+                        .to_string(),
                 },
                 Field {
                     label: "DNS",
                     value: "ready".to_string(),
+                },
+                Field {
+                    label: "Destroyed",
+                    value: "—".to_string(),
+                },
+                Field {
+                    label: "Created",
+                    value: "2026-08-25T10:00:00Z".to_string(),
                 },
                 Field {
                     label: "Updated",
@@ -892,6 +984,7 @@ mod tests {
     #[test]
     fn resource_screens_fit_at_standard_terminal_size() {
         for resource in [user(), organization(), app()] {
+            let expect_ellipsis = resource.kind != ResourceKind::User;
             let mut state = AppState::new();
             state.open_resource(
                 resource,
@@ -903,6 +996,9 @@ mod tests {
             let text = screen_text(&mut state);
             assert!(text.contains("2026-08-26T10:00:00Z") || text.contains("alice@example.com"));
             assert!(text.contains("q quit"));
+            if expect_ellipsis {
+                assert!(text.contains('…'));
+            }
         }
     }
 
@@ -931,6 +1027,19 @@ mod tests {
         );
         assert_eq!(details.spans[1].style.fg, None);
         assert_eq!(details.spans[2].style.fg, None);
+
+        let detail =
+            super::detail_line("Credit state", "suspended · dunning suspended".to_string());
+        assert_eq!(detail.spans[1].style.fg, Some(ratatui::style::Color::Red));
+        assert_eq!(detail.spans[2].style.fg, None);
+        assert_eq!(detail.spans[3].style.fg, None);
+    }
+
+    #[test]
+    fn terminal_cleanup_emits_restore_commands() {
+        let mut output = Vec::new();
+        leave_alternate_screen(&mut output).expect("restore terminal commands");
+        assert!(!output.is_empty());
     }
 
     #[test]

@@ -104,8 +104,9 @@ async fn run_admin() -> Result<(), RunAdminError> {
             if json {
                 print_json(&resources).with_context(Ctx::new(RunAdminStage::PrintJson))
             } else {
-                print_summaries(&resources);
-                Ok(())
+                let stdout = io::stdout();
+                print_summaries(&mut stdout.lock(), &resources)
+                    .with_context(Ctx::new(RunAdminStage::PrintSummaries))
             }
         }
         Some(Command::List {
@@ -121,8 +122,9 @@ async fn run_admin() -> Result<(), RunAdminError> {
             if json {
                 print_json(&page).with_context(Ctx::new(RunAdminStage::PrintJson))
             } else {
-                print_summaries(&page.items);
-                Ok(())
+                let stdout = io::stdout();
+                print_summaries(&mut stdout.lock(), &page.items)
+                    .with_context(Ctx::new(RunAdminStage::PrintSummaries))
             }
         }
         Some(Command::Show { kind, id, json }) => {
@@ -133,8 +135,9 @@ async fn run_admin() -> Result<(), RunAdminError> {
             if json {
                 print_json(&resource).with_context(Ctx::new(RunAdminStage::PrintJson))
             } else {
-                print_resource(&resource);
-                Ok(())
+                let stdout = io::stdout();
+                print_resource(&mut stdout.lock(), &resource)
+                    .with_context(Ctx::new(RunAdminStage::PrintResource))
             }
         }
         Some(Command::Follow {
@@ -159,8 +162,9 @@ async fn run_admin() -> Result<(), RunAdminError> {
             if json {
                 print_json(&page).with_context(Ctx::new(RunAdminStage::PrintJson))
             } else {
-                print_related(&page.items);
-                Ok(())
+                let stdout = io::stdout();
+                print_related(&mut stdout.lock(), &page.items)
+                    .with_context(Ctx::new(RunAdminStage::PrintRelated))
             }
         }
     }
@@ -206,6 +210,9 @@ enum RunAdminStage {
     ParseRelation,
     Follow,
     PrintJson,
+    PrintSummaries,
+    PrintResource,
+    PrintRelated,
 }
 
 impl fmt::Display for RunAdminStage {
@@ -221,6 +228,9 @@ impl fmt::Display for RunAdminStage {
             Self::ParseRelation => "parsing a relationship",
             Self::Follow => "following a relationship",
             Self::PrintJson => "writing JSON output",
+            Self::PrintSummaries => "writing resource summaries",
+            Self::PrintResource => "writing resource details",
+            Self::PrintRelated => "writing related resources",
         })
     }
 }
@@ -270,30 +280,78 @@ struct PrintJsonError {
     source: Box<dyn Error + Send + Sync + 'static>,
 }
 
-fn print_summaries(resources: &[ResourceSummary]) {
-    println!("TYPE\tID\tNAME\tDETAILS");
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("resource summary output failed while {operation}")]
+struct PrintSummariesError {
+    operation: &'static str,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
+}
+
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("resource detail output failed while {operation}")]
+struct PrintResourceError {
+    operation: &'static str,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
+}
+
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("related resource output failed while {operation}")]
+struct PrintRelatedError {
+    operation: &'static str,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
+}
+
+fn print_summaries(
+    output: &mut (impl io::Write + ?Sized),
+    resources: &[ResourceSummary],
+) -> Result<(), PrintSummariesError> {
+    use PrintSummariesErrorCtx as Ctx;
+
+    writeln!(output, "TYPE\tID\tNAME\tDETAILS")
+        .with_context(Ctx::new("writing the table header"))?;
     for resource in resources {
-        println!(
+        writeln!(
+            output,
             "{}\t{}\t{}\t{}",
             resource.kind,
             resource.id,
             resource.label,
             resource.context.as_deref().unwrap_or("")
-        );
+        )
+        .with_context(Ctx::new("writing a resource row"))?;
     }
+    Ok(())
 }
 
-fn print_resource(resource: &Resource) {
-    println!("{}\t{}", resource.kind, resource.id);
+fn print_resource(
+    output: &mut (impl io::Write + ?Sized),
+    resource: &Resource,
+) -> Result<(), PrintResourceError> {
+    use PrintResourceErrorCtx as Ctx;
+
+    writeln!(output, "{}\t{}", resource.kind, resource.id)
+        .with_context(Ctx::new("writing the resource header"))?;
     for field in &resource.fields {
-        println!("{}\t{}", field.label, field.value);
+        writeln!(output, "{}\t{}", field.label, field.value)
+            .with_context(Ctx::new("writing a resource field"))?;
     }
+    Ok(())
 }
 
-fn print_related(resources: &[RelatedResource]) {
-    println!("TYPE\tID\tNAME\tDETAILS\tROLE\tVIA");
+fn print_related(
+    output: &mut (impl io::Write + ?Sized),
+    resources: &[RelatedResource],
+) -> Result<(), PrintRelatedError> {
+    use PrintRelatedErrorCtx as Ctx;
+
+    writeln!(output, "TYPE\tID\tNAME\tDETAILS\tROLE\tVIA")
+        .with_context(Ctx::new("writing the table header"))?;
     for related in resources {
-        println!(
+        writeln!(
+            output,
             "{}\t{}\t{}\t{}\t{}\t{}",
             related.resource.kind,
             related.resource.id,
@@ -305,19 +363,39 @@ fn print_related(resources: &[RelatedResource]) {
                 .as_ref()
                 .map(|resource| resource.label.as_str())
                 .unwrap_or("")
-        );
+        )
+        .with_context(Ctx::new("writing a related resource row"))?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::{error::Error as _, io};
 
-    use caution_admin::db::{SearchError, SearchErrorCtx};
+    use caution_admin::{
+        db::{SearchError, SearchErrorCtx},
+        model::{Resource, ResourceKind},
+    };
     use clap::Parser as _;
     use dterror::ResultExt as _;
 
-    use super::{Cli, Command, RunAdminError, RunAdminErrorCtx, RunAdminStage};
+    use super::{
+        Cli, Command, PrintRelatedError, PrintResourceError, PrintSummariesError, RunAdminError,
+        RunAdminErrorCtx, RunAdminStage, print_related, print_resource, print_summaries,
+    };
+
+    struct FailingWriter;
+
+    impl io::Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("stdout failed"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn no_arguments_selects_the_tui() {
@@ -360,5 +438,34 @@ mod tests {
             search_source.source().map(ToString::to_string).as_deref(),
             Some("query failed")
         );
+    }
+
+    #[test]
+    fn human_output_functions_have_distinct_typed_errors() {
+        let summary_error: PrintSummariesError =
+            print_summaries(&mut FailingWriter, &[]).expect_err("summary output must fail");
+        let resource_error: PrintResourceError = print_resource(
+            &mut FailingWriter,
+            &Resource {
+                kind: ResourceKind::User,
+                id: uuid::Uuid::nil(),
+                label: "alice".to_string(),
+                fields: Vec::new(),
+            },
+        )
+        .expect_err("resource output must fail");
+        let related_error: PrintRelatedError =
+            print_related(&mut FailingWriter, &[]).expect_err("related output must fail");
+
+        for error in [
+            summary_error.source(),
+            resource_error.source(),
+            related_error.source(),
+        ] {
+            assert_eq!(
+                error.map(ToString::to_string).as_deref(),
+                Some("stdout failed")
+            );
+        }
     }
 }

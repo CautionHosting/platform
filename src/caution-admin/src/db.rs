@@ -292,6 +292,23 @@ impl Database {
             relation,
             "validating pagination",
         ))?;
+        if !self.resource_exists(source).await.with_context(Ctx::new(
+            source.kind,
+            source.id,
+            relation,
+            "checking the source resource",
+        ))? {
+            return Err(ResourceNotFoundError {
+                kind: source.kind,
+                id: source.id,
+            })
+            .with_context(Ctx::new(
+                source.kind,
+                source.id,
+                relation,
+                "checking the source resource",
+            ));
+        }
         let fetch_limit = i64::from(limit) + 1;
         let offset_value = i64::from(offset);
 
@@ -467,6 +484,27 @@ impl Database {
         Ok(Page::from_extra(items, offset, limit))
     }
 
+    async fn resource_exists(&self, reference: ResourceRef) -> Result<bool, ResourceExistsError> {
+        use ResourceExistsErrorCtx as Ctx;
+
+        let query = match reference.kind {
+            ResourceKind::User => {
+                sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+            }
+            ResourceKind::Organization => sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM organizations WHERE id = $1)",
+            ),
+            ResourceKind::App => sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM compute_resources WHERE id = $1)",
+            ),
+        };
+        query
+            .bind(reference.id)
+            .fetch_one(&self.pool)
+            .await
+            .with_context(Ctx::new(reference.kind, reference.id))
+    }
+
     async fn show_user(&self, id: Uuid) -> Result<Resource, ShowUserError> {
         use ShowUserErrorCtx as Ctx;
 
@@ -582,10 +620,12 @@ impl Database {
 
 fn search_parameters(query: &str) -> Result<(String, String), SearchParametersError> {
     let exact = query.trim().to_string();
-    if exact.len() < 2 && Uuid::parse_str(&exact).is_err() {
+    let parsed_uuid = Uuid::parse_str(&exact);
+    if exact.len() < 2 && parsed_uuid.is_err() {
         return Err(SearchParametersError);
     }
-    Ok((["%", &exact, "%"].concat(), exact))
+    let canonical = parsed_uuid.map_or_else(|_| exact.clone(), |id| id.to_string());
+    Ok((["%", &exact, "%"].concat(), canonical))
 }
 
 fn validate_page(limit: u32) -> Result<(), ValidatePageError> {
@@ -672,6 +712,15 @@ struct ShowOrganizationError {
 #[derive(Debug, thiserror::Error, FromContext)]
 #[error("failed to load app {id}")]
 struct ShowAppError {
+    id: Uuid,
+    #[source]
+    source: Box<dyn Error + Send + Sync + 'static>,
+}
+
+#[derive(Debug, thiserror::Error, FromContext)]
+#[error("failed to check whether {kind} {id} exists")]
+struct ResourceExistsError {
+    kind: ResourceKind,
     id: Uuid,
     #[source]
     source: Box<dyn Error + Send + Sync + 'static>,
@@ -1037,7 +1086,11 @@ fn money(cents: i64) -> String {
 
 fn credit_state(suspended_at: Option<DateTime<Utc>>, dunning_stage: &str) -> String {
     let mut value = suspended_at.map_or_else(
-        || "clear".to_string(),
+        || match dunning_stage {
+            "none" => "clear".to_string(),
+            "suspended" => "suspended".to_string(),
+            _ => "warning".to_string(),
+        },
         |suspended_at| ["suspended since ", &timestamp(suspended_at)].concat(),
     );
     if dunning_stage != "none" {
@@ -1102,7 +1155,9 @@ const fn deployment_mode(managed_on_prem: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{byoc_capacity, deployment_mode, money, search_parameters, tier_name};
+    use super::{
+        byoc_capacity, credit_state, deployment_mode, money, search_parameters, tier_name,
+    };
     use crate::model::Page;
 
     #[test]
@@ -1115,6 +1170,13 @@ mod tests {
             )
         );
         assert!(search_parameters("a").is_err());
+        assert_eq!(
+            search_parameters("40000000-0000-0000-0000-0000000000AB").expect("uppercase UUID"),
+            (
+                "%40000000-0000-0000-0000-0000000000AB%".to_string(),
+                "40000000-0000-0000-0000-0000000000ab".to_string(),
+            )
+        );
         assert_eq!(
             search_parameters("a")
                 .expect_err("short search must fail")
@@ -1140,5 +1202,14 @@ mod tests {
         assert_eq!(byoc_capacity(0, None, None), "—");
         assert_eq!(deployment_mode(true), "BYOC");
         assert_eq!(deployment_mode(false), "Fully managed");
+        assert_eq!(credit_state(None, "none"), "clear");
+        assert_eq!(
+            credit_state(None, "warning_sent"),
+            "warning · dunning warning sent"
+        );
+        assert_eq!(
+            credit_state(None, "suspended"),
+            "suspended · dunning suspended"
+        );
     }
 }
