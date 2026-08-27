@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-const ENCLAVE_SOURCE_BASE: &str = "https://git.distrust.co/public/enclaveos/archive";
+const ENCLAVE_SOURCE_BASE: &str = "https://codeberg.org/caution/enclaveos/archive";
 pub const FRAMEWORK_SOURCE: &str = "https://codeberg.org/caution/platform/archive/main.tar.gz";
 const PLATFORM_CODEBERG_ARCHIVE_PREFIX: &str = "https://codeberg.org/caution/platform/archive/";
 const PLATFORM_GITHUB_ARCHIVE_PREFIX: &str = "https://github.com/CautionHosting/platform/archive/";
@@ -854,6 +854,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn enclave_source_url_uses_codeberg() {
+        assert_eq!(
+            enclave_source_url("abc"),
+            "https://codeberg.org/caution/enclaveos/archive/abc.tar.gz"
+        );
+    }
+
+    #[test]
     fn classify_enclave_source_dispatches_by_source_kind() {
         let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("ENCLAVEOS_COMMIT");
@@ -873,7 +881,7 @@ mod tests {
 
         // 2. Git URL -> GitRepository with url/branch/commit.
         match classify_enclave_source(
-            "https://git.distrust.co/public/enclaveos.git",
+            "https://codeberg.org/caution/enclaveos.git",
             "develop",
             Some("dead".to_string()),
         ) {
@@ -882,7 +890,7 @@ mod tests {
                 branch,
                 commit,
             } => {
-                assert_eq!(url, "https://git.distrust.co/public/enclaveos.git");
+                assert_eq!(url, "https://codeberg.org/caution/enclaveos.git");
                 assert_eq!(branch, "develop");
                 assert_eq!(commit.as_deref(), Some("dead"));
             }

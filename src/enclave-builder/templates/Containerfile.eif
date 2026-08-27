@@ -35,7 +35,7 @@ ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,
 ENV TARGET_ARCH="x86_64-unknown-linux-musl"
 
 WORKDIR /build-steve
-RUN git clone https://git.distrust.co/public/steve.git . && \
+RUN git clone https://codeberg.org/caution/steve.git . && \
     git checkout {{STEVE_COMMIT}}
 
 RUN cargo fetch --locked --target $TARGET_ARCH
@@ -88,7 +88,7 @@ ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,
 ENV TARGET_ARCH="x86_64-unknown-linux-musl"
 
 WORKDIR /build-bootproof
-RUN git clone https://git.distrust.co/public/bootproof.git . && \
+RUN git clone https://codeberg.org/caution/bootproof.git . && \
     git checkout {{BOOTPROOF_COMMIT}}
 
 RUN cargo fetch --locked --target $TARGET_ARCH

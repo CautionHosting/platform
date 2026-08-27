@@ -16,9 +16,9 @@ const DEFAULT_STEVE_COMMIT: &str = "c0b8d2d62e66108689745561242972048f6cfce5";
 const DEFAULT_LOCKSMITH_COMMIT: &str = "d16b74c6b3fd1d1006a5b00e4d9e21a4613947a9";
 
 // Kept in sync with the git clone URLs in templates/Containerfile.eif.
-pub const ENCLAVEOS_REPO: &str = "https://git.distrust.co/public/enclaveos.git";
-pub const BOOTPROOF_REPO: &str = "https://git.distrust.co/public/bootproof.git";
-pub const STEVE_REPO: &str = "https://git.distrust.co/public/steve.git";
+pub const ENCLAVEOS_REPO: &str = "https://codeberg.org/caution/enclaveos.git";
+pub const BOOTPROOF_REPO: &str = "https://codeberg.org/caution/bootproof.git";
+pub const STEVE_REPO: &str = "https://codeberg.org/caution/steve.git";
 pub const LOCKSMITH_REPO: &str = "https://codeberg.org/caution/locksmith.git";
 
 /// STEVE's built-in default key exchange. Must match

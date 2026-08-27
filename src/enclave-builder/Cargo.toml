@@ -49,6 +49,6 @@ serde_cbor = "0.11"
 base64 = { workspace = true }
 
 [dev-dependencies]
-bootproof-sdk = { git = "https://git.distrust.co/public/bootproof.git" }
+bootproof-sdk = { git = "https://codeberg.org/caution/bootproof.git", rev = "b03721957e3850931f5b53627e7c3d1c302a06fe" }
 coset = "0.3"
 rand = { workspace = true }
