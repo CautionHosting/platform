@@ -89,10 +89,3 @@ sequoia-openpgp = { version = "1" }
 # compile the SDK itself without LLVM optimization.
 [profile.release.package.aws-sdk-ec2]
 opt-level = 0
-
-# Temporary compatibility for the Platform-pinned Locksmith revision, whose
-# manifests still name the former Bootproof host. Remove after Locksmith is
-# migrated and repinned.
-[patch."https://git.distrust.co/public/bootproof"]
-bootproof = { git = "https://codeberg.org/caution/bootproof.git", rev = "b03721957e3850931f5b53627e7c3d1c302a06fe" }
-bootproof-sdk = { git = "https://codeberg.org/caution/bootproof.git", rev = "b03721957e3850931f5b53627e7c3d1c302a06fe" }

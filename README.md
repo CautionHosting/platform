@@ -75,9 +75,7 @@ npm run dev
 
 `allow-git=root` permits only the commit-pinned git dependencies declared by
 this package; npm 12 blocks git dependencies by default. Project sources are
-fetched from Codeberg. The npm override for `attestation-widget` and the Cargo
-patch for Locksmith's Bootproof dependency are temporary until those projects
-are migrated and repinned. Keyfork and the private `_cargo-index` intentionally
+fetched from Codeberg. Keyfork and the private `_cargo-index` intentionally
 remain on `git.distrust.co`.
 
 Open `http://localhost:3000`. This remains authentication-gated and proxies API,
