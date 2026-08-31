@@ -1399,26 +1399,12 @@ dependencies = [
 [[package]]
 name = "bootproof"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/bootproof.git?rev=53a93872c17c22a253e4ecb8ade00c5964762e45#53a93872c17c22a253e4ecb8ade00c5964762e45"
+source = "git+https://codeberg.org/caution/bootproof.git?rev=b03721957e3850931f5b53627e7c3d1c302a06fe#b03721957e3850931f5b53627e7c3d1c302a06fe"
 dependencies = [
  "aws-nitro-enclaves-nsm-api",
  "serde_bytes",
  "thiserror 2.0.20",
  "tracing",
-]
-
-[[package]]
-name = "bootproof-sdk"
-version = "0.1.0"
-source = "git+https://codeberg.org/caution/bootproof.git?rev=53a93872c17c22a253e4ecb8ade00c5964762e45#53a93872c17c22a253e4ecb8ade00c5964762e45"
-dependencies = [
- "coset 0.4.2",
- "ring",
- "serde_cbor",
- "thiserror 2.0.20",
- "tracing",
- "webpki",
- "x509-parser 0.18.1",
 ]
 
 [[package]]
@@ -1777,7 +1763,7 @@ dependencies = [
  "anyhow",
  "authenticator",
  "base64 0.22.1",
- "bootproof-sdk 0.1.0 (git+https://codeberg.org/caution/bootproof.git?rev=b03721957e3850931f5b53627e7c3d1c302a06fe)",
+ "bootproof-sdk",
  "caution-config",
  "caution-environment-heuristics",
  "chrono",
@@ -2797,7 +2783,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bollard",
- "bootproof-sdk 0.1.0 (git+https://codeberg.org/caution/bootproof.git?rev=b03721957e3850931f5b53627e7c3d1c302a06fe)",
+ "bootproof-sdk",
  "coset 0.3.8",
  "flate2",
  "futures-util",
@@ -4296,7 +4282,7 @@ dependencies = [
 [[package]]
 name = "keymaker-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=e6e7dd5e5bd6e0bd9ba0a6040499a60e0cc01468#e6e7dd5e5bd6e0bd9ba0a6040499a60e0cc01468"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=2db332a5315242ae84385571b2af9e2b499a369c#2db332a5315242ae84385571b2af9e2b499a369c"
 dependencies = [
  "serde",
  "sha2 0.10.9",
@@ -4477,13 +4463,13 @@ dependencies = [
 [[package]]
 name = "locksmith"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=e6e7dd5e5bd6e0bd9ba0a6040499a60e0cc01468#e6e7dd5e5bd6e0bd9ba0a6040499a60e0cc01468"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=2db332a5315242ae84385571b2af9e2b499a369c#2db332a5315242ae84385571b2af9e2b499a369c"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
  "blahaj",
  "bootproof",
- "bootproof-sdk 0.1.0 (git+https://codeberg.org/caution/bootproof.git?rev=53a93872c17c22a253e4ecb8ade00c5964762e45)",
+ "bootproof-sdk",
  "card-backend",
  "card-backend-pcsc",
  "cfg-if",
