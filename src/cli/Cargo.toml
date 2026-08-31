@@ -42,12 +42,12 @@ zeroize = "1"
 indicatif = "0.17"
 
 # Attestation verification
-bootproof-sdk = { git = "https://git.distrust.co/public/bootproof.git" }
+bootproof-sdk = { git = "https://codeberg.org/caution/bootproof.git", rev = "b03721957e3850931f5b53627e7c3d1c302a06fe" }
 coset = "0.3"
 
 # Locksmith (shard sending)
-locksmith = { git = "https://codeberg.org/caution/locksmith.git", rev = "6918ad900024cf9b1a2a67865019edf07e14c634" }
-keymaker-models = { git = "https://codeberg.org/caution/locksmith.git", rev = "6918ad900024cf9b1a2a67865019edf07e14c634" }
+locksmith = { git = "https://codeberg.org/caution/locksmith.git", rev = "e6e7dd5e5bd6e0bd9ba0a6040499a60e0cc01468" }
+keymaker-models = { git = "https://codeberg.org/caution/locksmith.git", rev = "e6e7dd5e5bd6e0bd9ba0a6040499a60e0cc01468" }
 sequoia-openpgp = { workspace = true }
 
 # Archive handling

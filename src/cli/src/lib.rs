@@ -23,7 +23,7 @@ use enclave_builder::{
     BuildConfig, build_user_image, has_explicit_build_command, resolve_build_command_in_dir,
     validate_explicit_containerfile_path,
 };
-use keymaker_models::generate_quorum::GenerateQuorumResponse;
+use keymaker_models::generate_quorum::v0::GenerateQuorumResponse;
 use reqwest;
 use reqwest::tls::TlsInfo;
 use sequoia_openpgp as openpgp;
@@ -767,7 +767,7 @@ fn parse_env_assignments(content: &str) -> Vec<EnvAssignment> {
 }
 
 fn parse_quorum_bundle_public_key(bundle_text: &str) -> Result<String> {
-    let bundle: keymaker_models::generate_quorum::GenerateQuorumResponse =
+    let bundle: GenerateQuorumResponse =
         serde_json::from_str(bundle_text).context("Failed to parse quorum bundle JSON")?;
 
     Ok(bundle.public_key)
@@ -9797,7 +9797,7 @@ enclave "default" {{
         // Parse the quorum bundle
         let bundle_text = fs::read_to_string(&bundle_file)
             .with_context(|| format!("Failed to read bundle file: {}", bundle_file.display()))?;
-        let bundle: keymaker_models::generate_quorum::GenerateQuorumResponse =
+        let bundle: GenerateQuorumResponse =
             serde_json::from_str(&bundle_text).context("Failed to parse bundle JSON")?;
 
         let address_str = format!("{}:49504", public_ip);
@@ -10289,7 +10289,7 @@ mod tests {
     };
     use caution_config::{ConfigurationFile, E2eEncryption, E2eMode};
     use clap::Parser;
-    use keymaker_models::generate_quorum::GenerateQuorumResponse;
+    use keymaker_models::generate_quorum::v0::GenerateQuorumResponse;
     use openpgp::cert::prelude::*;
     use openpgp::parse::Parse;
     use openpgp::serialize::SerializeInto;

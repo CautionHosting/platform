@@ -10,8 +10,8 @@
     "test": "node --test tests/*.test.js"
   },
   "dependencies": {
-    "attestation-widget": "git+https://git.distrust.co/public/attestation-widget.git#47b24ef7e3fd8d51982678b78cd0c62afb31e4f3",
-    "tee-attestation-js": "git+https://git.distrust.co/public/tee-attestation-js.git#ba0d0c57de673c8576c91a8730775a87575f5c10",
+    "attestation-widget": "git+https://codeberg.org/caution/attestation-widget.git#478d15d58a9a9f835b1f56f8301118171af8c3bf",
+    "tee-attestation-js": "git+https://codeberg.org/caution/tee-attestation-js.git#ba0d0c57de673c8576c91a8730775a87575f5c10",
     "vue": "3.5.34"
   },
   "devDependencies": {

@@ -1034,9 +1034,8 @@ fn generate_builder_userdata(
     let mut manifest = enclave_builder::EnclaveManifest::new(
         app_source,
         enclave_builder::EnclaveSource::GitArchive {
-            urls: vec![format!(
-                "https://git.distrust.co/public/enclaveos/archive/{}.tar.gz",
-                request.enclaveos_commit
+            urls: vec![enclave_builder::enclave_source_url(
+                &request.enclaveos_commit,
             )],
             commit: Some(request.enclaveos_commit.clone()),
         },

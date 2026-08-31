@@ -8,7 +8,7 @@
 >
 > This software is in early alpha. It may introduce backwards-incompatible changes, has not undergone security audits, and is not production ready. Use at your own risk.
 
-This software is a cloud hosting management platform that builds and deploys [verifiable](#verifiable-enclaves) secure enclaves using the AWS Nitro System, based on <a href="https://git.distrust.co/public/enclaveos" target="_blank">EnclaveOS</a>.
+This software is a cloud hosting management platform that builds and deploys [verifiable](#verifiable-enclaves) secure enclaves using the AWS Nitro System, based on <a href="https://codeberg.org/caution/enclaveos" target="_blank">EnclaveOS</a>.
 
 ### Verifiable Enclaves
 
@@ -74,7 +74,9 @@ npm run dev
 ```
 
 `allow-git=root` permits only the commit-pinned git dependencies declared by
-this package; npm 12 blocks git dependencies by default.
+this package; npm 12 blocks git dependencies by default. Project sources are
+fetched from Codeberg. Keyfork and the private `_cargo-index` intentionally
+remain on `git.distrust.co`.
 
 Open `http://localhost:3000`. This remains authentication-gated and proxies API,
 authentication, health, and build-input requests to `VITE_PROXY_TARGET` (default
