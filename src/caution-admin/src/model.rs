@@ -4,6 +4,7 @@
 use std::{fmt, str::FromStr};
 
 use chrono::{DateTime, Utc};
+use dterror::Location;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -49,14 +50,20 @@ impl FromStr for ResourceKind {
             "user" | "users" => Ok(Self::User),
             "organization" | "organizations" | "org" | "orgs" => Ok(Self::Organization),
             "app" | "apps" | "application" | "applications" => Ok(Self::App),
-            _ => Err(ParseResourceKindError(value.to_string())),
+            _ => Err(ParseResourceKindError {
+                value: value.to_string(),
+                location: std::panic::Location::caller(),
+            }),
         }
     }
 }
 
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
-#[error("unknown resource kind `{0}`; expected user, organization, or app")]
-pub struct ParseResourceKindError(String);
+#[error("unknown resource kind `{value}`; expected user, organization, or app [{location:?}]")]
+pub struct ParseResourceKindError {
+    value: String,
+    location: Location,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -128,15 +135,20 @@ impl Relation {
             .ok_or_else(|| ParseRelationError {
                 kind,
                 value: value.to_string(),
+                location: std::panic::Location::caller(),
             })
     }
 }
 
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
-#[error("unknown relation `{value}` for {kind}; expected {expected}", expected = expected_relations(*kind))]
+#[error(
+    "unknown relation `{value}` for {kind}; expected {expected} [{location:?}]",
+    expected = expected_relations(*kind)
+)]
 pub struct ParseRelationError {
     kind: ResourceKind,
     value: String,
+    location: Location,
 }
 
 fn expected_relations(kind: ResourceKind) -> String {

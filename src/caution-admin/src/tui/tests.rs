@@ -319,8 +319,8 @@ fn terminal_errors_show_their_actionable_cause() {
         .with_context(RunTuiErrorCtx::new(RunTuiStage::Draw))
         .expect_err("terminal draw must fail");
 
-    assert_eq!(
-        error_message(&error),
-        "terminal explorer failed while drawing the screen: draw failed"
-    );
+    let message = error_message(&error);
+    assert!(message.starts_with("terminal explorer failed while drawing the screen ["));
+    assert!(message.contains("src/caution-admin/src/tui/tests.rs"));
+    assert!(message.ends_with(": draw failed"));
 }

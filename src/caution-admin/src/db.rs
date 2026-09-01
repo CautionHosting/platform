@@ -1,9 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use std::error::Error;
-
-use dterror::{FromContext, ResultExt as _};
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
@@ -54,7 +52,11 @@ impl Database {
             .await
             .with_context(Ctx::new("verifying read-only mode"))?;
         if read_only != "on" {
-            return Err(ReadWriteSessionError).with_context(Ctx::new("verifying read-only mode"));
+            return Err(ConnectReadOnlyError {
+                operation: "verifying read-only mode: PostgreSQL connection is not read-only",
+                location: std::panic::Location::caller(),
+                source: None,
+            });
         }
 
         Ok(Self { pool })
@@ -220,12 +222,15 @@ impl Database {
         .bind(id)
         .fetch_optional(&self.pool)
         .await
-        .with_context(Ctx::new(id))?
-        .ok_or(ResourceNotFoundError {
-            kind: ResourceKind::User,
-            id,
-        })
-        .with_context(Ctx::new(id))?;
+        .with_context(Ctx::new(id, "querying PostgreSQL"))?;
+        let Some(row) = row else {
+            return Err(ShowUserError {
+                id,
+                operation: "the user was not found",
+                location: std::panic::Location::caller(),
+                source: None,
+            });
+        };
 
         Ok(row.into_resource())
     }
@@ -266,12 +271,15 @@ impl Database {
         .bind(id)
         .fetch_optional(&self.pool)
         .await
-        .with_context(Ctx::new(id))?
-        .ok_or(ResourceNotFoundError {
-            kind: ResourceKind::Organization,
-            id,
-        })
-        .with_context(Ctx::new(id))?;
+        .with_context(Ctx::new(id, "querying PostgreSQL"))?;
+        let Some(row) = row else {
+            return Err(ShowOrganizationError {
+                id,
+                operation: "the organization was not found",
+                location: std::panic::Location::caller(),
+                source: None,
+            });
+        };
 
         Ok(row.into_resource())
     }
@@ -311,12 +319,15 @@ impl Database {
         .bind(id)
         .fetch_optional(&self.pool)
         .await
-        .with_context(Ctx::new(id))?
-        .ok_or(ResourceNotFoundError {
-            kind: ResourceKind::App,
-            id,
-        })
-        .with_context(Ctx::new(id))?;
+        .with_context(Ctx::new(id, "querying PostgreSQL"))?;
+        let Some(row) = row else {
+            return Err(ShowAppError {
+                id,
+                operation: "the app was not found",
+                location: std::panic::Location::caller(),
+                source: None,
+            });
+        };
 
         Ok(row.into_resource())
     }
@@ -326,7 +337,9 @@ fn search_parameters(query: &str) -> Result<(String, String), SearchParametersEr
     let exact = query.trim().to_string();
     let parsed_uuid = Uuid::parse_str(&exact);
     if exact.len() < 2 && parsed_uuid.is_err() {
-        return Err(SearchParametersError);
+        return Err(SearchParametersError {
+            location: std::panic::Location::caller(),
+        });
     }
     let canonical = parsed_uuid.map_or_else(|_| exact.clone(), |id| id.to_string());
     Ok((["%", &exact, "%"].concat(), canonical))
@@ -339,88 +352,102 @@ fn validate_page(limit: u32) -> Result<(), ValidatePageError> {
         Err(ValidatePageError {
             limit,
             max: MAX_PAGE_SIZE,
+            location: std::panic::Location::caller(),
         })
     }
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("failed to establish a read-only PostgreSQL session while {operation}")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("failed to establish a read-only PostgreSQL session while {operation} [{location:?}]")]
 pub struct ConnectReadOnlyError {
     operation: &'static str,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+    #[context(option)]
+    source: Option<BoxError>,
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("resource search failed while {operation}")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("resource search failed while {operation} [{location:?}]")]
 pub struct SearchError {
     operation: &'static str,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+    source: BoxError,
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("failed to list {kind} resources while {operation}")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("failed to list {kind} resources while {operation} [{location:?}]")]
 pub struct ListError {
     kind: ResourceKind,
     operation: &'static str,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+    source: BoxError,
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("failed to show {kind} {id}")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("failed to show {kind} {id} [{location:?}]")]
 pub struct ShowError {
     kind: ResourceKind,
     id: Uuid,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+    source: BoxError,
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("failed to load user {id}")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("failed to load user {id} while {operation} [{location:?}]")]
 struct ShowUserError {
     id: Uuid,
+    operation: &'static str,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+    #[context(option)]
+    source: Option<BoxError>,
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("failed to load organization {id}")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("failed to load organization {id} while {operation} [{location:?}]")]
 struct ShowOrganizationError {
     id: Uuid,
+    operation: &'static str,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+    #[context(option)]
+    source: Option<BoxError>,
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("failed to load app {id}")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("failed to load app {id} while {operation} [{location:?}]")]
 struct ShowAppError {
     id: Uuid,
+    operation: &'static str,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+    #[context(option)]
+    source: Option<BoxError>,
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("search requires at least two characters or an exact UUID")]
-struct SearchParametersError;
+#[error("search requires at least two characters or an exact UUID [{location:?}]")]
+struct SearchParametersError {
+    location: Location,
+}
 
 #[derive(Debug, thiserror::Error)]
-#[error("limit must be between 1 and {max}, got {limit}")]
+#[error("limit must be between 1 and {max}, got {limit} [{location:?}]")]
 struct ValidatePageError {
     limit: u32,
     max: u32,
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("PostgreSQL connection is not read-only")]
-struct ReadWriteSessionError;
-
-#[derive(Debug, thiserror::Error)]
-#[error("{kind} {id} was not found")]
-struct ResourceNotFoundError {
-    kind: ResourceKind,
-    id: Uuid,
+    location: Location,
 }
 
 #[cfg(test)]
@@ -445,12 +472,11 @@ mod tests {
                 "40000000-0000-0000-0000-0000000000ab".to_string(),
             )
         );
-        assert_eq!(
-            search_parameters("a")
-                .expect_err("short search must fail")
-                .to_string(),
-            "search requires at least two characters or an exact UUID"
-        );
+        let message = search_parameters("a")
+            .expect_err("short search must fail")
+            .to_string();
+        assert!(message.starts_with("search requires at least two characters or an exact UUID ["));
+        assert!(message.contains("src/caution-admin/src/db.rs"));
     }
 
     #[test]

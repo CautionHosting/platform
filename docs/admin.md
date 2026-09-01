@@ -74,9 +74,9 @@ make admin ADMIN_ARGS='follow user <uuid> apps --json'
 
 `list` and `follow` accept `--limit` (1 to 200) and `--offset`. Human-readable
 tabular output is the default; `--json` produces machine-readable output.
-Failures identify the operation and print their complete source chain. `show`
-and `follow` fail when their source UUID does not exist rather than treating a
-missing resource as an empty relationship.
+Failures identify the operation and call site and print their complete typed
+source chain. `show` and `follow` fail when their source UUID does not exist
+rather than treating a missing resource as an empty relationship.
 
 This pilot does not replace `utils/admin`. Continue using that script for legal
 document and other mutating administration workflows.

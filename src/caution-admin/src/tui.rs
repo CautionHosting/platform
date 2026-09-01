@@ -9,7 +9,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use dterror::{FromContext, ResultExt as _};
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
@@ -66,12 +66,14 @@ impl fmt::Display for RunTuiStage {
     }
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("terminal explorer failed while {stage}")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("terminal explorer failed while {stage} [{location:?}]")]
 pub struct RunTuiError {
     stage: RunTuiStage,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+    source: BoxError,
 }
 
 async fn handle_key(database: &Database, state: &mut AppState, key: KeyEvent) {
@@ -253,21 +255,32 @@ impl fmt::Display for NewTerminalSessionStage {
     }
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("terminal initialization failed while {stage}")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("terminal initialization failed while {stage} [{location:?}]")]
 struct NewTerminalSessionError {
     stage: NewTerminalSessionStage,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+    source: BoxError,
 }
 
 fn leave_alternate_screen(output: &mut impl io::Write) -> Result<(), LeaveAlternateScreenError> {
-    execute!(output, LeaveAlternateScreen, Show).map_err(LeaveAlternateScreenError)
+    use LeaveAlternateScreenErrorCtx as Ctx;
+
+    execute!(output, LeaveAlternateScreen, Show).with_context(Ctx::execute())
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("failed to leave the alternate terminal screen")]
-struct LeaveAlternateScreenError(#[source] io::Error);
+#[derive(Debug, thiserror::Error, CtxError)]
+enum LeaveAlternateScreenError {
+    #[error("failed to leave the alternate terminal screen [{location:?}]")]
+    Execute {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {

@@ -1,22 +1,22 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use std::error::Error;
-
 use chrono::{DateTime, Utc};
-use dterror::{FromContext, ResultExt as _};
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use sqlx::FromRow;
 use uuid::Uuid;
 
 use crate::model::{Field, Resource, ResourceKind, ResourceSummary, timestamp};
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("failed to decode database resource kind `{kind}`")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("failed to decode database resource kind `{kind}` [{location:?}]")]
 pub(super) struct SummaryRowError {
     #[context(borrow = str)]
     kind: String,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+    source: BoxError,
 }
 
 #[derive(FromRow)]

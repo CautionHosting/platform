@@ -9,7 +9,7 @@ use caution_admin::{
     tui,
 };
 use clap::{Parser, Subcommand};
-use dterror::{FromContext, ResultExt as _};
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -90,7 +90,11 @@ async fn run_admin() -> Result<(), RunAdminError> {
     match cli.command {
         None | Some(Command::Browse) => {
             if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-                return Err(TtyRequiredError).with_context(Ctx::new(RunAdminStage::Browse));
+                return Err(RunAdminError {
+                    stage: RunAdminStage::RequireTty,
+                    location: std::panic::Location::caller(),
+                    source: None,
+                });
             }
             tui::run(database, env::var("PLATFORM_GIT_SHA").ok())
                 .await
@@ -171,9 +175,13 @@ async fn run_admin() -> Result<(), RunAdminError> {
 }
 
 fn require_development() -> Result<(), RequireDevelopmentError> {
-    let environment = env::var("ENVIRONMENT").map_err(RequireDevelopmentError::Missing)?;
+    use RequireDevelopmentErrorCtx as Ctx;
+
+    let environment = env::var("ENVIRONMENT").with_context(Ctx::missing())?;
     if environment != "development" {
-        return Err(RequireDevelopmentError::OutsideDevelopment);
+        return Err(RequireDevelopmentError::OutsideDevelopment {
+            location: std::panic::Location::caller(),
+        });
     }
     Ok(())
 }
@@ -203,6 +211,7 @@ enum RunAdminStage {
     CheckEnvironment,
     ReadDatabaseUrl,
     ConnectDatabase,
+    RequireTty,
     Browse,
     Search,
     List,
@@ -221,6 +230,9 @@ impl fmt::Display for RunAdminStage {
             Self::CheckEnvironment => "checking the environment",
             Self::ReadDatabaseUrl => "reading DATABASE_URL",
             Self::ConnectDatabase => "connecting to PostgreSQL",
+            Self::RequireTty => {
+                "requiring a TTY; use search, list, show, or follow for headless access"
+            }
             Self::Browse => "running the terminal explorer",
             Self::Search => "searching resources",
             Self::List => "listing resources",
@@ -235,27 +247,34 @@ impl fmt::Display for RunAdminStage {
     }
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("caution-admin failed while {stage}")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("caution-admin failed while {stage} [{location:?}]")]
 struct RunAdminError {
     stage: RunAdminStage,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+    #[context(option)]
+    source: Option<BoxError>,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 enum RequireDevelopmentError {
-    #[error("ENVIRONMENT must be set to development")]
-    Missing(#[source] env::VarError),
-    #[error("caution-admin is a development pilot and refuses to run outside development")]
-    OutsideDevelopment,
+    #[error("ENVIRONMENT must be set to development [{location:?}]")]
+    Missing {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error(
+        "caution-admin is a development pilot and refuses to run outside development [{location:?}]"
+    )]
+    OutsideDevelopment {
+        #[location]
+        location: Location,
+    },
 }
-
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "the terminal explorer requires a TTY; use search, list, show, or follow for headless access"
-)]
-struct TtyRequiredError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PrintJsonStage {
@@ -272,36 +291,44 @@ impl fmt::Display for PrintJsonStage {
     }
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("JSON output failed while {stage}")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("JSON output failed while {stage} [{location:?}]")]
 struct PrintJsonError {
     stage: PrintJsonStage,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+    source: BoxError,
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("resource summary output failed while {operation}")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("resource summary output failed while {operation} [{location:?}]")]
 struct PrintSummariesError {
     operation: &'static str,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+    source: BoxError,
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("resource detail output failed while {operation}")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("resource detail output failed while {operation} [{location:?}]")]
 struct PrintResourceError {
     operation: &'static str,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+    source: BoxError,
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("related resource output failed while {operation}")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("related resource output failed while {operation} [{location:?}]")]
 struct PrintRelatedError {
     operation: &'static str,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+    source: BoxError,
 }
 
 fn print_summaries(
@@ -430,10 +457,9 @@ mod tests {
             .expect_err("admin command must fail");
 
         let search_source = error.source().expect("search source");
-        assert_eq!(
-            search_source.to_string(),
-            "resource search failed while querying PostgreSQL"
-        );
+        let message = search_source.to_string();
+        assert!(message.starts_with("resource search failed while querying PostgreSQL ["));
+        assert!(message.contains("src/caution-admin/src/main.rs"));
         assert_eq!(
             search_source.source().map(ToString::to_string).as_deref(),
             Some("query failed")

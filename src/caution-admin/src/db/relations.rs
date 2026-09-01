@@ -1,13 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use std::error::Error;
-
-use dterror::{FromContext, ResultExt as _};
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use sqlx::FromRow;
 use uuid::Uuid;
 
-use super::{Database, ResourceNotFoundError, validate_page};
+use super::{Database, validate_page};
 use crate::model::{
     Page, RelatedResource, Relation, RelationSummary, ResourceKind, ResourceRef, ResourceSummary,
 };
@@ -83,16 +81,11 @@ impl Database {
         use FollowErrorCtx as Ctx;
 
         if relation.source_kind() != source.kind {
-            return Err(RelationSourceMismatchError {
+            return Err(FollowError::RelationSourceMismatch {
                 relation,
                 kind: source.kind,
-            })
-            .with_context(Ctx::new(
-                source.kind,
-                source.id,
-                relation,
-                "validating the relationship",
-            ));
+                location: std::panic::Location::caller(),
+            });
         }
         validate_page(limit).with_context(Ctx::new(
             source.kind,
@@ -106,16 +99,11 @@ impl Database {
             relation,
             "checking the source resource",
         ))? {
-            return Err(ResourceNotFoundError {
+            return Err(FollowError::SourceNotFound {
                 kind: source.kind,
                 id: source.id,
-            })
-            .with_context(Ctx::new(
-                source.kind,
-                source.id,
-                relation,
-                "checking the source resource",
-            ));
+                location: std::panic::Location::caller(),
+            });
         }
         let fetch_limit = i64::from(limit) + 1;
         let offset_value = i64::from(offset);
@@ -314,40 +302,56 @@ impl Database {
     }
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("failed to load relationships for {kind} {id}")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("failed to load relationships for {kind} {id} [{location:?}]")]
 pub struct RelationSummariesError {
     kind: ResourceKind,
     id: Uuid,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+    source: BoxError,
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("failed to follow {relation:?} from {kind} {id} while {operation}")]
-pub struct FollowError {
-    kind: ResourceKind,
-    id: Uuid,
-    relation: Relation,
-    operation: &'static str,
-    #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum FollowError {
+    #[context(constructor = "new")]
+    #[error("failed to follow {relation:?} from {kind} {id} while {operation} [{location:?}]")]
+    Operation {
+        kind: ResourceKind,
+        id: Uuid,
+        relation: Relation,
+        operation: &'static str,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("relation {relation:?} cannot be followed from {kind} [{location:?}]")]
+    RelationSourceMismatch {
+        relation: Relation,
+        kind: ResourceKind,
+        #[location]
+        location: Location,
+    },
+    #[error("{kind} {id} was not found [{location:?}]")]
+    SourceNotFound {
+        kind: ResourceKind,
+        id: Uuid,
+        #[location]
+        location: Location,
+    },
 }
 
-#[derive(Debug, thiserror::Error, FromContext)]
-#[error("failed to check whether {kind} {id} exists")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("failed to check whether {kind} {id} exists [{location:?}]")]
 struct ResourceExistsError {
     kind: ResourceKind,
     id: Uuid,
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn Error + Send + Sync + 'static>,
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("relation {relation:?} cannot be followed from {kind}")]
-struct RelationSourceMismatchError {
-    relation: Relation,
-    kind: ResourceKind,
+    source: BoxError,
 }
 
 #[derive(FromRow)]
