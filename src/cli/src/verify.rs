@@ -817,6 +817,21 @@ fn framework_cache_key(source_key: &str, framework_commit: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Interpret the result of a `git rev-parse` invocation.
+///
+/// Returns `Some(value)` only when the command exited successfully AND produced
+/// non-empty stdout after trimming. A successful run that emits no output (or
+/// only whitespace) is treated as a failure so callers fall back to their UUID
+/// fallback instead of building an invalid Docker tag (an empty tag suffix such
+/// as `caution-local-build:`) or an empty cache key.
+fn parse_git_rev_parse_output(success: bool, stdout: &[u8]) -> Option<String> {
+    if !success {
+        return None;
+    }
+    let value = String::from_utf8_lossy(stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
 struct StagedSource {
     path: PathBuf,
     cache_key: String,
@@ -912,24 +927,12 @@ pub(crate) async fn build_local(client: &ApiClient, no_cache: bool) -> Result<()
         .args(&["rev-parse", "HEAD"])
         .output()
         .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        });
+        .and_then(|o| parse_git_rev_parse_output(o.status.success(), &o.stdout));
     let app_branch = Command::new("git")
         .args(&["rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        });
+        .and_then(|o| parse_git_rev_parse_output(o.status.success(), &o.stdout));
     let source_cache_key = app_commit
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -1357,13 +1360,7 @@ async fn build_and_get_pcrs(
             .args(&["rev-parse", "HEAD"])
             .output()
             .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            })
+            .and_then(|o| parse_git_rev_parse_output(o.status.success(), &o.stdout))
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         framework_cache_key(
             &source_key,
@@ -1582,13 +1579,7 @@ async fn build_and_get_pcrs(
                         .current_dir(config_dir)
                         .output()
                         .ok()
-                        .and_then(|o| {
-                            if o.status.success() {
-                                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                            } else {
-                                None
-                            }
-                        })
+                        .and_then(|o| parse_git_rev_parse_output(o.status.success(), &o.stdout))
                 });
 
             let branch = Command::new("git")
@@ -1596,13 +1587,7 @@ async fn build_and_get_pcrs(
                 .current_dir(config_dir)
                 .output()
                 .ok()
-                .and_then(|o| {
-                    if o.status.success() {
-                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    } else {
-                        None
-                    }
-                });
+                .and_then(|o| parse_git_rev_parse_output(o.status.success(), &o.stdout));
 
             output::verbose(
                 client.verbose,
@@ -3144,13 +3129,7 @@ async fn build_docker_image_from_dir(
         .output()
         .await
         .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
+        .and_then(|o| parse_git_rev_parse_output(o.status.success(), &o.stdout))
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let tag = format!(
@@ -3624,17 +3603,20 @@ pub(crate) async fn preflight_archive_urls(
         "\nChecking {} is reachable on remote...",
         label.to_lowercase()
     ));
-    let mut client = reqwest::Client::builder();
-    if urls.len() == 1 {
-        client = client.redirect(reqwest::redirect::Policy::none());
-    }
-    let client = client.build().with_context(Ctx::build_client())?;
+    // Always follow redirects (reqwest's default policy, up to 10 hops). The
+    // URL comes from the user's own manifest, so there is no threat model where
+    // a redirect matters; forges legitimately redirect (GitHub → codeload,
+    // reverse-proxied Forgejo), and disabling redirects would misclassify those
+    // valid archives as unavailable.
+    let http_client = reqwest::Client::builder()
+        .build()
+        .with_context(Ctx::build_client())?;
     let attempts = ARCHIVE_PREFLIGHT_ATTEMPTS;
     let mut failures = Vec::new();
 
     for url in urls {
         for attempt in 1..=attempts {
-            match client
+            match http_client
                 .head(url)
                 .timeout(ARCHIVE_PREFLIGHT_TIMEOUT)
                 .send()
@@ -4219,4 +4201,44 @@ async fn download_and_extract_app_source_with_git_fallback(
     Err(DownloadAndExtractAppSourceWithGitFallbackError::NoSource {
         location: std::panic::Location::caller(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_git_rev_parse_output_returns_value_on_success() {
+        let stdout = b"0123456789abcdef0123456789abcdef01234567\n";
+        assert_eq!(
+            parse_git_rev_parse_output(true, stdout).as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+    }
+
+    #[test]
+    fn parse_git_rev_parse_output_trims_surrounding_whitespace() {
+        assert_eq!(
+            parse_git_rev_parse_output(true, b"  deadbeef  \n").as_deref(),
+            Some("deadbeef")
+        );
+    }
+
+    #[test]
+    fn parse_git_rev_parse_output_treats_empty_stdout_as_failure() {
+        // The bug this guards against: `git rev-parse HEAD` exits 0 but emits
+        // nothing. Without the empty guard the Docker tag becomes the invalid
+        // `caution-local-build:` and the UUID fallback never fires.
+        assert_eq!(parse_git_rev_parse_output(true, b""), None);
+    }
+
+    #[test]
+    fn parse_git_rev_parse_output_treats_whitespace_only_stdout_as_failure() {
+        assert_eq!(parse_git_rev_parse_output(true, b"   \n\t  "), None);
+    }
+
+    #[test]
+    fn parse_git_rev_parse_output_returns_none_on_nonzero_exit() {
+        assert_eq!(parse_git_rev_parse_output(false, b"deadbeef\n"), None);
+    }
 }

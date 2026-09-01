@@ -12,7 +12,6 @@ path = "src/bin/caution.rs"
 
 [dependencies]
 # Workspace dependencies
-anyhow = { workspace = true }
 thiserror = { workspace = true }
 dterror = { workspace = true }
 reqwest = { workspace = true }
@@ -44,7 +43,7 @@ indicatif = "0.17"
 
 # Attestation verification
 bootproof-sdk = { git = "https://codeberg.org/caution/bootproof.git", rev = "b03721957e3850931f5b53627e7c3d1c302a06fe" }
-coset = "0.3"
+coset = { version = "0.3", features = ["std"] }
 
 # Locksmith (shard sending)
 locksmith = { git = "https://codeberg.org/caution/locksmith.git", rev = "2db332a5315242ae84385571b2af9e2b499a369c" }

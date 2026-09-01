@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose};
 use clap::{Parser, Subcommand};
 use dterror::{BoxError, CtxError, FromContext, Location, ResultExt};
@@ -5110,6 +5109,26 @@ enclave "default" {
             .unwrap();
 
         assert_eq!(server.await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn archive_preflight_follows_redirect_for_single_url() {
+        // Regression: a single forge URL that redirects (e.g. GitHub → codeload)
+        // must still pass. Disabling redirects for single URLs misclassified the
+        // 3xx as Failed and hard-failed the preflight with "archive is not
+        // available on the remote."
+        let (target, target_server) =
+            serve_preflight_responses(vec![(reqwest::StatusCode::OK, None)]).await;
+        let (primary, primary_server) =
+            serve_preflight_responses(vec![(reqwest::StatusCode::FOUND, Some(target))]).await;
+        let client = test_api_client();
+
+        preflight_archive_urls(&client, "Enclave source", &[primary])
+            .await
+            .unwrap();
+
+        assert_eq!(primary_server.await.unwrap(), 1);
+        assert_eq!(target_server.await.unwrap(), 1);
     }
 
     #[test]
