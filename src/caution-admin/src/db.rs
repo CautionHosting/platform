@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::model::{Page, Resource, ResourceKind, ResourceRef, ResourceSummary};
 
+pub(crate) mod aws;
 mod relations;
 mod rows;
 
@@ -14,6 +15,7 @@ pub use relations::{
     FollowError, FollowErrorCtx, RelationSummariesError, RelationSummariesErrorCtx,
 };
 use rows::{AppRow, OrganizationRow, SummaryRow, UserRow};
+pub(crate) use rows::{billing_source, byoc_capacity, pending_change, status, tier_name};
 
 const MAX_PAGE_SIZE: u32 = 200;
 const SEARCH_LIMIT: i64 = 50;

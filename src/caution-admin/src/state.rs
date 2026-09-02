@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+use crate::aws::{AwsDisplayRow, AwsOverviewMetadata, AwsSection, AwsSnapshot};
 use crate::model::{
     Page, RelatedResource, Relation, RelationSummary, Resource, ResourceKind, ResourceSummary,
 };
@@ -8,6 +9,8 @@ use crate::model::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Screen {
     Home,
+    AwsOverview(AwsOverviewMetadata),
+    AwsSection(AwsSection),
     Search {
         query: String,
         kind: Option<ResourceKind>,
@@ -23,6 +26,8 @@ impl Screen {
     pub fn title(&self) -> String {
         match self {
             Self::Home => "Find anything".to_string(),
+            Self::AwsOverview(_) => "AWS Overview".to_string(),
+            Self::AwsSection(section) => section.label().to_string(),
             Self::Search {
                 query,
                 kind: Some(kind),
@@ -52,6 +57,8 @@ impl Screen {
     fn breadcrumb(&self) -> Option<String> {
         match self {
             Self::Home => None,
+            Self::AwsOverview(_) => Some("AWS".to_string()),
+            Self::AwsSection(section) => Some(section.label().to_string()),
             Self::Search {
                 query,
                 kind: Some(kind),
@@ -73,6 +80,8 @@ impl Screen {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Row {
     Browse(ResourceKind),
+    AwsRoot,
+    Aws(AwsDisplayRow),
     Resource(ResourceSummary),
     Relation(RelationSummary),
     Related(RelatedResource),
@@ -83,7 +92,11 @@ impl Row {
         match self {
             Self::Resource(resource) => Some(resource),
             Self::Related(resource) => Some(&resource.resource),
-            Self::Browse(_) | Self::Relation(_) => None,
+            Self::Aws(resource) => match &resource.action {
+                crate::aws::AwsAction::Resource(resource) => Some(resource),
+                crate::aws::AwsAction::None | crate::aws::AwsAction::Section(_) => None,
+            },
+            Self::Browse(_) | Self::AwsRoot | Self::Relation(_) => None,
         }
     }
 }
@@ -100,9 +113,14 @@ pub struct Snapshot {
 
 impl Snapshot {
     fn home() -> Self {
+        let mut rows = ResourceKind::ALL
+            .into_iter()
+            .map(Row::Browse)
+            .collect::<Vec<_>>();
+        rows.push(Row::AwsRoot);
         Self {
             screen: Screen::Home,
-            rows: ResourceKind::ALL.into_iter().map(Row::Browse).collect(),
+            rows,
             selected: 0,
             query: String::new(),
             input_mode: false,
@@ -117,6 +135,7 @@ pub struct AppState {
     history: Vec<Snapshot>,
     pub show_help: bool,
     pub should_quit: bool,
+    pub aws_cache: Option<AwsSnapshot>,
 }
 
 impl Default for AppState {
@@ -132,6 +151,7 @@ impl AppState {
             history: Vec::new(),
             show_help: false,
             should_quit: false,
+            aws_cache: None,
         }
     }
 
@@ -248,6 +268,58 @@ impl AppState {
         });
     }
 
+    pub fn open_aws_overview(&mut self, snapshot: AwsSnapshot) {
+        let rows = snapshot.overview.iter().cloned().map(Row::Aws).collect();
+        let metadata = snapshot.metadata.clone();
+        self.aws_cache = Some(snapshot);
+        self.push(Snapshot {
+            screen: Screen::AwsOverview(metadata),
+            rows,
+            selected: 0,
+            query: String::new(),
+            input_mode: false,
+            status: None,
+        });
+    }
+
+    pub fn open_aws_section(&mut self, section: AwsSection) {
+        let rows = self
+            .aws_cache
+            .as_ref()
+            .map(|snapshot| snapshot.rows(section))
+            .unwrap_or_default()
+            .into_iter()
+            .map(Row::Aws)
+            .collect();
+        self.push(Snapshot {
+            screen: Screen::AwsSection(section),
+            rows,
+            selected: 0,
+            query: String::new(),
+            input_mode: false,
+            status: None,
+        });
+    }
+
+    pub fn replace_aws(&mut self, snapshot: AwsSnapshot) {
+        let overview = matches!(&self.current.screen, Screen::AwsOverview(_));
+        let rows = match &self.current.screen {
+            Screen::AwsOverview(_) => snapshot.overview.clone(),
+            Screen::AwsSection(section) => snapshot.rows(*section),
+            _ => Vec::new(),
+        };
+        if overview {
+            self.current.screen = Screen::AwsOverview(snapshot.metadata.clone());
+        }
+        self.aws_cache = Some(snapshot);
+        self.current.rows = rows.into_iter().map(Row::Aws).collect();
+        self.current.selected = self
+            .current
+            .selected
+            .min(self.current.rows.len().saturating_sub(1));
+        self.current.status = None;
+    }
+
     pub fn replace_resources(&mut self, resources: Vec<ResourceSummary>) {
         self.current.rows = resources.into_iter().map(Row::Resource).collect();
         self.current.selected = self
@@ -348,7 +420,7 @@ mod tests {
         for _ in 0..10 {
             state.select_next();
         }
-        assert_eq!(state.current.selected, 2);
+        assert_eq!(state.current.selected, 3);
     }
 
     #[test]
@@ -363,16 +435,18 @@ mod tests {
     }
 
     #[test]
-    fn home_contains_the_three_browse_roots() {
+    fn home_contains_resource_roots_and_aws() {
         let state = AppState::new();
-        assert_eq!(state.current.rows.len(), 3);
+        assert_eq!(state.current.rows.len(), 4);
         assert!(
             state
                 .current
                 .rows
                 .iter()
+                .take(3)
                 .all(|row| matches!(row, Row::Browse(_)))
         );
+        assert!(matches!(state.current.rows.last(), Some(Row::AwsRoot)));
     }
 
     #[test]

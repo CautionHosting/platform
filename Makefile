@@ -632,6 +632,11 @@ admin: build-admin
 		echo "Error: set DATABASE_URL or start the local api container"; \
 		exit 1; \
 	fi; \
+	if [ -z "$${AWS_ACCESS_KEY_ID:-}$${AWS_PROFILE:-}$${AWS_DEFAULT_PROFILE:-}$${AWS_SHARED_CREDENTIALS_FILE:-}$${AWS_CONFIG_FILE:-}$${AWS_ROLE_ARN:-}$${AWS_WEB_IDENTITY_TOKEN_FILE:-}$${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI:-}$${AWS_CONTAINER_CREDENTIALS_FULL_URI:-}" ] \
+		&& [ "$${CAUTION_ADMIN_SKIP_AWS_ENV:-0}" != "1" ] \
+		&& [ -r "$$HOME/.config/caution/.env" ]; then \
+		set -a; . "$$HOME/.config/caution/.env"; set +a; \
+	fi; \
 	ENVIRONMENT="$$environment" DATABASE_URL="$$database_url" ./target/release/caution-admin $(ADMIN_ARGS)
 
 # ── E2E test infrastructure ──────────────────────────────────────────
@@ -924,6 +929,11 @@ test-e2e-admin:
 		trap '"'"'$(MAKE) down-test'"'"' EXIT; \
 		$(MAKE) migrate-test; \
 		$(MAKE) build-admin; \
+		db_address=$$(docker inspect -f '"'"'{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}'"'"' postgres-test); \
+		DATABASE_URL="postgresql://postgres:postgres@$$db_address:5432/$(TEST_DB_NAME)" \
+			cargo test --locked -p caution-admin --lib \
+				db::aws::tests::database_projection_includes_apps_builds_and_current_byoc_subscriptions \
+				-- --ignored --exact; \
 		bash tests/e2e/test_admin.sh'
 
 test-e2e-byoc:

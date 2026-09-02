@@ -13,6 +13,7 @@ use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
+    aws::{self, AwsAction},
     db::Database,
     model::ResourceSummary,
     state::{AppState, Row, Screen},
@@ -148,6 +149,12 @@ async fn open_selected(database: &Database, state: &mut AppState) {
             Ok(page) => state.open_search(String::new(), Some(kind), page.items),
             Err(error) => state.set_status(error_message(&error)),
         },
+        Some(Row::AwsRoot) => open_aws(database, state).await,
+        Some(Row::Aws(row)) => match row.action {
+            AwsAction::Section(section) => state.open_aws_section(section),
+            AwsAction::Resource(summary) => open_resource(database, state, summary).await,
+            AwsAction::None => state.set_status("this AWS row is informational"),
+        },
         Some(Row::Resource(summary)) => open_resource(database, state, summary).await,
         Some(Row::Related(related)) => open_resource(database, state, related.resource).await,
         Some(Row::Relation(relation)) => {
@@ -177,10 +184,42 @@ async fn open_resource(database: &Database, state: &mut AppState, summary: Resou
     }
 }
 
+async fn open_aws(database: &Database, state: &mut AppState) {
+    if let Some(snapshot) = state.aws_cache.clone() {
+        state.open_aws_overview(snapshot);
+        return;
+    }
+    match aws::load_snapshot(database).await {
+        Ok(snapshot) => state.open_aws_overview(snapshot),
+        Err(error) => state.set_status(error_message(&error)),
+    }
+}
+
 async fn refresh(database: &Database, state: &mut AppState) {
     let screen = state.current.screen.clone();
     match screen {
         Screen::Home => {}
+        Screen::AwsOverview(_) | Screen::AwsSection(_) => {
+            match aws::load_snapshot(database).await {
+                Ok(snapshot) => {
+                    let snapshot = state
+                        .aws_cache
+                        .as_ref()
+                        .map_or(snapshot.clone(), |previous| {
+                            previous.merge_refresh(snapshot)
+                        });
+                    state.replace_aws(snapshot);
+                }
+                Err(error) => {
+                    let message = error_message(&error);
+                    if let Some(mut snapshot) = state.aws_cache.clone() {
+                        snapshot.mark_stale("refresh failed; previous data retained");
+                        state.replace_aws(snapshot);
+                    }
+                    state.set_status(message);
+                }
+            }
+        }
         Screen::Search {
             query: _,
             kind: Some(kind),

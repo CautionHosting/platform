@@ -1586,10 +1586,16 @@ dependencies = [
 name = "caution-admin"
 version = "0.1.0"
 dependencies = [
+ "aws-config",
+ "aws-sdk-costexplorer",
+ "aws-sdk-ec2",
+ "aws-sdk-sts",
  "chrono",
  "clap",
  "crossterm",
+ "drift-detector",
  "dterror 0.3.0",
+ "futures-util",
  "ratatui",
  "serde",
  "serde_json",

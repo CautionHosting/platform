@@ -13,9 +13,11 @@ use ratatui::{
 };
 
 use crate::{
-    model::{ResourceKind, ResourceSummary},
+    model::ResourceSummary,
     state::{AppState, Row, Screen},
 };
+
+mod aws;
 
 pub fn render(frame: &mut Frame<'_>, state: &mut AppState, platform_sha: Option<&str>) {
     let areas = Layout::default()
@@ -30,8 +32,11 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState, platform_sha: Option<
     render_header(frame, areas[0], state, platform_sha);
     match &state.current.screen {
         Screen::Home => render_home(frame, areas[1], state),
-        Screen::Search { .. } | Screen::Related { .. } => {
-            render_resource_table(frame, areas[1], state)
+        Screen::Search { .. } | Screen::Related { .. } | Screen::AwsSection(_) => {
+            render_resource_table(frame, areas[1], state, None);
+        }
+        Screen::AwsOverview(metadata) => {
+            aws::render_overview(frame, areas[1], state, metadata.clone());
         }
         Screen::Resource(resource) => render_resource(frame, areas[1], state, resource.clone()),
     }
@@ -108,9 +113,15 @@ fn render_home(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         areas[0],
     );
 
-    let items = ResourceKind::ALL
-        .into_iter()
-        .map(|kind| ListItem::new(kind.plural()))
+    let items = state
+        .current
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            Row::Browse(kind) => Some(ListItem::new(kind.plural())),
+            Row::AwsRoot => Some(ListItem::new("AWS")),
+            _ => None,
+        })
         .collect::<Vec<_>>();
     let list = List::new(items)
         .block(
@@ -125,16 +136,23 @@ fn render_home(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     frame.render_stateful_widget(list, areas[1], &mut list_state);
 }
 
-fn render_resource_table(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
+fn render_resource_table(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &mut AppState,
+    title: Option<&'static str>,
+) {
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .padding(Padding::left(1));
+    if let Some(title) = title {
+        block = block.title(title);
+    }
     if state.current.rows.is_empty() {
         frame.render_widget(
             Paragraph::new("No results")
                 .alignment(Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .padding(Padding::left(1)),
-                ),
+                .block(block),
             area,
         );
         return;
@@ -158,11 +176,7 @@ fn render_resource_table(frame: &mut Frame<'_>, area: Rect, state: &mut AppState
         TableRow::new(["TYPE", "NAME", "DETAILS"])
             .style(Style::default().add_modifier(Modifier::BOLD)),
     )
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .padding(Padding::left(1)),
-    )
+    .block(block)
     .row_highlight_style(selection_style())
     .highlight_symbol("> ");
     let mut table_state = TableState::default().with_selected(Some(state.current.selected));
@@ -177,7 +191,8 @@ fn table_row(row: &Row) -> Option<TableRow<'static>> {
             related.role.as_deref(),
             related.via.as_ref(),
         )),
-        Row::Browse(_) | Row::Relation(_) => None,
+        Row::Aws(row) => Some(aws::table_row(row)),
+        Row::Browse(_) | Row::AwsRoot | Row::Relation(_) => None,
     }
 }
 
@@ -392,7 +407,7 @@ pub(super) fn status_style(value: &str) -> Style {
     let color = match token.as_str() {
         "active" | "running" | "ready" | "validated" | "clear" => Some(Color::Green),
         "pending" | "trialing" | "past_due" | "paused" | "stopped" | "terminating" | "reserved"
-        | "publishing" | "withdrawing" | "warning" | "reminder" => Some(Color::Yellow),
+        | "publishing" | "withdrawing" | "warning" | "reminder" | "stale" => Some(Color::Yellow),
         "inactive" | "failed" | "terminated" | "suspended" | "canceled" | "invalid" => {
             Some(Color::Red)
         }

@@ -33,6 +33,50 @@ with the arrow keys or `j`/`k`, press Enter to open it, and follow its listed
 relationships. Backspace returns to the exact previous screen. Press `?` for
 the complete key reference.
 
+The `AWS` entry is a read-only account snapshot. It scans enabled regions for
+Caution app hosts, builders, EBS volumes, and public IPv4 addresses, then
+compares them with Platform records. Its Drift section highlights missing,
+surviving-after-destroy, mismatched, and unknown hosts. A running EC2 host does
+not prove that a Nitro Enclave process is running; that requires host-local
+`nitro-cli` inspection and is intentionally outside this tool.
+
+The AWS overview keeps account, principal, regional coverage, and refresh time
+in a non-selectable detail panel. Only the six sections below it are selectable.
+Host rows label AWS and Platform state separately. They open an App only when
+the AWS instance ID exactly matches the App's recorded provider resource; a
+tag-only or conflicting association is reported as a navigable Drift finding.
+
+AWS data is loaded only when `AWS` is first opened and cached for the terminal
+session. Leaving and reopening the screen does not call AWS again; press `r` to
+refresh. Regional or Cost Explorer failures are shown as unavailable or
+partial, never as zero. If a refresh fails completely, the last successful
+snapshot remains visible and is marked stale.
+
+`make admin` uses the normal AWS SDK credential chain. When no explicit AWS
+credential environment or profile is set, it sources
+`~/.config/caution/.env` in the recipe subshell if that file exists. Set
+`CAUTION_ADMIN_SKIP_AWS_ENV=1` to suppress that fallback. The minimum read-only
+permissions are:
+
+- `sts:GetCallerIdentity`;
+- `ec2:DescribeRegions`, `ec2:DescribeInstances`, `ec2:DescribeVolumes`, and
+  `ec2:DescribeAddresses`;
+- `ce:GetCostAndUsage` and `ce:GetCostForecast`.
+
+The Costs section uses unblended month-to-date cost through yesterday and the
+remaining-month mean forecast. Cost Explorer data is normally delayed, each
+paginated request is billable, and tag attribution requires the `ManagedBy`
+and `org_id` cost-allocation tags to be activated. Untagged cost is retained as
+`Unattributed`; denied or unavailable queries remain visibly unavailable.
+
+BYOC lists one Organization row for every current non-canceled subscription,
+including subscriptions with no configured app. Rows show organization and
+subscription status, plan, effective capacity, billing source, and pending
+changes; opening one uses the existing Organization and Apps navigation.
+Customer AWS accounts are not queried, and credential configuration or secrets
+are never selected. BYOC apps remain excluded from managed-account missing-host
+findings.
+
 The header shows the path used to reach the current resource, for example
 `Search “alice” › User alice › Apps via organizations › App alice-api`.
 Healthy states are green, transitional states yellow, and failed or suspended

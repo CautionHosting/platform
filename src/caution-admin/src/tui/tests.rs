@@ -12,6 +12,7 @@ use super::{
     RunTuiError, RunTuiErrorCtx, RunTuiStage, error_message, leave_alternate_screen, render,
 };
 use crate::{
+    aws::{AwsAction, AwsDisplayRow, AwsOverviewMetadata, AwsSection, AwsSnapshot},
     model::{
         Field, Page, RelatedResource, Relation, RelationSummary, Resource, ResourceKind,
         ResourceSummary,
@@ -191,6 +192,88 @@ fn home_screen_renders_at_standard_terminal_size() {
     assert!(lines[users].starts_with("│ > Users"));
     assert_eq!(organizations, users + 1);
     assert_eq!(apps, organizations + 1);
+    assert_eq!(
+        lines
+            .iter()
+            .position(|line| line.contains("AWS"))
+            .expect("AWS row"),
+        apps + 1
+    );
+}
+
+#[test]
+fn aws_overview_and_section_render_at_standard_terminal_size() {
+    let aws_row = AwsDisplayRow {
+        kind: "HOST".to_string(),
+        name: "alice-api".to_string(),
+        details: "running · i-0123456789abcdef · m6i.xlarge · us-west-2".to_string(),
+        action: AwsAction::None,
+    };
+    let snapshot = AwsSnapshot {
+        metadata: AwsOverviewMetadata {
+            account: "123456789012".to_string(),
+            principal: "caution-platform".to_string(),
+            regions: "17 scanned · 7 with resources · 0 partial failures".to_string(),
+            updated: "2026-09-02T10:00:00Z · r refresh".to_string(),
+            status: "active".to_string(),
+        },
+        overview: AwsSection::ALL
+            .into_iter()
+            .map(|section| AwsDisplayRow {
+                kind: "AWS".to_string(),
+                name: if section == AwsSection::AppHosts {
+                    "App hosts (1)".to_string()
+                } else {
+                    format!("{} (0)", section.label())
+                },
+                details: "active · available".to_string(),
+                action: AwsAction::Section(section),
+            })
+            .collect(),
+        app_hosts: vec![aws_row],
+        builders: Vec::new(),
+        storage: Vec::new(),
+        drift: Vec::new(),
+        costs: Vec::new(),
+        byoc: Vec::new(),
+        stale_reason: None,
+        identity_available: true,
+        inventory_available: true,
+        costs_available: false,
+    };
+    let mut failed_refresh = snapshot.clone();
+    failed_refresh.inventory_available = false;
+    failed_refresh.app_hosts.clear();
+    let merged = snapshot.merge_refresh(failed_refresh);
+    assert_eq!(merged.app_hosts.len(), 1);
+    assert!(merged.stale_reason.is_some());
+    assert_eq!(merged.metadata.status, "stale");
+    assert!(merged.metadata.updated.contains("retained previous data"));
+    let mut state = AppState::new();
+    state.open_aws_overview(snapshot);
+    let text = screen_text(&mut state);
+    assert!(text.contains("AWS · 123456789012 · ACTIVE"));
+    assert!(text.contains("Principal: caution-platform"));
+    assert!(text.contains("Regions: 17 scanned · 7 with resources"));
+    assert!(text.contains("Updated: 2026-09-02T10:00:00Z · r refresh"));
+    assert!(text.contains("┌ Resources "));
+    assert!(text.contains("App hosts (1)"));
+    assert!(text.contains("q quit"));
+    assert_eq!(state.current.rows.len(), AwsSection::ALL.len());
+
+    state.select_next();
+    state.open_aws_section(AwsSection::AppHosts);
+    let text = screen_text(&mut state);
+    assert!(text.contains("AWS › App hosts"));
+    assert!(text.contains("alice-api"));
+    assert!(text.contains("i-0123456789abcdef"));
+    assert!(state.back());
+    assert_eq!(state.current.selected, 1);
+    assert!(matches!(
+        &state.current.screen,
+        crate::state::Screen::AwsOverview(metadata)
+            if metadata.account == "123456789012"
+    ));
 }
 
 #[test]
@@ -285,6 +368,10 @@ fn breadcrumbs_and_statuses_have_clear_terminal_styles() {
     );
     assert_eq!(
         status_style("pending").fg,
+        Some(ratatui::style::Color::Yellow)
+    );
+    assert_eq!(
+        status_style("stale").fg,
         Some(ratatui::style::Color::Yellow)
     );
     assert_eq!(

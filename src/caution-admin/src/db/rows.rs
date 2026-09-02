@@ -284,7 +284,7 @@ fn optional(value: Option<String>) -> String {
     value.unwrap_or_else(|| "—".to_string())
 }
 
-fn status(active: bool) -> String {
+pub(crate) fn status(active: bool) -> String {
     if active { "active" } else { "inactive" }.to_string()
 }
 
@@ -321,7 +321,7 @@ fn credit_state(suspended_at: Option<DateTime<Utc>>, dunning_stage: &str) -> Str
     value
 }
 
-fn tier_name(tier: &str) -> String {
+pub(crate) fn tier_name(tier: &str) -> String {
     tier.split('_')
         .map(|word| {
             let mut characters = word.chars();
@@ -333,7 +333,7 @@ fn tier_name(tier: &str) -> String {
         .join(" ")
 }
 
-fn billing_source(source: &str) -> String {
+pub(crate) fn billing_source(source: &str) -> String {
     match source {
         "legacy_credits" => "Credits".to_string(),
         "paddle" => "Paddle".to_string(),
@@ -342,7 +342,7 @@ fn billing_source(source: &str) -> String {
     }
 }
 
-fn byoc_capacity(allocated: i64, maximum: Option<i32>, pending: Option<i32>) -> String {
+pub(crate) fn byoc_capacity(allocated: i64, maximum: Option<i32>, pending: Option<i32>) -> String {
     let Some(maximum) = maximum else {
         return "—".to_string();
     };
@@ -354,7 +354,7 @@ fn byoc_capacity(allocated: i64, maximum: Option<i32>, pending: Option<i32>) -> 
     value
 }
 
-fn pending_change(tier: Option<&str>, limit: Option<i32>) -> String {
+pub(crate) fn pending_change(tier: Option<&str>, limit: Option<i32>) -> String {
     let mut value = tier
         .map(tier_name)
         .unwrap_or_else(|| "plan unchanged".to_string());

@@ -10,6 +10,7 @@
 
 use aws_config::SdkConfig;
 use aws_sdk_ec2::Client as Ec2Client;
+use aws_sdk_ec2::config::Region;
 use aws_sdk_ec2::error::SdkError as Ec2SdkError;
 use aws_sdk_ec2::operation::describe_instances::DescribeInstancesError;
 use aws_sdk_ec2::operation::describe_regions::DescribeRegionsError;
@@ -27,11 +28,11 @@ pub enum AwsError {
         region: String,
         /// The underlying AWS SDK error.
         #[source]
-        source: Ec2SdkError<DescribeInstancesError>,
+        source: Box<Ec2SdkError<DescribeInstancesError>>,
     },
     /// Failed to discover the enabled AWS regions.
     #[error("failed to discover enabled AWS regions")]
-    DescribeRegions(#[source] Ec2SdkError<DescribeRegionsError>),
+    DescribeRegions(#[source] Box<Ec2SdkError<DescribeRegionsError>>),
 }
 
 /// Represents an EC2 instance in AWS.
@@ -92,6 +93,23 @@ pub struct Ec2Inspector {
 }
 
 impl Ec2Inspector {
+    /// Create an EC2 inspector from an already-resolved AWS configuration.
+    ///
+    /// This keeps credentials and retry settings shared with other AWS clients.
+    #[must_use]
+    pub fn from_sdk_config(sdk_config: &SdkConfig) -> Self {
+        let region = sdk_config
+            .region()
+            .map_or_else(|| "us-west-2".to_string(), ToString::to_string);
+        let mut config = aws_sdk_ec2::config::Builder::from(sdk_config);
+        config.set_region(Some(Region::new(region.clone())));
+        Self {
+            client: Ec2Client::from_conf(config.build()),
+            region,
+            sdk_config: sdk_config.clone(),
+        }
+    }
+
     /// Create a new EC2 inspector from credentials.
     ///
     /// Configuration loading does not perform any network I/O and cannot fail;
@@ -190,7 +208,7 @@ impl Ec2Inspector {
         while let Some(page) = paginator.next().await {
             let page = page.map_err(|source| AwsError::DescribeInstances {
                 region: region.to_string(),
-                source,
+                source: Box::new(source),
             })?;
 
             for reservation in page.reservations() {
@@ -285,7 +303,7 @@ impl Ec2Inspector {
             .all_regions(true)
             .send()
             .await
-            .map_err(AwsError::DescribeRegions)?;
+            .map_err(|source| AwsError::DescribeRegions(Box::new(source)))?;
 
         let mut regions: Vec<String> = output
             .regions()
@@ -464,9 +482,9 @@ mod tests {
     fn test_aws_error_display_includes_region() {
         let err = AwsError::DescribeInstances {
             region: "eu-west-1".to_string(),
-            source: Ec2SdkError::<DescribeInstancesError>::construction_failure(
+            source: Box::new(Ec2SdkError::<DescribeInstancesError>::construction_failure(
                 std::io::Error::other("boom"),
-            ),
+            )),
         };
 
         let display = err.to_string();
@@ -478,10 +496,11 @@ mod tests {
 
     #[test]
     fn test_aws_error_describe_regions_display() {
-        let err =
-            AwsError::DescribeRegions(Ec2SdkError::<DescribeRegionsError>::construction_failure(
-                std::io::Error::other("boom"),
-            ));
+        let err = AwsError::DescribeRegions(Box::new(
+            Ec2SdkError::<DescribeRegionsError>::construction_failure(std::io::Error::other(
+                "boom",
+            )),
+        ));
 
         let display = err.to_string();
         assert_eq!(display, "failed to discover enabled AWS regions");
