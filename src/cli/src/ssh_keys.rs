@@ -13,7 +13,6 @@ use crate::{ApiClient, output, prompt};
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum FetchExistingSshKeysError {
-    /// `get_protected_json` still returns an anyhow error boundary; its context text ("Failed to fetch existing SSH keys") is preserved on the chain.
     #[error("Failed to fetch existing SSH keys [{location:?}]")]
     GetProtectedJson {
         #[location]
@@ -124,7 +123,6 @@ async fn add_single_key(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum SshKeysAddError {
-    /// `ensure_authenticated` still returns an anyhow error boundary; the source is boxed until that method converts.
     #[error("authentication failed [{location:?}]")]
     EnsureAuthenticated {
         #[location]
@@ -375,7 +373,6 @@ pub async fn add(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum SshKeysRemoveError {
-    /// `ensure_authenticated` still returns an anyhow error boundary; the source is boxed until that method converts.
     #[error("authentication failed [{location:?}]")]
     EnsureAuthenticated {
         #[location]
@@ -439,7 +436,6 @@ pub async fn remove(client: &ApiClient, fingerprint: &str) -> Result<(), SshKeys
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum SshKeysListError {
-    /// `ensure_authenticated` still returns an anyhow error boundary; the source is boxed until that method converts.
     #[error("authentication failed [{location:?}]")]
     EnsureAuthenticated {
         #[location]
@@ -449,7 +445,6 @@ pub enum SshKeysListError {
         source: BoxError,
     },
 
-    /// `get_protected_json` still returns an anyhow error boundary; its context text ("Failed to list SSH keys") is preserved on the chain.
     #[error("Failed to list SSH keys [{location:?}]")]
     ListSshKeys {
         #[location]

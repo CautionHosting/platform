@@ -32,7 +32,6 @@ struct ListPgpKeysResponse {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum FetchPgpKeysError {
-    /// `get_protected_json` still returns an anyhow error boundary; its context text ("Failed to fetch PGP public keys") is preserved on the chain.
     #[error("Failed to fetch PGP public keys [{location:?}]")]
     GetProtectedJson {
         #[location]
@@ -104,7 +103,6 @@ pub enum PgpKeysAddError {
         source: BoxError,
     },
 
-    /// `prepare_pgp_public_key_for_upload` still returns an anyhow error boundary; its validation contexts are preserved on the chain.
     #[error("Failed to prepare PGP public key [{location:?}]")]
     UploadPreparation {
         #[location]
@@ -137,7 +135,6 @@ pub enum PgpKeysAddError {
         location: Location,
     },
 
-    /// `ensure_authenticated` still returns an anyhow error boundary; the source is boxed until that method converts.
     #[error("authentication failed [{location:?}]")]
     EnsureAuthenticated {
         #[location]
@@ -287,7 +284,6 @@ pub async fn add(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum PgpKeysListError {
-    /// `ensure_authenticated` still returns an anyhow error boundary; the source is boxed until that method converts.
     #[error("authentication failed [{location:?}]")]
     EnsureAuthenticated {
         #[location]
@@ -345,7 +341,6 @@ pub enum PgpKeysRemoveError {
         location: Location,
     },
 
-    /// `ensure_authenticated` still returns an anyhow error boundary; the source is boxed until that method converts.
     #[error("authentication failed [{location:?}]")]
     EnsureAuthenticated {
         #[location]

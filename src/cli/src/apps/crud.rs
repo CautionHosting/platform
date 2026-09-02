@@ -1017,8 +1017,7 @@ pub(crate) async fn try_relink(
         );
     }
 
-    // `fetch_app` returns `anyhow::Error`, which `dterror::ResultExt::with_context` accepts
-    // directly (anyhow::Error converts into a BoxError).
+
     let app = client
         .fetch_app(&resource_id)
         .await

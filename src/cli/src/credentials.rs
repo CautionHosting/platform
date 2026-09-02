@@ -11,7 +11,6 @@ const CREDENTIALS_API_PATH: &str = "/api/credentials";
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum CredentialsAddError {
-    /// `ensure_authenticated` still returns an anyhow error boundary; the source is boxed until that method converts.
     #[error("authentication failed [{location:?}]")]
     EnsureAuthenticated {
         #[location]
@@ -263,7 +262,6 @@ pub async fn add(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum CredentialsListError {
-    /// `ensure_authenticated` still returns an anyhow error boundary; the source is boxed until that method converts.
     #[error("authentication failed [{location:?}]")]
     EnsureAuthenticated {
         #[location]
@@ -273,7 +271,6 @@ pub enum CredentialsListError {
         source: BoxError,
     },
 
-    /// `get_protected_json` still returns an anyhow error boundary; its context text ("Failed to list credentials") is preserved on the chain.
     #[error("Failed to list credentials [{location:?}]")]
     ListCredentials {
         #[location]
@@ -332,7 +329,6 @@ pub async fn list(client: &ApiClient) -> Result<(), CredentialsListError> {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum CredentialsRemoveError {
-    /// `ensure_authenticated` still returns an anyhow error boundary; the source is boxed until that method converts.
     #[error("authentication failed [{location:?}]")]
     EnsureAuthenticated {
         #[location]
@@ -355,7 +351,6 @@ pub enum CredentialsRemoveError {
         source: BoxError,
     },
 
-    /// `get_protected_json` still returns an anyhow error boundary; its context text ("Failed to fetch credential") is preserved on the chain.
     #[error("Failed to fetch credential [{location:?}]")]
     FetchCredential {
         #[location]
@@ -460,7 +455,6 @@ pub async fn remove(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum CredentialsSetDefaultError {
-    /// `ensure_authenticated` still returns an anyhow error boundary; the source is boxed until that method converts.
     #[error("authentication failed [{location:?}]")]
     EnsureAuthenticated {
         #[location]
