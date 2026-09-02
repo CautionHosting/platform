@@ -246,7 +246,7 @@ fn render_qr_code(url: &str) -> Result<(), RenderQrCodeError> {
     use RenderQrCodeErrorCtx as Ctx;
     // When not attached to a terminal, skip QR art and print only the URL
     if !output::is_tty_stdout() {
-        output::status(&format!("QR URL: {url}"));
+        output::status(format!("QR URL: {url}"));
         return Ok(());
     }
 
@@ -678,7 +678,7 @@ pub(crate) async fn register(
 ) -> Result<(), RegisterError> {
     use RegisterErrorCtx as Ctx;
     output::verbose(client.verbose, "Starting FIDO2 registration...");
-    output::verbose(client.verbose, &format!("Target URL: {}", client.base_url));
+    output::verbose(client.verbose, format!("Target URL: {}", client.base_url));
 
     let cookie_store = reqwest::cookie::Jar::default();
     let client_local = reqwest::Client::builder()
@@ -699,7 +699,7 @@ pub(crate) async fn register(
 
     output::verbose(
         client.verbose,
-        &format!("Response status: {}", response.status()),
+        format!("Response status: {}", response.status()),
     );
 
     if !response.status().is_success() {
@@ -715,7 +715,7 @@ pub(crate) async fn register(
     output::verbose(client.verbose, "Registration challenge received");
     output::verbose(
         client.verbose,
-        &format!("Challenge: {}", begin_resp.public_key.challenge),
+        format!("Challenge: {}", begin_resp.public_key.challenge),
     );
 
     output::verbose(client.verbose, "Creating credential on security key...");
@@ -739,7 +739,7 @@ pub(crate) async fn register(
 
     output::verbose(
         client.verbose,
-        &format!("Response status: {}", response.status()),
+        format!("Response status: {}", response.status()),
     );
 
     if response.status().is_success() {
@@ -754,7 +754,7 @@ pub(crate) async fn register(
             response.json().await.with_context(Ctx::parse_finish())?;
 
         output::success("FIDO2 registration successful");
-        output::success(&format!(
+        output::success(format!(
             "Logged in. Account expires: {}",
             finish_resp.expires_at
         ));
@@ -767,7 +767,7 @@ pub(crate) async fn register(
         output::status("You're registered as an alpha user. You can now:");
         output::status("  • Create apps with 'caution init'");
         output::status("  • Deploy with 'git push caution main'");
-        output::status(&format!("Dashboard: {}/dashboard", client.frontend_url()));
+        output::status(format!("Dashboard: {}/dashboard", client.frontend_url()));
 
         Ok(())
     } else {
@@ -844,7 +844,7 @@ pub(crate) async fn login(client: &ApiClient, username: Option<String>) -> Resul
         Err(e) => {
             output::verbose(
                 client.verbose,
-                &format!("Could not check onboarding status: {}", e),
+                format!("Could not check onboarding status: {}", e),
             );
         }
     }
@@ -860,7 +860,7 @@ pub(crate) async fn login(client: &ApiClient, username: Option<String>) -> Resul
         Err(e) => {
             output::verbose(
                 client.verbose,
-                &format!("Could not check security settings: {}", e),
+                format!("Could not check security settings: {}", e),
             );
         }
     }
@@ -994,15 +994,15 @@ pub(crate) async fn login_qr(
     }
 
     let begin_resp: QrLoginBeginResponse = response.json().await.with_context(Ctx::parse_begin())?;
-    output::verbose(client.verbose, &format!("QR token: {}", begin_resp.token));
-    output::verbose(client.verbose, &format!("QR URL: {}", begin_resp.url));
+    output::verbose(client.verbose, format!("QR token: {}", begin_resp.token));
+    output::verbose(client.verbose, format!("QR URL: {}", begin_resp.url));
 
     // Step 2: Render the QR code in the terminal
     output::status("");
     render_qr_code(&begin_resp.url).with_context(Ctx::render_qr())?;
     output::status("");
     output::status("Scan the QR code with your phone, or open this URL:");
-    output::status(&format!("  {}", begin_resp.url));
+    output::status(format!("  {}", begin_resp.url));
 
     // Step 3: Poll for completion
     let loader = Spinner::new("Waiting for authentication...", SpinnerStyle::Processing);
@@ -1043,7 +1043,7 @@ pub(crate) async fn login_qr(
 
             let status: QrLoginStatusResponse =
                 status_resp.json().await.with_context(Ctx::poll_parse())?;
-            output::verbose(client.verbose, &format!("Poll status: {}", status.status));
+            output::verbose(client.verbose, format!("Poll status: {}", status.status));
 
             match status.status.as_str() {
                 "completed" => {
@@ -1092,7 +1092,7 @@ pub(crate) async fn login_qr(
         Err(e) => {
             output::verbose(
                 client.verbose,
-                &format!("Could not check security settings: {}", e),
+                format!("Could not check security settings: {}", e),
             );
         }
     }
@@ -1130,11 +1130,11 @@ pub(crate) async fn logout(client: &ApiClient) -> Result<(), LogoutError> {
             Ok(response) => {
                 output::verbose(
                     client.verbose,
-                    &format!("Server returned {}", response.status()),
+                    format!("Server returned {}", response.status()),
                 );
             }
             Err(e) => {
-                output::verbose(client.verbose, &format!("Could not reach server: {}", e));
+                output::verbose(client.verbose, format!("Could not reach server: {}", e));
             }
         }
     }
@@ -1335,8 +1335,8 @@ fn make_credential(
             Ok(result)
         }
         Err(e) => {
-            output::verbose(client.verbose, &format!("First attempt failed: {:?}", e));
-            output::verbose(client.verbose, &format!("Full error details: {:#?}", e));
+            output::verbose(client.verbose, format!("First attempt failed: {:?}", e));
+            output::verbose(client.verbose, format!("Full error details: {:#?}", e));
 
             // Only ask for PIN if the error is PIN-related
             if is_pin_related_error(&e) {
@@ -1525,9 +1525,9 @@ fn try_make_credential(
         .decode(&opts.challenge)
         .with_context(Ctx::decode_challenge())?;
 
-    output::verbose(client.verbose, &format!("user_id bytes: {:?}", user_id));
-    output::verbose(client.verbose, &format!("challenge bytes: {:?}", challenge));
-    output::verbose(client.verbose, &format!("rpId: {}", opts.rp.id));
+    output::verbose(client.verbose, format!("user_id bytes: {:?}", user_id));
+    output::verbose(client.verbose, format!("challenge bytes: {:?}", challenge));
+    output::verbose(client.verbose, format!("rpId: {}", opts.rp.id));
 
     let user = PublicKeyCredentialUserEntity {
         id: user_id.clone(),
@@ -1556,11 +1556,11 @@ fn try_make_credential(
 
     output::verbose(
         client.verbose,
-        &format!("pub_key_params count: {}", pub_key_params.len()),
+        format!("pub_key_params count: {}", pub_key_params.len()),
     );
     output::verbose(
         client.verbose,
-        &format!("timeout from server: {} ms", opts.timeout),
+        format!("timeout from server: {} ms", opts.timeout),
     );
 
     let mut manager = AuthenticatorService::new().with_context(Ctx::authenticator_service())?;
@@ -1668,7 +1668,7 @@ fn try_make_credential(
                 }
                 StatusUpdate::PinUvError(e) => {
                     loader.abandon();
-                    output::verbose(client.verbose, &format!("PIN/UV error: {:?}", e));
+                    output::verbose(client.verbose, format!("PIN/UV error: {:?}", e));
                     return Err(TryMakeCredentialError::PinUvError {
                         error: e,
                         location: std::panic::Location::caller(),
@@ -1677,7 +1677,7 @@ fn try_make_credential(
                 _ => {
                     output::verbose(
                         client.verbose,
-                        &format!("Authenticator status: {:?}", status),
+                        format!("Authenticator status: {:?}", status),
                     );
                 }
             }
@@ -1723,11 +1723,11 @@ fn try_make_credential(
 
             output::verbose(
                 client.verbose,
-                &format!("credential_id len: {}", credential_id.len()),
+                format!("credential_id len: {}", credential_id.len()),
             );
             output::verbose(
                 client.verbose,
-                &format!("credential_id: {}", hex::encode(credential_id)),
+                format!("credential_id: {}", hex::encode(credential_id)),
             );
 
             let att_obj_bytes = serde_cbor::to_vec(&register_result.att_obj)
@@ -1901,7 +1901,7 @@ async fn perform_login(
     output::verbose(client.verbose, "Login challenge received");
     output::verbose(
         client.verbose,
-        &format!("Session from server: {:?}", begin_resp.session),
+        format!("Session from server: {:?}", begin_resp.session),
     );
 
     let assertion =
@@ -1959,7 +1959,7 @@ async fn perform_login(
         let error = response.text().await.with_context(Ctx::read_error_body())?;
         output::verbose(
             client.verbose,
-            &format!("Server error response (status {}): {}", status, error),
+            format!("Server error response (status {}): {}", status, error),
         );
         Err(PerformLoginError::Failed {
             message: error,
@@ -2112,7 +2112,7 @@ pub(crate) async fn signed_request_qr(
     let begin_resp: QrSignBeginResponse = response.json().await.with_context(Ctx::parse_begin())?;
     output::verbose(
         client.verbose,
-        &format!("QR sign token: {}", begin_resp.token),
+        format!("QR sign token: {}", begin_resp.token),
     );
 
     // Step 2: Render QR code
@@ -2154,7 +2154,7 @@ pub(crate) async fn signed_request_qr(
 
             let status: QrSignStatusResponse =
                 status_resp.json().await.with_context(Ctx::poll_parse())?;
-            output::verbose(client.verbose, &format!("Poll status: {}", status.status));
+            output::verbose(client.verbose, format!("Poll status: {}", status.status));
 
             match status.status.as_str() {
                 "completed" => {
@@ -2237,8 +2237,8 @@ pub(crate) fn get_assertion(
             Ok(result)
         }
         Err(e) => {
-            output::verbose(client.verbose, &format!("First attempt failed: {:?}", e));
-            output::verbose(client.verbose, &format!("Full error details: {:#?}", e));
+            output::verbose(client.verbose, format!("First attempt failed: {:?}", e));
+            output::verbose(client.verbose, format!("Full error details: {:#?}", e));
 
             // Only ask for PIN if the error is PIN-related
             if is_pin_related_error(&e) {
@@ -2420,8 +2420,8 @@ fn try_get_assertion(
         .decode(&opts.challenge)
         .with_context(Ctx::decode_challenge())?;
 
-    output::verbose(client.verbose, &format!("challenge bytes: {:?}", challenge));
-    output::verbose(client.verbose, &format!("rpId: {}", opts.rp_id));
+    output::verbose(client.verbose, format!("challenge bytes: {:?}", challenge));
+    output::verbose(client.verbose, format!("rpId: {}", opts.rp_id));
 
     let mut manager = AuthenticatorService::new().with_context(Ctx::authenticator_service())?;
 
@@ -2450,7 +2450,7 @@ fn try_get_assertion(
 
     output::verbose(
         client.verbose,
-        &format!("Allow list has {} credentials", allow_list.len()),
+        format!("Allow list has {} credentials", allow_list.len()),
     );
 
     let args = SignArgs {
@@ -2542,7 +2542,7 @@ fn try_get_assertion(
                 }
                 StatusUpdate::PinUvError(e) => {
                     loader.abandon();
-                    output::verbose(client.verbose, &format!("PIN/UV error: {:?}", e));
+                    output::verbose(client.verbose, format!("PIN/UV error: {:?}", e));
                     return Err(TryGetAssertionError::PinUvError {
                         error: e,
                         location: std::panic::Location::caller(),
@@ -2551,7 +2551,7 @@ fn try_get_assertion(
                 _ => {
                     output::verbose(
                         client.verbose,
-                        &format!("Authenticator status: {:?}", status),
+                        format!("Authenticator status: {:?}", status),
                     );
                 }
             }
@@ -2596,7 +2596,7 @@ fn try_get_assertion(
                 "id": general_purpose::URL_SAFE_NO_PAD.encode(cred_id_bytes),
                 "rawId": general_purpose::URL_SAFE_NO_PAD.encode(cred_id_bytes),
                 "response": {
-                    "authenticatorData": general_purpose::URL_SAFE_NO_PAD.encode(&sign_result.assertion.auth_data.to_vec()),
+                    "authenticatorData": general_purpose::URL_SAFE_NO_PAD.encode(sign_result.assertion.auth_data.to_vec()),
                     "clientDataJSON": general_purpose::URL_SAFE_NO_PAD.encode(&client_data_json_bytes),
                     "signature": general_purpose::URL_SAFE_NO_PAD.encode(&sign_result.assertion.signature),
                     "userHandle": sign_result.assertion.user.as_ref()

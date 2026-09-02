@@ -7,8 +7,6 @@ use dterror::{BoxError, CtxError, FromContext, Location, ResultExt};
 use enclave_builder::{
     has_explicit_build_command, resolve_build_command_in_dir, validate_explicit_containerfile_path,
 };
-use keymaker_models::generate_quorum::v0::GenerateQuorumResponse;
-use reqwest;
 use sequoia_openpgp as openpgp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -73,6 +71,7 @@ struct SshSignedRequestError {
 enum FetchAppViaSshHttpsErrorKind {
     SendSignedRequest,
     DecodeResponse,
+    #[allow(dead_code, reason = "used in Display of error")]
     ApiStatus {
         status: reqwest::StatusCode,
         #[context(borrow = str)]
@@ -98,6 +97,7 @@ struct FetchAppViaSshHttpsError {
 #[derive(Debug, FromContext)]
 enum DestroyAppViaSshHttpsErrorKind {
     SendSignedRequest,
+    #[allow(dead_code, reason = "used in Display of error")]
     ApiStatus {
         status: reqwest::StatusCode,
         #[context(borrow = str)]
@@ -313,7 +313,7 @@ async fn check_gateway_connectivity(
 
     output::verbose(
         verbose,
-        &format!("Testing connectivity to gateway: {}", url),
+        format!("Testing connectivity to gateway: {}", url),
     );
 
     let client = reqwest::Client::builder()
@@ -322,18 +322,18 @@ async fn check_gateway_connectivity(
         .with_context(Ctx::build_client())?;
 
     // Just verify we can reach the gateway base URL
-    output::verbose(verbose, &format!("HEAD {}", url));
+    output::verbose(verbose, format!("HEAD {}", url));
 
     match client.head(url).send().await {
         Ok(resp) => {
             output::verbose(
                 verbose,
-                &format!("Gateway reachable (status: {})", resp.status()),
+                format!("Gateway reachable (status: {})", resp.status()),
             );
             Ok(())
         }
         Err(e) => {
-            output::verbose(verbose, &format!("HEAD request failed (this is ok): {}", e));
+            output::verbose(verbose, format!("HEAD request failed (this is ok): {}", e));
             output::verbose(
                 verbose,
                 "Skipping connectivity check, will test during auth",
@@ -951,7 +951,7 @@ impl CheckoutLink {
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum InspectCheckoutLinkError {
     #[error("failed to check existing git remote [{location:?}]")]
-    CheckRemote {
+    Check {
         #[location]
         location: Location,
         #[source]
@@ -959,13 +959,13 @@ pub(crate) enum InspectCheckoutLinkError {
     },
 
     #[error("failed to list git remotes [{location:?}]")]
-    ListRemotes {
+    List {
         #[location]
         location: Location,
     },
 
     #[error("failed to read existing caution git remote [{location:?}]")]
-    ReadCautionRemote {
+    ReadCaution {
         #[location]
         location: Location,
         #[source]
@@ -973,7 +973,7 @@ pub(crate) enum InspectCheckoutLinkError {
     },
 
     #[error("failed to list caution git remotes [{location:?}]")]
-    ListCautionRemotes {
+    ListCaution {
         #[location]
         location: Location,
     },
@@ -1005,9 +1005,9 @@ fn inspect_checkout_link(
         .arg(repo_dir)
         .arg("remote")
         .output()
-        .with_context(Ctx::check_remote())?;
+        .with_context(Ctx::check())?;
     if !remotes.status.success() {
-        return Err(InspectCheckoutLinkError::ListRemotes {
+        return Err(InspectCheckoutLinkError::List {
             location: std::panic::Location::caller(),
         });
     }
@@ -1020,9 +1020,9 @@ fn inspect_checkout_link(
             .arg(repo_dir)
             .args(["remote", "get-url", "caution"])
             .output()
-            .with_context(Ctx::read_caution_remote())?;
+            .with_context(Ctx::read_caution())?;
         if !remote.status.success() {
-            return Err(InspectCheckoutLinkError::ListCautionRemotes {
+            return Err(InspectCheckoutLinkError::ListCaution {
                 location: std::panic::Location::caller(),
             });
         }
@@ -1616,7 +1616,7 @@ pub(crate) enum CheckGitRepoError {
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum SetGitRemoteError {
     #[error("failed to check existing git remote [{location:?}]")]
-    CheckRemote {
+    Check {
         #[location]
         location: Location,
         #[source]
@@ -1624,7 +1624,7 @@ pub(crate) enum SetGitRemoteError {
     },
 
     #[error("failed to update git remote 'caution' [{location:?}]")]
-    UpdateRemote {
+    Update {
         #[location]
         location: Location,
         #[source]
@@ -1632,7 +1632,7 @@ pub(crate) enum SetGitRemoteError {
     },
 
     #[error("failed to add git remote 'caution' [{location:?}]")]
-    AddRemote {
+    Add {
         #[location]
         location: Location,
         #[source]
@@ -2055,17 +2055,16 @@ impl ApiClient {
         let config_dir = base_config.join("caution-cli");
 
         // Migrate from the old api-cli directory name if present
-        if legacy_dir.exists() && !config_dir.exists() {
-            if let Err(e) = fs::rename(&legacy_dir, &config_dir) {
+        if legacy_dir.exists() && !config_dir.exists()
+            && let Err(e) = fs::rename(&legacy_dir, &config_dir) {
                 output::warning(format!(
                     "Warning: could not migrate config from {} to {}: {e}. You may need to log in again.",
                     legacy_dir.display(),
                     config_dir.display()
                 ));
             }
-        }
 
-        output::verbose(verbose, &format!("Config directory: {:?}", config_dir));
+        output::verbose(verbose, format!("Config directory: {:?}", config_dir));
 
         fs::create_dir_all(&config_dir).with_context(Ctx::create_config_dir())?;
         let config_path = config_dir.join("config.json");
@@ -2078,10 +2077,10 @@ impl ApiClient {
             caution_dir.join("deployment.json")
         });
 
-        output::verbose(verbose, &format!("Config file: {:?}", config_path));
-        output::verbose(verbose, &format!("Deployment file: {:?}", deployment_path));
+        output::verbose(verbose, format!("Config file: {:?}", config_path));
+        output::verbose(verbose, format!("Deployment file: {:?}", deployment_path));
         if let Some(ref wd) = workdir {
-            output::verbose(verbose, &format!("Working directory: {:?}", wd));
+            output::verbose(verbose, format!("Working directory: {:?}", wd));
         }
         output::verbose(verbose, "API client initialized");
 
@@ -2196,20 +2195,17 @@ impl ApiClient {
     }
 
     fn format_api_error(&self, status: reqwest::StatusCode, body: &str) -> String {
-        if status == reqwest::StatusCode::FORBIDDEN {
-            if let Ok(payload) = serde_json::from_str::<LegalAcceptanceRequiredError>(body) {
-                if payload.code == "legal_acceptance_required" {
+        if status == reqwest::StatusCode::FORBIDDEN
+            && let Ok(payload) = serde_json::from_str::<LegalAcceptanceRequiredError>(body)
+                && payload.code == "legal_acceptance_required" {
                     let mut message = self.legal_acceptance_message(&payload.document_type);
-                    if let Some(server_message) = payload.message {
-                        if !server_message.trim().is_empty() {
+                    if let Some(server_message) = payload.message
+                        && !server_message.trim().is_empty() {
                             message.push_str("\n\n");
                             message.push_str(server_message.trim());
                         }
-                    }
                     return message;
                 }
-            }
-        }
 
         if body.trim().is_empty() {
             format!("HTTP {}", status)
@@ -2229,7 +2225,6 @@ impl ApiClient {
 
     /// Prompts for a username and claims it via `POST /user/username`
     /// (a FIDO2-signed protected mutation), reprompting on 409 (taken).
-
     /// GETs `path` with the session header, transparently handling the
     /// username-claim gate: on 403 `username_required`, prompts for and
     /// claims a username, then retries the request once.
@@ -2378,7 +2373,7 @@ impl ApiClient {
         config
             .server_url
             .as_ref()
-            .map_or(true, |url| url == &self.base_url)
+            .is_none_or(|url| url == &self.base_url)
     }
 
     fn save_deployment(&self, resource_id: &str) -> Result<(), SaveDeploymentError> {
@@ -2394,7 +2389,7 @@ impl ApiClient {
         fs::write(deployment_path, json).with_context(Ctx::write(deployment_path))?;
         output::verbose(
             self.verbose,
-            &format!("Saved deployment info to {:?}", deployment_path),
+            format!("Saved deployment info to {:?}", deployment_path),
         );
         Ok(())
     }
@@ -2488,23 +2483,20 @@ impl ApiClient {
                 if let Some(value) = iter.next() {
                     return Some(Self::expand_identity_path(value));
                 }
-            } else if let Some(value) = arg.strip_prefix("-i") {
-                if !value.is_empty() {
+            } else if let Some(value) = arg.strip_prefix("-i")
+                && !value.is_empty() {
                     return Some(Self::expand_identity_path(value));
                 }
-            }
 
             if arg == "-o" {
-                if let Some(value) = iter.next() {
-                    if let Some(identity) = Self::identity_from_ssh_option(value) {
+                if let Some(value) = iter.next()
+                    && let Some(identity) = Self::identity_from_ssh_option(value) {
                         return Some(identity);
                     }
-                }
-            } else if let Some(value) = arg.strip_prefix("-o") {
-                if let Some(identity) = Self::identity_from_ssh_option(value) {
+            } else if let Some(value) = arg.strip_prefix("-o")
+                && let Some(identity) = Self::identity_from_ssh_option(value) {
                     return Some(identity);
                 }
-            }
         }
         None
     }
@@ -2519,11 +2511,10 @@ impl ApiClient {
     }
 
     fn expand_identity_path(path: &str) -> PathBuf {
-        if let Some(rest) = path.strip_prefix("~/") {
-            if let Some(home) = dirs::home_dir() {
+        if let Some(rest) = path.strip_prefix("~/")
+            && let Some(home) = dirs::home_dir() {
                 return home.join(rest);
             }
-        }
         PathBuf::from(path)
     }
 
@@ -2546,27 +2537,22 @@ impl ApiClient {
             }
         }
 
-        if let Ok(command) = std::env::var("GIT_SSH_COMMAND") {
-            if let Some(path) = Self::identity_from_ssh_command(&command) {
-                if path.exists() {
+        if let Ok(command) = std::env::var("GIT_SSH_COMMAND")
+            && let Some(path) = Self::identity_from_ssh_command(&command)
+                && path.exists() {
                     return Some(path);
                 }
-            }
-        }
 
         if let Ok(output) = Command::new("git")
             .args(["config", "--get", "core.sshCommand"])
             .output()
-        {
-            if output.status.success() {
+            && output.status.success() {
                 let command = String::from_utf8_lossy(&output.stdout);
-                if let Some(path) = Self::identity_from_ssh_command(command.trim()) {
-                    if path.exists() {
+                if let Some(path) = Self::identity_from_ssh_command(command.trim())
+                    && path.exists() {
                         return Some(path);
                     }
-                }
             }
-        }
 
         if self.read_caution_git_remote().is_some() {
             for name in ["id_ed25519", "id_ecdsa", "id_rsa"] {
@@ -2645,7 +2631,7 @@ impl ApiClient {
     }
 
     fn ssh_key_identity(public_key: &str) -> Option<String> {
-        let parts: Vec<&str> = public_key.trim().split_whitespace().collect();
+        let parts: Vec<&str> = public_key.split_whitespace().collect();
         if parts.len() < 2 {
             return None;
         }
@@ -2736,7 +2722,7 @@ impl ApiClient {
 
         output::verbose(
             self.verbose,
-            &format!("Sending SSH-signed HTTPS request for {}", path),
+            format!("Sending SSH-signed HTTPS request for {}", path),
         );
 
         let mut request = self
@@ -2841,7 +2827,7 @@ impl ApiClient {
         use CheckGitRepoErrorCtx as Ctx;
 
         let output = Command::new("git")
-            .args(&["rev-parse", "--is-inside-work-tree"])
+            .args(["rev-parse", "--is-inside-work-tree"])
             .output()
             .with_context(Ctx::run_git_command())?;
 
@@ -2858,22 +2844,22 @@ impl ApiClient {
         use SetGitRemoteErrorCtx as Ctx;
 
         let check_output = Command::new("git")
-            .args(&["remote", "get-url", "caution"])
+            .args(["remote", "get-url", "caution"])
             .output()
-            .with_context(Ctx::check_remote())?;
+            .with_context(Ctx::check())?;
 
         if check_output.status.success() {
             Command::new("git")
-                .args(&["remote", "set-url", "caution", git_url])
+                .args(["remote", "set-url", "caution", git_url])
                 .output()
-                .with_context(Ctx::update_remote())?;
+                .with_context(Ctx::update())?;
 
             output::success(format!("Updated git remote 'caution' to: {}", git_url));
         } else {
             Command::new("git")
-                .args(&["remote", "add", "caution", git_url])
+                .args(["remote", "add", "caution", git_url])
                 .output()
-                .with_context(Ctx::add_remote())?;
+                .with_context(Ctx::add())?;
 
             output::success(format!("Added git remote 'caution': {}", git_url));
         }
@@ -2999,7 +2985,7 @@ enclave "default" {{
         use std::process::Command;
 
         let output = Command::new("git")
-            .args(&["remote", "get-url", "origin"])
+            .args(["remote", "get-url", "origin"])
             .output()
             .ok()?;
 
@@ -3180,7 +3166,7 @@ enclave "default" {{
 
         output::verbose(
             self.verbose,
-            &format!(
+            format!(
                 "Requesting FIDO2 sign challenge for {} {}",
                 method_name, path
             ),
@@ -3532,8 +3518,8 @@ pub async fn run() -> Result<(), RunError> {
     let cli = Cli::parse();
 
     output::verbose(cli.verbose, "API CLI v0.1.0");
-    output::verbose(cli.verbose, &format!("Gateway URL: {}", cli.url));
-    output::verbose(cli.verbose, &format!("Command: {:?}", cli.command));
+    output::verbose(cli.verbose, format!("Gateway URL: {}", cli.url));
+    output::verbose(cli.verbose, format!("Command: {:?}", cli.command));
 
     validate_global_qr(&cli.command, cli.qr)?;
 

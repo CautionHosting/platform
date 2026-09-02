@@ -45,10 +45,6 @@ pub enum ParseError {
 pub fn parse(attestation_bytes: &[u8]) -> Result<CborValue, ParseError> {
     use ParseErrorCtx as Ctx;
 
-    fn as_boxdyne(e: &(dyn std::error::Error + Send + Sync + 'static)) {
-        ();
-    }
-
     let cose_sign1 = coset::CoseSign1::from_slice(attestation_bytes)
         .with_context(Ctx::parse_cose_sign1())?;
 

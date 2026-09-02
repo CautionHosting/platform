@@ -2573,7 +2573,7 @@ checksum = "e05ee8f3f4ed77223f1ff7b12051ec44fc36d3e67ea217452dc8434559df9ded"
 [[package]]
 name = "dterror"
 version = "0.3.0"
-source = "git+https://git.distrust.co/public/dterror?branch=main#f745354f9949ca8235e4e52ebb8aabc708c38efb"
+source = "git+https://git.distrust.co/public/dterror?branch=main#409a8ca001d9e6cedabf5587b138073e78ed7e65"
 dependencies = [
  "dterror-derive",
 ]
@@ -2581,7 +2581,7 @@ dependencies = [
 [[package]]
 name = "dterror-derive"
 version = "0.2.0"
-source = "git+https://git.distrust.co/public/dterror?branch=main#f745354f9949ca8235e4e52ebb8aabc708c38efb"
+source = "git+https://git.distrust.co/public/dterror?branch=main#409a8ca001d9e6cedabf5587b138073e78ed7e65"
 dependencies = [
  "heck",
  "proc-macro2",

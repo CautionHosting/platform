@@ -626,10 +626,12 @@ pub(crate) enum PersistTrustedHashesWithBackupErrorKind {
 
     SyncTemp,
 
+    #[allow(dead_code, reason = "used in Display of error")]
     BackupPath {
         backup: Option<PathBuf>,
     },
 
+    #[allow(dead_code, reason = "used in Display of error")]
     BackupFile {
         #[context(borrow = Path)]
         backup: PathBuf,
@@ -924,12 +926,12 @@ pub(crate) async fn build_local(client: &ApiClient, no_cache: bool) -> Result<()
         .with_context(Ctx::build_input())?;
 
     let app_commit = Command::new("git")
-        .args(&["rev-parse", "HEAD"])
+        .args(["rev-parse", "HEAD"])
         .output()
         .ok()
         .and_then(|o| parse_git_rev_parse_output(o.status.success(), &o.stdout));
     let app_branch = Command::new("git")
-        .args(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()
         .and_then(|o| parse_git_rev_parse_output(o.status.success(), &o.stdout));
@@ -1014,7 +1016,7 @@ pub(crate) async fn build_local(client: &ApiClient, no_cache: bool) -> Result<()
         .and_then(|config| config.network.as_ref())
         .and_then(|network| network.http.as_ref())
         .map(|http| http.port);
-    output::verbose(client.verbose, &format!("HTTP port: {:?}", http_port));
+    output::verbose(client.verbose, format!("HTTP port: {:?}", http_port));
 
     let domain = enclave
         .and_then(|config| config.network.as_ref())
@@ -1027,13 +1029,13 @@ pub(crate) async fn build_local(client: &ApiClient, no_cache: bool) -> Result<()
     let allow_plaintext_fallback = e2e_config
         .map(|ee| ee.allow_plaintext_fallback())
         .unwrap_or(false);
-    output::verbose(client.verbose, &format!("E2E encryption: {}", e2e));
+    output::verbose(client.verbose, format!("E2E encryption: {}", e2e));
 
     let locksmith = cfg.has_vault_env();
-    output::verbose(client.verbose, &format!("Locksmith secrets: {}", locksmith));
+    output::verbose(client.verbose, format!("Locksmith secrets: {}", locksmith));
 
     let egress = config_egress_enabled(&cfg);
-    output::verbose(client.verbose, &format!("Egress: {}", egress));
+    output::verbose(client.verbose, format!("Egress: {}", egress));
 
     let e2e_cors_origins = e2e_config
         .and_then(|e2e| e2e.cors_origins.as_ref())
@@ -1047,7 +1049,7 @@ pub(crate) async fn build_local(client: &ApiClient, no_cache: bool) -> Result<()
         .unwrap_or("http");
     output::verbose(
         client.verbose,
-        &format!("HTTP upstream protocol: {}", http_upstream_protocol),
+        format!("HTTP upstream protocol: {}", http_upstream_protocol),
     );
 
     let loader = Spinner::new("Building enclave image", SpinnerStyle::Processing);
@@ -1309,7 +1311,7 @@ async fn build_and_get_pcrs(
         );
         output::verbose(
             client.verbose,
-            &format!("Using default enclave source: {}", source),
+            format!("Using default enclave source: {}", source),
         );
         (source, "unused".to_string())
     };
@@ -1357,7 +1359,7 @@ async fn build_and_get_pcrs(
         }
     } else {
         let source_key = Command::new("git")
-            .args(&["rev-parse", "HEAD"])
+            .args(["rev-parse", "HEAD"])
             .output()
             .ok()
             .and_then(|o| parse_git_rev_parse_output(o.status.success(), &o.stdout))
@@ -1526,23 +1528,23 @@ async fn build_and_get_pcrs(
 
             output::verbose(
                 client.verbose,
-                &format!("Binary from manifest: {:?}", binary),
+                format!("Binary from manifest: {:?}", binary),
             );
             output::verbose(
                 client.verbose,
-                &format!("Run command from manifest: {:?}", run_cmd),
+                format!("Run command from manifest: {:?}", run_cmd),
             );
             output::verbose(
                 client.verbose,
-                &format!("App source URLs from manifest: {:?}", source_urls),
+                format!("App source URLs from manifest: {:?}", source_urls),
             );
             output::verbose(
                 client.verbose,
-                &format!("Branch from manifest: {:?}", branch),
+                format!("Branch from manifest: {:?}", branch),
             );
             output::verbose(
                 client.verbose,
-                &format!("Commit from manifest: {:?}", commit),
+                format!("Commit from manifest: {:?}", commit),
             );
 
             (
@@ -1575,7 +1577,7 @@ async fn build_and_get_pcrs(
                 .and_then(|source| source.app_commit.clone())
                 .or_else(|| {
                     Command::new("git")
-                        .args(&["rev-parse", "HEAD"])
+                        .args(["rev-parse", "HEAD"])
                         .current_dir(config_dir)
                         .output()
                         .ok()
@@ -1583,7 +1585,7 @@ async fn build_and_get_pcrs(
                 });
 
             let branch = Command::new("git")
-                .args(&["rev-parse", "--abbrev-ref", "HEAD"])
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
                 .current_dir(config_dir)
                 .output()
                 .ok()
@@ -1591,14 +1593,14 @@ async fn build_and_get_pcrs(
 
             output::verbose(
                 client.verbose,
-                &format!("Run command from config: {:?}", run_cmd),
+                format!("Run command from config: {:?}", run_cmd),
             );
             output::verbose(
                 client.verbose,
-                &format!("Source URLs from config: {:?}", source_urls),
+                format!("Source URLs from config: {:?}", source_urls),
             );
-            output::verbose(client.verbose, &format!("Git branch: {:?}", branch));
-            output::verbose(client.verbose, &format!("Git commit: {:?}", commit));
+            output::verbose(client.verbose, format!("Git branch: {:?}", branch));
+            output::verbose(client.verbose, format!("Git commit: {:?}", commit));
 
             (binary, run_cmd, source_urls, branch, commit, None)
         };
@@ -1624,7 +1626,7 @@ async fn build_and_get_pcrs(
             })
             .unwrap_or_default()
     };
-    output::verbose(client.verbose, &format!("Ports: {:?}", ports));
+    output::verbose(client.verbose, format!("Ports: {:?}", ports));
 
     let http_config = {
         let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
@@ -1639,7 +1641,7 @@ async fn build_and_get_pcrs(
             .and_then(|network| network.http)
     };
     let http_port = http_config.as_ref().map(|http| http.port);
-    output::verbose(client.verbose, &format!("HTTP port: {:?}", http_port));
+    output::verbose(client.verbose, format!("HTTP port: {:?}", http_port));
 
     let http_upstream_protocol = http_config
         .as_ref()
@@ -1648,7 +1650,7 @@ async fn build_and_get_pcrs(
         .unwrap_or("http");
     output::verbose(
         client.verbose,
-        &format!("HTTP upstream protocol: {}", http_upstream_protocol),
+        format!("HTTP upstream protocol: {}", http_upstream_protocol),
     );
 
     let domain = http_config.as_ref().and_then(|http| http.domain.clone());
@@ -1687,7 +1689,7 @@ async fn build_and_get_pcrs(
                 .map(|manifest| manifest.steve_allow_plaintext_fallback)
                 .unwrap_or(false)
         });
-    output::verbose(client.verbose, &format!("E2E encryption: {}", e2e));
+    output::verbose(client.verbose, format!("E2E encryption: {}", e2e));
 
     let locksmith = if let Some(ref app_dir) = app_source_dir {
         client
@@ -1709,7 +1711,7 @@ async fn build_and_get_pcrs(
             .map(|cfg| cfg.has_vault_env())
             .unwrap_or(false)
     };
-    output::verbose(client.verbose, &format!("Locksmith secrets: {}", locksmith));
+    output::verbose(client.verbose, format!("Locksmith secrets: {}", locksmith));
 
     let egress = if let Some(ref app_dir) = app_source_dir {
         client
@@ -1727,7 +1729,7 @@ async fn build_and_get_pcrs(
             .map(|cfg| config_egress_enabled(&cfg))
             .unwrap_or(false)
     };
-    output::verbose(client.verbose, &format!("Egress: {}", egress));
+    output::verbose(client.verbose, format!("Egress: {}", egress));
 
     let e2e_cors_origins = if e2e {
         e2e_config
@@ -1741,7 +1743,7 @@ async fn build_and_get_pcrs(
     let deployment = if let Some(ref bin_path) = binary_path {
         output::verbose(
             client.verbose,
-            &format!("Using build_enclave_auto with binary: {}", bin_path),
+            format!("Using build_enclave_auto with binary: {}", bin_path),
         );
         builder
             .build_enclave_auto(
@@ -2291,6 +2293,7 @@ pub(crate) enum VerifyError {
     },
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) async fn verify(
     client: &ApiClient,
     attestation_url_opt: Option<String>,
@@ -2337,7 +2340,7 @@ pub(crate) async fn verify(
 
     output::verbose(
         client.verbose,
-        &format!("Requesting attestation from: {}", attestation_url),
+        format!("Requesting attestation from: {}", attestation_url),
     );
     output::status("Requesting attestation...");
 
@@ -2388,7 +2391,7 @@ pub(crate) async fn verify(
         })?;
     output::verbose(
         client.verbose,
-        &format!("Received attestation: {} bytes", attestation_b64.len()),
+        format!("Received attestation: {} bytes", attestation_b64.len()),
     );
     let attestation_bytes = base64::engine::general_purpose::STANDARD
         .decode(attestation_b64)
@@ -2933,7 +2936,7 @@ async fn stage_git_source(
 
     output::verbose(
         client.verbose,
-        &format!(
+        format!(
             "Staged local Git commit {} from {} into {}",
             commit,
             repo_root.display(),
@@ -2996,7 +2999,7 @@ fn stage_tarball_source(
 
     output::verbose(
         client.verbose,
-        &format!(
+        format!(
             "Staged source tarball {} into {}",
             tarball_path.display(),
             temp_dir.path().display()
@@ -3124,7 +3127,7 @@ async fn build_docker_image_from_dir(
     use tokio::process::Command;
 
     let commit_sha = Command::new("git")
-        .args(&["rev-parse", "HEAD"])
+        .args(["rev-parse", "HEAD"])
         .current_dir(work_dir)
         .output()
         .await
@@ -3139,7 +3142,7 @@ async fn build_docker_image_from_dir(
 
     if !no_cache {
         let inspect = Command::new("docker")
-            .args(&["inspect", "--type=image", &tag])
+            .args(["inspect", "--type=image", &tag])
             .output()
             .await
             .with_context(Ctx::inspect_image())?;
@@ -3147,7 +3150,7 @@ async fn build_docker_image_from_dir(
         if inspect.status.success() {
             output::verbose(
                 client.verbose,
-                &format!("Using cached Docker image: {}", tag),
+                format!("Using cached Docker image: {}", tag),
             );
             return Ok(tag);
         }
@@ -3160,7 +3163,7 @@ async fn build_docker_image_from_dir(
 
     output::verbose(
         client.verbose,
-        &format!("Building Docker image with tag: {}", tag),
+        format!("Building Docker image with tag: {}", tag),
     );
 
     let containerfile = client
@@ -3208,8 +3211,8 @@ async fn build_docker_image_from_dir(
         }
     };
 
-    output::verbose(client.verbose, &format!("work_dir = {:?}", work_dir));
-    output::verbose(client.verbose, &format!("BuildConfig = {:?}", config));
+    output::verbose(client.verbose, format!("work_dir = {:?}", work_dir));
+    output::verbose(client.verbose, format!("BuildConfig = {:?}", config));
 
     build_user_image(work_dir, &tag, &config)
         .await
@@ -3217,7 +3220,7 @@ async fn build_docker_image_from_dir(
 
     output::verbose(
         client.verbose,
-        &format!("Docker image built successfully: {}", tag),
+        format!("Docker image built successfully: {}", tag),
     );
     Ok(tag)
 }
@@ -3322,12 +3325,12 @@ async fn download_and_extract_app_source(
     {
         output::verbose(
             client.verbose,
-            &format!("Using cached app source: {}", extract_dir.display()),
+            format!("Using cached app source: {}", extract_dir.display()),
         );
         return Ok(extract_dir);
     }
 
-    output::verbose(client.verbose, &format!("Downloading app source: {}", url));
+    output::verbose(client.verbose, format!("Downloading app source: {}", url));
 
     // Clean up any partial extraction
     if extract_dir.exists() {
@@ -3353,14 +3356,14 @@ async fn download_and_extract_app_source(
 
     output::verbose(
         client.verbose,
-        &format!("Downloaded {} bytes, extracting...", archive_bytes.len()),
+        format!("Downloaded {} bytes, extracting...", archive_bytes.len()),
     );
 
     extract_tarball_bytes_to_dir(&archive_bytes, &extract_dir).with_context(Ctx::extract())?;
 
     output::verbose(
         client.verbose,
-        &format!("App source extracted to: {}", extract_dir.display()),
+        format!("App source extracted to: {}", extract_dir.display()),
     );
 
     Ok(extract_dir)
@@ -3400,7 +3403,7 @@ async fn download_and_extract_app_source_with_fallbacks(
         if i > 0 {
             output::verbose(
                 client.verbose,
-                &format!("Trying fallback URL ({}/{}): {}", i + 1, urls.len(), url),
+                format!("Trying fallback URL ({}/{}): {}", i + 1, urls.len(), url),
             );
         }
 
@@ -3409,7 +3412,7 @@ async fn download_and_extract_app_source_with_fallbacks(
             Err(e) => {
                 output::verbose(
                     client.verbose,
-                    &format!("Failed to download from {}: {}", url, e),
+                    format!("Failed to download from {}: {}", url, e),
                 );
                 last_error = Some(e);
             }
@@ -3760,7 +3763,7 @@ fn preflight_app_source_ref(
         Err(e) => {
             output::verbose(
                 client.verbose,
-                &format!(
+                format!(
                     "App source preflight skipped (ls-remote could not run): {}",
                     e
                 ),
@@ -3774,7 +3777,7 @@ fn preflight_app_source_ref(
         let stderr = String::from_utf8_lossy(&output.stderr);
         output::verbose(
             client.verbose,
-            &format!(
+            format!(
                 "App source preflight inconclusive (ls-remote failed): {}",
                 stderr.trim()
             ),
@@ -3792,7 +3795,7 @@ fn preflight_app_source_ref(
             // still live in history; only warn and let the fetch resolve it.
             output::verbose(
                 client.verbose,
-                &format!(
+                format!(
                     "App source commit {} is not a current ref tip; relying on fetch to resolve",
                     commit
                 ),
@@ -3843,11 +3846,10 @@ pub(crate) fn classify_app_source_refs(
         {
             commit_is_ref_tip = true;
         }
-        if let Some(ref br) = branch_ref {
-            if r == br {
+        if let Some(ref br) = branch_ref
+            && r == br {
                 branch_present = true;
             }
-        }
     }
 
     match branch {
@@ -3983,7 +3985,7 @@ async fn download_and_extract_app_source_with_git_fallback(
         match download_and_extract_app_source_with_fallbacks(client, archive_urls).await {
             Ok(path) => return Ok(path),
             Err(e) => {
-                output::verbose(client.verbose, &format!("Archive download failed: {}", e));
+                output::verbose(client.verbose, format!("Archive download failed: {}", e));
             }
         }
     }
@@ -4002,7 +4004,7 @@ async fn download_and_extract_app_source_with_git_fallback(
         if let Some(branch_name) = branch {
             output::verbose(
                 client.verbose,
-                &format!(
+                format!(
                     "Cloning branch '{}' then checking out commit '{}'",
                     branch_name, commit
                 ),
@@ -4023,7 +4025,7 @@ async fn download_and_extract_app_source_with_git_fallback(
 
             if !clone_output.status.success() {
                 let stderr = String::from_utf8_lossy(&clone_output.stderr);
-                output::verbose(client.verbose, &format!("Branch clone failed: {}", stderr));
+                output::verbose(client.verbose, format!("Branch clone failed: {}", stderr));
                 // Fall through to try commit-based fetch
             } else {
                 // Checkout the specific commit
@@ -4036,14 +4038,14 @@ async fn download_and_extract_app_source_with_git_fallback(
                     let extract_dir = temp_dir.keep().join("repo");
                     output::verbose(
                         client.verbose,
-                        &format!("Git clone successful: {}", extract_dir.display()),
+                        format!("Git clone successful: {}", extract_dir.display()),
                     );
                     return Ok(extract_dir);
                 } else {
                     let stderr = String::from_utf8_lossy(&checkout_output.stderr);
                     output::verbose(
                         client.verbose,
-                        &format!("Commit checkout failed: {}, will try deeper clone", stderr),
+                        format!("Commit checkout failed: {}, will try deeper clone", stderr),
                     );
 
                     // Try fetching more history to find the commit
@@ -4060,7 +4062,7 @@ async fn download_and_extract_app_source_with_git_fallback(
                         let extract_dir = temp_dir.keep().join("repo");
                         output::verbose(
                             client.verbose,
-                            &format!(
+                            format!(
                                 "Git clone successful after unshallow: {}",
                                 extract_dir.display()
                             ),
@@ -4114,7 +4116,7 @@ async fn download_and_extract_app_source_with_git_fallback(
                     let extract_dir = temp_dir.keep().join("repo");
                     output::verbose(
                         client.verbose,
-                        &format!("Git fetch successful: {}", extract_dir.display()),
+                        format!("Git fetch successful: {}", extract_dir.display()),
                     );
                     return Ok(extract_dir);
                 }
@@ -4193,7 +4195,7 @@ async fn download_and_extract_app_source_with_git_fallback(
         let extract_dir = temp_dir.keep().join("repo");
         output::verbose(
             client.verbose,
-            &format!("Git clone successful: {}", extract_dir.display()),
+            format!("Git clone successful: {}", extract_dir.display()),
         );
         return Ok(extract_dir);
     }

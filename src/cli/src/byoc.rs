@@ -768,7 +768,7 @@ pub(crate) async fn init(
     let cmd = resolve_local_build_command_from_dir(Path::new("."), false)
         .with_context(Ctx::resolve_build_command())?;
     output::success("Configuration found");
-    output::status(&format!("Build command: {}", cmd));
+    output::status(format!("Build command: {}", cmd));
 
     checkout_link.byoc_provider = config_file
         .caution
@@ -910,7 +910,7 @@ async fn init_byoc(client: &ApiClient, config_path: &PathBuf) -> Result<(), Init
 
     output::verbose(
         client.verbose,
-        &format!("Reading config from {:?}", config_path),
+        format!("Reading config from {:?}", config_path),
     );
     let config_content = fs::read_to_string(config_path).with_context(Ctx::read_config_file())?;
 
@@ -991,13 +991,12 @@ async fn init_byoc(client: &ApiClient, config_path: &PathBuf) -> Result<(), Init
             }
         }
 
-        if let Some(value) = config_json.get("builder_instance_profile_name") {
-            if !value.is_string() {
+        if let Some(value) = config_json.get("builder_instance_profile_name")
+            && !value.is_string() {
                 return Err(InitByocError::BuilderInstanceProfileNotString {
                     location: std::panic::Location::caller(),
                 });
             }
-        }
 
         output::verbose(client.verbose, "Config file validated");
         serde_json::to_string(&config_json).with_context(Ctx::serialize_config_file())?
@@ -1068,10 +1067,10 @@ async fn init_byoc(client: &ApiClient, config_path: &PathBuf) -> Result<(), Init
     } else {
         output::success("Bring-your-own-compute resource created");
     }
-    output::status(&format!("ID: {}", id));
-    output::status(&format!("Name: {}", resource_name));
-    output::status(&format!("State: {}", state));
-    output::status(&format!("Git URL: {}", git_url));
+    output::status(format!("ID: {}", id));
+    output::status(format!("Name: {}", resource_name));
+    output::status(format!("State: {}", state));
+    output::status(format!("Git URL: {}", git_url));
     output::status(deployment_target_summary("BYOC", aws_account, aws_region));
     print_managed_dns_details(
         create_response["managed_hostname"].as_str(),
@@ -1162,8 +1161,8 @@ fn parse_aws_credentials_file(
             in_target_section = trimmed == section_header;
             continue;
         }
-        if in_target_section {
-            if let Some((key, value)) = trimmed.split_once('=') {
+        if in_target_section
+            && let Some((key, value)) = trimmed.split_once('=') {
                 let key = key.trim();
                 let value = value.trim();
                 match key {
@@ -1173,7 +1172,6 @@ fn parse_aws_credentials_file(
                     _ => {}
                 }
             }
-        }
     }
 
     (access_key, secret_key, session_token)
@@ -1196,13 +1194,11 @@ fn parse_aws_config_region(content: &str, profile: &str) -> Option<String> {
             in_target_section = section_headers.iter().any(|h| h == trimmed);
             continue;
         }
-        if in_target_section {
-            if let Some((key, value)) = trimmed.split_once('=') {
-                if key.trim() == "region" {
+        if in_target_section
+            && let Some((key, value)) = trimmed.split_once('=')
+                && key.trim() == "region" {
                     region = Some(value.trim().to_string());
                 }
-            }
-        }
     }
 
     region
@@ -1312,7 +1308,7 @@ async fn init_byoc_interactive(
     } else {
         output::status("\nPulling provisioner image...");
         let pull_output = Command::new("docker")
-            .args(&["pull", BYOC_PROVISIONER_IMAGE])
+            .args(["pull", BYOC_PROVISIONER_IMAGE])
             .output()
             .with_context(Ctx::pull_provisioner_image())?;
 
@@ -1586,17 +1582,14 @@ pub(crate) async fn teardown(
         if let Ok(entries) = fs::read_dir(&caution_dir) {
             for entry in entries.flatten() {
                 let state_path = byoc_state_read_path(&entry.path());
-                if state_path.exists() {
-                    if let Ok(content) = fs::read_to_string(&state_path) {
-                        if let Ok(state) = serde_json::from_str::<serde_json::Value>(&content) {
-                            if state.get("resource_id").and_then(|v| v.as_str()) == Some(rid) {
+                if state_path.exists()
+                    && let Ok(content) = fs::read_to_string(&state_path)
+                        && let Ok(state) = serde_json::from_str::<serde_json::Value>(&content)
+                            && state.get("resource_id").and_then(|v| v.as_str()) == Some(rid) {
                                 byoc_state = Some(state);
                                 byoc_state_dir = Some(entry.path());
                                 break;
                             }
-                        }
-                    }
-                }
             }
         }
     }
@@ -1699,7 +1692,7 @@ pub(crate) async fn teardown(
         output::status("Using local provisioner image (--local)...");
     } else {
         let _ = Command::new("docker")
-            .args(&["pull", provisioner_image])
+            .args(["pull", provisioner_image])
             .output();
     }
 

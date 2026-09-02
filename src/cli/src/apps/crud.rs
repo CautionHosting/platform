@@ -269,7 +269,7 @@ pub(crate) async fn create(client: &ApiClient) -> Result<(), CreateError> {
     let cmd = resolve_local_build_command_from_dir(Path::new("."), false)
         .with_context(Ctx::resolve_build_command())?;
     output::success("Configuration found");
-    output::status(&format!("Build command: {}", cmd));
+    output::status(format!("Build command: {}", cmd));
 
     let checkout_link = crate::inspect_checkout_link(
         client
@@ -381,8 +381,8 @@ pub(crate) async fn create(client: &ApiClient) -> Result<(), CreateError> {
         .create_config_file_if_needed(false)
         .with_context(Ctx::create_config_file())?;
 
-    output::status(format!("\nYou can now push to 'caution' remote:"));
-    output::status(format!("  git push caution main"));
+    output::status("\nYou can now push to 'caution' remote:");
+    output::status("  git push caution main");
 
     Ok(())
 }
@@ -429,16 +429,14 @@ pub(crate) async fn list(client: &ApiClient) -> Result<(), ListError> {
             let name = app.resource_name.as_deref().unwrap_or("unnamed");
             let mut details = vec![app.state.clone()];
 
-            if let Some(config) = &app.configuration {
-                if let Some(enclave_config) = config.get("enclave_config") {
-                    if let (Some(mem), Some(cpus)) = (
+            if let Some(config) = &app.configuration
+                && let Some(enclave_config) = config.get("enclave_config")
+                    && let (Some(mem), Some(cpus)) = (
                         enclave_config.get("memory_mb").and_then(|v| v.as_u64()),
                         enclave_config.get("cpus").and_then(|v| v.as_u64()),
                     ) {
                         details.push(format!("{}MB/{}cpu", mem, cpus));
                     }
-                }
-            }
 
             if let Some(ip) = &app.public_ip {
                 details.push(ip.clone());
@@ -528,35 +526,31 @@ pub(crate) async fn get(
         output::status(format!("  Domain: {}", domain));
     }
 
-    if let Some(config) = &app.configuration {
-        if let Some(enclave_config) = config.get("enclave_config") {
+    if let Some(config) = &app.configuration
+        && let Some(enclave_config) = config.get("enclave_config") {
             if let Some(memory) = enclave_config.get("memory_mb").and_then(|v| v.as_u64()) {
                 output::status(format!("  Memory: {} MB", memory));
             }
             if let Some(cpus) = enclave_config.get("cpus").and_then(|v| v.as_u64()) {
                 output::status(format!("  CPUs: {}", cpus));
             }
-            if let Some(debug) = enclave_config.get("debug").and_then(|v| v.as_bool()) {
-                if debug {
+            if let Some(debug) = enclave_config.get("debug").and_then(|v| v.as_bool())
+                && debug {
                     output::status("  Debug Mode: enabled");
                 }
-            }
-            if let Some(ports) = enclave_config.get("ports").and_then(|v| v.as_array()) {
-                if !ports.is_empty() {
+            if let Some(ports) = enclave_config.get("ports").and_then(|v| v.as_array())
+                && !ports.is_empty() {
                     let ports_str: Vec<String> = ports
                         .iter()
                         .filter_map(|p| p.as_u64().map(|n| n.to_string()))
                         .collect();
                     output::status(format!("  Ports: {}", ports_str.join(", ")));
                 }
-            }
-            if let Some(http_port) = enclave_config.get("http_port").and_then(|v| v.as_u64()) {
-                if http_port > 0 {
+            if let Some(http_port) = enclave_config.get("http_port").and_then(|v| v.as_u64())
+                && http_port > 0 {
                     output::status(format!("  HTTP Port: {}", http_port));
                 }
-            }
         }
-    }
 
     if let Some(ip) = &app.public_ip {
         output::status(format!("  Public IP: {}", ip));
@@ -910,7 +904,7 @@ pub(crate) async fn rename(
             .await
             .with_context(Ctx::parse_rename_response())?;
         let updated_name = updated_app.resource_name.as_deref().unwrap_or("unnamed");
-        output::success(&format!("App renamed: {} -> {}", old_name, updated_name));
+        output::success(format!("App renamed: {} -> {}", old_name, updated_name));
 
         Ok(())
     } else {
@@ -1012,14 +1006,14 @@ pub(crate) async fn try_relink(
     };
 
     if from_remote {
-        output::status(&format!(
+        output::status(format!(
             "Attempting to re-link app from git remote (ID: {})...",
             resource_id
         ));
     } else {
         output::verbose(
             client.verbose,
-            &["Found existing deployment with ID: ", &resource_id].concat(),
+            ["Found existing deployment with ID: ", &resource_id].concat(),
         );
     }
 
