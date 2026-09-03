@@ -56,6 +56,7 @@ pub(crate) struct InventoryIssue {
 pub(crate) struct InventorySnapshot {
     pub regions_scanned: usize,
     pub regions_with_resources: usize,
+    pub instance_regions_succeeded: usize,
     pub instances: Vec<AwsInstance>,
     pub volumes: Vec<AwsVolume>,
     pub addresses: Vec<AwsAddress>,
@@ -87,6 +88,9 @@ pub(crate) async fn fetch_inventory(
         ..InventorySnapshot::default()
     };
     for scan in scans {
+        if scan.instances_succeeded {
+            snapshot.instance_regions_succeeded += 1;
+        }
         if !scan.instances.is_empty() || !scan.volumes.is_empty() || !scan.addresses.is_empty() {
             snapshot.regions_with_resources += 1;
         }
@@ -153,6 +157,7 @@ async fn scan_region(config: &SdkConfig, inspector: &Ec2Inspector, region: Strin
     let mut scan = RegionScan::default();
     match instances {
         Ok(Ok(values)) => {
+            scan.instances_succeeded = true;
             scan.instances = values
                 .into_iter()
                 .map(|instance| AwsInstance {
@@ -186,6 +191,7 @@ async fn scan_region(config: &SdkConfig, inspector: &Ec2Inspector, region: Strin
 
 #[derive(Default)]
 struct RegionScan {
+    instances_succeeded: bool,
     instances: Vec<AwsInstance>,
     volumes: Vec<AwsVolume>,
     addresses: Vec<AwsAddress>,

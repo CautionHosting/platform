@@ -55,7 +55,16 @@ fn instance(app: &AwsAppRow, state: &str) -> AwsInstance {
     }
 }
 
-fn snapshot(database: AwsDatabaseState, inventory: InventorySnapshot) -> AwsSnapshot {
+fn snapshot(database: AwsDatabaseState, mut inventory: InventorySnapshot) -> AwsSnapshot {
+    if inventory.regions_scanned == 0 {
+        let instance_failures = inventory
+            .issues
+            .iter()
+            .filter(|issue| issue.component == "instances")
+            .count();
+        inventory.regions_scanned = instance_failures.saturating_add(1);
+        inventory.instance_regions_succeeded = 1;
+    }
     build_snapshot(
         database,
         Ok(AccountIdentity {

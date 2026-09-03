@@ -61,9 +61,42 @@ pub(super) fn render_section(
         AwsSection::Costs => render_costs(frame, area, state),
         AwsSection::Byoc => render_byoc(frame, area, state),
         AwsSection::AppHosts | AwsSection::Builders | AwsSection::Storage => {
-            render_resource_table(frame, area, state, Some(" AWS resources "));
+            render_inventory_section(frame, area, state, section);
         }
     }
+}
+
+fn render_inventory_section(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &mut AppState,
+    section: AwsSection,
+) {
+    let quality = state.aws_cache.as_ref().map(|snapshot| match section {
+        AwsSection::AppHosts | AwsSection::Builders => {
+            (snapshot.instances_available, snapshot.instances_complete)
+        }
+        AwsSection::Storage => (snapshot.inventory_available, snapshot.inventory_complete),
+        _ => unreachable!("inventory section"),
+    });
+    if matches!(quality, Some((_, true))) {
+        render_resource_table(frame, area, state, Some(" AWS resources "));
+        return;
+    }
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(4)])
+        .split(area);
+    let coverage = match quality {
+        Some((true, false)) => "Partial; some regional requests failed",
+        _ => "Unavailable; no regional inventory was returned",
+    };
+    frame.render_widget(
+        Paragraph::new(detail_line("Coverage", coverage.to_string()))
+            .block(panel(Line::from(" Inventory coverage "))),
+        areas[0],
+    );
+    render_resource_table(frame, areas[1], state, Some(" AWS resources "));
 }
 
 pub(super) fn render_finding(
@@ -382,16 +415,16 @@ fn render_findings(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         .filter(|finding| finding.severity == DriftSeverity::Critical)
         .count();
     let warning = findings.len().saturating_sub(critical);
-    let inventory_available = snapshot.is_some_and(|snapshot| snapshot.inventory_available);
-    let findings_summary = if inventory_available {
+    let instances_available = snapshot.is_some_and(|snapshot| snapshot.instances_available);
+    let findings_summary = if instances_available {
         format!("{critical} critical · {warning} warning")
     } else {
         "Unavailable".to_string()
     };
     let coverage = snapshot.map_or("Not scanned", |snapshot| {
-        if !snapshot.inventory_available {
+        if !snapshot.instances_available {
             "Not scanned"
-        } else if snapshot.inventory_complete {
+        } else if snapshot.instances_complete {
             "Complete"
         } else {
             "Partial; absence findings suppressed in failed regions"
@@ -405,7 +438,7 @@ fn render_findings(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         .block(panel(Line::from(" Reconciliation summary "))),
         areas[0],
     );
-    if !inventory_available {
+    if !instances_available {
         frame.render_widget(
             Paragraph::new("Findings unavailable because AWS inventory was not scanned")
                 .alignment(Alignment::Center)

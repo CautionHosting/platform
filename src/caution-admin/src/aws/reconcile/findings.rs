@@ -8,14 +8,12 @@ use drift_detector::drift::{CautionResourceKind, DriftSeverity, classify_caution
 use crate::{
     aws::{
         AwsFinding, AwsHost, AwsHostPlatform, FindingKind,
-        display::{app_summary, host_row, tagged_host_row},
+        display::{app_summary, build_summary, builder_row, host_row, tagged_host_row},
         inventory::{AwsInstance, InventorySnapshot},
     },
     db::aws::{AwsAppRow, AwsBuildRow, AwsDatabaseState},
     model::ResourceSummary,
 };
-
-use super::{map_apps, map_builds};
 
 mod builders;
 
@@ -47,13 +45,21 @@ pub(super) fn reconcile_inventory(
     inventory: &InventorySnapshot,
     account: Option<&str>,
 ) -> FindingResults {
-    let apps_by_id = map_apps(&database.apps, |app| Some(app.id.to_string()));
-    let apps_by_instance = map_apps(&database.apps, |app| {
+    let apps_by_id = database
+        .apps
+        .iter()
+        .map(|app| (app.id.to_string(), app))
+        .collect::<HashMap<_, _>>();
+    let apps_by_instance = map_claims(&database.apps, |app| {
         (!app.provider_resource_id.is_empty()).then(|| app.provider_resource_id.clone())
     });
-    let builds_by_id = map_builds(&database.builds, |build| Some(build.id.to_string()));
+    let builds_by_id = database
+        .builds
+        .iter()
+        .map(|build| (build.id.to_string(), build))
+        .collect::<HashMap<_, _>>();
     let builds_by_instance =
-        map_builds(&database.builds, |build| build.builder_instance_id.clone());
+        map_claims(&database.builds, |build| build.builder_instance_id.clone());
     let failed_regions = inventory
         .issues
         .iter()
@@ -73,10 +79,26 @@ pub(super) fn reconcile_inventory(
     let mut tagged_expected: HashMap<uuid::Uuid, Vec<&AwsInstance>> = HashMap::new();
 
     for instance in &inventory.instances {
-        let exact_app = apps_by_instance.get(&instance.instance_id).copied();
-        let exact_build = builds_by_instance.get(&instance.instance_id).copied();
+        let exact_apps = apps_by_instance
+            .get(&instance.instance_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let exact_builds = builds_by_instance
+            .get(&instance.instance_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         let classified = classify_caution_resource(&instance.tags);
-        if let Some(app) = exact_app {
+        if exact_apps.len() + exact_builds.len() > 1 {
+            reconcile_ambiguous_claims(
+                instance,
+                exact_apps,
+                exact_builds,
+                account,
+                &mut matched_expected,
+                &mut observed_apps,
+                &mut result,
+            );
+        } else if let Some(app) = exact_apps.first().copied() {
             mark_caution(instance, &mut result);
             observed_apps.insert(app.id);
             if matches!(app_scope(app, account), AppScope::InScope) {
@@ -84,7 +106,7 @@ pub(super) fn reconcile_inventory(
             }
             add_app_host(instance, app, "exact instance ID", account, &mut result);
             reconcile_exact_app(instance, app, classified, account, &apps_by_id, &mut result);
-        } else if let Some(build) = exact_build {
+        } else if let Some(build) = exact_builds.first().copied() {
             mark_caution(instance, &mut result);
             builders::add_build_host(instance, build, account, &mut result);
             builders::reconcile_exact_build(
@@ -181,6 +203,70 @@ pub(super) fn reconcile_inventory(
     }
     sort_findings(&mut result.findings);
     result
+}
+
+fn map_claims<T>(rows: &[T], key: impl Fn(&T) -> Option<String>) -> HashMap<String, Vec<&T>> {
+    let mut mapped = HashMap::new();
+    for row in rows {
+        if let Some(key) = key(row) {
+            mapped.entry(key).or_insert_with(Vec::new).push(row);
+        }
+    }
+    mapped
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_ambiguous_claims(
+    instance: &AwsInstance,
+    apps: &[&AwsAppRow],
+    builds: &[&AwsBuildRow],
+    account: Option<&str>,
+    matched_expected: &mut HashSet<uuid::Uuid>,
+    observed_apps: &mut HashSet<uuid::Uuid>,
+    result: &mut FindingResults,
+) {
+    mark_caution(instance, result);
+    if !apps.is_empty() {
+        result.app_hosts.push(host_row(instance, None));
+    }
+    if !builds.is_empty() {
+        result.builders.push(builder_row(instance, None));
+    }
+    result.hosts.push(AwsHost {
+        account: account.map(str::to_string),
+        instance: instance.clone(),
+        platform: None,
+    });
+    let mut resources = Vec::new();
+    for app in apps {
+        observed_apps.insert(app.id);
+        if matches!(app_scope(app, account), AppScope::InScope)
+            && matches!(app.state.as_str(), "running" | "stopped")
+        {
+            matched_expected.insert(app.id);
+        }
+        push_resource(&mut resources, app_summary(app));
+    }
+    for build in builds {
+        push_resource(&mut resources, build_summary(build));
+    }
+    result.findings.push(AwsFinding {
+        severity: instance_severity(instance),
+        kind: FindingKind::AmbiguousAssociation,
+        subject: instance.instance_id.clone(),
+        platform: format!(
+            "{} apps and {} builds claim this EC2 instance",
+            apps.len(),
+            builds.len()
+        ),
+        aws: format!(
+            "{} EC2 {} in {}",
+            instance.state, instance.instance_id, instance.region
+        ),
+        scope: None,
+        host_id: Some(instance.instance_id.clone()),
+        resources,
+    });
 }
 
 fn app_scope(app: &AwsAppRow, account: Option<&str>) -> AppScope {

@@ -285,6 +285,7 @@ impl Ec2Inspector {
                 .name("instance-state-name")
                 .values("pending")
                 .values("running")
+                .values("stopping")
                 .values("stopped")
                 .build(),
         ];

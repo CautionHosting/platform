@@ -96,6 +96,30 @@ fn result_pages_keep_navigation_metadata() {
 }
 
 #[test]
+fn refresh_keeps_the_selected_resource_identity() {
+    let mut first = summary("first");
+    first.id = Uuid::from_u128(1);
+    let mut selected = summary("selected");
+    selected.id = Uuid::from_u128(2);
+    let mut state = AppState::new();
+    state.open_search(
+        String::new(),
+        Some(ResourceKind::User),
+        page(vec![first.clone(), selected.clone()]),
+    );
+    state.current.selected = 1;
+    selected.label = "renamed".to_string();
+    selected.context = Some("inactive".to_string());
+
+    state.replace_resources(page(vec![selected, first]), SortColumn::Details, false);
+
+    assert!(matches!(
+        state.selected_row(),
+        Some(Row::Resource(resource)) if resource.id == Uuid::from_u128(2)
+    ));
+}
+
+#[test]
 fn query_editing_is_limited_to_input_mode() {
     let mut state = AppState::new();
     state.begin_search();

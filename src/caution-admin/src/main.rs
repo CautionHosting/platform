@@ -143,6 +143,11 @@ async fn run_admin() -> Result<(), RunAdminError> {
                 .list(kind, offset, limit, None)
                 .await
                 .with_context(Ctx::new(RunAdminStage::List))?;
+            if !json && page.has_more {
+                let stderr = io::stderr();
+                print_search_warning(&mut stderr.lock(), page.offset, page.limit)
+                    .with_context(Ctx::new(RunAdminStage::PrintSearchWarning))?;
+            }
             if json {
                 print_json(&page).with_context(Ctx::new(RunAdminStage::PrintJson))
             } else {
@@ -184,6 +189,11 @@ async fn run_admin() -> Result<(), RunAdminError> {
                 )
                 .await
                 .with_context(Ctx::new(RunAdminStage::Follow))?;
+            if !json && page.has_more {
+                let stderr = io::stderr();
+                print_search_warning(&mut stderr.lock(), page.offset, page.limit)
+                    .with_context(Ctx::new(RunAdminStage::PrintSearchWarning))?;
+            }
             if json {
                 print_json(&page).with_context(Ctx::new(RunAdminStage::PrintJson))
             } else {

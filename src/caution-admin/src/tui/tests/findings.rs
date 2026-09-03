@@ -26,6 +26,8 @@ fn unavailable_inventory_is_not_presented_as_zero_findings() {
     let mut snapshot = aws_snapshot(Vec::new());
     snapshot.inventory_available = false;
     snapshot.inventory_complete = false;
+    snapshot.instances_available = false;
+    snapshot.instances_complete = false;
     snapshot.metadata.status = "partial".to_string();
     let mut state = AppState::new();
     state.open_aws_overview(snapshot);
@@ -37,6 +39,33 @@ fn unavailable_inventory_is_not_presented_as_zero_findings() {
     assert!(text.contains("AWS inventory was not scanned"));
     assert!(!text.contains("No findings"));
     assert!(!text.contains("0 critical"));
+
+    assert!(state.back());
+    state.open_aws_section(AwsSection::AppHosts);
+    let text = screen_text(&mut state);
+    assert!(text.contains("Coverage: Unavailable"));
+    assert!(!text.contains("HOST   Unavailable"));
+}
+
+#[test]
+fn back_uses_the_refreshed_aws_history() {
+    let snapshot = aws_snapshot(Vec::new());
+    let host = snapshot.hosts[0].clone();
+    let mut state = AppState::new();
+    state.open_aws_overview(snapshot);
+    state.open_aws_section(AwsSection::AppHosts);
+    state.open_aws_host(host);
+
+    let mut refreshed = aws_snapshot(Vec::new());
+    refreshed.metadata.updated = "new snapshot".to_string();
+    refreshed.app_hosts[0].details = "stopped · refreshed".to_string();
+    refreshed.hosts[0].instance.state = "stopped".to_string();
+    state.replace_aws(refreshed);
+
+    assert!(state.back());
+    assert!(screen_text(&mut state).contains("stopped · refreshed"));
+    assert!(state.back());
+    assert!(screen_text(&mut state).contains("new snapshot"));
 }
 
 #[test]

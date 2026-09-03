@@ -60,6 +60,7 @@ pub enum FindingKind {
     StateMismatch,
     UntrackedHost,
     LinkMismatch,
+    AmbiguousAssociation,
     InvalidAccountMapping,
     AccountMismatch,
     OrphanBuilder,
@@ -74,6 +75,7 @@ impl FindingKind {
             Self::StateMismatch => "Platform/AWS states differ",
             Self::UntrackedHost => "EC2 has no Platform match",
             Self::LinkMismatch => "EC2 association differs",
+            Self::AmbiguousAssociation => "Multiple Platform records claim EC2",
             Self::InvalidAccountMapping => "Invalid provider account mapping",
             Self::AccountMismatch => "Provider account mismatch",
             Self::OrphanBuilder => "Orphan builder",
@@ -90,6 +92,9 @@ impl FindingKind {
             }
             Self::UntrackedHost => "Identify the owner from AWS tags before taking action.",
             Self::LinkMismatch => "Compare the Platform host ID with the AWS resource tags.",
+            Self::AmbiguousAssociation => {
+                "Resolve the duplicate Platform host ownership before taking action."
+            }
             Self::InvalidAccountMapping | Self::AccountMismatch => {
                 "Verify the Platform provider account before changing either resource."
             }
@@ -193,6 +198,7 @@ pub struct AwsSnapshot {
     pub storage: Vec<AwsDisplayRow>,
     pub findings: Vec<AwsFinding>,
     pub costs: Vec<AwsDisplayRow>,
+    pub(crate) cost_snapshot: cost::CostSnapshot,
     pub byoc: Vec<AwsDisplayRow>,
     pub stale_reason: Option<String>,
     pub identity_available: bool,
@@ -200,6 +206,10 @@ pub struct AwsSnapshot {
     pub inventory_available: bool,
     /// Every inventory component succeeded in every region.
     pub inventory_complete: bool,
+    /// At least one regional EC2 instance scan succeeded.
+    pub instances_available: bool,
+    /// Every enabled region returned its EC2 instance inventory.
+    pub instances_complete: bool,
     pub costs_available: bool,
 }
 
@@ -229,40 +239,42 @@ impl AwsSnapshot {
         // retain the last internally consistent inventory/findings snapshot.
         let retain_inventory = self.inventory_available
             && (!next.inventory_available || (!next.identity_available && self.identity_available));
-        let retain_costs = !next.costs_available && self.costs_available;
+        let retain_instances = self.instances_available
+            && (!next.instances_available || (!next.identity_available && self.identity_available));
+        let (cost_snapshot, retain_costs) =
+            self.cost_snapshot.merge_refresh(next.cost_snapshot.clone());
         if retain_identity {
             next.metadata.account.clone_from(&self.metadata.account);
             next.metadata.principal.clone_from(&self.metadata.principal);
             next.identity_available = true;
         }
         if retain_inventory {
-            next.inventory_complete = self.inventory_complete;
+            next.storage = self.storage.clone();
+            next.metadata.regions.clone_from(&self.metadata.regions);
+            preserve_overview_row(self, &mut next, |row| {
+                row.action == AwsAction::Section(AwsSection::Storage)
+            });
+            next.inventory_available = true;
+        }
+        if retain_instances {
+            next.instances_available = self.instances_available;
+            next.instances_complete = false;
             next.app_hosts = self.app_hosts.clone();
             next.builders = self.builders.clone();
             next.hosts = self.hosts.clone();
-            next.storage = self.storage.clone();
             next.findings = self.findings.clone();
-            next.metadata.regions.clone_from(&self.metadata.regions);
             for section in [
                 AwsSection::AppHosts,
                 AwsSection::Builders,
-                AwsSection::Storage,
                 AwsSection::Findings,
             ] {
                 preserve_overview_row(self, &mut next, |row| {
                     row.action == AwsAction::Section(section)
                 });
             }
-            next.inventory_available = true;
         }
-        if retain_costs {
-            next.costs = self.costs.clone();
-            preserve_overview_row(self, &mut next, |row| {
-                row.action == AwsAction::Section(AwsSection::Costs)
-            });
-            next.costs_available = true;
-        }
-        if retain_identity || retain_inventory || retain_costs {
+        reconcile::replace_costs(&mut next, cost_snapshot, retain_costs);
+        if retain_identity || retain_inventory || retain_instances || retain_costs.any() {
             let reason = "partial refresh failed; retained previous data";
             next.stale_reason = Some(reason.to_string());
             mark_metadata_stale(&mut next.metadata, reason);

@@ -82,7 +82,7 @@ impl Snapshot {
         self.sort = Some(column);
         self.selected = selected
             .as_ref()
-            .and_then(|selected| self.rows.iter().position(|row| row == selected))
+            .and_then(|selected| self.rows.iter().position(|row| row.same_identity(selected)))
             .unwrap_or(0);
     }
 }

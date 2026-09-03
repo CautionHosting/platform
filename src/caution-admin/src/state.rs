@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use crate::aws::{
-    AwsDisplayRow, AwsFinding, AwsHost, AwsOverviewMetadata, AwsSection, AwsSnapshot,
-    is_cost_summary,
+    AwsAction, AwsDisplayRow, AwsFinding, AwsHost, AwsOverviewMetadata, AwsSection, AwsSnapshot,
 };
 use crate::model::{
     Page, RelatedResource, Relation, RelationSummary, Resource, ResourceKind, ResourceSummary,
     SortColumn,
 };
 
+mod aws;
 mod loading;
 mod table;
 
@@ -76,6 +76,23 @@ impl Row {
     fn same_identity(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::AwsFinding(left), Self::AwsFinding(right)) => left.key() == right.key(),
+            (Self::Aws(left), Self::Aws(right)) => match (&left.action, &right.action) {
+                (AwsAction::Section(left), AwsAction::Section(right)) => left == right,
+                (AwsAction::Host(left), AwsAction::Host(right)) => left == right,
+                (AwsAction::Resource(left), AwsAction::Resource(right)) => {
+                    left.kind == right.kind && left.id == right.id
+                }
+                (AwsAction::None, AwsAction::None) => {
+                    left.kind == right.kind && left.name == right.name
+                }
+                _ => false,
+            },
+            (Self::Resource(left), Self::Resource(right)) => {
+                left.kind == right.kind && left.id == right.id
+            }
+            (Self::Related(left), Self::Related(right)) => {
+                left.resource.kind == right.resource.kind && left.resource.id == right.resource.id
+            }
             _ => self == other,
         }
     }
@@ -281,149 +298,18 @@ impl AppState {
         });
     }
 
-    pub fn open_aws_overview(&mut self, snapshot: AwsSnapshot) {
-        let rows = snapshot.overview.iter().cloned().map(Row::Aws).collect();
-        let metadata = snapshot.metadata.clone();
-        self.aws_cache = Some(snapshot);
-        self.push(Snapshot {
-            screen: Screen::AwsOverview(metadata),
-            rows,
-            selected: 0,
-            query: String::new(),
-            input_mode: false,
-            status: None,
-            page: None,
-            sort: None,
-        });
-    }
-
-    pub fn open_aws_section(&mut self, section: AwsSection) {
-        let rows = self
-            .aws_cache
-            .as_ref()
-            .map_or_else(Vec::new, |snapshot| aws_section_rows(snapshot, section));
-        let sort = aws_section_sort(section);
-        let mut next = Snapshot {
-            screen: Screen::AwsSection(section),
-            rows,
-            selected: 0,
-            query: String::new(),
-            input_mode: false,
-            status: None,
-            page: None,
-            sort,
-        };
-        if let Some(sort) = sort {
-            next.sort_rows(sort);
-            next.selected = 0;
-        }
-        self.push(next);
-    }
-
-    pub fn open_aws_finding(&mut self, finding: AwsFinding) {
-        let rows = self.finding_rows(&finding);
-        self.push(Snapshot {
-            screen: Screen::AwsFinding(finding),
-            rows,
-            selected: 0,
-            query: String::new(),
-            input_mode: false,
-            status: None,
-            page: None,
-            sort: None,
-        });
-    }
-
-    pub fn open_aws_host(&mut self, host: AwsHost) {
-        let rows = host
-            .platform
-            .as_ref()
-            .map(|platform| vec![Row::Resource(platform.resource.clone())])
-            .unwrap_or_default();
-        self.push(Snapshot {
-            screen: Screen::AwsHost(Box::new(host)),
-            rows,
-            selected: 0,
-            query: String::new(),
-            input_mode: false,
-            status: None,
-            page: None,
-            sort: None,
-        });
-    }
-
-    pub fn aws_host(&self, instance_id: &str) -> Option<AwsHost> {
-        self.aws_cache
-            .as_ref()?
-            .hosts
-            .iter()
-            .find(|host| host.instance.instance_id == instance_id)
-            .cloned()
-    }
-
-    pub fn replace_aws(&mut self, snapshot: AwsSnapshot) {
-        let overview = matches!(&self.current.screen, Screen::AwsOverview(_));
-        let selected = self.selected_row().cloned();
-        self.current.status = None;
-        let rows = match &self.current.screen {
-            Screen::AwsOverview(_) => snapshot.overview.iter().cloned().map(Row::Aws).collect(),
-            Screen::AwsSection(section) => aws_section_rows(&snapshot, *section),
-            Screen::AwsFinding(current) => {
-                let key = current.key();
-                if let Some(finding) = snapshot
-                    .findings
-                    .iter()
-                    .find(|finding| finding.key() == key)
-                {
-                    self.current.screen = Screen::AwsFinding(finding.clone());
-                    finding_rows(&snapshot, finding)
-                } else {
-                    self.current.screen = Screen::AwsSection(AwsSection::Findings);
-                    self.current.status = Some(StatusMessage {
-                        level: StatusLevel::Info,
-                        text: "Finding cleared by refresh".to_string(),
-                    });
-                    snapshot
-                        .findings
-                        .iter()
-                        .cloned()
-                        .map(Row::AwsFinding)
-                        .collect()
-                }
-            }
-            Screen::AwsHost(current) => {
-                if let Some(host) = snapshot
-                    .hosts
-                    .iter()
-                    .find(|host| host.instance.instance_id == current.instance.instance_id)
-                {
-                    self.current.screen = Screen::AwsHost(Box::new(host.clone()));
-                    host.platform
-                        .as_ref()
-                        .map(|platform| vec![Row::Resource(platform.resource.clone())])
-                        .unwrap_or_default()
-                } else {
-                    self.current.screen = Screen::AwsSection(AwsSection::AppHosts);
-                    self.current.status = Some(StatusMessage {
-                        level: StatusLevel::Info,
-                        text: "AWS host no longer present".to_string(),
-                    });
-                    snapshot.app_hosts.iter().cloned().map(Row::Aws).collect()
-                }
-            }
-            _ => Vec::new(),
-        };
-        if overview {
-            self.current.screen = Screen::AwsOverview(snapshot.metadata.clone());
-        }
-        if self.current.sort.is_none() {
-            self.current.sort = match self.current.screen {
-                Screen::AwsSection(section) => aws_section_sort(section),
-                _ => None,
-            };
-        }
-        self.aws_cache = Some(snapshot);
-        self.current.rows = rows;
+    pub fn replace_resources(
+        &mut self,
+        page: Page<ResourceSummary>,
+        sort: SortColumn,
+        reset_selection: bool,
+    ) {
+        let selected = (!reset_selection)
+            .then(|| self.selected_row().cloned())
+            .flatten();
+        self.current.page = Some(PageState::from_page(&page));
+        self.current.sort = Some(sort);
+        self.current.rows = page.items.into_iter().map(Row::Resource).collect();
         self.current.selected = selected
             .as_ref()
             .and_then(|selected| {
@@ -433,27 +319,6 @@ impl AppState {
                     .position(|row| row.same_identity(selected))
             })
             .unwrap_or(0);
-        if let Some(sort) = self.current.sort {
-            self.current.sort_rows(sort);
-        }
-    }
-
-    pub fn replace_resources(
-        &mut self,
-        page: Page<ResourceSummary>,
-        sort: SortColumn,
-        reset_selection: bool,
-    ) {
-        self.current.page = Some(PageState::from_page(&page));
-        self.current.sort = Some(sort);
-        self.current.rows = page.items.into_iter().map(Row::Resource).collect();
-        self.current.selected = if reset_selection {
-            0
-        } else {
-            self.current
-                .selected
-                .min(self.current.rows.len().saturating_sub(1))
-        };
         self.current.status = None;
     }
 
@@ -473,16 +338,21 @@ impl AppState {
         sort: SortColumn,
         reset_selection: bool,
     ) {
+        let selected = (!reset_selection)
+            .then(|| self.selected_row().cloned())
+            .flatten();
         self.current.page = Some(PageState::from_page(&page));
         self.current.sort = Some(sort);
         self.current.rows = page.items.into_iter().map(Row::Related).collect();
-        self.current.selected = if reset_selection {
-            0
-        } else {
-            self.current
-                .selected
-                .min(self.current.rows.len().saturating_sub(1))
-        };
+        self.current.selected = selected
+            .as_ref()
+            .and_then(|selected| {
+                self.current
+                    .rows
+                    .iter()
+                    .position(|row| row.same_identity(selected))
+            })
+            .unwrap_or(0);
         self.current.status = None;
     }
 
@@ -513,69 +383,10 @@ impl AppState {
         });
     }
 
-    fn finding_rows(&self, finding: &AwsFinding) -> Vec<Row> {
-        self.aws_cache.as_ref().map_or_else(
-            || {
-                finding
-                    .resources
-                    .iter()
-                    .cloned()
-                    .map(Row::Resource)
-                    .collect()
-            },
-            |snapshot| finding_rows(snapshot, finding),
-        )
-    }
-
     fn push(&mut self, next: Snapshot) {
         self.history.push(self.current.clone());
         self.current = next;
     }
-}
-
-fn aws_section_rows(snapshot: &AwsSnapshot, section: AwsSection) -> Vec<Row> {
-    if section == AwsSection::Findings {
-        return snapshot
-            .findings
-            .iter()
-            .cloned()
-            .map(Row::AwsFinding)
-            .collect();
-    }
-    snapshot
-        .rows(section)
-        .into_iter()
-        .filter(|row| section != AwsSection::Costs || !is_cost_summary(row))
-        .map(Row::Aws)
-        .collect()
-}
-
-const fn aws_section_sort(section: AwsSection) -> Option<SortColumn> {
-    match section {
-        AwsSection::Findings => Some(SortColumn::Type),
-        AwsSection::AppHosts | AwsSection::Builders | AwsSection::Storage | AwsSection::Byoc => {
-            Some(SortColumn::Details)
-        }
-        AwsSection::Costs => None,
-    }
-}
-
-fn finding_rows(snapshot: &AwsSnapshot, finding: &AwsFinding) -> Vec<Row> {
-    let mut rows = finding
-        .host_id
-        .as_deref()
-        .and_then(|id| {
-            snapshot
-                .hosts
-                .iter()
-                .find(|host| host.instance.instance_id == id)
-        })
-        .cloned()
-        .map(|host| Row::AwsHost(Box::new(host)))
-        .into_iter()
-        .collect::<Vec<_>>();
-    rows.extend(finding.resources.iter().cloned().map(Row::Resource));
-    rows
 }
 
 #[cfg(test)]

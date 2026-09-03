@@ -33,6 +33,61 @@ pub(crate) struct CostSnapshot {
     pub first_day: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CostRetention {
+    pub primary: bool,
+    pub forecast: bool,
+    pub managed_by: bool,
+    pub organizations: bool,
+}
+
+impl CostRetention {
+    pub(crate) const fn any(self) -> bool {
+        self.primary || self.forecast || self.managed_by || self.organizations
+    }
+}
+
+impl CostSnapshot {
+    pub(crate) fn merge_refresh(&self, mut next: Self) -> (Self, CostRetention) {
+        let mut retained = CostRetention::default();
+        if !next.primary_available() && self.primary_available() {
+            next.period.clone_from(&self.period);
+            next.mtd_micros = self.mtd_micros;
+            next.currency.clone_from(&self.currency);
+            next.services.clone_from(&self.services);
+            next.first_day = self.first_day;
+            retained.primary = true;
+        }
+        if next.forecast_micros.is_none() && self.forecast_micros.is_some() {
+            next.forecast_micros = self.forecast_micros;
+            retained.forecast = true;
+        }
+        if next.component_failed("ManagedBy attribution")
+            && !self.component_failed("ManagedBy attribution")
+        {
+            next.managed_by.clone_from(&self.managed_by);
+            retained.managed_by = true;
+        }
+        if next.component_failed("org_id attribution")
+            && !self.component_failed("org_id attribution")
+        {
+            next.organizations.clone_from(&self.organizations);
+            retained.organizations = true;
+        }
+        (next, retained)
+    }
+
+    pub(crate) fn primary_available(&self) -> bool {
+        self.mtd_micros.is_some() || self.first_day
+    }
+
+    fn component_failed(&self, component: &str) -> bool {
+        self.issues
+            .iter()
+            .any(|issue| issue.starts_with(component) && issue.contains("unavailable:"))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CostWindow {
     pub start: NaiveDate,
@@ -427,7 +482,8 @@ mod tests {
     use chrono::NaiveDate;
 
     use super::{
-        CostLine, attribution_name, combine_lines, cost_issue, cost_window, money, parse_micros,
+        CostLine, CostSnapshot, attribution_name, combine_lines, cost_issue, cost_window, money,
+        parse_micros,
     };
 
     #[test]
@@ -487,5 +543,48 @@ mod tests {
             cost_issue("forecast", &error),
             "forecast unavailable: access denied"
         );
+    }
+
+    #[test]
+    fn partial_refresh_keeps_fresh_components_and_only_reuses_failed_ones() {
+        let previous = CostSnapshot {
+            mtd_micros: Some(10),
+            forecast_micros: Some(20),
+            managed_by: vec![CostLine {
+                name: "old".into(),
+                amount_micros: 1,
+                currency: "USD".into(),
+            }],
+            ..CostSnapshot::default()
+        };
+        let next = CostSnapshot {
+            mtd_micros: Some(30),
+            services: vec![CostLine {
+                name: "fresh".into(),
+                amount_micros: 30,
+                currency: "USD".into(),
+            }],
+            organizations: vec![CostLine {
+                name: "fresh-org".into(),
+                amount_micros: 2,
+                currency: "USD".into(),
+            }],
+            issues: vec![
+                "forecast unavailable: access denied".into(),
+                "ManagedBy attribution unavailable: access denied".into(),
+            ],
+            ..CostSnapshot::default()
+        };
+
+        let (merged, retained) = previous.merge_refresh(next);
+
+        assert!(retained.forecast);
+        assert!(retained.managed_by);
+        assert!(!retained.primary);
+        assert_eq!(merged.mtd_micros, Some(30));
+        assert_eq!(merged.services[0].name, "fresh");
+        assert_eq!(merged.forecast_micros, Some(20));
+        assert_eq!(merged.managed_by[0].name, "old");
+        assert_eq!(merged.organizations[0].name, "fresh-org");
     }
 }

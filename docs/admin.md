@@ -60,7 +60,8 @@ findings name terminated-app hosts, AWS/Platform state differences, association
 errors, provider-account errors, and orphan builders. Pending and terminating
 Platform apps do not produce host presence/state findings. Exact Platform
 instance IDs are authoritative; tags are secondary evidence and never hide an
-absent expected host.
+absent expected host. If multiple Platform apps or builds claim the same exact
+instance ID, the tool reports the ambiguity instead of choosing one.
 
 Observed EC2 instances are correlated against all AWS-backed Platform apps
 before account filtering. Absence and provider-account checks are then limited
@@ -68,7 +69,10 @@ to non-BYOC apps. A malformed mapping is reported as `Invalid provider account
 mapping`; a valid differing account is reported as `Provider account mismatch`,
 never as “untracked.” A failed regional
 instance scan suppresses absence findings for that region, while findings based
-on observed resources remain visible. Partial totals use `N+`; scan failures
+on observed resources remain visible. Findings coverage is based only on EC2
+instance scans, so an EBS or address failure cannot suppress an otherwise
+confirmed host finding. If no regional instance scan succeeds, Findings is
+`Unavailable`, not zero. Partial totals use `N+`; scan failures
 stay in the coverage panel rather than appearing as findings. Findings sort
 Critical before Warning. The concise list shows only level, issue, and subject;
 press Enter for the structured Platform expectation, AWS observation, scope,
@@ -79,7 +83,8 @@ The AWS overview keeps account, principal, regional coverage, and refresh time
 in a non-selectable detail panel. `COMPLETE`, `PARTIAL`, and `STALE` describe
 snapshot quality, not account health. Only the six sections below it are
 selectable.
-Host rows lead with the actual AWS state and label Platform state separately;
+Host rows lead with the actual AWS state, including the transitional `stopping`
+state, and label Platform state separately;
 they never replace host state with a synthetic `failed` status. Every app-host
 or builder row opens an AWS host screen with account, region/AZ, type, launch
 time, network fields, allowlisted tags, Platform correlation, and finding
@@ -96,8 +101,11 @@ Cost Explorer failures are shown as unavailable or partial, never as zero. If
 inventory cannot be loaded, Findings explicitly says that no scan was performed.
 A refresh that only partially fails still replaces the cached data, because the
 newer partial view is more accurate than the older one; the affected sections
-are marked partial. Only a refresh that fails completely keeps the last
-successful snapshot, marked stale. Open findings and list selection survive
+are marked partial. Successful Cost Explorer components are kept even when a
+different cost component fails; only the failed component reuses cached data.
+Only a refresh that fails completely keeps the last successful snapshot,
+marked stale. Back history is updated with the refreshed AWS snapshot. Open
+findings and list selection survive
 wording, severity, and label changes when their resource and host identity is
 unchanged.
 
@@ -153,7 +161,8 @@ The pilot exposes these relationships:
 
 Organization pages also summarize the derived credit balance and state, the
 current BYOC plan, billing source, effective capacity, and any pending plan
-change. App pages show their organization, fully managed or BYOC mode,
+change. A valid active subscription at its limit is labelled `full`, not
+inactive. App pages show their organization, fully managed or BYOC mode,
 provider/account/resource metadata, region, public IP, allowlisted domain, and
 DNS state.
 
@@ -174,9 +183,10 @@ make admin ADMIN_ARGS='show user <uuid> --json'
 make admin ADMIN_ARGS='follow user <uuid> apps --json'
 ```
 
-`search`, `list`, and `follow` accept `--limit` (1 to 200) and `--offset`.
-Human-readable tabular output is the default; terminal control and Unicode bidi
-formatting characters are escaped while other Unicode is preserved. `--json`
+`search`, `list`, and `follow` accept `--limit` (1 to 200) and `--offset` and
+warn when human-readable output has another page. Human-readable tabular output
+is the default; terminal controls and invisible Unicode formatting characters
+are escaped while visible Unicode is preserved. `--json`
 is unchanged and produces the original machine-readable values.
 Failures identify the operation and call site and print their complete typed
 source chain. `show` and `follow` fail when their source UUID does not exist

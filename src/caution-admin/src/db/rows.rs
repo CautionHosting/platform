@@ -399,7 +399,7 @@ pub(crate) fn byoc_state(
     }
     let capacity = maximum.map(|maximum| pending.map_or(maximum, |pending| pending.min(maximum)));
     if capacity.is_none_or(|capacity| capacity <= 0 || allocated >= i64::from(capacity)) {
-        "inactive · no deployment capacity".to_string()
+        "active · full; no capacity for additional apps".to_string()
     } else {
         "active · deployable".to_string()
     }
@@ -501,7 +501,7 @@ mod tests {
         );
         assert_eq!(
             state("legacy_credits", "active", true, None, 3, Some(1), 1),
-            "inactive · no deployment capacity"
+            "active · full; no capacity for additional apps"
         );
     }
 }

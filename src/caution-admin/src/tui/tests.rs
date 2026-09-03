@@ -149,6 +149,7 @@ pub(super) fn aws_snapshot(findings: Vec<AwsFinding>) -> AwsSnapshot {
                 action: AwsAction::None,
             },
         ],
+        cost_snapshot: Default::default(),
         byoc: vec![AwsDisplayRow {
             kind: "ORGANIZATION".to_string(),
             name: "Acme".to_string(),
@@ -159,6 +160,8 @@ pub(super) fn aws_snapshot(findings: Vec<AwsFinding>) -> AwsSnapshot {
         identity_available: true,
         inventory_available: true,
         inventory_complete: true,
+        instances_available: true,
+        instances_complete: true,
         costs_available: true,
     }
 }
@@ -435,6 +438,7 @@ fn refresh_of_a_disappeared_host_returns_to_the_host_list() {
 fn partial_and_stale_quality_are_explicit() {
     let mut snapshot = aws_snapshot(vec![finding(Vec::new())]);
     snapshot.inventory_complete = false;
+    snapshot.instances_complete = false;
     snapshot.metadata.status = "partial".to_string();
     snapshot.overview[3].name = "Findings (1+)".to_string();
     let mut state = AppState::new();
@@ -494,8 +498,8 @@ fn statuses_and_terminal_text_are_safe_and_unambiguous() {
     );
     assert_eq!(byoc.spans[1].style.fg, Some(ratatui::style::Color::Red));
     assert_eq!(
-        terminal_text("safe 日本語\u{1b}[31m\u{202e}spoof\n"),
-        "safe 日本語\\u{1b}[31m\\u{202e}spoof\\n"
+        terminal_text("safe 日本語\u{1b}[31m\u{202e}spoof\u{2060}\n"),
+        "safe 日本語\\u{1b}[31m\\u{202e}spoof\\u{2060}\\n"
     );
 }
 

@@ -9,40 +9,14 @@ use drift_detector::drift::{DriftSeverity, classify_caution_resource};
 use super::{
     AccountIdentity, AwsAction, AwsDisplayRow, AwsFinding, AwsOverviewMetadata, AwsSection,
     AwsSnapshot,
-    cost::CostSnapshot,
+    cost::{CostRetention, CostSnapshot},
     display::{byoc_rows, cost_rows},
     inventory::{FetchInventoryError, InventorySnapshot},
     is_cost_summary,
 };
-use crate::db::aws::{AwsAppRow, AwsBuildRow, AwsDatabaseState};
+use crate::db::aws::AwsDatabaseState;
 
 mod findings;
-
-fn map_apps(
-    apps: &[AwsAppRow],
-    key: impl Fn(&AwsAppRow) -> Option<String>,
-) -> std::collections::HashMap<String, &AwsAppRow> {
-    let mut mapped = std::collections::HashMap::new();
-    for app in apps {
-        if let Some(key) = key(app) {
-            mapped.entry(key).or_insert(app);
-        }
-    }
-    mapped
-}
-
-fn map_builds(
-    builds: &[AwsBuildRow],
-    key: impl Fn(&AwsBuildRow) -> Option<String>,
-) -> std::collections::HashMap<String, &AwsBuildRow> {
-    let mut mapped = std::collections::HashMap::new();
-    for build in builds {
-        if let Some(key) = key(build) {
-            mapped.entry(key).or_insert(build);
-        }
-    }
-    mapped
-}
 
 pub(crate) fn build_snapshot(
     database: AwsDatabaseState,
@@ -71,7 +45,9 @@ pub(crate) fn build_snapshot(
         Err(error) => (InventorySnapshot::default(), unavailable_reason(&error)),
     };
     let inventory_complete = inventory_loaded && inventory.issues.is_empty();
-    let instances_complete = inventory_loaded && component_complete(&inventory, "instances");
+    let instances_available = inventory_loaded && inventory.instance_regions_succeeded > 0;
+    let instances_complete =
+        instances_available && inventory.instance_regions_succeeded == inventory.regions_scanned;
     let storage_complete = inventory_loaded
         && component_complete(&inventory, "volumes")
         && component_complete(&inventory, "public IPs")
@@ -107,17 +83,9 @@ pub(crate) fn build_snapshot(
         unavailable_inventory()
     };
     let cost_rows = cost_rows(&costs);
-    let costs_available = (costs.mtd_micros.is_some() || costs.first_day)
-        && costs
-            .issues
-            .iter()
-            .all(|issue| !issue.contains("unavailable:"));
+    let costs_available = costs_available(&costs);
     let byoc = byoc_rows(&database);
-    let projected = match (costs.mtd_micros, costs.forecast_micros) {
-        (Some(mtd), Some(forecast)) => super::cost::money(mtd + forecast, &costs.currency),
-        (None, Some(forecast)) if costs.first_day => super::cost::money(forecast, &costs.currency),
-        _ => "unavailable".to_string(),
-    };
+    let projected = projected_cost(&costs);
     let overview = overview_rows(
         &app_hosts,
         &builders,
@@ -127,6 +95,7 @@ pub(crate) fn build_snapshot(
         &byoc,
         OverviewQuality {
             inventory_loaded,
+            instances_available,
             instances_complete,
             storage_complete,
             costs_available,
@@ -136,11 +105,12 @@ pub(crate) fn build_snapshot(
         unassociated_ips,
         &projected,
     );
-    let status = if identity_available && inventory_complete && costs_available {
-        "complete"
-    } else {
-        "partial"
-    };
+    let status =
+        if identity_available && instances_available && inventory_complete && costs_available {
+            "complete"
+        } else {
+            "partial"
+        };
 
     AwsSnapshot {
         metadata: AwsOverviewMetadata {
@@ -157,17 +127,74 @@ pub(crate) fn build_snapshot(
         storage,
         findings,
         costs: cost_rows,
+        cost_snapshot: costs,
         byoc,
         stale_reason: None,
         identity_available,
         inventory_available: inventory_loaded,
         inventory_complete,
+        instances_available,
+        instances_complete,
         costs_available,
+    }
+}
+
+pub(super) fn replace_costs(
+    snapshot: &mut AwsSnapshot,
+    costs: CostSnapshot,
+    retained: CostRetention,
+) {
+    let costs_available = costs_available(&costs);
+    let mut rows = cost_rows(&costs);
+    for row in &mut rows {
+        let stale = match row.kind.as_str() {
+            "MTD" | "SERVICE" => retained.primary,
+            "FORECAST" => retained.forecast,
+            "MANAGED BY" => retained.managed_by,
+            "ORG TAG" => retained.organizations,
+            _ => false,
+        };
+        if stale {
+            row.details = format!("warning · stale · {}", strip_status(&row.details));
+        }
+    }
+    let projected = projected_cost(&costs);
+    let row = cost_overview_row(&rows, costs_available, &projected);
+    if let Some(current) = snapshot
+        .overview
+        .iter_mut()
+        .find(|current| current.action == AwsAction::Section(AwsSection::Costs))
+    {
+        *current = row;
+    }
+    snapshot.costs = rows;
+    snapshot.costs_available = costs_available;
+    snapshot.cost_snapshot = costs;
+}
+
+fn strip_status(details: &str) -> &str {
+    details.split_once(" · ").map_or(details, |(_, rest)| rest)
+}
+
+fn costs_available(costs: &CostSnapshot) -> bool {
+    costs.primary_available()
+        && costs
+            .issues
+            .iter()
+            .all(|issue| !issue.contains("unavailable:"))
+}
+
+fn projected_cost(costs: &CostSnapshot) -> String {
+    match (costs.mtd_micros, costs.forecast_micros) {
+        (Some(mtd), Some(forecast)) => super::cost::money(mtd + forecast, &costs.currency),
+        (None, Some(forecast)) if costs.first_day => super::cost::money(forecast, &costs.currency),
+        _ => "unavailable".to_string(),
     }
 }
 
 struct OverviewQuality {
     inventory_loaded: bool,
+    instances_available: bool,
     instances_complete: bool,
     storage_complete: bool,
     costs_available: bool,
@@ -192,7 +219,7 @@ fn overview_rows(
         .filter(|finding| finding.severity == DriftSeverity::Critical)
         .count();
     let warning = findings.len() - critical;
-    let findings_name = if !quality.inventory_loaded {
+    let findings_name = if !quality.instances_available {
         "Findings (?)".to_string()
     } else if quality.instances_complete {
         format!("Findings ({})", findings.len())
@@ -208,7 +235,7 @@ fn overview_rows(
                 quality.instances_complete,
             ),
             inventory_details(
-                quality.inventory_loaded,
+                quality.instances_available,
                 quality.instances_complete,
                 format!("{unrelated_instances} unrelated EC2 instances"),
             ),
@@ -221,7 +248,7 @@ fn overview_rows(
                 quality.instances_complete,
             ),
             inventory_details(
-                quality.inventory_loaded,
+                quality.instances_available,
                 quality.instances_complete,
                 "live AWS hosts".to_string(),
             ),
@@ -238,7 +265,7 @@ fn overview_rows(
         section_row(
             AwsSection::Findings,
             findings_name,
-            if !quality.inventory_loaded {
+            if !quality.instances_available {
                 "warning · inventory unavailable".to_string()
             } else if findings.is_empty() && quality.instances_complete {
                 "clear · no confirmed findings".to_string()
@@ -254,31 +281,31 @@ fn overview_rows(
                 )
             },
         ),
-        section_row(
-            AwsSection::Costs,
-            if quality.costs_available {
-                format!(
-                    "Costs ({})",
-                    costs.iter().filter(|row| !is_cost_summary(row)).count()
-                )
-            } else {
-                "Costs (?)".to_string()
-            },
-            format!(
-                "{} · projected {projected}",
-                if quality.costs_available {
-                    "active"
-                } else {
-                    "warning"
-                }
-            ),
-        ),
+        cost_overview_row(costs, quality.costs_available, projected),
         section_row(
             AwsSection::Byoc,
             format!("BYOC ({})", byoc.len()),
             "active · Platform subscriptions only; customer AWS not queried".to_string(),
         ),
     ]
+}
+
+fn cost_overview_row(costs: &[AwsDisplayRow], available: bool, projected: &str) -> AwsDisplayRow {
+    section_row(
+        AwsSection::Costs,
+        if available {
+            format!(
+                "Costs ({})",
+                costs.iter().filter(|row| !is_cost_summary(row)).count()
+            )
+        } else {
+            "Costs (?)".to_string()
+        },
+        format!(
+            "{} · projected {projected}",
+            if available { "active" } else { "warning" }
+        ),
+    )
 }
 
 fn count_name(section: AwsSection, count: usize, complete: bool) -> String {
@@ -311,19 +338,11 @@ fn component_complete(inventory: &InventorySnapshot, component: &str) -> bool {
 }
 
 fn unavailable_inventory() -> Reconciled {
-    let unavailable = |kind: &str, name: &str| {
-        vec![row(
-            kind,
-            name,
-            "warning · unavailable; region discovery failed".to_string(),
-            AwsAction::None,
-        )]
-    };
     Reconciled {
-        app_hosts: unavailable("HOST", "Unavailable"),
-        builders: unavailable("BUILDER", "Unavailable"),
+        app_hosts: Vec::new(),
+        builders: Vec::new(),
         hosts: Vec::new(),
-        storage: unavailable("STORAGE", "Unavailable"),
+        storage: Vec::new(),
         findings: Vec::new(),
         unrelated_instances: 0,
         storage_gib: 0,
