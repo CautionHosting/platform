@@ -179,11 +179,27 @@ configuration or secrets, authentication material, or tokens.
 The same binary has small commands for diagnostics and tests:
 
 ```bash
+make admin ADMIN_ARGS='findings --json'
 make admin ADMIN_ARGS='search alice --json'
 make admin ADMIN_ARGS='list user --json'
 make admin ADMIN_ARGS='show user <uuid> --json'
 make admin ADMIN_ARGS='follow user <uuid> apps --json'
 ```
+
+`findings` performs the Platform, STS, and EC2 reconciliation without querying
+Cost Explorer and prints every finding without pagination. Its JSON envelope
+contains account identity, refresh time, coverage, and structured findings with
+stable kinds, Platform expectations, AWS observations, scope, host IDs, linked
+resources, and next steps. Coverage is `complete` only when identity and every
+regional instance scan succeed, `partial` when some usable coverage is missing,
+and `unavailable` when no regional instance scan succeeds. Findings and partial
+or unavailable coverage do not change the exit status; scripts must inspect the
+envelope. Database and output failures remain non-zero. Human output contains
+the same details and escapes terminal controls. It prints `No findings` only
+for complete scans; partial totals use `N+ confirmed`, while unavailable EC2
+coverage remains explicit. Platform-only findings remain visible when no
+regional instance scan succeeds. Coverage details describe instance scans and
+their regional failures only, not EBS or public-IP collection.
 
 `search`, `list`, and `follow` accept `--limit` (1 to 200) and `--offset` and
 warn when human-readable output has another page. Human-readable tabular output

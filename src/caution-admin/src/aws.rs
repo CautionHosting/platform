@@ -5,8 +5,12 @@ mod cost;
 mod display;
 mod inventory;
 mod reconcile;
+mod report;
 
 pub(crate) use inventory::AwsInstance;
+pub use report::{
+    FindingReport, FindingSeverity, FindingsCoverage, FindingsReport, load_findings_report,
+};
 
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_sts::Client as StsClient;
@@ -67,6 +71,21 @@ pub enum FindingKind {
 }
 
 impl FindingKind {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::ExpectedHostAbsent => "expected_host_absent",
+            Self::HostForTerminatedApp => "host_for_terminated_app",
+            Self::UnexpectedHost => "unexpected_host",
+            Self::StateMismatch => "state_mismatch",
+            Self::UntrackedHost => "untracked_host",
+            Self::LinkMismatch => "link_mismatch",
+            Self::AmbiguousAssociation => "ambiguous_association",
+            Self::InvalidAccountMapping => "invalid_account_mapping",
+            Self::AccountMismatch => "account_mismatch",
+            Self::OrphanBuilder => "orphan_builder",
+        }
+    }
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::ExpectedHostAbsent => "App expects EC2; none observed",

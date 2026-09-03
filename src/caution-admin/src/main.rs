@@ -13,6 +13,7 @@ use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use serde::Serialize;
 use uuid::Uuid;
 
+mod findings;
 mod terminal;
 
 use terminal::terminal_text as terminal_safe;
@@ -32,6 +33,8 @@ struct Cli {
 enum Command {
     /// Launch the interactive terminal explorer.
     Browse,
+    /// Print the AWS reconciliation findings.
+    Findings(findings::Args),
     /// Search users, organizations, and apps.
     Search {
         query: String,
@@ -109,6 +112,9 @@ async fn run_admin() -> Result<(), RunAdminError> {
                 .await
                 .with_context(Ctx::new(RunAdminStage::Browse))
         }
+        Some(Command::Findings(args)) => findings::run(&database, args)
+            .await
+            .with_context(Ctx::new(RunAdminStage::Findings)),
         Some(Command::Search {
             query,
             limit,
@@ -247,6 +253,7 @@ enum RunAdminStage {
     ConnectDatabase,
     RequireTty,
     Browse,
+    Findings,
     Search,
     List,
     Show,
@@ -266,9 +273,10 @@ impl fmt::Display for RunAdminStage {
             Self::ReadDatabaseUrl => "reading DATABASE_URL",
             Self::ConnectDatabase => "connecting to PostgreSQL",
             Self::RequireTty => {
-                "requiring a TTY; use search, list, show, or follow for headless access"
+                "requiring a TTY; use findings, search, list, show, or follow for headless access"
             }
             Self::Browse => "running the terminal explorer",
+            Self::Findings => "printing AWS findings",
             Self::Search => "searching resources",
             Self::List => "listing resources",
             Self::Show => "showing a resource",
