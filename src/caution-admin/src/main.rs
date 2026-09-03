@@ -88,7 +88,8 @@ async fn run_admin() -> Result<(), RunAdminError> {
     use RunAdminErrorCtx as Ctx;
 
     let cli = Cli::parse();
-    require_development().with_context(Ctx::new(RunAdminStage::CheckEnvironment))?;
+    require_development_acknowledgement()
+        .with_context(Ctx::new(RunAdminStage::CheckEnvironment))?;
     let database_url =
         env::var("DATABASE_URL").with_context(Ctx::new(RunAdminStage::ReadDatabaseUrl))?;
     let database = Database::connect_read_only(&database_url)
@@ -205,12 +206,12 @@ async fn run_admin() -> Result<(), RunAdminError> {
     }
 }
 
-fn require_development() -> Result<(), RequireDevelopmentError> {
-    use RequireDevelopmentErrorCtx as Ctx;
+fn require_development_acknowledgement() -> Result<(), RequireDevelopmentAcknowledgementError> {
+    use RequireDevelopmentAcknowledgementErrorCtx as Ctx;
 
     let environment = env::var("ENVIRONMENT").with_context(Ctx::missing())?;
     if environment != "development" {
-        return Err(RequireDevelopmentError::OutsideDevelopment {
+        return Err(RequireDevelopmentAcknowledgementError::NotAcknowledged {
             location: std::panic::Location::caller(),
         });
     }
@@ -294,8 +295,8 @@ struct RunAdminError {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-enum RequireDevelopmentError {
-    #[error("ENVIRONMENT must be set to development [{location:?}]")]
+enum RequireDevelopmentAcknowledgementError {
+    #[error("set ENVIRONMENT=development after verifying the target database [{location:?}]")]
     Missing {
         #[location]
         location: Location,
@@ -303,9 +304,9 @@ enum RequireDevelopmentError {
         source: BoxError,
     },
     #[error(
-        "caution-admin is a development pilot and refuses to run outside development [{location:?}]"
+        "caution-admin requires an explicit ENVIRONMENT=development acknowledgement [{location:?}]"
     )]
-    OutsideDevelopment {
+    NotAcknowledged {
         #[location]
         location: Location,
     },

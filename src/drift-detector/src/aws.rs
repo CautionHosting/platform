@@ -266,8 +266,8 @@ impl Ec2Inspector {
         self.describe_instances(&filters).await
     }
 
-    /// List all instances that still exist in AWS: pending, running, or
-    /// stopped.
+    /// List all instances that still exist in AWS: pending, running, stopping,
+    /// or stopped.
     ///
     /// Terminated instances are excluded; AWS reaps them quickly and they
     /// cannot be drift-checked. Stopped instances are included so that
@@ -280,15 +280,7 @@ impl Ec2Inspector {
     /// Returns [`AwsError::DescribeInstances`] when the AWS API call fails in
     /// the region this inspector is based in.
     pub async fn list_live_instances(&self) -> Result<Vec<Ec2Instance>, AwsError> {
-        let filters = vec![
-            Filter::builder()
-                .name("instance-state-name")
-                .values("pending")
-                .values("running")
-                .values("stopping")
-                .values("stopped")
-                .build(),
-        ];
+        let filters = vec![live_instance_filter()];
 
         self.describe_instances(&filters).await
     }
@@ -332,14 +324,7 @@ impl Ec2Inspector {
         &self,
         region: &str,
     ) -> Result<Vec<Ec2Instance>, AwsError> {
-        let filters = vec![
-            Filter::builder()
-                .name("instance-state-name")
-                .values("pending")
-                .values("running")
-                .values("stopped")
-                .build(),
-        ];
+        let filters = vec![live_instance_filter()];
 
         let client = self.client_for_region(region);
         Self::describe_instances_in_region(&client, &filters, region).await
@@ -414,6 +399,16 @@ fn region_usable(opt_in_status: Option<&str>) -> bool {
     opt_in_status.is_none_or(|status| matches!(status, "opt-in-not-required" | "opted-in"))
 }
 
+fn live_instance_filter() -> Filter {
+    ["pending", "running", "stopping", "stopped"]
+        .into_iter()
+        .fold(
+            Filter::builder().name("instance-state-name"),
+            |filter, state| filter.values(state),
+        )
+        .build()
+}
+
 impl std::fmt::Debug for Ec2Inspector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Ec2Inspector")
@@ -426,6 +421,18 @@ impl std::fmt::Debug for Ec2Inspector {
 mod tests {
     use super::*;
     use aws_sdk_ec2::types::Tag;
+
+    #[test]
+    fn live_instance_filter_includes_stopping_hosts() {
+        assert_eq!(
+            live_instance_filter()
+                .values()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["pending", "running", "stopping", "stopped"]
+        );
+    }
 
     #[test]
     fn test_aws_credentials_debug_redacts_secret() {

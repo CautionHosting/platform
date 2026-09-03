@@ -296,7 +296,7 @@ assert_missing_follow app organization
 
 if ENVIRONMENT=production DATABASE_URL="$DATABASE_URL" \
     "$ADMIN_BINARY" list user --json >/dev/null 2>&1; then
-    echo "caution-admin did not refuse production" >&2
+    echo "caution-admin accepted ENVIRONMENT=production" >&2
     exit 1
 fi
 

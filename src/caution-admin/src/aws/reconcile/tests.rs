@@ -127,17 +127,19 @@ fn exact_hosts_apply_lifecycle_and_state_rules() {
     let initialized = app("initialized", "initialized", false);
     let running = app("running", "running", false);
     let stopped = app("stopped", "stopped", false);
+    let stopping = app("stopping", "running", false);
     let inventory = InventorySnapshot {
         instances: vec![
             instance(&terminated, "running"),
             instance(&initialized, "running"),
             instance(&running, "stopped"),
             instance(&stopped, "running"),
+            instance(&stopping, "stopping"),
         ],
         ..InventorySnapshot::default()
     };
     let snapshot = snapshot(
-        database(vec![terminated, initialized, running, stopped]),
+        database(vec![terminated, initialized, running, stopped, stopping]),
         inventory,
     );
     assert!(has(
@@ -171,6 +173,18 @@ fn exact_hosts_apply_lifecycle_and_state_rules() {
             .app_hosts
             .iter()
             .all(|row| !row.details.starts_with("failed"))
+    );
+    assert!(snapshot.app_hosts.iter().any(|row| {
+        row.name == "stopping"
+            && row
+                .details
+                .starts_with("stopping · AWS host · Platform running")
+    }));
+    assert!(
+        snapshot
+            .findings
+            .iter()
+            .all(|finding| finding.subject != "stopping")
     );
 }
 

@@ -1,8 +1,10 @@
 # Caution admin explorer
 
 `caution-admin` is an experimental, read-only terminal explorer for platform
-operators. The pilot runs only when `ENVIRONMENT=development`; it refuses to
-start in production.
+operators. It is intended only for development and requires the explicit
+operator acknowledgement `ENVIRONMENT=development`. This flag is not a
+database-owned environment identity: verify that `DATABASE_URL` targets the
+development database before starting the tool.
 
 The tool is a normal Rust workspace binary, not a StageX artifact, container
 image, service, or end-user `caution` command. With the development stack
