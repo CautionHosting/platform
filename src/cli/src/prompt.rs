@@ -70,10 +70,12 @@ pub fn confirm(label: &str) -> io::Result<bool> {
 
 /// Read a password-like value without echo.
 ///
-/// Writes the prompt label to stderr, then reads from stdin with echo suppressed.
+/// Both the label and the (echo-suppressed) read go to the controlling
+/// terminal — `/dev/tty` on unix — not to stdin/stderr. Writing the label
+/// anywhere else would hide it whenever stderr is redirected, leaving the
+/// command blocked on a terminal read with nothing on screen to explain why.
 pub fn password(prompt: &str) -> io::Result<String> {
-    write_prompt(prompt)?;
-    rpassword::read_password().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+    rpassword::prompt_password(prompt).map_err(io::Error::other)
 }
 
 /// Prompt for a numeric selection from a list of items.

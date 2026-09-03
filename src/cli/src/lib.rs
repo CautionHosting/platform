@@ -42,7 +42,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::channel;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use zeroize::Zeroizing;
 
+use openpgp::crypto::Password as OpenPgpPassword;
 use openpgp::policy::StandardPolicy as OpenPgpPolicy;
 use openpgp::serialize::stream::{Armorer, Encryptor2, LiteralWriter, Message};
 use openpgp::{
@@ -70,6 +72,11 @@ const PLAINTEXT_KEYGEN_WARNING: &str = "This helper writes private OpenPGP key m
 unencrypted file on disk. That is unsafe for real shard holders: anyone who can read the file can \
 submit that holder's shard. Prefer a smart card containing the OpenPGP key. Keyfork supports \
 offline OpenPGP key derivation and smart-card-oriented workflows: https://git.distrust.co/public/keyfork";
+const PROTECTED_KEYGEN_NOTICE: &str = "The private keyring is encrypted with your passphrase. \
+That protects it at rest only: once unlocked, the key is ordinary software key material on a \
+general-purpose machine. For real shard holders, keep the private key on an OpenPGP smart card \
+instead. Keyfork supports offline OpenPGP key derivation and smart-card-oriented workflows: \
+https://git.distrust.co/public/keyfork";
 const SSH_SIGNING_NAMESPACE: &str = "caution-api";
 const PGP_PUBLIC_KEY_MAX_BYTES: usize = 64 * 1024;
 const PGP_KEY_NAME_MAX_CHARS: usize = 255;
@@ -1137,6 +1144,92 @@ impl Drop for ZeroizePin {
     }
 }
 
+const KEYGEN_PASSPHRASE_PROMPT: &str = "Passphrase for the new private keyring: ";
+const KEYGEN_PASSPHRASE_CONFIRM_PROMPT: &str = "Confirm passphrase: ";
+
+#[derive(Debug, thiserror::Error)]
+enum KeygenPassphraseError {
+    #[error(
+        "A passphrase is required to protect the private keyring, but no terminal is \
+         available to prompt on. Re-run this command from a terminal, or pass \
+         --shoot-self-in-foot to write an unencrypted plaintext private keyring."
+    )]
+    NonInteractive,
+    #[error("The passphrase must not be empty. Nothing was written.")]
+    Empty,
+    #[error("The passphrases did not match. Nothing was written.")]
+    Mismatch,
+    #[error(
+        "failed to read the passphrase\n\nThis command needs a terminal. Pass \
+         --shoot-self-in-foot to write an unencrypted plaintext private keyring instead."
+    )]
+    Io(#[source] std::io::Error),
+}
+
+/// Prompts twice for the passphrase protecting a freshly generated private
+/// keyring, returning it only when both entries match.
+///
+/// Requires a terminal: `keygen` deliberately has no argv/env/file passphrase
+/// input, so a non-interactive caller must opt into plaintext output with
+/// `--shoot-self-in-foot` rather than silently producing an unprotected key.
+fn keygen_passphrase() -> Result<Zeroizing<String>, KeygenPassphraseError> {
+    if !controlling_terminal_available() {
+        return Err(KeygenPassphraseError::NonInteractive);
+    }
+
+    keygen_passphrase_from(prompt::password)
+}
+
+/// Whether a controlling terminal is available to prompt on.
+///
+/// This probes `/dev/tty` rather than stdin because that is what
+/// [`prompt::password`] reads from and writes to. Gating on `stdin` instead
+/// would refuse to prompt for `keygen ... < /dev/null` — or the same under
+/// `make`, `xargs`, or `ssh host '...'` — even though the terminal is right
+/// there, and would push the caller toward `--shoot-self-in-foot` (an
+/// unencrypted private key) to work around a prompt that would have succeeded.
+fn controlling_terminal_available() -> bool {
+    #[cfg(unix)]
+    {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        std::io::IsTerminal::is_terminal(&std::io::stdin())
+    }
+}
+
+/// Testable core of [`keygen_passphrase`]: reads the two entries through any
+/// prompt function instead of always going to the real terminal.
+///
+/// Each entry is zeroized on drop, including the one discarded on a mismatch.
+/// The accepted passphrase is returned exactly as typed — trimming it would
+/// silently protect the key with something other than what the user entered —
+/// but an entry that is blank once trimmed is rejected, so a stray space bar
+/// cannot become the passphrase.
+fn keygen_passphrase_from<F>(mut read: F) -> Result<Zeroizing<String>, KeygenPassphraseError>
+where
+    F: FnMut(&str) -> std::io::Result<String>,
+{
+    let passphrase =
+        Zeroizing::new(read(KEYGEN_PASSPHRASE_PROMPT).map_err(KeygenPassphraseError::Io)?);
+    if passphrase.trim().is_empty() {
+        return Err(KeygenPassphraseError::Empty);
+    }
+
+    let confirmation =
+        Zeroizing::new(read(KEYGEN_PASSPHRASE_CONFIRM_PROMPT).map_err(KeygenPassphraseError::Io)?);
+    if *passphrase != *confirmation {
+        return Err(KeygenPassphraseError::Mismatch);
+    }
+
+    Ok(passphrase)
+}
+
 fn is_pin_related_error(error: &anyhow::Error) -> bool {
     let error_msg = format!("{:?}", error).to_lowercase();
     error_msg.contains("pin")
@@ -1682,7 +1775,7 @@ enum CapacityCommands {
 
 #[derive(Subcommand, Debug)]
 enum SecretCommands {
-    #[command(about = "Generate unsafe plaintext Keymaker-compatible OpenPGP keyrings")]
+    #[command(about = "Generate Keymaker-compatible OpenPGP keyrings")]
     Keygen {
         #[arg(help = "Path to write the armored public keyring")]
         output: PathBuf,
@@ -1697,7 +1790,10 @@ enum SecretCommands {
         email: String,
         #[arg(long, help = "Overwrite output files if they exist")]
         force: bool,
-        #[arg(long, help = "Acknowledge unsafe plaintext private keyring generation")]
+        #[arg(
+            long,
+            help = "Skip the passphrase prompt and write an unencrypted plaintext private keyring"
+        )]
         shoot_self_in_foot: bool,
     },
     #[command(about = "Generate a new cryptographic quorum")]
@@ -2538,12 +2634,18 @@ fn resolve_quorum_parameters(
     Ok((threshold, max))
 }
 
-fn keymaker_cert(user_id: String) -> Result<openpgp::Cert> {
+/// Builds a Keymaker-eligible certificate (primary plus signing, storage
+/// encryption, and authentication subkeys).
+///
+/// `password` protects the secret material of every one of those keys. `None`
+/// leaves them in the clear, which is only reachable via `--shoot-self-in-foot`.
+fn keymaker_cert(user_id: String, password: Option<OpenPgpPassword>) -> Result<openpgp::Cert> {
     let (cert, _) = CertBuilder::new()
         .add_userid(user_id)
         .add_signing_subkey()
         .add_storage_encryption_subkey()
         .add_authentication_subkey()
+        .set_password(password)
         .generate()
         .context("Failed to generate OpenPGP key")?;
 
@@ -9495,13 +9597,6 @@ enclave "default" {{
         force: bool,
         shoot_self_in_foot: bool,
     ) -> Result<()> {
-        anyhow::ensure!(
-            shoot_self_in_foot,
-            "Refusing to generate an unencrypted private keyring without \
-             --shoot-self-in-foot.\n\n{}",
-            PLAINTEXT_KEYGEN_WARNING
-        );
-
         let name = name.trim();
         let email = email.trim();
 
@@ -9535,10 +9630,20 @@ enclave "default" {{
             );
         }
 
+        // Prompt only once every argument and path is known-good, so a bad
+        // invocation fails without asking for a passphrase first. Generating and
+        // validating the key before any `write_keyring` call also means a rejected
+        // passphrase leaves existing output untouched, even under `--force`.
+        let password = if shoot_self_in_foot {
+            None
+        } else {
+            Some(OpenPgpPassword::from(keygen_passphrase()?.as_str()))
+        };
+
         let user_id = format!("{name} <{email}>");
         output::status(format!("Generating OpenPGP key for {user_id}..."));
 
-        let cert = keymaker_cert(user_id)?;
+        let cert = keymaker_cert(user_id, password)?;
         let fingerprint = cert.fingerprint();
         let (public_keyring, private_keyring_contents) = armored_keyrings_for_cert(&cert)?;
 
@@ -9558,7 +9663,11 @@ enclave "default" {{
         output::success(format!("Wrote public keyring to {}", output.display()));
         output::status(format!("Fingerprint: {}", fingerprint));
         output::success(format!("Wrote private keyring to {}", private_keyring.display()));
-        output::warning(PLAINTEXT_KEYGEN_WARNING);
+        if shoot_self_in_foot {
+            output::warning(PLAINTEXT_KEYGEN_WARNING);
+        } else {
+            output::status(PROTECTED_KEYGEN_NOTICE);
+        }
         output::warning(format!(
             "Use the private keyring with: caution secret send-shard --keyring {}",
             private_keyring.display()
@@ -10267,16 +10376,19 @@ pub async fn run() -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
+    use super::Zeroizing;
     use super::openpgp;
     use super::{
-        AccountCommands, ApiClient, ArchivePreflightStatus, Cli, Commands, LoginUsernameError,
+        AccountCommands, ApiClient, ArchivePreflightStatus, Cli, Commands, KeygenPassphraseError,
+        LoginUsernameError,
         ARCHIVE_PREFLIGHT_ATTEMPTS, MAX_ATTESTATION_RESPONSE_BYTES, PgpKeyCommands,
         RegisterUsernameError, RunError, TlsConnection, TlsExpectation, TrustedHashes, TrustedTls,
         append_attestation_response_chunk, archive_preflight_urls, attestation_inspection_json,
         attestation_user_data, classify_archive_preflight, configured_enclave, display_user_data,
         dns_answer_is_absent,
         dns_contains_deployment_ip, encrypt_env_file, encrypt_secret_value,
-        keymaker_cert_eligibility, load_recipient_cert, login_begin_request_body,
+        keygen_passphrase_from, keymaker_cert, keymaker_cert_eligibility, load_recipient_cert,
+        login_begin_request_body,
         measured_build_cache_key, normalize_keyring, parse_env_assignments, persist_trusted_hashes,
         persist_trusted_hashes_with_backup, prepare_pgp_public_key_for_upload, prompt_line_from,
         prompt_optional_line_from, reproduction_uses_steve, resolve_local_build_command_from_dir,
@@ -11585,6 +11697,118 @@ enclave "default" {
     fn cert_armor(builder: CertBuilder) -> String {
         let (cert, _revocation) = builder.generate().unwrap();
         String::from_utf8(cert.armored().to_vec().unwrap()).unwrap()
+    }
+
+    /// Feeds `keygen_passphrase_from` a scripted sequence of entries, so the
+    /// two-prompt flow can be exercised without a terminal.
+    fn scripted_passphrase(entries: &[&str]) -> Result<Zeroizing<String>, KeygenPassphraseError> {
+        let mut entries = entries.iter();
+        keygen_passphrase_from(|_prompt| {
+            entries
+                .next()
+                .map(|entry| entry.to_string())
+                .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no more input"))
+        })
+    }
+
+    // No-flag keygen protects the secret material of every key it generates:
+    // primary plus the signing, storage-encryption, and authentication subkeys.
+    #[test]
+    fn keymaker_cert_with_passphrase_encrypts_every_secret_key() {
+        let cert = keymaker_cert(
+            "Alice <alice@example.org>".to_string(),
+            Some("correct horse battery staple".into()),
+        )
+        .unwrap();
+
+        let secret_keys: Vec<_> = cert.keys().secret().collect();
+        assert_eq!(
+            secret_keys.len(),
+            4,
+            "expected the primary key plus three subkeys to carry secret material"
+        );
+        for key in &secret_keys {
+            assert!(
+                key.key().secret().is_encrypted(),
+                "secret material for {} was left unencrypted",
+                key.key().fingerprint()
+            );
+        }
+    }
+
+    // `--shoot-self-in-foot` still produces plaintext secret material, and the
+    // public half stays Keymaker-eligible either way.
+    #[test]
+    fn keymaker_cert_without_passphrase_leaves_secret_keys_plaintext() {
+        let cert = keymaker_cert("Bob <bob@example.org>".to_string(), None).unwrap();
+
+        let secret_keys: Vec<_> = cert.keys().secret().collect();
+        assert_eq!(secret_keys.len(), 4);
+        for key in &secret_keys {
+            assert!(!key.key().secret().is_encrypted());
+        }
+
+        let keyring = String::from_utf8(cert.armored().to_vec().unwrap()).unwrap();
+        let certs = keymaker_cert_eligibility(&keyring).unwrap();
+        assert_eq!(certs.len(), 1);
+        assert!(certs[0].is_eligible());
+    }
+
+    // A protected cert's public keyring is unaffected by the passphrase, so it
+    // must still pass the eligibility check `secret_keygen` runs before writing.
+    #[test]
+    fn keymaker_cert_with_passphrase_stays_keymaker_eligible() {
+        let cert =
+            keymaker_cert("Carol <carol@example.org>".to_string(), Some("pw".into())).unwrap();
+
+        let keyring = String::from_utf8(cert.armored().to_vec().unwrap()).unwrap();
+        let certs = keymaker_cert_eligibility(&keyring).unwrap();
+        assert_eq!(certs.len(), 1);
+        assert!(certs[0].is_eligible());
+        assert!(certs[0].missing().is_empty());
+    }
+
+    // Matching entries are accepted verbatim: trimming would protect the key
+    // with something other than what the holder typed.
+    #[test]
+    fn keygen_passphrase_accepts_matching_entries_untrimmed() {
+        let passphrase = scripted_passphrase(&[" spaced pass ", " spaced pass "]).unwrap();
+
+        assert_eq!(&*passphrase, " spaced pass ");
+    }
+
+    // An empty or whitespace-only first entry is rejected outright, so a stray
+    // space bar can never become the passphrase.
+    #[test]
+    fn keygen_passphrase_rejects_blank_entries() {
+        for entry in ["", "   ", "\t"] {
+            assert!(
+                matches!(
+                    scripted_passphrase(&[entry, entry]),
+                    Err(KeygenPassphraseError::Empty)
+                ),
+                "blank entry {entry:?} should be rejected"
+            );
+        }
+    }
+
+    // A mismatch fails once rather than re-prompting, and reports nothing written.
+    #[test]
+    fn keygen_passphrase_rejects_mismatched_confirmation() {
+        let error = scripted_passphrase(&["first", "second"]).unwrap_err();
+
+        assert!(matches!(error, KeygenPassphraseError::Mismatch));
+        assert!(error.to_string().contains("did not match"));
+    }
+
+    // A failing prompt surfaces as an IO error that still names the plaintext
+    // escape hatch, for the no-controlling-terminal case the TTY guard misses.
+    #[test]
+    fn keygen_passphrase_surfaces_read_failures() {
+        let error = scripted_passphrase(&[]).unwrap_err();
+
+        assert!(matches!(error, KeygenPassphraseError::Io(_)));
+        assert!(error.to_string().contains("--shoot-self-in-foot"));
     }
 
     // A3: a cert carrying all three subkeys is Keymaker-eligible.
