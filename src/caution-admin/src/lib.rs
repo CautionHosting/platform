@@ -5,4 +5,5 @@ pub mod aws;
 pub mod db;
 pub mod model;
 pub mod state;
+mod terminal;
 pub mod tui;

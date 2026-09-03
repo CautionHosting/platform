@@ -13,6 +13,10 @@ use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use serde::Serialize;
 use uuid::Uuid;
 
+mod terminal;
+
+use terminal::terminal_text as terminal_safe;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "caution-admin",
@@ -31,6 +35,10 @@ enum Command {
     /// Search users, organizations, and apps.
     Search {
         query: String,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
         #[arg(long)]
         json: bool,
     },
@@ -100,16 +108,28 @@ async fn run_admin() -> Result<(), RunAdminError> {
                 .await
                 .with_context(Ctx::new(RunAdminStage::Browse))
         }
-        Some(Command::Search { query, json }) => {
-            let resources = database
-                .search(&query)
+        Some(Command::Search {
+            query,
+            limit,
+            offset,
+            json,
+        }) => {
+            let page = database
+                .search(&query, offset, limit, None)
                 .await
                 .with_context(Ctx::new(RunAdminStage::Search))?;
+            // The JSON shape stays a bare array for compatibility, so the
+            // next-page notice goes to stderr where it cannot corrupt it.
+            if page.has_more {
+                let stderr = io::stderr();
+                print_search_warning(&mut stderr.lock(), page.offset, page.limit)
+                    .with_context(Ctx::new(RunAdminStage::PrintSearchWarning))?;
+            }
             if json {
-                print_json(&resources).with_context(Ctx::new(RunAdminStage::PrintJson))
+                print_json(&page.items).with_context(Ctx::new(RunAdminStage::PrintJson))
             } else {
                 let stdout = io::stdout();
-                print_summaries(&mut stdout.lock(), &resources)
+                print_summaries(&mut stdout.lock(), &page.items)
                     .with_context(Ctx::new(RunAdminStage::PrintSummaries))
             }
         }
@@ -120,7 +140,7 @@ async fn run_admin() -> Result<(), RunAdminError> {
             json,
         }) => {
             let page = database
-                .list(kind, offset, limit)
+                .list(kind, offset, limit, None)
                 .await
                 .with_context(Ctx::new(RunAdminStage::List))?;
             if json {
@@ -160,6 +180,7 @@ async fn run_admin() -> Result<(), RunAdminError> {
                     relation,
                     offset,
                     limit,
+                    None,
                 )
                 .await
                 .with_context(Ctx::new(RunAdminStage::Follow))?;
@@ -198,10 +219,12 @@ fn print_json(value: &impl Serialize) -> Result<(), PrintJsonError> {
 }
 
 fn report_error(error: &dyn Error) {
-    eprintln!("Error: {error}");
+    let stderr = io::stderr();
+    let mut output = stderr.lock();
+    let _ = writeln!(output, "Error: {}", terminal_safe(&error.to_string()));
     let mut source = error.source();
     while let Some(cause) = source {
-        eprintln!("  caused by: {cause}");
+        let _ = writeln!(output, "  caused by: {}", terminal_safe(&cause.to_string()));
         source = cause.source();
     }
 }
@@ -219,6 +242,7 @@ enum RunAdminStage {
     ParseRelation,
     Follow,
     PrintJson,
+    PrintSearchWarning,
     PrintSummaries,
     PrintResource,
     PrintRelated,
@@ -240,6 +264,7 @@ impl fmt::Display for RunAdminStage {
             Self::ParseRelation => "parsing a relationship",
             Self::Follow => "following a relationship",
             Self::PrintJson => "writing JSON output",
+            Self::PrintSearchWarning => "writing the search pagination notice",
             Self::PrintSummaries => "writing resource summaries",
             Self::PrintResource => "writing resource details",
             Self::PrintRelated => "writing related resources",
@@ -331,6 +356,31 @@ struct PrintRelatedError {
     source: BoxError,
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("search warning output failed while {operation} [{location:?}]")]
+struct PrintSearchWarningError {
+    operation: &'static str,
+    #[location]
+    location: Location,
+    #[source]
+    source: BoxError,
+}
+
+fn print_search_warning(
+    output: &mut (impl io::Write + ?Sized),
+    offset: u32,
+    limit: u32,
+) -> Result<(), PrintSearchWarningError> {
+    use PrintSearchWarningErrorCtx as Ctx;
+
+    writeln!(
+        output,
+        "more matches available; rerun with --offset {} --limit {limit}",
+        offset.saturating_add(limit)
+    )
+    .with_context(Ctx::new("writing stderr"))
+}
+
 fn print_summaries(
     output: &mut (impl io::Write + ?Sized),
     resources: &[ResourceSummary],
@@ -345,8 +395,8 @@ fn print_summaries(
             "{}\t{}\t{}\t{}",
             resource.kind,
             resource.id,
-            resource.label,
-            resource.context.as_deref().unwrap_or("")
+            terminal_safe(&resource.label),
+            terminal_safe(resource.context.as_deref().unwrap_or(""))
         )
         .with_context(Ctx::new("writing a resource row"))?;
     }
@@ -362,8 +412,13 @@ fn print_resource(
     writeln!(output, "{}\t{}", resource.kind, resource.id)
         .with_context(Ctx::new("writing the resource header"))?;
     for field in &resource.fields {
-        writeln!(output, "{}\t{}", field.label, field.value)
-            .with_context(Ctx::new("writing a resource field"))?;
+        writeln!(
+            output,
+            "{}\t{}",
+            terminal_safe(field.label),
+            terminal_safe(&field.value)
+        )
+        .with_context(Ctx::new("writing a resource field"))?;
     }
     Ok(())
 }
@@ -382,14 +437,15 @@ fn print_related(
             "{}\t{}\t{}\t{}\t{}\t{}",
             related.resource.kind,
             related.resource.id,
-            related.resource.label,
-            related.resource.context.as_deref().unwrap_or(""),
-            related.role.as_deref().unwrap_or(""),
+            terminal_safe(&related.resource.label),
+            terminal_safe(related.resource.context.as_deref().unwrap_or("")),
+            terminal_safe(related.role.as_deref().unwrap_or("")),
             related
                 .via
                 .as_ref()
                 .map(|resource| resource.label.as_str())
-                .unwrap_or("")
+                .map(terminal_safe)
+                .unwrap_or_default()
         )
         .with_context(Ctx::new("writing a related resource row"))?;
     }
@@ -409,7 +465,8 @@ mod tests {
 
     use super::{
         Cli, Command, PrintRelatedError, PrintResourceError, PrintSummariesError, RunAdminError,
-        RunAdminErrorCtx, RunAdminStage, print_related, print_resource, print_summaries,
+        RunAdminErrorCtx, RunAdminStage, print_related, print_resource, print_search_warning,
+        print_summaries,
     };
 
     struct FailingWriter;
@@ -482,6 +539,8 @@ mod tests {
         .expect_err("resource output must fail");
         let related_error: PrintRelatedError =
             print_related(&mut FailingWriter, &[]).expect_err("related output must fail");
+        let warning_error =
+            print_search_warning(&mut FailingWriter, 0, 50).expect_err("warning output must fail");
 
         for error in [
             summary_error.source(),
@@ -493,5 +552,27 @@ mod tests {
                 Some("stdout failed")
             );
         }
+        assert_eq!(
+            warning_error.source().map(ToString::to_string).as_deref(),
+            Some("stdout failed")
+        );
+    }
+
+    #[test]
+    fn human_output_escapes_controls_but_preserves_unicode() {
+        let mut output = Vec::new();
+        print_summaries(
+            &mut output,
+            &[caution_admin::model::ResourceSummary {
+                kind: ResourceKind::User,
+                id: uuid::Uuid::nil(),
+                label: "Alice 日本語\u{1b}[31m\u{202e}spoof".to_string(),
+                context: Some("active\nadmin".to_string()),
+            }],
+        )
+        .expect("summary output");
+        let output = String::from_utf8(output).expect("UTF-8 output");
+        assert!(output.contains("Alice 日本語\\u{1b}[31m\\u{202e}spoof"));
+        assert!(output.contains("active\\nadmin"));
     }
 }

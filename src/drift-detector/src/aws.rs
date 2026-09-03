@@ -42,6 +42,10 @@ pub struct Ec2Instance {
     pub instance_id: String,
     /// The region the instance was observed in (e.g. `us-west-2`).
     pub region: String,
+    /// The availability zone reported by AWS, when known.
+    pub availability_zone: Option<String>,
+    /// The instance launch time as Unix seconds, when known.
+    pub launch_time_epoch_secs: Option<i64>,
     /// The instance type reported by AWS (e.g. `c5.xlarge`), when known.
     pub instance_type: Option<String>,
     /// The current lifecycle state reported by AWS.
@@ -377,6 +381,11 @@ impl Ec2Inspector {
         Ec2Instance {
             instance_id: instance.instance_id().unwrap_or_default().to_string(),
             region: region.to_string(),
+            availability_zone: instance
+                .placement()
+                .and_then(|placement| placement.availability_zone())
+                .map(ToString::to_string),
+            launch_time_epoch_secs: instance.launch_time().map(|time| time.secs()),
             instance_type: instance.instance_type().map(|t| t.as_str().to_string()),
             state: match instance.state().and_then(|s| s.name()) {
                 Some(s) => s.clone(),
@@ -438,6 +447,8 @@ mod tests {
         let instance = Ec2Instance {
             instance_id: "i-1234567890abcdef0".to_string(),
             region: "us-west-2".to_string(),
+            availability_zone: Some("us-west-2a".to_string()),
+            launch_time_epoch_secs: Some(1_788_000_000),
             instance_type: Some("c5.xlarge".to_string()),
             state: InstanceStateName::Running,
             public_ip: Some("54.123.45.67".to_string()),
@@ -458,6 +469,15 @@ mod tests {
     fn test_convert_instance_preserves_tags() {
         let instance = Instance::builder()
             .instance_id("i-1234567890abcdef0")
+            .placement(
+                aws_sdk_ec2::types::Placement::builder()
+                    .availability_zone("eu-west-1a")
+                    .build(),
+            )
+            .launch_time(aws_sdk_ec2::primitives::DateTime::from_secs(1_788_000_000))
+            .private_ip_address("10.0.0.10")
+            .vpc_id("vpc-1")
+            .subnet_id("subnet-1")
             .tags(
                 Tag::builder()
                     .key("ResourceId")
@@ -470,6 +490,11 @@ mod tests {
         let converted = Ec2Inspector::convert_instance(&instance, "eu-west-1");
 
         assert_eq!(converted.region, "eu-west-1");
+        assert_eq!(converted.availability_zone.as_deref(), Some("eu-west-1a"));
+        assert_eq!(converted.launch_time_epoch_secs, Some(1_788_000_000));
+        assert_eq!(converted.private_ip.as_deref(), Some("10.0.0.10"));
+        assert_eq!(converted.vpc_id.as_deref(), Some("vpc-1"));
+        assert_eq!(converted.subnet_id.as_deref(), Some("subnet-1"));
         assert_eq!(converted.tags.len(), 2);
         assert_eq!(
             converted.tags.get("ResourceId"),

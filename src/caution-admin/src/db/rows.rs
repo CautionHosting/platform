@@ -96,6 +96,8 @@ pub(super) struct OrganizationRow {
     subscription_tier: Option<String>,
     subscription_status: Option<String>,
     billing_source: Option<String>,
+    catalog_valid: Option<bool>,
+    enterprise_expires_at: Option<DateTime<Utc>>,
     subscription_max_apps: Option<i32>,
     pending_tier: Option<String>,
     pending_max_apps: Option<i32>,
@@ -133,7 +135,21 @@ impl OrganizationRow {
             },
             Field {
                 label: "Subscription status",
-                value: optional(self.subscription_status),
+                value: optional(self.subscription_status.clone()),
+            },
+            Field {
+                label: "BYOC state",
+                value: byoc_state(
+                    self.is_active,
+                    self.billing_source.as_deref(),
+                    self.subscription_status.as_deref(),
+                    self.catalog_valid,
+                    self.enterprise_expires_at,
+                    self.subscription_max_apps,
+                    self.pending_max_apps,
+                    self.allocated_byoc_apps,
+                    Utc::now(),
+                ),
             },
             Field {
                 label: "Billing source",
@@ -354,6 +370,41 @@ pub(crate) fn byoc_capacity(allocated: i64, maximum: Option<i32>, pending: Optio
     value
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn byoc_state(
+    organization_active: bool,
+    billing_source: Option<&str>,
+    subscription_status: Option<&str>,
+    catalog_valid: Option<bool>,
+    enterprise_expires_at: Option<DateTime<Utc>>,
+    maximum: Option<i32>,
+    pending: Option<i32>,
+    allocated: i64,
+    now: DateTime<Utc>,
+) -> String {
+    if !organization_active {
+        return "inactive · organization disabled".to_string();
+    }
+    let permitted = match billing_source {
+        Some("legacy_credits") => matches!(subscription_status, Some("active" | "past_due")),
+        Some("paddle") => subscription_status == Some("active") && catalog_valid == Some(true),
+        Some("enterprise") => {
+            subscription_status == Some("active")
+                && enterprise_expires_at.is_none_or(|expires_at| expires_at > now)
+        }
+        _ => false,
+    };
+    if !permitted {
+        return "inactive · subscription cannot deploy".to_string();
+    }
+    let capacity = maximum.map(|maximum| pending.map_or(maximum, |pending| pending.min(maximum)));
+    if capacity.is_none_or(|capacity| capacity <= 0 || allocated >= i64::from(capacity)) {
+        "inactive · no deployment capacity".to_string()
+    } else {
+        "active · deployable".to_string()
+    }
+}
+
 pub(crate) fn pending_change(tier: Option<&str>, limit: Option<i32>) -> String {
     let mut value = tier
         .map(tier_name)
@@ -376,7 +427,9 @@ const fn deployment_mode(managed_on_prem: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{byoc_capacity, credit_state, deployment_mode, money, tier_name};
+    use chrono::{Duration, Utc};
+
+    use super::{byoc_capacity, byoc_state, credit_state, deployment_mode, money, tier_name};
 
     #[test]
     fn billing_and_mode_summaries_use_operator_terms() {
@@ -395,6 +448,60 @@ mod tests {
         assert_eq!(
             credit_state(None, "suspended"),
             "suspended · dunning suspended"
+        );
+    }
+
+    #[test]
+    fn byoc_state_matches_the_api_deployment_gate() {
+        let now = Utc::now();
+        let state = |source, status, catalog, expiry, limit, pending, allocated| {
+            byoc_state(
+                true,
+                Some(source),
+                Some(status),
+                Some(catalog),
+                expiry,
+                Some(limit),
+                pending,
+                allocated,
+                now,
+            )
+        };
+        assert_eq!(
+            state("legacy_credits", "past_due", true, None, 3, Some(2), 1),
+            "active · deployable"
+        );
+        assert_eq!(
+            state("paddle", "active", false, None, 3, None, 0),
+            "inactive · subscription cannot deploy"
+        );
+        assert_eq!(
+            state(
+                "enterprise",
+                "active",
+                true,
+                Some(now - Duration::seconds(1)),
+                3,
+                None,
+                0
+            ),
+            "inactive · subscription cannot deploy"
+        );
+        assert_eq!(
+            state(
+                "enterprise",
+                "active",
+                true,
+                Some(now + Duration::seconds(1)),
+                3,
+                None,
+                0
+            ),
+            "active · deployable"
+        );
+        assert_eq!(
+            state("legacy_credits", "active", true, None, 3, Some(1), 1),
+            "inactive · no deployment capacity"
         );
     }
 }

@@ -16,9 +16,14 @@ const REGION_CONCURRENCY: usize = 6;
 pub(crate) struct AwsInstance {
     pub instance_id: String,
     pub region: String,
+    pub availability_zone: Option<String>,
+    pub launch_time_epoch_secs: Option<i64>,
     pub instance_type: Option<String>,
     pub state: String,
     pub public_ip: Option<String>,
+    pub private_ip: Option<String>,
+    pub vpc_id: Option<String>,
+    pub subnet_id: Option<String>,
     pub tags: HashMap<String, String>,
 }
 
@@ -148,9 +153,14 @@ async fn scan_region(config: &SdkConfig, inspector: &Ec2Inspector, region: Strin
                 .map(|instance| AwsInstance {
                     instance_id: instance.instance_id,
                     region: instance.region,
+                    availability_zone: instance.availability_zone,
+                    launch_time_epoch_secs: instance.launch_time_epoch_secs,
                     instance_type: instance.instance_type,
                     state: instance.state.as_str().to_string(),
                     public_ip: instance.public_ip,
+                    private_ip: instance.private_ip,
+                    vpc_id: instance.vpc_id,
+                    subnet_id: instance.subnet_id,
                     tags: instance.tags,
                 })
                 .collect();

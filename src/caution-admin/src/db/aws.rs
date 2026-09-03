@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+use chrono::{DateTime, Utc};
 use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -14,6 +15,7 @@ pub(crate) struct AwsAppRow {
     pub organization_name: String,
     pub name: String,
     pub state: String,
+    pub aws_account_id: String,
     pub provider_resource_id: String,
     pub region: Option<String>,
     pub public_ip: Option<String>,
@@ -40,6 +42,8 @@ pub(crate) struct ByocSubscriptionRow {
     pub tier: String,
     pub status: String,
     pub billing_source: String,
+    pub catalog_valid: bool,
+    pub enterprise_expires_at: Option<DateTime<Utc>>,
     pub max_apps: i32,
     pub pending_tier: Option<String>,
     pub pending_max_apps: Option<i32>,
@@ -63,6 +67,7 @@ impl Database {
                     o.name::text AS organization_name,
                     COALESCE(cr.resource_name, '(unnamed app)')::text AS name,
                     cr.state::text AS state,
+                    pa.external_account_id::text AS aws_account_id,
                     cr.provider_resource_id::text AS provider_resource_id,
                     cr.region::text AS region,
                     cr.public_ip::text AS public_ip,
@@ -108,6 +113,8 @@ impl Database {
                     s.tier,
                     s.status,
                     s.billing_source,
+                    s.catalog_valid,
+                    s.enterprise_expires_at,
                     s.max_apps,
                     s.pending_tier,
                     s.pending_max_apps,
@@ -162,6 +169,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::Database;
+    use crate::model::{Relation, ResourceKind, ResourceRef, SortColumn};
 
     #[tokio::test]
     #[ignore = "requires a migrated PostgreSQL test database"]
@@ -174,6 +182,7 @@ mod tests {
         let canceled_organization_id = Uuid::new_v4();
         let account_id = Uuid::new_v4();
         let app_id = Uuid::new_v4();
+        let stopped_app_id = Uuid::new_v4();
         let build_id = Uuid::new_v4();
 
         sqlx::query("INSERT INTO users (id, username) VALUES ($1, $2)")
@@ -194,6 +203,15 @@ mod tests {
         .execute(&writer)
         .await
         .expect("organization fixtures");
+        sqlx::query(
+            "INSERT INTO organization_members (organization_id, user_id, role)
+             VALUES ($1, $2, 'owner')",
+        )
+        .bind(organization_id)
+        .bind(user_id)
+        .execute(&writer)
+        .await
+        .expect("membership fixture");
         sqlx::query(
             "INSERT INTO subscriptions
                 (user_id, organization_id, tier, max_vcpus, max_apps,
@@ -228,7 +246,7 @@ mod tests {
             "INSERT INTO compute_resources
                 (id, organization_id, provider_account_id, resource_type_id,
                  provider_resource_id, resource_name, state, region)
-             SELECT $1, $2, $3, rt.id, 'i-projection', 'projection-app',
+             SELECT $1, $2, $3, rt.id, 'i-projection', 'paging-app-running',
                     'running', 'us-west-2'
              FROM resource_types rt
              JOIN providers p ON p.id = rt.provider_id
@@ -240,6 +258,22 @@ mod tests {
         .execute(&writer)
         .await
         .expect("app fixture");
+        sqlx::query(
+            "INSERT INTO compute_resources
+                (id, organization_id, provider_account_id, resource_type_id,
+                 provider_resource_id, resource_name, state, region)
+             SELECT $1, $2, $3, rt.id, 'i-projection-stopped', 'paging-app-stopped',
+                    'stopped', 'us-west-2'
+             FROM resource_types rt
+             JOIN providers p ON p.id = rt.provider_id
+             WHERE p.provider_type::text = 'aws' AND rt.type_code = 'ec2-instance'",
+        )
+        .bind(stopped_app_id)
+        .bind(organization_id)
+        .bind(account_id)
+        .execute(&writer)
+        .await
+        .expect("stopped app fixture");
         sqlx::query(
             "INSERT INTO eif_builds
                 (id, organization_id, app_id, commit_sha, procfile_hash, cache_key,
@@ -271,13 +305,57 @@ mod tests {
             .await
             .expect("read-only database");
         let state = database.load_aws_state().await.expect("AWS projection");
-        assert!(
-            state
-                .apps
-                .iter()
-                .any(|app| app.id == app_id && app.managed_on_prem)
-        );
+        assert!(state.apps.iter().any(|app| app.id == app_id
+            && app.managed_on_prem
+            && app.aws_account_id == "aws-projection"));
         assert!(state.builds.iter().any(|build| build.id == build_id));
+
+        let apps = database
+            .list(ResourceKind::App, 0, 1, Some(SortColumn::Details))
+            .await
+            .expect("sorted app page");
+        assert_eq!(apps.items[0].id, app_id);
+        assert!(apps.has_more);
+        let search = database
+            .search("paging-app-", 1, 1, Some(SortColumn::Details))
+            .await
+            .expect("second sorted search page");
+        assert_eq!(search.items[0].id, stopped_app_id);
+        let related = database
+            .follow(
+                ResourceRef {
+                    kind: ResourceKind::Organization,
+                    id: organization_id,
+                },
+                Relation::OrganizationApps,
+                0,
+                1,
+                Some(SortColumn::Details),
+            )
+            .await
+            .expect("sorted related app page");
+        assert_eq!(related.items[0].resource.id, app_id);
+        assert!(related.has_more);
+        let relations = database
+            .relation_summaries(ResourceRef {
+                kind: ResourceKind::Organization,
+                id: organization_id,
+            })
+            .await
+            .expect("relationship counts");
+        assert_eq!(
+            relations,
+            [
+                crate::model::RelationSummary {
+                    relation: Relation::OrganizationUsers,
+                    count: 1,
+                },
+                crate::model::RelationSummary {
+                    relation: Relation::OrganizationApps,
+                    count: 2,
+                },
+            ]
+        );
         let byoc = state
             .byoc
             .iter()
@@ -286,6 +364,8 @@ mod tests {
         assert_eq!(byoc.allocated_apps, 1);
         assert_eq!(byoc.max_apps, 5);
         assert_eq!(byoc.pending_max_apps, Some(3));
+        assert!(byoc.catalog_valid);
+        assert_eq!(byoc.enterprise_expires_at, None);
         assert!(
             state
                 .byoc
@@ -314,8 +394,8 @@ mod tests {
             .execute(&writer)
             .await
             .expect("delete subscription fixtures");
-        sqlx::query("DELETE FROM compute_resources WHERE id = $1")
-            .bind(app_id)
+        sqlx::query("DELETE FROM compute_resources WHERE id = ANY($1)")
+            .bind(vec![app_id, stopped_app_id])
             .execute(&writer)
             .await
             .expect("delete app fixture");

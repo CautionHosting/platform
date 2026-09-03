@@ -30,27 +30,74 @@ them in the repository.
 Press `/` to search by username, email, organization name, app name, or exact
 UUID; valid UUID representations are normalized before lookup. Select a result
 with the arrow keys or `j`/`k`, press Enter to open it, and follow its listed
-relationships. Backspace returns to the exact previous screen. Press `?` for
-the complete key reference.
+relationships. Backspace returns to the exact previous screen, except while
+typing a search, where it deletes a character. Search matches literally:
+`%` and `_` are escaped rather than treated as wildcards. Result tables use
+50-row pages: press `n`/Page Down and `p`/Page Up to move between them. Press
+`s` to cycle the meaningful table columns; the active column is marked in the
+header. Apps and app relationships initially use operational state order, with
+running apps first. Page, sort, selection, and query are restored by Back and
+preserved by refresh. Press `?` for the complete key reference.
+Esc cancels a global search and restores the screen it was opened from.
+The selected row uses one shared charcoal highlight across every list and table
+without replacing resource and status colours.
 
 The `AWS` entry is a read-only account snapshot. It scans enabled regions for
 Caution app hosts, builders, EBS volumes, and public IPv4 addresses, then
-compares them with Platform records. Its Drift section highlights missing,
-surviving-after-destroy, mismatched, and unknown hosts. A running EC2 host does
-not prove that a Nitro Enclave process is running; that requires host-local
-`nitro-cli` inspection and is intentionally outside this tool.
+compares them with Platform records. `Findings` is this read-only comparison;
+it is not AWS Config, Terraform drift, or persisted data. Diagnostics, partial
+scan errors, costs, BYOC status, and unrelated AWS resources do not appear as
+findings. A running EC2 host does not prove that a Nitro Enclave process is
+running; that requires host-local `nitro-cli` inspection and is intentionally
+outside this tool.
+
+Findings are intentionally conservative and directional. `App expects EC2;
+none observed` means Platform says a running or stopped app should have a
+particular EC2 host, but a complete scan did not observe it. `EC2 has no
+Platform match` means AWS has a Caution-tagged host whose IDs and tags match no
+Platform app or build. Other
+findings name terminated-app hosts, AWS/Platform state differences, association
+errors, provider-account errors, and orphan builders. Pending and terminating
+Platform apps do not produce host presence/state findings. Exact Platform
+instance IDs are authoritative; tags are secondary evidence and never hide an
+absent expected host.
+
+Observed EC2 instances are correlated against all AWS-backed Platform apps
+before account filtering. Absence and provider-account checks are then limited
+to non-BYOC apps. A malformed mapping is reported as `Invalid provider account
+mapping`; a valid differing account is reported as `Provider account mismatch`,
+never as “untracked.” A failed regional
+instance scan suppresses absence findings for that region, while findings based
+on observed resources remain visible. Partial totals use `N+`; scan failures
+stay in the coverage panel rather than appearing as findings. Findings sort
+Critical before Warning. The concise list shows only level, issue, and subject;
+press Enter for the structured Platform expectation, AWS observation, scope,
+next step, AWS host, and linked Platform resources. Press `s` to sort by level,
+issue, or subject.
 
 The AWS overview keeps account, principal, regional coverage, and refresh time
-in a non-selectable detail panel. Only the six sections below it are selectable.
-Host rows label AWS and Platform state separately. They open an App only when
-the AWS instance ID exactly matches the App's recorded provider resource; a
-tag-only or conflicting association is reported as a navigable Drift finding.
+in a non-selectable detail panel. `COMPLETE`, `PARTIAL`, and `STALE` describe
+snapshot quality, not account health. Only the six sections below it are
+selectable.
+Host rows lead with the actual AWS state and label Platform state separately;
+they never replace host state with a synthetic `failed` status. Every app-host
+or builder row opens an AWS host screen with account, region/AZ, type, launch
+time, network fields, allowlisted tags, Platform correlation, and finding
+reasons. Linked Platform Apps or Organizations appear in their own navigable
+panel. Finding details separately show `Platform expected`, `AWS observed`,
+optional scope, and a read-only next step. AWS-only findings explicitly show
+that no Platform resource is linked.
 
 AWS data is loaded only when `AWS` is first opened and cached for the terminal
 session. Leaving and reopening the screen does not call AWS again; press `r` to
 refresh. Regional or Cost Explorer failures are shown as unavailable or
-partial, never as zero. If a refresh fails completely, the last successful
-snapshot remains visible and is marked stale.
+partial, never as zero. If inventory cannot be loaded, Findings explicitly says
+that no scan was performed. A refresh that only partially fails still replaces
+the cached data, because the newer partial view is more accurate than the older
+one; the affected sections are marked partial. Only a refresh that fails
+completely keeps the last successful snapshot, marked stale. Open findings and
+list selection survive wording, severity, and label changes when their resource
+and host identity is unchanged.
 
 `make admin` uses the normal AWS SDK credential chain. When no explicit AWS
 credential environment or profile is set, it sources
@@ -67,12 +114,17 @@ The Costs section uses unblended month-to-date cost through yesterday and the
 remaining-month mean forecast. Cost Explorer data is normally delayed, each
 paginated request is billable, and tag attribution requires the `ManagedBy`
 and `org_id` cost-allocation tags to be activated. Untagged cost is retained as
-`Unattributed`; denied or unavailable queries remain visibly unavailable.
+`Unattributed`. `ManagedBy` and `org_id` are queried and displayed as separate
+attribution dimensions, each with its own unattributed total; denied or
+unavailable queries remain visibly unavailable.
 
 BYOC lists one Organization row for every current non-canceled subscription,
 including subscriptions with no configured app. Rows show organization and
-subscription status, plan, effective capacity, billing source, and pending
-changes; opening one uses the existing Organization and Apps navigation.
+subscription status, plan, effective capacity, billing source, pending
+changes, and whether the API deployment gate currently permits another app.
+That gate uses the same legacy-credit, Paddle catalog, enterprise-expiry, and
+pending-capacity rules as the API. Opening a row uses the existing Organization
+and Apps navigation.
 Customer AWS accounts are not queried, and credential configuration or secrets
 are never selected. BYOC apps remain excluded from managed-account missing-host
 findings.
@@ -116,8 +168,10 @@ make admin ADMIN_ARGS='show user <uuid> --json'
 make admin ADMIN_ARGS='follow user <uuid> apps --json'
 ```
 
-`list` and `follow` accept `--limit` (1 to 200) and `--offset`. Human-readable
-tabular output is the default; `--json` produces machine-readable output.
+`search`, `list`, and `follow` accept `--limit` (1 to 200) and `--offset`.
+Human-readable tabular output is the default; terminal control and Unicode bidi
+formatting characters are escaped while other Unicode is preserved. `--json`
+is unchanged and produces the original machine-readable values.
 Failures identify the operation and call site and print their complete typed
 source chain. `show` and `follow` fail when their source UUID does not exist
 rather than treating a missing resource as an empty relationship.
@@ -127,3 +181,5 @@ document and other mutating administration workflows.
 
 The implementation keeps database resource queries, relationship traversal,
 row decoding, terminal control, and Ratatui rendering in small focused modules.
+Allowlisted SQL ordering lives in `db/order.rs`; table paging and in-memory AWS
+ordering live in `state/table.rs`.

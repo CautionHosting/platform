@@ -1,19 +1,48 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+use chrono::{DateTime, Utc};
+use drift_detector::drift::{DriftSeverity, classify_caution_resource};
 
 use super::{
-    AccountIdentity, AwsAction, AwsDisplayRow, AwsOverviewMetadata, AwsSection, AwsSnapshot,
-    cost::{CostSnapshot, money},
-    display::{
-        app_action, build_action, builder_row, byoc_rows, cost_rows, host_row, tagged_host_row,
-    },
+    AccountIdentity, AwsAction, AwsDisplayRow, AwsFinding, AwsOverviewMetadata, AwsSection,
+    AwsSnapshot,
+    cost::CostSnapshot,
+    display::{byoc_rows, cost_rows},
     inventory::{FetchInventoryError, InventorySnapshot},
+    is_cost_summary,
 };
 use crate::db::aws::{AwsAppRow, AwsBuildRow, AwsDatabaseState};
-use chrono::{DateTime, Utc};
-use drift_detector::drift::{CautionResourceKind, classify_caution_resource};
+
+mod findings;
+
+fn map_apps(
+    apps: &[AwsAppRow],
+    key: impl Fn(&AwsAppRow) -> Option<String>,
+) -> std::collections::HashMap<String, &AwsAppRow> {
+    let mut mapped = std::collections::HashMap::new();
+    for app in apps {
+        if let Some(key) = key(app) {
+            mapped.entry(key).or_insert(app);
+        }
+    }
+    mapped
+}
+
+fn map_builds(
+    builds: &[AwsBuildRow],
+    key: impl Fn(&AwsBuildRow) -> Option<String>,
+) -> std::collections::HashMap<String, &AwsBuildRow> {
+    let mut mapped = std::collections::HashMap::new();
+    for build in builds {
+        if let Some(key) = key(build) {
+            mapped.entry(key).or_insert(build);
+        }
+    }
+    mapped
+}
 
 pub(crate) fn build_snapshot(
     database: AwsDatabaseState,
@@ -23,7 +52,6 @@ pub(crate) fn build_snapshot(
     updated_at: DateTime<Utc>,
 ) -> AwsSnapshot {
     let updated_at = updated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let mut overview = Vec::new();
     let identity_available = identity.is_ok();
     let (account, principal) = match identity {
         Ok(identity) => (identity.account, identity.principal),
@@ -42,25 +70,42 @@ pub(crate) fn build_snapshot(
         }
         Err(error) => (InventorySnapshot::default(), unavailable_reason(&error)),
     };
-    let inventory_available = inventory_loaded && inventory.issues.is_empty();
-
+    let inventory_complete = inventory_loaded && inventory.issues.is_empty();
+    let instances_complete = inventory_loaded && component_complete(&inventory, "instances");
+    let storage_complete = inventory_loaded
+        && component_complete(&inventory, "volumes")
+        && component_complete(&inventory, "public IPs")
+        && instances_complete;
     let Reconciled {
         app_hosts,
         builders,
+        hosts,
         storage,
-        drift,
+        findings,
         unrelated_instances,
         storage_gib,
         unassociated_ips,
     } = if inventory_loaded {
-        reconcile_inventory(&database, &inventory)
+        let findings = findings::reconcile_inventory(
+            &database,
+            &inventory,
+            identity_available.then_some(account.as_str()),
+        );
+        let (storage, storage_gib, unassociated_ips) =
+            storage_rows(&inventory, &findings.caution_instances);
+        Reconciled {
+            app_hosts: findings.app_hosts,
+            builders: findings.builders,
+            hosts: findings.hosts,
+            storage,
+            findings: findings.findings,
+            unrelated_instances: findings.unrelated_instances,
+            storage_gib,
+            unassociated_ips,
+        }
     } else {
         unavailable_inventory()
     };
-    let instances_complete = inventory_loaded && component_complete(&inventory, "instances");
-    let storage_complete = inventory_loaded
-        && component_complete(&inventory, "volumes")
-        && component_complete(&inventory, "public IPs");
     let cost_rows = cost_rows(&costs);
     let costs_available = (costs.mtd_micros.is_some() || costs.first_day)
         && costs
@@ -69,89 +114,33 @@ pub(crate) fn build_snapshot(
             .all(|issue| !issue.contains("unavailable:"));
     let byoc = byoc_rows(&database);
     let projected = match (costs.mtd_micros, costs.forecast_micros) {
-        (Some(mtd), Some(forecast)) => money(mtd + forecast, &costs.currency),
-        (None, Some(forecast)) if costs.first_day => money(forecast, &costs.currency),
+        (Some(mtd), Some(forecast)) => super::cost::money(mtd + forecast, &costs.currency),
+        (None, Some(forecast)) if costs.first_day => super::cost::money(forecast, &costs.currency),
         _ => "unavailable".to_string(),
     };
-    for (section, count, details) in [
-        (
-            AwsSection::AppHosts,
-            instances_complete.then_some(app_hosts.len()),
-            if instances_complete {
-                format!("active · {unrelated_instances} unrelated EC2 instances")
-            } else if inventory_loaded {
-                "warning · partial regional inventory".to_string()
-            } else {
-                "warning · inventory unavailable".to_string()
-            },
-        ),
-        (
-            AwsSection::Builders,
-            instances_complete.then_some(builders.len()),
-            if instances_complete {
-                "active · live AWS hosts"
-            } else if inventory_loaded {
-                "warning · partial regional inventory"
-            } else {
-                "warning · inventory unavailable"
-            }
-            .to_string(),
-        ),
-        (
-            AwsSection::Storage,
-            storage_complete.then_some(storage.len()),
-            if storage_complete {
-                format!("active · {storage_gib} GiB EBS · {unassociated_ips} unassociated IPs")
-            } else if inventory_loaded {
-                format!("warning · partial · observed {storage_gib} GiB EBS")
-            } else {
-                "warning · inventory unavailable".to_string()
-            },
-        ),
-        (
-            AwsSection::Drift,
-            instances_complete.then_some(drift.len()),
-            if !inventory_loaded {
-                "warning · inventory unavailable"
-            } else if !instances_complete {
-                "warning · partial regional inventory"
-            } else if drift.is_empty() {
-                "clear · no findings"
-            } else {
-                "warning · review findings"
-            }
-            .to_string(),
-        ),
-        (
-            AwsSection::Costs,
-            costs_available.then_some(cost_rows.len()),
-            format!(
-                "{} · projected {projected}",
-                if costs.forecast_micros.is_some()
-                    && (costs.mtd_micros.is_some() || costs.first_day)
-                {
-                    "active"
-                } else {
-                    "warning"
-                }
-            ),
-        ),
-        (
-            AwsSection::Byoc,
-            Some(byoc.len()),
-            "active · Platform subscriptions only; customer AWS not queried".to_string(),
-        ),
-    ] {
-        overview.push(row(
-            "AWS",
-            count.map_or_else(
-                || format!("{} (?)", section.label()),
-                |count| format!("{} ({count})", section.label()),
-            ),
-            details,
-            AwsAction::Section(section),
-        ));
-    }
+    let overview = overview_rows(
+        &app_hosts,
+        &builders,
+        &storage,
+        &findings,
+        &cost_rows,
+        &byoc,
+        OverviewQuality {
+            inventory_loaded,
+            instances_complete,
+            storage_complete,
+            costs_available,
+        },
+        unrelated_instances,
+        storage_gib,
+        unassociated_ips,
+        &projected,
+    );
+    let status = if identity_available && inventory_complete && costs_available {
+        "complete"
+    } else {
+        "partial"
+    };
 
     AwsSnapshot {
         metadata: AwsOverviewMetadata {
@@ -159,25 +148,159 @@ pub(crate) fn build_snapshot(
             principal,
             regions,
             updated: format!("{updated_at} · r refresh"),
-            status: if identity_available && inventory_available {
-                "active"
-            } else {
-                "warning"
-            }
-            .to_string(),
+            status: status.to_string(),
         },
         overview,
         app_hosts,
         builders,
+        hosts,
         storage,
-        drift,
+        findings,
         costs: cost_rows,
         byoc,
         stale_reason: None,
         identity_available,
-        inventory_available,
+        inventory_available: inventory_loaded,
+        inventory_complete,
         costs_available,
     }
+}
+
+struct OverviewQuality {
+    inventory_loaded: bool,
+    instances_complete: bool,
+    storage_complete: bool,
+    costs_available: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn overview_rows(
+    app_hosts: &[AwsDisplayRow],
+    builders: &[AwsDisplayRow],
+    storage: &[AwsDisplayRow],
+    findings: &[AwsFinding],
+    costs: &[AwsDisplayRow],
+    byoc: &[AwsDisplayRow],
+    quality: OverviewQuality,
+    unrelated_instances: usize,
+    storage_gib: i64,
+    unassociated_ips: usize,
+    projected: &str,
+) -> Vec<AwsDisplayRow> {
+    let critical = findings
+        .iter()
+        .filter(|finding| finding.severity == DriftSeverity::Critical)
+        .count();
+    let warning = findings.len() - critical;
+    let findings_name = if !quality.inventory_loaded {
+        "Findings (?)".to_string()
+    } else if quality.instances_complete {
+        format!("Findings ({})", findings.len())
+    } else {
+        format!("Findings ({}+)", findings.len())
+    };
+    vec![
+        section_row(
+            AwsSection::AppHosts,
+            count_name(
+                AwsSection::AppHosts,
+                app_hosts.len(),
+                quality.instances_complete,
+            ),
+            inventory_details(
+                quality.inventory_loaded,
+                quality.instances_complete,
+                format!("{unrelated_instances} unrelated EC2 instances"),
+            ),
+        ),
+        section_row(
+            AwsSection::Builders,
+            count_name(
+                AwsSection::Builders,
+                builders.len(),
+                quality.instances_complete,
+            ),
+            inventory_details(
+                quality.inventory_loaded,
+                quality.instances_complete,
+                "live AWS hosts".to_string(),
+            ),
+        ),
+        section_row(
+            AwsSection::Storage,
+            count_name(AwsSection::Storage, storage.len(), quality.storage_complete),
+            inventory_details(
+                quality.inventory_loaded,
+                quality.storage_complete,
+                format!("{storage_gib} GiB EBS · {unassociated_ips} unassociated IPs"),
+            ),
+        ),
+        section_row(
+            AwsSection::Findings,
+            findings_name,
+            if !quality.inventory_loaded {
+                "warning · inventory unavailable".to_string()
+            } else if findings.is_empty() && quality.instances_complete {
+                "clear · no confirmed findings".to_string()
+            } else {
+                format!(
+                    "{} · {critical} critical · {warning} warning{}",
+                    if critical > 0 { "failed" } else { "warning" },
+                    if quality.instances_complete {
+                        ""
+                    } else {
+                        " · partial scan"
+                    }
+                )
+            },
+        ),
+        section_row(
+            AwsSection::Costs,
+            if quality.costs_available {
+                format!(
+                    "Costs ({})",
+                    costs.iter().filter(|row| !is_cost_summary(row)).count()
+                )
+            } else {
+                "Costs (?)".to_string()
+            },
+            format!(
+                "{} · projected {projected}",
+                if quality.costs_available {
+                    "active"
+                } else {
+                    "warning"
+                }
+            ),
+        ),
+        section_row(
+            AwsSection::Byoc,
+            format!("BYOC ({})", byoc.len()),
+            "active · Platform subscriptions only; customer AWS not queried".to_string(),
+        ),
+    ]
+}
+
+fn count_name(section: AwsSection, count: usize, complete: bool) -> String {
+    if complete {
+        format!("{} ({count})", section.label())
+    } else {
+        format!("{} (?)", section.label())
+    }
+}
+
+fn inventory_details(loaded: bool, complete: bool, details: String) -> String {
+    if !loaded {
+        "warning · inventory unavailable".to_string()
+    } else if !complete {
+        "warning · partial regional inventory".to_string()
+    } else {
+        format!("active · {details}")
+    }
+}
+
+fn section_row(section: AwsSection, name: String, details: String) -> AwsDisplayRow {
+    row("AWS", name, details, AwsAction::Section(section))
 }
 
 fn component_complete(inventory: &InventorySnapshot, component: &str) -> bool {
@@ -199,8 +322,9 @@ fn unavailable_inventory() -> Reconciled {
     Reconciled {
         app_hosts: unavailable("HOST", "Unavailable"),
         builders: unavailable("BUILDER", "Unavailable"),
+        hosts: Vec::new(),
         storage: unavailable("STORAGE", "Unavailable"),
-        drift: unavailable("DRIFT", "Unavailable"),
+        findings: Vec::new(),
         unrelated_instances: 0,
         storage_gib: 0,
         unassociated_ips: 0,
@@ -210,215 +334,17 @@ fn unavailable_inventory() -> Reconciled {
 struct Reconciled {
     app_hosts: Vec<AwsDisplayRow>,
     builders: Vec<AwsDisplayRow>,
+    hosts: Vec<super::AwsHost>,
     storage: Vec<AwsDisplayRow>,
-    drift: Vec<AwsDisplayRow>,
+    findings: Vec<AwsFinding>,
     unrelated_instances: usize,
     storage_gib: i64,
     unassociated_ips: usize,
 }
 
-fn reconcile_inventory(database: &AwsDatabaseState, inventory: &InventorySnapshot) -> Reconciled {
-    let apps_by_id: HashMap<String, &AwsAppRow> = database
-        .apps
-        .iter()
-        .map(|app| (app.id.to_string(), app))
-        .collect();
-    let apps_by_instance: HashMap<&str, &AwsAppRow> = database
-        .apps
-        .iter()
-        .map(|app| (app.provider_resource_id.as_str(), app))
-        .collect();
-    let builds_by_id: HashMap<String, &AwsBuildRow> = database
-        .builds
-        .iter()
-        .map(|build| (build.id.to_string(), build))
-        .collect();
-    let builds_by_instance: HashMap<&str, &AwsBuildRow> = database
-        .builds
-        .iter()
-        .filter_map(|build| Some((build.builder_instance_id.as_deref()?, build)))
-        .fold(HashMap::new(), |mut builds, (instance_id, build)| {
-            builds.entry(instance_id).or_insert(build);
-            builds
-        });
-    let mut matched_apps = HashSet::new();
-    let mut linked_apps = HashSet::new();
-    let mut caution_instances = HashSet::new();
-    let mut app_hosts = Vec::new();
-    let mut builders = Vec::new();
-    let mut drift = Vec::new();
-    let mut unrelated_instances = 0;
-    let failed_instance_regions = inventory
-        .issues
-        .iter()
-        .filter(|issue| issue.component == "instances")
-        .filter_map(|issue| issue.region.as_deref())
-        .collect::<HashSet<_>>();
-
-    for instance in &inventory.instances {
-        match classify_caution_resource(&instance.tags) {
-            Some(CautionResourceKind::Deployment) => {
-                caution_instances.insert(instance.instance_id.as_str());
-                let resource_id = tag(&instance.tags, &["ResourceId", "caution:resource_id"]);
-                let tagged_app = resource_id.and_then(|id| apps_by_id.get(id).copied());
-                let exact_app = apps_by_instance.get(instance.instance_id.as_str()).copied();
-                if let Some(app) = exact_app {
-                    matched_apps.insert(app.id);
-                    let first_match = linked_apps.insert(app.id);
-                    app_hosts.push(host_row(instance, Some(app)));
-                    if !first_match {
-                        drift.push(drift_row(
-                            "DUPLICATE",
-                            &app.name,
-                            format!("failed · multiple AWS hosts · {}", instance.instance_id),
-                            Some(app),
-                        ));
-                    }
-                    if let Some(tagged_app) = tagged_app.filter(|tagged| tagged.id != app.id) {
-                        drift.push(drift_row(
-                            "LINK",
-                            &instance.instance_id,
-                            format!(
-                                "failed · AWS host belongs to {} · tag points to {}",
-                                app.name, tagged_app.name
-                            ),
-                            Some(tagged_app),
-                        ));
-                    }
-                    if app.destroyed || app.state == "terminated" {
-                        drift.push(drift_row(
-                            "ORPHAN",
-                            &app.name,
-                            format!(
-                                "failed · AWS {} · Platform terminated · {}",
-                                instance.state, instance.instance_id,
-                            ),
-                            Some(app),
-                        ));
-                    } else if app.state != instance.state {
-                        drift.push(drift_row(
-                            "STATE",
-                            &app.name,
-                            format!("warning · AWS {} · Platform {}", instance.state, app.state),
-                            Some(app),
-                        ));
-                    }
-                } else if let Some(app) = tagged_app {
-                    let first_match = linked_apps.insert(app.id);
-                    app_hosts.push(tagged_host_row(instance, app));
-                    drift.push(drift_row(
-                        "LINK",
-                        &instance.instance_id,
-                        format!(
-                            "{} · AWS {} · tagged for {} · DB host {}",
-                            if app.destroyed || app.state == "terminated" {
-                                "failed"
-                            } else {
-                                "warning"
-                            },
-                            instance.state,
-                            app.name,
-                            app.provider_resource_id,
-                        ),
-                        Some(app),
-                    ));
-                    if !first_match {
-                        drift.push(drift_row(
-                            "DUPLICATE",
-                            &app.name,
-                            format!("failed · multiple AWS hosts · {}", instance.instance_id),
-                            Some(app),
-                        ));
-                    }
-                } else {
-                    app_hosts.push(host_row(instance, None));
-                    drift.push(row(
-                        "UNKNOWN",
-                        instance.instance_id.clone(),
-                        format!(
-                            "failed · Caution-tagged host in {} has no Platform app",
-                            instance.region
-                        ),
-                        AwsAction::None,
-                    ));
-                }
-            }
-            Some(CautionResourceKind::Builder) => {
-                caution_instances.insert(instance.instance_id.as_str());
-                let build = instance
-                    .tags
-                    .get("BuildId")
-                    .and_then(|id| builds_by_id.get(id).copied())
-                    .or_else(|| {
-                        builds_by_instance
-                            .get(instance.instance_id.as_str())
-                            .copied()
-                    });
-                builders.push(builder_row(instance, build));
-                if build.is_none_or(|build| {
-                    !matches!(build.status.as_str(), "pending" | "building" | "uploading")
-                }) {
-                    drift.push(row(
-                        "BUILDER",
-                        instance.instance_id.clone(),
-                        match build {
-                            Some(build) => format!(
-                                "warning · live host for {} build {}",
-                                build.status, build.id
-                            ),
-                            None => "warning · live host has no tracked build".to_string(),
-                        },
-                        build.map(build_action).unwrap_or(AwsAction::None),
-                    ));
-                }
-            }
-            None => unrelated_instances += 1,
-        }
-    }
-    for app in database
-        .apps
-        .iter()
-        .filter(|app| !app.managed_on_prem && !app.destroyed && app.state != "terminated")
-        .filter(|app| match app.region.as_deref() {
-            Some(region) => !failed_instance_regions.contains(region),
-            None => failed_instance_regions.is_empty(),
-        })
-        .filter(|app| !matched_apps.contains(&app.id))
-    {
-        drift.push(drift_row(
-            "MISSING",
-            &app.name,
-            format!("failed · DB {} · no AWS host", app.state),
-            Some(app),
-        ));
-    }
-    for issue in &inventory.issues {
-        drift.push(row(
-            "PARTIAL",
-            issue.component,
-            format!(
-                "warning · {} · {}",
-                issue.region.as_deref().unwrap_or("account"),
-                issue.reason
-            ),
-            AwsAction::None,
-        ));
-    }
-    let (storage, storage_gib, unassociated_ips) = storage_rows(inventory, &caution_instances);
-    Reconciled {
-        app_hosts,
-        builders,
-        storage,
-        drift,
-        unrelated_instances,
-        storage_gib,
-        unassociated_ips,
-    }
-}
-
 fn storage_rows(
     inventory: &InventorySnapshot,
-    caution_instances: &HashSet<&str>,
+    caution_instances: &HashSet<String>,
 ) -> (Vec<AwsDisplayRow>, i64, usize) {
     let mut rows = Vec::new();
     let mut total_gib = 0_i64;
@@ -428,7 +354,7 @@ fn storage_rows(
             || volume
                 .attached_instances
                 .iter()
-                .any(|id| caution_instances.contains(id.as_str()));
+                .any(|id| caution_instances.contains(id));
         if managed {
             total_gib += i64::from(volume.size_gib);
             rows.push(row(
@@ -479,15 +405,6 @@ fn storage_rows(
     (rows, total_gib, unassociated_ips)
 }
 
-fn drift_row(kind: &str, name: &str, details: String, app: Option<&AwsAppRow>) -> AwsDisplayRow {
-    row(
-        kind,
-        name,
-        details,
-        app.map(app_action).unwrap_or(AwsAction::None),
-    )
-}
-
 fn row(
     kind: impl Into<String>,
     name: impl Into<String>,
@@ -500,12 +417,6 @@ fn row(
         details,
         action,
     }
-}
-
-fn tag<'a>(tags: &'a HashMap<String, String>, names: &[&str]) -> Option<&'a str> {
-    names
-        .iter()
-        .find_map(|name| tags.get(*name).map(String::as_str))
 }
 
 fn unavailable_reason(error: &dyn std::error::Error) -> String {

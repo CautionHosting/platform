@@ -10,7 +10,7 @@ use super::{
 use crate::{
     db::{
         aws::{AwsAppRow, AwsBuildRow, AwsDatabaseState},
-        billing_source, byoc_capacity, pending_change, status, tier_name,
+        billing_source, byoc_capacity, byoc_state, pending_change, tier_name,
     },
     model::ResourceKind,
 };
@@ -50,10 +50,25 @@ pub(super) fn cost_rows(costs: &CostSnapshot) -> Vec<AwsDisplayRow> {
             format!("active · {}", money(line.amount_micros, &line.currency)),
         )
     }));
-    rows.extend(costs.attribution.iter().map(|line| {
+    rows.extend(costs.managed_by.iter().map(|line| {
         row(
-            "TAG",
-            &line.name,
+            "MANAGED BY",
+            if line.name == "Unattributed" {
+                "Unattributed ManagedBy"
+            } else {
+                &line.name
+            },
+            format!("active · {}", money(line.amount_micros, &line.currency)),
+        )
+    }));
+    rows.extend(costs.organizations.iter().map(|line| {
+        row(
+            "ORG TAG",
+            if line.name == "Unattributed" {
+                "Unattributed org_id"
+            } else {
+                &line.name
+            },
             format!("active · {}", money(line.amount_micros, &line.currency)),
         )
     }));
@@ -71,9 +86,20 @@ pub(super) fn byoc_rows(database: &AwsDatabaseState) -> Vec<AwsDisplayRow> {
         .byoc
         .iter()
         .map(|subscription| {
+            let deployment_state = byoc_state(
+                subscription.organization_active,
+                Some(&subscription.billing_source),
+                Some(&subscription.status),
+                Some(subscription.catalog_valid),
+                subscription.enterprise_expires_at,
+                Some(subscription.max_apps),
+                subscription.pending_max_apps,
+                subscription.allocated_apps,
+                chrono::Utc::now(),
+            );
             let mut details = format!(
                 "{} · subscription {} · {} · {} · {}",
-                status(subscription.organization_active),
+                deployment_state,
                 subscription.status,
                 tier_name(&subscription.tier),
                 byoc_capacity(
@@ -93,11 +119,12 @@ pub(super) fn byoc_rows(database: &AwsDatabaseState) -> Vec<AwsDisplayRow> {
             AwsDisplayRow {
                 kind: "ORGANIZATION".to_string(),
                 name: subscription.organization_name.clone(),
-                details,
+                details: details.clone(),
                 action: AwsAction::Resource(resource_summary(
                     ResourceKind::Organization,
                     subscription.organization_id,
                     subscription.organization_name.clone(),
+                    details,
                 )),
             }
         })
@@ -115,38 +142,23 @@ pub(super) fn host_row(instance: &AwsInstance, app: Option<&AwsAppRow>) -> AwsDi
                     instance.instance_type.as_deref().unwrap_or("unknown type"),
                     instance.region,
                 ),
-                AwsAction::None,
+                AwsAction::Host(instance.instance_id.clone()),
             )
         },
         |app| {
-            let details = if app.destroyed || app.state == "terminated" {
-                format!(
-                    "failed · AWS {} · Platform terminated · {} · {} · {}",
-                    instance.state,
-                    instance.instance_id,
-                    instance.instance_type.as_deref().unwrap_or("unknown type"),
-                    instance.region,
-                )
-            } else if app.state != instance.state {
-                format!(
-                    "warning · AWS {} · Platform {} · {} · {} · {}",
-                    instance.state,
-                    app.state,
-                    instance.instance_id,
-                    instance.instance_type.as_deref().unwrap_or("unknown type"),
-                    instance.region,
-                )
-            } else {
-                format!(
-                    "{} · AWS host · Platform {} · {} · {} · {}",
-                    instance.state,
-                    app.state,
-                    instance.instance_id,
-                    instance.instance_type.as_deref().unwrap_or("unknown type"),
-                    instance.region,
-                )
-            };
-            (app.name.clone(), details, app_action(app))
+            let details = format!(
+                "{} · AWS host · Platform {} · {} · {} · {}",
+                instance.state,
+                app.state,
+                instance.instance_id,
+                instance.instance_type.as_deref().unwrap_or("unknown type"),
+                instance.region,
+            );
+            (
+                app.name.clone(),
+                details,
+                AwsAction::Host(instance.instance_id.clone()),
+            )
         },
     );
     AwsDisplayRow {
@@ -162,18 +174,10 @@ pub(super) fn tagged_host_row(instance: &AwsInstance, app: &AwsAppRow) -> AwsDis
         kind: "HOST".to_string(),
         name: instance.instance_id.clone(),
         details: format!(
-            "{} · AWS {} · tagged app {} is {} · DB host {}",
-            if app.destroyed || app.state == "terminated" {
-                "failed"
-            } else {
-                "warning"
-            },
-            instance.state,
-            app.name,
-            app.state,
-            app.provider_resource_id,
+            "{} · AWS host · Platform {} · tagged app {} · expected {}",
+            instance.state, app.state, app.name, app.provider_resource_id,
         ),
-        action: AwsAction::None,
+        action: AwsAction::Host(instance.instance_id.clone()),
     }
 }
 
@@ -188,34 +192,37 @@ pub(super) fn builder_row(instance: &AwsInstance, build: Option<&AwsBuildRow>) -
             "{} · {} · {}",
             instance.state, instance.instance_id, instance.region
         ),
-        action: build.map(build_action).unwrap_or(AwsAction::None),
+        action: AwsAction::Host(instance.instance_id.clone()),
     }
 }
 
-pub(super) fn app_action(app: &AwsAppRow) -> AwsAction {
-    AwsAction::Resource(resource_summary(
+pub(super) fn app_summary(app: &AwsAppRow) -> crate::model::ResourceSummary {
+    resource_summary(
         ResourceKind::App,
         app.id,
         app.name.clone(),
-    ))
+        format!("{} · {}", app.state, app.organization_name),
+    )
 }
 
-pub(super) fn build_action(build: &AwsBuildRow) -> AwsAction {
+pub(super) fn build_summary(build: &AwsBuildRow) -> crate::model::ResourceSummary {
     if let Some(app_id) = build.app_id {
-        AwsAction::Resource(resource_summary(
+        resource_summary(
             ResourceKind::App,
             app_id,
             build
                 .app_name
                 .clone()
                 .unwrap_or_else(|| "(unnamed app)".to_string()),
-        ))
+            format!("build {} · {}", build.status, build.organization_name),
+        )
     } else {
-        AwsAction::Resource(resource_summary(
+        resource_summary(
             ResourceKind::Organization,
             build.organization_id,
             build.organization_name.clone(),
-        ))
+            format!("build {}", build.status),
+        )
     }
 }
 
@@ -250,6 +257,32 @@ mod tests {
     }
 
     #[test]
+    fn cost_attribution_dimensions_are_not_combined() {
+        let line = |name: &str| crate::aws::cost::CostLine {
+            name: name.to_string(),
+            amount_micros: 1_000_000,
+            currency: "USD".to_string(),
+        };
+        let rows = cost_rows(&CostSnapshot {
+            managed_by: vec![line("Unattributed")],
+            organizations: vec![line("org-1"), line("Unattributed")],
+            ..CostSnapshot::default()
+        });
+        assert!(
+            rows.iter()
+                .any(|row| row.kind == "MANAGED BY" && row.name == "Unattributed ManagedBy")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.kind == "ORG TAG" && row.name == "org-1")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.kind == "ORG TAG" && row.name == "Unattributed org_id")
+        );
+    }
+
+    #[test]
     fn byoc_rows_use_organization_status_and_subscription_details() {
         let organization_id = Uuid::new_v4();
         let rows = byoc_rows(&AwsDatabaseState {
@@ -262,6 +295,8 @@ mod tests {
                 tier: "growth".to_string(),
                 status: "active".to_string(),
                 billing_source: "paddle".to_string(),
+                catalog_valid: true,
+                enterprise_expires_at: None,
                 max_apps: 5,
                 pending_tier: Some("scale".to_string()),
                 pending_max_apps: Some(3),
@@ -274,12 +309,14 @@ mod tests {
         assert_eq!(rows[0].name, "Acme");
         assert_eq!(
             rows[0].details,
-            "active · subscription active · Growth · 2 / 3 used · Paddle · pending Scale · 3 apps"
+            "active · deployable · subscription active · Growth · 2 / 3 used · Paddle · pending Scale · 3 apps"
         );
         assert!(matches!(
             &rows[0].action,
             AwsAction::Resource(resource)
-                if resource.kind == ResourceKind::Organization && resource.id == organization_id
+                if resource.kind == ResourceKind::Organization
+                    && resource.id == organization_id
+                    && resource.context.as_deref() == Some(rows[0].details.as_str())
         ));
     }
 }

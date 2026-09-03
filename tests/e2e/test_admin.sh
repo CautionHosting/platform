@@ -11,6 +11,7 @@ DATABASE_URL="postgresql://postgres:postgres@${DB_ADDRESS}:5432/${DB_NAME}"
 ADMIN_BINARY="${ADMIN_BINARY:-target/release/caution-admin}"
 USER_ID="10000000-0000-0000-0000-000000000001"
 USER_WITHOUT_EMAIL_ID="10000000-0000-0000-0000-000000000002"
+WILDCARD_USER_ID="10000000-0000-0000-0000-000000000003"
 ORG_ID="20000000-0000-0000-0000-000000000001"
 ACCOUNT_ID="30000000-0000-0000-0000-000000000001"
 APP_ID="40000000-0000-0000-0000-000000000001"
@@ -36,7 +37,7 @@ DELETE FROM compute_resources WHERE id IN ('$APP_ID', '$APP_ID_2');
 DELETE FROM provider_accounts WHERE id = '$ACCOUNT_ID';
 DELETE FROM organization_members WHERE user_id = '$USER_ID';
 DELETE FROM organizations WHERE id = '$ORG_ID';
-DELETE FROM users WHERE id IN ('$USER_ID', '$USER_WITHOUT_EMAIL_ID');
+DELETE FROM users WHERE id IN ('$USER_ID', '$USER_WITHOUT_EMAIL_ID', '$WILDCARD_USER_ID');
 " >/dev/null 2>&1 || true
 }
 trap cleanup_rows EXIT
@@ -49,6 +50,9 @@ VALUES ('$USER_ID', 'admin-pilot-alice', 'admin-pilot-alice@example.com');
 
 INSERT INTO users (id, username)
 VALUES ('$USER_WITHOUT_EMAIL_ID', 'admin-pilot-no-email');
+
+INSERT INTO users (id, username, email)
+VALUES ('$WILDCARD_USER_ID', 'admin-pilot-wildcards', 'literal%%@example.com');
 
 INSERT INTO organizations (id, name)
 VALUES ('$ORG_ID', 'Admin Pilot Labs');
@@ -79,7 +83,7 @@ INSERT INTO compute_resources (
     provider_resource_id, resource_name, state, region
 )
 SELECT '$APP_ID_2', '$ORG_ID', '$ACCOUNT_ID', rt.id,
-       'i-admin-pilot-2', 'admin-pilot-worker', 'stopped', 'eu-central-1'
+       'i-admin-pilot-2', 'admin_pilot_worker', 'stopped', 'eu-central-1'
 FROM resource_types rt
 JOIN providers p ON p.id = rt.provider_id
 WHERE p.provider_type = 'aws' AND rt.type_code = 'ec2-instance';
@@ -155,6 +159,16 @@ jq -e --arg id "$USER_WITHOUT_EMAIL_ID" '
     .[] | select(.kind == "user" and .id == $id and .context == "active · no email")
 ' <<<"$USER_WITHOUT_EMAIL_SEARCH" >/dev/null
 
+PERCENT_SEARCH=$(admin search '%%' --json)
+jq -e --arg id "$WILDCARD_USER_ID" '
+    length == 1 and .[0].id == $id
+' <<<"$PERCENT_SEARCH" >/dev/null
+
+UNDERSCORE_SEARCH=$(admin search 'pilot_' --json)
+jq -e --arg expected "$APP_ID_2" --arg wrong "$APP_ID" '
+    any(.[]; .id == $expected) and all(.[]; .id != $wrong)
+' <<<"$UNDERSCORE_SEARCH" >/dev/null
+
 ORG_SEARCH=$(admin search 'Admin Pilot Labs' --json)
 jq -e --arg id "$ORG_ID" '
     .[] | select(.kind == "organization" and .id == $id and .context == "active · 2 apps")
@@ -164,6 +178,12 @@ APP_SEARCH=$(admin search admin-pilot-api --json)
 jq -e --arg id "$APP_ID" '
     .[] | select(.kind == "app" and .id == $id and .context == "running · Admin Pilot Labs")
 ' <<<"$APP_SEARCH" >/dev/null
+
+SEARCH_PAGE_1=$(admin search admin-pilot --limit 1 --offset 0 --json 2>/dev/null)
+SEARCH_PAGE_2=$(admin search admin-pilot --limit 1 --offset 1 --json 2>/dev/null)
+jq -e --argjson second "$SEARCH_PAGE_2" '
+    length == 1 and ($second | length) == 1 and .[0].id != $second[0].id
+' <<<"$SEARCH_PAGE_1" >/dev/null
 
 UUID_SEARCH=$(admin search "$APP_ID" --json)
 jq -e --arg id "$APP_ID" '.[] | select(.id == $id)' <<<"$UUID_SEARCH" >/dev/null
@@ -225,8 +245,32 @@ jq -e '.fields[] | select(.label == "Billing source" and .value == "Credits")' \
     <<<"$SHOW_ORG" >/dev/null
 jq -e '.fields[] | select(.label == "BYOC capacity" and .value == "1 / 2 used")' \
     <<<"$SHOW_ORG" >/dev/null
+jq -e '.fields[] | select(.label == "BYOC state" and .value == "active · deployable")' \
+    <<<"$SHOW_ORG" >/dev/null
 jq -e '.fields[] | select(.label == "Pending change" and .value == "2 Enclaves · 2 apps")' \
     <<<"$SHOW_ORG" >/dev/null
+
+db "UPDATE subscriptions SET billing_source = 'paddle', catalog_valid = false,
+        paddle_customer_id = 'ctm_admin', paddle_subscription_id = 'sub_admin',
+        paddle_price_id = 'pri_admin', catalog_version = 1
+    WHERE id = '$SUBSCRIPTION_ID';" >/dev/null
+PADDLE_ORG=$(admin show organization "$ORG_ID" --json)
+jq -e '.fields[] | select(.label == "BYOC state" and .value == "inactive · subscription cannot deploy")' \
+    <<<"$PADDLE_ORG" >/dev/null
+
+db "UPDATE subscriptions SET billing_source = 'enterprise', catalog_valid = true,
+        enterprise_expires_at = NOW() - INTERVAL '1 minute'
+    WHERE id = '$SUBSCRIPTION_ID';" >/dev/null
+EXPIRED_ORG=$(admin show organization "$ORG_ID" --json)
+jq -e '.fields[] | select(.label == "BYOC state" and .value == "inactive · subscription cannot deploy")' \
+    <<<"$EXPIRED_ORG" >/dev/null
+
+db "UPDATE subscriptions SET billing_source = 'legacy_credits', status = 'past_due',
+        enterprise_expires_at = NULL
+    WHERE id = '$SUBSCRIPTION_ID';" >/dev/null
+LEGACY_ORG=$(admin show organization "$ORG_ID" --json)
+jq -e '.fields[] | select(.label == "BYOC state" and .value == "active · deployable")' \
+    <<<"$LEGACY_ORG" >/dev/null
 
 if admin show user 00000000-0000-0000-0000-000000000000 --json >/dev/null 2>&1; then
     echo "caution-admin unexpectedly found a missing user" >&2
@@ -260,6 +304,17 @@ if ENVIRONMENT=development DATABASE_URL="$DATABASE_URL" \
     "$ADMIN_BINARY" >/dev/null 2>&1; then
     echo "caution-admin entered the TUI without a TTY" >&2
     exit 1
+fi
+
+if command -v script >/dev/null && command -v timeout >/dev/null; then
+    PTY_OUTPUT=$(
+        { sleep 1; printf '?'; sleep 1; printf '?q'; } |
+            timeout 10 script -qec \
+                "stty rows 24 cols 80; ENVIRONMENT=development DATABASE_URL='$DATABASE_URL' '$ADMIN_BINARY'" \
+                /dev/null
+    )
+    grep -Fq 'Help' <<<"$PTY_OUTPUT"
+    grep -Fq $'\033[?1049l' <<<"$PTY_OUTPUT"
 fi
 
 echo "caution-admin e2e passed"

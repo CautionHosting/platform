@@ -938,6 +938,8 @@ mod tests {
         let actual = Ec2Instance {
             instance_id: "i-123".to_string(),
             region: "us-west-2".to_string(),
+            availability_zone: None,
+            launch_time_epoch_secs: None,
             instance_type: Some("c5.xlarge".to_string()),
             state: InstanceStateName::Stopped,
             public_ip: None,
@@ -975,6 +977,8 @@ mod tests {
                 Ec2Instance {
                     instance_id: "i-456".to_string(),
                     region: "us-west-2".to_string(),
+                    availability_zone: None,
+                    launch_time_epoch_secs: None,
                     instance_type: Some("t3.micro".to_string()),
                     state: InstanceStateName::Running,
                     public_ip: Some("54.123.45.67".to_string()),
@@ -1065,6 +1069,8 @@ mod tests {
         Ec2Instance {
             instance_id: instance_id.to_string(),
             region: "us-west-2".to_string(),
+            availability_zone: None,
+            launch_time_epoch_secs: None,
             instance_type: None,
             state: InstanceStateName::Running,
             public_ip: None,

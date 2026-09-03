@@ -6,20 +6,26 @@ mod display;
 mod inventory;
 mod reconcile;
 
+pub(crate) use inventory::AwsInstance;
+
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_sts::Client as StsClient;
 use chrono::Utc;
+use drift_detector::drift::DriftSeverity;
 use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use uuid::Uuid;
 
-use crate::{db::Database, model::ResourceSummary};
+use crate::{
+    db::Database,
+    model::{ResourceRef, ResourceSummary},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AwsSection {
     AppHosts,
     Builders,
     Storage,
-    Drift,
+    Findings,
     Costs,
     Byoc,
 }
@@ -29,7 +35,7 @@ impl AwsSection {
         Self::AppHosts,
         Self::Builders,
         Self::Storage,
-        Self::Drift,
+        Self::Findings,
         Self::Costs,
         Self::Byoc,
     ];
@@ -39,17 +45,120 @@ impl AwsSection {
             Self::AppHosts => "App hosts",
             Self::Builders => "Builders",
             Self::Storage => "Storage and IPs",
-            Self::Drift => "Drift",
+            Self::Findings => "Findings",
             Self::Costs => "Costs",
             Self::Byoc => "BYOC",
         }
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FindingKind {
+    ExpectedHostAbsent,
+    HostForTerminatedApp,
+    UnexpectedHost,
+    StateMismatch,
+    UntrackedHost,
+    LinkMismatch,
+    InvalidAccountMapping,
+    AccountMismatch,
+    OrphanBuilder,
+}
+
+impl FindingKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ExpectedHostAbsent => "App expects EC2; none observed",
+            Self::HostForTerminatedApp => "EC2 linked to terminated app",
+            Self::UnexpectedHost => "EC2 present for inactive app",
+            Self::StateMismatch => "Platform/AWS states differ",
+            Self::UntrackedHost => "EC2 has no Platform match",
+            Self::LinkMismatch => "EC2 association differs",
+            Self::InvalidAccountMapping => "Invalid provider account mapping",
+            Self::AccountMismatch => "Provider account mismatch",
+            Self::OrphanBuilder => "Orphan builder",
+        }
+    }
+
+    pub const fn next_step(self) -> &'static str {
+        match self {
+            Self::ExpectedHostAbsent | Self::StateMismatch => {
+                "Verify the Platform record and the expected EC2 instance."
+            }
+            Self::HostForTerminatedApp | Self::UnexpectedHost => {
+                "Confirm whether the EC2 instance should still exist before taking action."
+            }
+            Self::UntrackedHost => "Identify the owner from AWS tags before taking action.",
+            Self::LinkMismatch => "Compare the Platform host ID with the AWS resource tags.",
+            Self::InvalidAccountMapping | Self::AccountMismatch => {
+                "Verify the Platform provider account before changing either resource."
+            }
+            Self::OrphanBuilder => "Confirm the build is inactive before removing the builder.",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AwsFinding {
+    pub severity: DriftSeverity,
+    pub kind: FindingKind,
+    pub subject: String,
+    pub platform: String,
+    pub aws: String,
+    pub scope: Option<String>,
+    pub host_id: Option<String>,
+    pub resources: Vec<ResourceSummary>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FindingKey {
+    kind: FindingKind,
+    host_id: Option<String>,
+    resources: Vec<ResourceRef>,
+    fallback_subject: Option<String>,
+}
+
+impl AwsFinding {
+    pub(crate) fn key(&self) -> FindingKey {
+        let mut resources = self
+            .resources
+            .iter()
+            .map(ResourceSummary::reference)
+            .collect::<Vec<_>>();
+        resources.sort_unstable_by_key(|resource| (resource.kind as u8, resource.id));
+        resources.dedup();
+        let fallback_subject =
+            (self.host_id.is_none() && resources.is_empty()).then(|| self.subject.clone());
+        FindingKey {
+            kind: self.kind,
+            host_id: self.host_id.clone(),
+            resources,
+            fallback_subject,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AwsHostPlatform {
+    pub resource: ResourceSummary,
+    pub state: String,
+    pub expected_host: Option<String>,
+    pub account: Option<String>,
+    pub relation: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AwsHost {
+    pub(crate) account: Option<String>,
+    pub(crate) instance: AwsInstance,
+    pub(crate) platform: Option<AwsHostPlatform>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AwsAction {
     None,
     Section(AwsSection),
+    Host(String),
     Resource(ResourceSummary),
 }
 
@@ -59,6 +168,10 @@ pub struct AwsDisplayRow {
     pub name: String,
     pub details: String,
     pub action: AwsAction,
+}
+
+pub(crate) fn is_cost_summary(row: &AwsDisplayRow) -> bool {
+    matches!(row.kind.as_str(), "MTD" | "FORECAST")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -76,13 +189,17 @@ pub struct AwsSnapshot {
     pub overview: Vec<AwsDisplayRow>,
     pub app_hosts: Vec<AwsDisplayRow>,
     pub builders: Vec<AwsDisplayRow>,
+    pub(crate) hosts: Vec<AwsHost>,
     pub storage: Vec<AwsDisplayRow>,
-    pub drift: Vec<AwsDisplayRow>,
+    pub findings: Vec<AwsFinding>,
     pub costs: Vec<AwsDisplayRow>,
     pub byoc: Vec<AwsDisplayRow>,
     pub stale_reason: Option<String>,
     pub identity_available: bool,
+    /// The inventory fetch returned data, even if some regions failed.
     pub inventory_available: bool,
+    /// Every inventory component succeeded in every region.
+    pub inventory_complete: bool,
     pub costs_available: bool,
 }
 
@@ -92,7 +209,7 @@ impl AwsSnapshot {
             AwsSection::AppHosts => &self.app_hosts,
             AwsSection::Builders => &self.builders,
             AwsSection::Storage => &self.storage,
-            AwsSection::Drift => &self.drift,
+            AwsSection::Findings => return Vec::new(),
             AwsSection::Costs => &self.costs,
             AwsSection::Byoc => &self.byoc,
         }
@@ -107,7 +224,11 @@ impl AwsSnapshot {
 
     pub fn merge_refresh(&self, mut next: Self) -> Self {
         let retain_identity = !next.identity_available && self.identity_available;
-        let retain_inventory = !next.inventory_available && self.inventory_available;
+        // Reconciliation is account-scoped. Without a fresh STS identity we
+        // cannot safely combine new inventory with Platform expectations, so
+        // retain the last internally consistent inventory/findings snapshot.
+        let retain_inventory = self.inventory_available
+            && (!next.inventory_available || (!next.identity_available && self.identity_available));
         let retain_costs = !next.costs_available && self.costs_available;
         if retain_identity {
             next.metadata.account.clone_from(&self.metadata.account);
@@ -115,16 +236,18 @@ impl AwsSnapshot {
             next.identity_available = true;
         }
         if retain_inventory {
+            next.inventory_complete = self.inventory_complete;
             next.app_hosts = self.app_hosts.clone();
             next.builders = self.builders.clone();
+            next.hosts = self.hosts.clone();
             next.storage = self.storage.clone();
-            next.drift = self.drift.clone();
+            next.findings = self.findings.clone();
             next.metadata.regions.clone_from(&self.metadata.regions);
             for section in [
                 AwsSection::AppHosts,
                 AwsSection::Builders,
                 AwsSection::Storage,
-                AwsSection::Drift,
+                AwsSection::Findings,
             ] {
                 preserve_overview_row(self, &mut next, |row| {
                     row.action == AwsAction::Section(section)
@@ -261,11 +384,16 @@ enum FetchIdentityError {
     },
 }
 
-fn resource_summary(kind: crate::model::ResourceKind, id: Uuid, label: String) -> ResourceSummary {
+fn resource_summary(
+    kind: crate::model::ResourceKind,
+    id: Uuid,
+    label: String,
+    context: String,
+) -> ResourceSummary {
     ResourceSummary {
         kind,
         id,
         label,
-        context: None,
+        context: Some(context),
     }
 }

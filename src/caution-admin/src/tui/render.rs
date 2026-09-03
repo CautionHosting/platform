@@ -13,34 +13,43 @@ use ratatui::{
 };
 
 use crate::{
-    model::ResourceSummary,
+    model::{ResourceSummary, SortColumn},
     state::{AppState, Row, Screen},
 };
 
+pub(super) use crate::terminal::terminal_text;
+
 mod aws;
+mod footer;
 
 pub fn render(frame: &mut Frame<'_>, state: &mut AppState, platform_sha: Option<&str>) {
+    let footer_height = footer::height(state, frame.area().width);
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
-            Constraint::Length(2),
+            Constraint::Length(footer_height),
         ])
         .split(frame.area());
 
     render_header(frame, areas[0], state, platform_sha);
     match &state.current.screen {
         Screen::Home => render_home(frame, areas[1], state),
-        Screen::Search { .. } | Screen::Related { .. } | Screen::AwsSection(_) => {
-            render_resource_table(frame, areas[1], state, None);
+        Screen::Search { .. } | Screen::Related { .. } => {
+            render_resource_table(frame, areas[1], state, Some(" Resources "));
         }
+        Screen::AwsSection(section) => aws::render_section(frame, areas[1], state, *section),
         Screen::AwsOverview(metadata) => {
             aws::render_overview(frame, areas[1], state, metadata.clone());
         }
+        Screen::AwsFinding(finding) => {
+            aws::render_finding(frame, areas[1], state, finding.clone());
+        }
+        Screen::AwsHost(host) => aws::render_host(frame, areas[1], state, host.as_ref().clone()),
         Screen::Resource(resource) => render_resource(frame, areas[1], state, resource.clone()),
     }
-    render_footer(frame, areas[2], state);
+    footer::render(frame, areas[2], state);
 
     if state.show_help {
         render_help(frame);
@@ -51,7 +60,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, platform_s
     let mut title = " CAUTION ADMIN · DEVELOPMENT".to_string();
     if let Some(sha) = platform_sha.filter(|sha| !sha.is_empty()) {
         title.push_str(" · ");
-        title.push_str(&sha[..sha.len().min(8)]);
+        title.extend(terminal_text(sha).chars().take(8));
     }
     title.push(' ');
     let block = Block::default()
@@ -74,19 +83,26 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, platform_s
 pub(super) fn breadcrumb_text(state: &AppState, width: u16) -> String {
     let segments = state.breadcrumbs();
     let available = usize::from(width.saturating_sub(3));
-    let joined = segments.join(" › ");
-    if joined.chars().count() <= available {
+    let joined = terminal_text(&segments.join(" › "));
+    if Span::raw(&joined).width() <= available {
         return joined;
     }
 
-    let current = segments.last().map(String::as_str).unwrap_or("Home");
+    let current = terminal_text(segments.last().map(String::as_str).unwrap_or("Home"));
     let prefix = "… › ";
-    let remaining = available.saturating_sub(prefix.chars().count());
-    let mut shortened = current
-        .chars()
-        .take(remaining.saturating_sub(1))
-        .collect::<String>();
-    if shortened.chars().count() < current.chars().count() && remaining > 0 {
+    let remaining = available.saturating_sub(Span::raw(prefix).width());
+    let ellipsis_width = Span::raw("…").width();
+    let mut shortened = String::new();
+    let mut used = 0;
+    for character in current.chars() {
+        let character_width = Span::raw(character.to_string().as_str()).width();
+        if used + character_width + ellipsis_width > remaining {
+            break;
+        }
+        shortened.push(character);
+        used += character_width;
+    }
+    if shortened.chars().count() < current.chars().count() && remaining >= ellipsis_width {
         shortened.push('…');
     }
     [prefix, &shortened].concat()
@@ -97,7 +113,7 @@ fn render_home(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(4), Constraint::Min(4)])
         .split(area);
-    let mut query = state.current.query.clone();
+    let mut query = terminal_text(&state.current.query);
     if state.current.input_mode {
         query.push('▏');
     } else if query.is_empty() {
@@ -136,7 +152,7 @@ fn render_home(frame: &mut Frame<'_>, area: Rect, state: &mut AppState) {
     frame.render_stateful_widget(list, areas[1], &mut list_state);
 }
 
-fn render_resource_table(
+pub(super) fn render_resource_table(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &mut AppState,
@@ -146,7 +162,7 @@ fn render_resource_table(
         .borders(Borders::ALL)
         .padding(Padding::left(1));
     if let Some(title) = title {
-        block = block.title(title);
+        block = block.title(table_title(state, title));
     }
     if state.current.rows.is_empty() {
         frame.render_widget(
@@ -169,18 +185,49 @@ fn render_resource_table(
         [
             Constraint::Length(14),
             Constraint::Percentage(38),
-            Constraint::Percentage(62),
+            Constraint::Fill(1),
         ],
     )
-    .header(
-        TableRow::new(["TYPE", "NAME", "DETAILS"])
-            .style(Style::default().add_modifier(Modifier::BOLD)),
-    )
+    .header(table_header(state, ["TYPE", "NAME", "DETAILS"]))
     .block(block)
     .row_highlight_style(selection_style())
     .highlight_symbol("> ");
     let mut table_state = TableState::default().with_selected(Some(state.current.selected));
     frame.render_stateful_widget(table, area, &mut table_state);
+}
+
+fn table_title(state: &AppState, title: &str) -> Line<'static> {
+    let title = title.trim();
+    let text = state.current.page.map_or_else(
+        || format!(" {title} "),
+        |page| {
+            format!(
+                " {title} · Page {} · rows {}–{} ",
+                page.page_number(),
+                page.first_row(),
+                page.last_row()
+            )
+        },
+    );
+    Line::from(text)
+}
+
+pub(super) fn table_header(state: &AppState, labels: [&'static str; 3]) -> TableRow<'static> {
+    let columns = [SortColumn::Type, SortColumn::Name, SortColumn::Details];
+    TableRow::new(labels.into_iter().zip(columns).map(|(label, column)| {
+        let active = state.current.sort == Some(column);
+        let text = if active {
+            format!("{label} ↑")
+        } else {
+            label.to_string()
+        };
+        let style = Style::default().add_modifier(Modifier::BOLD).fg(if active {
+            Color::Cyan
+        } else {
+            Color::Reset
+        });
+        Cell::from(text).style(style)
+    }))
 }
 
 fn table_row(row: &Row) -> Option<TableRow<'static>> {
@@ -192,7 +239,8 @@ fn table_row(row: &Row) -> Option<TableRow<'static>> {
             related.via.as_ref(),
         )),
         Row::Aws(row) => Some(aws::table_row(row)),
-        Row::Browse(_) | Row::AwsRoot | Row::Relation(_) => None,
+        Row::AwsFinding(finding) => Some(aws::finding_row(finding)),
+        Row::AwsHost(_) | Row::Browse(_) | Row::AwsRoot | Row::Relation(_) => None,
     }
 }
 
@@ -201,20 +249,20 @@ fn summary_row(
     role: Option<&str>,
     via: Option<&ResourceSummary>,
 ) -> TableRow<'static> {
-    let mut context = resource.context.clone().unwrap_or_default();
+    let mut context = terminal_text(resource.context.as_deref().unwrap_or(""));
     if let Some(role) = role {
         if !context.is_empty() {
             context.push_str(" · ");
         }
         context.push_str("role: ");
-        context.push_str(role);
+        context.push_str(&terminal_text(role));
     }
     if let Some(via) = via {
         if !context.is_empty() {
             context.push_str(" · ");
         }
         context.push_str("via ");
-        context.push_str(&via.label);
+        context.push_str(&terminal_text(&via.label));
     }
     TableRow::new([
         Cell::from(resource.kind.singular().to_ascii_uppercase()).style(
@@ -222,13 +270,13 @@ fn summary_row(
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Cell::from(resource.label.clone()),
+        Cell::from(terminal_text(&resource.label)),
         Cell::from(details_line(context)),
     ])
 }
 
 pub(super) fn details_line(details: String) -> Line<'static> {
-    Line::from(status_spans(details))
+    Line::from(status_spans(terminal_text(&details)))
 }
 
 fn status_spans(value: String) -> Vec<Span<'static>> {
@@ -257,7 +305,10 @@ fn render_resource(
         .iter()
         .filter(|field| !matches!(field.label, "Name" | "Username" | "State" | "Status"))
         .collect::<Vec<_>>();
-    let detail_height = (visible_fields.len() as u16 + 4).min(area.height.saturating_sub(4));
+    let field_lines = u16::try_from(visible_fields.len()).unwrap_or(u16::MAX);
+    let detail_height = field_lines
+        .saturating_add(4)
+        .min(area.height.saturating_sub(4));
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(detail_height), Constraint::Min(4)])
@@ -266,7 +317,7 @@ fn render_resource(
     let mut lines = vec![Line::from(vec![
         Span::styled("ID: ", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(
-            resource.id.to_string(),
+            terminal_text(&resource.id.to_string()),
             Style::default().fg(Color::DarkGray),
         ),
     ])];
@@ -274,7 +325,7 @@ fn render_resource(
     lines.extend(visible_fields.into_iter().map(|field| {
         detail_line(
             field.label,
-            truncate_detail_value(field.label, &field.value, detail_width),
+            truncate_detail_value(field.label, &terminal_text(&field.value), detail_width),
         )
     }));
     frame.render_widget(
@@ -324,7 +375,10 @@ pub(super) fn detail_line(label: &'static str, value: String) -> Line<'static> {
         [label, ": "].concat(),
         Style::default().add_modifier(Modifier::BOLD),
     )];
-    if matches!(label, "Credit state" | "Subscription status" | "DNS") {
+    if matches!(
+        label,
+        "Credit state" | "Subscription status" | "BYOC state" | "DNS" | "Level"
+    ) {
         spans.extend(status_spans(value));
     } else {
         spans.push(Span::styled(value, value_style));
@@ -361,11 +415,7 @@ fn truncate_detail_value(label: &str, value: &str, line_width: usize) -> String 
 }
 
 fn resource_title(resource: &crate::model::Resource) -> Line<'static> {
-    let status = resource
-        .fields
-        .iter()
-        .find(|field| matches!(field.label, "State" | "Status"))
-        .map(|field| field.value.as_str());
+    let status = resource.status();
     let mut spans = vec![
         Span::raw(" "),
         Span::styled(
@@ -376,14 +426,14 @@ fn resource_title(resource: &crate::model::Resource) -> Line<'static> {
         ),
         Span::raw(" · "),
         Span::styled(
-            resource.label.clone(),
+            terminal_text(&resource.label),
             Style::default().add_modifier(Modifier::BOLD),
         ),
     ];
     if let Some(status) = status {
         spans.push(Span::raw(" · "));
         spans.push(Span::styled(
-            status.to_ascii_uppercase(),
+            terminal_text(&status.to_ascii_uppercase()),
             status_style(status),
         ));
     }
@@ -391,10 +441,9 @@ fn resource_title(resource: &crate::model::Resource) -> Line<'static> {
     Line::from(spans)
 }
 
-fn selection_style() -> Style {
+pub(super) fn selection_style() -> Style {
     Style::default()
-        .fg(Color::Black)
-        .bg(Color::Cyan)
+        .bg(Color::Rgb(36, 40, 52))
         .add_modifier(Modifier::BOLD)
 }
 
@@ -405,50 +454,47 @@ pub(super) fn status_style(value: &str) -> Style {
         .unwrap_or("")
         .to_ascii_lowercase();
     let color = match token.as_str() {
-        "active" | "running" | "ready" | "validated" | "clear" => Some(Color::Green),
-        "pending" | "trialing" | "past_due" | "paused" | "stopped" | "terminating" | "reserved"
-        | "publishing" | "withdrawing" | "warning" | "reminder" | "stale" => Some(Color::Yellow),
-        "inactive" | "failed" | "terminated" | "suspended" | "canceled" | "invalid" => {
-            Some(Color::Red)
-        }
+        "active" | "running" | "ready" | "validated" | "clear" | "complete" => Some(Color::Green),
+        "pending" | "initialized" | "trialing" | "past_due" | "paused" | "stopped"
+        | "terminating" | "reserved" | "publishing" | "withdrawing" | "warning" | "reminder"
+        | "stale" | "partial" => Some(Color::Yellow),
+        "inactive" | "failed" | "terminated" | "suspended" | "canceled" | "invalid"
+        | "critical" => Some(Color::Red),
         _ => None,
     };
     color.map_or_else(Style::default, |color| Style::default().fg(color))
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let (text, style) = if let Some(status) = &state.current.status {
-        (status.clone(), Style::default().fg(Color::Red))
-    } else if state.current.input_mode {
-        (
-            "Type query · Enter search · Esc cancel · Backspace delete".to_string(),
-            Style::default(),
-        )
-    } else {
-        (
-            "↑↓/jk move · Enter open · Bksp back · / search · r refresh · ? help · q quit"
-                .to_string(),
-            Style::default(),
-        )
-    };
-    frame.render_widget(Paragraph::new(text).style(style), area);
-}
+/// Help overlay body. Kept as data so a test can assert each line fits.
+/// Width of the help overlay as a percentage of the terminal width.
+pub(super) const HELP_WIDTH_PERCENT: u16 = 70;
+
+pub(super) const HELP_LINES: &[&str] = &[
+    "This is a read-only development pilot.",
+    "",
+    "/          Search users, organizations, and apps",
+    "↑↓ or j/k  Move selection",
+    "Enter      Open a resource or follow a relationship",
+    "s          Sort by the next table column",
+    "n/PgDn     Next page",
+    "p/PgUp     Previous page",
+    "Backspace  Return to the previous screen",
+    "           (deletes a character while searching)",
+    "r          Refresh the current screen",
+    "q          Quit",
+    "",
+    "Press ?, Esc, or Enter to close this help.",
+];
 
 fn render_help(frame: &mut Frame<'_>) {
-    let area = centered_rect(70, 60, frame.area());
+    let area = centered_rect(HELP_WIDTH_PERCENT, 60, frame.area());
     frame.render_widget(Clear, area);
-    let help = Paragraph::new(vec![
-        Line::from("This is a read-only development pilot."),
-        Line::from(""),
-        Line::from("/          Search users, organizations, and apps"),
-        Line::from("↑↓ or j/k  Move selection"),
-        Line::from("Enter      Open a resource or follow a relationship"),
-        Line::from("Backspace  Return to the exact previous screen"),
-        Line::from("r          Refresh the current screen"),
-        Line::from("q          Quit"),
-        Line::from(""),
-        Line::from("Press ?, Esc, or Enter to close this help."),
-    ])
+    let help = Paragraph::new(
+        HELP_LINES
+            .iter()
+            .map(|line| Line::from(*line))
+            .collect::<Vec<_>>(),
+    )
     .block(
         Block::default()
             .borders(Borders::ALL)

@@ -27,7 +27,8 @@ pub(crate) struct CostSnapshot {
     pub forecast_micros: Option<i64>,
     pub currency: String,
     pub services: Vec<CostLine>,
-    pub attribution: Vec<CostLine>,
+    pub managed_by: Vec<CostLine>,
+    pub organizations: Vec<CostLine>,
     pub issues: Vec<String>,
     pub first_day: bool,
 }
@@ -74,9 +75,10 @@ pub(crate) async fn fetch_costs(client: &Client, today: NaiveDate) -> CostSnapsh
             Err(error) => snapshot.issues.push(cost_issue("forecast", &error)),
         }
     } else {
-        let (services, attribution, forecast) = tokio::join!(
+        let (services, managed_by, organizations, forecast) = tokio::join!(
             fetch_service_costs(client, window),
-            fetch_attributed_costs(client, window),
+            fetch_tag_costs(client, window, "ManagedBy"),
+            fetch_tag_costs(client, window, "org_id"),
             fetch_forecast(client, window),
         );
         match services {
@@ -89,9 +91,17 @@ pub(crate) async fn fetch_costs(client: &Client, today: NaiveDate) -> CostSnapsh
             }
             Err(error) => snapshot.issues.push(cost_issue("service costs", &error)),
         }
-        match attribution {
-            Ok(lines) => snapshot.attribution = lines,
-            Err(error) => snapshot.issues.push(cost_issue("tag attribution", &error)),
+        match managed_by {
+            Ok(lines) => snapshot.managed_by = lines,
+            Err(error) => snapshot
+                .issues
+                .push(cost_issue("ManagedBy attribution", &error)),
+        }
+        match organizations {
+            Ok(lines) => snapshot.organizations = lines,
+            Err(error) => snapshot
+                .issues
+                .push(cost_issue("org_id attribution", &error)),
         }
         match forecast {
             Ok(forecast) => snapshot.forecast_micros = Some(forecast),
@@ -167,21 +177,18 @@ struct FetchServiceCostsError {
     source: BoxError,
 }
 
-async fn fetch_attributed_costs(
+async fn fetch_tag_costs(
     client: &Client,
     window: CostWindow,
-) -> Result<Vec<CostLine>, FetchAttributedCostsError> {
-    use FetchAttributedCostsErrorCtx as Ctx;
+    tag_key: &str,
+) -> Result<Vec<CostLine>, FetchTagCostsError> {
+    use FetchTagCostsErrorCtx as Ctx;
 
     let interval = interval(window.start, window.today)
-        .with_context(Ctx::new(FetchAttributedCostsStage::BuildInterval))?;
-    let managed = GroupDefinition::builder()
+        .with_context(Ctx::new(tag_key, FetchTagCostsStage::BuildInterval))?;
+    let tag = GroupDefinition::builder()
         .r#type(GroupDefinitionType::Tag)
-        .key("ManagedBy")
-        .build();
-    let organization = GroupDefinition::builder()
-        .r#type(GroupDefinitionType::Tag)
-        .key("org_id")
+        .key(tag_key)
         .build();
     let mut token = None;
     let mut lines = Vec::new();
@@ -192,24 +199,21 @@ async fn fetch_attributed_costs(
                 .get_cost_and_usage()
                 .time_period(interval.clone())
                 .granularity(Granularity::Monthly)
-                .group_by(managed.clone())
-                .group_by(organization.clone())
+                .group_by(tag.clone())
                 .metrics(METRIC)
                 .set_next_page_token(token)
                 .send(),
         )
         .await
-        .with_context(Ctx::new(FetchAttributedCostsStage::Request))?
-        .with_context(Ctx::new(FetchAttributedCostsStage::Request))?;
+        .with_context(Ctx::new(tag_key, FetchTagCostsStage::Request))?
+        .with_context(Ctx::new(tag_key, FetchTagCostsStage::Request))?;
         for result in result.results_by_time() {
             for group in result.groups() {
-                let managed = group.keys().first().map_or("", String::as_str);
-                let organization = group.keys().get(1).map_or("", String::as_str);
-                let name = attribution_name(managed, organization);
+                let name = attribution_name(group.keys().first().map_or("", String::as_str));
                 if let Some(metric) = group.metrics().and_then(|metrics| metrics.get(METRIC)) {
                     lines.push(
                         cost_line(&name, metric)
-                            .with_context(Ctx::new(FetchAttributedCostsStage::Decode))?,
+                            .with_context(Ctx::new(tag_key, FetchTagCostsStage::Decode))?,
                     );
                 }
             }
@@ -224,16 +228,18 @@ async fn fetch_attributed_costs(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FetchAttributedCostsStage {
+enum FetchTagCostsStage {
     BuildInterval,
     Request,
     Decode,
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to load attributed AWS costs while {stage:?} [{location:?}]")]
-struct FetchAttributedCostsError {
-    stage: FetchAttributedCostsStage,
+#[error("failed to load AWS costs attributed by {tag_key} while {stage:?} [{location:?}]")]
+struct FetchTagCostsError {
+    #[context(borrow = str)]
+    tag_key: String,
+    stage: FetchTagCostsStage,
     #[location]
     location: Location,
     #[source]
@@ -370,21 +376,12 @@ enum ParseMicrosError {
     },
 }
 
-fn attribution_name(managed: &str, organization: &str) -> String {
-    let managed = tag_value(managed);
-    let organization = tag_value(organization);
-    if managed.is_empty() && organization.is_empty() {
+fn attribution_name(value: &str) -> String {
+    let value = tag_value(value);
+    if value.is_empty() {
         "Unattributed".to_string()
     } else {
-        format!(
-            "{} · {}",
-            if managed.is_empty() { "other" } else { managed },
-            if organization.is_empty() {
-                "no organization"
-            } else {
-                organization
-            }
-        )
+        value.to_string()
     }
 }
 
@@ -445,11 +442,8 @@ mod tests {
 
     #[test]
     fn attribution_preserves_untagged_cost() {
-        assert_eq!(attribution_name("ManagedBy$", "org_id$"), "Unattributed");
-        assert_eq!(
-            attribution_name("ManagedBy$caution+tofu", "org_id$abc"),
-            "caution+tofu · abc"
-        );
+        assert_eq!(attribution_name("ManagedBy$"), "Unattributed");
+        assert_eq!(attribution_name("ManagedBy$caution+tofu"), "caution+tofu");
     }
 
     #[test]

@@ -209,9 +209,17 @@ impl Resource {
             context: self
                 .fields
                 .iter()
-                .find(|field| matches!(field.label, "Email" | "State" | "Status"))
-                .map(|field| field.value.clone()),
+                .find(|field| field.label == "Email")
+                .map(|field| field.value.clone())
+                .or_else(|| self.status().map(str::to_string)),
         }
+    }
+
+    pub fn status(&self) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|field| matches!(field.label, "State" | "Status"))
+            .map(|field| field.value.as_str())
     }
 }
 
@@ -229,6 +237,13 @@ pub struct RelatedResource {
 pub struct RelationSummary {
     pub relation: Relation,
     pub count: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SortColumn {
+    Type,
+    Name,
+    Details,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -260,7 +275,9 @@ pub fn timestamp(value: DateTime<Utc>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Relation, ResourceKind};
+    use uuid::Uuid;
+
+    use super::{Field, Relation, Resource, ResourceKind};
 
     #[test]
     fn resource_kind_accepts_product_and_plural_names() {
@@ -291,6 +308,22 @@ mod tests {
                     .iter()
                     .all(|relation| relation.source_kind() == kind)
             );
+        }
+    }
+
+    #[test]
+    fn resource_status_accepts_state_and_status_fields() {
+        for label in ["State", "Status"] {
+            let resource = Resource {
+                kind: ResourceKind::App,
+                id: Uuid::nil(),
+                label: "api".to_string(),
+                fields: vec![Field {
+                    label,
+                    value: "running".to_string(),
+                }],
+            };
+            assert_eq!(resource.status(), Some("running"));
         }
     }
 }

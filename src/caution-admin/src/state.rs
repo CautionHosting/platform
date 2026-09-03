@@ -1,16 +1,26 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use crate::aws::{AwsDisplayRow, AwsOverviewMetadata, AwsSection, AwsSnapshot};
+use crate::aws::{
+    AwsDisplayRow, AwsFinding, AwsHost, AwsOverviewMetadata, AwsSection, AwsSnapshot,
+    is_cost_summary,
+};
 use crate::model::{
     Page, RelatedResource, Relation, RelationSummary, Resource, ResourceKind, ResourceSummary,
+    SortColumn,
 };
+
+mod table;
+
+pub use table::PageState;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Screen {
     Home,
     AwsOverview(AwsOverviewMetadata),
     AwsSection(AwsSection),
+    AwsFinding(AwsFinding),
+    AwsHost(Box<AwsHost>),
     Search {
         query: String,
         kind: Option<ResourceKind>,
@@ -23,42 +33,13 @@ pub enum Screen {
 }
 
 impl Screen {
-    pub fn title(&self) -> String {
-        match self {
-            Self::Home => "Find anything".to_string(),
-            Self::AwsOverview(_) => "AWS Overview".to_string(),
-            Self::AwsSection(section) => section.label().to_string(),
-            Self::Search {
-                query,
-                kind: Some(kind),
-            } => {
-                let mut title = kind.plural().to_string();
-                if !query.is_empty() {
-                    title.push_str(" matching ");
-                    title.push_str(query);
-                }
-                title
-            }
-            Self::Search { query, kind: None } => {
-                let mut title = "Search: ".to_string();
-                title.push_str(query);
-                title
-            }
-            Self::Resource(resource) => resource.label.clone(),
-            Self::Related { source, relation } => {
-                let mut title = source.label.clone();
-                title.push_str(" › ");
-                title.push_str(relation.label());
-                title
-            }
-        }
-    }
-
     fn breadcrumb(&self) -> Option<String> {
         match self {
             Self::Home => None,
             Self::AwsOverview(_) => Some("AWS".to_string()),
             Self::AwsSection(section) => Some(section.label().to_string()),
+            Self::AwsFinding(finding) => Some(finding.kind.label().to_string()),
+            Self::AwsHost(host) => Some(format!("Host {}", host.instance.instance_id)),
             Self::Search {
                 query,
                 kind: Some(kind),
@@ -82,23 +63,33 @@ pub enum Row {
     Browse(ResourceKind),
     AwsRoot,
     Aws(AwsDisplayRow),
+    AwsFinding(AwsFinding),
+    AwsHost(Box<AwsHost>),
     Resource(ResourceSummary),
     Relation(RelationSummary),
     Related(RelatedResource),
 }
 
 impl Row {
-    pub fn resource_summary(&self) -> Option<&ResourceSummary> {
-        match self {
-            Self::Resource(resource) => Some(resource),
-            Self::Related(resource) => Some(&resource.resource),
-            Self::Aws(resource) => match &resource.action {
-                crate::aws::AwsAction::Resource(resource) => Some(resource),
-                crate::aws::AwsAction::None | crate::aws::AwsAction::Section(_) => None,
-            },
-            Self::Browse(_) | Self::AwsRoot | Self::Relation(_) => None,
+    fn same_identity(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::AwsFinding(left), Self::AwsFinding(right)) => left.key() == right.key(),
+            _ => self == other,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StatusLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StatusMessage {
+    pub level: StatusLevel,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -108,7 +99,9 @@ pub struct Snapshot {
     pub selected: usize,
     pub query: String,
     pub input_mode: bool,
-    pub status: Option<String>,
+    pub status: Option<StatusMessage>,
+    pub page: Option<PageState>,
+    pub sort: Option<SortColumn>,
 }
 
 impl Snapshot {
@@ -125,6 +118,8 @@ impl Snapshot {
             query: String::new(),
             input_mode: false,
             status: None,
+            page: None,
+            sort: None,
         }
     }
 }
@@ -215,6 +210,13 @@ impl AppState {
     }
 
     pub fn cancel_input(&mut self) {
+        if matches!(self.current.screen, Screen::Home)
+            && self.current.input_mode
+            && !self.history.is_empty()
+        {
+            self.back();
+            return;
+        }
         self.current.query.clear();
         self.current.input_mode = false;
     }
@@ -223,18 +225,21 @@ impl AppState {
         &mut self,
         query: String,
         kind: Option<ResourceKind>,
-        resources: Vec<ResourceSummary>,
+        page: Page<ResourceSummary>,
     ) {
+        let page_state = PageState::from_page(&page);
         self.push(Snapshot {
             screen: Screen::Search {
                 query: query.clone(),
                 kind,
             },
-            rows: resources.into_iter().map(Row::Resource).collect(),
+            rows: page.items.into_iter().map(Row::Resource).collect(),
             selected: 0,
             query,
             input_mode: false,
             status: None,
+            page: Some(page_state),
+            sort: Some(SortColumn::Details),
         });
     }
 
@@ -246,6 +251,8 @@ impl AppState {
             query: String::new(),
             input_mode: false,
             status: None,
+            page: None,
+            sort: None,
         });
     }
 
@@ -255,16 +262,16 @@ impl AppState {
         relation: Relation,
         page: Page<RelatedResource>,
     ) {
-        let status = page.has_more.then(|| {
-            "Showing the first 50 results; use headless commands for pagination".to_string()
-        });
+        let page_state = PageState::from_page(&page);
         self.push(Snapshot {
             screen: Screen::Related { source, relation },
             rows: page.items.into_iter().map(Row::Related).collect(),
             selected: 0,
             query: String::new(),
             input_mode: false,
-            status,
+            status: None,
+            page: Some(page_state),
+            sort: Some(SortColumn::Details),
         });
     }
 
@@ -279,6 +286,8 @@ impl AppState {
             query: String::new(),
             input_mode: false,
             status: None,
+            page: None,
+            sort: None,
         });
     }
 
@@ -286,46 +295,158 @@ impl AppState {
         let rows = self
             .aws_cache
             .as_ref()
-            .map(|snapshot| snapshot.rows(section))
-            .unwrap_or_default()
-            .into_iter()
-            .map(Row::Aws)
-            .collect();
-        self.push(Snapshot {
+            .map_or_else(Vec::new, |snapshot| aws_section_rows(snapshot, section));
+        let sort = aws_section_sort(section);
+        let mut next = Snapshot {
             screen: Screen::AwsSection(section),
             rows,
             selected: 0,
             query: String::new(),
             input_mode: false,
             status: None,
+            page: None,
+            sort,
+        };
+        if let Some(sort) = sort {
+            next.sort_rows(sort);
+        }
+        self.push(next);
+    }
+
+    pub fn open_aws_finding(&mut self, finding: AwsFinding) {
+        let rows = self.finding_rows(&finding);
+        self.push(Snapshot {
+            screen: Screen::AwsFinding(finding),
+            rows,
+            selected: 0,
+            query: String::new(),
+            input_mode: false,
+            status: None,
+            page: None,
+            sort: None,
         });
+    }
+
+    pub fn open_aws_host(&mut self, host: AwsHost) {
+        let rows = host
+            .platform
+            .as_ref()
+            .map(|platform| vec![Row::Resource(platform.resource.clone())])
+            .unwrap_or_default();
+        self.push(Snapshot {
+            screen: Screen::AwsHost(Box::new(host)),
+            rows,
+            selected: 0,
+            query: String::new(),
+            input_mode: false,
+            status: None,
+            page: None,
+            sort: None,
+        });
+    }
+
+    pub fn aws_host(&self, instance_id: &str) -> Option<AwsHost> {
+        self.aws_cache
+            .as_ref()?
+            .hosts
+            .iter()
+            .find(|host| host.instance.instance_id == instance_id)
+            .cloned()
     }
 
     pub fn replace_aws(&mut self, snapshot: AwsSnapshot) {
         let overview = matches!(&self.current.screen, Screen::AwsOverview(_));
+        let selected = self.selected_row().cloned();
+        self.current.status = None;
         let rows = match &self.current.screen {
-            Screen::AwsOverview(_) => snapshot.overview.clone(),
-            Screen::AwsSection(section) => snapshot.rows(*section),
+            Screen::AwsOverview(_) => snapshot.overview.iter().cloned().map(Row::Aws).collect(),
+            Screen::AwsSection(section) => aws_section_rows(&snapshot, *section),
+            Screen::AwsFinding(current) => {
+                let key = current.key();
+                if let Some(finding) = snapshot
+                    .findings
+                    .iter()
+                    .find(|finding| finding.key() == key)
+                {
+                    self.current.screen = Screen::AwsFinding(finding.clone());
+                    finding_rows(&snapshot, finding)
+                } else {
+                    self.current.screen = Screen::AwsSection(AwsSection::Findings);
+                    self.current.status = Some(StatusMessage {
+                        level: StatusLevel::Info,
+                        text: "Finding cleared by refresh".to_string(),
+                    });
+                    snapshot
+                        .findings
+                        .iter()
+                        .cloned()
+                        .map(Row::AwsFinding)
+                        .collect()
+                }
+            }
+            Screen::AwsHost(current) => {
+                if let Some(host) = snapshot
+                    .hosts
+                    .iter()
+                    .find(|host| host.instance.instance_id == current.instance.instance_id)
+                {
+                    self.current.screen = Screen::AwsHost(Box::new(host.clone()));
+                    host.platform
+                        .as_ref()
+                        .map(|platform| vec![Row::Resource(platform.resource.clone())])
+                        .unwrap_or_default()
+                } else {
+                    self.current.screen = Screen::AwsSection(AwsSection::AppHosts);
+                    self.current.status = Some(StatusMessage {
+                        level: StatusLevel::Info,
+                        text: "AWS host no longer present".to_string(),
+                    });
+                    snapshot.app_hosts.iter().cloned().map(Row::Aws).collect()
+                }
+            }
             _ => Vec::new(),
         };
         if overview {
             self.current.screen = Screen::AwsOverview(snapshot.metadata.clone());
         }
+        if self.current.sort.is_none() {
+            self.current.sort = match self.current.screen {
+                Screen::AwsSection(section) => aws_section_sort(section),
+                _ => None,
+            };
+        }
         self.aws_cache = Some(snapshot);
-        self.current.rows = rows.into_iter().map(Row::Aws).collect();
-        self.current.selected = self
-            .current
-            .selected
-            .min(self.current.rows.len().saturating_sub(1));
-        self.current.status = None;
+        self.current.rows = rows;
+        self.current.selected = selected
+            .as_ref()
+            .and_then(|selected| {
+                self.current
+                    .rows
+                    .iter()
+                    .position(|row| row.same_identity(selected))
+            })
+            .unwrap_or(0);
+        if let Some(sort) = self.current.sort {
+            self.current.sort_rows(sort);
+        }
     }
 
-    pub fn replace_resources(&mut self, resources: Vec<ResourceSummary>) {
-        self.current.rows = resources.into_iter().map(Row::Resource).collect();
-        self.current.selected = self
-            .current
-            .selected
-            .min(self.current.rows.len().saturating_sub(1));
+    pub fn replace_resources(
+        &mut self,
+        page: Page<ResourceSummary>,
+        sort: SortColumn,
+        reset_selection: bool,
+    ) {
+        self.current.page = Some(PageState::from_page(&page));
+        self.current.sort = Some(sort);
+        self.current.rows = page.items.into_iter().map(Row::Resource).collect();
+        self.current.selected = if reset_selection {
+            0
+        } else {
+            self.current
+                .selected
+                .min(self.current.rows.len().saturating_sub(1))
+        };
         self.current.status = None;
     }
 
@@ -339,15 +460,23 @@ impl AppState {
         self.current.status = None;
     }
 
-    pub fn replace_related(&mut self, page: Page<RelatedResource>) {
+    pub fn replace_related(
+        &mut self,
+        page: Page<RelatedResource>,
+        sort: SortColumn,
+        reset_selection: bool,
+    ) {
+        self.current.page = Some(PageState::from_page(&page));
+        self.current.sort = Some(sort);
         self.current.rows = page.items.into_iter().map(Row::Related).collect();
-        self.current.selected = self
-            .current
-            .selected
-            .min(self.current.rows.len().saturating_sub(1));
-        self.current.status = page.has_more.then(|| {
-            "Showing the first 50 results; use headless commands for pagination".to_string()
-        });
+        self.current.selected = if reset_selection {
+            0
+        } else {
+            self.current
+                .selected
+                .min(self.current.rows.len().saturating_sub(1))
+        };
+        self.current.status = None;
     }
 
     pub fn back(&mut self) -> bool {
@@ -359,7 +488,36 @@ impl AppState {
     }
 
     pub fn set_status(&mut self, status: impl Into<String>) {
-        self.current.status = Some(status.into());
+        self.set_status_level(StatusLevel::Info, status);
+    }
+
+    pub fn set_warning(&mut self, status: impl Into<String>) {
+        self.set_status_level(StatusLevel::Warning, status);
+    }
+
+    pub fn set_error(&mut self, status: impl Into<String>) {
+        self.set_status_level(StatusLevel::Error, status);
+    }
+
+    fn set_status_level(&mut self, level: StatusLevel, status: impl Into<String>) {
+        self.current.status = Some(StatusMessage {
+            level,
+            text: status.into(),
+        });
+    }
+
+    fn finding_rows(&self, finding: &AwsFinding) -> Vec<Row> {
+        self.aws_cache.as_ref().map_or_else(
+            || {
+                finding
+                    .resources
+                    .iter()
+                    .cloned()
+                    .map(Row::Resource)
+                    .collect()
+            },
+            |snapshot| finding_rows(snapshot, finding),
+        )
     }
 
     fn push(&mut self, next: Snapshot) {
@@ -368,134 +526,50 @@ impl AppState {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use uuid::Uuid;
+fn aws_section_rows(snapshot: &AwsSnapshot, section: AwsSection) -> Vec<Row> {
+    if section == AwsSection::Findings {
+        return snapshot
+            .findings
+            .iter()
+            .cloned()
+            .map(Row::AwsFinding)
+            .collect();
+    }
+    snapshot
+        .rows(section)
+        .into_iter()
+        .filter(|row| section != AwsSection::Costs || !is_cost_summary(row))
+        .map(Row::Aws)
+        .collect()
+}
 
-    use super::{AppState, Row, Screen};
-    use crate::model::{
-        Field, Page, RelatedResource, Relation, RelationSummary, Resource, ResourceKind,
-        ResourceSummary,
-    };
-
-    fn summary(label: &str) -> ResourceSummary {
-        ResourceSummary {
-            kind: ResourceKind::User,
-            id: Uuid::nil(),
-            label: label.to_string(),
-            context: None,
+const fn aws_section_sort(section: AwsSection) -> Option<SortColumn> {
+    match section {
+        AwsSection::Findings => Some(SortColumn::Type),
+        AwsSection::AppHosts | AwsSection::Builders | AwsSection::Storage | AwsSection::Byoc => {
+            Some(SortColumn::Details)
         }
-    }
-
-    fn resource(kind: ResourceKind, label: &str) -> Resource {
-        Resource {
-            kind,
-            id: Uuid::nil(),
-            label: label.to_string(),
-            fields: vec![Field {
-                label: "Status",
-                value: "active".to_string(),
-            }],
-        }
-    }
-
-    #[test]
-    fn back_restores_query_rows_and_selection() {
-        let mut state = AppState::new();
-        state.current.query = "alice".to_string();
-        state.current.selected = 2;
-        let previous = state.current.clone();
-
-        state.open_search("alice".to_string(), None, vec![summary("alice")]);
-        assert!(matches!(state.current.screen, Screen::Search { .. }));
-        assert!(state.back());
-        assert_eq!(state.current, previous);
-    }
-
-    #[test]
-    fn selection_is_clamped_at_both_ends() {
-        let mut state = AppState::new();
-        state.select_previous();
-        assert_eq!(state.current.selected, 0);
-        for _ in 0..10 {
-            state.select_next();
-        }
-        assert_eq!(state.current.selected, 3);
-    }
-
-    #[test]
-    fn query_editing_is_limited_to_input_mode() {
-        let mut state = AppState::new();
-        state.begin_search();
-        state.insert_query_char('a');
-        assert_eq!(state.current.query, "a");
-        state.open_search("alice".to_string(), None, vec![summary("alice")]);
-        state.insert_query_char('b');
-        assert_eq!(state.current.query, "alice");
-    }
-
-    #[test]
-    fn home_contains_resource_roots_and_aws() {
-        let state = AppState::new();
-        assert_eq!(state.current.rows.len(), 4);
-        assert!(
-            state
-                .current
-                .rows
-                .iter()
-                .take(3)
-                .all(|row| matches!(row, Row::Browse(_)))
-        );
-        assert!(matches!(state.current.rows.last(), Some(Row::AwsRoot)));
-    }
-
-    #[test]
-    fn breadcrumbs_follow_the_opened_relationship_path_and_back() {
-        let mut state = AppState::new();
-        let user = resource(ResourceKind::User, "alice");
-        let app = resource(ResourceKind::App, "api");
-
-        state.open_search("alice".to_string(), None, vec![user.summary()]);
-        state.open_resource(
-            user.clone(),
-            vec![RelationSummary {
-                relation: Relation::UserApps,
-                count: 1,
-            }],
-        );
-        state.open_related(
-            user,
-            Relation::UserApps,
-            Page {
-                items: vec![RelatedResource {
-                    resource: app.summary(),
-                    role: Some("owner".to_string()),
-                    via: None,
-                }],
-                offset: 0,
-                limit: 50,
-                has_more: false,
-            },
-        );
-        state.open_resource(app, Vec::new());
-
-        assert_eq!(
-            state.breadcrumbs(),
-            [
-                "Search \u{201c}alice\u{201d}",
-                "User alice",
-                "Apps via organizations",
-                "App api",
-            ]
-        );
-        assert!(state.back());
-        assert_eq!(
-            state.breadcrumbs(),
-            [
-                "Search \u{201c}alice\u{201d}",
-                "User alice",
-                "Apps via organizations",
-            ]
-        );
+        AwsSection::Costs => None,
     }
 }
+
+fn finding_rows(snapshot: &AwsSnapshot, finding: &AwsFinding) -> Vec<Row> {
+    let mut rows = finding
+        .host_id
+        .as_deref()
+        .and_then(|id| {
+            snapshot
+                .hosts
+                .iter()
+                .find(|host| host.instance.instance_id == id)
+        })
+        .cloned()
+        .map(|host| Row::AwsHost(Box::new(host)))
+        .into_iter()
+        .collect::<Vec<_>>();
+    rows.extend(finding.resources.iter().cloned().map(Row::Resource));
+    rows
+}
+
+#[cfg(test)]
+mod tests;

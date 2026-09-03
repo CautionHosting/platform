@@ -5,9 +5,10 @@ use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-use crate::model::{Page, Resource, ResourceKind, ResourceRef, ResourceSummary};
+use crate::model::{Page, Resource, ResourceKind, ResourceRef, ResourceSummary, SortColumn};
 
 pub(crate) mod aws;
+mod order;
 mod relations;
 mod rows;
 
@@ -15,10 +16,9 @@ pub use relations::{
     FollowError, FollowErrorCtx, RelationSummariesError, RelationSummariesErrorCtx,
 };
 use rows::{AppRow, OrganizationRow, SummaryRow, UserRow};
-pub(crate) use rows::{billing_source, byoc_capacity, pending_change, status, tier_name};
+pub(crate) use rows::{billing_source, byoc_capacity, byoc_state, pending_change, tier_name};
 
 const MAX_PAGE_SIZE: u32 = 200;
-const SEARCH_LIMIT: i64 = 50;
 
 #[derive(Clone)]
 pub struct Database {
@@ -26,6 +26,57 @@ pub struct Database {
 }
 
 impl Database {
+    /// The resource search query.
+    ///
+    /// A raw string literal on purpose: `ESCAPE '\'` written in a normal Rust
+    /// literal is an escaped quote, so PostgreSQL would receive `ESCAPE ''`
+    /// and every wildcard escape would silently stop working.
+    const SEARCH_SQL: &'static str = r"SELECT kind, id, label, context
+             FROM (
+                 SELECT 'user'::text AS kind,
+                        u.id,
+                        u.username::text AS label,
+                        (CASE WHEN u.is_active THEN 'active' ELSE 'inactive' END ||
+                         ' · ' || COALESCE(u.email, 'no email'))::text AS context,
+                        CASE WHEN u.is_active THEN 0 ELSE 1 END AS status_rank,
+                        u.created_at
+                 FROM users u
+                 WHERE u.username ILIKE $1 ESCAPE '\'
+                    OR u.email ILIKE $1 ESCAPE '\'
+                    OR u.id::text = $2
+                 UNION ALL
+                 SELECT 'organization'::text AS kind,
+                        o.id,
+                        o.name::text AS label,
+                        (CASE WHEN o.is_active THEN 'active' ELSE 'inactive' END ||
+                         ' · ' ||
+                         (SELECT COUNT(*) FROM compute_resources cr WHERE cr.organization_id = o.id)::text ||
+                         ' apps')::text AS context,
+                        CASE WHEN o.is_active THEN 0 ELSE 1 END AS status_rank,
+                        o.created_at
+                 FROM organizations o
+                 WHERE o.name ILIKE $1 ESCAPE '\' OR o.id::text = $2
+                 UNION ALL
+                 SELECT 'app'::text AS kind,
+                        cr.id,
+                        COALESCE(cr.resource_name, '(unnamed app)')::text AS label,
+                        (cr.state::text || ' · ' || o.name)::text AS context,
+                        CASE cr.state::text
+                            WHEN 'running' THEN 0
+                            WHEN 'pending' THEN 1
+                            WHEN 'initialized' THEN 2
+                            WHEN 'stopped' THEN 3
+                            WHEN 'terminating' THEN 4
+                            WHEN 'failed' THEN 5
+                            WHEN 'terminated' THEN 6
+                            ELSE 7
+                        END AS status_rank,
+                        cr.created_at
+                 FROM compute_resources cr
+                 JOIN organizations o ON o.id = cr.organization_id
+                 WHERE cr.resource_name ILIKE $1 ESCAPE '\' OR cr.id::text = $2
+             ) resources";
+
     pub async fn connect_read_only(database_url: &str) -> Result<Self, ConnectReadOnlyError> {
         use ConnectReadOnlyErrorCtx as Ctx;
 
@@ -64,58 +115,42 @@ impl Database {
         Ok(Self { pool })
     }
 
-    pub async fn search(&self, query: &str) -> Result<Vec<ResourceSummary>, SearchError> {
+    /// Search across users, organizations, and apps.
+    ///
+    /// Returns one globally sorted page of matching resources.
+    pub async fn search(
+        &self,
+        query: &str,
+        offset: u32,
+        limit: u32,
+        sort: Option<SortColumn>,
+    ) -> Result<Page<ResourceSummary>, SearchError> {
         use SearchErrorCtx as Ctx;
 
+        validate_page(limit).with_context(Ctx::new("validating pagination"))?;
         let (pattern, exact) =
             search_parameters(query).with_context(Ctx::new("validating the search query"))?;
+        let sql = format!(
+            "{} ORDER BY {} LIMIT $3 OFFSET $4",
+            Self::SEARCH_SQL,
+            order::search(sort)
+        );
 
-        let rows = sqlx::query_as::<_, SummaryRow>(
-            "SELECT kind, id, label, context
-             FROM (
-                 SELECT 'user'::text AS kind,
-                        u.id,
-                        u.username::text AS label,
-                        (CASE WHEN u.is_active THEN 'active' ELSE 'inactive' END ||
-                         ' · ' || COALESCE(u.email, 'no email'))::text AS context,
-                        u.created_at
-                 FROM users u
-                 WHERE u.username ILIKE $1 OR u.email ILIKE $1 OR u.id::text = $2
-                 UNION ALL
-                 SELECT 'organization'::text AS kind,
-                        o.id,
-                        o.name::text AS label,
-                        (CASE WHEN o.is_active THEN 'active' ELSE 'inactive' END ||
-                         ' · ' ||
-                         (SELECT COUNT(*) FROM compute_resources cr WHERE cr.organization_id = o.id)::text ||
-                         ' apps')::text AS context,
-                        o.created_at
-                 FROM organizations o
-                 WHERE o.name ILIKE $1 OR o.id::text = $2
-                 UNION ALL
-                 SELECT 'app'::text AS kind,
-                        cr.id,
-                        COALESCE(cr.resource_name, '(unnamed app)')::text AS label,
-                        (cr.state::text || ' · ' || o.name)::text AS context,
-                        cr.created_at
-                 FROM compute_resources cr
-                 JOIN organizations o ON o.id = cr.organization_id
-                 WHERE cr.resource_name ILIKE $1 OR cr.id::text = $2
-             ) resources
-             ORDER BY created_at DESC, id
-             LIMIT $3",
-        )
-        .bind(pattern)
-        .bind(exact)
-        .bind(SEARCH_LIMIT)
-        .fetch_all(&self.pool)
-        .await
-        .with_context(Ctx::new("querying PostgreSQL"))?;
+        let rows = sqlx::query_as::<_, SummaryRow>(&sql)
+            .bind(pattern)
+            .bind(exact)
+            .bind(i64::from(limit) + 1)
+            .bind(i64::from(offset))
+            .fetch_all(&self.pool)
+            .await
+            .with_context(Ctx::new("querying PostgreSQL"))?;
 
-        rows.into_iter()
+        let items = rows
+            .into_iter()
             .map(TryInto::try_into)
             .collect::<Result<Vec<_>, _>>()
-            .with_context(Ctx::new("decoding search results"))
+            .with_context(Ctx::new("decoding search results"))?;
+        Ok(Page::from_extra(items, offset, limit))
     }
 
     pub async fn list(
@@ -123,33 +158,36 @@ impl Database {
         kind: ResourceKind,
         offset: u32,
         limit: u32,
+        sort: Option<SortColumn>,
     ) -> Result<Page<ResourceSummary>, ListError> {
         use ListErrorCtx as Ctx;
 
         validate_page(limit).with_context(Ctx::new(kind, "validating pagination"))?;
         let fetch_limit = i64::from(limit) + 1;
         let offset = i64::from(offset);
+        let ordering = order::list(kind, sort);
 
         let rows = match kind {
             ResourceKind::User => {
-                sqlx::query_as::<_, SummaryRow>(
+                let sql = format!(
                     "SELECT 'user'::text AS kind,
                             id,
                             username::text AS label,
                             (CASE WHEN is_active THEN 'active' ELSE 'inactive' END ||
                              ' · ' || COALESCE(email, 'no email'))::text AS context
                      FROM users
-                     ORDER BY created_at DESC, id
-                     LIMIT $1 OFFSET $2",
-                )
-                .bind(fetch_limit)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await
-                .with_context(Ctx::new(kind, "querying PostgreSQL"))?
+                     ORDER BY {ordering}
+                     LIMIT $1 OFFSET $2"
+                );
+                sqlx::query_as::<_, SummaryRow>(&sql)
+                    .bind(fetch_limit)
+                    .bind(offset)
+                    .fetch_all(&self.pool)
+                    .await
+                    .with_context(Ctx::new(kind, "querying PostgreSQL"))?
             }
             ResourceKind::Organization => {
-                sqlx::query_as::<_, SummaryRow>(
+                let sql = format!(
                     "SELECT 'organization'::text AS kind,
                             o.id,
                             o.name::text AS label,
@@ -158,31 +196,33 @@ impl Database {
                              (SELECT COUNT(*) FROM compute_resources cr WHERE cr.organization_id = o.id)::text ||
                              ' apps')::text AS context
                      FROM organizations o
-                     ORDER BY o.created_at DESC, o.id
-                     LIMIT $1 OFFSET $2",
-                )
-                .bind(fetch_limit)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await
-                .with_context(Ctx::new(kind, "querying PostgreSQL"))?
+                     ORDER BY {ordering}
+                     LIMIT $1 OFFSET $2"
+                );
+                sqlx::query_as::<_, SummaryRow>(&sql)
+                    .bind(fetch_limit)
+                    .bind(offset)
+                    .fetch_all(&self.pool)
+                    .await
+                    .with_context(Ctx::new(kind, "querying PostgreSQL"))?
             }
             ResourceKind::App => {
-                sqlx::query_as::<_, SummaryRow>(
+                let sql = format!(
                     "SELECT 'app'::text AS kind,
                             cr.id,
                             COALESCE(cr.resource_name, '(unnamed app)')::text AS label,
                             (cr.state::text || ' · ' || o.name)::text AS context
                      FROM compute_resources cr
                      JOIN organizations o ON o.id = cr.organization_id
-                     ORDER BY cr.created_at DESC, cr.id
-                     LIMIT $1 OFFSET $2",
-                )
-                .bind(fetch_limit)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await
-                .with_context(Ctx::new(kind, "querying PostgreSQL"))?
+                     ORDER BY {ordering}
+                     LIMIT $1 OFFSET $2"
+                );
+                sqlx::query_as::<_, SummaryRow>(&sql)
+                    .bind(fetch_limit)
+                    .bind(offset)
+                    .fetch_all(&self.pool)
+                    .await
+                    .with_context(Ctx::new(kind, "querying PostgreSQL"))?
             }
         };
 
@@ -251,6 +291,8 @@ impl Database {
                     s.tier AS subscription_tier,
                     s.status AS subscription_status,
                     s.billing_source,
+                    s.catalog_valid,
+                    s.enterprise_expires_at,
                     s.max_apps AS subscription_max_apps,
                     s.pending_tier,
                     s.pending_max_apps,
@@ -338,13 +380,27 @@ impl Database {
 fn search_parameters(query: &str) -> Result<(String, String), SearchParametersError> {
     let exact = query.trim().to_string();
     let parsed_uuid = Uuid::parse_str(&exact);
-    if exact.len() < 2 && parsed_uuid.is_err() {
+    if exact.chars().count() < 2 && parsed_uuid.is_err() {
         return Err(SearchParametersError {
             location: std::panic::Location::caller(),
         });
     }
     let canonical = parsed_uuid.map_or_else(|_| exact.clone(), |id| id.to_string());
-    Ok((["%", &exact, "%"].concat(), canonical))
+    Ok((["%", &escape_like(&exact), "%"].concat(), canonical))
+}
+
+/// Escape `LIKE`/`ILIKE` metacharacters so operator input stays a literal
+/// substring match. Without this, the two-character query `%%` becomes the
+/// match-everything pattern `%%%` and returns every user with their email.
+fn escape_like(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 fn validate_page(limit: u32) -> Result<(), ValidatePageError> {
@@ -454,7 +510,7 @@ struct ValidatePageError {
 
 #[cfg(test)]
 mod tests {
-    use super::search_parameters;
+    use super::{Database, search_parameters};
     use crate::model::Page;
 
     #[test]
@@ -467,6 +523,10 @@ mod tests {
             )
         );
         assert!(search_parameters("a").is_err());
+        assert!(
+            search_parameters("é").is_err(),
+            "the minimum length must count characters, not bytes"
+        );
         assert_eq!(
             search_parameters("40000000-0000-0000-0000-0000000000AB").expect("uppercase UUID"),
             (
@@ -479,6 +539,45 @@ mod tests {
             .to_string();
         assert!(message.starts_with("search requires at least two characters or an exact UUID ["));
         assert!(message.contains("src/caution-admin/src/db.rs"));
+    }
+
+    #[test]
+    fn search_patterns_escape_like_wildcards() {
+        // `%%` used to become the match-everything pattern `%%%`, which
+        // returned every user together with their email address.
+        assert_eq!(
+            search_parameters("%%").expect("valid search").0,
+            "%\\%\\%%".to_string()
+        );
+        assert_eq!(
+            search_parameters("a_c").expect("valid search").0,
+            "%a\\_c%".to_string()
+        );
+        assert_eq!(
+            search_parameters("back\\slash").expect("valid search").0,
+            "%back\\\\slash%".to_string()
+        );
+    }
+
+    #[test]
+    fn search_sql_escape_clause_survives_rust_string_escaping() {
+        // `"ESCAPE '\'"` in a normal Rust literal is an escaped quote, so
+        // PostgreSQL receives `ESCAPE ''` and every escape stops working. The
+        // query must be a raw string; assert on the SQL actually sent.
+        let sql = Database::SEARCH_SQL;
+        assert!(
+            sql.contains("ESCAPE '\\'"),
+            "the ESCAPE clause must reach SQL as a single backslash"
+        );
+        assert!(
+            !sql.contains("ESCAPE ''"),
+            "an empty ESCAPE clause silently disables wildcard escaping"
+        );
+        assert_eq!(
+            sql.matches("ILIKE $1").count(),
+            sql.matches("ILIKE $1 ESCAPE").count(),
+            "every ILIKE must carry the ESCAPE clause"
+        );
     }
 
     #[test]

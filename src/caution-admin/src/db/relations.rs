@@ -5,9 +5,10 @@ use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use sqlx::FromRow;
 use uuid::Uuid;
 
-use super::{Database, validate_page};
+use super::{Database, order, validate_page};
 use crate::model::{
     Page, RelatedResource, Relation, RelationSummary, ResourceKind, ResourceRef, ResourceSummary,
+    SortColumn,
 };
 
 impl Database {
@@ -17,9 +18,9 @@ impl Database {
     ) -> Result<Vec<RelationSummary>, RelationSummariesError> {
         use RelationSummariesErrorCtx as Ctx;
 
-        let counts: (i64, i64) = match reference.kind {
+        let counts = match reference.kind {
             ResourceKind::User => {
-                sqlx::query_as(
+                let (organizations, apps): (i64, i64) = sqlx::query_as(
                     "SELECT
                          (SELECT COUNT(*) FROM organization_members om WHERE om.user_id = $1),
                          (SELECT COUNT(*)
@@ -30,10 +31,14 @@ impl Database {
                 .bind(reference.id)
                 .fetch_one(&self.pool)
                 .await
-                .with_context(Ctx::new(reference.kind, reference.id))?
+                .with_context(Ctx::new(reference.kind, reference.id))?;
+                [
+                    (Relation::UserOrganization, organizations),
+                    (Relation::UserApps, apps),
+                ]
             }
             ResourceKind::Organization => {
-                sqlx::query_as(
+                let (users, apps): (i64, i64) = sqlx::query_as(
                     "SELECT
                          (SELECT COUNT(*) FROM organization_members om WHERE om.organization_id = $1),
                          (SELECT COUNT(*) FROM compute_resources cr WHERE cr.organization_id = $1)",
@@ -41,10 +46,14 @@ impl Database {
                 .bind(reference.id)
                 .fetch_one(&self.pool)
                 .await
-                .with_context(Ctx::new(reference.kind, reference.id))?
+                .with_context(Ctx::new(reference.kind, reference.id))?;
+                [
+                    (Relation::OrganizationUsers, users),
+                    (Relation::OrganizationApps, apps),
+                ]
             }
             ResourceKind::App => {
-                sqlx::query_as(
+                let (organization, users): (i64, i64) = sqlx::query_as(
                     "SELECT
                          (SELECT COUNT(*) FROM compute_resources cr WHERE cr.id = $1),
                          (SELECT COUNT(*)
@@ -55,20 +64,20 @@ impl Database {
                 .bind(reference.id)
                 .fetch_one(&self.pool)
                 .await
-                .with_context(Ctx::new(reference.kind, reference.id))?
+                .with_context(Ctx::new(reference.kind, reference.id))?;
+                [
+                    (Relation::AppOrganization, organization),
+                    (Relation::AppUsers, users),
+                ]
             }
         };
-        let relations = Relation::for_kind(reference.kind);
-        Ok(vec![
-            RelationSummary {
-                relation: relations[0],
-                count: counts.0.try_into().unwrap_or(0),
-            },
-            RelationSummary {
-                relation: relations[1],
-                count: counts.1.try_into().unwrap_or(0),
-            },
-        ])
+        Ok(counts
+            .into_iter()
+            .map(|(relation, count)| RelationSummary {
+                relation,
+                count: count.try_into().unwrap_or(0),
+            })
+            .collect())
     }
 
     pub async fn follow(
@@ -77,6 +86,7 @@ impl Database {
         relation: Relation,
         offset: u32,
         limit: u32,
+        sort: Option<SortColumn>,
     ) -> Result<Page<RelatedResource>, FollowError> {
         use FollowErrorCtx as Ctx;
 
@@ -107,10 +117,11 @@ impl Database {
         }
         let fetch_limit = i64::from(limit) + 1;
         let offset_value = i64::from(offset);
+        let order = order::relation(relation, sort);
 
         let rows = match relation {
             Relation::UserOrganization => {
-                sqlx::query_as::<_, RelatedRow>(
+                let sql = format!(
                     "SELECT o.id,
                             o.name::text AS label,
                             CASE WHEN o.is_active THEN 'active' ELSE 'inactive' END::text AS context,
@@ -119,24 +130,24 @@ impl Database {
                             NULL::text AS via_label
                      FROM organization_members om
                      JOIN organizations o ON o.id = om.organization_id
-                     WHERE om.user_id = $1
-                     ORDER BY om.created_at, om.id
-                     LIMIT $2 OFFSET $3",
-                )
-                .bind(source.id)
-                .bind(fetch_limit)
-                .bind(offset_value)
-                .fetch_all(&self.pool)
-                .await
-                .with_context(Ctx::new(
-                    source.kind,
-                    source.id,
-                    relation,
-                    "querying PostgreSQL",
-                ))?
+                     WHERE om.user_id = $1{order}
+                     LIMIT $2 OFFSET $3"
+                );
+                sqlx::query_as::<_, RelatedRow>(&sql)
+                    .bind(source.id)
+                    .bind(fetch_limit)
+                    .bind(offset_value)
+                    .fetch_all(&self.pool)
+                    .await
+                    .with_context(Ctx::new(
+                        source.kind,
+                        source.id,
+                        relation,
+                        "querying PostgreSQL",
+                    ))?
             }
             Relation::UserApps => {
-                sqlx::query_as::<_, RelatedRow>(
+                let sql = format!(
                     "SELECT cr.id,
                             COALESCE(cr.resource_name, '(unnamed app)')::text AS label,
                             cr.state::text AS context,
@@ -146,24 +157,24 @@ impl Database {
                      FROM organization_members om
                      JOIN organizations o ON o.id = om.organization_id
                      JOIN compute_resources cr ON cr.organization_id = o.id
-                     WHERE om.user_id = $1
-                     ORDER BY cr.created_at DESC, cr.id
-                     LIMIT $2 OFFSET $3",
-                )
-                .bind(source.id)
-                .bind(fetch_limit)
-                .bind(offset_value)
-                .fetch_all(&self.pool)
-                .await
-                .with_context(Ctx::new(
-                    source.kind,
-                    source.id,
-                    relation,
-                    "querying PostgreSQL",
-                ))?
+                     WHERE om.user_id = $1{order}
+                     LIMIT $2 OFFSET $3"
+                );
+                sqlx::query_as::<_, RelatedRow>(&sql)
+                    .bind(source.id)
+                    .bind(fetch_limit)
+                    .bind(offset_value)
+                    .fetch_all(&self.pool)
+                    .await
+                    .with_context(Ctx::new(
+                        source.kind,
+                        source.id,
+                        relation,
+                        "querying PostgreSQL",
+                    ))?
             }
             Relation::OrganizationUsers => {
-                sqlx::query_as::<_, RelatedRow>(
+                let sql = format!(
                     "SELECT u.id,
                             u.username::text AS label,
                             (CASE WHEN u.is_active THEN 'active' ELSE 'inactive' END ||
@@ -173,24 +184,24 @@ impl Database {
                             NULL::text AS via_label
                      FROM organization_members om
                      JOIN users u ON u.id = om.user_id
-                     WHERE om.organization_id = $1
-                     ORDER BY om.role, u.username, u.id
-                     LIMIT $2 OFFSET $3",
-                )
-                .bind(source.id)
-                .bind(fetch_limit)
-                .bind(offset_value)
-                .fetch_all(&self.pool)
-                .await
-                .with_context(Ctx::new(
-                    source.kind,
-                    source.id,
-                    relation,
-                    "querying PostgreSQL",
-                ))?
+                     WHERE om.organization_id = $1{order}
+                     LIMIT $2 OFFSET $3"
+                );
+                sqlx::query_as::<_, RelatedRow>(&sql)
+                    .bind(source.id)
+                    .bind(fetch_limit)
+                    .bind(offset_value)
+                    .fetch_all(&self.pool)
+                    .await
+                    .with_context(Ctx::new(
+                        source.kind,
+                        source.id,
+                        relation,
+                        "querying PostgreSQL",
+                    ))?
             }
             Relation::OrganizationApps => {
-                sqlx::query_as::<_, RelatedRow>(
+                let sql = format!(
                     "SELECT cr.id,
                             COALESCE(cr.resource_name, '(unnamed app)')::text AS label,
                             cr.state::text AS context,
@@ -198,24 +209,24 @@ impl Database {
                             NULL::uuid AS via_id,
                             NULL::text AS via_label
                      FROM compute_resources cr
-                     WHERE cr.organization_id = $1
-                     ORDER BY cr.created_at DESC, cr.id
-                     LIMIT $2 OFFSET $3",
-                )
-                .bind(source.id)
-                .bind(fetch_limit)
-                .bind(offset_value)
-                .fetch_all(&self.pool)
-                .await
-                .with_context(Ctx::new(
-                    source.kind,
-                    source.id,
-                    relation,
-                    "querying PostgreSQL",
-                ))?
+                     WHERE cr.organization_id = $1{order}
+                     LIMIT $2 OFFSET $3"
+                );
+                sqlx::query_as::<_, RelatedRow>(&sql)
+                    .bind(source.id)
+                    .bind(fetch_limit)
+                    .bind(offset_value)
+                    .fetch_all(&self.pool)
+                    .await
+                    .with_context(Ctx::new(
+                        source.kind,
+                        source.id,
+                        relation,
+                        "querying PostgreSQL",
+                    ))?
             }
             Relation::AppOrganization => {
-                sqlx::query_as::<_, RelatedRow>(
+                let sql = format!(
                     "SELECT o.id,
                             o.name::text AS label,
                             CASE WHEN o.is_active THEN 'active' ELSE 'inactive' END::text AS context,
@@ -224,23 +235,24 @@ impl Database {
                             NULL::text AS via_label
                      FROM compute_resources cr
                      JOIN organizations o ON o.id = cr.organization_id
-                     WHERE cr.id = $1
-                     LIMIT $2 OFFSET $3",
-                )
-                .bind(source.id)
-                .bind(fetch_limit)
-                .bind(offset_value)
-                .fetch_all(&self.pool)
-                .await
-                .with_context(Ctx::new(
-                    source.kind,
-                    source.id,
-                    relation,
-                    "querying PostgreSQL",
-                ))?
+                     WHERE cr.id = $1{order}
+                     LIMIT $2 OFFSET $3"
+                );
+                sqlx::query_as::<_, RelatedRow>(&sql)
+                    .bind(source.id)
+                    .bind(fetch_limit)
+                    .bind(offset_value)
+                    .fetch_all(&self.pool)
+                    .await
+                    .with_context(Ctx::new(
+                        source.kind,
+                        source.id,
+                        relation,
+                        "querying PostgreSQL",
+                    ))?
             }
             Relation::AppUsers => {
-                sqlx::query_as::<_, RelatedRow>(
+                let sql = format!(
                     "SELECT u.id,
                             u.username::text AS label,
                             (CASE WHEN u.is_active THEN 'active' ELSE 'inactive' END ||
@@ -252,21 +264,21 @@ impl Database {
                      JOIN organizations o ON o.id = cr.organization_id
                      JOIN organization_members om ON om.organization_id = o.id
                      JOIN users u ON u.id = om.user_id
-                     WHERE cr.id = $1
-                     ORDER BY om.role, u.username, u.id
-                     LIMIT $2 OFFSET $3",
-                )
-                .bind(source.id)
-                .bind(fetch_limit)
-                .bind(offset_value)
-                .fetch_all(&self.pool)
-                .await
-                .with_context(Ctx::new(
-                    source.kind,
-                    source.id,
-                    relation,
-                    "querying PostgreSQL",
-                ))?
+                     WHERE cr.id = $1{order}
+                     LIMIT $2 OFFSET $3"
+                );
+                sqlx::query_as::<_, RelatedRow>(&sql)
+                    .bind(source.id)
+                    .bind(fetch_limit)
+                    .bind(offset_value)
+                    .fetch_all(&self.pool)
+                    .await
+                    .with_context(Ctx::new(
+                        source.kind,
+                        source.id,
+                        relation,
+                        "querying PostgreSQL",
+                    ))?
             }
         };
 
