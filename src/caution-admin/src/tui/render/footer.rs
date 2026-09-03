@@ -18,27 +18,15 @@ use super::terminal_text;
 
 pub(super) fn height(state: &AppState, width: u16) -> u16 {
     const MAX_HEIGHT: u16 = 5;
-    let text = state
-        .current
-        .status
-        .as_ref()
-        .map_or_else(|| actions(state), |status| status.text.clone());
+    let (text, _) = content(state);
     u16::try_from(wrapped_line_count(&terminal_text(&text), width.max(1)))
         .unwrap_or(MAX_HEIGHT)
         .clamp(1, MAX_HEIGHT)
 }
 
 pub(super) fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
-    let (text, style) = if let Some(status) = &state.current.status {
-        (terminal_text(&status.text), status_style(status.level))
-    } else if state.current.input_mode {
-        (
-            "Type query · Enter search · Esc cancel · Backspace delete".to_string(),
-            Style::default(),
-        )
-    } else {
-        (actions(state), Style::default())
-    };
+    let (text, style) = content(state);
+    let text = terminal_text(&text);
     let lines = u16::try_from(wrapped_line_count(&text, area.width.max(1))).unwrap_or(u16::MAX);
     let scroll = if matches!(
         state.current.status.as_ref().map(|status| status.level),
@@ -55,6 +43,24 @@ pub(super) fn render(frame: &mut Frame<'_>, area: Rect, state: &AppState) {
             .scroll((scroll, 0)),
         area,
     );
+}
+
+fn content(state: &AppState) -> (String, Style) {
+    if let Some(status) = &state.current.status {
+        (status.text.clone(), status_style(status.level))
+    } else if state.aws_loading.is_some() {
+        (
+            "AWS request in progress · Backspace cancel · q quit".to_string(),
+            Style::default().fg(Color::Cyan),
+        )
+    } else if state.current.input_mode {
+        (
+            "Type query · Enter search · Esc cancel · Backspace delete".to_string(),
+            Style::default(),
+        )
+    } else {
+        (actions(state), Style::default())
+    }
 }
 
 fn status_style(level: StatusLevel) -> Style {
@@ -121,4 +127,23 @@ fn wrapped_line_count(text: &str, width: u16) -> usize {
         }
     }
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{content, height, wrapped_line_count};
+    use crate::state::AppState;
+
+    #[test]
+    fn input_footer_height_measures_the_rendered_hint() {
+        let mut state = AppState::new();
+        state.begin_search();
+        let width = 20;
+        let (text, _) = content(&state);
+
+        assert_eq!(
+            usize::from(height(&state, width)),
+            wrapped_line_count(&text, width)
+        );
+    }
 }

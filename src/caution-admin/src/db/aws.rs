@@ -99,7 +99,8 @@ impl Database {
              JOIN organizations o ON o.id = eb.organization_id
              LEFT JOIN compute_resources cr ON cr.id = eb.app_id
              WHERE eb.status IN ('pending', 'building', 'uploading')
-                OR eb.builder_instance_id IS NOT NULL
+                OR (eb.builder_instance_id IS NOT NULL
+                    AND eb.created_at >= NOW() - INTERVAL '7 days')
              ORDER BY eb.created_at DESC, eb.id",
         )
         .fetch_all(&self.pool)
@@ -184,6 +185,8 @@ mod tests {
         let app_id = Uuid::new_v4();
         let stopped_app_id = Uuid::new_v4();
         let build_id = Uuid::new_v4();
+        let recent_build_id = Uuid::new_v4();
+        let old_build_id = Uuid::new_v4();
 
         sqlx::query("INSERT INTO users (id, username) VALUES ($1, $2)")
             .bind(user_id)
@@ -277,12 +280,20 @@ mod tests {
         sqlx::query(
             "INSERT INTO eif_builds
                 (id, organization_id, app_id, commit_sha, procfile_hash, cache_key,
-                 builder_instance_id, status)
-             VALUES ($1, $2, $3, 'commit', 'procfile', 'cache', 'i-builder', 'building')",
+                 builder_instance_id, status, created_at)
+             VALUES
+                ($1, $2, $3, 'commit', 'procfile', 'cache-active',
+                 'i-builder-active', 'building', NOW() - INTERVAL '30 days'),
+                ($4, $2, $3, 'commit', 'procfile', 'cache-recent',
+                 'i-builder-recent', 'completed', NOW() - INTERVAL '1 day'),
+                ($5, $2, $3, 'commit', 'procfile', 'cache-old',
+                 'i-builder-old', 'completed', NOW() - INTERVAL '30 days')",
         )
         .bind(build_id)
         .bind(organization_id)
         .bind(app_id)
+        .bind(recent_build_id)
+        .bind(old_build_id)
         .execute(&writer)
         .await
         .expect("build fixture");
@@ -309,6 +320,8 @@ mod tests {
             && app.managed_on_prem
             && app.aws_account_id == "aws-projection"));
         assert!(state.builds.iter().any(|build| build.id == build_id));
+        assert!(state.builds.iter().any(|build| build.id == recent_build_id));
+        assert!(state.builds.iter().all(|build| build.id != old_build_id));
 
         let apps = database
             .list(ResourceKind::App, 0, 1, Some(SortColumn::Details))
@@ -379,8 +392,8 @@ mod tests {
                 .all(|row| row.organization_id != canceled_organization_id)
         );
 
-        sqlx::query("DELETE FROM eif_builds WHERE id = $1")
-            .bind(build_id)
+        sqlx::query("DELETE FROM eif_builds WHERE id = ANY($1)")
+            .bind(vec![build_id, recent_build_id, old_build_id])
             .execute(&writer)
             .await
             .expect("delete build fixture");

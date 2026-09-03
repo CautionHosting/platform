@@ -16,6 +16,8 @@ use crate::{
     db::aws::{AwsAppRow, AwsBuildRow, AwsDatabaseState, ByocSubscriptionRow},
 };
 
+mod regressions;
+
 const ACCOUNT: &str = "123456789012";
 
 fn app(name: &str, state: &str, byoc: bool) -> AwsAppRow {
@@ -243,12 +245,18 @@ fn exact_host_with_malformed_account_is_linked_and_reported_once() {
 
     assert_eq!(snapshot.findings.len(), 1);
     let finding = &snapshot.findings[0];
-    assert_eq!(finding.kind, FindingKind::InvalidAccountMapping);
+    assert_eq!(finding.kind, FindingKind::UnexpectedHost);
     assert_eq!(finding.severity, DriftSeverity::Warning);
     assert_eq!(finding.host_id.as_deref(), Some("i-051a020411fa9d3f1"));
     assert_eq!(finding.resources[0].id, app.id);
     assert!(finding.platform.starts_with("initialized"));
     assert!(finding.aws.starts_with("running EC2"));
+    assert!(
+        finding
+            .scope
+            .as_deref()
+            .is_some_and(|scope| scope.contains("not a 12-digit AWS account ID"))
+    );
     assert_eq!(
         snapshot.hosts[0].platform.as_ref().unwrap().resource.id,
         app.id
@@ -286,30 +294,6 @@ fn exact_host_in_a_different_valid_account_reports_scope_not_unknown() {
     assert_eq!(snapshot.findings.len(), 1);
     assert_eq!(snapshot.findings[0].kind, FindingKind::AccountMismatch);
     assert_eq!(snapshot.findings[0].resources[0].id, app.id);
-}
-
-#[test]
-fn critical_lifecycle_and_account_evidence_are_one_finding() {
-    let mut app = app("terminated-invalid", "terminated", false);
-    app.aws_account_id = "not-an-account".to_string();
-    let host = instance(&app, "running");
-    let snapshot = snapshot(
-        database(vec![app]),
-        InventorySnapshot {
-            instances: vec![host],
-            ..InventorySnapshot::default()
-        },
-    );
-
-    assert_eq!(snapshot.findings.len(), 1);
-    assert_eq!(snapshot.findings[0].kind, FindingKind::HostForTerminatedApp);
-    assert_eq!(snapshot.findings[0].severity, DriftSeverity::Critical);
-    assert!(
-        snapshot.findings[0]
-            .scope
-            .as_deref()
-            .is_some_and(|scope| scope.contains("not a 12-digit AWS account ID"))
-    );
 }
 
 #[test]
@@ -557,7 +541,6 @@ fn storage_counts_only_caution_resources() {
             tags: HashMap::new(),
         }],
         addresses: vec![AwsAddress {
-            allocation_id: "eipalloc-1".into(),
             public_ip: "203.0.113.1".into(),
             region: host.region,
             instance_id: None,

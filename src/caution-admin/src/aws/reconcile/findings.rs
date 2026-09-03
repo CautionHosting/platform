@@ -163,6 +163,8 @@ pub(super) fn reconcile_inventory(
     }
     for app in database.apps.iter().filter(|app| {
         !app.managed_on_prem
+            && !app.destroyed
+            && matches!(app.state.as_str(), "running" | "stopped")
             && !valid_account_id(&app.aws_account_id)
             && !observed_apps.contains(&app.id)
     }) {
@@ -260,11 +262,11 @@ fn combined_app_finding(
     let scope = scope_finding(instance, app, scope);
     let lifecycle = lifecycle_finding(instance, app);
     match (scope, lifecycle) {
-        (Some(mut scope), Some(mut lifecycle)) if lifecycle.severity == DriftSeverity::Critical => {
+        (Some(mut scope), Some(mut lifecycle)) => {
             lifecycle.scope = scope.scope.take();
             Some(lifecycle)
         }
-        (Some(scope), _) => Some(scope),
+        (Some(scope), None) => Some(scope),
         (None, lifecycle) => lifecycle,
     }
 }

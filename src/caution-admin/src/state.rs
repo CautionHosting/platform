@@ -10,8 +10,10 @@ use crate::model::{
     SortColumn,
 };
 
+mod loading;
 mod table;
 
+pub use loading::AwsLoadMode;
 pub use table::PageState;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -131,6 +133,8 @@ pub struct AppState {
     pub show_help: bool,
     pub should_quit: bool,
     pub aws_cache: Option<AwsSnapshot>,
+    pub aws_loading: Option<AwsLoadMode>,
+    pub aws_loading_frame: usize,
 }
 
 impl Default for AppState {
@@ -147,6 +151,8 @@ impl AppState {
             show_help: false,
             should_quit: false,
             aws_cache: None,
+            aws_loading: None,
+            aws_loading_frame: 0,
         }
     }
 
@@ -309,6 +315,7 @@ impl AppState {
         };
         if let Some(sort) = sort {
             next.sort_rows(sort);
+            next.selected = 0;
         }
         self.push(next);
     }

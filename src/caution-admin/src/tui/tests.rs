@@ -81,7 +81,7 @@ fn resource(kind: ResourceKind, label: &str) -> Resource {
     }
 }
 
-fn aws_snapshot(findings: Vec<AwsFinding>) -> AwsSnapshot {
+pub(super) fn aws_snapshot(findings: Vec<AwsFinding>) -> AwsSnapshot {
     AwsSnapshot {
         metadata: AwsOverviewMetadata {
             account: "123456789012".to_string(),
@@ -218,6 +218,43 @@ fn resource_pages_show_range_and_active_sort_column() {
 
     state.current.sort_rows(SortColumn::Name);
     assert!(screen_text(&mut state).contains("NAME ↑"));
+}
+
+#[test]
+fn aws_loading_is_visible_without_replacing_the_current_screen() {
+    let mut state = AppState::new();
+    state.begin_aws_load(crate::state::AwsLoadMode::Open);
+
+    let text = screen_text(&mut state);
+
+    assert!(matches!(state.current.screen, Screen::Home));
+    assert!(text.contains("Loading AWS snapshot"));
+    assert!(text.contains("Backspace cancel"));
+}
+
+#[test]
+fn opening_a_sorted_aws_section_selects_its_first_row() {
+    let mut snapshot = aws_snapshot(Vec::new());
+    snapshot.app_hosts = vec![
+        AwsDisplayRow {
+            kind: "HOST".to_string(),
+            name: "stopped".to_string(),
+            details: "stopped · AWS host".to_string(),
+            action: AwsAction::None,
+        },
+        AwsDisplayRow {
+            kind: "HOST".to_string(),
+            name: "running".to_string(),
+            details: "running · AWS host".to_string(),
+            action: AwsAction::None,
+        },
+    ];
+    let mut state = AppState::new();
+    state.open_aws_overview(snapshot);
+    state.open_aws_section(AwsSection::AppHosts);
+
+    assert_eq!(state.current.selected, 0);
+    assert!(matches!(state.selected_row(), Some(Row::Aws(row)) if row.name == "running"));
 }
 
 #[test]

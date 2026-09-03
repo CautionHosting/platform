@@ -8,9 +8,10 @@ use dterror::ResultExt as _;
 
 use super::super::{
     KeyOutcome, PageDirection, RunTuiError, RunTuiErrorCtx, RunTuiStage, TUI_ACTIVE, classify_key,
-    error_message, install_panic_hook, leave_alternate_screen, restore_terminal_if_active,
+    error_message, install_panic_hook, leave_alternate_screen, loading_key, open_aws,
+    restore_terminal_if_active,
 };
-use crate::state::AppState;
+use crate::state::{AppState, AwsLoadMode};
 
 fn press(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -87,6 +88,27 @@ fn ctrl_c_quits_from_every_mode() {
         classify_key(&mut state, chord(KeyCode::Char('c')));
         assert!(state.should_quit);
     }
+}
+
+#[test]
+fn aws_open_requests_background_work_and_loading_keys_remain_responsive() {
+    let mut state = AppState::new();
+    state.current.selected = state.current.rows.len() - 1;
+
+    assert_eq!(open_aws(&mut state), Some(AwsLoadMode::Open));
+    assert!(!loading_key(&mut state, press(KeyCode::Char('r'))));
+    assert!(loading_key(&mut state, press(KeyCode::Backspace)));
+    assert!(!state.should_quit);
+
+    let mut state = AppState::new();
+    assert!(loading_key(&mut state, press(KeyCode::Char('q'))));
+    assert!(state.should_quit);
+
+    let mut state = AppState::new();
+    assert!(!loading_key(&mut state, chord(KeyCode::Char('q'))));
+    assert!(!state.should_quit);
+    assert!(loading_key(&mut state, chord(KeyCode::Char('c'))));
+    assert!(state.should_quit);
 }
 
 #[test]

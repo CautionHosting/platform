@@ -89,15 +89,21 @@ optional scope, and a read-only next step. AWS-only findings explicitly show
 that no Platform resource is linked.
 
 AWS data is loaded only when `AWS` is first opened and cached for the terminal
-session. Leaving and reopening the screen does not call AWS again; press `r` to
-refresh. Regional or Cost Explorer failures are shown as unavailable or
-partial, never as zero. If inventory cannot be loaded, Findings explicitly says
-that no scan was performed. A refresh that only partially fails still replaces
-the cached data, because the newer partial view is more accurate than the older
-one; the affected sections are marked partial. Only a refresh that fails
-completely keeps the last successful snapshot, marked stale. Open findings and
-list selection survive wording, severity, and label changes when their resource
-and host identity is unchanged.
+session. Loading runs in the background with a visible progress indicator, so
+`q`/Ctrl-C remains responsive; Backspace cancels the request. Leaving and
+reopening the screen does not call AWS again; press `r` to refresh. Regional or
+Cost Explorer failures are shown as unavailable or partial, never as zero. If
+inventory cannot be loaded, Findings explicitly says that no scan was performed.
+A refresh that only partially fails still replaces the cached data, because the
+newer partial view is more accurate than the older one; the affected sections
+are marked partial. Only a refresh that fails completely keeps the last
+successful snapshot, marked stale. Open findings and list selection survive
+wording, severity, and label changes when their resource and host identity is
+unchanged.
+
+Builder reconciliation loads every active build plus terminal builds created in
+the last seven days. An older observed builder is still reported as an orphan,
+but without historical Platform build linkage.
 
 `make admin` uses the normal AWS SDK credential chain. When no explicit AWS
 credential environment or profile is set, it sources

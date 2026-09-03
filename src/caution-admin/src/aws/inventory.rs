@@ -39,7 +39,6 @@ pub(crate) struct AwsVolume {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AwsAddress {
-    pub allocation_id: String,
     pub public_ip: String,
     pub region: String,
     pub instance_id: Option<String>,
@@ -96,6 +95,11 @@ pub(crate) async fn fetch_inventory(
         snapshot.addresses.extend(scan.addresses);
         snapshot.issues.extend(scan.issues);
     }
+    normalize_inventory(&mut snapshot);
+    Ok(snapshot)
+}
+
+fn normalize_inventory(snapshot: &mut InventorySnapshot) {
     snapshot
         .instances
         .sort_by(|left, right| left.instance_id.cmp(&right.instance_id));
@@ -108,13 +112,14 @@ pub(crate) async fn fetch_inventory(
     snapshot
         .volumes
         .dedup_by(|left, right| left.volume_id == right.volume_id && left.region == right.region);
+    snapshot.addresses.sort_by(|left, right| {
+        left.region
+            .cmp(&right.region)
+            .then_with(|| left.public_ip.cmp(&right.public_ip))
+    });
     snapshot
         .addresses
-        .sort_by(|left, right| left.public_ip.cmp(&right.public_ip));
-    snapshot.addresses.dedup_by(|left, right| {
-        left.allocation_id == right.allocation_id && left.region == right.region
-    });
-    Ok(snapshot)
+        .dedup_by(|left, right| left.region == right.region && left.public_ip == right.public_ip);
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
@@ -262,7 +267,6 @@ async fn list_addresses(
         .iter()
         .filter_map(|address| {
             Some(AwsAddress {
-                allocation_id: address.allocation_id().unwrap_or("classic").to_string(),
                 public_ip: address.public_ip()?.to_string(),
                 region: region.to_string(),
                 instance_id: address.instance_id().map(ToString::to_string),
@@ -332,4 +336,38 @@ pub(crate) fn error_chain_contains(error: &dyn std::error::Error, needle: &str) 
         current = error.source();
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{AwsAddress, InventorySnapshot, normalize_inventory};
+
+    #[test]
+    fn distinct_classic_addresses_in_one_region_are_retained() {
+        let mut snapshot = InventorySnapshot {
+            addresses: vec![
+                address("203.0.113.2"),
+                address("203.0.113.1"),
+                address("203.0.113.1"),
+            ],
+            ..InventorySnapshot::default()
+        };
+
+        normalize_inventory(&mut snapshot);
+
+        assert_eq!(snapshot.addresses.len(), 2);
+        assert_eq!(snapshot.addresses[0].public_ip, "203.0.113.1");
+        assert_eq!(snapshot.addresses[1].public_ip, "203.0.113.2");
+    }
+
+    fn address(public_ip: &str) -> AwsAddress {
+        AwsAddress {
+            public_ip: public_ip.to_string(),
+            region: "us-east-1".to_string(),
+            instance_id: None,
+            tags: HashMap::new(),
+        }
+    }
 }

@@ -18,13 +18,16 @@ use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
-    aws::{self, AwsAction},
+    aws::AwsAction,
     db::Database,
     model::{ResourceSummary, SortColumn},
-    state::{AppState, Row, Screen},
+    state::{AppState, AwsLoadMode, Row, Screen},
 };
 
+mod aws_load;
 mod render;
+
+use aws_load::PendingAwsLoad;
 
 pub use render::render;
 
@@ -36,8 +39,17 @@ pub async fn run(database: Database, platform_sha: Option<String>) -> Result<(),
 
     let mut session = TerminalSession::new().with_context(Ctx::new(RunTuiStage::Initialize))?;
     let mut state = AppState::new();
+    let mut aws_load = None;
 
     while !state.should_quit {
+        if aws_load.as_ref().is_some_and(PendingAwsLoad::is_finished)
+            && let Some(load) = aws_load.take()
+        {
+            load.finish(&mut state).await;
+            if state.should_quit {
+                break;
+            }
+        }
         session
             .terminal
             .draw(|frame| render(frame, &mut state, platform_sha.as_deref()))
@@ -47,8 +59,22 @@ pub async fn run(database: Database, platform_sha: Option<String>) -> Result<(),
             && let Event::Key(key) = event::read().with_context(Ctx::new(RunTuiStage::ReadEvent))?
             && key.kind == KeyEventKind::Press
         {
-            handle_key(&database, &mut state, key).await;
+            if state.aws_loading.is_some() {
+                if loading_key(&mut state, key)
+                    && let Some(load) = aws_load.take()
+                {
+                    let notify = !state.should_quit;
+                    load.cancel(&mut state, notify);
+                }
+            } else if let Some(mode) = handle_key(&database, &mut state, key).await {
+                aws_load = Some(PendingAwsLoad::start(database.clone(), &mut state, mode));
+            }
         }
+        state.advance_aws_loading();
+    }
+
+    if let Some(load) = aws_load {
+        load.cancel(&mut state, false);
     }
 
     Ok(())
@@ -83,14 +109,45 @@ pub struct RunTuiError {
     source: BoxError,
 }
 
-async fn handle_key(database: &Database, state: &mut AppState, key: KeyEvent) {
+async fn handle_key(
+    database: &Database,
+    state: &mut AppState,
+    key: KeyEvent,
+) -> Option<AwsLoadMode> {
     match classify_key(state, key) {
-        KeyOutcome::Handled => {}
-        KeyOutcome::Search => run_search(database, state).await,
+        KeyOutcome::Handled => None,
+        KeyOutcome::Search => {
+            run_search(database, state).await;
+            None
+        }
         KeyOutcome::Refresh => refresh(database, state).await,
         KeyOutcome::Open => open_selected(database, state).await,
-        KeyOutcome::Page(direction) => change_page(database, state, direction).await,
-        KeyOutcome::Sort => sort_current(database, state).await,
+        KeyOutcome::Page(direction) => {
+            change_page(database, state, direction).await;
+            None
+        }
+        KeyOutcome::Sort => {
+            sort_current(database, state).await;
+            None
+        }
+    }
+}
+
+fn loading_key(state: &mut AppState, key: KeyEvent) -> bool {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        state.should_quit = true;
+        return true;
+    }
+    if is_chord(key) {
+        return false;
+    }
+    match key.code {
+        KeyCode::Char('q') => {
+            state.should_quit = true;
+            true
+        }
+        KeyCode::Backspace | KeyCode::Left => true,
+        _ => false,
     }
 }
 
@@ -219,7 +276,7 @@ async fn run_search(database: &Database, state: &mut AppState) {
     }
 }
 
-async fn open_selected(database: &Database, state: &mut AppState) {
+async fn open_selected(database: &Database, state: &mut AppState) -> Option<AwsLoadMode> {
     let selected = state.selected_row().cloned();
     match selected {
         Some(Row::Browse(kind)) => match database
@@ -229,7 +286,7 @@ async fn open_selected(database: &Database, state: &mut AppState) {
             Ok(page) => state.open_search(String::new(), Some(kind), page),
             Err(error) => state.set_error(error_message(&error)),
         },
-        Some(Row::AwsRoot) => open_aws(database, state).await,
+        Some(Row::AwsRoot) => return open_aws(state),
         Some(Row::Aws(row)) => match row.action {
             AwsAction::Section(section) => state.open_aws_section(section),
             AwsAction::Host(instance_id) => open_aws_host(state, &instance_id),
@@ -243,7 +300,7 @@ async fn open_selected(database: &Database, state: &mut AppState) {
         Some(Row::Relation(relation)) => {
             let Screen::Resource(source) = state.current.screen.clone() else {
                 state.set_error("relationship is unavailable from this screen");
-                return;
+                return None;
             };
             match database
                 .follow(
@@ -261,6 +318,7 @@ async fn open_selected(database: &Database, state: &mut AppState) {
         }
         None => state.set_status("nothing to open"),
     }
+    None
 }
 
 fn open_aws_host(state: &mut AppState, instance_id: &str) {
@@ -281,43 +339,22 @@ async fn open_resource(database: &Database, state: &mut AppState, summary: Resou
     }
 }
 
-async fn open_aws(database: &Database, state: &mut AppState) {
+fn open_aws(state: &mut AppState) -> Option<AwsLoadMode> {
     if let Some(snapshot) = state.aws_cache.clone() {
         state.open_aws_overview(snapshot);
-        return;
+        return None;
     }
-    match aws::load_snapshot(database).await {
-        Ok(snapshot) => state.open_aws_overview(snapshot),
-        Err(error) => state.set_error(error_message(&error)),
-    }
+    Some(AwsLoadMode::Open)
 }
 
-async fn refresh(database: &Database, state: &mut AppState) {
+async fn refresh(database: &Database, state: &mut AppState) -> Option<AwsLoadMode> {
     let screen = state.current.screen.clone();
     match screen {
         Screen::Home => {}
         Screen::AwsOverview(_)
         | Screen::AwsSection(_)
         | Screen::AwsFinding(_)
-        | Screen::AwsHost(_) => match aws::load_snapshot(database).await {
-            Ok(snapshot) => {
-                let snapshot = state
-                    .aws_cache
-                    .as_ref()
-                    .map_or(snapshot.clone(), |previous| {
-                        previous.merge_refresh(snapshot)
-                    });
-                state.replace_aws(snapshot);
-            }
-            Err(error) => {
-                let message = error_message(&error);
-                if let Some(mut snapshot) = state.aws_cache.clone() {
-                    snapshot.mark_stale("refresh failed; previous data retained");
-                    state.replace_aws(snapshot);
-                }
-                state.set_error(message);
-            }
-        },
+        | Screen::AwsHost(_) => return Some(AwsLoadMode::Refresh),
         Screen::Search { .. } | Screen::Related { .. } => {
             let page = state.current.page;
             let sort = state.current.sort;
@@ -333,6 +370,7 @@ async fn refresh(database: &Database, state: &mut AppState) {
             Err(error) => state.set_error(error_message(&error)),
         },
     }
+    None
 }
 
 async fn change_page(database: &Database, state: &mut AppState, direction: PageDirection) {

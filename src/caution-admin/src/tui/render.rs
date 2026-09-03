@@ -14,7 +14,7 @@ use ratatui::{
 
 use crate::{
     model::{ResourceSummary, SortColumn},
-    state::{AppState, Row, Screen},
+    state::{AppState, AwsLoadMode, Row, Screen},
 };
 
 pub(super) use crate::terminal::terminal_text;
@@ -51,9 +51,32 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState, platform_sha: Option<
     }
     footer::render(frame, areas[2], state);
 
-    if state.show_help {
+    if state.aws_loading.is_some() {
+        render_aws_loading(frame, state);
+    } else if state.show_help {
         render_help(frame);
     }
+}
+
+fn render_aws_loading(frame: &mut Frame<'_>, state: &AppState) {
+    const SPINNER: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+    let area = centered_rect(48, 20, frame.area());
+    let action = match state.aws_loading {
+        Some(AwsLoadMode::Open) => "Loading AWS snapshot",
+        Some(AwsLoadMode::Refresh) => "Refreshing AWS snapshot",
+        None => return,
+    };
+    let text = format!(
+        "{} {action}…",
+        SPINNER[state.aws_loading_frame % SPINNER.len()]
+    );
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(text)
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL).title(" AWS ")),
+        area,
+    );
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, state: &AppState, platform_sha: Option<&str>) {
