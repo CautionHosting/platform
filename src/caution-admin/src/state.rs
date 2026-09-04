@@ -5,8 +5,8 @@ use crate::aws::{
     AwsAction, AwsDisplayRow, AwsFinding, AwsHost, AwsOverviewMetadata, AwsSection, AwsSnapshot,
 };
 use crate::model::{
-    Page, RelatedResource, Relation, RelationSummary, Resource, ResourceKind, ResourceSummary,
-    SortColumn,
+    AppFilter, AppPage, Build, Page, RelatedResource, Relation, RelationSummary, Resource,
+    ResourceKind, ResourceSummary, SortColumn,
 };
 
 mod aws;
@@ -23,6 +23,17 @@ pub enum Screen {
     AwsSection(AwsSection),
     AwsFinding(AwsFinding),
     AwsHost(Box<AwsHost>),
+    Apps {
+        filter: AppFilter,
+        counts: crate::model::AppCounts,
+    },
+    BuildHistory {
+        app: ResourceSummary,
+    },
+    Build {
+        app: ResourceSummary,
+        build: Build,
+    },
     Search {
         query: String,
         kind: Option<ResourceKind>,
@@ -42,6 +53,9 @@ impl Screen {
             Self::AwsSection(section) => Some(section.label().to_string()),
             Self::AwsFinding(finding) => Some(finding.kind.label().to_string()),
             Self::AwsHost(host) => Some(format!("Host {}", host.instance.instance_id)),
+            Self::Apps { filter, .. } => Some(format!("Browse Apps · {filter}")),
+            Self::BuildHistory { .. } => Some("Build history".to_string()),
+            Self::Build { build, .. } => Some(format!("Build {}", build.short_commit())),
             Self::Search {
                 query,
                 kind: Some(kind),
@@ -67,6 +81,8 @@ pub enum Row {
     Aws(AwsDisplayRow),
     AwsFinding(AwsFinding),
     AwsHost(Box<AwsHost>),
+    BuildHistory(ResourceSummary),
+    Build(Build),
     Resource(ResourceSummary),
     Relation(RelationSummary),
     Related(RelatedResource),
@@ -93,6 +109,8 @@ impl Row {
             (Self::Related(left), Self::Related(right)) => {
                 left.resource.kind == right.resource.kind && left.resource.id == right.resource.id
             }
+            (Self::BuildHistory(left), Self::BuildHistory(right)) => left.id == right.id,
+            (Self::Build(left), Self::Build(right)) => left.id == right.id,
             _ => self == other,
         }
     }
@@ -266,10 +284,57 @@ impl AppState {
         });
     }
 
+    pub fn open_apps(&mut self, filter: AppFilter, result: AppPage, sort: SortColumn) {
+        let page = PageState::from_page(&result.page);
+        self.push(Snapshot {
+            screen: Screen::Apps {
+                filter,
+                counts: result.counts,
+            },
+            rows: result.page.items.into_iter().map(Row::Resource).collect(),
+            selected: 0,
+            query: String::new(),
+            input_mode: false,
+            status: None,
+            page: Some(page),
+            sort: Some(sort),
+        });
+    }
+
+    pub fn replace_apps(
+        &mut self,
+        filter: AppFilter,
+        result: AppPage,
+        sort: SortColumn,
+        reset_selection: bool,
+    ) {
+        let selected = (!reset_selection)
+            .then(|| self.selected_row().cloned())
+            .flatten();
+        self.current.screen = Screen::Apps {
+            filter,
+            counts: result.counts,
+        };
+        self.current.page = Some(PageState::from_page(&result.page));
+        self.current.sort = Some(sort);
+        self.current.rows = result.page.items.into_iter().map(Row::Resource).collect();
+        self.current.selected = selected
+            .as_ref()
+            .and_then(|selected| {
+                self.current
+                    .rows
+                    .iter()
+                    .position(|row| row.same_identity(selected))
+            })
+            .unwrap_or(0);
+        self.current.status = None;
+    }
+
     pub fn open_resource(&mut self, resource: Resource, relations: Vec<RelationSummary>) {
+        let rows = resource_rows(&resource, relations);
         self.push(Snapshot {
             screen: Screen::Resource(resource),
-            rows: relations.into_iter().map(Row::Relation).collect(),
+            rows,
             selected: 0,
             query: String::new(),
             input_mode: false,
@@ -323,12 +388,63 @@ impl AppState {
     }
 
     pub fn replace_resource(&mut self, resource: Resource, relations: Vec<RelationSummary>) {
+        let rows = resource_rows(&resource, relations);
         self.current.screen = Screen::Resource(resource);
-        self.current.rows = relations.into_iter().map(Row::Relation).collect();
+        self.current.rows = rows;
         self.current.selected = self
             .current
             .selected
             .min(self.current.rows.len().saturating_sub(1));
+        self.current.status = None;
+    }
+
+    pub fn open_build_history(&mut self, app: ResourceSummary, page: Page<Build>) {
+        let page_state = PageState::from_page(&page);
+        self.push(Snapshot {
+            screen: Screen::BuildHistory { app },
+            rows: page.items.into_iter().map(Row::Build).collect(),
+            selected: 0,
+            query: String::new(),
+            input_mode: false,
+            status: None,
+            page: Some(page_state),
+            sort: None,
+        });
+    }
+
+    pub fn replace_builds(&mut self, page: Page<Build>, reset_selection: bool) {
+        let selected = (!reset_selection)
+            .then(|| self.selected_row().cloned())
+            .flatten();
+        self.current.page = Some(PageState::from_page(&page));
+        self.current.rows = page.items.into_iter().map(Row::Build).collect();
+        self.current.selected = selected
+            .as_ref()
+            .and_then(|selected| {
+                self.current
+                    .rows
+                    .iter()
+                    .position(|row| row.same_identity(selected))
+            })
+            .unwrap_or(0);
+        self.current.status = None;
+    }
+
+    pub fn open_build(&mut self, app: ResourceSummary, build: Build) {
+        self.push(Snapshot {
+            screen: Screen::Build { app, build },
+            rows: Vec::new(),
+            selected: 0,
+            query: String::new(),
+            input_mode: false,
+            status: None,
+            page: None,
+            sort: None,
+        });
+    }
+
+    pub fn replace_build(&mut self, app: ResourceSummary, build: Build) {
+        self.current.screen = Screen::Build { app, build };
         self.current.status = None;
     }
 
@@ -387,6 +503,14 @@ impl AppState {
         self.history.push(self.current.clone());
         self.current = next;
     }
+}
+
+fn resource_rows(resource: &Resource, relations: Vec<RelationSummary>) -> Vec<Row> {
+    let mut rows = relations.into_iter().map(Row::Relation).collect::<Vec<_>>();
+    if resource.kind == ResourceKind::App {
+        rows.push(Row::BuildHistory(resource.summary()));
+    }
+    rows
 }
 
 #[cfg(test)]

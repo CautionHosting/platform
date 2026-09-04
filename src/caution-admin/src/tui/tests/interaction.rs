@@ -12,6 +12,10 @@ use super::super::{
     restore_terminal_if_active,
 };
 use crate::state::{AppState, AwsLoadMode};
+use crate::{
+    model::{AppCounts, AppFilter, AppPage, Page, SortColumn},
+    state::Screen,
+};
 
 fn press(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -129,10 +133,46 @@ fn table_shortcuts_request_sorting_and_pages() {
 }
 
 #[test]
+fn filter_shortcut_is_scoped_to_top_level_apps() {
+    let mut state = AppState::new();
+    assert_eq!(
+        classify_key(&mut state, press(KeyCode::Char('f'))),
+        KeyOutcome::Handled
+    );
+    state.open_apps(
+        AppFilter::Current,
+        AppPage {
+            page: Page {
+                items: Vec::new(),
+                offset: 0,
+                limit: 50,
+                has_more: false,
+            },
+            counts: AppCounts::default(),
+        },
+        SortColumn::Details,
+    );
+    assert!(matches!(state.current.screen, Screen::Apps { .. }));
+    assert_eq!(
+        classify_key(&mut state, press(KeyCode::Char('f'))),
+        KeyOutcome::Filter
+    );
+}
+
+#[test]
 fn help_lines_fit_at_eighty_columns() {
     const OVERLAY: u16 = 80 * super::super::render::HELP_WIDTH_PERCENT / 100;
     let inner = usize::from(OVERLAY.saturating_sub(3));
     for line in super::super::render::HELP_LINES {
         assert!(ratatui::text::Span::raw(*line).width() <= inner, "{line:?}");
     }
+}
+
+#[test]
+fn help_overlay_fits_the_filter_key_at_eighty_by_twenty_four() {
+    let mut state = AppState::new();
+    state.show_help = true;
+    let text = super::screen_text(&mut state);
+    assert!(text.contains("f          Cycle top-level App filter"));
+    assert!(text.contains("Press ?, Esc, or Enter to close this help."));
 }

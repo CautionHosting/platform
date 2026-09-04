@@ -20,6 +20,7 @@ use crate::{
     state::{AppState, Row, Screen, StatusLevel},
 };
 
+mod apps;
 mod findings;
 mod interaction;
 
@@ -198,7 +199,7 @@ fn home_search_resource_and_relationship_screens_render_at_80_by_24() {
     );
     let text = screen_text(&mut state);
     assert!(text.contains("APP · api · RUNNING"));
-    assert!(text.contains("Relationships"));
+    assert!(text.contains("Navigate"));
 }
 
 #[test]
@@ -476,6 +477,10 @@ fn statuses_and_terminal_text_are_safe_and_unambiguous() {
     );
     assert_eq!(
         status_style("complete").fg,
+        Some(ratatui::style::Color::Green)
+    );
+    assert_eq!(
+        status_style("completed").fg,
         Some(ratatui::style::Color::Green)
     );
     assert_eq!(

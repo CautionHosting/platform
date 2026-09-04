@@ -38,8 +38,14 @@ typing a search, where it deletes a character. Search matches literally:
 50-row pages: press `n`/Page Down and `p`/Page Up to move between them. Press
 `s` to cycle the meaningful table columns; the active column is marked in the
 header. Apps and app relationships initially use operational state order, with
-running apps first. Page, sort, selection, and query are restored by Back and
-preserved by refresh. Press `?` for the complete key reference.
+running apps first. Top-level `Browse Apps` opens the `Current` filter and shows
+global counts for Current, Failed, Historical, and Total above the selectable
+rows. Press `f` to cycle Current, Failed, Historical, and All; filtering happens
+before paging. Current means a non-destroyed app that is neither failed nor
+terminated, Failed means a non-destroyed failed app, and Historical means a
+destroyed or terminated app. Search and relationship results remain unfiltered.
+Page, filter, sort, selection, and query are restored by Back and preserved by
+refresh. Press `?` for the complete key reference.
 Esc cancels a global search and restores the screen it was opened from.
 The selected row uses one shared charcoal highlight across every list and table
 without replacing resource and status colours.
@@ -166,7 +172,13 @@ current BYOC plan, billing source, effective capacity, and any pending plan
 change. A valid active subscription at its limit is labelled `full`, not
 inactive. App pages show their organization, fully managed or BYOC mode,
 provider/account/resource metadata, region, public IP, allowlisted domain, and
-DNS state.
+DNS state. Their `Navigate` panel also opens paginated EIF build history. Builds
+are ordered newest first and show status, a short commit, creation time, builder
+instance, and a coarse status-derived failure summary. Enter opens the build's
+full allowlisted metadata. Detailed failure text remains in API/builder logs;
+raw errors, logs, PCRs, configuration, cache keys, and object-storage paths are
+never queried. Only build rows with an explicit `app_id` are associated;
+legacy unlinked rows are not guessed. Build history is TUI-only in this pilot.
 
 Membership roles and the organization used by transitive relationships are
 shown on relationship results. Queries are bounded and the database connections
@@ -214,6 +226,6 @@ This pilot does not replace `utils/admin`. Continue using that script for legal
 document and other mutating administration workflows.
 
 The implementation keeps database resource queries, relationship traversal,
-row decoding, terminal control, and Ratatui rendering in small focused modules.
-Allowlisted SQL ordering lives in `db/order.rs`; table paging and in-memory AWS
-ordering live in `state/table.rs`.
+app and build queries, row decoding, terminal control, and Ratatui rendering in
+small focused modules. Allowlisted SQL ordering lives in `db/order.rs`; table
+paging and in-memory AWS ordering live in `state/table.rs`.

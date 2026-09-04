@@ -19,6 +19,7 @@ use crate::{
 
 pub(super) use crate::terminal::terminal_text;
 
+mod apps;
 mod aws;
 mod footer;
 
@@ -36,6 +37,13 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState, platform_sha: Option<
     render_header(frame, areas[0], state, platform_sha);
     match &state.current.screen {
         Screen::Home => render_home(frame, areas[1], state),
+        Screen::Apps { filter, counts } => {
+            apps::render_app_browse(frame, areas[1], state, *filter, *counts);
+        }
+        Screen::BuildHistory { .. } => apps::render_build_history(frame, areas[1], state),
+        Screen::Build { app, build } => {
+            apps::render_build(frame, areas[1], app.clone(), build.clone());
+        }
         Screen::Search { .. } | Screen::Related { .. } => {
             render_resource_table(frame, areas[1], state, Some(" Resources "));
         }
@@ -263,7 +271,12 @@ fn table_row(row: &Row) -> Option<TableRow<'static>> {
         )),
         Row::Aws(row) => Some(aws::table_row(row)),
         Row::AwsFinding(finding) => Some(aws::finding_row(finding)),
-        Row::AwsHost(_) | Row::Browse(_) | Row::AwsRoot | Row::Relation(_) => None,
+        Row::AwsHost(_)
+        | Row::BuildHistory(_)
+        | Row::Build(_)
+        | Row::Browse(_)
+        | Row::AwsRoot
+        | Row::Relation(_) => None,
     }
 }
 
@@ -370,15 +383,24 @@ fn render_resource(
                 Cell::from(relation.relation.label()),
                 Cell::from(relation.count.to_string()),
             ])),
+            Row::BuildHistory(_) => Some(TableRow::new([
+                Cell::from("Build history"),
+                Cell::from("View"),
+            ])),
             _ => None,
         })
         .collect::<Vec<_>>();
+    let navigation_title = if resource.kind == crate::model::ResourceKind::App {
+        " Navigate "
+    } else {
+        " Relationships "
+    };
     let table = Table::new(rows, [Constraint::Min(12), Constraint::Length(8)])
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .padding(Padding::left(1))
-                .title(" Relationships "),
+                .title(navigation_title),
         )
         .highlight_symbol("> ")
         .row_highlight_style(selection_style());
@@ -477,11 +499,13 @@ pub(super) fn status_style(value: &str) -> Style {
         .unwrap_or("")
         .to_ascii_lowercase();
     let color = match token.as_str() {
-        "active" | "running" | "ready" | "validated" | "clear" | "complete" => Some(Color::Green),
-        "pending" | "initialized" | "trialing" | "past_due" | "paused" | "stopped"
-        | "terminating" | "reserved" | "publishing" | "withdrawing" | "warning" | "reminder"
-        | "stale" | "partial" => Some(Color::Yellow),
-        "inactive" | "failed" | "terminated" | "suspended" | "canceled" | "invalid"
+        "active" | "running" | "ready" | "validated" | "clear" | "complete" | "completed" => {
+            Some(Color::Green)
+        }
+        "pending" | "building" | "uploading" | "initialized" | "trialing" | "past_due"
+        | "paused" | "stopped" | "terminating" | "reserved" | "publishing" | "withdrawing"
+        | "warning" | "reminder" | "stale" | "partial" => Some(Color::Yellow),
+        "inactive" | "failed" | "timeout" | "terminated" | "suspended" | "canceled" | "invalid"
         | "critical" => Some(Color::Red),
         _ => None,
     };
@@ -491,6 +515,7 @@ pub(super) fn status_style(value: &str) -> Style {
 /// Help overlay body. Kept as data so a test can assert each line fits.
 /// Width of the help overlay as a percentage of the terminal width.
 pub(super) const HELP_WIDTH_PERCENT: u16 = 70;
+pub(super) const HELP_HEIGHT_PERCENT: u16 = 75;
 
 pub(super) const HELP_LINES: &[&str] = &[
     "This is a read-only development pilot.",
@@ -499,6 +524,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "↑↓ or j/k  Move selection",
     "Enter      Open a resource or follow a relationship",
     "s          Sort by the next table column",
+    "f          Cycle top-level App filter",
     "n/PgDn     Next page",
     "p/PgUp     Previous page",
     "Backspace  Return to the previous screen",
@@ -510,7 +536,7 @@ pub(super) const HELP_LINES: &[&str] = &[
 ];
 
 fn render_help(frame: &mut Frame<'_>) {
-    let area = centered_rect(HELP_WIDTH_PERCENT, 60, frame.area());
+    let area = centered_rect(HELP_WIDTH_PERCENT, HELP_HEIGHT_PERCENT, frame.area());
     frame.render_widget(Clear, area);
     let help = Paragraph::new(
         HELP_LINES

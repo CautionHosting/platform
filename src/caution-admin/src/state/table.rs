@@ -58,7 +58,9 @@ impl Snapshot {
     pub fn sort_columns(&self) -> &'static [SortColumn] {
         match self.screen {
             Screen::Search { kind: None, .. } => RESOURCE_SORTS,
-            Screen::Search { kind: Some(_), .. } | Screen::Related { .. } => TYPED_RESOURCE_SORTS,
+            Screen::Apps { .. } | Screen::Search { kind: Some(_), .. } | Screen::Related { .. } => {
+                TYPED_RESOURCE_SORTS
+            }
             Screen::AwsSection(AwsSection::Findings) => FINDING_SORTS,
             Screen::AwsSection(AwsSection::Storage) => RESOURCE_SORTS,
             Screen::AwsSection(AwsSection::AppHosts | AwsSection::Builders | AwsSection::Byoc) => {
@@ -122,6 +124,8 @@ fn row_type(row: &Row) -> String {
         Row::Aws(row) => row.kind.to_ascii_lowercase(),
         Row::AwsFinding(finding) => finding.severity.to_string().to_ascii_lowercase(),
         Row::AwsHost(_) => "host".to_string(),
+        Row::Build(_) => "build".to_string(),
+        Row::BuildHistory(_) => "destination".to_string(),
         Row::Resource(resource) => resource.kind.singular().to_string(),
         Row::Related(related) => related.resource.kind.singular().to_string(),
         Row::Relation(_) => "relationship".to_string(),
@@ -135,6 +139,8 @@ fn row_name(row: &Row) -> String {
         Row::Aws(row) => row.name.to_ascii_lowercase(),
         Row::AwsFinding(finding) => finding.kind.label().to_ascii_lowercase(),
         Row::AwsHost(host) => host.instance.instance_id.to_ascii_lowercase(),
+        Row::Build(build) => build.commit_sha.to_ascii_lowercase(),
+        Row::BuildHistory(_) => "build history".to_string(),
         Row::Resource(resource) => resource.label.to_ascii_lowercase(),
         Row::Related(related) => related.resource.label.to_ascii_lowercase(),
         Row::Relation(relation) => relation.relation.label().to_ascii_lowercase(),
@@ -148,6 +154,8 @@ fn row_details(row: &Row) -> String {
         Row::Aws(row) => row.details.to_ascii_lowercase(),
         Row::AwsFinding(finding) => finding.subject.to_ascii_lowercase(),
         Row::AwsHost(host) => host.instance.state.to_ascii_lowercase(),
+        Row::Build(build) => build.status.to_ascii_lowercase(),
+        Row::BuildHistory(_) => String::new(),
         Row::Resource(resource) => resource
             .context
             .clone()

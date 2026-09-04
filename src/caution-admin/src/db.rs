@@ -7,7 +7,9 @@ use uuid::Uuid;
 
 use crate::model::{Page, Resource, ResourceKind, ResourceRef, ResourceSummary, SortColumn};
 
+mod apps;
 pub(crate) mod aws;
+mod builds;
 mod order;
 mod relations;
 mod rows;

@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use super::{AppState, Row, Screen};
 use crate::model::{
-    Field, Page, RelatedResource, Relation, RelationSummary, Resource, ResourceKind,
-    ResourceSummary, SortColumn,
+    AppCounts, AppFilter, AppPage, Build, Field, Page, RelatedResource, Relation, RelationSummary,
+    Resource, ResourceKind, ResourceSummary, SortColumn,
 };
 
 fn page(items: Vec<ResourceSummary>) -> Page<ResourceSummary> {
@@ -15,6 +15,18 @@ fn page(items: Vec<ResourceSummary>) -> Page<ResourceSummary> {
         offset: 0,
         limit: 50,
         has_more: false,
+    }
+}
+
+fn app_page(items: Vec<ResourceSummary>) -> AppPage {
+    AppPage {
+        page: page(items),
+        counts: AppCounts {
+            current: 1,
+            failed: 2,
+            historical: 3,
+            total: 6,
+        },
     }
 }
 
@@ -156,6 +168,83 @@ fn home_contains_resource_roots_and_aws() {
             .all(|row| matches!(row, Row::Browse(_)))
     );
     assert!(matches!(state.current.rows.last(), Some(Row::AwsRoot)));
+}
+
+#[test]
+fn app_browse_preserves_filter_counts_sort_and_selection() {
+    let mut first = resource(ResourceKind::App, "first").summary();
+    first.id = Uuid::from_u128(1);
+    let mut selected = resource(ResourceKind::App, "selected").summary();
+    selected.id = Uuid::from_u128(2);
+    let mut state = AppState::new();
+    state.open_apps(
+        AppFilter::Current,
+        app_page(vec![first.clone(), selected.clone()]),
+        SortColumn::Details,
+    );
+    state.current.selected = 1;
+
+    state.replace_apps(
+        AppFilter::Current,
+        app_page(vec![selected, first]),
+        SortColumn::Name,
+        false,
+    );
+
+    assert!(matches!(
+        state.current.screen,
+        Screen::Apps {
+            filter: AppFilter::Current,
+            counts: AppCounts { total: 6, .. }
+        }
+    ));
+    assert_eq!(state.current.sort, Some(SortColumn::Name));
+    assert!(matches!(
+        state.selected_row(),
+        Some(Row::Resource(resource)) if resource.id == Uuid::from_u128(2)
+    ));
+}
+
+#[test]
+fn app_details_add_build_history_without_changing_relationships() {
+    let mut state = AppState::new();
+    state.open_resource(
+        resource(ResourceKind::App, "api"),
+        vec![RelationSummary {
+            relation: Relation::AppOrganization,
+            count: 1,
+        }],
+    );
+    assert!(matches!(state.current.rows[0], Row::Relation(_)));
+    assert!(matches!(state.current.rows[1], Row::BuildHistory(_)));
+
+    let build = Build {
+        id: Uuid::from_u128(9),
+        status: "building".to_string(),
+        commit_sha: "0123456789abcdef".to_string(),
+        builder_instance_id: None,
+        builder_instance_type: None,
+        started_at: None,
+        completed_at: None,
+        created_at: chrono::Utc::now(),
+    };
+    let app = resource(ResourceKind::App, "api").summary();
+    state.open_build_history(
+        app.clone(),
+        Page {
+            items: vec![build.clone()],
+            offset: 0,
+            limit: 50,
+            has_more: false,
+        },
+    );
+    state.open_build(app, build);
+    assert_eq!(
+        state.breadcrumbs(),
+        ["App api", "Build history", "Build 0123456789ab"]
+    );
+    assert!(state.back());
+    assert!(matches!(state.current.screen, Screen::BuildHistory { .. }));
 }
 
 #[test]

@@ -16,6 +16,48 @@ pub enum ResourceKind {
     App,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AppFilter {
+    Current,
+    Failed,
+    Historical,
+    All,
+}
+
+impl AppFilter {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Current => "Current",
+            Self::Failed => "Failed",
+            Self::Historical => "Historical",
+            Self::All => "All",
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Current => Self::Failed,
+            Self::Failed => Self::Historical,
+            Self::Historical => Self::All,
+            Self::All => Self::Current,
+        }
+    }
+}
+
+impl fmt::Display for AppFilter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AppCounts {
+    pub current: u64,
+    pub failed: u64,
+    pub historical: u64,
+    pub total: u64,
+}
+
 impl ResourceKind {
     pub const ALL: [Self; 3] = [Self::User, Self::Organization, Self::App];
 
@@ -254,6 +296,38 @@ pub struct Page<T> {
     pub has_more: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AppPage {
+    pub page: Page<ResourceSummary>,
+    pub counts: AppCounts,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Build {
+    pub id: Uuid,
+    pub status: String,
+    pub commit_sha: String,
+    pub builder_instance_id: Option<String>,
+    pub builder_instance_type: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl Build {
+    pub fn short_commit(&self) -> String {
+        self.commit_sha.chars().take(12).collect()
+    }
+
+    pub fn failure_summary(&self) -> Option<&'static str> {
+        match self.status.as_str() {
+            "failed" => Some("Build failed; inspect API/builder logs"),
+            "timeout" => Some("Build timed out"),
+            _ => None,
+        }
+    }
+}
+
 impl<T> Page<T> {
     pub fn from_extra(mut items: Vec<T>, offset: u32, limit: u32) -> Self {
         let has_more = items.len() > limit as usize;
@@ -277,7 +351,15 @@ pub fn timestamp(value: DateTime<Utc>) -> String {
 mod tests {
     use uuid::Uuid;
 
-    use super::{Field, Relation, Resource, ResourceKind};
+    use super::{AppFilter, Field, Relation, Resource, ResourceKind};
+
+    #[test]
+    fn app_filters_cycle_in_operator_order() {
+        assert_eq!(AppFilter::Current.next(), AppFilter::Failed);
+        assert_eq!(AppFilter::Failed.next(), AppFilter::Historical);
+        assert_eq!(AppFilter::Historical.next(), AppFilter::All);
+        assert_eq!(AppFilter::All.next(), AppFilter::Current);
+    }
 
     #[test]
     fn resource_kind_accepts_product_and_plural_names() {

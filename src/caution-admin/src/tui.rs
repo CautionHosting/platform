@@ -20,10 +20,11 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use crate::{
     aws::AwsAction,
     db::Database,
-    model::{ResourceSummary, SortColumn},
+    model::{ResourceKind, ResourceSummary, SortColumn},
     state::{AppState, AwsLoadMode, Row, Screen},
 };
 
+mod apps;
 mod aws_load;
 mod render;
 
@@ -130,6 +131,10 @@ async fn handle_key(
             sort_current(database, state).await;
             None
         }
+        KeyOutcome::Filter => {
+            apps::cycle_filter(database, state).await;
+            None
+        }
     }
 }
 
@@ -161,6 +166,7 @@ enum KeyOutcome {
     Open,
     Page(PageDirection),
     Sort,
+    Filter,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -215,6 +221,9 @@ fn classify_key(state: &mut AppState, key: KeyEvent) -> KeyOutcome {
         KeyCode::Char('/') => state.begin_search(),
         KeyCode::Char('r') => return KeyOutcome::Refresh,
         KeyCode::Char('s') => return KeyOutcome::Sort,
+        KeyCode::Char('f') if matches!(state.current.screen, Screen::Apps { .. }) => {
+            return KeyOutcome::Filter;
+        }
         KeyCode::Char('n') | KeyCode::PageDown => {
             return KeyOutcome::Page(PageDirection::Next);
         }
@@ -279,6 +288,7 @@ async fn run_search(database: &Database, state: &mut AppState) {
 async fn open_selected(database: &Database, state: &mut AppState) -> Option<AwsLoadMode> {
     let selected = state.selected_row().cloned();
     match selected {
+        Some(Row::Browse(ResourceKind::App)) => apps::open_apps(database, state).await,
         Some(Row::Browse(kind)) => match database
             .list(kind, 0, TUI_PAGE_SIZE, Some(SortColumn::Details))
             .await
@@ -295,6 +305,8 @@ async fn open_selected(database: &Database, state: &mut AppState) -> Option<AwsL
         },
         Some(Row::AwsFinding(finding)) => state.open_aws_finding(finding),
         Some(Row::AwsHost(host)) => state.open_aws_host(*host),
+        Some(Row::BuildHistory(app)) => apps::open_build_history(database, state, app).await,
+        Some(Row::Build(build)) => apps::open_build(state, build),
         Some(Row::Resource(summary)) => open_resource(database, state, summary).await,
         Some(Row::Related(related)) => open_resource(database, state, related.resource).await,
         Some(Row::Relation(relation)) => {
@@ -355,6 +367,18 @@ async fn refresh(database: &Database, state: &mut AppState) -> Option<AwsLoadMod
         | Screen::AwsSection(_)
         | Screen::AwsFinding(_)
         | Screen::AwsHost(_) => return Some(AwsLoadMode::Refresh),
+        Screen::Apps { filter, .. } => {
+            let offset = state.current.page.map_or(0, |page| page.offset);
+            let sort = state.current.sort.unwrap_or(SortColumn::Details);
+            apps::reload_apps(database, state, filter, offset, sort, false).await;
+        }
+        Screen::BuildHistory { app } => {
+            let offset = state.current.page.map_or(0, |page| page.offset);
+            apps::reload_builds(database, state, &app, offset, false).await;
+        }
+        Screen::Build { app, build } => {
+            apps::refresh_build(database, state, app, build).await;
+        }
         Screen::Search { .. } | Screen::Related { .. } => {
             let page = state.current.page;
             let sort = state.current.sort;
@@ -390,6 +414,10 @@ async fn change_page(database: &Database, state: &mut AppState, direction: PageD
             return;
         }
     };
+    if let Screen::BuildHistory { app } = state.current.screen.clone() {
+        apps::reload_builds(database, state, &app, offset, true).await;
+        return;
+    }
     let Some(sort) = state.current.sort else {
         return;
     };
@@ -403,7 +431,7 @@ async fn sort_current(database: &Database, state: &mut AppState) {
     };
     if matches!(
         state.current.screen,
-        Screen::Search { .. } | Screen::Related { .. }
+        Screen::Apps { .. } | Screen::Search { .. } | Screen::Related { .. }
     ) {
         load_table_page(database, state, 0, sort, true).await;
     } else {
@@ -420,6 +448,9 @@ async fn load_table_page(
     reset_selection: bool,
 ) {
     match state.current.screen.clone() {
+        Screen::Apps { filter, .. } => {
+            apps::reload_apps(database, state, filter, offset, sort, reset_selection).await;
+        }
         Screen::Search {
             query: _,
             kind: Some(kind),

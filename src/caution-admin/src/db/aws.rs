@@ -170,7 +170,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::Database;
-    use crate::model::{Relation, ResourceKind, ResourceRef, SortColumn};
+    use crate::model::{AppFilter, Relation, ResourceKind, ResourceRef, SortColumn};
 
     #[tokio::test]
     #[ignore = "requires a migrated PostgreSQL test database"]
@@ -184,6 +184,9 @@ mod tests {
         let account_id = Uuid::new_v4();
         let app_id = Uuid::new_v4();
         let stopped_app_id = Uuid::new_v4();
+        let failed_app_id = Uuid::new_v4();
+        let terminated_app_id = Uuid::new_v4();
+        let destroyed_app_id = Uuid::new_v4();
         let build_id = Uuid::new_v4();
         let recent_build_id = Uuid::new_v4();
         let old_build_id = Uuid::new_v4();
@@ -278,16 +281,41 @@ mod tests {
         .await
         .expect("stopped app fixture");
         sqlx::query(
+            "INSERT INTO compute_resources
+                (id, organization_id, provider_account_id, resource_type_id,
+                 provider_resource_id, resource_name, state, region, destroyed_at)
+             SELECT fixture.id, $1, $2, rt.id, fixture.host, fixture.name,
+                    fixture.state::resource_state, 'us-west-2', fixture.destroyed_at
+             FROM resource_types rt
+             JOIN providers p ON p.id = rt.provider_id
+             CROSS JOIN (VALUES
+                ($3::uuid, 'i-projection-failed', 'filter-app-failed', 'failed', NULL::timestamptz),
+                ($4::uuid, 'i-projection-terminated', 'filter-app-terminated', 'terminated', NOW()),
+                ($5::uuid, 'i-projection-destroyed', 'filter-app-destroyed', 'pending', NOW())
+             ) AS fixture(id, host, name, state, destroyed_at)
+             WHERE p.provider_type::text = 'aws' AND rt.type_code = 'ec2-instance'",
+        )
+        .bind(organization_id)
+        .bind(account_id)
+        .bind(failed_app_id)
+        .bind(terminated_app_id)
+        .bind(destroyed_app_id)
+        .execute(&writer)
+        .await
+        .expect("filtered app fixtures");
+        sqlx::query(
             "INSERT INTO eif_builds
                 (id, organization_id, app_id, commit_sha, procfile_hash, cache_key,
-                 builder_instance_id, status, created_at)
+                 builder_instance_id, status, error_message, created_at)
              VALUES
                 ($1, $2, $3, 'commit', 'procfile', 'cache-active',
-                 'i-builder-active', 'building', NOW() - INTERVAL '30 days'),
+                 'i-builder-active', 'building', NULL, NOW() - INTERVAL '30 days'),
                 ($4, $2, $3, 'commit', 'procfile', 'cache-recent',
-                 'i-builder-recent', 'completed', NOW() - INTERVAL '1 day'),
+                 'i-builder-recent', 'failed',
+                 'never-display-build-error s3://private/cache-key=secret',
+                 NOW() - INTERVAL '1 day'),
                 ($5, $2, $3, 'commit', 'procfile', 'cache-old',
-                 'i-builder-old', 'completed', NOW() - INTERVAL '30 days')",
+                 'i-builder-old', 'completed', NULL, NOW() - INTERVAL '60 days')",
         )
         .bind(build_id)
         .bind(organization_id)
@@ -322,6 +350,87 @@ mod tests {
         assert!(state.builds.iter().any(|build| build.id == build_id));
         assert!(state.builds.iter().any(|build| build.id == recent_build_id));
         assert!(state.builds.iter().all(|build| build.id != old_build_id));
+
+        let current = database
+            .browse_apps(AppFilter::Current, 0, 200, SortColumn::Details)
+            .await
+            .expect("current apps");
+        assert!(current.page.items.iter().any(|app| app.id == app_id));
+        assert!(
+            current
+                .page
+                .items
+                .iter()
+                .any(|app| app.id == stopped_app_id)
+        );
+        assert!(
+            current.page.items.iter().all(|app| ![
+                failed_app_id,
+                terminated_app_id,
+                destroyed_app_id
+            ]
+            .contains(&app.id))
+        );
+        assert_eq!(
+            current.counts.total,
+            current.counts.current + current.counts.failed + current.counts.historical
+        );
+        let failed = database
+            .browse_apps(AppFilter::Failed, 0, 200, SortColumn::Details)
+            .await
+            .expect("failed apps");
+        assert!(failed.page.items.iter().any(|app| app.id == failed_app_id));
+        let historical = database
+            .browse_apps(AppFilter::Historical, 0, 200, SortColumn::Details)
+            .await
+            .expect("historical apps");
+        assert!(
+            historical
+                .page
+                .items
+                .iter()
+                .any(|app| app.id == terminated_app_id)
+        );
+        assert!(
+            historical
+                .page
+                .items
+                .iter()
+                .any(|app| app.id == destroyed_app_id)
+        );
+
+        let first_builds = database
+            .list_builds(app_id, 0, 2)
+            .await
+            .expect("first build page");
+        assert_eq!(first_builds.items[0].id, recent_build_id);
+        assert_eq!(
+            first_builds.items[0].failure_summary(),
+            Some("Build failed; inspect API/builder logs")
+        );
+        assert!(!format!("{:?}", first_builds.items[0]).contains("never-display-build-error"));
+        assert_eq!(first_builds.items[1].id, build_id);
+        assert!(first_builds.has_more);
+        let last_builds = database
+            .list_builds(app_id, 2, 2)
+            .await
+            .expect("last build page");
+        assert_eq!(last_builds.items[0].id, old_build_id);
+        assert!(!last_builds.has_more);
+        assert_eq!(
+            database
+                .show_build(app_id, recent_build_id)
+                .await
+                .expect("build detail")
+                .commit_sha,
+            "commit"
+        );
+        assert!(
+            database
+                .show_build(stopped_app_id, recent_build_id)
+                .await
+                .is_err()
+        );
 
         let apps = database
             .list(ResourceKind::App, 0, 1, Some(SortColumn::Details))
@@ -365,7 +474,7 @@ mod tests {
                 },
                 crate::model::RelationSummary {
                     relation: Relation::OrganizationApps,
-                    count: 2,
+                    count: 5,
                 },
             ]
         );
@@ -408,7 +517,13 @@ mod tests {
             .await
             .expect("delete subscription fixtures");
         sqlx::query("DELETE FROM compute_resources WHERE id = ANY($1)")
-            .bind(vec![app_id, stopped_app_id])
+            .bind(vec![
+                app_id,
+                stopped_app_id,
+                failed_app_id,
+                terminated_app_id,
+                destroyed_app_id,
+            ])
             .execute(&writer)
             .await
             .expect("delete app fixture");

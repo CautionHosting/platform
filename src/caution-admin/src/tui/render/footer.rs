@@ -11,7 +11,7 @@ use ratatui::{
 
 use crate::{
     aws::AwsAction,
-    state::{AppState, Row, StatusLevel},
+    state::{AppState, Row, Screen, StatusLevel},
 };
 
 use super::terminal_text;
@@ -81,7 +81,9 @@ fn actions(state: &AppState) -> String {
             | Row::Relation(_)
             | Row::Related(_)
             | Row::AwsFinding(_)
-            | Row::AwsHost(_),
+            | Row::AwsHost(_)
+            | Row::BuildHistory(_)
+            | Row::Build(_),
         ) => true,
         None => false,
     };
@@ -91,6 +93,9 @@ fn actions(state: &AppState) -> String {
     }
     if !state.current.sort_columns().is_empty() {
         actions.push("s sort");
+    }
+    if matches!(state.current.screen, Screen::Apps { .. }) {
+        actions.push("f filter");
     }
     if let Some(page) = state.current.page {
         if page.has_previous() {
