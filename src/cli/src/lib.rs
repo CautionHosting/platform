@@ -1,520 +1,46 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result, bail};
-use authenticator::{
-    Pin, RegisterResult, SignResult, StatusPinUv, StatusUpdate,
-    authenticatorservice::{AuthenticatorService, RegisterArgs, SignArgs},
-    crypto::COSEAlgorithm,
-    ctap2::server::{
-        PublicKeyCredentialDescriptor, PublicKeyCredentialParameters,
-        PublicKeyCredentialUserEntity, RelyingParty, Transport,
-    },
-    errors::AuthenticatorError,
-    statecallback::StateCallback,
-};
 use base64::{Engine as _, engine::general_purpose};
-use bootproof_sdk::{
-    VerifiableSignedAttestationFormat,
-    format::nitro::{Nitro, NitroPcrs},
-};
 use clap::{Parser, Subcommand};
+use dterror::{BoxError, CtxError, FromContext, Location, ResultExt};
 use enclave_builder::{
-    BuildConfig, build_user_image, has_explicit_build_command, resolve_build_command_in_dir,
-    validate_explicit_containerfile_path,
+    has_explicit_build_command, resolve_build_command_in_dir, validate_explicit_containerfile_path,
 };
-use keymaker_models::generate_quorum::v0::GenerateQuorumResponse;
-use reqwest;
-use reqwest::tls::TlsInfo;
 use sequoia_openpgp as openpgp;
 use serde::{Deserialize, Serialize};
-use serde_cbor;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
-use std::error::Error as StdError;
 use std::fs;
-use std::io::{self, Read, Write};
-use std::net::{IpAddr, SocketAddr};
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::panic::Location;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::channel;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openpgp::policy::StandardPolicy as OpenPgpPolicy;
-use openpgp::serialize::stream::{Armorer, Encryptor2, LiteralWriter, Message};
-use openpgp::{
-    cert::{CertParser, prelude::CertBuilder},
-    parse::Parse,
-    serialize::Serialize as _,
-};
+use openpgp::{cert::CertParser, parse::Parse, serialize::Serialize as _};
 
 pub mod output;
 pub mod prompt;
 
-use output::{Spinner, SpinnerStyle};
 mod apps;
 mod attestation;
+mod auth;
+mod byoc;
+mod cache;
+mod credentials;
+mod pgp_keys;
+mod secrets;
+mod ssh_keys;
+mod verify;
 
-const BYOC_PROVISIONER_IMAGE: &str =
-    "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest";
-const CREDENTIALS_API_PATH: &str = "/api/credentials";
-const BYOC_STATE_FILE_NAME: &str = "bring-your-own-compute.json";
-// Legacy state file name, kept for backward compatibility so that deployments
-// created before the bring-your-own-cloud -> bring-your-own-compute rename can
-// still be located (e.g. for teardown).
-const BYOC_STATE_FILE_NAME_LEGACY: &str = "bring-your-own-cloud.json";
-const PLAINTEXT_KEYGEN_WARNING: &str = "This helper writes private OpenPGP key material to an \
-unencrypted file on disk. That is unsafe for real shard holders: anyone who can read the file can \
-submit that holder's shard. Prefer a smart card containing the OpenPGP key. Keyfork supports \
-offline OpenPGP key derivation and smart-card-oriented workflows: https://git.distrust.co/public/keyfork";
 const SSH_SIGNING_NAMESPACE: &str = "caution-api";
 const PGP_PUBLIC_KEY_MAX_BYTES: usize = 64 * 1024;
 const PGP_KEY_NAME_MAX_CHARS: usize = 255;
 const PGP_PUBLIC_KEY_ARMOR_BEGIN: &str = "-----BEGIN PGP PUBLIC KEY BLOCK-----";
 const PGP_PUBLIC_KEY_ARMOR_END: &str = "-----END PGP PUBLIC KEY BLOCK-----";
 const PGP_PRIVATE_KEY_ARMOR_BEGIN: &str = "-----BEGIN PGP PRIVATE KEY BLOCK-----";
-const ARCHIVE_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
-const ARCHIVE_PREFLIGHT_ATTEMPTS: usize = 2;
-const MAX_ATTESTATION_RESPONSE_BYTES: usize = 1024 * 1024;
 
-#[derive(Debug, PartialEq, Eq)]
-enum ArchivePreflightStatus {
-    Passed,
-    Missing,
-    Retry,
-    Failed,
-}
-
-fn classify_archive_preflight(
-    status: reqwest::StatusCode,
-    attempt: usize,
-    attempts: usize,
-) -> ArchivePreflightStatus {
-    if status.is_success() {
-        ArchivePreflightStatus::Passed
-    } else if matches!(
-        status,
-        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
-    ) {
-        ArchivePreflightStatus::Missing
-    } else if attempt < attempts
-        && (matches!(
-            status,
-            reqwest::StatusCode::REQUEST_TIMEOUT | reqwest::StatusCode::TOO_MANY_REQUESTS
-        ) || status.is_server_error())
-    {
-        ArchivePreflightStatus::Retry
-    } else {
-        ArchivePreflightStatus::Failed
-    }
-}
-
-fn archive_preflight_urls(url: &str, use_platform_mirror: bool) -> Vec<String> {
-    if use_platform_mirror {
-        enclave_builder::archive_url_candidates(url)
-    } else {
-        vec![url.to_string()]
-    }
-}
-
-fn append_attestation_response_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> Result<()> {
-    anyhow::ensure!(
-        body.len() <= MAX_ATTESTATION_RESPONSE_BYTES
-            && chunk.len() <= MAX_ATTESTATION_RESPONSE_BYTES - body.len(),
-        "Attestation response exceeds 1 MiB limit"
-    );
-    body.extend_from_slice(chunk);
-    Ok(())
-}
-
-async fn bounded_attestation_response_json(
-    mut response: reqwest::Response,
-) -> Result<serde_json::Value> {
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .context("Failed to read attestation response")?
-    {
-        append_attestation_response_chunk(&mut body, &chunk)?;
-    }
-    serde_json::from_slice(&body).context("Failed to parse attestation response as JSON")
-}
-
-fn resolve_reproduction_e2e_mode(
-    config: Option<&caution_config::E2eEncryption>,
-    manifest_has_steve: bool,
-) -> Option<caution_config::E2eMode> {
-    match config {
-        Some(config) if config.mode.is_some() || config.enabled.is_some() => {
-            config.effective_mode()
-        }
-        _ => manifest_has_steve.then_some(caution_config::E2eMode::Steve),
-    }
-}
-
-fn reproduction_uses_steve(
-    config: Option<&caution_config::E2eEncryption>,
-    manifest_has_steve: bool,
-) -> bool {
-    resolve_reproduction_e2e_mode(config, manifest_has_steve)
-        == Some(caution_config::E2eMode::Steve)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TlsExpectation {
-    domain: String,
-}
-
-#[derive(Debug)]
-struct ReproductionResult {
-    pcrs: enclave_builder::PcrValues,
-    tls: Option<TlsExpectation>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-struct TrustedTls {
-    domain: String,
-    certfp: String,
-}
-
-#[derive(Debug, Serialize)]
-struct TrustedHashes<'a> {
-    pcr0: &'a str,
-    pcr1: &'a str,
-    pcr2: &'a str,
-    verified_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tls: Option<TrustedTls>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AttestedUserData {
-    tls: AttestedTls,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AttestedTls {
-    mode: String,
-    domain: String,
-    certfp: String,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum TlsVerification {
-    NotApplicable,
-    PcrOnly,
-    SkippedNoDns,
-    Verified(TrustedTls),
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum TlsConnection {
-    AttestationResponse,
-    PinnedIp(IpAddr),
-}
-
-fn tls_connection(
-    attestation_url: &reqwest::Url,
-    configured_domain: &str,
-) -> Result<TlsConnection> {
-    if attestation_url.scheme() == "https"
-        && attestation_url
-            .host_str()
-            .is_some_and(|host| host.eq_ignore_ascii_case(configured_domain))
-    {
-        return Ok(TlsConnection::AttestationResponse);
-    }
-
-    let deployment_ip = attestation_url
-        .host_str()
-        .context("TLS verification requires an attestation URL host")?
-        .parse()
-        .context(
-            "TLS verification requires either the configured HTTPS domain or a raw deployment IP",
-        )?;
-    Ok(TlsConnection::PinnedIp(deployment_ip))
-}
-
-fn dns_answer_is_absent(error: &io::Error) -> bool {
-    if error.kind() == io::ErrorKind::NotFound {
-        return true;
-    }
-
-    // std does not expose getaddrinfo's EAI_NONAME portably. Match only the
-    // platform messages for a definitive no-name/no-data response; all other
-    // resolver failures remain fatal.
-    let message = error.to_string().to_ascii_lowercase();
-    [
-        "name or service not known",
-        "nodename nor servname provided, or not known",
-        "no address associated with hostname",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle))
-}
-
-fn dns_contains_deployment_ip(
-    domain: &str,
-    deployment_ip: IpAddr,
-    addresses: &[SocketAddr],
-) -> Result<bool> {
-    if addresses.is_empty() {
-        return Ok(false);
-    }
-    anyhow::ensure!(
-        addresses
-            .iter()
-            .any(|address| address.ip() == deployment_ip),
-        "configured TLS domain {} does not resolve to deployment IP {}",
-        domain,
-        deployment_ip
-    );
-    Ok(true)
-}
-
-fn verify_deprecation_warnings(from_local: bool, save_pcrs: bool) -> Vec<&'static str> {
-    let mut warnings = Vec::new();
-    if from_local {
-        warnings.push("--from-local is deprecated; local source is now the default");
-    }
-    if save_pcrs {
-        warnings.push("--save-pcrs is deprecated; trusted state is now saved automatically");
-    }
-    warnings
-}
-
-fn tls_expectation_from_config(
-    config: &caution_config::ConfigurationFile,
-) -> Result<Option<TlsExpectation>> {
-    let http = config
-        .enclave
-        .as_ref()
-        .and_then(|enclaves| enclaves.values().next())
-        .and_then(|enclave| enclave.network.as_ref())
-        .and_then(|network| network.http.as_ref());
-    let is_tls = http
-        .and_then(|http| http.e2e_encryption.as_ref())
-        .and_then(caution_config::E2eEncryption::effective_mode)
-        == Some(caution_config::E2eMode::Tls);
-
-    if !is_tls {
-        return Ok(None);
-    }
-
-    let domain = http
-        .and_then(|http| http.domain.clone())
-        .context("tls mode requires a configured domain")?;
-    Ok(Some(TlsExpectation { domain }))
-}
-
-fn attestation_user_data(payload: &serde_cbor::Value) -> Result<Option<&[u8]>> {
-    let serde_cbor::Value::Map(payload) = payload else {
-        bail!("Nitro payload is not a CBOR map");
-    };
-    let Some(value) = payload.get(&serde_cbor::Value::Text("user_data".to_string())) else {
-        return Ok(None);
-    };
-    if value == &serde_cbor::Value::Null {
-        return Ok(None);
-    }
-    let serde_cbor::Value::Bytes(value) = value else {
-        bail!("Nitro user_data is neither bytes nor null");
-    };
-    Ok(Some(value))
-}
-
-fn display_user_data(user_data: &[u8]) -> (bool, String) {
-    match std::str::from_utf8(user_data) {
-        Ok(user_data) => (false, user_data.escape_debug().to_string()),
-        Err(_) => (true, hex::encode(user_data)),
-    }
-}
-
-fn attestation_inspection_json(
-    nonce: &[u8],
-    payload: &serde_cbor::Value,
-    manifest: Option<&serde_json::Value>,
-) -> Result<String> {
-    let value = serde_json::json!({
-        "verification": "not_performed",
-        "challenge_nonce": general_purpose::STANDARD.encode(nonce),
-        "attestation_payload": attestation::payload_json(payload)?,
-        "response_metadata": {
-            "manifest": manifest.cloned().unwrap_or(serde_json::Value::Null),
-        },
-    });
-    serde_json::to_string_pretty(&value).context("Failed to serialize parsed attestation")
-}
-
-fn validate_attested_tls(
-    expected: &TlsExpectation,
-    user_data: &[u8],
-    observed_certfp: &str,
-) -> Result<TrustedTls> {
-    let user_data: AttestedUserData = serde_json::from_slice(user_data)
-        .context("verified Nitro user_data is not valid TLS metadata")?;
-    anyhow::ensure!(user_data.tls.mode == "tls", "attested TLS mode is not tls");
-    anyhow::ensure!(
-        user_data.tls.domain == expected.domain,
-        "attested TLS domain does not match configured domain {}",
-        expected.domain
-    );
-    anyhow::ensure!(
-        user_data.tls.certfp.len() == 64
-            && user_data
-                .tls
-                .certfp
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        "attested TLS certfp is not lowercase SHA-256 hex"
-    );
-    anyhow::ensure!(
-        user_data.tls.certfp == observed_certfp,
-        "attested TLS certfp does not match the live leaf certificate"
-    );
-
-    Ok(TrustedTls {
-        domain: user_data.tls.domain,
-        certfp: user_data.tls.certfp,
-    })
-}
-
-fn peer_certificate_der(response: &reqwest::Response) -> Option<Vec<u8>> {
-    response
-        .extensions()
-        .get::<TlsInfo>()
-        .and_then(TlsInfo::peer_certificate)
-        .map(ToOwned::to_owned)
-}
-
-fn trusted_state_backup_path(path: &Path) -> Result<PathBuf> {
-    let parent = path
-        .parent()
-        .with_context(|| format!("Trusted-state path has no parent: {}", path.display()))?;
-    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.fZ");
-    for suffix in 0u32.. {
-        let suffix = if suffix == 0 {
-            String::new()
-        } else {
-            format!("-{suffix}")
-        };
-        let candidate = parent.join(format!("trusted_hashes.{timestamp}{suffix}.json"));
-        if !candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    unreachable!("u32 backup suffix space exhausted")
-}
-
-fn persist_trusted_hashes(path: &Path, trusted: &TrustedHashes<'_>) -> Result<Option<PathBuf>> {
-    persist_trusted_hashes_with_backup(path, trusted, |from, to| fs::copy(from, to).map(|_| ()))
-}
-
-fn persist_trusted_hashes_with_backup<F>(
-    path: &Path,
-    trusted: &TrustedHashes<'_>,
-    mut backup_file: F,
-) -> Result<Option<PathBuf>>
-where
-    F: FnMut(&Path, &Path) -> io::Result<()>,
-{
-    let parent = path
-        .parent()
-        .with_context(|| format!("Trusted-state path has no parent: {}", path.display()))?;
-
-    match fs::symlink_metadata(parent) {
-        Ok(metadata) => anyhow::ensure!(
-            metadata.is_dir() && !metadata.file_type().is_symlink(),
-            "Trusted-state directory must be a real directory: {}",
-            parent.display()
-        ),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir(parent).with_context(|| {
-                format!(
-                    "Failed to create trusted-state directory {}",
-                    parent.display()
-                )
-            })?;
-        }
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "Failed to inspect trusted-state directory {}",
-                    parent.display()
-                )
-            });
-        }
-    }
-
-    let existing = match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            anyhow::ensure!(
-                metadata.is_file() && !metadata.file_type().is_symlink(),
-                "Trusted-state path must be a regular file: {}",
-                path.display()
-            );
-            true
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("Failed to inspect trusted state {}", path.display()));
-        }
-    };
-
-    let mut serialized = serde_json::to_string_pretty(trusted)?;
-    serialized.push('\n');
-    let mut temporary = tempfile::NamedTempFile::new_in(parent).with_context(|| {
-        format!(
-            "Failed to create temporary trusted state in {}",
-            parent.display()
-        )
-    })?;
-    temporary
-        .write_all(serialized.as_bytes())
-        .context("Failed to write temporary trusted state")?;
-    temporary
-        .as_file()
-        .sync_all()
-        .context("Failed to sync temporary trusted state")?;
-
-    let backup = if existing {
-        loop {
-            let backup = trusted_state_backup_path(path)?;
-            match backup_file(path, &backup) {
-                Ok(()) => break Some(backup),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("Failed to back up trusted state to {}", backup.display())
-                    });
-                }
-            }
-        }
-    } else {
-        None
-    };
-
-    temporary
-        .persist(path)
-        .map_err(|error| error.error)
-        .with_context(|| {
-            format!(
-                "Failed to atomically replace trusted state {}",
-                path.display()
-            )
-        })?;
-
-    Ok(backup)
-}
-
-#[derive(Debug)]
+#[derive(Debug, FromContext)]
 enum SshSignedRequestErrorKind {
     PublicKeyForIdentity,
     FingerprintPublicKey,
@@ -523,738 +49,234 @@ enum SshSignedRequestErrorKind {
     SendRequest,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 #[error(
-    "Unable to send SSH-signed request {method} {path} with identity {identity:?}: {kind:?} [{location}]"
+    "Unable to send SSH-signed request {method} {path} with identity {identity:?}: {kind:?} [{location:?}]"
 )]
 struct SshSignedRequestError {
+    #[context(from = SshSignedRequestErrorKindCtx)]
     kind: SshSignedRequestErrorKind,
     method: reqwest::Method,
+    #[context(borrow = str)]
     path: String,
+    #[context(borrow = Path)]
     identity: PathBuf,
-    location: &'static Location<'static>,
-
+    #[location]
+    location: Location,
     #[source]
-    source: Box<dyn StdError + Send + Sync + 'static>,
+    source: BoxError,
 }
 
-impl SshSignedRequestError {
-    #[track_caller]
-    fn new<E>(
-        kind: SshSignedRequestErrorKind,
-        method: reqwest::Method,
-        path: &str,
-        identity: &Path,
-        source: E,
-    ) -> Self
-    where
-        E: StdError + Send + Sync + 'static,
-    {
-        Self {
-            kind,
-            method,
-            path: path.to_string(),
-            identity: identity.to_path_buf(),
-            location: Location::caller(),
-            source: Box::new(source),
-        }
-    }
-
-    #[track_caller]
-    fn new_boxed(
-        kind: SshSignedRequestErrorKind,
-        method: reqwest::Method,
-        path: &str,
-        identity: &Path,
-        source: Box<dyn StdError + Send + Sync + 'static>,
-    ) -> Self {
-        Self {
-            kind,
-            method,
-            path: path.to_string(),
-            identity: identity.to_path_buf(),
-            location: Location::caller(),
-            source,
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, FromContext)]
 enum FetchAppViaSshHttpsErrorKind {
-    #[error("send signed request")]
     SendSignedRequest,
-    #[error("decode response")]
     DecodeResponse,
-    #[error("api status {status}: {message}")]
+    #[allow(dead_code, reason = "used in Display of error")]
     ApiStatus {
         status: reqwest::StatusCode,
+        #[context(borrow = str)]
         message: String,
     },
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("Unable to fetch app {id} via SSH-signed HTTPS at {path}: {kind:?} [{location}]")]
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("Unable to fetch app {id} via SSH-signed HTTPS at {path}: {kind:?} [{location:?}]")]
 struct FetchAppViaSshHttpsError {
+    #[context(from = FetchAppViaSshHttpsErrorKindCtx<'a>)]
     kind: FetchAppViaSshHttpsErrorKind,
+    #[context(borrow = str)]
     id: String,
+    #[context(borrow = str)]
     path: String,
-    location: &'static Location<'static>,
-
+    #[location]
+    location: Location,
     #[source]
-    source: Option<Box<dyn StdError + Send + Sync + 'static>>,
+    source: Option<BoxError>,
 }
 
-impl FetchAppViaSshHttpsError {
-    #[track_caller]
-    fn new(kind: FetchAppViaSshHttpsErrorKind, id: &str, path: &str) -> Self {
-        Self {
-            kind,
-            id: id.to_string(),
-            path: path.to_string(),
-            location: Location::caller(),
-            source: None,
-        }
-    }
-
-    fn with_source<E>(mut self, source: E) -> Self
-    where
-        E: StdError + Send + Sync + 'static,
-    {
-        self.source = Some(Box::new(source));
-        self
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, FromContext)]
 enum DestroyAppViaSshHttpsErrorKind {
-    #[error("send signed request")]
     SendSignedRequest,
-    #[error("api status {status}: {message}")]
+    #[allow(dead_code, reason = "used in Display of error")]
     ApiStatus {
         status: reqwest::StatusCode,
+        #[context(borrow = str)]
         message: String,
     },
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 #[error(
-    "Unable to destroy app {id} via SSH-signed HTTPS at {path} with force_delete={force_delete}: {kind:?} [{location}]"
+    "Unable to destroy app {id} via SSH-signed HTTPS at {path} with force_delete={force_delete}: {kind:?} [{location:?}]"
 )]
 struct DestroyAppViaSshHttpsError {
+    #[context(from = DestroyAppViaSshHttpsErrorKindCtx<'a>)]
     kind: DestroyAppViaSshHttpsErrorKind,
+    #[context(borrow = str)]
     id: String,
+    #[context(borrow = str)]
     path: String,
     force_delete: bool,
-    location: &'static Location<'static>,
-
+    #[location]
+    location: Location,
     #[source]
-    source: Option<Box<dyn StdError + Send + Sync + 'static>>,
+    source: Option<BoxError>,
 }
 
-impl DestroyAppViaSshHttpsError {
-    #[track_caller]
-    fn new(kind: DestroyAppViaSshHttpsErrorKind, id: &str, path: &str, force_delete: bool) -> Self {
-        Self {
-            kind,
-            id: id.to_string(),
-            path: path.to_string(),
-            force_delete,
-            location: Location::caller(),
-            source: None,
-        }
-    }
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum PreparePgpPublicKeyForUploadError {
+    #[error("PGP public key is empty [{location:?}]")]
+    Empty {
+        #[location]
+        location: Location,
+    },
 
-    fn with_source<E>(mut self, source: E) -> Self
-    where
-        E: StdError + Send + Sync + 'static,
+    #[error("PGP public key is too large (maximum {max_bytes} bytes) [{location:?}]")]
+    TooLarge {
+        max_bytes: usize,
+        #[location]
+        location: Location,
+    },
+
+    #[error(
+        "PGP input contains private key material; export and submit only the public certificate [{location:?}]"
+    )]
+    PrivateMaterial {
+        #[location]
+        location: Location,
+    },
+
+    #[error("PGP public key must be an ASCII-armored public certificate [{location:?}]")]
+    NotArmored {
+        #[location]
+        location: Location,
+    },
+
+    #[error("failed to parse PGP public key [{location:?}]")]
+    Parse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("PGP input must contain exactly one public certificate (got {count}) [{location:?}]")]
+    CertCount {
+        count: usize,
+        #[location]
+        location: Location,
+    },
+
+    #[error("PGP input did not contain a public certificate [{location:?}]")]
+    MissingCert {
+        #[location]
+        location: Location,
+    },
+
+    #[error("PGP public certificate is not valid under the standard OpenPGP policy [{location:?}]")]
+    InvalidPolicy {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to normalize PGP public certificate [{location:?}]")]
+    Normalize {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("normalized PGP public certificate is not valid UTF-8 [{location:?}]")]
+    NotUtf8 {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+fn prepare_pgp_public_key_for_upload(
+    public_key: &str,
+) -> Result<(String, String), PreparePgpPublicKeyForUploadError> {
+    use PreparePgpPublicKeyForUploadErrorCtx as Ctx;
+
+    let public_key = public_key.trim();
+    if public_key.is_empty() {
+        return Err(PreparePgpPublicKeyForUploadError::Empty {
+            location: std::panic::Location::caller(),
+        });
+    }
+    if public_key.len() > PGP_PUBLIC_KEY_MAX_BYTES {
+        return Err(PreparePgpPublicKeyForUploadError::TooLarge {
+            max_bytes: PGP_PUBLIC_KEY_MAX_BYTES,
+            location: std::panic::Location::caller(),
+        });
+    }
+    if public_key.starts_with(PGP_PRIVATE_KEY_ARMOR_BEGIN) {
+        return Err(PreparePgpPublicKeyForUploadError::PrivateMaterial {
+            location: std::panic::Location::caller(),
+        });
+    }
+    if !(public_key.starts_with(PGP_PUBLIC_KEY_ARMOR_BEGIN)
+        && public_key.ends_with(PGP_PUBLIC_KEY_ARMOR_END))
     {
-        self.source = Some(Box::new(source));
-        self
-    }
-}
-
-fn byoc_state_path(base_dir: &Path) -> PathBuf {
-    base_dir.join(BYOC_STATE_FILE_NAME)
-}
-
-/// Resolve the state file to read: prefer the current name, then fall back to
-/// the legacy name for deployments created before the rename. Returns the
-/// current path when neither exists.
-fn byoc_state_read_path(base_dir: &Path) -> PathBuf {
-    let current = base_dir.join(BYOC_STATE_FILE_NAME);
-    if current.exists() {
-        return current;
-    }
-    let legacy = base_dir.join(BYOC_STATE_FILE_NAME_LEGACY);
-    if legacy.exists() {
-        return legacy;
-    }
-    current
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct EnvAssignment {
-    key: String,
-    value: String,
-}
-
-fn is_valid_env_key(key: &str) -> bool {
-    let mut chars = key.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-fn parse_env_value(value: &str) -> String {
-    // Parse the first shell compatible word
-    // $() and embedded variations will be maintained, but quotes will be stripped.
-    let first_word = if let Some(mut words) = shlex::split(value)
-        && !words.is_empty()
-    {
-        words.swap_remove(0)
-    } else {
-        String::new()
-    };
-
-    shlex::try_quote(&first_word)
-        .expect("only possible error is null byte, impossible with str")
-        .into()
-}
-
-fn parse_env_assignments(content: &str) -> Vec<EnvAssignment> {
-    let mut assignments = Vec::new();
-
-    for line in content.lines() {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        let trimmed = line.trim();
-
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        let assignment = match trimmed.strip_prefix("export") {
-            Some(rest)
-                if rest
-                    .chars()
-                    .next()
-                    .is_some_and(|ch| ch.is_ascii_whitespace()) =>
-            {
-                rest.trim_start()
-            }
-            _ => trimmed,
-        };
-
-        let Some((key, value)) = assignment.split_once('=') else {
-            continue;
-        };
-        let key = key.trim();
-        let value = value.trim();
-
-        if !is_valid_env_key(key) {
-            continue;
-        }
-
-        assignments.push(EnvAssignment {
-            key: key.to_string(),
-            value: parse_env_value(value),
+        return Err(PreparePgpPublicKeyForUploadError::NotArmored {
+            location: std::panic::Location::caller(),
         });
     }
 
-    assignments
-}
-
-fn parse_quorum_bundle_public_key(bundle_text: &str) -> Result<String> {
-    let bundle: GenerateQuorumResponse =
-        serde_json::from_str(bundle_text).context("Failed to parse quorum bundle JSON")?;
-
-    Ok(bundle.public_key)
-}
-
-fn load_recipient_cert(public_key: &str) -> Result<openpgp::Cert> {
-    openpgp::Cert::from_reader(public_key.as_bytes())
-        .context("Failed to parse recipient public key")
-}
-
-fn prepare_pgp_public_key_for_upload(public_key: &str) -> Result<(String, String)> {
-    let public_key = public_key.trim();
-    anyhow::ensure!(!public_key.is_empty(), "PGP public key is empty");
-    anyhow::ensure!(
-        public_key.len() <= PGP_PUBLIC_KEY_MAX_BYTES,
-        "PGP public key is too large (maximum {} bytes)",
-        PGP_PUBLIC_KEY_MAX_BYTES
-    );
-    anyhow::ensure!(
-        !public_key.starts_with(PGP_PRIVATE_KEY_ARMOR_BEGIN),
-        "PGP input contains private key material; export and submit only the public certificate"
-    );
-    anyhow::ensure!(
-        public_key.starts_with(PGP_PUBLIC_KEY_ARMOR_BEGIN)
-            && public_key.ends_with(PGP_PUBLIC_KEY_ARMOR_END),
-        "PGP public key must be an ASCII-armored public certificate"
-    );
-
-    let cert_parser =
-        CertParser::from_bytes(public_key.as_bytes()).context("Failed to parse PGP public key")?;
+    let cert_parser = CertParser::from_bytes(public_key.as_bytes()).with_context(Ctx::parse())?;
     let certs = cert_parser
         .collect::<openpgp::Result<Vec<_>>>()
-        .context("Failed to parse PGP public key")?;
-    anyhow::ensure!(
-        certs.len() == 1,
-        "PGP input must contain exactly one public certificate (got {})",
-        certs.len()
-    );
+        .with_context(Ctx::parse())?;
+    if certs.len() != 1 {
+        return Err(PreparePgpPublicKeyForUploadError::CertCount {
+            count: certs.len(),
+            location: std::panic::Location::caller(),
+        });
+    }
 
-    let cert = certs
-        .into_iter()
-        .next()
-        .context("PGP input did not contain a public certificate")?;
-    anyhow::ensure!(
-        !cert.is_tsk(),
-        "PGP input contains private key material; export and submit only the public certificate"
-    );
+    let cert =
+        certs
+            .into_iter()
+            .next()
+            .ok_or_else(|| PreparePgpPublicKeyForUploadError::MissingCert {
+                location: std::panic::Location::caller(),
+            })?;
+    if cert.is_tsk() {
+        return Err(PreparePgpPublicKeyForUploadError::PrivateMaterial {
+            location: std::panic::Location::caller(),
+        });
+    }
     cert.with_policy(&OpenPgpPolicy::new(), None)
-        .context("PGP public certificate is not valid under the standard OpenPGP policy")?;
+        .with_context(Ctx::invalid_policy())?;
 
     let fingerprint = cert.fingerprint().to_string();
     let mut serialized = Vec::new();
     cert.armored()
         .serialize(&mut serialized)
-        .context("Failed to normalize PGP public certificate")?;
-    let mut armored = String::from_utf8(serialized)
-        .context("Normalized PGP public certificate is not valid UTF-8")?;
+        .with_context(Ctx::normalize())?;
+    let mut armored = String::from_utf8(serialized).with_context(Ctx::not_utf8())?;
     if !armored.ends_with('\n') {
         armored.push('\n');
     }
-    anyhow::ensure!(
-        armored.len() <= PGP_PUBLIC_KEY_MAX_BYTES,
-        "Normalized PGP public key is too large (maximum {} bytes)",
-        PGP_PUBLIC_KEY_MAX_BYTES
-    );
+    if armored.len() > PGP_PUBLIC_KEY_MAX_BYTES {
+        return Err(PreparePgpPublicKeyForUploadError::TooLarge {
+            max_bytes: PGP_PUBLIC_KEY_MAX_BYTES,
+            location: std::panic::Location::caller(),
+        });
+    }
 
     Ok((armored, fingerprint))
 }
 
-fn encrypt_secret_value(recipient: &openpgp::Cert, plaintext: &str) -> Result<String> {
-    let policy = &OpenPgpPolicy::new();
-    let mut recipients: Vec<_> = recipient
-        .keys()
-        .with_policy(policy, None)
-        .supported()
-        .alive()
-        .revoked(false)
-        .for_storage_encryption()
-        .collect();
-
-    if recipients.is_empty() {
-        recipients = recipient
-            .keys()
-            .with_policy(policy, None)
-            .supported()
-            .alive()
-            .revoked(false)
-            .for_transport_encryption()
-            .collect();
-    }
-
-    anyhow::ensure!(
-        !recipients.is_empty(),
-        "Recipient public key has no suitable encryption subkey"
-    );
-
-    let mut ciphertext = Vec::new();
-    let message = Message::new(&mut ciphertext);
-    let message = Armorer::new(message)
-        .build()
-        .context("Failed to armor encrypted secret")?;
-    let message = Encryptor2::for_recipients(message, recipients)
-        .build()
-        .context("Failed to create OpenPGP encryptor")?;
-    let mut message = LiteralWriter::new(message)
-        .build()
-        .context("Failed to create OpenPGP literal writer")?;
-
-    message
-        .write_all(plaintext.as_bytes())
-        .context("Failed to write secret plaintext")?;
-    message
-        .finalize()
-        .context("Failed to finalize encrypted secret")?;
-
-    String::from_utf8(ciphertext).context("Encrypted OpenPGP armor was not valid UTF-8")
-}
-
-fn write_secret_file_atomically(path: &Path, content: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .with_context(|| format!("Output path has no parent: {}", path.display()))?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .with_context(|| format!("Output path has invalid file name: {}", path.display()))?;
-    let tmp_path = parent.join(format!(".{}.tmp.{}", file_name, std::process::id()));
-
-    fs::write(&tmp_path, content)
-        .with_context(|| format!("Failed to write temporary file {}", tmp_path.display()))?;
-
-    if let Err(err) = fs::rename(&tmp_path, path) {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(err)
-            .with_context(|| format!("Failed to move encrypted secret to {}", path.display()));
-    }
-
-    Ok(())
-}
-
-fn encrypt_env_file(
-    env_file: &Path,
-    bundle_file: &Path,
-    secrets_dir: &Path,
-    requested_keys: &[String],
-) -> Result<usize> {
-    for key in requested_keys {
-        anyhow::ensure!(is_valid_env_key(key), "Invalid env key: {}", key);
-    }
-
-    anyhow::ensure!(
-        env_file.is_file(),
-        "Missing env file: {}",
-        env_file.display()
-    );
-    anyhow::ensure!(
-        bundle_file.is_file(),
-        "Missing quorum bundle: {}",
-        bundle_file.display()
-    );
-
-    let env_text = fs::read_to_string(env_file)
-        .with_context(|| format!("Failed to read env file {}", env_file.display()))?;
-    let assignments = parse_env_assignments(&env_text);
-    let requested: HashSet<&str> = requested_keys.iter().map(String::as_str).collect();
-
-    if !requested.is_empty() {
-        let env_keys: HashSet<&str> = assignments
-            .iter()
-            .map(|assignment| assignment.key.as_str())
-            .collect();
-        let mut missing: Vec<&str> = requested
-            .iter()
-            .copied()
-            .filter(|key| !env_keys.contains(key))
-            .collect();
-        missing.sort_unstable();
-
-        anyhow::ensure!(
-            missing.is_empty(),
-            "Env key(s) not found in {}: {}",
-            env_file.display(),
-            missing.join(", ")
-        );
-    }
-
-    let bundle_text = fs::read_to_string(bundle_file)
-        .with_context(|| format!("Failed to read quorum bundle {}", bundle_file.display()))?;
-    let public_key = parse_quorum_bundle_public_key(&bundle_text)?;
-    let recipient = load_recipient_cert(&public_key)?;
-
-    fs::create_dir_all(secrets_dir)
-        .with_context(|| format!("Failed to create {}", secrets_dir.display()))?;
-
-    let mut count = 0usize;
-    for assignment in assignments {
-        if !requested.is_empty() && !requested.contains(assignment.key.as_str()) {
-            continue;
-        }
-
-        if assignment.value.is_empty() {
-            output::status(format!("skipping empty value for {}", assignment.key));
-            continue;
-        }
-
-        let encrypted = encrypt_secret_value(&recipient, &assignment.value)
-            .with_context(|| format!("Failed to encrypt {}", assignment.key))?;
-        let output = secrets_dir.join(format!("{}.asc", assignment.key));
-        write_secret_file_atomically(&output, &encrypted)?;
-
-        output::status(format!("encrypted {} -> {}", assignment.key, output.display()));
-        count += 1;
-    }
-
-    output::success(format!("encrypted {} secret(s)", count));
-
-    Ok(count)
-}
-
-fn prompt_for_pin() -> Result<Option<String>> {
-    let pin = prompt::password(
-        "Enter your security key PIN (or press Enter if no PIN is set): ",
-    )?;
-
-    if pin.trim().is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(pin))
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
-enum PromptLineError {
-    #[error("failed to read input from stdin: {0}")]
-    Io(#[from] std::io::Error),
-}
+pub(crate) enum CheckDependenciesError {}
 
-/// Prints `prompt`, reads a single non-empty trimmed line from stdin, and
-/// keeps re-prompting with `retry_message` until the user provides one.
-fn prompt_line(prompt: &str, retry_message: &str) -> Result<String, PromptLineError> {
-    prompt_line_from(&mut io::stdin().lock(), prompt, retry_message)
-}
-
-/// Testable core of [`prompt_line`]: reads non-empty trimmed lines from any
-/// `BufRead` instead of always going to real stdin.
-fn prompt_line_from<R: std::io::BufRead>(
-    reader: &mut R,
-    prompt: &str,
-    retry_message: &str,
-) -> Result<String, PromptLineError> {
-    loop {
-        eprint!("{}", prompt);
-        io::stderr().flush()?;
-
-        let mut input = String::new();
-        if reader.read_line(&mut input)? == 0 {
-            // EOF: nothing left to read, stop looping.
-            return Ok(String::new());
-        }
-        let trimmed = input.trim();
-
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
-
-        output::status(retry_message);
-    }
-}
-
-/// Prompts for the username to log in with when `--username` was not passed.
-/// Unlike [`prompt_for_claimed_username`], an empty line here is valid input
-/// (not just EOF): leaving it blank opts into the discoverable/broadcast
-/// login path for accounts that don't have a username yet.
-const LOGIN_USERNAME_PROMPT: &str = "Username (leave blank if you don't have one): ";
-
-#[derive(Debug, thiserror::Error)]
-enum LoginUsernameError {
-    #[error(
-        "Session expired and no username was provided. \
-         Re-authenticate with `caution login --username <name>`."
-    )]
-    NonInteractive,
-    #[error(transparent)]
-    Prompt(#[from] PromptLineError),
-}
-
-/// Resolves the username used for login. Returns the explicitly provided
-/// username as-is; otherwise prompts (reading from `reader`) only when a human
-/// terminal is attached. Non-interactive callers with no username — e.g. an
-/// `ensure_authenticated` auto-relogin fired from a CI/cron invocation — get a
-/// fail-fast error instead of a blocking stdin read that would hang forever.
-fn resolve_login_username<R: std::io::BufRead>(
-    provided: Option<String>,
-    is_terminal: bool,
-    reader: &mut R,
-) -> Result<String, LoginUsernameError> {
-    match provided {
-        Some(username) => Ok(username),
-        None if is_terminal => Ok(prompt_optional_line_from(reader, LOGIN_USERNAME_PROMPT)?),
-        None => Err(LoginUsernameError::NonInteractive),
-    }
-}
-
-/// Reads a single trimmed line from `reader`, returning it as-is (including
-/// empty). No retry loop: an empty line is a valid answer here.
-fn prompt_optional_line_from<R: std::io::BufRead>(
-    reader: &mut R,
-    prompt: &str,
-) -> Result<String, PromptLineError> {
-    eprint!("{}", prompt);
-    io::stderr().flush()?;
-
-    let mut input = String::new();
-    reader.read_line(&mut input)?;
-    Ok(input.trim().to_string())
-}
-
-/// Prompts for a new username when claiming one is required post-login
-/// (the `username_required` gate).
-fn prompt_for_claimed_username() -> Result<String, PromptLineError> {
-    prompt_line(
-        "Choose a username: ",
-        "Username cannot be empty, please try again.",
-    )
-}
-
-#[derive(Debug, thiserror::Error)]
-enum RegisterUsernameError {
-    #[error(
-        "No username was provided and stdin is not interactive. \
-         Re-run with `caution register --username <name>`."
-    )]
-    NonInteractive,
-    #[error(transparent)]
-    Prompt(#[from] PromptLineError),
-}
-
-/// Resolves the username used for `register`. Returns the explicitly
-/// provided username as-is (blank/whitespace-only treated as not provided);
-/// otherwise prompts (reading from `reader`, re-prompting on empty input)
-/// only when a human terminal is attached. Non-interactive callers with no
-/// username get a fail-fast error instead of silently registering with an
-/// empty username (mirrors `resolve_login_username`'s guard).
-fn resolve_register_username<R: std::io::BufRead>(
-    provided: Option<String>,
-    is_terminal: bool,
-    reader: &mut R,
-) -> Result<String, RegisterUsernameError> {
-    match provided {
-        Some(username) if !username.trim().is_empty() => Ok(username),
-        _ if is_terminal => Ok(prompt_line_from(
-            reader,
-            "Choose a username: ",
-            "Username cannot be empty, please try again.",
-        )?),
-        _ => Err(RegisterUsernameError::NonInteractive),
-    }
-}
-
-/// Wrapper that zeroizes the PIN string on drop.
-struct ZeroizePin(String);
-
-impl Drop for ZeroizePin {
-    fn drop(&mut self) {
-        use zeroize::Zeroize;
-        self.0.zeroize();
-    }
-}
-
-fn is_pin_related_error(error: &anyhow::Error) -> bool {
-    let error_msg = format!("{:?}", error).to_lowercase();
-    error_msg.contains("pin")
-        || error_msg.contains("pinuv")
-        || error_msg.contains("pin required")
-        || error_msg.contains("pin_required")
-        || error_msg.contains("pin invalid")
-        || error_msg.contains("pininvalid")
-}
-
-/// Egress is enabled iff the (single) enclave's network block declares >=1 egress rule.
-/// Derived solely from the parsed HCL config — never from a manifest.
-fn configured_enclave(
-    cfg: &caution_config::ConfigurationFile,
-) -> Option<&caution_config::EnclaveConfig> {
-    cfg.enclave.as_ref().and_then(|enclaves| enclaves.values().next())
-}
-
-fn config_egress_enabled(cfg: &caution_config::ConfigurationFile) -> bool {
-    configured_enclave(cfg)
-        .and_then(|enc| enc.network.as_ref())
-        .map(|n| n.egress_enabled())
-        .unwrap_or(false)
-}
-
-/// Add the normalized deployment configuration to a local EIF cache key.
-///
-/// Git identity alone is insufficient because local builds may consume an
-/// uncommitted `caution.hcl`. The generated, measured `run.sh` depends on this
-/// configuration and, for E2E builds, the effective STEVE commit.
-fn measured_build_cache_key(
-    source_key: &str,
-    cfg: &caution_config::ConfigurationFile,
-    steve_commit: Option<&str>,
-) -> Result<String> {
-    let config_json =
-        serde_json::to_vec(cfg).context("Failed to serialize deployment config for cache key")?;
-    let mut hasher = Sha256::new();
-    hasher.update(&config_json);
-    if let Some(steve_commit) = steve_commit {
-        hasher.update(b"|steve|");
-        hasher.update(steve_commit.as_bytes());
-    }
-    let config_hash = hex::encode(hasher.finalize());
-    Ok(format!("{}-config-{}", source_key, config_hash))
-}
-
-fn ssh_fingerprint(key: &str) -> String {
-    let parts: Vec<&str> = key.split_whitespace().collect();
-    parts
-        .get(1)
-        .and_then(|key_data| general_purpose::STANDARD.decode(key_data).ok())
-        .map(|decoded| {
-            format!(
-                "SHA256:{}",
-                general_purpose::STANDARD_NO_PAD.encode(Sha256::digest(&decoded))
-            )
-        })
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn render_qr_code(url: &str) -> Result<()> {
-    // When not attached to a terminal, skip QR art and print only the URL
-    if !output::is_tty_stdout() {
-        output::status(&format!("QR URL: {url}"));
-        return Ok(());
-    }
-
-    use qrcode::{EcLevel, QrCode};
-
-    let code = QrCode::with_error_correction_level(url.as_bytes(), EcLevel::L)
-        .context("Failed to generate QR code")?;
-    let modules = code.to_colors();
-    let width = code.width();
-    let height = modules.len() / width;
-
-    // Quiet zone: 1 module each side (minimal but sufficient for scanning)
-    let quiet = 1;
-    let total_width = width + quiet * 2;
-    let total_height = height + quiet * 2;
-
-    // Inverted rendering for dark terminal backgrounds:
-    // dark module = space (blends with background), light module = █
-    // Half-block chars pack 2 rows per terminal line
-    let is_dark = |row: usize, col: usize| -> bool {
-        if row < quiet || row >= quiet + height || col < quiet || col >= quiet + width {
-            false
-        } else {
-            modules[(row - quiet) * width + (col - quiet)] == qrcode::types::Color::Dark
-        }
-    };
-
-    let mut row = 0;
-    while row < total_height {
-        let mut line = String::new();
-        for col in 0..total_width {
-            let top = is_dark(row, col);
-            let bottom = if row + 1 < total_height {
-                is_dark(row + 1, col)
-            } else {
-                false
-            };
-
-            match (top, bottom) {
-                (true, true) => line.push(' '),
-                (true, false) => line.push('▄'),
-                (false, true) => line.push('▀'),
-                (false, false) => line.push('█'),
-            }
-        }
-        println!("{}", line);
-        row += 2;
-    }
-
-    Ok(())
-}
-
-fn check_dependencies(verbose: bool) -> Result<()> {
+fn check_dependencies(verbose: bool) -> Result<(), CheckDependenciesError> {
     output::verbose(verbose, "Checking dependencies...");
 
     let usb_dev_path = std::path::Path::new("/dev/bus/usb");
@@ -1272,29 +294,46 @@ fn check_dependencies(verbose: bool) -> Result<()> {
     Ok(())
 }
 
-async fn check_gateway_connectivity(url: &str, verbose: bool) -> Result<()> {
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum CheckGatewayConnectivityError {
+    #[error("failed to build HTTP client [{location:?}]")]
+    BuildClient {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+async fn check_gateway_connectivity(
+    url: &str,
+    verbose: bool,
+) -> Result<(), CheckGatewayConnectivityError> {
+    use CheckGatewayConnectivityErrorCtx as Ctx;
+
     output::verbose(
         verbose,
-        &format!("Testing connectivity to gateway: {}", url),
+        format!("Testing connectivity to gateway: {}", url),
     );
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
-        .build()?;
+        .build()
+        .with_context(Ctx::build_client())?;
 
     // Just verify we can reach the gateway base URL
-    output::verbose(verbose, &format!("HEAD {}", url));
+    output::verbose(verbose, format!("HEAD {}", url));
 
     match client.head(url).send().await {
         Ok(resp) => {
             output::verbose(
                 verbose,
-                &format!("Gateway reachable (status: {})", resp.status()),
+                format!("Gateway reachable (status: {})", resp.status()),
             );
             Ok(())
         }
         Err(e) => {
-            output::verbose(verbose, &format!("HEAD request failed (this is ok): {}", e));
+            output::verbose(verbose, format!("HEAD request failed (this is ok): {}", e));
             output::verbose(
                 verbose,
                 "Skipping connectivity check, will test during auth",
@@ -1825,155 +864,6 @@ impl std::fmt::Display for CredentialPlatform {
     }
 }
 
-#[derive(Deserialize)]
-struct RegisterBeginResponse {
-    #[serde(rename = "publicKey")]
-    public_key: PublicKeyCredentialCreationOptions,
-    session: String,
-}
-
-#[derive(Deserialize)]
-struct RegisterFinishResponse {
-    expires_at: String,
-}
-
-#[derive(Deserialize)]
-struct PublicKeyCredentialCreationOptions {
-    challenge: String,
-    rp: RelyingPartyInfo,
-    user: UserInfo,
-    #[serde(rename = "pubKeyCredParams")]
-    pub_key_cred_params: Vec<PubKeyCredParam>,
-    timeout: u64,
-}
-
-#[derive(Deserialize)]
-struct LoginBeginResponse {
-    #[serde(rename = "publicKey")]
-    public_key: PublicKeyCredentialRequestOptions,
-    session: String,
-}
-
-/// JSON body for `POST /auth/login/begin`. The CLI drives USB security keys
-/// directly (no conditional UI), so it always sends this field — but `username`
-/// may be an empty string (the user left the login prompt blank), which the
-/// server's `normalize_login_username` treats as absent, falling back to the
-/// broadcast/discoverable no-username path rather than a scoped `allowCredentials`.
-fn login_begin_request_body(username: &str) -> serde_json::Value {
-    serde_json::json!({ "username": username })
-}
-
-#[derive(Deserialize)]
-struct Fido2SignResponse {
-    #[serde(rename = "publicKey")]
-    public_key: PublicKeyCredentialRequestOptions,
-    challenge_id: String,
-}
-
-#[derive(Deserialize)]
-struct PublicKeyCredentialRequestOptions {
-    challenge: String,
-    #[serde(rename = "rpId")]
-    rp_id: String,
-    timeout: u64,
-    #[serde(rename = "allowCredentials", default)]
-    allow_credentials: Vec<AllowCredential>,
-}
-
-#[derive(Deserialize, Clone)]
-struct AllowCredential {
-    id: String,
-}
-
-#[derive(Deserialize)]
-struct RelyingPartyInfo {
-    id: String,
-    name: String,
-}
-
-#[derive(Deserialize)]
-struct UserInfo {
-    id: String,
-    name: String,
-    #[serde(rename = "displayName")]
-    display_name: String,
-}
-
-#[derive(Deserialize)]
-struct PubKeyCredParam {
-    alg: i32,
-}
-
-#[derive(Deserialize)]
-struct LoginFinishResponse {
-    expires_at: String,
-}
-
-#[derive(Deserialize)]
-struct QrLoginBeginResponse {
-    token: String,
-    url: String,
-    #[allow(dead_code)]
-    expires_at: String,
-}
-
-#[derive(Deserialize)]
-struct QrLoginStatusResponse {
-    status: String,
-    session_id: Option<String>,
-    expires_at: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct QrSignBeginResponse {
-    challenge_id: String,
-    token: String,
-    url: String,
-    expires_at: String,
-}
-
-#[derive(Deserialize)]
-struct QrSignStatusResponse {
-    status: String,
-    fido2_response: Option<String>,
-    challenge_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct AddPgpKeyResponse {
-    fingerprint: String,
-}
-
-#[derive(Deserialize)]
-struct PgpKeyInfo {
-    id: uuid::Uuid,
-    fingerprint: String,
-    name: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ListPgpKeysResponse {
-    keys: Vec<PgpKeyInfo>,
-}
-
-/// Extract session ID from Set-Cookie header
-fn extract_session_from_cookies(response: &reqwest::Response) -> Option<String> {
-    response
-        .headers()
-        .get_all("set-cookie")
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .find(|s| s.starts_with("caution_session="))
-        .and_then(|cookie| {
-            // Parse "caution_session=VALUE; path=/; ..."
-            cookie
-                .strip_prefix("caution_session=")
-                .and_then(|rest| rest.split(';').next())
-                .map(|s| s.to_string())
-        })
-}
-
 #[derive(Deserialize, Serialize, Debug)]
 pub struct App {
     pub id: String,
@@ -2058,12 +948,45 @@ impl CheckoutLink {
     }
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum InspectCheckoutLinkError {
+    #[error("failed to check existing git remote [{location:?}]")]
+    Check {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to list git remotes [{location:?}]")]
+    List {
+        #[location]
+        location: Location,
+    },
+
+    #[error("failed to read existing caution git remote [{location:?}]")]
+    ReadCaution {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to list caution git remotes [{location:?}]")]
+    ListCaution {
+        #[location]
+        location: Location,
+    },
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn inspect_checkout_link(
     deployment_path: &Path,
     repo_dir: &Path,
     config: Option<&caution_config::ConfigurationFile>,
-) -> Result<CheckoutLink> {
+) -> Result<CheckoutLink, InspectCheckoutLinkError> {
+    use InspectCheckoutLinkErrorCtx as Ctx;
+
     let deployment_file_exists = deployment_path.exists();
     let resource_id = if deployment_file_exists {
         fs::read_to_string(deployment_path)
@@ -2082,9 +1005,11 @@ fn inspect_checkout_link(
         .arg(repo_dir)
         .arg("remote")
         .output()
-        .context("Failed to check existing git remote")?;
+        .with_context(Ctx::check())?;
     if !remotes.status.success() {
-        bail!("Failed to list git remotes");
+        return Err(InspectCheckoutLinkError::List {
+            location: std::panic::Location::caller(),
+        });
     }
     let has_caution_remote = String::from_utf8_lossy(&remotes.stdout)
         .lines()
@@ -2095,9 +1020,11 @@ fn inspect_checkout_link(
             .arg(repo_dir)
             .args(["remote", "get-url", "caution"])
             .output()
-            .context("Failed to read existing caution git remote")?;
+            .with_context(Ctx::read_caution())?;
         if !remote.status.success() {
-            bail!("Failed to read existing caution git remote");
+            return Err(InspectCheckoutLinkError::ListCaution {
+                location: std::panic::Location::caller(),
+            });
         }
         Some(String::from_utf8_lossy(&remote.stdout).trim().to_string())
     } else {
@@ -2124,7 +1051,9 @@ fn linked_checkout_error(link: &CheckoutLink) -> String {
         message.push_str("\nLinked app: ");
         message.push_str(resource_id);
     } else if link.deployment_file_exists {
-        message.push_str("\n.caution/deployment.json exists but is unreadable; preserve and inspect it.");
+        message.push_str(
+            "\n.caution/deployment.json exists but is unreadable; preserve and inspect it.",
+        );
     }
     if let Some(remote) = link.caution_remote.as_deref() {
         message.push_str("\nExisting caution remote: ");
@@ -2138,73 +1067,9 @@ fn linked_checkout_error(link: &CheckoutLink) -> String {
             "\nFor a redeploy: `caution apps destroy <app-id>`, then `git push caution HEAD:main`. Do not run `caution apps create` or plain `caution init`. For BYOC apps, do not run `caution teardown --byoc`.",
         );
     } else if link.byoc_provider {
-        message.push_str(
-            "\nUse `caution init --byoc`; `caution apps create` is managed capacity.",
-        );
+        message.push_str("\nUse `caution init --byoc`; `caution apps create` is managed capacity.");
     }
     message
-}
-
-fn linked_encrypted_byoc_config(is_encrypted: bool, resource_id: Option<&str>) -> bool {
-    is_encrypted && resource_id.is_some()
-}
-
-/// Extract a UUID-formatted resource ID from a Caution git remote URL.
-///
-/// The API constructs git URLs as `git@hostname:<uuid>.git` (standard SSH) or
-/// `ssh://git@hostname:port/<uuid>.git` (SSH with explicit port). This function
-/// parses the last path segment and validates it as a UUID so that callers can
-/// attempt to re-link an app when only the git remote is set (no local
-/// `.caution/deployment.json`).
-fn extract_resource_id_from_git_url(url: &str) -> Option<String> {
-    if url.starts_with("ssh://") {
-        let parsed = url::Url::parse(url).ok()?;
-        if parsed.scheme() != "ssh" || parsed.username() != "git" || parsed.password().is_some() {
-            return None;
-        }
-        let mut segments = parsed.path_segments()?;
-        let candidate = segments.next()?.strip_suffix(".git")?;
-        if segments.next().is_some() {
-            return None;
-        }
-        return uuid::Uuid::parse_str(candidate)
-            .ok()
-            .map(|id| id.to_string());
-    }
-
-    let after_at = url.strip_prefix("git@")?;
-    let (host, path) = after_at.split_once(':')?;
-    if host.is_empty() || path.contains('/') {
-        return None;
-    }
-    let candidate = path.strip_suffix(".git")?;
-    uuid::Uuid::parse_str(candidate)
-        .ok()
-        .map(|id| id.to_string())
-}
-
-fn relink_candidate(checkout_link: &CheckoutLink) -> Result<Option<(String, bool)>> {
-    if let Some(resource_id) = checkout_link.resource_id.as_ref() {
-        return Ok(Some((resource_id.clone(), false)));
-    }
-
-    if let Some(remote_url) = checkout_link.caution_remote.as_deref() {
-        let resource_id = extract_resource_id_from_git_url(remote_url).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Caution git remote is set to '{}' but does not contain a valid Caution app ID. Preserve and inspect the remote; refusing to create a successor.",
-                remote_url
-            )
-        })?;
-        return Ok(Some((resource_id, true)));
-    }
-
-    if checkout_link.deployment_file_exists {
-        bail!(
-            ".caution/deployment.json exists but does not contain a valid resource_id. Preserve and inspect it; refusing to create a successor."
-        );
-    }
-
-    Ok(None)
 }
 
 fn deployment_target_summary(capacity: &str, aws_account: &str, region: &str) -> String {
@@ -2215,34 +1080,6 @@ fn deployment_target_summary(capacity: &str, aws_account: &str, region: &str) ->
         aws_account,
         ", region=",
         region,
-    ]
-    .concat()
-}
-
-fn print_destroy_redeploy_guidance(app: &App) {
-    output::status(
-        "The app ID, Git repository, and managed hostname were retained. Any linked BYOC credential was also retained.",
-    );
-    output::status("Redeploy with: git push caution HEAD:main");
-    if !app.git_url.is_empty() {
-        output::status(["Existing Git URL: ", app.git_url.as_str()].concat());
-    }
-    output::warning(
-        "Do not run `caution apps create` or plain `caution init` for this redeploy. For BYOC apps, do not run `caution teardown --byoc`.",
-    );
-}
-
-fn aws_credentials_error(profile: &str, action: &str) -> String {
-    [
-        "AWS credentials not found for profile \"",
-        profile,
-        "\". The CLI reads environment credentials and static keys from ~/.aws/credentials. For assume-role, SSO, or credential_process profiles, export AWS CLI v2 credentials:\n\n  aws sso login --profile ",
-        profile,
-        "  # SSO only\n  eval \"$(aws configure export-credentials --profile ",
-        profile,
-        " --format env)\"\n  aws sts get-caller-identity\n\nThen rerun `",
-        action,
-        "`. Export immediately before the operation; temporary credentials must remain valid until it completes. Required permissions: ec2:*, autoscaling:*, s3:*, iam:*, and sts:GetCallerIdentity.",
     ]
     .concat()
 }
@@ -2259,23 +1096,6 @@ impl Config {
     fn session_id(&self) -> &str {
         &self.session_id
     }
-}
-
-#[derive(Deserialize)]
-struct UserStatus {
-    email_verified: bool,
-    payment_method_added: bool,
-    onboarding_complete: bool,
-}
-
-#[derive(Deserialize)]
-struct OrgSettings {
-    require_pin: bool,
-}
-
-#[derive(Deserialize)]
-struct Organization {
-    id: String,
 }
 
 #[derive(Deserialize)]
@@ -2308,13 +1128,16 @@ struct PublicBuildInput {
     commit: String,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 #[error(
-    "Invalid Platform framework commit {commit:?}; expected a 40-character Git SHA [{location}]"
+    "Invalid Platform framework commit {commit:?}; expected a 40-character Git SHA [{location:?}]"
 )]
 struct PinPlatformFrameworkSourceError {
     commit: String,
-    location: &'static Location<'static>,
+    #[location]
+    location: Location,
+    #[source]
+    source: Option<BoxError>,
 }
 
 #[track_caller]
@@ -2325,7 +1148,8 @@ fn pinned_platform_framework_source(
     if normalized.len() != 40 || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(PinPlatformFrameworkSourceError {
             commit: commit.to_string(),
-            location: Location::caller(),
+            location: std::panic::Location::caller(),
+            source: None,
         });
     }
     Ok(enclave_builder::pin_archive_url_to_commit(
@@ -2334,7 +1158,7 @@ fn pinned_platform_framework_source(
     ))
 }
 
-#[derive(Debug)]
+#[derive(Debug, FromContext)]
 enum CurrentPlatformFrameworkSourceErrorKind {
     InvalidServerUrl,
     FetchBuildInputs,
@@ -2350,362 +1174,150 @@ struct PublicBuildInputsStatusError {
     status: reqwest::StatusCode,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 #[error(
-    "Unable to resolve the current Platform framework source from {endpoint}: {kind:?} [{location}]"
+    "Unable to resolve the current Platform framework source from {endpoint}: {kind:?} [{location:?}]"
 )]
 pub(crate) struct CurrentPlatformFrameworkSourceError {
+    #[context(from = CurrentPlatformFrameworkSourceErrorKindCtx)]
     kind: CurrentPlatformFrameworkSourceErrorKind,
+    #[context(borrow = str)]
     endpoint: String,
-    location: &'static Location<'static>,
-
+    #[location]
+    location: Location,
     #[source]
-    source: Option<Box<dyn StdError + Send + Sync + 'static>>,
+    source: Option<BoxError>,
 }
 
-impl CurrentPlatformFrameworkSourceError {
-    #[track_caller]
-    fn new(kind: CurrentPlatformFrameworkSourceErrorKind, endpoint: impl Into<String>) -> Self {
-        Self {
-            kind,
-            endpoint: endpoint.into(),
-            location: Location::caller(),
-            source: None,
-        }
-    }
-
-    fn with_source<E>(mut self, source: E) -> Self
-    where
-        E: StdError + Send + Sync + 'static,
-    {
-        self.source = Some(Box::new(source));
-        self
-    }
-}
-
-fn framework_cache_key(source_key: &str, framework_commit: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(source_key.as_bytes());
-    hasher.update(b"|framework|");
-    hasher.update(framework_commit.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
-struct StagedSource {
-    path: PathBuf,
-    cache_key: String,
-    app_commit: Option<String>,
-    _temp_dir: tempfile::TempDir,
-}
-
-/// Keymaker-eligibility of a single certificate, with per-subkey detail so we can tell the
-/// user exactly which subkey is missing instead of an opaque "no eligible certificates".
-struct CertEligibility {
-    user_id: String,
-    has_sign: bool,
-    has_auth: bool,
-    has_enc: bool,
-}
-
-impl CertEligibility {
-    fn is_eligible(&self) -> bool {
-        self.has_sign && self.has_auth && self.has_enc
-    }
-
-    /// Human-readable list of the missing subkey roles, in keygen order.
-    fn missing(&self) -> Vec<&'static str> {
-        let mut missing = Vec::new();
-        if !self.has_sign {
-            missing.push("signing");
-        }
-        if !self.has_auth {
-            missing.push("authentication");
-        }
-        if !self.has_enc {
-            missing.push("storage-encryption");
-        }
-        missing
-    }
-}
-
-/// Inspect each certificate in an armored keyring for Keymaker eligibility.
-///
-/// A certificate is eligible only if it carries signing, authentication, and
-/// storage-encryption subkeys valid under the standard policy.
-fn keymaker_cert_eligibility(armored_keyring: &str) -> Result<Vec<CertEligibility>> {
-    let cert_parser = CertParser::from_bytes(armored_keyring)
-        .context("Failed to parse keyring as OpenPGP public certificates")?;
-    let policy = openpgp::policy::StandardPolicy::new();
-    let mut certs = Vec::new();
-
-    for parseable_cert in cert_parser {
-        let cert = parseable_cert.context("Failed to parse OpenPGP public certificate")?;
-        let valid_cert = cert
-            .with_policy(&policy, None)
-            .context("OpenPGP public certificate is not valid under the standard policy")?;
-        let user_id = valid_cert
-            .userids()
-            .next()
-            .map(|uid| String::from_utf8_lossy(uid.userid().value()).into_owned())
-            .unwrap_or_else(|| valid_cert.fingerprint().to_string());
-
-        certs.push(CertEligibility {
-            user_id,
-            has_sign: valid_cert.keys().for_signing().next().is_some(),
-            has_auth: valid_cert.keys().for_authentication().next().is_some(),
-            has_enc: valid_cert.keys().for_storage_encryption().next().is_some(),
-        });
-    }
-
-    Ok(certs)
-}
-
-fn keymaker_eligible_cert_count(armored_keyring: &str) -> Result<usize> {
-    Ok(keymaker_cert_eligibility(armored_keyring)?
-        .iter()
-        .filter(|cert| cert.is_eligible())
-        .count())
-}
-
-/// Re-serialize all certificates into a single ASCII-armored block.
-///
-/// Keyrings assembled by concatenating armored files (`cat alice.asc bob.asc`)
-/// contain multiple armor blocks. Sequoia and GnuPG read all of them, but the
-/// rpgp-based Locksmith/Keymaker stack only parses the first block and
-/// silently drops the remaining certificates, which later breaks send-shard
-/// for the dropped holders.
-fn normalize_keyring(armored_keyring: &str) -> Result<String> {
-    let cert_parser = CertParser::from_bytes(armored_keyring)
-        .context("Failed to parse keyring as OpenPGP public certificates")?;
-
-    let mut writer = openpgp::armor::Writer::new(Vec::new(), openpgp::armor::Kind::PublicKey)
-        .context("Failed to create armor writer")?;
-    for parseable_cert in cert_parser {
-        let cert = parseable_cert.context("Failed to parse OpenPGP public certificate")?;
-        cert.serialize(&mut writer)
-            .context("Failed to serialize OpenPGP public certificate")?;
-    }
-    let bytes = writer.finalize().context("Failed to finalize armor")?;
-
-    String::from_utf8(bytes)
-        .context("Normalized keyring is not valid UTF-8")
-        .map(|mut keyring| {
-            if !keyring.ends_with('\n') {
-                keyring.push('\n');
-            }
-            keyring
-        })
-}
-
-fn resolve_quorum_parameters(
-    threshold: Option<u8>,
-    max: Option<u8>,
-    eligible_certs: usize,
-) -> Result<(u8, u8)> {
-    if eligible_certs == 0 {
-        bail!(
-            "keyring contains no Keymaker-eligible public certificates \
-             (each certificate needs signing, authentication, and storage-encryption keys)"
-        );
-    }
-
-    let inferred_max = u8::try_from(eligible_certs)
-        .context("keyring contains more than 255 Keymaker-eligible public certificates")?;
-    let threshold = threshold.unwrap_or(1);
-    let max = max.unwrap_or(inferred_max);
-
-    if max as usize != eligible_certs {
-        bail!(
-            "--max ({}) must match the number of Keymaker-eligible public certificates \
-             in the keyring ({}); use --max {}, or pass a keyring with exactly {} \
-             eligible certificate(s)",
-            max,
-            eligible_certs,
-            eligible_certs,
-            max
-        );
-    }
-
-    if threshold == 0 || threshold > max {
-        bail!(
-            "--threshold must be between 1 and --max \
-             (got threshold={}, max={})",
-            threshold,
-            max
-        );
-    }
-
-    Ok((threshold, max))
-}
-
-fn keymaker_cert(user_id: String) -> Result<openpgp::Cert> {
-    let (cert, _) = CertBuilder::new()
-        .add_userid(user_id)
-        .add_signing_subkey()
-        .add_storage_encryption_subkey()
-        .add_authentication_subkey()
-        .generate()
-        .context("Failed to generate OpenPGP key")?;
-
-    Ok(cert)
-}
-
-fn armored_keyrings_for_cert(cert: &openpgp::Cert) -> Result<(Vec<u8>, Vec<u8>)> {
-    let mut public_keyring = Vec::new();
-    cert.armored()
-        .serialize(&mut public_keyring)
-        .context("Failed to serialize public keyring")?;
-
-    let mut private_keyring = Vec::new();
-    cert.as_tsk()
-        .armored()
-        .serialize(&mut private_keyring)
-        .context("Failed to serialize private keyring")?;
-
-    Ok((public_keyring, private_keyring))
-}
-
-fn default_private_keyring_path(public_keyring: &Path) -> PathBuf {
-    let mut private_keyring = public_keyring.to_path_buf();
-    let extension = public_keyring
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| format!("private.{extension}"))
-        .unwrap_or_else(|| "private".to_string());
-    private_keyring.set_extension(extension);
-    private_keyring
-}
-
-fn write_keyring(path: &Path, contents: &[u8], force: bool, sensitive: bool) -> Result<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}", parent.display()))?;
-    }
-
-    let mut options = fs::OpenOptions::new();
-    options.write(true);
-    if force {
-        options.create(true).truncate(true);
-    } else {
-        options.create_new(true);
-    }
-    #[cfg(unix)]
-    if sensitive {
-        options.mode(0o600);
-    }
-
-    let mut file = options.open(path).with_context(|| {
-        if force {
-            format!("Failed to open {} for writing", path.display())
-        } else {
-            format!(
-                "{} already exists; pass --force to overwrite it",
-                path.display()
-            )
-        }
-    })?;
-    file.write_all(contents)
-        .with_context(|| format!("Failed to write {}", path.display()))?;
-
-    #[cfg(unix)]
-    if sensitive {
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("Failed to set permissions on {}", path.display()))?;
-    }
-
-    Ok(())
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum BuildLocalError {
-    #[error("failed to read deployment config")]
-    ReadConfig(#[source] anyhow::Error),
-
-    #[error("failed to resolve the Platform framework build input")]
-    BuildInput(#[source] CurrentPlatformFrameworkSourceError),
-
-    #[error("failed to build Docker image")]
-    BuildDockerImage(#[source] anyhow::Error),
-
-    #[error("failed to resolve cache directory")]
-    CacheDir(#[source] anyhow::Error),
-
-    #[error("failed to derive measured build cache key")]
-    CacheKey(#[source] anyhow::Error),
-
-    #[error("failed to initialize enclave builder")]
-    InitBuilder(#[source] anyhow::Error),
-
-    #[error("failed to parse run command")]
-    ParseRunCommand(#[source] caution_config::FromStrError),
-
-    #[error("failed to build enclave")]
-    BuildEnclave(#[source] anyhow::Error),
-}
-
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 pub enum RunError {
-    #[error("dependency check failed")]
-    DependencyCheck(#[source] anyhow::Error),
+    #[error("dependency check failed [{location:?}]")]
+    DependencyCheck {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("gateway connectivity check failed")]
-    GatewayConnectivity(#[source] anyhow::Error),
+    #[error("gateway connectivity check failed [{location:?}]")]
+    GatewayConnectivity {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("failed to initialize API client")]
-    ApiClientInit(#[source] anyhow::Error),
+    #[error("failed to initialize API client [{location:?}]")]
+    ApiClientInit {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("{0}")]
-    ArgValidation(&'static str),
+    #[error("{detail} [{location:?}]")]
+    ArgValidation {
+        detail: &'static str,
+        #[location]
+        location: Location,
+    },
 
-    #[error("command execution failed")]
-    CommandDispatch(#[source] anyhow::Error),
+    #[error("command execution failed [{location:?}]")]
+    CommandDispatch {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ReadConfigError {
-    #[error("failed to read caution.hcl")]
-    ReadHcl(#[source] std::io::Error),
+    #[error("failed to read caution.hcl [{location:?}]")]
+    ReadHcl {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("invalid caution.hcl: {0}")]
-    ParseHcl(#[source] caution_config::FromStrError),
+    #[error("invalid caution.hcl [{location:?}]")]
+    ParseHcl {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("failed to read Procfile")]
-    ReadProcfile(#[source] std::io::Error),
+    #[error("failed to read Procfile [{location:?}]")]
+    ReadProcfile {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("invalid Procfile: {0}")]
-    ParseProcfile(#[source] caution_config::FromProcfileError),
+    #[error("invalid Procfile [{location:?}]")]
+    ParseProcfile {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("no configuration file found; run `caution init` to generate a caution.hcl template")]
-    ConfigNotFound,
+    #[error(
+        "no configuration file found; run `caution init` to generate a caution.hcl template [{location:?}]"
+    )]
+    ConfigNotFound {
+        #[location]
+        location: Location,
+    },
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ReadConfigFromDirError {
-    #[error("failed to read {path}")]
+    #[error("failed to read {path} [{location:?}]")]
     ReadHcl {
         path: PathBuf,
+        #[location]
+        location: Location,
         #[source]
-        source: std::io::Error,
+        source: BoxError,
     },
 
-    #[error("invalid caution.hcl: {0}")]
-    ParseHcl(#[source] caution_config::FromStrError),
+    #[error("invalid caution.hcl [{location:?}]")]
+    ParseHcl {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("failed to read {path}")]
+    #[error("failed to read {path} [{location:?}]")]
     ReadProcfile {
         path: PathBuf,
+        #[location]
+        location: Location,
         #[source]
-        source: std::io::Error,
+        source: BoxError,
     },
 
-    #[error("invalid Procfile: {0}")]
-    ParseProcfile(#[source] caution_config::FromProcfileError),
+    #[error("invalid Procfile [{location:?}]")]
+    ParseProcfile {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("no configuration file found in {0}; create a caution.hcl or Procfile file")]
-    ConfigNotFound(PathBuf),
+    #[error(
+        "no configuration file found in {path}; create a caution.hcl or Procfile file [{location:?}]"
+    )]
+    ConfigNotFound {
+        path: PathBuf,
+        #[location]
+        location: Location,
+    },
 }
 
 struct ApiClient {
@@ -2718,25 +1330,743 @@ struct ApiClient {
     workdir: Option<PathBuf>,
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ApiClientNewError {
+    #[error("could not find config directory [{location:?}]")]
+    ConfigDir {
+        #[location]
+        location: Location,
+    },
+
+    #[error("failed to create config directory [{location:?}]")]
+    CreateConfigDir {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum GetDeploymentPathError {
+    #[error(
+        "cannot access current directory. Please run this command from a valid directory [{location:?}]"
+    )]
+    MissingCwd { location: Location },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SaveConfigError {
+    #[error("failed to serialize config [{location:?}]")]
+    Serialize {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to open config file '{path}' [{location:?}]")]
+    Open {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to write config file [{location:?}]")]
+    Write {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum LoadConfigError {
+    #[error("not logged in. Run 'login' command first [{location:?}]")]
+    ReadConfig {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to parse config file '{path}' [{location:?}]")]
+    Parse {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum EnsureAuthenticatedError {
+    #[error("QR login failed [{location:?}]")]
+    LoginQr {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("login failed [{location:?}]")]
+    Login {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to load config after authenticating [{location:?}]")]
+    LoadConfig {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum RequireExistingAuthenticatedConfigError {
+    #[error("failed to load config [{location:?}]")]
+    LoadConfig {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("session expired. Run 'login' command first [{location:?}]")]
+    SessionExpired {
+        #[location]
+        location: Location,
+    },
+
+    #[error("session is for a different server. Run 'login' command first [{location:?}]")]
+    DifferentServer {
+        #[location]
+        location: Location,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SaveDeploymentError {
+    #[error("failed to get deployment path [{location:?}]")]
+    GetDeploymentPath {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to serialize deployment info [{location:?}]")]
+    Serialize {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to write deployment info to '{path}' [{location:?}]")]
+    Write {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum LoadDeploymentError {
+    #[error("failed to get deployment path [{location:?}]")]
+    GetDeploymentPath {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("no deployment found. Run 'init' first [{location:?}]")]
+    ReadFile {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to parse deployment info [{location:?}]")]
+    Parse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum PublicKeyForIdentityError {
+    #[error("failed to read SSH public key '{path}' [{location:?}]")]
+    ReadFile {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to run ssh-keygen to derive SSH public key [{location:?}]")]
+    RunSshKeygen {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to derive SSH public key [{location:?}]")]
+    DeriveFailed {
+        stderr: String,
+        #[location]
+        location: Location,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SshFingerprintError {
+    #[error("invalid SSH public key [{location:?}]")]
+    Decode {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SignSshPayloadError {
+    #[error("failed to create SSH signing temp dir [{location:?}]")]
+    TempDir {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to write SSH signing payload [{location:?}]")]
+    WritePayload {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to run ssh-keygen for SSH request signing [{location:?}]")]
+    RunSshKeygen {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to sign request with SSH key [{location:?}]")]
+    SignFailed {
+        stderr: String,
+        #[location]
+        location: Location,
+    },
+
+    #[error("failed to read SSH signature '{path}' [{location:?}]")]
+    ReadSignature {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum CheckGitRepoError {
+    #[error("failed to execute git command. Is git installed? [{location:?}]")]
+    RunGitCommand {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error(
+        "not in a git repository. Please run this command from within a git repository [{location:?}]"
+    )]
+    NotGitRepo {
+        #[location]
+        location: Location,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SetGitRemoteError {
+    #[error("failed to check existing git remote [{location:?}]")]
+    Check {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to update git remote 'caution' [{location:?}]")]
+    Update {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to add git remote 'caution' [{location:?}]")]
+    Add {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum CreateConfigFileInDirIfNeededError {
+    #[error("failed to create caution.hcl [{location:?}]")]
+    WriteConfig {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GitUrlToArchiveUrlsError {
+    #[error("failed to parse git URL [{location:?}]")]
+    ParseUrl {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("invalid git URL format [{location:?}]")]
+    InvalidUrlFormat {
+        #[location]
+        location: Location,
+    },
+
+    #[error("invalid git SSH URL format [{location:?}]")]
+    InvalidSSHFormat {
+        #[location]
+        location: Location,
+    },
+
+    #[error("git URL has no host [{location:?}]")]
+    NoHost {
+        #[location]
+        location: Location,
+    },
+
+    #[error("unsupported git URL format: {url} [{location:?}]")]
+    UnsupportedFormat {
+        url: String,
+        #[location]
+        location: Location,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SignedRequestError {
+    #[error("failed to get FIDO2 sign challenge [{location:?}]")]
+    GetSignChallenge {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to get sign challenge: {error} [{location:?}]")]
+    ChallengeFailure {
+        error: String,
+        #[location]
+        location: Location,
+    },
+
+    #[error("failed to parse FIDO2 sign response [{location:?}]")]
+    ParseSignResponse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to get FIDO2 assertion [{location:?}]")]
+    GetAssertion {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to send signed request [{location:?}]")]
+    SendRequest {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SignedPostError {
+    #[error("failed to serialize request body [{location:?}]")]
+    SerializeBody {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to serialize request body for display [{location:?}]")]
+    SerializePretty {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("signed request failed [{location:?}]")]
+    SignedRequest {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SignedDeleteError {
+    #[error("signed request failed [{location:?}]")]
+    SignedRequest {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetProtectedJsonError {
+    #[error("{failure_context} [{location:?}]")]
+    SendRequest {
+        #[context(borrow = str)]
+        failure_context: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to read response body [{location:?}]")]
+    ReadBody {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("{failure_context} [{location:?}]")]
+    ParseJson {
+        #[context(borrow = str)]
+        failure_context: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("{failure_context}: {api_response} [{location:?}]")]
+    ApiFailure {
+        #[context(borrow = str)]
+        failure_context: String,
+        api_response: String,
+        #[location]
+        location: Location,
+    },
+
+    #[error("{failure_context} [{location:?}]")]
+    ClaimUsername {
+        #[context(borrow = str)]
+        failure_context: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum JoinCapacityWaitlistError {
+    #[error("--email must not be empty [{location:?}]")]
+    EmptyEmail {
+        #[location]
+        location: Location,
+    },
+
+    #[error("--email is invalid [{location:?}]")]
+    InvalidEmail {
+        #[location]
+        location: Location,
+    },
+
+    #[error("--email must be an email address [{location:?}]")]
+    NoAtSymbol {
+        #[location]
+        location: Location,
+    },
+
+    #[error("--vcpus must be between 1 and 46; contact support for larger requests [{location:?}]")]
+    InvalidVcpus {
+        vcpus: u32,
+        #[location]
+        location: Location,
+    },
+
+    #[error("authentication failed [{location:?}]")]
+    EnsureAuthenticated {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to determine organization [{location:?}]")]
+    GetOrgId {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to send capacity waitlist request [{location:?}]")]
+    SendRequest {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to join capacity waitlist: {error} [{location:?}]")]
+    ApiFailure {
+        error: String,
+        #[location]
+        location: Location,
+    },
+
+    #[error("failed to parse capacity waitlist response [{location:?}]")]
+    ParseResponse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum FetchAppError {
+    #[error("authentication failed [{location:?}]")]
+    EnsureAuthenticated {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to fetch app [{location:?}]")]
+    GetProtectedJson {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetCurrentAppError {
+    #[error("failed to load deployment [{location:?}]")]
+    LoadDeployment {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to fetch app [{location:?}]")]
+    FetchApp {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetAttestationUrlError {
+    #[error("failed to get current app [{location:?}]")]
+    GetCurrentApp {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error(
+        "no public IP available. Run 'caution app get <id/null>' to check deployment status, or provide --url explicitly [{location:?}]"
+    )]
+    NoPublicIp {
+        #[location]
+        location: Location,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum GetCacheDirError {
+    #[error("failed to determine home directory [{location:?}]")]
+    HomeDir { location: Location },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ResolveProcfileBuildCommandError {
+    #[error(
+        "Procfile has empty build command. Expected format: build: docker build -t myapp . [{location:?}]"
+    )]
+    EmptyBuildCommand {
+        #[location]
+        location: Location,
+    },
+
+    #[error(
+        "Procfile has empty containerfile path. Expected format: containerfile: Containerfile [{location:?}]"
+    )]
+    EmptyContainerfile {
+        #[location]
+        location: Location,
+    },
+
+    #[error("Procfile field `containerfile:` points to missing file: {path} [{location:?}]")]
+    MissingContainerfile {
+        path: String,
+        #[location]
+        location: Location,
+    },
+
+    #[error("invalid containerfile path [{location:?}]")]
+    InvalidContainerfile {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ResolveLocalBuildCommandFromDirError {
+    #[error("failed to read caution.hcl [{location:?}]")]
+    ReadCautionHcl {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("invalid caution.hcl [{location:?}]")]
+    ParseCautionHcl {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to read Procfile [{location:?}]")]
+    ReadProcfile {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("no caution.hcl or Procfile found [{location:?}]")]
+    NoConfigFound {
+        #[location]
+        location: Location,
+    },
+
+    #[error("caution.hcl `containerfile` points to missing file: {path} [{location:?}]")]
+    MissingContainerfile {
+        path: String,
+        #[location]
+        location: Location,
+    },
+
+    #[error("invalid containerfile path [{location:?}]")]
+    InvalidContainerfile {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to resolve build command [{location:?}]")]
+    ProcfileResolve {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 impl ApiClient {
-    fn new(base_url: &str, verbose: bool, qr: bool, workdir: Option<PathBuf>) -> Result<Self> {
+    fn new(
+        base_url: &str,
+        verbose: bool,
+        qr: bool,
+        workdir: Option<PathBuf>,
+    ) -> Result<Self, ApiClientNewError> {
+        use ApiClientNewErrorCtx as Ctx;
+
         output::verbose(verbose, "Initializing API client...");
 
-        let base_config = dirs::config_dir().context("Could not find config directory")?;
+        let base_config = dirs::config_dir().ok_or_else(|| ApiClientNewError::ConfigDir {
+            location: std::panic::Location::caller(),
+        })?;
         let legacy_dir = base_config.join("api-cli");
         let config_dir = base_config.join("caution-cli");
 
         // Migrate from the old api-cli directory name if present
-        if legacy_dir.exists() && !config_dir.exists() {
-            if let Err(e) = fs::rename(&legacy_dir, &config_dir) {
-                output::warning(format!("Warning: could not migrate config from {} to {}: {e}. You may need to log in again.",
-                    legacy_dir.display(), config_dir.display()));
+        if legacy_dir.exists() && !config_dir.exists()
+            && let Err(e) = fs::rename(&legacy_dir, &config_dir) {
+                output::warning(format!(
+                    "Warning: could not migrate config from {} to {}: {e}. You may need to log in again.",
+                    legacy_dir.display(),
+                    config_dir.display()
+                ));
             }
-        }
 
-        output::verbose(verbose, &format!("Config directory: {:?}", config_dir));
+        output::verbose(verbose, format!("Config directory: {:?}", config_dir));
 
-        fs::create_dir_all(&config_dir).context("Failed to create config directory")?;
+        fs::create_dir_all(&config_dir).with_context(Ctx::create_config_dir())?;
         let config_path = config_dir.join("config.json");
 
         // Local deployment info in the current git repo (optional - may not have a valid cwd)
@@ -2747,10 +2077,10 @@ impl ApiClient {
             caution_dir.join("deployment.json")
         });
 
-        output::verbose(verbose, &format!("Config file: {:?}", config_path));
-        output::verbose(verbose, &format!("Deployment file: {:?}", deployment_path));
+        output::verbose(verbose, format!("Config file: {:?}", config_path));
+        output::verbose(verbose, format!("Deployment file: {:?}", deployment_path));
         if let Some(ref wd) = workdir {
-            output::verbose(verbose, &format!("Working directory: {:?}", wd));
+            output::verbose(verbose, format!("Working directory: {:?}", wd));
         }
         output::verbose(verbose, "API client initialized");
 
@@ -2783,13 +2113,11 @@ impl ApiClient {
     async fn current_platform_framework_source(
         &self,
     ) -> std::result::Result<(String, String), CurrentPlatformFrameworkSourceError> {
-        let mut endpoint = reqwest::Url::parse(&self.base_url).map_err(|source| {
-            CurrentPlatformFrameworkSourceError::new(
-                CurrentPlatformFrameworkSourceErrorKind::InvalidServerUrl,
-                &self.base_url,
-            )
-            .with_source(source)
-        })?;
+        use CurrentPlatformFrameworkSourceErrorCtx as Ctx;
+        use CurrentPlatformFrameworkSourceErrorKindCtx as KindCtx;
+
+        let mut endpoint = reqwest::Url::parse(&self.base_url)
+            .with_context(Ctx::new(KindCtx::invalid_server_url(), &self.base_url))?;
         endpoint.set_path("/.well-known/caution/build-inputs");
         endpoint.set_query(None);
         endpoint.set_fragment(None);
@@ -2799,59 +2127,43 @@ impl ApiClient {
             .timeout(Duration::from_secs(30))
             .send()
             .await
-            .map_err(|source| {
-                CurrentPlatformFrameworkSourceError::new(
-                    CurrentPlatformFrameworkSourceErrorKind::FetchBuildInputs,
-                    endpoint.as_str(),
-                )
-                .with_source(source)
-            })?;
+            .with_context(Ctx::new(KindCtx::fetch_build_inputs(), endpoint.as_str()))?;
         if !response.status().is_success() {
-            return Err(CurrentPlatformFrameworkSourceError::new(
-                CurrentPlatformFrameworkSourceErrorKind::BuildInputsStatus,
-                endpoint.as_str(),
-            )
-            .with_source(PublicBuildInputsStatusError {
-                status: response.status(),
-            }));
+            return Err(CurrentPlatformFrameworkSourceError {
+                kind: KindCtx::build_inputs_status().into(),
+                endpoint: endpoint.as_str().to_string(),
+                location: std::panic::Location::caller(),
+                source: Some(Box::new(PublicBuildInputsStatusError {
+                    status: response.status(),
+                })),
+            });
         }
         let inputs: PublicBuildInputs = response
             .json()
             .await
-            .map_err(|source| {
-                CurrentPlatformFrameworkSourceError::new(
-                    CurrentPlatformFrameworkSourceErrorKind::DecodeBuildInputs,
-                    endpoint.as_str(),
-                )
-                .with_source(source)
-            })?;
+            .with_context(Ctx::new(KindCtx::decode_build_inputs(), endpoint.as_str()))?;
         let commit = inputs
             .platform
-            .ok_or_else(|| {
-                CurrentPlatformFrameworkSourceError::new(
-                    CurrentPlatformFrameworkSourceErrorKind::MissingPlatformCommit,
-                    endpoint.as_str(),
-                )
+            .ok_or_else(|| CurrentPlatformFrameworkSourceError {
+                kind: KindCtx::missing_platform_commit().into(),
+                endpoint: endpoint.as_str().to_string(),
+                location: std::panic::Location::caller(),
+                source: None,
             })?
             .commit;
-        let source = pinned_platform_framework_source(&commit).map_err(|source| {
-            CurrentPlatformFrameworkSourceError::new(
-                CurrentPlatformFrameworkSourceErrorKind::PinFrameworkSource,
-                endpoint.as_str(),
-            )
-            .with_source(source)
-        })?;
+        let source = pinned_platform_framework_source(&commit)
+            .with_context(Ctx::new(KindCtx::pin_framework_source(), endpoint.as_str()))?;
         let commit = commit.trim().to_ascii_lowercase();
         Ok((commit, source))
     }
 
     /// Get deployment path, creating .caution directory if needed
-    fn get_deployment_path(&self) -> Result<&PathBuf> {
-        self.deployment_path.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Cannot access current directory. Please run this command from a valid directory."
-            )
-        })
+    fn get_deployment_path(&self) -> Result<&PathBuf, GetDeploymentPathError> {
+        self.deployment_path
+            .as_ref()
+            .ok_or_else(|| GetDeploymentPathError::MissingCwd {
+                location: std::panic::Location::caller(),
+            })
     }
 
     fn frontend_url(&self) -> String {
@@ -2883,20 +2195,17 @@ impl ApiClient {
     }
 
     fn format_api_error(&self, status: reqwest::StatusCode, body: &str) -> String {
-        if status == reqwest::StatusCode::FORBIDDEN {
-            if let Ok(payload) = serde_json::from_str::<LegalAcceptanceRequiredError>(body) {
-                if payload.code == "legal_acceptance_required" {
+        if status == reqwest::StatusCode::FORBIDDEN
+            && let Ok(payload) = serde_json::from_str::<LegalAcceptanceRequiredError>(body)
+                && payload.code == "legal_acceptance_required" {
                     let mut message = self.legal_acceptance_message(&payload.document_type);
-                    if let Some(server_message) = payload.message {
-                        if !server_message.trim().is_empty() {
+                    if let Some(server_message) = payload.message
+                        && !server_message.trim().is_empty() {
                             message.push_str("\n\n");
                             message.push_str(server_message.trim());
                         }
-                    }
                     return message;
                 }
-            }
-        }
 
         if body.trim().is_empty() {
             format!("HTTP {}", status)
@@ -2916,69 +2225,6 @@ impl ApiClient {
 
     /// Prompts for a username and claims it via `POST /user/username`
     /// (a FIDO2-signed protected mutation), reprompting on 409 (taken).
-    async fn claim_username_interactively(&self, session_id: &str) -> Result<()> {
-        // This prompts on stdin in a loop; without a terminal a non-interactive
-        // caller (CI/cron reaching a placeholder account) would block forever on
-        // the read, or hit EOF and spin on empty input. Fail fast instead — the
-        // same guard `resolve_login_username` applies to the login prompt.
-        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-            bail!(
-                "This account needs a username set before continuing, but stdin \
-                 is not interactive. Re-run this command from a terminal to choose one."
-            );
-        }
-
-        loop {
-            let username = prompt_for_claimed_username()?;
-            let body = serde_json::json!({ "username": username });
-
-            let response = self
-                .signed_post(session_id, "/user/username", &body)
-                .await?;
-
-            if response.status().is_success() {
-                output::success(format!("Username '{}' claimed.", username));
-                return Ok(());
-            }
-
-            if response.status() == reqwest::StatusCode::CONFLICT {
-                let error = self.api_error_message(response).await;
-                // The gateway returns 409 for two distinct cases with the
-                // same status code: the chosen name is taken (retry with a
-                // different name), or the account already has a real
-                // username (e.g. a concurrent claim raced this one). Only
-                // the former is worth re-prompting for; looping on the
-                // latter would spin forever since no name would ever work.
-                // Match on the handler's `#[error(...)]` Display text
-                // (see UsernameClaimError in gateway/src/handlers.rs).
-                if error.contains("already set your username") {
-                    bail!(
-                        "Your account already has a username set: {}. Re-run the command that required a username.",
-                        error
-                    );
-                }
-
-                output::status(format!(
-                    "Username '{}' is already taken. Please choose another.",
-                    username
-                ));
-                continue;
-            }
-
-            // A 400 is a validation failure (too short/long, illegal chars):
-            // user-fixable, so surface the server's message and reprompt rather
-            // than aborting the whole command over a typo.
-            if response.status() == reqwest::StatusCode::BAD_REQUEST {
-                let error = self.api_error_message(response).await;
-                output::status(error);
-                continue;
-            }
-
-            let error = self.api_error_message(response).await;
-            bail!("Failed to claim username: {}", error);
-        }
-    }
-
     /// GETs `path` with the session header, transparently handling the
     /// username-claim gate: on 403 `username_required`, prompts for and
     /// claims a username, then retries the request once.
@@ -2987,7 +2233,9 @@ impl ApiClient {
         session_id: &str,
         path: &str,
         failure_context: &str,
-    ) -> Result<T> {
+    ) -> Result<T, GetProtectedJsonError> {
+        use GetProtectedJsonErrorCtx as Ctx;
+
         let mut gate_claimed = false;
 
         loop {
@@ -2996,37 +2244,42 @@ impl ApiClient {
                 .get(format!("{}{}", self.base_url, path))
                 .header("X-Session-ID", session_id)
                 .send()
-                .await?;
+                .await
+                .with_context(Ctx::send_request(failure_context))?;
 
             let status = response.status();
-            let body = response.text().await?;
+            let body = response.text().await.with_context(Ctx::read_body())?;
 
             if status.is_success() {
-                return Ok(serde_json::from_str(&body)?);
+                return serde_json::from_str(&body).with_context(Ctx::parse_json(failure_context));
             }
 
             if !gate_claimed && Self::is_username_required(status, &body) {
                 gate_claimed = true;
-                self.claim_username_interactively(session_id).await?;
+                auth::claim_username_interactively(self, session_id)
+                    .await
+                    .with_context(Ctx::claim_username(failure_context))?;
                 continue;
             }
 
-            bail!(
-                "{}: {}",
-                failure_context,
-                self.format_api_error(status, &body)
-            );
+            return Err(GetProtectedJsonError::ApiFailure {
+                failure_context: failure_context.to_string(),
+                api_response: self.format_api_error(status, &body),
+                location: std::panic::Location::caller(),
+            });
         }
     }
 
-    fn save_config(&self, session_id: String, expires_at: String) -> Result<()> {
+    fn save_config(&self, session_id: String, expires_at: String) -> Result<(), SaveConfigError> {
+        use SaveConfigErrorCtx as Ctx;
+
         let config = Config {
             session_id,
             expires_at,
             server_url: Some(self.base_url.clone()),
         };
 
-        let json = serde_json::to_string_pretty(&config)?;
+        let json = serde_json::to_string_pretty(&config).with_context(Ctx::serialize())?;
 
         // Write with restricted permissions so other users cannot read session tokens
         {
@@ -3036,17 +2289,20 @@ impl ApiClient {
                 .create(true)
                 .truncate(true)
                 .mode(0o600)
-                .open(&self.config_path)?;
-            file.write_all(json.as_bytes())?;
+                .open(&self.config_path)
+                .with_context(Ctx::open(&self.config_path))?;
+            file.write_all(json.as_bytes()).with_context(Ctx::write())?;
         }
 
         Ok(())
     }
 
-    fn load_config(&self) -> Result<Config> {
-        let content = fs::read_to_string(&self.config_path)
-            .context("Not logged in. Run 'login' command first")?;
-        let config: Config = serde_json::from_str(&content)?;
+    fn load_config(&self) -> Result<Config, LoadConfigError> {
+        use LoadConfigErrorCtx as Ctx;
+
+        let content = fs::read_to_string(&self.config_path).with_context(Ctx::read_config())?;
+        let config: Config =
+            serde_json::from_str(&content).with_context(Ctx::parse(&self.config_path))?;
         Ok(config)
     }
 
@@ -3074,29 +2330,41 @@ impl ApiClient {
         true
     }
 
-    async fn ensure_authenticated(&self) -> Result<Config> {
+    async fn ensure_authenticated(&self) -> Result<Config, EnsureAuthenticatedError> {
+        use EnsureAuthenticatedErrorCtx as Ctx;
+
         match self.load_config() {
             Ok(config) if !self.is_session_expired(&config) && self.is_same_server(&config) => {
                 Ok(config)
             }
             _ => {
                 if self.qr {
-                    self.login_qr(None).await?;
+                    auth::login_qr(self, None)
+                        .await
+                        .with_context(Ctx::login_qr())?;
                 } else {
-                    self.login(None).await?;
+                    auth::login(self, None).await.with_context(Ctx::login())?;
                 }
-                self.load_config()
+                self.load_config().with_context(Ctx::load_config())
             }
         }
     }
 
-    fn require_existing_authenticated_config(&self) -> Result<Config> {
-        let config = self.load_config()?;
+    fn require_existing_authenticated_config(
+        &self,
+    ) -> Result<Config, RequireExistingAuthenticatedConfigError> {
+        use RequireExistingAuthenticatedConfigErrorCtx as Ctx;
+
+        let config = self.load_config().with_context(Ctx::load_config())?;
         if self.is_session_expired(&config) {
-            bail!("Session expired. Run 'login' command first");
+            return Err(RequireExistingAuthenticatedConfigError::SessionExpired {
+                location: std::panic::Location::caller(),
+            });
         }
         if !self.is_same_server(&config) {
-            bail!("Session is for a different server. Run 'login' command first");
+            return Err(RequireExistingAuthenticatedConfigError::DifferentServer {
+                location: std::panic::Location::caller(),
+            });
         }
         Ok(config)
     }
@@ -3105,84 +2373,93 @@ impl ApiClient {
         config
             .server_url
             .as_ref()
-            .map_or(true, |url| url == &self.base_url)
+            .is_none_or(|url| url == &self.base_url)
     }
 
-    fn save_deployment(&self, resource_id: &str) -> Result<()> {
-        let deployment_path = self.get_deployment_path()?;
+    fn save_deployment(&self, resource_id: &str) -> Result<(), SaveDeploymentError> {
+        use SaveDeploymentErrorCtx as Ctx;
+
+        let deployment_path = self
+            .get_deployment_path()
+            .with_context(Ctx::get_deployment_path())?;
         let deployment_info = DeploymentInfo {
             resource_id: resource_id.to_string(),
         };
-        let json = serde_json::to_string_pretty(&deployment_info)?;
-        fs::write(deployment_path, json)?;
+        let json = serde_json::to_string_pretty(&deployment_info).with_context(Ctx::serialize())?;
+        fs::write(deployment_path, json).with_context(Ctx::write(deployment_path))?;
         output::verbose(
             self.verbose,
-            &format!("Saved deployment info to {:?}", deployment_path),
+            format!("Saved deployment info to {:?}", deployment_path),
         );
         Ok(())
     }
 
-    fn load_deployment(&self) -> Result<DeploymentInfo> {
-        let deployment_path = self.get_deployment_path()?;
-        let content =
-            fs::read_to_string(deployment_path).context("No deployment found. Run 'init' first")?;
-        let deployment_info: DeploymentInfo = serde_json::from_str(&content)?;
+    fn load_deployment(&self) -> Result<DeploymentInfo, LoadDeploymentError> {
+        use LoadDeploymentErrorCtx as Ctx;
+
+        let deployment_path = self
+            .get_deployment_path()
+            .with_context(Ctx::get_deployment_path())?;
+        let content = fs::read_to_string(deployment_path).with_context(Ctx::read_file())?;
+        let deployment_info: DeploymentInfo =
+            serde_json::from_str(&content).with_context(Ctx::parse())?;
         Ok(deployment_info)
     }
 
     fn read_config(&self) -> Result<caution_config::ConfigurationFile, ReadConfigError> {
+        use ReadConfigErrorCtx as Ctx;
         use std::path::Path;
 
         let hcl_path = Path::new("caution.hcl");
         if hcl_path.exists() {
-            let content = std::fs::read_to_string(hcl_path)
-                .map_err(ReadConfigError::ReadHcl)?;
+            let content = std::fs::read_to_string(hcl_path).with_context(Ctx::read_hcl())?;
             let config = caution_config::ConfigurationFile::from_str(&content)
-                .map_err(ReadConfigError::ParseHcl)?;
+                .with_context(Ctx::parse_hcl())?;
             return Ok(config);
         }
 
         let procfile_path = Path::new("Procfile");
         if procfile_path.exists() {
-            let content = std::fs::read_to_string(procfile_path)
-                .map_err(ReadConfigError::ReadProcfile)?;
+            let content =
+                std::fs::read_to_string(procfile_path).with_context(Ctx::read_procfile())?;
             let config = caution_config::ConfigurationFile::from_procfile(&content)
-                .map_err(ReadConfigError::ParseProcfile)?;
+                .with_context(Ctx::parse_procfile())?;
             return Ok(config);
         }
 
-        Err(ReadConfigError::ConfigNotFound)
+        Err(ReadConfigError::ConfigNotFound {
+            location: std::panic::Location::caller(),
+        })
     }
 
     fn read_config_from_dir(
         &self,
         dir: &Path,
     ) -> Result<caution_config::ConfigurationFile, ReadConfigFromDirError> {
+        use ReadConfigFromDirErrorCtx as Ctx;
+
         let hcl_path = dir.join("caution.hcl");
         if hcl_path.exists() {
-            let content = std::fs::read_to_string(&hcl_path)
-                .map_err(|source| ReadConfigFromDirError::ReadHcl {
-                    path: hcl_path.clone(),
-                    source,
-                })?;
+            let content =
+                std::fs::read_to_string(&hcl_path).with_context(Ctx::read_hcl(hcl_path.clone()))?;
             let config = caution_config::ConfigurationFile::from_str(&content)
-                .map_err(ReadConfigFromDirError::ParseHcl)?;
+                .with_context(Ctx::parse_hcl())?;
             return Ok(config);
         }
 
         let procfile_path = dir.join("Procfile");
         if procfile_path.exists() {
             let content = std::fs::read_to_string(&procfile_path)
-                .map_err(|source| ReadConfigFromDirError::ReadProcfile {
-                    path: procfile_path.clone(),
-                    source,
-                })?;
+                .with_context(Ctx::read_procfile(procfile_path.clone()))?;
             let config = caution_config::ConfigurationFile::from_procfile(&content)
-                .map_err(ReadConfigFromDirError::ParseProcfile)?;
+                .with_context(Ctx::parse_procfile())?;
             return Ok(config);
         }
 
-        Err(ReadConfigFromDirError::ConfigNotFound(dir.to_path_buf()))
+        Err(ReadConfigFromDirError::ConfigNotFound {
+            path: dir.to_path_buf(),
+            location: std::panic::Location::caller(),
+        })
     }
 
     fn read_caution_git_remote(&self) -> Option<String> {
@@ -3206,23 +2483,20 @@ impl ApiClient {
                 if let Some(value) = iter.next() {
                     return Some(Self::expand_identity_path(value));
                 }
-            } else if let Some(value) = arg.strip_prefix("-i") {
-                if !value.is_empty() {
+            } else if let Some(value) = arg.strip_prefix("-i")
+                && !value.is_empty() {
                     return Some(Self::expand_identity_path(value));
                 }
-            }
 
             if arg == "-o" {
-                if let Some(value) = iter.next() {
-                    if let Some(identity) = Self::identity_from_ssh_option(value) {
+                if let Some(value) = iter.next()
+                    && let Some(identity) = Self::identity_from_ssh_option(value) {
                         return Some(identity);
                     }
-                }
-            } else if let Some(value) = arg.strip_prefix("-o") {
-                if let Some(identity) = Self::identity_from_ssh_option(value) {
+            } else if let Some(value) = arg.strip_prefix("-o")
+                && let Some(identity) = Self::identity_from_ssh_option(value) {
                     return Some(identity);
                 }
-            }
         }
         None
     }
@@ -3237,11 +2511,10 @@ impl ApiClient {
     }
 
     fn expand_identity_path(path: &str) -> PathBuf {
-        if let Some(rest) = path.strip_prefix("~/") {
-            if let Some(home) = dirs::home_dir() {
+        if let Some(rest) = path.strip_prefix("~/")
+            && let Some(home) = dirs::home_dir() {
                 return home.join(rest);
             }
-        }
         PathBuf::from(path)
     }
 
@@ -3264,27 +2537,22 @@ impl ApiClient {
             }
         }
 
-        if let Ok(command) = std::env::var("GIT_SSH_COMMAND") {
-            if let Some(path) = Self::identity_from_ssh_command(&command) {
-                if path.exists() {
+        if let Ok(command) = std::env::var("GIT_SSH_COMMAND")
+            && let Some(path) = Self::identity_from_ssh_command(&command)
+                && path.exists() {
                     return Some(path);
                 }
-            }
-        }
 
         if let Ok(output) = Command::new("git")
             .args(["config", "--get", "core.sshCommand"])
             .output()
-        {
-            if output.status.success() {
+            && output.status.success() {
                 let command = String::from_utf8_lossy(&output.stdout);
-                if let Some(path) = Self::identity_from_ssh_command(command.trim()) {
-                    if path.exists() {
+                if let Some(path) = Self::identity_from_ssh_command(command.trim())
+                    && path.exists() {
                         return Some(path);
                     }
-                }
             }
-        }
 
         if self.read_caution_git_remote().is_some() {
             for name in ["id_ed25519", "id_ecdsa", "id_rsa"] {
@@ -3313,7 +2581,9 @@ impl ApiClient {
         }
     }
 
-    fn public_key_for_identity(identity: &Path) -> Result<String> {
+    fn public_key_for_identity(identity: &Path) -> Result<String, PublicKeyForIdentityError> {
+        use PublicKeyForIdentityErrorCtx as Ctx;
+
         let public_key_path = if identity.extension().is_some_and(|ext| ext == "pub") {
             identity.to_path_buf()
         } else {
@@ -3322,12 +2592,7 @@ impl ApiClient {
 
         if public_key_path.exists() {
             return Ok(fs::read_to_string(&public_key_path)
-                .with_context(|| {
-                    format!(
-                        "Failed to read SSH public key {}",
-                        public_key_path.display()
-                    )
-                })?
+                .with_context(Ctx::read_file(&public_key_path))?
                 .trim()
                 .to_string());
         }
@@ -3337,17 +2602,22 @@ impl ApiClient {
             .arg("-f")
             .arg(identity)
             .output()
-            .context("Failed to run ssh-keygen to derive SSH public key")?;
+            .with_context(Ctx::run_ssh_keygen())?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            bail!("Failed to derive SSH public key: {}", stderr);
+            return Err(PublicKeyForIdentityError::DeriveFailed {
+                stderr,
+                location: std::panic::Location::caller(),
+            });
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    fn ssh_fingerprint(public_key: &str) -> Result<String> {
+    fn ssh_fingerprint(public_key: &str) -> Result<String, SshFingerprintError> {
+        use SshFingerprintErrorCtx as Ctx;
+
         let parts: Vec<&str> = public_key.split_whitespace().collect();
         let key_data = if parts.len() >= 2 {
             parts[1]
@@ -3356,12 +2626,12 @@ impl ApiClient {
         };
         let decoded = general_purpose::STANDARD
             .decode(key_data)
-            .context("Invalid SSH public key")?;
+            .with_context(Ctx::decode())?;
         Ok(general_purpose::STANDARD_NO_PAD.encode(Sha256::digest(&decoded)))
     }
 
     fn ssh_key_identity(public_key: &str) -> Option<String> {
-        let parts: Vec<&str> = public_key.trim().split_whitespace().collect();
+        let parts: Vec<&str> = public_key.split_whitespace().collect();
         if parts.len() < 2 {
             return None;
         }
@@ -3374,11 +2644,13 @@ impl ApiClient {
         format!("caution-ssh-http-v1\n{method}\n{canonical_path}\n{timestamp}\n{body_hash}\n")
     }
 
-    fn sign_ssh_payload(identity: &Path, payload: &str) -> Result<String> {
+    fn sign_ssh_payload(identity: &Path, payload: &str) -> Result<String, SignSshPayloadError> {
+        use SignSshPayloadErrorCtx as Ctx;
+
         let signing_key = Self::signing_key_path(identity);
-        let temp_dir = tempfile::tempdir().context("Failed to create SSH signing temp dir")?;
+        let temp_dir = tempfile::tempdir().with_context(Ctx::temp_dir())?;
         let payload_path = temp_dir.path().join("request.txt");
-        fs::write(&payload_path, payload).context("Failed to write SSH signing payload")?;
+        fs::write(&payload_path, payload).with_context(Ctx::write_payload())?;
 
         let output = Command::new("ssh-keygen")
             .arg("-Y")
@@ -3389,17 +2661,19 @@ impl ApiClient {
             .arg(SSH_SIGNING_NAMESPACE)
             .arg(&payload_path)
             .output()
-            .context("Failed to run ssh-keygen for SSH request signing")?;
+            .with_context(Ctx::run_ssh_keygen())?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            bail!("Failed to sign request with SSH key: {}", stderr);
+            return Err(SignSshPayloadError::SignFailed {
+                stderr,
+                location: std::panic::Location::caller(),
+            });
         }
 
         let signature_path = payload_path.with_extension("txt.sig");
-        let signature = fs::read(&signature_path).with_context(|| {
-            format!("Failed to read SSH signature {}", signature_path.display())
-        })?;
+        let signature =
+            fs::read(&signature_path).with_context(Ctx::read_signature(&signature_path))?;
         Ok(general_purpose::URL_SAFE_NO_PAD.encode(signature))
     }
 
@@ -3409,55 +2683,46 @@ impl ApiClient {
         path: &str,
         body: Option<Vec<u8>>,
     ) -> std::result::Result<Option<reqwest::Response>, SshSignedRequestError> {
+        use SshSignedRequestErrorCtx as Ctx;
+        use SshSignedRequestErrorKindCtx as KindCtx;
+
         let Some(identity) = self.configured_ssh_signing_identity() else {
             return Ok(None);
         };
 
         let body = body.unwrap_or_default();
-        let public_key = Self::public_key_for_identity(&identity).map_err(|source| {
-            SshSignedRequestError::new_boxed(
-                SshSignedRequestErrorKind::PublicKeyForIdentity,
-                method.clone(),
-                path,
-                &identity,
-                source.into_boxed_dyn_error(),
-            )
-        })?;
-        let fingerprint = Self::ssh_fingerprint(&public_key).map_err(|source| {
-            SshSignedRequestError::new_boxed(
-                SshSignedRequestErrorKind::FingerprintPublicKey,
-                method.clone(),
-                path,
-                &identity,
-                source.into_boxed_dyn_error(),
-            )
-        })?;
+        let public_key = Self::public_key_for_identity(&identity).with_context(Ctx::new(
+            KindCtx::public_key_for_identity(),
+            method.clone(),
+            path,
+            &identity,
+        ))?;
+        let fingerprint = Self::ssh_fingerprint(&public_key).with_context(Ctx::new(
+            KindCtx::fingerprint_public_key(),
+            method.clone(),
+            path,
+            &identity,
+        ))?;
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|source| {
-                SshSignedRequestError::new(
-                    SshSignedRequestErrorKind::SystemClockBeforeUnixEpoch,
-                    method.clone(),
-                    path,
-                    &identity,
-                    source,
-                )
-            })?
-            .as_secs();
-        let payload = Self::canonical_ssh_request(method.as_str(), path, timestamp, &body);
-        let signature = Self::sign_ssh_payload(&identity, &payload).map_err(|source| {
-            SshSignedRequestError::new_boxed(
-                SshSignedRequestErrorKind::SignPayload,
+            .with_context(Ctx::new(
+                KindCtx::system_clock_before_unix_epoch(),
                 method.clone(),
                 path,
                 &identity,
-                source.into_boxed_dyn_error(),
-            )
-        })?;
+            ))?
+            .as_secs();
+        let payload = Self::canonical_ssh_request(method.as_str(), path, timestamp, &body);
+        let signature = Self::sign_ssh_payload(&identity, &payload).with_context(Ctx::new(
+            KindCtx::sign_payload(),
+            method.clone(),
+            path,
+            &identity,
+        ))?;
 
         output::verbose(
             self.verbose,
-            &format!("Sending SSH-signed HTTPS request for {}", path),
+            format!("Sending SSH-signed HTTPS request for {}", path),
         );
 
         let mut request = self
@@ -3473,54 +2738,46 @@ impl ApiClient {
                 .body(body);
         }
 
-        Ok(Some(request.send().await.map_err(|source| {
-            SshSignedRequestError::new(
-                SshSignedRequestErrorKind::SendRequest,
-                method,
-                path,
-                &identity,
-                source,
-            )
-        })?))
+        Ok(Some(request.send().await.with_context(Ctx::new(
+            KindCtx::send_request(),
+            method,
+            path,
+            &identity,
+        ))?))
     }
 
     async fn fetch_app_via_ssh_https(
         &self,
         id: &str,
     ) -> std::result::Result<Option<App>, FetchAppViaSshHttpsError> {
+        use FetchAppViaSshHttpsErrorCtx as Ctx;
+        use FetchAppViaSshHttpsErrorKindCtx as KindCtx;
+
         let path = format!("/api/resources/{}", id);
         let Some(response) = self
             .ssh_signed_request(reqwest::Method::GET, &path, None)
             .await
-            .map_err(|source| {
-                FetchAppViaSshHttpsError::new(
-                    FetchAppViaSshHttpsErrorKind::SendSignedRequest,
-                    id,
-                    &path,
-                )
-                .with_source(source)
-            })?
+            .with_context(Ctx::new(KindCtx::send_signed_request(), id, &path))?
         else {
             return Ok(None);
         };
 
         if response.status().is_success() {
-            Ok(Some(response.json().await.map_err(|source| {
-                FetchAppViaSshHttpsError::new(
-                    FetchAppViaSshHttpsErrorKind::DecodeResponse,
-                    id,
-                    &path,
-                )
-                .with_source(source)
-            })?))
+            Ok(Some(response.json().await.with_context(Ctx::new(
+                KindCtx::decode_response(),
+                id,
+                &path,
+            ))?))
         } else {
             let status = response.status();
             let message = self.api_error_message(response).await;
-            Err(FetchAppViaSshHttpsError::new(
-                FetchAppViaSshHttpsErrorKind::ApiStatus { status, message },
-                id,
-                &path,
-            ))
+            Err(FetchAppViaSshHttpsError {
+                kind: FetchAppViaSshHttpsErrorKind::ApiStatus { status, message },
+                id: id.to_string(),
+                path: path.clone(),
+                location: std::panic::Location::caller(),
+                source: None,
+            })
         }
     }
 
@@ -3529,6 +2786,9 @@ impl ApiClient {
         id: &str,
         force_delete: bool,
     ) -> std::result::Result<bool, DestroyAppViaSshHttpsError> {
+        use DestroyAppViaSshHttpsErrorCtx as Ctx;
+        use DestroyAppViaSshHttpsErrorKindCtx as KindCtx;
+
         let path = if force_delete {
             format!("/api/resources/{}?force=true", id)
         } else {
@@ -3537,15 +2797,12 @@ impl ApiClient {
         let Some(response) = self
             .ssh_signed_request(reqwest::Method::DELETE, &path, None)
             .await
-            .map_err(|source| {
-                DestroyAppViaSshHttpsError::new(
-                    DestroyAppViaSshHttpsErrorKind::SendSignedRequest,
-                    id,
-                    &path,
-                    force_delete,
-                )
-                .with_source(source)
-            })?
+            .with_context(Ctx::new(
+                KindCtx::send_signed_request(),
+                id,
+                &path,
+                force_delete,
+            ))?
         else {
             return Ok(false);
         };
@@ -3555,46 +2812,54 @@ impl ApiClient {
         } else {
             let status = response.status();
             let message = self.api_error_message(response).await;
-            Err(DestroyAppViaSshHttpsError::new(
-                DestroyAppViaSshHttpsErrorKind::ApiStatus { status, message },
-                id,
-                &path,
+            Err(DestroyAppViaSshHttpsError {
+                kind: DestroyAppViaSshHttpsErrorKind::ApiStatus { status, message },
+                id: id.to_string(),
+                path: path.clone(),
                 force_delete,
-            ))
+                location: std::panic::Location::caller(),
+                source: None,
+            })
         }
     }
 
-    fn check_git_repo(&self) -> Result<()> {
+    fn check_git_repo(&self) -> Result<(), CheckGitRepoError> {
+        use CheckGitRepoErrorCtx as Ctx;
+
         let output = Command::new("git")
-            .args(&["rev-parse", "--is-inside-work-tree"])
+            .args(["rev-parse", "--is-inside-work-tree"])
             .output()
-            .context("Failed to execute git command. Is git installed?")?;
+            .with_context(Ctx::run_git_command())?;
 
         if !output.status.success() {
-            bail!("Not in a git repository. Please run this command from within a git repository.");
+            return Err(CheckGitRepoError::NotGitRepo {
+                location: std::panic::Location::caller(),
+            });
         }
 
         Ok(())
     }
 
-    fn set_git_remote(&self, git_url: &str) -> Result<()> {
+    fn set_git_remote(&self, git_url: &str) -> Result<(), SetGitRemoteError> {
+        use SetGitRemoteErrorCtx as Ctx;
+
         let check_output = Command::new("git")
-            .args(&["remote", "get-url", "caution"])
+            .args(["remote", "get-url", "caution"])
             .output()
-            .context("Failed to check existing git remote")?;
+            .with_context(Ctx::check())?;
 
         if check_output.status.success() {
             Command::new("git")
-                .args(&["remote", "set-url", "caution", git_url])
+                .args(["remote", "set-url", "caution", git_url])
                 .output()
-                .context("Failed to update git remote 'caution'")?;
+                .with_context(Ctx::update())?;
 
             output::success(format!("Updated git remote 'caution' to: {}", git_url));
         } else {
             Command::new("git")
-                .args(&["remote", "add", "caution", git_url])
+                .args(["remote", "add", "caution", git_url])
                 .output()
-                .context("Failed to add git remote 'caution'")?;
+                .with_context(Ctx::add())?;
 
             output::success(format!("Added git remote 'caution': {}", git_url));
         }
@@ -3669,14 +2934,21 @@ enclave "default" {{
         )
     }
 
-    fn create_config_file_if_needed(&self, byoc: bool) -> Result<()> {
+    fn create_config_file_if_needed(
+        &self,
+        byoc: bool,
+    ) -> Result<(), CreateConfigFileInDirIfNeededError> {
         use std::path::Path;
 
         self.create_config_file_in_dir_if_needed(Path::new("."), byoc)
     }
 
-    fn create_config_file_in_dir_if_needed(&self, dir: &Path, byoc: bool) -> Result<()> {
-        use std::fs;
+    fn create_config_file_in_dir_if_needed(
+        &self,
+        dir: &Path,
+        byoc: bool,
+    ) -> Result<(), CreateConfigFileInDirIfNeededError> {
+        use CreateConfigFileInDirIfNeededErrorCtx as Ctx;
 
         let config_path = dir.join("caution.hcl");
 
@@ -3694,11 +2966,13 @@ enclave "default" {{
 
         let hcl_content = Self::generate_config_hcl(&source_url, byoc);
 
-        fs::write(&config_path, hcl_content).context("Failed to create caution.hcl")?;
+        fs::write(&config_path, hcl_content).with_context(Ctx::write_config())?;
 
         output::success("\nCreated caution.hcl in current directory");
         output::status("Edit the unit \"default\" command to match your application");
-        output::status("Build file precedence: containerfile: -> repo-root Containerfile -> Dockerfile");
+        output::status(
+            "Build file precedence: containerfile: -> repo-root Containerfile -> Dockerfile",
+        );
         if byoc {
             output::status("Configure AWS deployment settings in the BYOC section");
         }
@@ -3711,7 +2985,7 @@ enclave "default" {{
         use std::process::Command;
 
         let output = Command::new("git")
-            .args(&["remote", "get-url", "origin"])
+            .args(["remote", "get-url", "origin"])
             .output()
             .ok()?;
 
@@ -3759,7 +3033,13 @@ enclave "default" {{
         }
     }
 
-    fn git_url_to_archive_urls(&self, git_url: &str, commit: &str) -> Result<Vec<String>> {
+    fn git_url_to_archive_urls(
+        &self,
+        git_url: &str,
+        commit: &str,
+    ) -> Result<Vec<String>, GitUrlToArchiveUrlsError> {
+        use GitUrlToArchiveUrlsErrorCtx as Ctx;
+
         // If the URL is already a direct archive URL, use it as-is
         if git_url.contains("/archive/")
             && (git_url.ends_with(".tar.gz") || git_url.ends_with(".tar"))
@@ -3776,27 +3056,31 @@ enclave "default" {{
         }
 
         let (host, path) = if git_url.starts_with("git@") {
-            let without_prefix = git_url
-                .strip_prefix("git@")
-                .ok_or_else(|| anyhow::anyhow!("Invalid git URL format"))?;
-            let (host, path) = without_prefix
-                .split_once(':')
-                .ok_or_else(|| anyhow::anyhow!("Invalid git SSH URL format"))?;
+            let without_prefix = git_url.strip_prefix("git@").ok_or_else(|| {
+                GitUrlToArchiveUrlsError::InvalidUrlFormat {
+                    location: std::panic::Location::caller(),
+                }
+            })?;
+            let (host, path) = without_prefix.split_once(':').ok_or_else(|| {
+                GitUrlToArchiveUrlsError::InvalidSSHFormat {
+                    location: std::panic::Location::caller(),
+                }
+            })?;
             (host.to_string(), path.trim_end_matches(".git").to_string())
         } else if git_url.starts_with("https://") || git_url.starts_with("http://") {
-            let url = url::Url::parse(git_url).context("Failed to parse git URL")?;
+            let url = url::Url::parse(git_url).with_context(Ctx::parse_url())?;
             let host = url
                 .host_str()
-                .ok_or_else(|| anyhow::anyhow!("Git URL has no host"))?
-                .to_string();
-            let path = url
-                .path()
-                .trim_start_matches('/')
-                .trim_end_matches(".git")
-                .to_string();
-            (host, path)
+                .ok_or_else(|| GitUrlToArchiveUrlsError::NoHost {
+                    location: std::panic::Location::caller(),
+                })?;
+            let path = url.path().trim_start_matches('/').trim_end_matches(".git");
+            (host.to_string(), path.to_string())
         } else {
-            bail!("Unsupported git URL format: {}", git_url);
+            return Err(GitUrlToArchiveUrlsError::UnsupportedFormat {
+                url: git_url.to_string(),
+                location: std::panic::Location::caller(),
+            });
         };
 
         let repo_name = path.rsplit('/').next().unwrap_or("repo");
@@ -3817,706 +3101,37 @@ enclave "default" {{
         ])
     }
 
-    async fn register(&self, alpha_code: &str, username: &str) -> Result<()> {
-        output::verbose(self.verbose, "Starting FIDO2 registration...");
-        output::verbose(self.verbose, &format!("Target URL: {}", self.base_url));
-
-        let cookie_store = reqwest::cookie::Jar::default();
-        let client = reqwest::Client::builder()
-            .cookie_provider(std::sync::Arc::new(cookie_store))
-            .build()?;
-
-        output::verbose(
-            self.verbose,
-            "Sending registration begin request with alpha code...",
-        );
-        let response = client
-            .post(format!("{}/auth/register/begin", self.base_url))
-            .json(&serde_json::json!({ "alpha_code": alpha_code, "username": username }))
-            .send()
-            .await
-            .context("Failed to send registration begin request")?;
-
-        output::verbose(
-            self.verbose,
-            &format!("Response status: {}", response.status()),
-        );
-
-        if !response.status().is_success() {
-            let error = response.text().await?;
-            bail!("Registration begin failed: {}", error);
-        }
-
-        let begin_resp: RegisterBeginResponse = response
-            .json()
-            .await
-            .context("Failed to parse registration begin response")?;
-        output::verbose(self.verbose, "Registration challenge received");
-        output::verbose(
-            self.verbose,
-            &format!("Challenge: {}", begin_resp.public_key.challenge),
-        );
-
-        output::verbose(self.verbose, "Creating credential on security key...");
-
-        let mut attestation = self.make_credential(&begin_resp, &self.base_url)?;
-
-        output::success("Credential created on device");
-
-        if let Some(obj) = attestation.as_object_mut() {
-            obj.insert("session".to_string(), serde_json::json!(begin_resp.session));
-        }
-
-        output::verbose(self.verbose, "Sending registration finish request...");
-        let response = client
-            .post(format!("{}/auth/register/finish", self.base_url))
-            .json(&attestation)
-            .send()
-            .await
-            .context("Failed to send registration finish request")?;
-
-        output::verbose(
-            self.verbose,
-            &format!("Response status: {}", response.status()),
-        );
-
-        if response.status().is_success() {
-            // Extract session from Set-Cookie header (not response body)
-            let session_id = extract_session_from_cookies(&response)
-                .ok_or_else(|| anyhow::anyhow!("No session cookie in response"))?;
-
-            let finish_resp: RegisterFinishResponse = response.json().await?;
-
-            output::success("FIDO2 registration successful");
-            output::success(&format!("Logged in. Account expires: {}", finish_resp.expires_at));
-
-            self.save_config(session_id.clone(), finish_resp.expires_at.clone())?;
-
-            output::success("\nALPHA ACCESS GRANTED");
-            output::status("You're registered as an alpha user. You can now:");
-            output::status("  • Create apps with 'caution init'");
-            output::status("  • Deploy with 'git push caution main'");
-            output::status(&format!("Dashboard: {}/dashboard", self.frontend_url()));
-
-            Ok(())
-        } else {
-            let error = response.text().await?;
-            bail!("Registration failed: {}", error)
-        }
-    }
-
-    async fn login(&self, username: Option<String>) -> Result<()> {
-        output::verbose(self.verbose, "Starting FIDO2 login...");
-
-        let username = resolve_login_username(
-            username,
-            std::io::IsTerminal::is_terminal(&std::io::stdin()),
-            &mut std::io::stdin().lock(),
-        )?;
-
-        let (session_id, _expires_at) = self.perform_login(&username).await?;
-        output::success("Login successful");
-
-        match self.check_onboarding_status(&session_id).await {
-            Ok(status) => {
-                if !status.onboarding_complete {
-                    output::warning("=======================================================");
-                    output::warning("COMPLETE YOUR ONBOARDING");
-                    output::warning("=======================================================");
-                    output::warning("You need to complete onboarding to use this service:");
-                    output::warning(format!(
-                        "  1. Verify your email address {}",
-                        if status.email_verified { "✓" } else { "✗" }
-                    ));
-                    output::warning(format!(
-                        "  2. Add payment information {}",
-                        if status.payment_method_added {
-                            "✓"
-                        } else {
-                            "✗"
-                        }
-                    ));
-                    output::warning("Onboarding URL:");
-                    output::warning(format!("  {}/onboarding", self.frontend_url()));
-                    output::warning("You must complete onboarding before you can create apps.");
-                    output::warning("=======================================================");
-                }
-            }
-            Err(e) => {
-                output::verbose(
-                    self.verbose,
-                    &format!("Could not check onboarding status: {}", e),
-                );
-            }
-        }
-
-        // Check if PIN requirement is disabled and warn the user
-        match self.check_org_security_settings(&session_id).await {
-            Ok(settings) => {
-                if !settings.require_pin {
-                    output::warning("⚠️  WARNING: PIN verification is disabled for your organization.");
-                    output::warning("   For production use, enable PIN requirement.");
-                }
-            }
-            Err(e) => {
-                output::verbose(
-                    self.verbose,
-                    &format!("Could not check security settings: {}", e),
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn login_qr(&self, username: Option<&str>) -> Result<()> {
-        output::verbose(self.verbose, "Starting QR code cross-device login...");
-
-        // Step 1: Request a QR login token from the gateway. An optional
-        // username scopes the eventual allowCredentials to that user's own
-        // credentials, needed for non-resident/legacy keys the scanning
-        // device can't otherwise offer via a discoverable challenge.
-        let response = self
-            .client
-            .post(format!("{}/auth/qr-login/begin", self.base_url))
-            .json(&serde_json::json!({ "username": username }))
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error = response.text().await?;
-            bail!("Failed to start QR login: {}", error);
-        }
-
-        let begin_resp: QrLoginBeginResponse = response.json().await?;
-        output::verbose(self.verbose, &format!("QR token: {}", begin_resp.token));
-        output::verbose(self.verbose, &format!("QR URL: {}", begin_resp.url));
-
-        // Step 2: Render the QR code in the terminal
-        output::status("");
-        render_qr_code(&begin_resp.url)?;
-        output::status("");
-        output::status("Scan the QR code with your phone, or open this URL:");
-        output::status(&format!("  {}", begin_resp.url));
-
-        // Step 3: Poll for completion
-        let loader = Spinner::new("Waiting for authentication...", SpinnerStyle::Processing);
-
-        let poll_result = async {
-            let timeout = Duration::from_secs(180); // 3 minutes
-            let start = std::time::Instant::now();
-
-            loop {
-                let elapsed = start.elapsed();
-                if elapsed > timeout {
-                    bail!("QR login timed out. Please try again.");
-                }
-
-                let remaining = timeout.saturating_sub(elapsed).as_secs();
-                loader.set_message(&format!(
-                    "Waiting for authentication... QR code expires in {}:{:02}",
-                    remaining / 60,
-                    remaining % 60
-                ));
-
-                tokio::time::sleep(Duration::from_secs(2)).await;
-
-                let status_resp = self
-                    .client
-                    .get(format!("{}/auth/qr-login/status", self.base_url))
-                    .query(&[("token", &begin_resp.token)])
-                    .send()
-                    .await?;
-
-                if !status_resp.status().is_success() {
-                    output::verbose(self.verbose, "Status poll failed, retrying...");
-                    continue;
-                }
-
-                let status: QrLoginStatusResponse = status_resp.json().await?;
-                output::verbose(self.verbose, &format!("Poll status: {}", status.status));
-
-                match status.status.as_str() {
-                    "completed" => {
-                        let session_id = status.session_id.ok_or_else(|| {
-                            anyhow::anyhow!("Completed but no session_id returned")
-                        })?;
-                        let expires_at = status.expires_at.ok_or_else(|| {
-                            anyhow::anyhow!("Completed but no expires_at returned")
-                        })?;
-
-                        self.save_config(session_id.clone(), expires_at)?;
-                        return Ok(session_id);
-                    }
-                    "expired" => {
-                        bail!("QR login token expired. Please try again.");
-                    }
-                    // "pending" or "authenticated" — keep polling
-                    _ => continue,
-                }
-            }
-        }
-        .await;
-
-        loader.finish();
-
-        let session_id = poll_result?;
-        output::success("Login successful");
-
-        match self.check_org_security_settings(&session_id).await {
-            Ok(settings) => {
-                if !settings.require_pin {
-                    output::warning("\nWARNING: PIN verification is disabled for your organization.");
-                    output::warning("For production use, enable PIN requirement.");
-                }
-            }
-            Err(e) => {
-                output::verbose(
-                    self.verbose,
-                    &format!("Could not check security settings: {}", e),
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn logout(&self) -> Result<()> {
-        // Try to invalidate session on server if we have a config
-        if let Ok(config) = self.load_config() {
-            output::verbose(self.verbose, "Invalidating session on server...");
-            match self
-                .client
-                .post(format!("{}/auth/logout", self.base_url))
-                .header("X-Session-ID", &config.session_id)
-                .send()
-                .await
-            {
-                Ok(response) if response.status().is_success() => {
-                    output::verbose(self.verbose, "Session invalidated on server");
-                }
-                Ok(response) => {
-                    output::verbose(
-                        self.verbose,
-                        &format!("Server returned {}", response.status()),
-                    );
-                }
-                Err(e) => {
-                    output::verbose(self.verbose, &format!("Could not reach server: {}", e));
-                }
-            }
-        }
-
-        // Delete local config
-        if self.config_path.exists() {
-            std::fs::remove_file(&self.config_path)?;
-            output::success("Logged out successfully");
-        } else {
-            output::status("Not logged in");
-        }
-
-        Ok(())
-    }
-
-    async fn check_onboarding_status(&self, session_id: &str) -> Result<UserStatus> {
-        self.get_protected_json(session_id, "/api/user/status", "Failed to get user status")
-            .await
-    }
-
-    async fn primary_organization_id(&self, session_id: &str) -> Result<String> {
-        let orgs: Vec<Organization> = self
-            .get_protected_json(
-                session_id,
-                "/api/organizations",
-                "Failed to get organizations",
-            )
-            .await?;
-
-        if orgs.is_empty() {
-            bail!("No organizations found");
-        }
-
-        Ok(orgs[0].id.clone())
-    }
-
-    async fn print_account_id(&self) -> Result<()> {
-        let config = self.require_existing_authenticated_config()?;
-        let account_id = self.primary_organization_id(config.session_id()).await?;
-        output::data_ln(account_id)?;
-        Ok(())
-    }
-
-    async fn check_org_security_settings(&self, session_id: &str) -> Result<OrgSettings> {
-        let org_id = self.primary_organization_id(session_id).await?;
-
-        self.get_protected_json(
-            session_id,
-            &format!("/api/organizations/{}/settings", org_id),
-            "Failed to get security settings",
-        )
-        .await
-    }
-
-    fn make_credential(
-        &self,
-        options: &RegisterBeginResponse,
-        base_url: &str,
-    ) -> Result<serde_json::Value> {
-        output::verbose(self.verbose, "Attempting registration without PIN first...");
-        match self.try_make_credential(options, base_url, None) {
-            Ok(result) => {
-                output::verbose(self.verbose, "Registration succeeded without PIN");
-                Ok(result)
-            }
-            Err(e) => {
-                output::verbose(self.verbose, &format!("First attempt failed: {:?}", e));
-                output::verbose(self.verbose, &format!("Full error details: {:#?}", e));
-
-                // Only ask for PIN if the error is PIN-related
-                if is_pin_related_error(&e) {
-                    output::status("Your security key requires a PIN.");
-                    match prompt_for_pin()? {
-                        Some(pin_string) => {
-                            let pin_string = ZeroizePin(pin_string);
-                            let pin = Pin::new(&pin_string.0);
-                            output::verbose(self.verbose, "Retrying registration with PIN...");
-                            self.try_make_credential(options, base_url, Some(pin))
-                        }
-                        None => {
-                            output::verbose(self.verbose, "No PIN provided, returning original error");
-                            Err(e)
-                        }
-                    }
-                } else {
-                    // Not a PIN error, return the original error
-                    output::verbose(
-                        self.verbose,
-                        "Error is not PIN-related, not prompting for PIN",
-                    );
-                    Err(e)
-                }
-            }
-        }
-    }
-
-    fn try_make_credential(
-        &self,
-        options: &RegisterBeginResponse,
-        base_url: &str,
-        pin: Option<Pin>,
-    ) -> Result<serde_json::Value> {
-        let opts = &options.public_key;
-
-        output::verbose(self.verbose, "Creating FIDO2 credential...");
-
-        let user_id = general_purpose::URL_SAFE_NO_PAD
-            .decode(&opts.user.id)
-            .context("Failed to decode user ID")?;
-
-        let challenge = general_purpose::URL_SAFE_NO_PAD
-            .decode(&opts.challenge)
-            .context("Failed to decode challenge")?;
-
-        output::verbose(self.verbose, &format!("user_id bytes: {:?}", user_id));
-        output::verbose(self.verbose, &format!("challenge bytes: {:?}", challenge));
-        output::verbose(self.verbose, &format!("rpId: {}", opts.rp.id));
-
-        let user = PublicKeyCredentialUserEntity {
-            id: user_id.clone(),
-            name: Some(opts.user.name.clone()),
-            display_name: Some(opts.user.display_name.clone()),
-        };
-
-        let rp = RelyingParty {
-            id: opts.rp.id.clone(),
-            name: Some(opts.rp.name.clone()),
-        };
-
-        let pub_key_params: Vec<PublicKeyCredentialParameters> = opts
-            .pub_key_cred_params
-            .iter()
-            .filter_map(|p| match p.alg {
-                -7 => Some(PublicKeyCredentialParameters {
-                    alg: COSEAlgorithm::ES256,
-                }),
-                -257 => Some(PublicKeyCredentialParameters {
-                    alg: COSEAlgorithm::RS256,
-                }),
-                _ => None,
-            })
-            .collect();
-
-        output::verbose(
-            self.verbose,
-            &format!("pub_key_params count: {}", pub_key_params.len()),
-        );
-        output::verbose(
-            self.verbose,
-            &format!("timeout from server: {} ms", opts.timeout),
-        );
-
-        let mut manager =
-            AuthenticatorService::new().context("Failed to create authenticator service")?;
-
-        manager.add_u2f_usb_hid_platform_transports();
-
-        let (status_tx, status_rx) = channel::<StatusUpdate>();
-        let (callback_tx, callback_rx) = channel::<Result<RegisterResult, AuthenticatorError>>();
-
-        let callback = StateCallback::new(Box::new(move |result| {
-            let _ = callback_tx.send(result);
-        }));
-
-        let args = RegisterArgs {
-            client_data_hash: Sha256::digest(serde_json::to_vec(&serde_json::json!({
-                "type": "webauthn.create",
-                "challenge": opts.challenge,
-                "origin": base_url,
-            }))?)
-            .into(),
-            relying_party: rp,
-            origin: base_url.to_string(),
-            user,
-            pub_cred_params: pub_key_params,
-            exclude_list: vec![],
-            user_verification_req:
-                authenticator::ctap2::server::UserVerificationRequirement::Preferred,
-            resident_key_req: authenticator::ctap2::server::ResidentKeyRequirement::Required,
-            extensions: Default::default(),
-            pin,
-            use_ctap1_fallback: false,
-        };
-
-        output::verbose(self.verbose, "Sending register request to authenticator...");
-        manager
-            .register(opts.timeout, args, status_tx, callback)
-            .context("Failed to start registration")?;
-
-        output::verbose(
-            self.verbose,
-            "Waiting for callback result (up to 60 seconds)...",
-        );
-
-        let mut loader = Spinner::new("Tap your security key to continue", SpinnerStyle::KeyTap);
-
-        loop {
-            // Check for status updates
-            while let Ok(status) = status_rx.try_recv() {
-                match status {
-                    StatusUpdate::SelectResultNotice(sender, users) => {
-                        loader.abandon();
-                        output::status("Multiple credentials found. Please select one:");
-                        for (idx, user) in users.iter().enumerate() {
-                            let display = user
-                                .display_name
-                                .as_deref()
-                                .or(user.name.as_deref())
-                                .unwrap_or("Unknown");
-                            output::status(format!("[{}] {}", idx, display));
-                        }
-
-                        let selection = crate::prompt::select(&format!(
-                            "Enter selection (0-{}): ",
-                            users.len() - 1
-                        ))
-                        .map_err(|e| anyhow::anyhow!(e))?;
-
-                        if selection >= users.len() {
-                            bail!("Selection out of range");
-                        }
-
-                        output::status(format!(
-                            "Selected: {}",
-                            users[selection].name.as_deref().unwrap_or("Unknown")
-                        ));
-                        sender
-                            .send(Some(selection))
-                            .context("Failed to send selection")?;
-                    }
-                    StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender)) => {
-                        loader.abandon();
-                        output::verbose(self.verbose, "PIN required by authenticator");
-                        match prompt_for_pin()? {
-                            Some(pin_string) => {
-                                let pin = Pin::new(&pin_string);
-                                sender.send(pin).context("Failed to send PIN")?;
-                                loader = Spinner::new(
-                                    "Tap your security key to continue",
-                                    SpinnerStyle::KeyTap,
-                                );
-                            }
-                            None => {
-                                bail!("PIN is required but none provided");
-                            }
-                        }
-                    }
-                    StatusUpdate::PinUvError(e) => {
-                        loader.abandon();
-                        output::verbose(self.verbose, &format!("PIN/UV error: {:?}", e));
-                        bail!("PIN/UV error: {:?}", e);
-                    }
-                    _ => {
-                        output::verbose(self.verbose, &format!("Authenticator status: {:?}", status));
-                    }
-                }
-            }
-
-            if let Ok(result) = callback_rx.try_recv() {
-                loader.finish();
-                output::verbose(self.verbose, "Got registration result");
-                let register_result = result.context("Registration failed")?;
-
-                let att_obj = &register_result.att_obj;
-
-                let client_data_json = serde_json::json!({
-                    "type": "webauthn.create",
-                    "challenge": opts.challenge,
-                    "origin": base_url,
-                });
-                let client_data_json_bytes = serde_json::to_vec(&client_data_json)?;
-
-                let auth_data_bytes = att_obj.auth_data.to_vec();
-
-                if auth_data_bytes.len() < 37 {
-                    bail!(
-                        "Invalid authenticator data length: {}",
-                        auth_data_bytes.len()
-                    );
-                }
-
-                let credential_id_len =
-                    u16::from_be_bytes([auth_data_bytes[53], auth_data_bytes[54]]) as usize;
-
-                let credential_id_start = 55;
-                let credential_id_end = credential_id_start + credential_id_len;
-
-                if auth_data_bytes.len() < credential_id_end {
-                    bail!("Authenticator data too short for credential ID");
-                }
-
-                let credential_id = &auth_data_bytes[credential_id_start..credential_id_end];
-
-                output::verbose(
-                    self.verbose,
-                    &format!("credential_id len: {}", credential_id.len()),
-                );
-                output::verbose(
-                    self.verbose,
-                    &format!("credential_id: {}", hex::encode(credential_id)),
-                );
-
-                let att_obj_bytes = serde_cbor::to_vec(&register_result.att_obj)?;
-
-                let response_json = serde_json::json!({
-                    "id": general_purpose::URL_SAFE_NO_PAD.encode(credential_id),
-                    "rawId": general_purpose::URL_SAFE_NO_PAD.encode(credential_id),
-                    "response": {
-                        "clientDataJSON": general_purpose::URL_SAFE_NO_PAD.encode(&client_data_json_bytes),
-                        "attestationObject": general_purpose::URL_SAFE_NO_PAD.encode(&att_obj_bytes),
-                    },
-                    "type": "public-key"
-                });
-
-                return Ok(response_json);
-            }
-
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
-
-    async fn perform_login(&self, username: &str) -> Result<(String, String)> {
-        let cookie_store = reqwest::cookie::Jar::default();
-        let client = reqwest::Client::builder()
-            .cookie_provider(std::sync::Arc::new(cookie_store))
-            .build()?;
-
-        output::verbose(self.verbose, "Sending login begin request...");
-        // The CLI drives USB security keys directly and has no conditional UI,
-        // so it always sends this field — but an empty `username` (blank login
-        // prompt, see prompt_for_login_username) opts into the no-username
-        // broadcast/discoverable path instead of a scoped allow-list.
-        let response = client
-            .post(format!("{}/auth/login/begin", self.base_url))
-            .json(&login_begin_request_body(username))
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error = response.text().await?;
-            bail!("Login begin failed: {}", error);
-        }
-
-        let begin_resp: LoginBeginResponse = response.json().await?;
-        output::verbose(self.verbose, "Login challenge received");
-        output::verbose(
-            self.verbose,
-            &format!("Session from server: {:?}", begin_resp.session),
-        );
-
-        let assertion = self.get_assertion(&begin_resp, &self.base_url)?;
-
-        output::status("Assertion created");
-
-        let mut credential: serde_json::Value = serde_json::from_slice(&assertion.response_json)?;
-
-        output::verbose(self.verbose, "Credential before adding session:");
-        output::verbose(self.verbose, &serde_json::to_string_pretty(&credential)?);
-
-        if let Some(obj) = credential.as_object_mut() {
-            obj.insert("session".to_string(), serde_json::json!(begin_resp.session));
-        }
-
-        output::verbose(
-            self.verbose,
-            "Final payload being sent to /auth/login/finish:",
-        );
-        output::verbose(self.verbose, &serde_json::to_string_pretty(&credential)?);
-
-        let response = client
-            .post(format!("{}/auth/login/finish", self.base_url))
-            .json(&credential)
-            .send()
-            .await?;
-
-        if response.status().is_success() {
-            // Extract session from Set-Cookie header (not response body)
-            let session_id = extract_session_from_cookies(&response)
-                .ok_or_else(|| anyhow::anyhow!("No session cookie in response"))?;
-
-            let finish_resp: LoginFinishResponse = response.json().await?;
-
-            self.save_config(session_id.clone(), finish_resp.expires_at.clone())?;
-
-            Ok((session_id, finish_resp.expires_at))
-        } else {
-            let status = response.status();
-            let error = response.text().await?;
-            output::verbose(
-                self.verbose,
-                &format!("Server error response (status {}): {}", status, error),
-            );
-            bail!("Login failed: {}", error)
-        }
-    }
-
     async fn signed_post<T: serde::Serialize>(
         &self,
         session_id: &str,
         path: &str,
         body: &T,
-    ) -> Result<reqwest::Response> {
-        let body_json = serde_json::to_vec(body)?;
+    ) -> Result<reqwest::Response, SignedPostError> {
+        use SignedPostErrorCtx as Ctx;
+
+        let body_json = serde_json::to_vec(body).with_context(Ctx::serialize_body())?;
 
         if !self.qr {
             output::status("\nData to be signed:");
-            output::status(format!("{}", serde_json::to_string_pretty(body)?));
+            output::status(
+                serde_json::to_string_pretty(body)
+                    .with_context(Ctx::serialize_pretty())?
+                    .to_string(),
+            );
         }
 
         self.signed_request(session_id, path, reqwest::Method::POST, body_json)
             .await
+            .with_context(Ctx::signed_request())
     }
 
-    async fn signed_delete(&self, session_id: &str, path: &str) -> Result<reqwest::Response> {
+    async fn signed_delete(
+        &self,
+        session_id: &str,
+        path: &str,
+    ) -> Result<reqwest::Response, SignedDeleteError> {
+        use SignedDeleteErrorCtx as Ctx;
+
         if !self.qr {
             output::status("\nRequest to be signed:");
             output::status(format!("DELETE {}", path));
@@ -4524,6 +3139,7 @@ enclave "default" {{
 
         self.signed_request(session_id, path, reqwest::Method::DELETE, Vec::new())
             .await
+            .with_context(Ctx::signed_request())
     }
 
     async fn signed_request(
@@ -4532,9 +3148,13 @@ enclave "default" {{
         path: &str,
         method: reqwest::Method,
         body: Vec<u8>,
-    ) -> Result<reqwest::Response> {
+    ) -> Result<reqwest::Response, SignedRequestError> {
+        use SignedRequestErrorCtx as Ctx;
+
         if self.qr {
-            return self.signed_request_qr(session_id, path, method, body).await;
+            return auth::signed_request_qr(self, session_id, path, method, body)
+                .await
+                .with_context(Ctx::get_assertion());
         }
 
         let body_json = body;
@@ -4546,7 +3166,7 @@ enclave "default" {{
 
         output::verbose(
             self.verbose,
-            &format!(
+            format!(
                 "Requesting FIDO2 sign challenge for {} {}",
                 method_name, path
             ),
@@ -4564,23 +3184,34 @@ enclave "default" {{
             .header("X-Session-ID", session_id)
             .json(&sign_req)
             .send()
-            .await?;
+            .await
+            .with_context(Ctx::get_sign_challenge())?;
 
         if !response.status().is_success() {
-            let error = response.text().await?;
-            bail!("Failed to get sign challenge: {}", error);
+            let error = response
+                .text()
+                .await
+                .with_context(Ctx::get_sign_challenge())?;
+            return Err(SignedRequestError::ChallengeFailure {
+                error,
+                location: std::panic::Location::caller(),
+            });
         }
 
-        let sign_resp: Fido2SignResponse = response.json().await?;
+        let sign_resp: auth::Fido2SignResponse = response
+            .json()
+            .await
+            .with_context(Ctx::parse_sign_response())?;
         output::verbose(self.verbose, "Got FIDO2 sign challenge");
 
-        let login_resp = LoginBeginResponse {
+        let login_resp = auth::LoginBeginResponse {
             public_key: sign_resp.public_key,
             session: sign_resp.challenge_id.clone(),
         };
 
         output::status("\nTap your security key to sign the request.");
-        let assertion = self.get_assertion(&login_resp, &self.base_url)?;
+        let assertion = auth::get_assertion(self, &login_resp, &self.base_url)
+            .with_context(Ctx::get_assertion())?;
 
         let fido_response_b64 = general_purpose::URL_SAFE_NO_PAD.encode(&assertion.response_json);
 
@@ -4594,534 +3225,52 @@ enclave "default" {{
             .header("Content-Type", "application/json")
             .body(body_json)
             .send()
-            .await?;
+            .await
+            .with_context(Ctx::send_request())?;
 
         Ok(response)
     }
 
-    async fn signed_request_qr(
+    async fn join_capacity_waitlist(
         &self,
-        session_id: &str,
-        path: &str,
-        method: reqwest::Method,
-        body_json: Vec<u8>,
-    ) -> Result<reqwest::Response> {
-        let body_hash = hex::encode(Sha256::digest(&body_json));
-        let method_name = method.as_str();
+        email: &str,
+        vcpus: Option<u32>,
+    ) -> Result<(), JoinCapacityWaitlistError> {
+        use JoinCapacityWaitlistErrorCtx as Ctx;
 
-        // The gateway nests /api routes, so the sign middleware sees paths with /api stripped
-        let challenge_path = path.strip_prefix("/api").unwrap_or(path);
-
-        output::verbose(self.verbose, "Starting QR code cross-device signing...");
-
-        // Step 1: Request a QR sign token from the gateway
-        let body_str = String::from_utf8_lossy(&body_json);
-        let sign_req = serde_json::json!({
-            "method": method_name,
-            "path": challenge_path,
-            "body": body_str,
-            "body_hash": body_hash,
-        });
-
-        let response = self
-            .client
-            .post(format!("{}/auth/qr-sign/begin", self.base_url))
-            .header("X-Session-ID", session_id)
-            .json(&sign_req)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error = response.text().await?;
-            bail!("Failed to start QR signing: {}", error);
-        }
-
-        let begin_resp: QrSignBeginResponse = response.json().await?;
-        output::verbose(
-            self.verbose,
-            &format!("QR sign token: {}", begin_resp.token),
-        );
-
-        // Step 2: Render QR code
-        output::status("");
-        render_qr_code(&begin_resp.url)?;
-        output::status("");
-        output::status("Scan the QR code with your phone to approve the operation, or open:");
-        output::status(format!("  {}", begin_resp.url));
-        output::status("");
-
-        // Step 3: Poll for completion
-        let loader = Spinner::new("Waiting for approval...", SpinnerStyle::Processing);
-
-        let poll_result = async {
-            let timeout = Duration::from_secs(180);
-            let start = std::time::Instant::now();
-
-            loop {
-                if start.elapsed() > timeout {
-                    bail!("QR signing timed out. Please try again.");
-                }
-
-                tokio::time::sleep(Duration::from_secs(2)).await;
-
-                let status_resp = self
-                    .client
-                    .get(format!("{}/auth/qr-sign/status", self.base_url))
-                    .query(&[("token", &begin_resp.token)])
-                    .send()
-                    .await?;
-
-                if !status_resp.status().is_success() {
-                    output::verbose(self.verbose, "Status poll failed, retrying...");
-                    continue;
-                }
-
-                let status: QrSignStatusResponse = status_resp.json().await?;
-                output::verbose(self.verbose, &format!("Poll status: {}", status.status));
-
-                match status.status.as_str() {
-                    "completed" => {
-                        let fido2_response = status.fido2_response.ok_or_else(|| {
-                            anyhow::anyhow!("Completed but no fido2_response returned")
-                        })?;
-                        let challenge_id = status.challenge_id.ok_or_else(|| {
-                            anyhow::anyhow!("Completed but no challenge_id returned")
-                        })?;
-                        return Ok((fido2_response, challenge_id));
-                    }
-                    "expired" => {
-                        bail!("QR signing token expired. Please try again.");
-                    }
-                    // "pending" or "authenticated" — keep polling
-                    _ => continue,
-                }
-            }
-        }
-        .await;
-
-        loader.finish();
-
-        let (fido2_response, challenge_id) = poll_result?;
-        output::verbose(self.verbose, "Sending QR-signed request");
-
-        // Step 4: Send the actual request with the FIDO2 assertion from the phone
-        let response = self
-            .client
-            .request(method, format!("{}{}", self.base_url, path))
-            .header("X-Fido2-Challenge-Id", &challenge_id)
-            .header("X-Fido2-Response", &fido2_response)
-            .header("Content-Type", "application/json")
-            .body(body_json)
-            .send()
-            .await?;
-
-        Ok(response)
-    }
-
-    fn get_assertion(
-        &self,
-        options: &LoginBeginResponse,
-        base_url: &str,
-    ) -> Result<AssertionResult> {
-        output::verbose(self.verbose, "Attempting assertion without PIN first...");
-        match self.try_get_assertion(options, base_url, None) {
-            Ok(result) => {
-                output::verbose(self.verbose, "Assertion succeeded without PIN");
-                Ok(result)
-            }
-            Err(e) => {
-                output::verbose(self.verbose, &format!("First attempt failed: {:?}", e));
-                output::verbose(self.verbose, &format!("Full error details: {:#?}", e));
-
-                // Only ask for PIN if the error is PIN-related
-                if is_pin_related_error(&e) {
-                    output::status("Your security key requires a PIN.");
-                    match prompt_for_pin()? {
-                        Some(pin_string) => {
-                            let pin_string = ZeroizePin(pin_string);
-                            let pin = Pin::new(&pin_string.0);
-                            output::verbose(self.verbose, "Retrying assertion with PIN...");
-                            self.try_get_assertion(options, base_url, Some(pin))
-                        }
-                        None => {
-                            output::verbose(self.verbose, "No PIN provided, returning original error");
-                            Err(e)
-                        }
-                    }
-                } else {
-                    // Not a PIN error, return the original error
-                    output::verbose(
-                        self.verbose,
-                        "Error is not PIN-related, not prompting for PIN",
-                    );
-                    Err(e)
-                }
-            }
-        }
-    }
-
-    fn try_get_assertion(
-        &self,
-        options: &LoginBeginResponse,
-        base_url: &str,
-        pin: Option<Pin>,
-    ) -> Result<AssertionResult> {
-        let opts = &options.public_key;
-
-        output::verbose(self.verbose, "Getting assertion from authenticator...");
-
-        let challenge = general_purpose::URL_SAFE_NO_PAD
-            .decode(&opts.challenge)
-            .context("Failed to decode challenge")?;
-
-        output::verbose(self.verbose, &format!("challenge bytes: {:?}", challenge));
-        output::verbose(self.verbose, &format!("rpId: {}", opts.rp_id));
-
-        let mut manager =
-            AuthenticatorService::new().context("Failed to create authenticator service")?;
-
-        manager.add_u2f_usb_hid_platform_transports();
-
-        let (status_tx, status_rx) = channel::<StatusUpdate>();
-        let (callback_tx, callback_rx) = channel::<Result<SignResult, AuthenticatorError>>();
-
-        let callback = StateCallback::new(Box::new(move |result| {
-            let _ = callback_tx.send(result);
-        }));
-
-        let allow_list: Vec<PublicKeyCredentialDescriptor> = opts
-            .allow_credentials
-            .iter()
-            .filter_map(|cred| {
-                general_purpose::URL_SAFE_NO_PAD
-                    .decode(&cred.id)
-                    .ok()
-                    .map(|id_bytes| PublicKeyCredentialDescriptor {
-                        id: id_bytes,
-                        transports: vec![Transport::USB],
-                    })
-            })
-            .collect();
-
-        output::verbose(
-            self.verbose,
-            &format!("Allow list has {} credentials", allow_list.len()),
-        );
-
-        let args = SignArgs {
-            client_data_hash: Sha256::digest(serde_json::to_vec(&serde_json::json!({
-                "type": "webauthn.get",
-                "challenge": opts.challenge,
-                "origin": base_url,
-            }))?)
-            .into(),
-            origin: base_url.to_string(),
-            relying_party_id: opts.rp_id.clone(),
-            allow_list,
-            user_verification_req:
-                authenticator::ctap2::server::UserVerificationRequirement::Preferred,
-            user_presence_req: true,
-            extensions: Default::default(),
-            pin,
-            use_ctap1_fallback: false,
-        };
-
-        output::verbose(self.verbose, "Sending sign request to authenticator...");
-        manager
-            .sign(opts.timeout, args, status_tx, callback)
-            .context("Failed to start assertion")?;
-
-        output::verbose(
-            self.verbose,
-            "Waiting for callback result (up to 60 seconds)...",
-        );
-
-        let mut loader = Spinner::new("Tap your security key to continue", SpinnerStyle::KeyTap);
-
-        loop {
-            // Check for status updates
-            while let Ok(status) = status_rx.try_recv() {
-                match status {
-                    StatusUpdate::SelectResultNotice(sender, users) => {
-                        loader.abandon();
-                        output::status("Multiple credentials found. Please select one:");
-                        for (idx, user) in users.iter().enumerate() {
-                            let display = user
-                                .display_name
-                                .as_deref()
-                                .or(user.name.as_deref())
-                                .unwrap_or("Unknown");
-                            output::status(format!("[{}] {}", idx, display));
-                        }
-
-                        let selection = crate::prompt::select(&format!(
-                            "Enter selection (0-{}): ",
-                            users.len() - 1
-                        ))
-                        .map_err(|e| anyhow::anyhow!(e))?;
-
-                        if selection >= users.len() {
-                            bail!("Selection out of range");
-                        }
-
-                        output::status(format!(
-                            "Selected: {}",
-                            users[selection].name.as_deref().unwrap_or("Unknown")
-                        ));
-                        sender
-                            .send(Some(selection))
-                            .context("Failed to send selection")?;
-                    }
-                    StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender)) => {
-                        loader.abandon();
-                        output::verbose(self.verbose, "PIN required by authenticator");
-                        match prompt_for_pin()? {
-                            Some(pin_string) => {
-                                let pin = Pin::new(&pin_string);
-                                sender.send(pin).context("Failed to send PIN")?;
-                                loader = Spinner::new(
-                                    "Tap your security key to continue",
-                                    SpinnerStyle::KeyTap,
-                                );
-                            }
-                            None => {
-                                bail!("PIN is required but none provided");
-                            }
-                        }
-                    }
-                    StatusUpdate::PinUvError(e) => {
-                        loader.abandon();
-                        output::verbose(self.verbose, &format!("PIN/UV error: {:?}", e));
-                        bail!("PIN/UV error: {:?}", e);
-                    }
-                    _ => {
-                        output::verbose(self.verbose, &format!("Authenticator status: {:?}", status));
-                    }
-                }
-            }
-
-            if let Ok(result) = callback_rx.try_recv() {
-                loader.finish();
-                output::verbose(self.verbose, "Got assertion result");
-                let sign_result = result.map_err(|e| {
-                    let msg = format!("{:?}", e);
-                    if msg.contains("NoCredentials") {
-                        anyhow::anyhow!(
-                            "No passkey found on this device for this server.\n\
-                             If you haven't registered yet, run: caution register\n\
-                             If you registered with a different key, try that one instead."
-                        )
-                    } else {
-                        anyhow::anyhow!("Assertion failed: {}", e)
-                    }
-                })?;
-
-                let client_data_json = serde_json::json!({
-                    "type": "webauthn.get",
-                    "challenge": opts.challenge,
-                    "origin": self.base_url.clone(),
-                });
-                let client_data_json_bytes = serde_json::to_vec(&client_data_json)?;
-
-                let cred_id_bytes = &sign_result
-                    .assertion
-                    .credentials
-                    .as_ref()
-                    .context("No credential")?
-                    .id;
-
-                let response_json = serde_json::json!({
-                    "id": general_purpose::URL_SAFE_NO_PAD.encode(cred_id_bytes),
-                    "rawId": general_purpose::URL_SAFE_NO_PAD.encode(cred_id_bytes),
-                    "response": {
-                        "authenticatorData": general_purpose::URL_SAFE_NO_PAD.encode(&sign_result.assertion.auth_data.to_vec()),
-                        "clientDataJSON": general_purpose::URL_SAFE_NO_PAD.encode(&client_data_json_bytes),
-                        "signature": general_purpose::URL_SAFE_NO_PAD.encode(&sign_result.assertion.signature),
-                        "userHandle": sign_result.assertion.user.as_ref()
-                            .map(|u| general_purpose::URL_SAFE_NO_PAD.encode(&u.id))
-                            .unwrap_or_default(),
-                    },
-                    "type": "public-key"
-                });
-
-                output::verbose(self.verbose, "Response JSON structure:");
-                output::verbose(self.verbose, &serde_json::to_string_pretty(&response_json)?);
-
-                return Ok(AssertionResult {
-                    response_json: serde_json::to_vec(&response_json)?,
-                });
-            }
-
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
-
-    async fn create_app(&self) -> Result<()> {
-        output::status("Creating new Caution-managed app...");
-
-        output::verbose(self.verbose, "Checking git repository...");
-        self.check_git_repo()?;
-        output::success("Git repository found");
-
-        output::verbose(self.verbose, "Reading configuration...");
-        let config_file = self.read_config()?;
-        let cmd = resolve_local_build_command_from_dir(Path::new("."), false)?;
-        output::success("Configuration found");
-        output::status(&format!("Build command: {}", cmd));
-
-        let checkout_link = inspect_checkout_link(
-            self.get_deployment_path()?,
-            Path::new("."),
-            Some(&config_file),
-        )?;
-
-        if checkout_link.blocks_managed_creation() {
-            bail!(linked_checkout_error(&checkout_link));
-        }
-
-        let config = self.ensure_authenticated().await?;
-
-        output::verbose(self.verbose, "Creating app on server...");
-        let body = serde_json::json!({
-            "cmd": cmd
-        });
-
-        let loader = Spinner::new("Setting up your app", SpinnerStyle::Processing);
-
-        let response = self
-            .client
-            .post(format!("{}/api/resources", self.base_url))
-            .header("X-Session-ID", config.session_id)
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to send create app request")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error = self.api_error_message(response).await;
-            loader.finish();
-
-            if error.contains("initialize")
-                || error.contains("provisioning")
-                || error.contains("AWS account")
-            {
-                output::error("\n❌ Failed to initialize your AWS account");
-                output::error("\nThis is your first time using Caution. We attempted to provision");
-                output::error(
-                    "a dedicated AWS account for your organization, but encountered an error:"
-                );
-                output::error(format!("\n{}", error));
-                output::warning("\nPlease check:");
-                output::warning("  • AWS Organizations is enabled in your main account");
-                output::warning("  • Your IAM user has organizations:CreateAccount permission");
-                output::warning("  • Run: aws organizations create-organization --feature-set ALL");
-                bail!("Account initialization failed");
-            }
-
-            bail!("Failed to create app (status {}): {}", status, error);
-        }
-
-        let create_response: CreateAppResponse = response
-            .json()
-            .await
-            .context("Failed to parse create app response")?;
-
-        loader.finish();
-
-        output::success("App created!");
-        output::status(format!("ID: {}", create_response.id));
-        output::status(format!("Name: {}", create_response.resource_name));
-        output::status(format!("State: {}", create_response.state));
-        output::status(format!("Git URL: {}", create_response.git_url));
-        output::status(deployment_target_summary(
-            "Caution-managed",
-            "platform-managed",
-            "pending",
-        ));
-        print_managed_dns_details(
-            create_response.managed_hostname.as_deref(),
-            create_response.dns_status.as_deref(),
-            create_response.dns_error.as_deref(),
-            None,
-        );
-
-        output::verbose(self.verbose, "Saving deployment info...");
-        self.save_deployment(&create_response.id)?;
-        output::verbose(self.verbose, "Saved deployment info");
-
-        output::verbose(self.verbose, "Setting git remote...");
-        self.set_git_remote(&create_response.git_url)?;
-
-        self.create_config_file_if_needed(false)?;
-
-        output::status(format!("\nYou can now push to 'caution' remote:"));
-        output::status(format!("  git push caution main"));
-
-        Ok(())
-    }
-
-    async fn list_apps(&self) -> Result<()> {
-        let config = self.ensure_authenticated().await?;
-
-        let apps: Vec<App> = self
-            .get_protected_json(
-                &config.session_id,
-                "/api/resources",
-                "Failed to list apps"
-            )
-            .await?;
-
-        if apps.is_empty() {
-            output::status("No deployed apps found.");
-        } else {
-            output::data_header("Apps:");
-            for app in apps {
-                let name = app.resource_name.as_deref().unwrap_or("unnamed");
-                let mut details = vec![app.state.clone()];
-
-                if let Some(config) = &app.configuration {
-                    if let Some(enclave_config) = config.get("enclave_config") {
-                        if let (Some(mem), Some(cpus)) = (
-                            enclave_config.get("memory_mb").and_then(|v| v.as_u64()),
-                            enclave_config.get("cpus").and_then(|v| v.as_u64()),
-                        ) {
-                            details.push(format!("{}MB/{}cpu", mem, cpus));
-                        }
-                    }
-                }
-
-                if let Some(ip) = &app.public_ip {
-                    details.push(ip.clone());
-                }
-                if let Some(dns_status) = &app.dns_status {
-                    details.push(["dns:", dns_status].concat());
-                }
-
-                output::status(format!("  {} - {} ({})", app.id, name, details.join(", ")));
-            }
-        }
-        Ok(())
-    }
-
-    async fn join_capacity_waitlist(&self, email: &str, vcpus: Option<u32>) -> Result<()> {
         let email = email.trim();
-        anyhow::ensure!(!email.is_empty(), "--email must not be empty");
-        anyhow::ensure!(
-            !email.contains('\n') && !email.contains('\r'),
-            "--email is invalid"
-        );
-        anyhow::ensure!(email.contains('@'), "--email must be an email address");
-
-        if let Some(vcpus) = vcpus {
-            anyhow::ensure!(
-                (1..=46).contains(&vcpus),
-                "--vcpus must be between 1 and 46; contact support for larger requests"
-            );
+        if email.is_empty() {
+            return Err(JoinCapacityWaitlistError::EmptyEmail {
+                location: std::panic::Location::caller(),
+            });
+        }
+        if email.contains('\n') || email.contains('\r') {
+            return Err(JoinCapacityWaitlistError::InvalidEmail {
+                location: std::panic::Location::caller(),
+            });
+        }
+        if !email.contains('@') {
+            return Err(JoinCapacityWaitlistError::NoAtSymbol {
+                location: std::panic::Location::caller(),
+            });
         }
 
-        let config = self.ensure_authenticated().await?;
-        let org_id = self.primary_organization_id(config.session_id()).await?;
+        if let Some(vcpus) = vcpus
+            && !(1..=46).contains(&vcpus)
+        {
+            return Err(JoinCapacityWaitlistError::InvalidVcpus {
+                vcpus,
+                location: std::panic::Location::caller(),
+            });
+        }
+
+        let config = self
+            .ensure_authenticated()
+            .await
+            .with_context(Ctx::ensure_authenticated())?;
+        let org_id = auth::primary_organization_id(self, config.session_id())
+            .await
+            .with_context(Ctx::get_org_id())?;
 
         let response = self
             .client
@@ -5136,17 +3285,18 @@ enclave "default" {{
             }))
             .send()
             .await
-            .context("Failed to send capacity waitlist request")?;
+            .with_context(Ctx::send_request())?;
 
         if !response.status().is_success() {
             let error = self.api_error_message(response).await;
-            bail!("Failed to join capacity waitlist: {}", error);
+            return Err(JoinCapacityWaitlistError::ApiFailure {
+                error,
+                location: std::panic::Location::caller(),
+            });
         }
 
-        let waitlist_response: CapacityWaitlistResponse = response
-            .json()
-            .await
-            .context("Failed to parse capacity waitlist response")?;
+        let waitlist_response: CapacityWaitlistResponse =
+            response.json().await.with_context(Ctx::parse_response())?;
 
         if waitlist_response.status == "already_waiting" {
             output::status(format!(
@@ -5163,4668 +3313,69 @@ enclave "default" {{
         Ok(())
     }
 
-    async fn fetch_app(&self, id: &str) -> Result<App> {
-        let config = self.ensure_authenticated().await?;
+    async fn fetch_app(&self, id: &str) -> Result<App, FetchAppError> {
+        use FetchAppErrorCtx as Ctx;
+
+        let config = self
+            .ensure_authenticated()
+            .await
+            .with_context(Ctx::ensure_authenticated())?;
 
         self.get_protected_json(
             &config.session_id,
             &format!("/api/resources/{}", id),
-            "Failed to get app"
+            "Failed to get app",
         )
         .await
+        .with_context(Ctx::get_protected_json())
     }
 
-    async fn get_current_app(&self) -> Result<App> {
-        let deployment = self.load_deployment()?;
-        self.fetch_app(&deployment.resource_id).await
-    }
+    async fn get_current_app(&self) -> Result<App, GetCurrentAppError> {
+        use GetCurrentAppErrorCtx as Ctx;
 
-    async fn get_app(&self, id: Option<String>, allow_ci_ssh: bool) -> Result<()> {
-        let app_id = match id {
-            Some(id) => id,
-            None => self.load_deployment()?.resource_id,
-        };
-        let app = if allow_ci_ssh {
-            match self.fetch_app_via_ssh_https(&app_id).await? {
-                Some(app) => app,
-                None => self.fetch_app(&app_id).await?,
-            }
-        } else {
-            self.fetch_app(&app_id).await?
-        };
-        let name = app.resource_name.as_deref().unwrap_or("unnamed");
-
-        output::data_header("App Details:");
-        output::status(format!("  ID: {}", app.id));
-        output::status(format!("  Name: {}", name));
-        output::status(format!("  State: {}", app.state));
-
-        if let Some(domain) = &app.domain {
-            output::status(format!("  Domain: {}", domain));
-        }
-
-        if let Some(config) = &app.configuration {
-            if let Some(enclave_config) = config.get("enclave_config") {
-                if let Some(memory) = enclave_config.get("memory_mb").and_then(|v| v.as_u64()) {
-                    output::status(format!("  Memory: {} MB", memory));
-                }
-                if let Some(cpus) = enclave_config.get("cpus").and_then(|v| v.as_u64()) {
-                    output::status(format!("  CPUs: {}", cpus));
-                }
-                if let Some(debug) = enclave_config.get("debug").and_then(|v| v.as_bool()) {
-                    if debug {
-                        output::status("  Debug Mode: enabled");
-                    }
-                }
-                if let Some(ports) = enclave_config.get("ports").and_then(|v| v.as_array()) {
-                    if !ports.is_empty() {
-                        let ports_str: Vec<String> = ports
-                            .iter()
-                            .filter_map(|p| p.as_u64().map(|n| n.to_string()))
-                            .collect();
-                        output::status(format!("  Ports: {}", ports_str.join(", ")));
-                    }
-                }
-                if let Some(http_port) = enclave_config.get("http_port").and_then(|v| v.as_u64()) {
-                    if http_port > 0 {
-                        output::status(format!("  HTTP Port: {}", http_port));
-                    }
-                }
-            }
-        }
-
-        if let Some(ip) = &app.public_ip {
-            output::status(format!("  Public IP: {}", ip));
-            output::status(format!("  URL: http://{}", app.domain.as_deref().unwrap_or(ip)));
-            output::status(format!("  Attestation: http://{}/attestation", ip));
-        }
-
-        print_managed_dns_details(
-            app.managed_hostname.as_deref(),
-            app.dns_status.as_deref(),
-            app.dns_error.as_deref(),
-            app.domain.as_deref(),
-        );
-
-        Ok(())
-    }
-
-    async fn destroy_app(
-        &self,
-        id: Option<String>,
-        force: bool,
-        force_delete: bool,
-        allow_ci_ssh: bool,
-    ) -> Result<()> {
-        let app_id = match id {
-            Some(id) => id,
-            None => self.load_deployment()?.resource_id,
-        };
-        let app = if allow_ci_ssh {
-            match self.fetch_app_via_ssh_https(&app_id).await? {
-                Some(app) => app,
-                None => self.fetch_app(&app_id).await?,
-            }
-        } else {
-            self.fetch_app(&app_id).await?
-        };
-
-        let name = app.resource_name.as_deref().unwrap_or("unnamed");
-
-        if !force {
-            output::status("About to destroy app:");
-            output::status(format!("  ID: {}", app.id));
-            output::status(format!("  Name: {}", name));
-            output::status(format!("  State: {}", app.state));
-            if let Some(ip) = &app.public_ip {
-                output::status(format!("  Public IP: {}", ip));
-            }
-            output::warning(
-                "  WARNING: Destroy causes downtime and temporarily withdraws managed DNS.",
-            );
-            output::status(
-                "  The app ID, Git repository, and managed hostname will be retained. Any linked BYOC credential will also be retained.",
-            );
-            if force_delete {
-                output::status("");
-                output::warning(
-                    "  WARNING: --force-delete may bypass cloud cleanup failure only after managed DNS is withdrawn and drained."
-                );
-            }
-            output::status("");
-            let confirmed = prompt::confirm("Are you sure you want to destroy this app? [y/N] ")?;
-            if !confirmed {
-                output::status("Aborted.");
-                return Ok(());
-            }
-        }
-
-        let loader = Spinner::new(
-            &format!("Destroying app {} ({})", name, app.id),
-            SpinnerStyle::Processing,
-        );
-
-        if allow_ci_ssh
-            && self
-                .destroy_app_via_ssh_https(&app.id, force_delete)
-                .await?
-        {
-            loader.finish();
-            output::success(format!("App {} ({}) destroyed", name, app.id));
-            print_destroy_redeploy_guidance(&app);
-            Ok(())
-        } else {
-            let config = self.ensure_authenticated().await?;
-            
-            // We can't use get_protected_json here since DELETE returns no body.
-            // Instead, we check if username_required error appears during the call.
-            let path = if force_delete {
-                format!("{}/api/resources/{}?force=true", self.base_url, app.id)
-            } else {
-                format!("{}/api/resources/{}", self.base_url, app.id)
-            };
-            
-            // First check: try a protected GET to ensure username is claimed
-            // This will prompt for username if needed, then proceed with DELETE
-            let _: serde_json::Value = self
-                .get_protected_json(
-                    &config.session_id,
-                    &format!("/api/resources/{}", app.id),
-                    "Failed to get app status"
-                )
-                .await?;
-            
-            // If we got here, username claim is handled. Now perform the DELETE.
-            let response = self
-                .client
-                .delete(&path)
-                .header("X-Session-ID", config.session_id)
-                .send()
-                .await?;
-
-            if response.status().is_success() {
-                loader.finish();
-                output::success(format!("App {} ({}) destroyed", name, app.id));
-                print_destroy_redeploy_guidance(&app);
-                Ok(())
-            } else {
-                let status = response.status();
-                let error = self.api_error_message(response).await;
-                loader.finish();
-                bail!("Failed to destroy app (status {}): {}", status, error)
-            }
-        }
-    }
-
-    async fn rename_app(&self, id: Option<String>, new_name: String) -> Result<()> {
-        let app = match id {
-            Some(id) => self.fetch_app(&id).await?,
-            None => self.get_current_app().await?,
-        };
-
-        let old_name = app.resource_name.as_deref().unwrap_or("unnamed");
-
-        output::status(format!("Renaming app '{}' to '{}'...", old_name, new_name));
-
-        let config = self.ensure_authenticated().await?;
-
-        let body = serde_json::json!({
-            "name": new_name
-        });
-
-        // Note: This is a PATCH mutation. get_protected_json only handles GETs,
-        // so we still use the raw client call here since it's not idempotent.
-        // The username_required check happens during fetch_app above.
-        let response = self
-            .client
-            .patch(format!("{}/api/resources/{}", self.base_url, app.id))
-            .header("X-Session-ID", config.session_id)
-            .json(&body)
-            .send()
+        let deployment = self
+            .load_deployment()
+            .with_context(Ctx::load_deployment())?;
+        self.fetch_app(&deployment.resource_id)
             .await
-            .context("Failed to send rename request")?;
-
-        if response.status().is_success() {
-            let updated_app: App = response.json().await?;
-            let updated_name = updated_app.resource_name.as_deref().unwrap_or("unnamed");
-            output::success(&format!("App renamed: {} -> {}", old_name, updated_name));
-
-            Ok(())
-        } else {
-            let status = response.status();
-            let error = self.api_error_message(response).await;
-            bail!("Failed to rename app (status {}): {}", status, error)
-        }
+            .with_context(Ctx::fetch_app())
     }
 
-    /// Attempt to re-link an existing app based on local checkout state.
-    ///
-    /// A valid resource ID in `.caution/deployment.json` takes precedence;
-    /// otherwise a UUID is read from the `caution` SSH remote. The selected app
-    /// is verified through the API before local state or the remote is changed.
-    ///
-    /// Returns `Ok(true)` when the checkout was successfully re-linked (the
-    /// caller should short-circuit), `Ok(false)` when no linkage state exists at
-    /// all (proceed with creation), or returns an error for unverifiable state.
-    async fn try_relink(&self, checkout_link: &CheckoutLink) -> Result<bool> {
-        let Some((resource_id, from_remote)) = relink_candidate(checkout_link)? else {
-            return Ok(false);
-        };
+    async fn get_attestation_url(&self) -> Result<String, GetAttestationUrlError> {
+        use GetAttestationUrlErrorCtx as Ctx;
 
-        if from_remote {
-            output::status(&format!(
-                "Attempting to re-link app from git remote (ID: {})...",
-                resource_id
-            ));
-        } else {
-            output::verbose(
-                self.verbose,
-                &["Found existing deployment with ID: ", &resource_id].concat(),
-            );
-        }
-
-        let app = self.fetch_app(&resource_id).await.map_err(|error| {
-            error.context(format!(
-                "Unable to verify linked app {}; refusing to create a successor. Preserve the caution remote and restore authentication or connectivity before retrying.",
-                resource_id
-            ))
-        })?;
-        if app.id != resource_id {
-            bail!(
-                "API returned app {} while verifying {}; refusing to change the checkout link",
-                app.id,
-                resource_id
-            );
-        }
-        if app.git_url.is_empty() {
-            bail!(
-                "App {} was verified but the API returned no Git URL; refusing to report a successful re-link",
-                app.id
-            );
-        }
-
-        let name = app.resource_name.as_deref().unwrap_or("unnamed");
-        output::status(if from_remote {
-            "App re-linked successfully!"
-        } else {
-            "App already exists!"
-        });
-        output::status(format!("ID: {}", app.id));
-        output::status(format!("Name: {}", name));
-        output::status(format!("State: {}", app.state));
-        output::status(format!("Git URL: {}", app.git_url));
-
-        self.save_deployment(&app.id)?;
-        output::verbose(self.verbose, "Updating git remote...");
-        self.set_git_remote(&app.git_url)?;
-
-        Ok(true)
-    }
-
-    async fn init(
-        &self,
-        bring_your_own_cloud: bool,
-        name: Option<String>,
-        region: Option<String>,
-        local: bool,
-        config_path: Option<PathBuf>,
-        yes: bool,
-    ) -> Result<()> {
-        output::status("Initializing new deployment...");
-
-        output::verbose(self.verbose, "Checking git repository...");
-        self.check_git_repo()?;
-        output::success("Git repository found");
-
-        let mut checkout_link =
-            inspect_checkout_link(self.get_deployment_path()?, Path::new("."), None)?;
-        let relinked = self.try_relink(&checkout_link).await?;
-
-        if let Some(ref path) = config_path {
-            return self.init_byoc(path).await;
-        }
-
-        if relinked {
-            output::status("\nYou can now push to 'caution' remote:");
-            output::status("  git push caution main");
-            return Ok(());
-        }
-
-        if bring_your_own_cloud {
-            return self.init_byoc_interactive(name, region, local, yes).await;
-        }
-
-        self.create_config_file_if_needed(false)?;
-
-        output::verbose(self.verbose, "Reading configuration...");
-        let config_file = self.read_config()?;
-        let cmd = resolve_local_build_command_from_dir(Path::new("."), false)?;
-        output::success("Configuration found");
-        output::status(&format!("Build command: {}", cmd));
-
-        checkout_link.byoc_provider = config_file
-            .caution
-            .as_ref()
-            .and_then(|caution| caution.provider.as_ref())
-            .is_some();
-
-        if checkout_link.blocks_managed_creation() {
-            bail!(linked_checkout_error(&checkout_link));
-        }
-
-        let config = self.ensure_authenticated().await?;
-
-        let app_name = name.unwrap_or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
-                .map(|s| s.to_lowercase().replace(' ', "-"))
-                .filter(|s| {
-                    !s.is_empty()
-                        && s.chars()
-                            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-                })
-                .unwrap_or_else(|| "app".to_string())
-        });
-
-        output::verbose(self.verbose, "Creating app on server...");
-        let body = serde_json::json!({
-            "cmd": cmd,
-            "name": app_name
-        });
-
-        let loader = Spinner::new("Setting up your app", SpinnerStyle::Processing);
-
-        let response = self
-            .client
-            .post(format!("{}/api/resources", self.base_url))
-            .header("X-Session-ID", config.session_id)
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to send create app request")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error = self.api_error_message(response).await;
-            loader.finish();
-
-            if error.contains("initialize")
-                || error.contains("provisioning")
-                || error.contains("AWS account")
-            {
-                output::error("\n❌ Failed to initialize your AWS account");
-                output::error("\nThis is your first time using Caution. We attempted to provision");
-                output::error(
-                    "a dedicated AWS account for your organization, but encountered an error:"
-                );
-                output::error(format!("\n{}", error));
-                output::error("\nPlease check:");
-                output::error("  • AWS Organizations is enabled in your main account");
-                output::error("  • Your IAM user has organizations:CreateAccount permission");
-                output::error("  • Run: aws organizations create-organization --feature-set ALL");
-                bail!("Account initialization failed");
-            }
-
-            bail!("Failed to create app (status {}): {}", status, error);
-        }
-
-        let create_response: CreateAppResponse = response
-            .json()
-            .await
-            .context("Failed to parse create app response")?;
-
-        loader.finish();
-
-        output::success("App created!");
-        output::status(format!("ID: {}", create_response.id));
-        output::status(format!("Name: {}", create_response.resource_name));
-        output::status(format!("State: {}", create_response.state));
-        output::status(format!("Git URL: {}", create_response.git_url));
-        output::status(deployment_target_summary(
-            "Caution-managed",
-            "platform-managed",
-            "pending",
-        ));
-
-        print_managed_dns_details(
-            create_response.managed_hostname.as_deref(),
-            create_response.dns_status.as_deref(),
-            create_response.dns_error.as_deref(),
-            None,
-        );
-
-        output::verbose(self.verbose, "Saving deployment info...");
-        self.save_deployment(&create_response.id)?;
-        output::verbose(self.verbose, "Saved deployment info");
-
-        output::verbose(self.verbose, "Setting git remote...");
-        self.set_git_remote(&create_response.git_url)?;
-
-        self.create_config_file_if_needed(false)?;
-
-        output::status("\nYou can now push to 'caution' remote:");
-        output::status("  git push caution main");
-        output::status("\nAfter pushing, check your app status:");
-        output::status("  caution apps list");
-        output::status("\nVerify attestation:");
-        output::status("  caution verify");
-
-        Ok(())
-    }
-
-    async fn init_byoc(&self, config_path: &PathBuf) -> Result<()> {
-        output::status("Initializing bring-your-own-compute deployment...");
-
-        let auth_config = self.require_existing_authenticated_config()?;
-
-        output::verbose(
-            self.verbose,
-            &format!("Reading config from {:?}", config_path),
-        );
-        let config_content =
-            fs::read_to_string(config_path).context("Failed to read config file")?;
-
-        let has_gpg_extension = config_path
-            .extension()
-            .map(|ext| ext == "gpg" || ext == "asc")
-            .unwrap_or(false);
-        let has_gpg_header = config_content
-            .trim()
-            .starts_with("-----BEGIN PGP MESSAGE-----");
-        let is_gpg_encrypted = has_gpg_extension || has_gpg_header;
-        let existing_resource_id = self.load_deployment().ok().map(|d| d.resource_id);
-
-        if linked_encrypted_byoc_config(is_gpg_encrypted, existing_resource_id.as_deref()) {
-            bail!([
-                "Refusing encrypted BYOC config update for linked app ",
-                existing_resource_id.as_deref().unwrap_or("unknown"),
-                ": the CLI cannot verify or inject its resource ID into ciphertext. Decrypt the config and retry with `caution init --byoc --config <decrypted-json>`.",
-            ]
-            .concat());
-        }
-
-        let request_body = if is_gpg_encrypted {
-            output::verbose(
-                self.verbose,
-                "Config file is GPG-encrypted (will be decrypted server-side)",
-            );
-            output::status("Detected GPG-encrypted config file");
-
-            config_content
-        } else {
-            let mut config_json: serde_json::Value = serde_json::from_str(&config_content)
-                .context("Failed to parse config file as JSON")?;
-
-            if let Some(ref id) = existing_resource_id {
-                output::status(format!("Found existing deployment: {}", id));
-                output::status("Updating existing resource with new configuration...");
-                config_json["resource_id"] = serde_json::json!(id);
-            }
-
-            let platform = config_json.get("platform").and_then(|v| v.as_str());
-            if platform != Some("aws") {
-                bail!(
-                    "Config file must have platform: \"aws\" (got: {:?})",
-                    platform
-                );
-            }
-
-            let byoc_enabled = config_json.get("managed_on_prem").and_then(|v| v.as_bool());
-            if byoc_enabled != Some(true) {
-                bail!("Config file must have managed_on_prem: true for BYOC deployments");
-            }
-
-            let required_fields = [
-                "aws_region",
-                "aws_access_key_id",
-                "aws_secret_access_key",
-                "deployment_id",
-                "asg_name",
-                "eif_bucket",
-                "launch_template_name",
-                "launch_template_id",
-                "vpc_id",
-                "subnet_ids",
-                "instance_profile_name",
-                "iam_user",
-                "aws_account_id",
-                "scope_tag",
-            ];
-            for field in required_fields {
-                if config_json.get(field).is_none() {
-                    bail!("Config file missing required field: {}", field);
-                }
-            }
-
-            if let Some(value) = config_json.get("builder_instance_profile_name") {
-                if !value.is_string() {
-                    bail!("Config field builder_instance_profile_name must be a string");
-                }
-            }
-
-            output::verbose(self.verbose, "Config file validated");
-            serde_json::to_string(&config_json)?
-        };
-
-        self.create_config_file_if_needed(true)?;
-
-        output::verbose(self.verbose, "Reading configuration...");
-        let _config = self.read_config()?;
-        output::success("Configuration found");
-
-        let is_update = existing_resource_id.is_some();
-        let loader_msg = if is_update {
-            "Updating bring-your-own-compute resource"
-        } else {
-            "Creating bring-your-own-compute resource"
-        };
-        let loader = Spinner::new(loader_msg, SpinnerStyle::Processing);
-
-        let response = self
-            .client
-            .post(format!("{}/api/resources/managed-onprem", self.base_url))
-            .header("X-Session-ID", &auth_config.session_id)
-            .header("Content-Type", "text/plain")
-            .body(request_body)
-            .send()
-            .await
-            .context("Failed to send bring-your-own-compute request")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error = response.text().await?;
-            loader.finish();
-            let action = if is_update { "update" } else { "create" };
-            bail!(
-                "Failed to {} bring-your-own-compute resource (status {}): {}",
-                action,
-                status,
-                error
-            );
-        }
-
-        let create_response: serde_json::Value =
-            response.json().await.context("Failed to parse response")?;
-
-        loader.finish();
-
-        let id = create_response["id"].as_str().unwrap_or("unknown");
-        let resource_name = create_response["resource_name"]
-            .as_str()
-            .unwrap_or("unnamed");
-        let git_url = create_response["git_url"].as_str().unwrap_or("");
-        let state = create_response["state"].as_str().unwrap_or("unknown");
-        let aws_account = create_response["managed_onprem"]["aws_account_id"]
-            .as_str()
-            .unwrap_or("unknown");
-        let aws_region = create_response["managed_onprem"]["aws_region"]
-            .as_str()
-            .unwrap_or("unknown");
-
-        if is_update {
-            output::success("Bring-your-own-compute resource updated");
-        } else {
-            output::success("Bring-your-own-compute resource created");
-        }
-        output::status(&format!("ID: {}", id));
-        output::status(&format!("Name: {}", resource_name));
-        output::status(&format!("State: {}", state));
-        output::status(&format!("Git URL: {}", git_url));
-        output::status(deployment_target_summary("BYOC", aws_account, aws_region));
-        print_managed_dns_details(
-            create_response["managed_hostname"].as_str(),
-            create_response["dns_status"].as_str(),
-            create_response["dns_error"].as_str(),
-            None,
-        );
-
-        output::verbose(self.verbose, "Saving deployment info...");
-        self.save_deployment(id)?;
-        output::verbose(self.verbose, "Saved deployment info");
-
-        if !git_url.is_empty() {
-            output::verbose(self.verbose, "Setting git remote...");
-            self.set_git_remote(git_url)?;
-        }
-
-        output::success("\nYou can now push to 'caution' remote to deploy:");
-        output::status("  git push caution main");
-        output::success("\nAfter pushing, check your app status:");
-        output::status("  caution apps list");
-
-        Ok(())
-    }
-
-    /// Detect AWS credentials from environment or ~/.aws/credentials
-    /// Returns (access_key, secret_key, region, session_token)
-    fn detect_aws_credentials() -> Option<(String, String, Option<String>, Option<String>)> {
-        // First check environment variables
-        if let (Ok(key), Ok(secret)) = (
-            std::env::var("AWS_ACCESS_KEY_ID"),
-            std::env::var("AWS_SECRET_ACCESS_KEY"),
-        ) {
-            let region = std::env::var("AWS_REGION")
-                .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
-                .ok();
-            let session_token = std::env::var("AWS_SESSION_TOKEN").ok();
-            return Some((key, secret, region, session_token));
-        }
-
-        // Determine which profile to use
-        let profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".to_string());
-
-        // Fall back to ~/.aws/credentials and ~/.aws/config
-        let home = dirs::home_dir()?;
-        let creds_path = home.join(".aws").join("credentials");
-        let config_path = home.join(".aws").join("config");
-
-        // Parse credentials file for the selected profile
-        let (access_key, secret_key, session_token) =
-            if let Ok(creds_content) = fs::read_to_string(&creds_path) {
-                Self::parse_aws_credentials_file(&creds_content, &profile)
-            } else {
-                (None, None, None)
-            };
-
-        // Parse config file for region (and potentially credentials for SSO profiles)
-        let region = if let Ok(config_content) = fs::read_to_string(&config_path) {
-            Self::parse_aws_config_region(&config_content, &profile)
-        } else {
-            None
-        };
-
-        match (access_key, secret_key) {
-            (Some(k), Some(s)) => Some((k, s, region, session_token)),
-            _ => None,
-        }
-    }
-
-    fn parse_aws_credentials_file(
-        content: &str,
-        profile: &str,
-    ) -> (Option<String>, Option<String>, Option<String>) {
-        let mut access_key = None;
-        let mut secret_key = None;
-        let mut session_token = None;
-        let mut in_target_section = false;
-
-        let section_header = format!("[{}]", profile);
-
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                in_target_section = trimmed == section_header;
-                continue;
-            }
-            if in_target_section {
-                if let Some((key, value)) = trimmed.split_once('=') {
-                    let key = key.trim();
-                    let value = value.trim();
-                    match key {
-                        "aws_access_key_id" => access_key = Some(value.to_string()),
-                        "aws_secret_access_key" => secret_key = Some(value.to_string()),
-                        "aws_session_token" => session_token = Some(value.to_string()),
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        (access_key, secret_key, session_token)
-    }
-
-    fn parse_aws_config_region(content: &str, profile: &str) -> Option<String> {
-        let mut region = None;
-        let mut in_target_section = false;
-
-        // In config file, default profile is [default], others are [profile name]
-        let section_headers: Vec<String> = if profile == "default" {
-            vec!["[default]".to_string(), "[profile default]".to_string()]
-        } else {
-            vec![format!("[profile {}]", profile)]
-        };
-
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                in_target_section = section_headers.iter().any(|h| h == trimmed);
-                continue;
-            }
-            if in_target_section {
-                if let Some((key, value)) = trimmed.split_once('=') {
-                    if key.trim() == "region" {
-                        region = Some(value.trim().to_string());
-                    }
-                }
-            }
-        }
-
-        region
-    }
-
-    /// Interactive bring-your-own-compute initialization
-    async fn init_byoc_interactive(
-        &self,
-        name: Option<String>,
-        region: Option<String>,
-        local: bool,
-        yes: bool,
-    ) -> Result<()> {
-
-        output::status("\n╔══════════════════════════════════════════════════════════════════╗");
-        output::status("║          Bring-Your-Own-Compute Deployment Setup (AWS)           ║");
-        output::status("╚══════════════════════════════════════════════════════════════════╝\n");
-
-        // Check for Docker
-        let docker_check = Command::new("docker").arg("--version").output();
-        if docker_check.is_err() || !docker_check.unwrap().status.success() {
-            bail!("Docker is required but not found. Please install Docker first.");
-        }
-
-        let app_name = name.unwrap_or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
-                .map(|s| s.to_lowercase().replace(' ', "-"))
-                .filter(|s| {
-                    !s.is_empty()
-                        && s.chars()
-                            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-                })
-                .unwrap_or_else(|| "app".to_string())
-        });
-
-        if !app_name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-        {
-            bail!("App name must contain only alphanumeric characters, hyphens, and underscores");
-        }
-
-        output::status(format!("App name: {}", app_name));
-
-        // Check AWS credentials
-        let aws_profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".to_string());
-        let (aws_key, aws_secret, detected_region, aws_session_token) =
-            Self::detect_aws_credentials().ok_or_else(|| {
-                anyhow::anyhow!(aws_credentials_error(&aws_profile, "caution init --byoc"))
-            })?;
-
-        let aws_region = region
-            .or(detected_region)
-            .unwrap_or_else(|| "us-west-2".to_string());
-
-        if std::env::var("AWS_ACCESS_KEY_ID").is_ok() {
-            output::status("AWS credentials detected (from environment)");
-        } else if aws_profile == "default" {
-            output::status("AWS credentials detected (from ~/.aws/credentials)");
-        } else {
-            output::status(format!("AWS credentials detected (profile: {})", aws_profile));
-        }
-        output::status(format!("Region: {}", aws_region));
-        output::status(deployment_target_summary(
-            "BYOC",
-            "current-credentials",
-            &aws_region,
-        ));
-
-        // Display what will be created
-        output::status("\nThis will create the following AWS resources:");
-        output::status("  • VPC with 3 subnets across availability zones");
-        output::status("  • S3 bucket for enclave images");
-        output::status("  • EC2 Auto Scaling Group and Launch Template");
-        output::status("  • IAM user with scoped permissions");
-        output::status("  • IAM role and instance profile for EC2");
-        output::status("\nAll resources will be tagged for easy identification and cleanup.\n");
-
-        if !yes {
-            let confirmed = prompt::confirm("Do you want to proceed? [y/N]: ")?;
-            if !confirmed {
-                output::status("Aborted.");
-                return Ok(());
-            }
-        }
-
-        let auth_config = self.ensure_authenticated().await?;
-
-        // Pull the provisioner image (unless --local is set)
-        if local {
-            output::status("\nUsing local provisioner image (--local)...");
-        } else {
-            output::status("\nPulling provisioner image...");
-            let pull_output = Command::new("docker")
-                .args(&["pull", BYOC_PROVISIONER_IMAGE])
-                .output()
-                .context("Failed to pull provisioner image")?;
-
-            if !pull_output.status.success() {
-                let stderr = String::from_utf8_lossy(&pull_output.stderr);
-                bail!("Failed to pull provisioner image: {}", stderr);
-            }
-        }
-
-        // Run the provisioner
-        output::status("Provisioning AWS resources (this may take a few minutes)...");
-        output::status("---");
-
-        let mut docker_args = vec![
-            "run".to_string(),
-            "--rm".to_string(),
-            "-e".to_string(),
-            format!("AWS_ACCESS_KEY_ID={}", aws_key),
-            "-e".to_string(),
-            format!("AWS_SECRET_ACCESS_KEY={}", aws_secret),
-            "-e".to_string(),
-            format!("AWS_REGION={}", aws_region),
-            "-e".to_string(),
-            "CLI_MODE=true".to_string(),
-        ];
-
-        // Add session token if present (needed for temporary credentials/SSO)
-        if let Some(token) = aws_session_token {
-            docker_args.push("-e".to_string());
-            docker_args.push(format!("AWS_SESSION_TOKEN={}", token));
-        }
-
-        docker_args.push(BYOC_PROVISIONER_IMAGE.to_string());
-
-        let output = Command::new("docker")
-            .args(&docker_args)
-            .output()
-            .context("Failed to run provisioner container")?;
-
-        // Always print stderr (contains progress messages)
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.is_empty() {
-            eprint!("{}", stderr);
-        }
-
-        output::status("---");
-
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if !stdout.is_empty() {
-                eprintln!("stdout: {}", stdout);
-            }
-            bail!(
-                "Provisioning failed (exit code: {:?})",
-                output.status.code()
-            );
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        // Parse the JSON output from the provisioner (CLI_MODE outputs to stdout)
-        let credentials_json: serde_json::Value =
-            serde_json::from_str(&stdout).with_context(|| {
-                if stdout.trim().is_empty() {
-                    "Provisioner returned empty output (expected JSON)".to_string()
-                } else {
-                    format!(
-                        "Failed to parse provisioner output as JSON. Raw output:\n{}",
-                        stdout
-                    )
-                }
-            })?;
-
-        let deployment_id = credentials_json["deployment_id"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing deployment_id in provisioner output"))?;
-        let aws_account_id = credentials_json["aws_account_id"]
-            .as_str()
-            .unwrap_or("unknown");
-
-        let create_cmd = resolve_local_build_command_from_dir(Path::new("."), true)?;
-
-        // Create app on Caution
-        output::status("\nCreating app on Caution...");
-        let loader = Spinner::new("Creating app", SpinnerStyle::Processing);
-
-        // Create the app first
-        let create_body = serde_json::json!({
-            "name": app_name,
-            "cmd": create_cmd
-        });
-
-        let create_response = self
-            .client
-            .post(format!("{}/api/resources", self.base_url))
-            .header("X-Session-ID", &auth_config.session_id)
-            .json(&create_body)
-            .send()
-            .await
-            .context("Failed to create app")?;
-
-        if !create_response.status().is_success() {
-            loader.finish();
-            let status = create_response.status();
-            let error = create_response.text().await?;
-            bail!("Failed to create app (status {}): {}", status, error);
-        }
-
-        let app_data: serde_json::Value = create_response
-            .json()
-            .await
-            .context("Failed to parse create app response")?;
-
-        let resource_id = app_data["id"].as_str().unwrap_or("");
-        let git_url = app_data["git_url"].as_str().unwrap_or("");
-
-        loader.finish();
-        output::success(format!("App created: {}", app_name));
-
-        // Now register the BYOC credentials
-        output::status("Registering bring-your-own-compute configuration...");
-        let loader = Spinner::new("Registering credentials", SpinnerStyle::Processing);
-
-        // Add resource_id to credentials
-        let mut creds_with_resource = credentials_json.clone();
-        creds_with_resource["resource_id"] = serde_json::json!(resource_id);
-
-        let register_response = self
-            .client
-            .post(format!("{}/api/resources/managed-onprem", self.base_url))
-            .header("X-Session-ID", &auth_config.session_id)
-            .header("Content-Type", "application/json")
-            .body(serde_json::to_string(&creds_with_resource)?)
-            .send()
-            .await
-            .context("Failed to register BYOC credentials")?;
-
-        if !register_response.status().is_success() {
-            loader.finish();
-            let status = register_response.status();
-            let error = register_response.text().await?;
-            bail!(
-                "Failed to register credentials (status {}): {}",
-                status,
-                error
-            );
-        }
-
-        let registered_app_data = match register_response.json::<serde_json::Value>().await {
-            Ok(data) => data,
-            Err(_) => {
-                output::verbose(
-                    self.verbose,
-                    "Could not parse the BYOC registration response; using initial DNS details",
-                );
-                app_data.clone()
-            }
-        };
-        loader.finish();
-
-        // Save local state
-        let caution_dir = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?
-            .join(".caution")
-            .join(&app_name);
-
-        fs::create_dir_all(&caution_dir)?;
-
-        let byoc_state = serde_json::json!({
-            "deployment_id": deployment_id,
-            "resource_id": resource_id,
-            "app_name": app_name,
-            "aws_region": aws_region,
-            "created_at": chrono::Utc::now().to_rfc3339(),
-        });
-
-        fs::write(
-            byoc_state_path(&caution_dir),
-            serde_json::to_string_pretty(&byoc_state)?,
-        )?;
-
-        // Also save deployment.json and caution.hcl in current directory
-        self.save_deployment(resource_id)?;
-        self.create_config_file_if_needed(true)?;
-
-        // Set up git remote
-        if !git_url.is_empty() {
-            self.set_git_remote(git_url)?;
-        }
-
-        output::status("\n╔══════════════════════════════════════════════════════════════════╗");
-        output::success("║                    Setup Complete!                               ║");
-        output::status("╚══════════════════════════════════════════════════════════════════╝");
-        output::status(format!("\nApp: {}", app_name));
-        output::status(format!("Resource ID: {}", resource_id));
-        output::status(format!("Deployment ID: {}", deployment_id));
-        output::status(format!("Git URL: {}", git_url));
-        output::status(deployment_target_summary(
-            "BYOC",
-            aws_account_id,
-            &aws_region,
-        ));
-        print_managed_dns_details(
-            registered_app_data["managed_hostname"].as_str(),
-            registered_app_data["dns_status"].as_str(),
-            registered_app_data["dns_error"].as_str(),
-            None,
-        );
-        output::status(format!("\nState saved to: {}", caution_dir.display()));
-        output::status("\nNext steps:");
-        output::status("  1. Create your Procfile with 'run:' and optional 'containerfile:'");
-        output::status(
-            "     If containerfile is absent, Caution auto-detects a repo-root Containerfile before Dockerfile"
-        );
-        output::status("  2. Push to deploy: git push caution main");
-        output::status("\nTo tear down this deployment:");
-        output::status("  caution teardown --byoc");
-
-        Ok(())
-    }
-
-    /// Tear down bring-your-own-compute deployment
-    async fn teardown_byoc(&self, force: bool, local: bool) -> Result<()> {
-
-        output::status("\n╔══════════════════════════════════════════════════════════════════╗");
-        output::status("║          Bring-Your-Own-Compute Teardown (AWS)                   ║");
-        output::status("╚══════════════════════════════════════════════════════════════════╝\n");
-
-        // Try to find local state
-        let deployment = self.load_deployment().ok();
-        let resource_id = deployment.as_ref().map(|d| d.resource_id.clone());
-
-        // Look for the BYOC state file in ~/.caution/*/
-        let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
-        let caution_dir = home.join(".caution");
-
-        let mut byoc_state: Option<serde_json::Value> = None;
-        let mut byoc_state_dir: Option<PathBuf> = None;
-
-        if let Some(ref rid) = resource_id {
-            // Look for state file that matches this resource_id
-            if let Ok(entries) = fs::read_dir(&caution_dir) {
-                for entry in entries.flatten() {
-                    let state_path = byoc_state_read_path(&entry.path());
-                    if state_path.exists() {
-                        if let Ok(content) = fs::read_to_string(&state_path) {
-                            if let Ok(state) = serde_json::from_str::<serde_json::Value>(&content) {
-                                if state.get("resource_id").and_then(|v| v.as_str()) == Some(rid) {
-                                    byoc_state = Some(state);
-                                    byoc_state_dir = Some(entry.path());
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let (deployment_id, app_name, aws_region) = match &byoc_state {
-            Some(state) => {
-                let did = state["deployment_id"]
-                    .as_str()
-                    .ok_or_else(|| anyhow::anyhow!("Missing deployment_id in state file"))?;
-                let name = state["app_name"].as_str().unwrap_or("unknown");
-                let region = state["aws_region"].as_str().unwrap_or("us-west-2");
-                (did.to_string(), name.to_string(), region.to_string())
-            }
-            None => {
-                bail!(
-                    "No bring-your-own-compute state found.\n\
-                       Run this command from your app directory or ensure the BYOC state file exists in ~/.caution/<app>/."
-                );
-            }
-        };
-
-        output::status("Found bring-your-own-compute deployment:");
-        output::status(format!("  App: {}", app_name));
-        output::status(format!("  Deployment ID: {}", deployment_id));
-        output::status(format!("  Region: {}", aws_region));
-
-        if !force {
-            output::warning("\n⚠️  WARNING: This will permanently destroy:");
-            output::warning("    • The Caution app and all deployment data");
-            output::warning("    • AWS VPC and all associated resources");
-            output::warning("    • S3 bucket and all stored images");
-            output::warning("    • IAM user, role, and policies");
-            output::warning("\n    This action cannot be undone!\n");
-
-            let confirm = prompt::text(&format!("Type the app name to confirm deletion [{}]: ", app_name))?;
-            if confirm != app_name {
-                output::status("Aborted.");
-                return Ok(());
-            }
-        }
-
-        // Check AWS credentials for teardown
-        let aws_profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "default".to_string());
-        let (aws_key, aws_secret, _, aws_session_token) = Self::detect_aws_credentials()
-            .ok_or_else(|| {
-                anyhow::anyhow!(aws_credentials_error(
-                    &aws_profile,
-                    "caution teardown --byoc"
-                ))
-            })?;
-
-        resource_id.as_ref().context(
-            "Caution app ID is unavailable; AWS teardown was not started and local BYOC state was preserved",
-        )?;
-
-        // Destroy Caution resource first
-        if let Some(ref rid) = resource_id {
-            output::status("\nDestroying Caution app...");
-            let loader = Spinner::new("Destroying app", SpinnerStyle::Processing);
-
-            let auth_config = self.ensure_authenticated().await?;
-            let response = self
-                .client
-                .delete(format!("{}/api/resources/{}", self.base_url, rid))
-                .header("X-Session-ID", &auth_config.session_id)
-                .send()
-                .await;
-
-            loader.finish();
-
-            match response {
-                Ok(resp) if resp.status().is_success() => {
-                    output::success("Caution app destroyed");
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let error = resp.text().await.unwrap_or_default();
-                    bail!(
-                        "Caution app deletion is unresolved (status {}): {}. AWS teardown was not started and local BYOC state was preserved.",
-                        status,
-                        error
-                    );
-                }
-                Err(e) => {
-                    bail!(
-                        "Caution app deletion is unresolved: {}. AWS teardown was not started and local BYOC state was preserved.",
-                        e
-                    );
-                }
-            }
-        }
-
-        // Run teardown container
-        output::status("\nDestroying AWS infrastructure...");
-        let loader = Spinner::new("Running teardown", SpinnerStyle::Processing);
-
-        let provisioner_image = BYOC_PROVISIONER_IMAGE;
-        if local {
-            output::status("Using local provisioner image (--local)...");
-        } else {
-            let _ = Command::new("docker")
-                .args(&["pull", provisioner_image])
-                .output();
-        }
-
-        let mut teardown_args = vec![
-            "run".to_string(),
-            "--rm".to_string(),
-            "-e".to_string(),
-            format!("AWS_ACCESS_KEY_ID={}", aws_key),
-            "-e".to_string(),
-            format!("AWS_SECRET_ACCESS_KEY={}", aws_secret),
-            "-e".to_string(),
-            format!("AWS_REGION={}", aws_region),
-            "-e".to_string(),
-            format!("DEPLOYMENT_ID={}", deployment_id),
-            "-e".to_string(),
-            "TEARDOWN=true".to_string(),
-        ];
-
-        // Add session token if present (needed for temporary credentials/SSO)
-        if let Some(token) = aws_session_token {
-            teardown_args.push("-e".to_string());
-            teardown_args.push(format!("AWS_SESSION_TOKEN={}", token));
-        }
-
-        teardown_args.push(provisioner_image.to_string());
-
-        let output = Command::new("docker")
-            .args(&teardown_args)
-            .output()
-            .context("Failed to run teardown")?;
-
-        loader.finish();
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "AWS teardown failed; local BYOC state was preserved for retry: {}",
-                stderr.trim()
-            );
-        } else {
-            output::success("AWS infrastructure destroyed");
-        }
-
-        // Clean up local state
-        if let Some(path) = byoc_state_dir {
-            if let Err(e) = fs::remove_dir_all(&path) {
-                output::warning(format!("Warning: Failed to remove local state: {}", e));
-            } else {
-                output::success("Local state cleaned up");
-            }
-        }
-
-        // Remove .caution/deployment.json
-        let deployment_file = PathBuf::from(".caution").join("deployment.json");
-        if deployment_file.exists() {
-            let _ = fs::remove_file(&deployment_file);
-        }
-
-        output::status("\n╔══════════════════════════════════════════════════════════════════╗");
-        output::success("║                    Teardown Complete                             ║");
-        output::status("╚══════════════════════════════════════════════════════════════════╝");
-        output::status("\nAll bring-your-own-compute resources have been destroyed.");
-
-        Ok(())
-    }
-
-    async fn get_attestation_url(&self) -> Result<String> {
         let app = self
             .get_current_app()
             .await
-            .context("No deployment found. Either run 'caution init' first or provide --url")?;
+            .with_context(Ctx::get_current_app())?;
 
         match app.public_ip {
             Some(ref ip) if !ip.is_empty() => Ok(format!("http://{}/attestation", ip)),
-            _ => {
-                bail!(
-                    "No public IP available. Run 'caution app get <id/null>' to check deployment status, or provide --url explicitly."
-                )
-            }
-        }
-    }
-
-    async fn build_local(&self, no_cache: bool) -> Result<(), BuildLocalError> {
-        output::status("Building EIF locally for inspection...");
-
-        let (framework_commit, framework_source) = self
-            .current_platform_framework_source()
-            .await
-            .map_err(BuildLocalError::BuildInput)?;
-
-        let app_commit = Command::new("git")
-            .args(&["rev-parse", "HEAD"])
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            });
-        let app_branch = Command::new("git")
-            .args(&["rev-parse", "--abbrev-ref", "HEAD"])
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            });
-        let source_cache_key = app_commit
-            .clone()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-        let cfg = self.read_config().map_err(|e| BuildLocalError::ReadConfig(e.into()))?;
-        let enclave = configured_enclave(&cfg);
-        let e2e_config = enclave
-            .and_then(|e| e.network.as_ref())
-            .and_then(|n| n.http.as_ref())
-            .and_then(|h| h.e2e_encryption.as_ref());
-        let e2e_mode = e2e_config.and_then(|config| config.effective_mode());
-        let e2e = e2e_mode == Some(caution_config::E2eMode::Steve);
-        let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
-        let steve_commit = e2e.then(enclave_builder::build::resolve_steve_commit);
-        let measured_cache_key =
-            measured_build_cache_key(&source_cache_key, &cfg, steve_commit.as_deref())
-            .map_err(BuildLocalError::CacheKey)?;
-        let cache_key = framework_cache_key(&measured_cache_key, &framework_commit);
-
-        let config_no_cache = enclave
-            .and_then(|e| e.build.as_ref())
-            .and_then(|b| b.cache)
-            .map(|c| !c)
-            .unwrap_or(false);
-        let no_cache = no_cache || config_no_cache;
-
-        let loader = Spinner::new("Building application image", SpinnerStyle::Processing);
-        let image_ref = self.build_local_docker_image(no_cache).await.map_err(BuildLocalError::BuildDockerImage)?;
-        loader.finish();
-        output::success(format!("✓ Application image built: {}", image_ref));
-
-        let cache_dir = self.get_cache_dir().map_err(BuildLocalError::CacheDir)?;
-        let builder = enclave_builder::EnclaveBuilder::new_with_cache(
-            enclave_builder::enclave_source_url(&enclave_builder::build::resolve_enclaveos_commit()),
-            "unused",
-            &framework_source,
-            "local",
-            &cache_key,
-            enclave_builder::CacheType::Build,
-            no_cache,
-            &cache_dir,
-        )
-        .map_err(BuildLocalError::InitBuilder)?;
-
-        let work_dir = builder.work_dir.clone();
-
-        let user_image = enclave_builder::UserImage {
-            reference: image_ref.clone(),
-        };
-
-        let run_command = enclave
-            .and_then(|e| e.unit.as_ref())
-            .and_then(|u| u.values().next())
-            .map(|u| u.run_command_string())
-            .transpose()
-            .map_err(BuildLocalError::ParseRunCommand)?;
-
-        let app_source_urls_opt = enclave
-            .and_then(|e| e.build.as_ref())
-            .map(|b| b.app_sources.clone())
-            .filter(|s| !s.is_empty());
-
-        let ports: Vec<u16> = enclave
-            .and_then(|e| e.network.as_ref())
-            .map(|n| {
-                n.ingress
-                    .iter()
-                    .filter_map(|rule| match &rule.port_spec {
-                        Some(caution_config::PortSpec::Exact { port }) => Some(*port),
-                        _ => None,
-                    })
-                    .collect::<Vec<u16>>()
-            })
-            .unwrap_or_default();
-
-        let http_port = enclave
-            .and_then(|config| config.network.as_ref())
-            .and_then(|network| network.http.as_ref())
-            .map(|http| http.port);
-        output::verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
-
-        let domain = enclave
-            .and_then(|config| config.network.as_ref())
-            .and_then(|network| network.http.as_ref())
-            .and_then(|http| http.domain.clone());
-
-        let e2e_key_exchange = e2e_config
-            .map(|ee| ee.key_exchange().steve_env_value())
-            .unwrap_or(caution_config::KeyExchange::X25519.steve_env_value());
-        let allow_plaintext_fallback = e2e_config
-            .map(|ee| ee.allow_plaintext_fallback())
-            .unwrap_or(false);
-        output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
-
-        let locksmith = cfg.has_vault_env();
-        output::verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
-
-        let egress = config_egress_enabled(&cfg);
-        output::verbose(self.verbose, &format!("Egress: {}", egress));
-
-        let e2e_cors_origins = e2e_config
-            .and_then(|e2e| e2e.cors_origins.as_ref())
-            .map(|origins| origins.join(","));
-
-        let http_upstream_protocol = enclave
-            .and_then(|config| config.network.as_ref())
-            .and_then(|network| network.http.as_ref())
-            .and_then(|http| http.upstream_protocol)
-            .map(|protocol| protocol.as_str())
-            .unwrap_or("http");
-        output::verbose(
-            self.verbose,
-            &format!("HTTP upstream protocol: {}", http_upstream_protocol),
-        );
-
-        let loader = Spinner::new("Building enclave image", SpinnerStyle::Processing);
-        output::verbose(self.verbose, "Using build_enclave");
-        let deployment = builder
-            .build_enclave(
-                &user_image,
-                None,
-                run_command,
-                app_source_urls_opt,
-                app_branch.clone(),
-                app_commit.clone(),
-                None,
-                None,
-                &ports,
-                http_port,
-                e2e,
-                e2e_mode_value,
-                e2e_key_exchange,
-                allow_plaintext_fallback,
-                domain.as_deref(),
-                http_upstream_protocol,
-                locksmith,
-                e2e_cors_origins,
-                egress,
-            )
-            .await
-        .map_err(BuildLocalError::BuildEnclave)?;
-        loader.finish();
-
-        output::success("✓ Enclave built successfully!");
-
-        let stage_dir = work_dir.join("eif-stage");
-        output::status("=== Build Artifacts ===");
-        output::status(format!("EIF file: {}", deployment.eif.path.display()));
-        output::status(format!("Size: {} bytes", deployment.eif.size));
-        output::status(format!("SHA256: {}", deployment.eif.sha256));
-
-        output::status("=== PCR Values ===");
-        output::status(format!("PCR0 (Enclave image): {}", deployment.pcrs.pcr0));
-        output::status(format!("PCR1 (Kernel/boot): {}", deployment.pcrs.pcr1));
-        output::status(format!("PCR2 (Application): {}", deployment.pcrs.pcr2));
-
-        output::status("=== Build Directory ===");
-        output::status(format!("Location: {}", stage_dir.display()));
-        output::status("You can inspect the exact build process:");
-        output::status("  Containerfile.eif - Shows exactly how the EIF is built");
-        output::status("  app/ - Your application files");
-        output::status("  enclave/ - Enclave source code");
-        output::status("  kernel/ - Kernel files");
-        output::status("  output/ - Final EIF and PCRs files");
-
-        output::status("To verify your deployed enclave matches this build:");
-        output::status("  caution verify");
-
-        Ok(())
-    }
-
-    async fn build_and_get_pcrs(
-        &self,
-        external_manifest: Option<enclave_builder::EnclaveManifest>,
-        no_cache: bool,
-        local_source: Option<&StagedSource>,
-    ) -> Result<ReproductionResult> {
-        let public_framework = if external_manifest.is_none() {
-            Some(self.current_platform_framework_source().await?)
-        } else {
-            None
-        };
-        let no_cache = if let Some(source) = local_source {
-            no_cache
-                || self
-                    .read_config_from_dir(&source.path)
-                    .ok()
-                    .and_then(|cfg| {
-                        cfg.enclave
-                            .and_then(|e| e.into_iter().next().map(|(_, v)| v))
-                    })
-                    .and_then(|e| e.build)
-                    .and_then(|b| b.cache)
-                    .map(|c| !c)
-                    .unwrap_or(false)
-        } else {
-            no_cache
-        };
-
-        let (enclave_source, enclave_version) = if let Some(ref manifest) = external_manifest {
-            match &manifest.enclave_source {
-                enclave_builder::EnclaveSource::GitArchive { urls, commit } => {
-                    let url = urls.first().cloned().unwrap_or_default();
-                    let pinned = if let Some(commit) = commit {
-                        enclave_builder::pin_archive_url_to_commit(&url, commit)
-                    } else {
-                        url
-                    };
-                    (pinned, "unused".to_string())
-                }
-                enclave_builder::EnclaveSource::GitRepository { url, branch, .. } => {
-                    (url.clone(), branch.clone())
-                }
-                enclave_builder::EnclaveSource::Local { path } => {
-                    (path.clone(), "local".to_string())
-                }
-            }
-        } else {
-            let source = enclave_builder::enclave_source_url(
-                &enclave_builder::build::resolve_enclaveos_commit(),
-            );
-            output::verbose(
-                self.verbose,
-                &format!("Using default enclave source: {}", source),
-            );
-            (source, "unused".to_string())
-        };
-
-        let framework_source = if let Some(ref manifest) = external_manifest {
-            match &manifest.framework_source {
-                enclave_builder::FrameworkSource::GitArchive { url, commit } => {
-                    if let Some(commit) = commit {
-                        enclave_builder::pin_archive_url_to_commit(url, commit)
-                    } else {
-                        url.clone()
-                    }
-                }
-            }
-        } else {
-            public_framework
-                .as_ref()
-                .expect("manifestless builds resolve public framework input")
-                .1
-                .clone()
-        };
-
-        let source_cache_key = if let Some(source) = local_source {
-            if let Some(ref manifest) = external_manifest {
-                let manifest_json = serde_json::to_vec(manifest)
-                    .context("Failed to serialize manifest for cache key")?;
-                let manifest_hash = hex::encode(Sha256::digest(&manifest_json));
-                format!("{}-{}", source.cache_key, &manifest_hash[..16])
-            } else {
-                framework_cache_key(
-                    &source.cache_key,
-                    &public_framework
-                        .as_ref()
-                        .expect("manifestless builds resolve public framework input")
-                        .0,
-                )
-            }
-        } else if let Some(ref manifest) = external_manifest {
-            let manifest_json = serde_json::to_vec(manifest)
-                .context("Failed to serialize manifest for cache key")?;
-            let manifest_hash = hex::encode(Sha256::digest(&manifest_json));
-            if let Some(ref app_src) = manifest.app_source {
-                format!("{}-{}", app_src.commit, &manifest_hash[..16])
-            } else {
-                format!("manifest-{}", &manifest_hash[..16])
-            }
-        } else {
-            let source_key = Command::new("git")
-                .args(&["rev-parse", "HEAD"])
-                .output()
-                .ok()
-                .and_then(|o| {
-                    if o.status.success() {
-                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            framework_cache_key(
-                &source_key,
-                &public_framework
-                    .as_ref()
-                    .expect("manifestless builds resolve public framework input")
-                    .0,
-            )
-        };
-
-        let app_source_dir = if let Some(source) = local_source {
-            Some(source.path.clone())
-        } else if let Some(ref manifest) = external_manifest {
-            let app_source = manifest.app_source.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Manifest does not contain app_source - cannot reproduce without source URL"
-                )
-            })?;
-            let archive_urls: Vec<String> = app_source
-                .urls
-                .iter()
-                .filter_map(|url| self.git_url_to_archive_urls(url, &app_source.commit).ok())
-                .flatten()
-                .collect();
-            let git_fallback = app_source.urls.first().map(|url| {
-                (
-                    url.clone(),
-                    app_source.commit.clone(),
-                    app_source.branch.clone(),
-                )
-            });
-
-            if let Some((ref url, ref commit, ref branch)) = git_fallback {
-                self.preflight_app_source_ref(url, commit, branch.as_deref())?;
-            }
-
-            Some(
-                self.download_and_extract_app_source_with_git_fallback(
-                    &archive_urls,
-                    git_fallback
-                        .as_ref()
-                        .map(|(u, c, b)| (u.as_str(), c.as_str(), b.as_deref())),
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-
-        let measured_config = if let Some(ref app_dir) = app_source_dir {
-            Some(self.read_config_from_dir(app_dir)?)
-        } else if external_manifest.is_none() {
-            Some(self.read_config()?)
-        } else {
-            None
-        };
-        let tls = measured_config
-            .as_ref()
-            .map(tls_expectation_from_config)
-            .transpose()?
-            .flatten();
-        let cache_key = match measured_config.as_ref() {
-            Some(cfg) => {
-                let e2e_config = cfg
-                    .enclave
-                    .as_ref()
-                    .and_then(|e| e.values().next())
-                    .and_then(|enc| enc.network.as_ref())
-                    .and_then(|network| network.http.as_ref())
-                    .and_then(|http| http.e2e_encryption.as_ref());
-                let manifest_steve_commit = external_manifest
-                    .as_ref()
-                    .and_then(|manifest| manifest.steve_commit.as_ref());
-                let e2e = reproduction_uses_steve(e2e_config, manifest_steve_commit.is_some());
-                let steve_commit = e2e.then(|| {
-                    manifest_steve_commit
-                        .cloned()
-                        .unwrap_or_else(enclave_builder::build::resolve_steve_commit)
-                });
-                measured_build_cache_key(&source_cache_key, cfg, steve_commit.as_deref())?
-            }
-            // Manifest reproductions already hash the full manifest, including
-            // steve_commit, into source_cache_key.
-            None => source_cache_key,
-        };
-
-        let builder = enclave_builder::EnclaveBuilder::new_with_cache(
-            &enclave_source,
-            &enclave_version,
-            &framework_source,
-            "local",
-            &cache_key,
-            enclave_builder::CacheType::Reproduction,
-            no_cache,
-            &self.get_cache_dir()?,
-        )?;
-
-        if let Some(cached) = builder.get_cached_eif() {
-            output::status("Using cached reproduction build");
-            output::status(format!("Cache key: {}", cache_key));
-            return Ok(ReproductionResult {
-                pcrs: cached.pcrs,
-                tls,
-            });
-        }
-
-        // Preflight the enclave/framework source archives before the expensive
-        // build. They are deterministic URLs derived from the manifest; a 404'd
-        // commit otherwise only surfaces after the Docker image build and
-        // user-filesystem extraction (minutes in). Only meaningful when
-        // reproducing from a manifest.
-        if external_manifest.is_some() {
-            self.preflight_archive_url("Enclave source", &enclave_source, false)
-                .await?;
-            self.preflight_archive_url("Framework source", &framework_source, true)
-                .await?;
-        }
-
-        output::verbose(self.verbose, "Building Docker image locally...");
-
-        let loader = Spinner::new("Reproducing enclave image", SpinnerStyle::Processing);
-        let image_ref = if let Some(ref app_dir) = app_source_dir {
-            self.build_docker_image_from_dir(app_dir, no_cache).await?
-        } else {
-            self.build_local_docker_image(no_cache).await?
-        };
-
-        output::verbose(
-            self.verbose,
-            "Building EIF locally to calculate expected PCRs...",
-        );
-
-        let user_image = enclave_builder::UserImage {
-            reference: image_ref.clone(),
-        };
-
-        let (binary_path, run_command, app_source_urls, app_branch, app_commit, metadata) =
-            if let Some(ref manifest) = external_manifest {
-                let binary = manifest.binary.clone();
-                let run_cmd = manifest.run_command.clone();
-                let source_urls: Option<Vec<String>> =
-                    manifest.app_source.as_ref().map(|s| s.urls.clone());
-                let branch = manifest.app_source.as_ref().and_then(|s| s.branch.clone());
-                let commit = manifest.app_source.as_ref().map(|s| s.commit.clone());
-
-                output::verbose(self.verbose, &format!("Binary from manifest: {:?}", binary));
-                output::verbose(
-                    self.verbose,
-                    &format!("Run command from manifest: {:?}", run_cmd),
-                );
-                output::verbose(
-                    self.verbose,
-                    &format!("App source URLs from manifest: {:?}", source_urls),
-                );
-                output::verbose(self.verbose, &format!("Branch from manifest: {:?}", branch));
-                output::verbose(self.verbose, &format!("Commit from manifest: {:?}", commit));
-
-                (
-                    binary,
-                    run_cmd,
-                    source_urls,
-                    branch,
-                    commit,
-                    manifest.metadata.clone(),
-                )
-            } else {
-                let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
-                let cfg = self.read_config_from_dir(config_dir)?;
-                let enclave = configured_enclave(&cfg);
-
-                let binary = None;
-                let run_cmd = enclave
-                    .and_then(|e| e.unit.as_ref())
-                    .and_then(|u| u.values().next())
-                    .map(|u| u.run_command_string())
-                    .transpose()?;
-                let source_urls = enclave
-                    .and_then(|e| e.build.as_ref())
-                    .map(|b| b.app_sources.clone())
-                    .filter(|s| !s.is_empty());
-                let commit = local_source
-                    .and_then(|source| source.app_commit.clone())
-                    .or_else(|| {
-                        Command::new("git")
-                            .args(&["rev-parse", "HEAD"])
-                            .current_dir(config_dir)
-                            .output()
-                            .ok()
-                            .and_then(|o| {
-                                if o.status.success() {
-                                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                                } else {
-                                    None
-                                }
-                            })
-                    });
-
-                let branch = Command::new("git")
-                    .args(&["rev-parse", "--abbrev-ref", "HEAD"])
-                    .current_dir(config_dir)
-                    .output()
-                    .ok()
-                    .and_then(|o| {
-                        if o.status.success() {
-                            Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                        } else {
-                            None
-                        }
-                    });
-
-                output::verbose(
-                    self.verbose,
-                    &format!("Run command from config: {:?}", run_cmd),
-                );
-                output::verbose(
-                    self.verbose,
-                    &format!("Source URLs from config: {:?}", source_urls),
-                );
-                output::verbose(self.verbose, &format!("Git branch: {:?}", branch));
-                output::verbose(self.verbose, &format!("Git commit: {:?}", commit));
-
-                (binary, run_cmd, source_urls, branch, commit, None)
-            };
-
-        let ports: Vec<u16> = {
-            let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
-            self.read_config_from_dir(config_dir)
-                .ok()
-                .and_then(|cfg| {
-                    cfg.enclave
-                        .and_then(|e| e.into_iter().next().map(|(_, v)| v))
-                })
-                .and_then(|e| e.network)
-                .map(|n| {
-                    n.ingress
-                        .iter()
-                        .filter_map(|rule| match &rule.port_spec {
-                            Some(caution_config::PortSpec::Exact { port }) => Some(*port),
-                            _ => None,
-                        })
-                        .collect::<Vec<u16>>()
-                })
-                .unwrap_or_default()
-        };
-        output::verbose(self.verbose, &format!("Ports: {:?}", ports));
-
-        let http_config = {
-            let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
-            self.read_config_from_dir(config_dir)
-                .ok()
-                .and_then(|cfg| {
-                    cfg.enclave
-                        .and_then(|e| e.into_iter().next().map(|(_, v)| v))
-                })
-                .and_then(|config| config.network)
-                .and_then(|network| network.http)
-        };
-        let http_port = http_config.as_ref().map(|http| http.port);
-        output::verbose(self.verbose, &format!("HTTP port: {:?}", http_port));
-
-        let http_upstream_protocol = http_config
-            .as_ref()
-            .and_then(|http| http.upstream_protocol)
-            .map(|protocol| protocol.as_str())
-            .unwrap_or("http");
-        output::verbose(
-            self.verbose,
-            &format!("HTTP upstream protocol: {}", http_upstream_protocol),
-        );
-
-        let domain = http_config.as_ref().and_then(|http| http.domain.clone());
-        let e2e_config = http_config
-            .as_ref()
-            .and_then(|http| http.e2e_encryption.clone());
-
-        let manifest_has_steve = external_manifest
-            .as_ref()
-            .and_then(|manifest| manifest.steve_commit.as_ref())
-            .is_some();
-        let e2e_mode = resolve_reproduction_e2e_mode(e2e_config.as_ref(), manifest_has_steve);
-        let e2e = e2e_mode == Some(caution_config::E2eMode::Steve);
-        let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
-        let e2e_key_exchange = e2e_config
-            .as_ref()
-            .map(|e2e| e2e.key_exchange().steve_env_value().to_string())
-            .unwrap_or_else(|| {
-                // No readable config: fall back to what the deployment recorded,
-                // otherwise reproduction would silently rebuild with X25519.
-                external_manifest
-                    .as_ref()
-                    .and_then(|manifest| manifest.steve_key_exchange.clone())
-                    .unwrap_or_else(|| {
-                        caution_config::KeyExchange::X25519.steve_env_value().to_string()
-                    })
-            });
-        let allow_plaintext_fallback = e2e_config
-            .as_ref()
-            .map(|e2e| e2e.allow_plaintext_fallback())
-            .unwrap_or_else(|| {
-                external_manifest
-                    .as_ref()
-                    .map(|manifest| manifest.steve_allow_plaintext_fallback)
-                    .unwrap_or(false)
-            });
-        output::verbose(self.verbose, &format!("E2E encryption: {}", e2e));
-
-        let locksmith = if let Some(ref app_dir) = app_source_dir {
-            self.read_config_from_dir(app_dir)
-                .ok()
-                .map(|cfg| cfg.has_vault_env())
-                .unwrap_or_else(|| {
-                    external_manifest
-                        .as_ref()
-                        .map(|manifest| manifest.locksmith || manifest.locksmith_commit.is_some())
-                        .unwrap_or(false)
-                })
-        } else if let Some(ref manifest) = external_manifest {
-            manifest.locksmith || manifest.locksmith_commit.is_some()
-        } else {
-            self.read_config()
-                .ok()
-                .map(|cfg| cfg.has_vault_env())
-                .unwrap_or(false)
-        };
-        output::verbose(self.verbose, &format!("Locksmith secrets: {}", locksmith));
-
-        let egress = if let Some(ref app_dir) = app_source_dir {
-            self.read_config_from_dir(app_dir)
-                .ok()
-                .map(|cfg| config_egress_enabled(&cfg))
-                .unwrap_or(false)
-        } else if external_manifest.is_some() {
-            // Egress is intentionally never read from the manifest; default-deny.
-            false
-        } else {
-            self.read_config()
-                .ok()
-                .map(|cfg| config_egress_enabled(&cfg))
-                .unwrap_or(false)
-        };
-        output::verbose(self.verbose, &format!("Egress: {}", egress));
-
-        let e2e_cors_origins = if e2e {
-            e2e_config
-                .as_ref()
-                .and_then(|e2e| e2e.cors_origins.as_ref())
-                .map(|origins| origins.join(","))
-        } else {
-            None
-        };
-
-        let deployment = if let Some(ref bin_path) = binary_path {
-            output::verbose(
-                self.verbose,
-                &format!("Using build_enclave_auto with binary: {}", bin_path),
-            );
-            builder
-                .build_enclave_auto(
-                    &user_image,
-                    bin_path,
-                    run_command,
-                    app_source_urls,
-                    app_branch,
-                    app_commit,
-                    metadata,
-                    external_manifest,
-                    &ports,
-                    http_port,
-                    e2e,
-                    e2e_mode_value,
-                    &e2e_key_exchange,
-                    allow_plaintext_fallback,
-                    domain.as_deref(),
-                    http_upstream_protocol,
-                    locksmith,
-                    e2e_cors_origins,
-                    egress,
-                )
-                .await
-        } else {
-            output::verbose(self.verbose, "Using build_enclave (no binary specified)");
-            builder
-                .build_enclave(
-                    &user_image,
-                    None,
-                    run_command,
-                    app_source_urls,
-                    app_branch,
-                    app_commit,
-                    metadata,
-                    external_manifest,
-                    &ports,
-                    http_port,
-                    e2e,
-                    e2e_mode_value,
-                    &e2e_key_exchange,
-                    allow_plaintext_fallback,
-                    domain.as_deref(),
-                    http_upstream_protocol,
-                    locksmith,
-                    e2e_cors_origins,
-                    egress,
-                )
-                .await
-        }
-        .context("Failed to build enclave locally")?;
-        loader.finish();
-
-        if let Some(work_dir) = deployment.eif.path.parent() {
-            let stage_dir = work_dir.join("eif-stage");
-            if stage_dir.exists() {
-                output::status("");
-                output::status(format!("Build artifacts available at: {}", stage_dir.display()));
-                output::status("You can review everything that went into building this enclave:");
-                output::status("  • Containerfile.eif - The complete build recipe");
-                output::status("  • app/ - Your application files");
-                output::status("  • enclave/ - EnclaveOS source (attestation-service, init)");
-                output::status("  • run.sh - Generated startup script");
-                output::status("  • manifest.json - Build provenance information");
-            }
-        }
-
-        Ok(ReproductionResult {
-            pcrs: deployment.pcrs,
-            tls,
-        })
-    }
-
-    fn read_pcrs_from_file(&self, path: &str) -> Result<enclave_builder::PcrValues> {
-        use std::fs;
-        let content =
-            fs::read_to_string(path).context(format!("Failed to read PCRs file: {}", path))?;
-
-        if let Ok(pcrs) = serde_json::from_str::<enclave_builder::PcrValues>(&content) {
-            return Ok(pcrs);
-        }
-
-        let mut pcr0 = None;
-        let mut pcr1 = None;
-        let mut pcr2 = None;
-
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            // eif_build is weird... it is <digest> <pcr>
-            if let Some((pcr_digest, pcr_name)) = line.split_once(' ') {
-                match pcr_name.trim().to_lowercase().as_str() {
-                    "pcr0" => pcr0 = Some(pcr_digest.trim().to_owned()),
-                    "pcr1" => pcr1 = Some(pcr_digest.trim().to_owned()),
-                    "pcr2" => pcr2 = Some(pcr_digest.trim().to_owned()),
-                    _ => {}
-                }
-            }
-        }
-
-        match (pcr0, pcr1, pcr2) {
-            (Some(pcr0), Some(pcr1), Some(pcr2)) => Ok(enclave_builder::PcrValues {
-                pcr0,
-                pcr1,
-                pcr2,
-                pcr3: None,
-                pcr4: None,
+            _ => Err(GetAttestationUrlError::NoPublicIp {
+                location: std::panic::Location::caller(),
             }),
-            _ => bail!("PCRs file must contain PCR0, PCR1, and PCR2 values"),
         }
     }
 
-    async fn verify_tls_binding(
-        &self,
-        expected: &TlsExpectation,
-        payload: &serde_cbor::Value,
-        attestation_url: &reqwest::Url,
-        attestation_leaf: Option<&[u8]>,
-    ) -> Result<TlsVerification> {
-        let user_data = attestation_user_data(payload)?
-            .context("verified Nitro attestation is missing TLS user_data")?;
-
-        let deployment_ip = match tls_connection(attestation_url, &expected.domain)? {
-            TlsConnection::AttestationResponse => {
-                let leaf = attestation_leaf
-                    .context("HTTPS attestation response did not expose its leaf certificate")?;
-                let observed_certfp = hex::encode(Sha256::digest(leaf));
-                return Ok(TlsVerification::Verified(validate_attested_tls(
-                    expected,
-                    user_data,
-                    &observed_certfp,
-                )?));
-            }
-            TlsConnection::PinnedIp(ip) => ip,
-        };
-        let addresses: Vec<SocketAddr> =
-            match tokio::net::lookup_host((&*expected.domain, 443)).await {
-                Ok(addresses) => addresses.collect(),
-                Err(error) if dns_answer_is_absent(&error) => {
-                    return Ok(TlsVerification::SkippedNoDns);
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!(
-                            "Failed to resolve configured TLS domain {}",
-                            expected.domain
-                        )
-                    });
-                }
-            };
-        if !dns_contains_deployment_ip(&expected.domain, deployment_ip, &addresses)? {
-            return Ok(TlsVerification::SkippedNoDns);
-        }
-
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(30))
-            .timeout(Duration::from_secs(60))
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .tls_info(true)
-            .resolve(&expected.domain, SocketAddr::new(deployment_ip, 443))
-            .build()
-            .context("Failed to create pinned TLS verification client")?;
-        let health_url = format!("https://{}/.well-known/caution/health", expected.domain);
-        let response = client
-            .get(&health_url)
-            .send()
-            .await
-            .with_context(|| format!("TLS health request failed for {}", expected.domain))?;
-        anyhow::ensure!(
-            response.status().is_success(),
-            "TLS health request returned {}",
-            response.status()
-        );
-        let leaf = peer_certificate_der(&response)
-            .context("TLS health response did not expose its leaf certificate")?;
-        let observed_certfp = hex::encode(Sha256::digest(&leaf));
-
-        Ok(TlsVerification::Verified(validate_attested_tls(
-            expected,
-            user_data,
-            &observed_certfp,
-        )?))
-    }
-
-    async fn verify(
-        &self,
-        attestation_url_opt: Option<String>,
-        from_local: bool,
-        from_tarball: Option<PathBuf>,
-        app_source_url: Option<String>,
-        pcrs_file: Option<String>,
-        no_cache: bool,
-        save_pcrs: bool,
-        inspect_attestation: bool,
-    ) -> Result<()> {
-        if inspect_attestation {
-            output::status("Inspecting remote attestation...");
-        } else {
-            output::status("Verifying enclave attestation...");
-            output::status("Learn more: https://docs.caution.co/concepts/attestation/");
-        }
-
-        for warning in verify_deprecation_warnings(from_local, save_pcrs) {
-            output::warning(warning);
-        }
-
-        let attestation_url = if let Some(u) = attestation_url_opt {
-            u
-        } else {
-            self.get_attestation_url().await?
-        };
-        let attestation_url = reqwest::Url::parse(&attestation_url)
-            .context("Attestation endpoint is not a valid URL")?;
-
-        let nonce = {
-            use rand::RngCore;
-            let mut nonce = vec![0u8; 32];
-            rand::thread_rng().fill_bytes(&mut nonce);
-            nonce
-        };
-
-        output::status(format!("\nChallenge nonce (sent): {}", hex::encode(&nonce)));
-
-        output::verbose(
-            self.verbose,
-            &format!("Requesting attestation from: {}", attestation_url),
-        );
-        output::status("Requesting attestation...");
-
-        // Bound the challenge/response: a reachable-but-unresponsive enclave must
-        // not hang verify indefinitely. The connect phase is already bounded by
-        // the client's connect_timeout; this caps the whole request.
-        let attestation_client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
-            .tls_info(true)
-            .build()
-            .context("Failed to create attestation client")?;
-        let response = attestation_client
-            .post(attestation_url.clone())
-            .timeout(Duration::from_secs(60))
-            .json(&serde_json::json!({"nonce": general_purpose::STANDARD.encode(&nonce)}))
-            .send()
-            .await
-            .context("Failed to fetch attestation document (timed out or unreachable)")?;
-
-        if !response.status().is_success() {
-            bail!("Failed to fetch attestation: {}", response.status());
-        }
-        let attestation_leaf = peer_certificate_der(&response);
-
-        let attest_resp = bounded_attestation_response_json(response).await?;
-
-        let attestation_b64 = attest_resp
-            .get("attestation_document")
-            .or_else(|| attest_resp.get("document"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No attestation document in response. Fields: {:?}",
-                    attest_resp
-                        .as_object()
-                        .map(|o| o.keys().collect::<Vec<_>>())
-                )
-            })?;
-        output::verbose(
-            self.verbose,
-            &format!("Received attestation: {} bytes", attestation_b64.len()),
-        );
-        let attestation_bytes = base64::engine::general_purpose::STANDARD
-            .decode(attestation_b64)
-            .context("Failed to decode attestation document")?;
-
-        let attestation_payload = attestation::parse(&attestation_bytes)
-            .context("Failed to parse attestation document")?;
-
-        if inspect_attestation {
-            output::warning(
-                "UNVERIFIED: parsing succeeded, but Nitro, expected PCRs, and TLS were not verified",
-            );
-            output::data_ln(attestation_inspection_json(
-                &nonce,
-                &attestation_payload,
-                attest_resp.get("manifest"),
-            )?)?;
-            return Ok(());
-        }
-
-        output::status("\nExtracting remote attestation values...");
-        let remote_pcrs = attestation::extract_pcrs(&attestation_payload)
-            .context("Failed to extract PCRs from attestation document")?;
-
-        output::status("\nRemote PCR values (unverified until verification succeeds):");
-        output::status(format!("  PCR0: {}", remote_pcrs.pcr0));
-        output::status(format!("  PCR1: {}", remote_pcrs.pcr1));
-        output::status(format!("  PCR2: {}", remote_pcrs.pcr2));
-
-        if let Some(user_data) = attestation_user_data(&attestation_payload)? {
-            let (is_hex, user_data) = display_user_data(user_data);
-            if is_hex {
-                output::status(format_args!(
-                    "Remote user data (unverified, hex): {user_data}"
-                ));
-            } else {
-                output::status(format_args!(
-                    "Remote user data (unverified): {user_data}"
-                ));
-            }
-        }
-
-        let manifest: Option<enclave_builder::EnclaveManifest> = attest_resp
-            .get("manifest")
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .context("Attestation response contains an invalid manifest")?;
-
-        if let Some(ref m) = manifest {
-            output::status("\nResponse manifest information (unsigned):");
-            if let Some(ref app_src) = m.app_source {
-                if app_src.urls.len() == 1 {
-                    output::status(format!("  App source: {} commit: {}", app_src.urls[0], app_src.commit));
-                } else {
-                    output::status(format!("  App source: ({} URLs) commit: {}", app_src.urls.len(), app_src.commit));
-                }
-                if let Some(ref b) = app_src.branch {
-                    output::status(format!("    branch: {}", b));
-                }
-                if app_src.urls.len() > 1 {
-                    for (i, url) in app_src.urls.iter().enumerate() {
-                        output::status(format!("    [{}] {}", i + 1, url));
-                    }
-                }
-            } else {
-                output::status("  App source: (none - private code)");
-            }
-
-            match &m.enclave_source {
-                enclave_builder::EnclaveSource::GitArchive { urls, commit } => {
-                    if urls.len() == 1 {
-                        output::status(format!("  Enclave source: {}{}", urls[0], commit.as_ref().map(|c| format!(" commit: {}", c)).unwrap_or_default()));
-                    } else {
-                        output::status(format!("  Enclave source: ({} URLs){}", urls.len(), commit.as_ref().map(|c| format!(" commit: {}", c)).unwrap_or_default()));
-                    }
-                    if urls.len() > 1 {
-                        for (i, url) in urls.iter().enumerate() {
-                            output::status(format!("    [{}] {}", i + 1, url));
-                        }
-                    }
-                }
-                enclave_builder::EnclaveSource::GitRepository {
-                    url,
-                    branch,
-                    commit,
-                } => {
-                    output::status(format!("  Enclave source: {}{} branch: {}", url, commit.as_ref().map(|c| format!(" commit: {}", c)).unwrap_or_default(), branch));
-                }
-                enclave_builder::EnclaveSource::Local { path } => {
-                    output::status(format!("  Enclave source: {} (local)", path));
-                }
-            }
-            match &m.framework_source {
-                enclave_builder::FrameworkSource::GitArchive { url, commit } => {
-                    output::status(format!("  Framework source: {}{}", url, commit.as_ref().map(|c| format!(" commit: {}", c)).unwrap_or_default()));
-                }
-            }
-            if let Some(ref metadata) = m.metadata {
-                output::status(format!("  Metadata: {}", metadata));
-            }
-        }
-
-        let pcr_only = pcrs_file.is_some();
-        let reproduction = if let Some(pcrs_path) = pcrs_file {
-            output::status(format!("\nReading expected PCRs from file: {}", pcrs_path));
-            ReproductionResult {
-                pcrs: self.read_pcrs_from_file(&pcrs_path)?,
-                tls: None,
-            }
-        } else if let Some(ref tarball_path) = from_tarball {
-            output::status(format!(
-                "\nBuilding from source tarball: {}",
-                tarball_path.display()
-            ));
-            let source = self.stage_tarball_source(tarball_path)?;
-            self.build_and_get_pcrs(manifest.clone(), no_cache, Some(&source))
-                .await?
-        } else if let Some(ref source_url) = app_source_url {
-            output::status(format!(
-                "\nBuilding from provided source URL: {}",
-                source_url
-            ));
-            if let Some(ref m) = manifest {
-                let mut modified_manifest = m.clone();
-                let commit = m
-                    .app_source
-                    .as_ref()
-                    .map(|s| s.commit.clone())
-                    .unwrap_or_else(|| "HEAD".to_string());
-                modified_manifest.app_source = Some(enclave_builder::AppSource {
-                    urls: vec![source_url.clone()],
-                    commit,
-                    branch: None,
-                });
-                self.build_and_get_pcrs(Some(modified_manifest), no_cache, None)
-                    .await?
-            } else {
-                output::warning("⚠️  Remote attestation does not include a manifest");
-                output::status("Cannot determine commit hash without manifest.");
-                output::status("");
-                output::status("Options:");
-                output::status("  1. Build from local directory: caution verify");
-                output::status("  2. Use a PCRs file: caution verify --pcrs pcrs.txt");
-                bail!("Manifest required when using --app-source-url");
-            }
-        } else {
-            let manifest_commit = manifest
-                .as_ref()
-                .and_then(|manifest| manifest.app_source.as_ref())
-                .map(|source| source.commit.as_str());
-            if let Some(commit) = manifest_commit {
-                output::status(format!(
-                    "\nBuilding local source at manifest commit: {commit}"
-                ));
-            } else {
-                output::status("\nBuilding local source at HEAD (manifest has no app commit)");
-            }
-            let source = self.stage_git_source(manifest_commit).await?;
-            self.build_and_get_pcrs(manifest.clone(), no_cache, Some(&source))
-                .await?
-        };
-
-        let ReproductionResult {
-            pcrs: expected_pcrs,
-            tls: expected_tls,
-        } = reproduction;
-
-        output::status("\nExpected PCR values:");
-        output::status(format!("  PCR0: {}", expected_pcrs.pcr0));
-        output::status(format!("  PCR1: {}", expected_pcrs.pcr1));
-        output::status(format!("  PCR2: {}", expected_pcrs.pcr2));
-
-        let is_debug = remote_pcrs.pcr0.chars().all(|c| c == '0')
-            || remote_pcrs.pcr1.chars().all(|c| c == '0')
-            || remote_pcrs.pcr2.chars().all(|c| c == '0');
-
-        if is_debug {
-            output::warning("\n⚠ WARNING: The remote enclave is running in DEBUG MODE");
-            output::warning("In debug mode, AWS Nitro Enclaves zero out PCR values.");
-            output::warning("This means attestation cannot be verified.");
-            output::warning("\nDebug mode should ONLY be used for development/testing.");
-            output::warning("For production, the enclave must run in production mode.");
-            bail!("Cannot verify attestation: enclave is in debug mode");
-        }
-
-        output::status("\nVerifying attestation with bootproof-sdk...");
-        let expected_nitro_pcrs: NitroPcrs = [
-            (
-                0u8,
-                hex::decode(&expected_pcrs.pcr0).context("bad PCR0 hex")?,
-            ),
-            (
-                1u8,
-                hex::decode(&expected_pcrs.pcr1).context("bad PCR1 hex")?,
-            ),
-            (
-                2u8,
-                hex::decode(&expected_pcrs.pcr2).context("bad PCR2 hex")?,
-            ),
-        ]
-        .into_iter()
-        .collect();
-        let nitro = Nitro::new(attestation_bytes, expected_nitro_pcrs)
-            .context("could not build bootproof nitro attestation")?;
-        let duration_since_epoch = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .context("could not get time since epoch")?;
-        match nitro.verify(duration_since_epoch, &nonce) {
-            Ok(payload) => {
-                output::success("\n✓ Base Nitro attestation and expected PCR0/1/2 verified");
-                let verified_pcrs = attestation::extract_pcrs(&payload)
-                    .context("verified Nitro payload has malformed PCRs")?;
-
-                let tls = if pcr_only {
-                    TlsVerification::PcrOnly
-                } else if let Some(ref expected) = expected_tls {
-                    self.verify_tls_binding(
-                        expected,
-                        &payload,
-                        &attestation_url,
-                        attestation_leaf.as_deref(),
-                    )
-                    .await
-                    .context("TLS certificate binding failed")?
-                } else {
-                    TlsVerification::NotApplicable
-                };
-
-                match &tls {
-                    TlsVerification::NotApplicable => {
-                        output::status("TLS certificate binding: not applicable")
-                    }
-                    TlsVerification::PcrOnly => {
-                        output::status("TLS certificate binding: not performed (--pcrs)")
-                    }
-                    TlsVerification::SkippedNoDns => output::warning(
-                        "TLS certificate binding: skipped because the configured domain has no DNS answer",
-                    ),
-                    TlsVerification::Verified(_) => {
-                        output::success("✓ TLS certificate binding verified")
-                    }
-                }
-
-                let trusted = TrustedHashes {
-                    pcr0: &verified_pcrs.pcr0,
-                    pcr1: &verified_pcrs.pcr1,
-                    pcr2: &verified_pcrs.pcr2,
-                    verified_at: chrono::Utc::now().to_rfc3339(),
-                    tls: match tls {
-                        TlsVerification::Verified(tls) => Some(tls),
-                        _ => None,
-                    },
-                };
-                let hashes_path = PathBuf::from(".caution/trusted_hashes.json");
-                let backup = persist_trusted_hashes(&hashes_path, &trusted)?;
-                output::success("✓ Attestation verification PASSED");
-                output::status(format!("Trusted state: {}", hashes_path.display()));
-                if let Some(backup) = backup {
-                    output::status(format!("Previous state: {}", backup.display()));
-                }
-
-                Ok(())
-            }
-            Err(e) => {
-                output::error("\n✗ Attestation verification FAILED");
-                output::error(format!("Error: {e}"));
-                output::status("\nPCR comparison:");
-                if expected_pcrs.pcr0 != remote_pcrs.pcr0 {
-                    output::error("  PCR0: MISMATCH");
-                    output::status(format!("    expected: {}", expected_pcrs.pcr0));
-                    output::status(format!("    remote:   {}", remote_pcrs.pcr0));
-                } else {
-                    output::status("  PCR0: match");
-                }
-                if expected_pcrs.pcr1 != remote_pcrs.pcr1 {
-                    output::error("  PCR1: MISMATCH");
-                    output::status(format!("    expected: {}", expected_pcrs.pcr1));
-                    output::status(format!("    remote:   {}", remote_pcrs.pcr1));
-                } else {
-                    output::status("  PCR1: match");
-                }
-                if expected_pcrs.pcr2 != remote_pcrs.pcr2 {
-                    output::error("  PCR2: MISMATCH");
-                    output::status(format!("    expected: {}", expected_pcrs.pcr2));
-                    output::status(format!("    remote:   {}", remote_pcrs.pcr2));
-                } else {
-                    output::status("  PCR2: match");
-                }
-                bail!("Attestation verification failed - {e}");
-            }
-        }
-    }
-
-    async fn build_local_docker_image(&self, no_cache: bool) -> Result<String> {
-        let work_dir = std::env::current_dir().context("Failed to get current directory")?;
-        self.build_docker_image_from_dir(&work_dir, no_cache).await
-    }
-
-    async fn stage_git_source(&self, requested_commit: Option<&str>) -> Result<StagedSource> {
-        let root_output = tokio::process::Command::new("git")
-            .args(["rev-parse", "--show-toplevel"])
-            .output()
-            .await
-            .context("Failed to locate Git repository")?;
-
-        if !root_output.status.success() {
-            let stderr = String::from_utf8_lossy(&root_output.stderr);
-            bail!(
-                "Default source verification must be run inside a Git repository: {}",
-                stderr.trim()
-            );
-        }
-
-        let repo_root = PathBuf::from(String::from_utf8_lossy(&root_output.stdout).trim());
-        let requested_commit = requested_commit
-            .map(str::trim)
-            .filter(|commit| !commit.is_empty());
-        let commit_ish = requested_commit.unwrap_or("HEAD");
-        let commit_rev = format!("{commit_ish}^{{commit}}");
-
-        let commit_output = tokio::process::Command::new("git")
-            .args(["rev-parse", "--verify", &commit_rev])
-            .current_dir(&repo_root)
-            .output()
-            .await
-            .with_context(|| format!("Failed to resolve local Git commit {commit_ish}"))?;
-
-        if !commit_output.status.success() {
-            let stderr = String::from_utf8_lossy(&commit_output.stderr);
-            if requested_commit.is_some() {
-                bail!(
-                    "Failed to resolve manifest app commit {} in local repository. Fetch it locally or use --from-tarball. Git error: {}",
-                    commit_ish,
-                    stderr.trim()
-                );
-            } else {
-                bail!(
-                    "Failed to resolve local Git commit {}: {}",
-                    commit_ish,
-                    stderr.trim()
-                );
-            }
-        }
-
-        let commit = String::from_utf8_lossy(&commit_output.stdout)
-            .trim()
-            .to_string();
-
-        let archive_output = tokio::process::Command::new("git")
-            .args(["archive", "--format=tar.gz", &commit])
-            .current_dir(&repo_root)
-            .output()
-            .await
-            .with_context(|| format!("Failed to archive local Git commit {commit}"))?;
-
-        if !archive_output.status.success() {
-            let stderr = String::from_utf8_lossy(&archive_output.stderr);
-            bail!("git archive failed for {}: {}", commit, stderr.trim());
-        }
-
-        let temp_dir = tempfile::TempDir::new().context("Failed to create temp source dir")?;
-        Self::extract_tarball_bytes_to_dir(&archive_output.stdout, temp_dir.path())?;
-
-        output::verbose(
-            self.verbose,
-            &format!(
-                "Staged local Git commit {} from {} into {}",
-                commit,
-                repo_root.display(),
-                temp_dir.path().display()
-            ),
-        );
-
-        Ok(StagedSource {
-            path: temp_dir.path().to_path_buf(),
-            cache_key: commit.clone(),
-            app_commit: Some(commit),
-            _temp_dir: temp_dir,
-        })
-    }
-
-    fn stage_tarball_source(&self, tarball_path: &Path) -> Result<StagedSource> {
-        let archive_bytes = fs::read(tarball_path)
-            .with_context(|| format!("Failed to read tarball: {}", tarball_path.display()))?;
-        let archive_hash = hex::encode(Sha256::digest(&archive_bytes));
-        let temp_dir = tempfile::TempDir::new().context("Failed to create temp source dir")?;
-
-        Self::extract_tarball_bytes_to_dir(&archive_bytes, temp_dir.path())?;
-
-        output::verbose(
-            self.verbose,
-            &format!(
-                "Staged source tarball {} into {}",
-                tarball_path.display(),
-                temp_dir.path().display()
-            ),
-        );
-
-        Ok(StagedSource {
-            path: temp_dir.path().to_path_buf(),
-            cache_key: format!("tarball-{}", &archive_hash[..16]),
-            app_commit: None,
-            _temp_dir: temp_dir,
-        })
-    }
-
-    fn extract_tarball_bytes_to_dir(
-        archive_bytes: &[u8],
-        extract_dir: &Path,
-    ) -> Result<()> {
-        if archive_bytes.starts_with(&[0x1f, 0x8b]) {
-            let decoder = flate2::read::GzDecoder::new(archive_bytes);
-            Self::extract_tar_archive_to_dir(
-                tar::Archive::new(decoder),
-                extract_dir,
-            )
-        } else {
-            Self::extract_tar_archive_to_dir(
-                tar::Archive::new(archive_bytes),
-                extract_dir,
-            )
-        }
-    }
-
-    fn extract_tar_archive_to_dir<R: std::io::Read>(
-        mut archive: tar::Archive<R>,
-        extract_dir: &Path,
-    ) -> Result<()> {
-        for entry in archive
-            .entries()
-            .context("Failed to read archive entries")?
-        {
-            let mut entry = entry.context("Failed to read archive entry")?;
-            entry
-                .unpack_in(extract_dir)
-                .with_context(|| format!("Failed to extract entry"))?;
-        }
-
-        Ok(())
-    }
-
-    async fn build_docker_image_from_dir(
-        &self,
-        work_dir: &std::path::Path,
-        no_cache: bool,
-    ) -> Result<String> {
-        use tokio::process::Command;
-
-        let commit_sha = Command::new("git")
-            .args(&["rev-parse", "HEAD"])
-            .current_dir(work_dir)
-            .output()
-            .await
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-        let tag = format!(
-            "caution-local-build:{}",
-            &commit_sha[..12.min(commit_sha.len())]
-        );
-
-        if !no_cache {
-            let inspect = Command::new("docker")
-                .args(&["inspect", "--type=image", &tag])
-                .output()
-                .await
-                .context("Failed to inspect docker image")?;
-
-            if inspect.status.success() {
-                output::verbose(self.verbose, &format!("Using cached Docker image: {}", tag));
-                return Ok(tag);
-            }
-        } else {
-            output::verbose(
-                self.verbose,
-                "--no-cache specified, rebuilding Docker image...",
-            );
-        }
-
-        output::verbose(
-            self.verbose,
-            &format!("Building Docker image with tag: {}", tag),
-        );
-
-        let containerfile = self
-            .read_config_from_dir(work_dir)
-            .ok()
-            .and_then(|c| c.enclave)
-            .and_then(|e| e.into_iter().next().map(|(_, v)| v))
-            .and_then(|e| e.build)
-            .and_then(|b| b.containerfile);
-
-        let procfile_path = work_dir.join("Procfile");
-        let config = if procfile_path.exists() {
-            let content =
-                std::fs::read_to_string(&procfile_path).context("Failed to read Procfile")?;
-            let mut build_command = None;
-            let mut oci_tarball = None;
-
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                if let Some((key, value)) = line.split_once(':') {
-                    let key = key.trim().to_lowercase();
-                    let value = value.trim().to_string();
-                    match key.as_str() {
-                        "build" => build_command = Some(value),
-                        "oci_tarball" => oci_tarball = Some(value),
-                        _ => {}
-                    }
-                }
-            }
-
-            BuildConfig {
-                build_command,
-                containerfile,
-                oci_tarball,
-                no_cache,
-            }
-        } else {
-            BuildConfig {
-                build_command: None,
-                containerfile,
-                oci_tarball: None,
-                no_cache,
-            }
-        };
-
-        output::verbose(self.verbose, &format!("work_dir = {:?}", work_dir));
-        output::verbose(self.verbose, &format!("BuildConfig = {:?}", config));
-
-        build_user_image(work_dir, &tag, &config).await?;
-
-        output::verbose(
-            self.verbose,
-            &format!("Docker image built successfully: {}", tag),
-        );
-        Ok(tag)
-    }
-
-    async fn download_and_extract_app_source(&self, url: &str) -> Result<PathBuf> {
-        let cache_dir = if let Some(ref workdir) = self.workdir {
-            workdir.join("downloads")
-        } else {
-            dirs::home_dir()
-                .context("Failed to determine home directory")?
-                .join(".cache/caution/downloads")
-        };
-        std::fs::create_dir_all(&cache_dir)
-            .context("Failed to create downloads cache directory")?;
-
-        use sha2::Digest;
-        let url_hash = sha2::Sha256::digest(url.as_bytes());
-        let extract_dir = cache_dir.join(hex::encode(&url_hash[..8]));
-
-        // Check if already cached
-        if extract_dir.exists()
-            && extract_dir
-                .read_dir()
-                .map(|mut d| d.next().is_some())
-                .unwrap_or(false)
-        {
-            output::verbose(
-                self.verbose,
-                &format!("Using cached app source: {}", extract_dir.display()),
-            );
-            return Ok(extract_dir);
-        }
-
-        output::verbose(self.verbose, &format!("Downloading app source: {}", url));
-
-        // Clean up any partial extraction
-        if extract_dir.exists() {
-            std::fs::remove_dir_all(&extract_dir)
-                .context("Failed to clean up partial extraction")?;
-        }
-
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .timeout(std::time::Duration::from_secs(300)) // 5 minutes for full download
-            .build()
-            .context("Failed to create HTTP client")?;
-
-        let response = client
-            .get(url)
-            .send()
-            .await
-            .context("Failed to download app source")?;
-
-        if !response.status().is_success() {
-            bail!("Failed to download app source: HTTP {}", response.status());
-        }
-
-        let archive_bytes = response
-            .bytes()
-            .await
-            .context("Failed to read archive bytes")?;
-
-        output::verbose(
-            self.verbose,
-            &format!("Downloaded {} bytes, extracting...", archive_bytes.len()),
-        );
-
-        Self::extract_tarball_bytes_to_dir(&archive_bytes, &extract_dir)?;
-
-        output::verbose(
-            self.verbose,
-            &format!("App source extracted to: {}", extract_dir.display()),
-        );
-
-        Ok(extract_dir)
-    }
-
-    async fn download_and_extract_app_source_with_fallbacks(
-        &self,
-        urls: &[String],
-    ) -> Result<PathBuf> {
-        if urls.is_empty() {
-            bail!("No source URLs provided");
-        }
-
-        let mut last_error: Option<anyhow::Error> = None;
-
-        for (i, url) in urls.iter().enumerate() {
-            if i > 0 {
-                output::verbose(
-                    self.verbose,
-                    &format!("Trying fallback URL ({}/{}): {}", i + 1, urls.len(), url),
-                );
-            }
-
-            match self.download_and_extract_app_source(url).await {
-                Ok(path) => return Ok(path),
-                Err(e) => {
-                    output::verbose(
-                        self.verbose,
-                        &format!("Failed to download from {}: {}", url, e),
-                    );
-                    last_error = Some(e);
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("All source URLs failed")))
-    }
-
-    /// Build a non-interactive, stall-bounded `git` command that cannot prompt
-    /// for credentials or block on a TTY. During verification the source URL
-    /// comes from the remote response manifest and may point at a repo the
-    /// host refuses to serve anonymously — e.g. a non-existent Codeberg/Forgejo
-    /// repo, which returns `401` (rather than `404`, to avoid leaking
-    /// existence). Without these guards, `git` falls back to prompting
-    /// `Username for ...` on the inherited `/dev/tty` and blocks forever,
-    /// leaving the "Reproducing enclave image" spinner spinning. Verification
-    /// sources are public and reproducible, so a credential prompt is always a
-    /// failure, never an interaction.
-    fn git_command(args: &[&str]) -> std::process::Command {
-        let mut cmd = std::process::Command::new("git");
-        cmd.args([
-            // Abort a transfer that drips below 1000 B/s for 300s, so a server
-            // that accepts the connection but never makes progress can't hang
-            // the build. (git has no working connect-timeout config knob; the
-            // connect phase falls back to libcurl's default. A hard wall-clock
-            // bound would need a process-level deadline.) These precede the
-            // subcommand so git applies them; harmless for local ops.
-            "-c", "http.lowSpeedLimit=1000",
-            "-c", "http.lowSpeedTime=300",
-        ])
-        .args(args)
-        // Never prompt on /dev/tty for a username/password.
-        .env("GIT_TERMINAL_PROMPT", "0")
-        // Belt-and-suspenders: if a credential helper/askpass is somehow
-        // configured, make it non-interactive. `true` exits 0 with empty
-        // output, so git gets empty credentials and fails fast.
-        .env("GIT_ASKPASS", "true")
-        // Detach stdin so git can't wait on the parent's TTY either.
-        .stdin(std::process::Stdio::null())
-        // Prevent SSH from prompting for host-key confirmation or credentials
-        // via /dev/tty, which hangs non-interactive callers. BatchMode=yes
-        // makes SSH fail immediately instead. accept-new accepts unknown hosts
-        // on first contact (no TOFU hang in fresh CI) while still rejecting
-        // changed keys (MITM protection). Preserve any caller-set
-        // GIT_SSH_COMMAND (e.g. a custom -i key) by appending rather than
-        // replacing.
-        .env(
-            "GIT_SSH_COMMAND",
-            format!(
-                "{} -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
-                std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| "ssh".to_string())
-            ),
-        );
-        cmd
-    }
-
-    /// Fail-fast reachability check for an enclave/framework source archive.
-    /// Try configured mirrors in order, then stop before the expensive build.
-    async fn preflight_archive_url(
-        &self,
-        label: &str,
-        url: &str,
-        use_platform_mirror: bool,
-    ) -> Result<()> {
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return Ok(());
-        }
-
-        let candidates = archive_preflight_urls(url, use_platform_mirror);
-        self.preflight_archive_urls(label, &candidates).await
-    }
-
-    async fn preflight_archive_urls(&self, label: &str, urls: &[String]) -> Result<()> {
-        if urls.is_empty() {
-            bail!("No archive URLs provided for {label}");
-        }
-
-        output::status(format_args!(
-            "\nChecking {} is reachable on remote...",
-            label.to_lowercase()
-        ));
-        let mut client = reqwest::Client::builder();
-        if urls.len() == 1 {
-            client = client.redirect(reqwest::redirect::Policy::none());
-        }
-        let client = client
-            .build()
-            .context("Failed to create archive preflight client")?;
-        let attempts = ARCHIVE_PREFLIGHT_ATTEMPTS;
-        let mut failures = Vec::new();
-
-        for url in urls {
-            for attempt in 1..=attempts {
-                match client
-                    .head(url)
-                    .timeout(ARCHIVE_PREFLIGHT_TIMEOUT)
-                    .send()
-                    .await
-                {
-                    Ok(response) => match classify_archive_preflight(
-                        response.status(),
-                        attempt,
-                        attempts,
-                    ) {
-                        ArchivePreflightStatus::Passed => {
-                            output::verbose(
-                                self.verbose,
-                                format_args!(
-                                    "{} reachable via {} (HTTP {})",
-                                    label,
-                                    url,
-                                    response.status().as_u16()
-                                ),
-                            );
-                            output::status(format_args!("  {} preflight passed ✓", label));
-                            return Ok(());
-                        }
-                        ArchivePreflightStatus::Missing if urls.len() == 1 => {
-                            bail!(
-                                "{label} archive is not available on the remote (HTTP {code}):\n  \
-                                 {url}\n\n\
-                                 The deployed enclave references a {lower} commit that the remote \
-                                 no longer serves — it may have been garbage-collected, or the \
-                                 manifest is stale. This build cannot be reproduced from the \
-                                 remote manifest.",
-                                label = label,
-                                lower = label.to_lowercase(),
-                                code = response.status().as_u16(),
-                                url = url,
-                            );
-                        }
-                        ArchivePreflightStatus::Retry => {
-                            output::warning(format_args!(
-                                "  {} preflight returned HTTP {}; retrying once",
-                                label,
-                                response.status().as_u16()
-                            ));
-                        }
-                        ArchivePreflightStatus::Failed if urls.len() == 1 => {
-                            bail!(
-                                "{label} preflight failed (HTTP {code}):\n  {url}\n\n\
-                                 Refusing to start the reproduction build.",
-                                code = response.status().as_u16(),
-                            );
-                        }
-                        ArchivePreflightStatus::Missing | ArchivePreflightStatus::Failed => {
-                            let code = response.status().as_u16().to_string();
-                            failures.push([url.as_str(), ": HTTP ", code.as_str()].concat());
-                            break;
-                        }
-                    },
-                    Err(error) if attempt < attempts => {
-                        output::warning(format_args!(
-                            "  {} preflight failed: {}; retrying once",
-                            label, error
-                        ));
-                    }
-                    Err(error) if urls.len() == 1 => {
-                        bail!(
-                            "{label} preflight failed after {attempts} attempts:\n  {url}\n  \
-                             {error}\n\nRefusing to start the reproduction build.",
-                        );
-                    }
-                    Err(error) => {
-                        let details = error.to_string();
-                        failures.push([url.as_str(), ": ", details.as_str()].concat());
-                        break;
-                    }
-                }
-            }
-        }
-
-        let failures = failures.join("\n  ");
-        let lower_label = label.to_lowercase();
-        Err(anyhow::anyhow!([
-            "All ",
-            lower_label.as_str(),
-            " archive preflights failed:\n  ",
-            failures.as_str(),
-            "\n\nRefusing to start the reproduction build.",
-        ]
-        .concat()))
-    }
-
-    /// Cheap network preflight: confirm the app source branch is present on the
-    /// remote before kicking off an expensive reproduce build.
-    ///
-    /// `git ls-remote` lists refs without transferring any objects, so a branch
-    /// that was never pushed (or was renamed/deleted) fails here in seconds
-    /// instead of after minutes of archive downloads and clone/fetch fallbacks.
-    ///
-    /// Scope and limits (intentionally conservative — never blocks a valid build):
-    /// - We run `ls-remote` with credentials disabled, so a **private** repo
-    ///   auth-fails and is treated as inconclusive: the fast-fail only fires for
-    ///   public (or SSH-agent-reachable) remotes.
-    /// - A missing/unreachable repo (`ls-remote` non-zero) is also inconclusive,
-    ///   not a hard fail — only an *existing, reachable* remote that lacks the
-    ///   branch fast-fails.
-    /// - A commit force-pushed off an existing branch is **not** caught here
-    ///   (we only check branch presence, not commit reachability); the real fetch
-    ///   surfaces that.
-    fn preflight_app_source_ref(
-        &self,
-        git_url: &str,
-        commit: &str,
-        branch: Option<&str>,
-    ) -> Result<()> {
-        // Archive tarball URLs aren't ls-remote-able and 404 quickly on their own.
-        if git_url.contains("/archive/")
-            && (git_url.ends_with(".tar.gz") || git_url.ends_with(".tar"))
-        {
-            return Ok(());
-        }
-
-        output::status("\nChecking app source is reachable on remote...");
-        let output = match Self::git_command(&["ls-remote", git_url]).output() {
-            Ok(output) => output,
-            Err(e) => {
-                output::verbose(
-                    self.verbose,
-                    &format!("App source preflight skipped (ls-remote could not run): {}", e),
-                );
-                return Ok(());
-            }
-        };
-
-        if !output.status.success() {
-            // Likely auth/network rather than a missing ref; don't hard-block.
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            output::verbose(
-                self.verbose,
-                &format!(
-                    "App source preflight inconclusive (ls-remote failed): {}",
-                    stderr.trim()
-                ),
-            );
-            return Ok(());
-        }
-
-        let listing = String::from_utf8_lossy(&output.stdout);
-        match Self::classify_app_source_refs(&listing, commit, branch) {
-            Ok(true) => {
-                output::status("  App source reachable ✓");
-            }
-            Ok(false) => {
-                // No branch hint and the commit is not a current ref tip. It may
-                // still live in history; only warn and let the fetch resolve it.
-                output::verbose(
-                    self.verbose,
-                    &format!(
-                        "App source commit {} is not a current ref tip; relying on fetch to resolve",
-                        commit
-                    ),
-                );
-            }
-            Err(missing_branch) => {
-                bail!(
-                    "App source branch '{branch}' is not present on the remote:\n  \
-                     {url}\n\n\
-                     The deployed enclave was built from commit {commit} on branch \
-                     '{branch}', but that branch is not on the remote — it was never \
-                     pushed, or was renamed/deleted. This build cannot be reproduced \
-                     from the remote manifest.\n\n\
-                     Fixes:\n  \
-                     - Push the branch:        git push <remote> {branch}\n  \
-                     - Verify a local checkout: caution verify\n  \
-                     - Verify a source tarball: caution verify --from-tarball <path>",
-                    branch = missing_branch,
-                    url = git_url,
-                    commit = commit,
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Decide whether a `git ls-remote` listing confirms the app source is
-    /// reachable. Pure logic split out from [`Self::preflight_app_source_ref`]
-    /// so it can be unit-tested without the network.
-    ///
-    /// - `Ok(true)`  — reachable confirmed (branch present, or commit is a ref tip)
-    /// - `Ok(false)` — inconclusive (no branch hint and commit isn't a tip; proceed)
-    /// - `Err(branch)` — the named branch is definitively absent from the remote
-    fn classify_app_source_refs(
-        listing: &str,
-        commit: &str,
-        branch: Option<&str>,
-    ) -> std::result::Result<bool, String> {
-        // Require a meaningful abbreviation before prefix-matching a commit against
-        // a ref tip. Without this, a blank ls-remote field (empty `sha`) or a
-        // 1-char `commit` would falsely match an unrelated ref. Git's default
-        // minimum abbreviation is 7; deployed manifests carry full 40-char SHAs.
-        const MIN_SHA_PREFIX: usize = 7;
-        let commit_matchable = commit.len() >= MIN_SHA_PREFIX;
-
-        let branch_ref = branch.map(|b| format!("refs/heads/{}", b));
-        let mut branch_present = false;
-        let mut commit_is_ref_tip = false;
-        for line in listing.lines() {
-            let mut parts = line.split('\t');
-            let sha = parts.next().unwrap_or("");
-            let r = parts.next().unwrap_or("");
-            if commit_matchable
-                && sha.len() >= MIN_SHA_PREFIX
-                && (sha.starts_with(commit) || commit.starts_with(sha))
-            {
-                commit_is_ref_tip = true;
-            }
-            if let Some(ref br) = branch_ref {
-                if r == br {
-                    branch_present = true;
-                }
-            }
-        }
-
-        match branch {
-            Some(branch_name) if !branch_present => Err(branch_name.to_string()),
-            Some(_) => Ok(true),
-            None if commit_is_ref_tip => Ok(true),
-            None => Ok(false),
-        }
-    }
-
-    async fn download_and_extract_app_source_with_git_fallback(
-        &self,
-        archive_urls: &[String],
-        git_fallback: Option<(&str, &str, Option<&str>)>,
-    ) -> Result<PathBuf> {
-        if !archive_urls.is_empty() {
-            match self
-                .download_and_extract_app_source_with_fallbacks(archive_urls)
-                .await
-            {
-                Ok(path) => return Ok(path),
-                Err(e) => {
-                    output::verbose(self.verbose, &format!("Archive download failed: {}", e));
-                }
-            }
-        }
-
-        if let Some((git_url, commit, branch)) = git_fallback {
-            output::verbose(self.verbose, "Archive download failed. Trying git clone...");
-
-            let temp_dir = tempfile::TempDir::new().context("Failed to create temp directory")?;
-            let clone_path = temp_dir.path().join("repo");
-
-            // If we have a branch, clone by branch first (works with Forgejo/Codeberg)
-            // then checkout the specific commit
-            if let Some(branch_name) = branch {
-                output::verbose(
-                    self.verbose,
-                    &format!(
-                        "Cloning branch '{}' then checking out commit '{}'",
-                        branch_name, commit
-                    ),
-                );
-
-                let clone_output = Self::git_command(&[
-                    "clone",
-                    "--depth",
-                    "100",
-                    "--single-branch",
-                    "--branch",
-                    branch_name,
-                    git_url,
-                    clone_path.to_str().unwrap(),
-                ])
-                .output()
-                .context("Failed to clone repository")?;
-
-                if !clone_output.status.success() {
-                    let stderr = String::from_utf8_lossy(&clone_output.stderr);
-                    output::verbose(self.verbose, &format!("Branch clone failed: {}", stderr));
-                    // Fall through to try commit-based fetch
-                } else {
-                    // Checkout the specific commit
-                    let checkout_output = Self::git_command(&["checkout", commit])
-                        .current_dir(&clone_path)
-                        .output()
-                        .context("Failed to checkout commit")?;
-
-                    if checkout_output.status.success() {
-                        let extract_dir = temp_dir.keep().join("repo");
-                        output::verbose(
-                            self.verbose,
-                            &format!("Git clone successful: {}", extract_dir.display()),
-                        );
-                        return Ok(extract_dir);
-                    } else {
-                        let stderr = String::from_utf8_lossy(&checkout_output.stderr);
-                        output::verbose(
-                            self.verbose,
-                            &format!("Commit checkout failed: {}, will try deeper clone", stderr),
-                        );
-
-                        // Try fetching more history to find the commit
-                        let _ = Self::git_command(&["fetch", "--unshallow"])
-                            .current_dir(&clone_path)
-                            .output();
-
-                        let checkout_retry = Self::git_command(&["checkout", commit])
-                            .current_dir(&clone_path)
-                            .output()
-                            .context("Failed to checkout commit after unshallow")?;
-
-                        if checkout_retry.status.success() {
-                            let extract_dir = temp_dir.keep().join("repo");
-                            output::verbose(
-                                self.verbose,
-                                &format!(
-                                    "Git clone successful after unshallow: {}",
-                                    extract_dir.display()
-                                ),
-                            );
-                            return Ok(extract_dir);
-                        }
-                    }
-                }
-            }
-
-            // Fallback: fetch the full advertised branch ref into a fresh repo.
-            // Some forges reject raw SHA fetches unless the object is reachable
-            // from a requested ref, and reusing a failed shallow clone can leave
-            // the object database incomplete.
-            let mut branch_fetch_error = None;
-            if let Some(branch_name) = branch {
-                if clone_path.exists() {
-                    std::fs::remove_dir_all(&clone_path).with_context(|| {
-                        format!("Failed to reset git checkout: {}", clone_path.display())
-                    })?;
-                }
-
-                std::fs::create_dir_all(&clone_path)?;
-
-                let init_output = Self::git_command(&["init"])
-                    .current_dir(&clone_path)
-                    .output()
-                    .context("Failed to run git init")?;
-
-                if !init_output.status.success() {
-                    let stderr = String::from_utf8_lossy(&init_output.stderr);
-                    bail!("Git init failed: {}", stderr);
-                }
-
-                let branch_ref = format!("refs/heads/{}", branch_name);
-                let fetch_branch_output = Self::git_command(&["fetch", git_url, &branch_ref])
-                    .current_dir(&clone_path)
-                    .output()
-                    .context("Failed to fetch branch")?;
-
-                if fetch_branch_output.status.success() {
-                    let checkout_output = Self::git_command(&["checkout", commit])
-                        .current_dir(&clone_path)
-                        .output()
-                        .context("Failed to checkout commit")?;
-
-                    if checkout_output.status.success() {
-                        let extract_dir = temp_dir.keep().join("repo");
-                        output::verbose(
-                            self.verbose,
-                            &format!("Git fetch successful: {}", extract_dir.display()),
-                        );
-                        return Ok(extract_dir);
-                    }
-
-                    let stderr = String::from_utf8_lossy(&checkout_output.stderr);
-                    branch_fetch_error = Some(format!(
-                        "Fetched branch '{}' but could not checkout commit '{}': {}",
-                        branch_name, commit, stderr
-                    ));
-                } else {
-                    let stderr = String::from_utf8_lossy(&fetch_branch_output.stderr);
-                    branch_fetch_error = Some(format!(
-                        "Git branch fetch failed for '{}': {}",
-                        branch_name, stderr
-                    ));
-                }
-            }
-
-            // Last resort: direct fetch by commit. This works on hosts that allow
-            // fetching reachable objects by SHA, but not all forges permit it.
-            if clone_path.exists() {
-                std::fs::remove_dir_all(&clone_path).with_context(|| {
-                    format!("Failed to reset git checkout: {}", clone_path.display())
-                })?;
-            }
-            std::fs::create_dir_all(&clone_path)?;
-
-            let init_output = Self::git_command(&["init"])
-                .current_dir(&clone_path)
-                .output()
-                .context("Failed to run git init")?;
-
-            if !init_output.status.success() {
-                let stderr = String::from_utf8_lossy(&init_output.stderr);
-                bail!("Git init failed: {}", stderr);
-            }
-
-            let fetch_output = Self::git_command(&["fetch", "--depth", "1", git_url, commit])
-                .current_dir(&clone_path)
-                .output()
-                .context("Failed to fetch commit")?;
-
-            if !fetch_output.status.success() {
-                let stderr = String::from_utf8_lossy(&fetch_output.stderr);
-                if let Some(branch_error) = branch_fetch_error {
-                    bail!("Git fetch failed: {}\n{}", stderr, branch_error);
-                }
-                bail!("Git fetch failed: {}", stderr);
-            }
-
-            let checkout_output = Self::git_command(&["checkout", "FETCH_HEAD"])
-                .current_dir(&clone_path)
-                .output()
-                .context("Failed to checkout commit")?;
-
-            if !checkout_output.status.success() {
-                let stderr = String::from_utf8_lossy(&checkout_output.stderr);
-                bail!("Git checkout failed: {}", stderr);
-            }
-
-            let extract_dir = temp_dir.keep().join("repo");
-            output::verbose(
-                self.verbose,
-                &format!("Git clone successful: {}", extract_dir.display()),
-            );
-            return Ok(extract_dir);
-        }
-
-        bail!("No source URLs available and no git fallback configured")
-    }
-
-    async fn fetch_pgp_keys(&self, session_id: &str) -> Result<Vec<PgpKeyInfo>> {
-        let response: ListPgpKeysResponse = self
-            .get_protected_json(session_id, "/pgp-keys", "Failed to fetch PGP public keys")
-            .await?;
-        Ok(response.keys)
-    }
-
-    async fn add_pgp_key(&self, key_file: PathBuf, name: Option<String>) -> Result<()> {
-        let key_file_handle = fs::File::open(&key_file).with_context(|| {
-            format!("Failed to open PGP public key file: {}", key_file.display())
-        })?;
-        let mut key_bytes = Vec::new();
-        key_file_handle
-            .take((PGP_PUBLIC_KEY_MAX_BYTES + 1) as u64)
-            .read_to_end(&mut key_bytes)
-            .with_context(|| {
-                format!("Failed to read PGP public key file: {}", key_file.display())
-            })?;
-        anyhow::ensure!(
-            key_bytes.len() <= PGP_PUBLIC_KEY_MAX_BYTES,
-            "PGP public key is too large (maximum {} bytes)",
-            PGP_PUBLIC_KEY_MAX_BYTES
-        );
-        let key_text = String::from_utf8(key_bytes)
-            .context("PGP public key file must contain UTF-8 armored text")?;
-        let (public_key, fingerprint) = prepare_pgp_public_key_for_upload(&key_text)?;
-
-        let name = name.unwrap_or_else(|| {
-            key_file
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or("PGP key")
-                .to_string()
-        });
-        anyhow::ensure!(
-            name.chars().count() <= PGP_KEY_NAME_MAX_CHARS,
-            "PGP key name must be at most {} characters",
-            PGP_KEY_NAME_MAX_CHARS
-        );
-        anyhow::ensure!(
-            !name.chars().any(char::is_control),
-            "PGP key name cannot contain control characters"
-        );
-        let name = name.trim();
-        anyhow::ensure!(!name.is_empty(), "PGP key name cannot be empty");
-
-        let config = self.ensure_authenticated().await?;
-        let existing_keys = self.fetch_pgp_keys(&config.session_id).await?;
-        if existing_keys
-            .iter()
-            .any(|key| key.fingerprint == fingerprint)
-        {
-            bail!("This PGP public key is already registered to your account");
-        }
-
-        let body = serde_json::json!({
-            "public_key": public_key,
-            "name": name,
-        });
-        let response = self
-            .signed_post(&config.session_id, "/pgp-keys", &body)
-            .await?;
-
-        if !response.status().is_success() {
-            let error = self.api_error_message(response).await;
-            bail!("Failed to add PGP public key: {}", error);
-        }
-
-        let added: AddPgpKeyResponse = response
-            .json()
-            .await
-            .context("Failed to parse add PGP public key response")?;
-        output::success(format!("Added PGP key: {} ({})", name, added.fingerprint));
-        Ok(())
-    }
-
-    async fn list_pgp_keys(&self) -> Result<()> {
-        let config = self.ensure_authenticated().await?;
-        let keys = self.fetch_pgp_keys(&config.session_id).await?;
-
-        if keys.is_empty() {
-            output::status("No PGP keys found. Add one with 'caution pgp-keys add <key-file>'");
-            return Ok(());
-        }
-
-        output::data_header("PGP Keys:");
-        for key in keys {
-            output::status(format!(
-                "  {} ({})",
-                key.name.as_deref().unwrap_or("untitled"),
-                key.fingerprint
-            ));
-        }
-        Ok(())
-    }
-
-    async fn remove_pgp_key(&self, fingerprint: &str) -> Result<()> {
-        let normalized_fingerprint: String = fingerprint
-            .chars()
-            .filter(|character| !character.is_ascii_whitespace())
-            .map(|character| character.to_ascii_uppercase())
-            .collect();
-        anyhow::ensure!(
-            matches!(normalized_fingerprint.len(), 40 | 64)
-                && normalized_fingerprint
-                    .chars()
-                    .all(|character| character.is_ascii_hexdigit()),
-            "PGP key fingerprint must contain 40 or 64 hexadecimal characters"
-        );
-
-        let config = self.ensure_authenticated().await?;
-        let keys = self.fetch_pgp_keys(&config.session_id).await?;
-        let key = keys
-            .iter()
-            .find(|key| {
-                key.fingerprint
-                    .eq_ignore_ascii_case(&normalized_fingerprint)
-            })
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No active PGP public key matches fingerprint {}",
-                    normalized_fingerprint
-                )
-            })?;
-
-        let path = format!("/pgp-keys/{}", key.id);
-        let response = self.signed_delete(&config.session_id, &path).await?;
-        if !response.status().is_success() {
-            let error = self.api_error_message(response).await;
-            bail!("Failed to remove PGP public key: {}", error);
-        }
-
-        output::success(format!("Removed PGP key: {}", key.fingerprint));
-        Ok(())
-    }
-
-    async fn fetch_existing_ssh_keys(&self, session_id: &str) -> Result<Vec<(String, String)>> {
-        let response_data: serde_json::Value = self
-            .get_protected_json(session_id, "/ssh-keys", "Failed to fetch existing SSH keys")
-            .await?;
-        
-        let keys = response_data["keys"]
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
-
-        Ok(keys
-            .iter()
-            .filter_map(|key| {
-                let name = key["name"].as_str()?.to_string();
-                let public_key = key["public_key"].as_str()?.to_string();
-                Some((name, public_key))
-            })
-            .collect())
-    }
-
-    async fn add_ssh_key(
-        &self,
-        key_file: Option<PathBuf>,
-        from_agent: bool,
-        key: Option<String>,
-        name: Option<String>,
-    ) -> Result<()> {
-        let config = self.ensure_authenticated().await?;
-
-        // Fetch existing keys to check for duplicates
-        let existing_keys = self.fetch_existing_ssh_keys(&config.session_id).await?;
-
-        if from_agent {
-            let keys = self.get_ssh_agent_keys();
-            if keys.is_empty() {
-                bail!("No keys found in ssh-agent. Run 'ssh-add' first.");
-            }
-
-            let index = if keys.len() > 1 {
-                for (i, (k, comment)) in keys.iter().enumerate() {
-                    let key_name = name.clone().unwrap_or_else(|| comment.clone());
-                    let fingerprint = ssh_fingerprint(k);
-                    output::status(format!("{}. [{}], [{}]", i + 1, key_name, fingerprint));
-                }
-
-                let selection = prompt::text(&format!("Which key would you like to add? (1-{}): ", keys.len()))?;
-
-                match selection.parse::<usize>() {
-                    Ok(n) if n >= 1 && n <= keys.len() => n - 1,
-                    _ => bail!(
-                        "Invalid number, please select a number between 1 and {}",
-                        keys.len()
-                    ),
-                }
-            } else {
-                let (k, comment) = &keys[0];
-                let key_name = name.clone().unwrap_or(comment.clone());
-                let fingerprint = ssh_fingerprint(k);
-                output::status(format!("Adding SSH key: {} ({})", key_name, fingerprint));
-                0
-            };
-
-            let (k, comment) = &keys[index];
-            let fingerprint = ssh_fingerprint(k);
-            let key_name = name.clone().unwrap_or(comment.clone());
-
-            // Check for duplicate before adding
-            if let Some(new_identity) = Self::ssh_key_identity(k) {
-                for (existing_name, existing_key) in &existing_keys {
-                    if let Some(existing_identity) = Self::ssh_key_identity(existing_key) {
-                        if new_identity == existing_identity {
-                            bail!(
-                                "This SSH key is already added as '{}'.",
-                                existing_name
-                            );
-                        }
-                    }
-                }
-            }
-
-            self.add_single_key(&config.session_id, &key_name, k)
-                .await?;
-            output::success(format!("Added SSH key: [{}] [{}]", key_name, fingerprint));
-        } else if let Some(key_str) = key {
-            let key_content = key_str.trim();
-            if !key_content.starts_with("ssh-") {
-                bail!("Invalid SSH key format");
-            }
-            let key_name = name.unwrap_or_else(|| "key".to_string());
-
-            // Check for duplicate before adding
-            if let Some(new_identity) = Self::ssh_key_identity(key_content) {
-                for (existing_name, existing_key) in &existing_keys {
-                    if let Some(existing_identity) = Self::ssh_key_identity(existing_key) {
-                        if new_identity == existing_identity {
-                            bail!(
-                                "This SSH key is already added as '{}'.",
-                                existing_name
-                            );
-                        }
-                    }
-                }
-            }
-
-            self.add_single_key(&config.session_id, &key_name, key_content)
-                .await?;
-            output::success(format!("Added: {}", key_name));
-            output::status(format!("  {}", key_content));
-        } else if let Some(path) = key_file {
-            let key_content = fs::read_to_string(&path)
-                .context("Failed to read SSH key file")?
-                .trim()
-                .to_string();
-
-            if !key_content.starts_with("ssh-") {
-                bail!("Invalid SSH key format");
-            }
-
-            let key_name = name.unwrap_or_else(|| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("key")
-                    .to_string()
-            });
-
-            // Check for duplicate before adding
-            if let Some(new_identity) = Self::ssh_key_identity(&key_content) {
-                for (existing_name, existing_key) in &existing_keys {
-                    if let Some(existing_identity) = Self::ssh_key_identity(existing_key) {
-                        if new_identity == existing_identity {
-                            bail!(
-                                "This SSH key is already added as '{}'.",
-                                existing_name
-                            );
-                        }
-                    }
-                }
-            }
-
-            self.add_single_key(&config.session_id, &key_name, &key_content)
-                .await?;
-            output::success(format!("Added: {}", key_name));
-            output::status(format!("  {}", key_content));
-        } else {
-            bail!("Provide a key file, --key, or --from-agent");
-        }
-
-        Ok(())
-    }
-
-    async fn add_single_key(&self, session_id: &str, name: &str, key: &str) -> Result<()> {
-        let body = serde_json::json!({ "name": name, "public_key": key });
-
-        let response = self.signed_post(session_id, "/ssh-keys", &body).await?;
-
-        if !response.status().is_success() {
-            let error = self.api_error_message(response).await;
-            if error.contains("insert SSH key")
-                || error.contains("duplicate")
-                || error.contains("23505")
-            {
-                bail!("Key already exists");
-            }
-            bail!("{}", error);
-        }
-        Ok(())
-    }
-
-    async fn remove_ssh_key(&self, fingerprint: &str) -> Result<()> {
-        let config = self.ensure_authenticated().await?;
-
-        // Note: This is a DELETE mutation. get_protected_json only handles GETs.
-        // Username claim gate check relies on the server returning username_required error
-        // which we don't handle here - mutations would need a separate delete_protected helper.
-        let response = self
-            .client
-            .delete(format!("{}/ssh-keys/{}", self.base_url, fingerprint))
-            .header("X-Session-ID", config.session_id)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let error = self.api_error_message(response).await;
-            bail!("Failed to remove key: {}", error);
-        }
-
-        output::success("Key removed.");
-        Ok(())
-    }
-
-    fn get_ssh_agent_keys(&self) -> Vec<(String, String)> {
-        let output = Command::new("ssh-add").arg("-L").output();
-        match output {
-            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter(|line| line.starts_with("ssh-"))
-                .map(|line| {
-                    let parts: Vec<&str> = line.splitn(3, ' ').collect();
-                    let comment = parts.get(2).unwrap_or(&"unnamed").to_string();
-                    (line.to_string(), comment)
-                })
-                .collect(),
-            _ => Vec::new(),
-        }
-    }
-
-    async fn list_ssh_keys(&self) -> Result<()> {
-        let config = self.ensure_authenticated().await?;
-
-        let response_data: serde_json::Value = self
-            .get_protected_json(
-                &config.session_id,
-                "/ssh-keys",
-                "Failed to list SSH keys"
-            )
-            .await?;
-        
-        let keys = response_data["keys"]
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("Invalid response format"))?;
-
-        if keys.is_empty() {
-            output::status("No SSH keys found. Add one with 'caution ssh-keys add'");
-        } else {
-            output::data_header("SSH Keys:");
-            for key in keys {
-                let name = key["name"].as_str().unwrap_or("untitled");
-                let public_key = key["public_key"].as_str().unwrap_or("");
-                let fingerprint = ssh_fingerprint(public_key);
-                output::status(format!("  {} ({})", name, fingerprint));
-            }
-        }
-        Ok(())
-    }
-
-    fn get_cache_dir(&self) -> Result<PathBuf> {
+    fn get_cache_dir(&self) -> Result<PathBuf, GetCacheDirError> {
         if let Some(ref workdir) = self.workdir {
             return Ok(workdir.clone());
         }
         let cache_dir = dirs::home_dir()
-            .context("Failed to determine home directory")?
+            .ok_or_else(|| GetCacheDirError::HomeDir {
+                location: std::panic::Location::caller(),
+            })?
             .join(".cache/caution");
         Ok(cache_dir)
     }
-
-    fn cache_path(&self) -> Result<()> {
-        let cache_dir = self.get_cache_dir()?;
-        output::status(format!("{}", cache_dir.display()));
-        Ok(())
-    }
-
-    fn cache_size(&self) -> Result<()> {
-        let cache_dir = self.get_cache_dir()?;
-
-        if !cache_dir.exists() {
-            output::status("Cache is empty (0 bytes)");
-            return Ok(());
-        }
-
-        let total_size = self.dir_size(&cache_dir)?;
-        output::status(format!("{}", self.format_size(total_size)));
-
-        Ok(())
-    }
-
-    fn cache_list(&self) -> Result<()> {
-        let cache_dir = self.get_cache_dir()?;
-
-        if !cache_dir.exists() {
-            output::status("Cache is empty");
-            return Ok(());
-        }
-
-        let downloads_dir = cache_dir.join("downloads");
-        if downloads_dir.exists() {
-            output::data_header("Downloads:");
-            if let Ok(entries) = fs::read_dir(&downloads_dir) {
-                let mut items: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-                if items.is_empty() {
-                    output::status("  (empty)");
-                } else {
-                    items.sort_by_key(|e| e.path());
-                    for entry in items {
-                        let path = entry.path();
-                        let size = self.dir_size(&path).unwrap_or(0);
-                        let name = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        output::status(format!("  {} ({})", name, self.format_size(size)));
-                    }
-                }
-            }
-        } else {
-            output::status("Cache is empty");
-        }
-
-        Ok(())
-    }
-
-    fn cache_destroy(&self, force: bool) -> Result<()> {
-        let cache_dir = self.get_cache_dir()?;
-
-        if !cache_dir.exists() {
-            output::status("Cache is already empty");
-            return Ok(());
-        }
-
-        let total_size = self.dir_size(&cache_dir)?;
-
-        if !force {
-            output::status("About to delete cache:");
-            output::status(format!("  Path: {}", cache_dir.display()));
-            output::status(format!("  Size: {}", self.format_size(total_size)));
-            output::status("");
-            let confirmed = prompt::confirm("Are you sure you want to delete the cache? [y/N] ")?;
-            if !confirmed {
-                output::status("Aborted.");
-                return Ok(());
-            }
-        }
-
-        fs::remove_dir_all(&cache_dir).context("Failed to remove cache directory")?;
-
-        output::success(format!("Cache cleared ({} freed)", self.format_size(total_size)));
-        Ok(())
-    }
-
-    fn dir_size(&self, path: &PathBuf) -> Result<u64> {
-        let mut total = 0;
-        if path.is_file() {
-            return Ok(fs::metadata(path)?.len());
-        }
-        if path.is_dir() {
-            for entry in fs::read_dir(path)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_file() {
-                    total += fs::metadata(&path)?.len();
-                } else if path.is_dir() {
-                    total += self.dir_size(&path)?;
-                }
-            }
-        }
-        Ok(total)
-    }
-
-    fn format_size(&self, bytes: u64) -> String {
-        const KB: u64 = 1024;
-        const MB: u64 = KB * 1024;
-        const GB: u64 = MB * 1024;
-
-        if bytes >= GB {
-            format!("{:.2} GB", bytes as f64 / GB as f64)
-        } else if bytes >= MB {
-            format!("{:.2} MB", bytes as f64 / MB as f64)
-        } else if bytes >= KB {
-            format!("{:.2} KB", bytes as f64 / KB as f64)
-        } else {
-            format!("{} bytes", bytes)
-        }
-    }
-
-    async fn add_credential(
-        &self,
-        platform: CredentialPlatform,
-        name: String,
-        is_default: bool,
-        region: Option<String>,
-    ) -> Result<()> {
-        let config = self.ensure_authenticated().await?;
-
-        let request_body = match platform {
-            CredentialPlatform::Aws => {
-                output::status(format!("Adding AWS credentials for '{}'", name));
-                let access_key_id = prompt::text("AWS Access Key ID: ")?;
-
-                let secret_access_key =
-                    prompt::password("AWS Secret Access Key: ")?;
-
-                serde_json::json!({
-                    "platform": "aws",
-                    "name": name,
-                    "access_key_id": access_key_id,
-                    "secret_access_key": secret_access_key,
-                    "default_region": region,
-                    "is_default": is_default
-                })
-            }
-            CredentialPlatform::Digitalocean
-            | CredentialPlatform::Hetzner
-            | CredentialPlatform::Linode
-            | CredentialPlatform::Vultr
-            | CredentialPlatform::Ovh => {
-                output::status(format!("Adding {} credentials for '{}'", platform, name));
-                let api_token = prompt::password("API Token: ")?;
-
-                serde_json::json!({
-                    "platform": platform.to_string(),
-                    "name": name,
-                    "api_token": api_token,
-                    "default_region": region,
-                    "is_default": is_default
-                })
-            }
-            CredentialPlatform::Gcp => {
-                output::status(format!("Adding GCP credentials for '{}'", name));
-                let email = prompt::text("Service Account Email: ")?;
-
-                let key_path = prompt::text("Path to service account JSON key file: ")?;
-
-                let key_content = fs::read_to_string(&key_path)
-                    .context("Failed to read service account key file")?;
-                let key_json: serde_json::Value = serde_json::from_str(&key_content)
-                    .context("Invalid JSON in service account key file")?;
-
-                serde_json::json!({
-                    "platform": "gcp",
-                    "name": name,
-                    "service_account_email": email,
-                    "service_account_key": key_json,
-                    "default_region": region,
-                    "is_default": is_default
-                })
-            }
-            CredentialPlatform::Azure => {
-                output::status(format!("Adding Azure credentials for '{}'", name));
-                let tenant_id = prompt::text("Tenant ID: ")?;
-
-                let client_id = prompt::text("Client ID: ")?;
-
-                let client_secret =
-                    prompt::password("Client Secret: ")?;
-
-                let subscription_id = prompt::text("Subscription ID: ")?;
-
-                serde_json::json!({
-                    "platform": "azure",
-                    "name": name,
-                    "tenant_id": tenant_id,
-                    "client_id": client_id,
-                    "client_secret": client_secret,
-                    "subscription_id": subscription_id,
-                    "default_region": region,
-                    "is_default": is_default
-                })
-            }
-            CredentialPlatform::Baremetal => {
-                output::status(format!("Adding bare metal credentials for '{}'", name));
-                let host = prompt::text("Host address: ")?;
-
-                let port = prompt::text_or_default("SSH Port [22]: ", 22)?;
-
-                let username = prompt::text("Username: ")?;
-
-                let auth_type = prompt::text_or_default("Use SSH key (k) or password (p)? [k]: ", "k".to_string())?.to_lowercase();
-
-                let (ssh_private_key, ssh_password) = if auth_type == "p" {
-                    let password = prompt::password("SSH Password: ")?;
-                    (None, Some(password))
-                } else {
-                    let default_key_path = dirs::home_dir()
-                        .map(|h| h.join(".ssh/id_ed25519"))
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "~/.ssh/id_ed25519".to_string());
-                    let key_path = prompt::text_or_default(
-                        "Path to SSH private key [~/.ssh/id_ed25519]: ",
-                        default_key_path,
-                    )?;
-
-                    let key_content = fs::read_to_string(&key_path)
-                        .context(format!("Failed to read SSH key from {}", key_path))?;
-                    (Some(key_content), None)
-                };
-
-                serde_json::json!({
-                    "platform": "baremetal",
-                    "name": name,
-                    "host": host,
-                    "port": port,
-                    "username": username,
-                    "ssh_private_key": ssh_private_key,
-                    "ssh_password": ssh_password,
-                    "is_default": is_default
-                })
-            }
-        };
-
-        let response = self
-            .client
-            .post(format!("{}{}", self.base_url, CREDENTIALS_API_PATH))
-            .header("X-Session-ID", &config.session_id)
-            .json(&request_body)
-            .send()
-            .await?;
-
-        if response.status().is_success() {
-            let cred: serde_json::Value = response.json().await?;
-            output::success(format!(
-                "Credential '{}' added successfully (ID: {})",
-                name, cred["id"]
-            ));
-            if is_default {
-                output::status(format!("Set as default for {}", platform));
-            }
-            Ok(())
-        } else {
-            let error_text = self.api_error_message(response).await;
-            bail!("Failed to add credential: {}", error_text)
-        }
-    }
-
-    async fn list_credentials(&self) -> Result<()> {
-        let config = self.ensure_authenticated().await?;
-
-        let credentials: Vec<serde_json::Value> = self
-            .get_protected_json(
-                &config.session_id,
-                CREDENTIALS_API_PATH,
-                "Failed to list credentials"
-            )
-            .await?;
-
-        if credentials.is_empty() {
-            output::status(
-                "No cloud credentials found. Add one with 'caution credentials add <platform> <name>'",
-            );
-        } else {
-            output::data_header("Cloud Credentials:");
-            output::status("");
-            for cred in credentials {
-                let id = cred["id"].as_str().unwrap_or("unknown");
-                let name = cred["name"].as_str().unwrap_or("untitled");
-                let platform = cred["platform"].as_str().unwrap_or("unknown");
-                let identifier = cred["identifier"].as_str().unwrap_or("");
-                let is_default = cred["is_default"].as_bool().unwrap_or(false);
-                let region = cred["default_region"].as_str();
-
-                let default_marker = if is_default { " (default)" } else { "" };
-                let region_str = region.map(|r| format!(" [{}]", r)).unwrap_or_default();
-
-                output::status(format!(
-                    "  [{}] {} - {}{}{}",
-                    id, name, platform, default_marker, region_str
-                ));
-                output::status(format!("       Identifier: {}", identifier));
-            }
-        }
-        Ok(())
-    }
-
-    async fn remove_credential(&self, id: &str, force: bool) -> Result<()> {
-        let config = self.ensure_authenticated().await?;
-
-        let credential_id =
-            uuid::Uuid::parse_str(id).context("Invalid credential ID - must be a valid UUID")?;
-
-        let cred: serde_json::Value = self
-            .get_protected_json(
-                &config.session_id,
-                &format!("{}/{}", CREDENTIALS_API_PATH, credential_id),
-                "Failed to fetch credential"
-            )
-            .await?;
-
-        let name = cred["name"].as_str().unwrap_or("unknown");
-        let platform = cred["platform"].as_str().unwrap_or("unknown");
-
-        if !force {
-            output::status("About to delete credential:");
-            output::status(format!("  Name: {}", name));
-            output::status(format!("  Platform: {}", platform));
-            output::status("");
-            let confirmed = prompt::confirm("Are you sure? [y/N] ")?;
-            if !confirmed {
-                output::status("Aborted.");
-                return Ok(());
-            }
-        }
-
-        let response = self
-            .client
-            .delete(format!(
-                "{}{}/{}",
-                self.base_url, CREDENTIALS_API_PATH, credential_id
-            ))
-            .header("X-Session-ID", &config.session_id)
-            .send()
-            .await?;
-
-        if response.status().is_success() {
-            output::success(format!("Credential '{}' removed", name));
-            Ok(())
-        } else {
-            let error = self.api_error_message(response).await;
-            bail!("Failed to remove credential: {}", error)
-        }
-    }
-
-    async fn set_default_credential(&self, id: &str) -> Result<()> {
-        let config = self.ensure_authenticated().await?;
-
-        let credential_id =
-            uuid::Uuid::parse_str(id).context("Invalid credential ID - must be a valid UUID")?;
-
-        let response = self
-            .client
-            .post(format!(
-                "{}{}/{}/default",
-                self.base_url, CREDENTIALS_API_PATH, credential_id
-            ))
-            .header("X-Session-ID", &config.session_id)
-            .send()
-            .await?;
-
-        if response.status().is_success() {
-            output::success("Credential set as default");
-            Ok(())
-        } else if response.status() == reqwest::StatusCode::NOT_FOUND {
-            bail!("Credential '{}' not found", id)
-        } else {
-            let error = self.api_error_message(response).await;
-            bail!("Failed to set default: {}", error)
-        }
-    }
-
-    async fn secret_new(
-        &self,
-        keyring: PathBuf,
-        threshold: Option<u8>,
-        max: Option<u8>,
-        upload: bool,
-        name: Option<String>,
-        labels: Vec<String>,
-    ) -> Result<()> {
-        let keymaker_url = std::env::var("KEYMAKER_URL")
-            .context("KEYMAKER_URL environment variable is required")?;
-
-        let keyring_data = fs::read_to_string(&keyring)
-            .with_context(|| format!("Failed to read keyring file: {}", keyring.display()))?;
-
-        let eligibility = keymaker_cert_eligibility(&keyring_data)
-            .with_context(|| format!("Failed to inspect keyring file: {}", keyring.display()))?;
-        let eligible_certs = eligibility.iter().filter(|cert| cert.is_eligible()).count();
-
-        if eligible_certs == 0 {
-            output::warning(
-                "Keyring has no Keymaker-eligible certificates (each needs signing + \
-                 authentication + storage-encryption subkeys):"
-            );
-            if eligibility.is_empty() {
-                output::warning("  (no certificates found in keyring)");
-            }
-            for cert in &eligibility {
-                output::warning(format!(
-                    "  - {} — missing: {}",
-                    cert.user_id,
-                    cert.missing().join(", ")
-                ));
-            }
-            bail!(
-                "No Keymaker-eligible certificates in {}. Fix: generate a compatible key with \
-                 `caution secret keygen` (non-prod), or derive one offline with keyfork: \
-                 https://git.distrust.co/public/keyfork",
-                keyring.display()
-            );
-        }
-
-        // Warn about any certs that lack required subkeys and will be silently excluded.
-        let ineligible: Vec<&CertEligibility> = eligibility
-            .iter()
-            .filter(|cert| !cert.is_eligible())
-            .collect();
-        if !ineligible.is_empty() {
-            output::warning(format!(
-                "Warning: {} certificate(s) in the keyring lack required subkeys and will be \
-                 excluded from the quorum:",
-                ineligible.len()
-            ));
-            for cert in ineligible {
-                output::warning(format!(
-                    "  - {} — missing: {}",
-                    cert.user_id,
-                    cert.missing().join(", ")
-                ));
-            }
-        }
-
-        let (threshold, max) = resolve_quorum_parameters(threshold, max, eligible_certs)?;
-
-        let keyring_data = normalize_keyring(&keyring_data)
-            .with_context(|| format!("Failed to normalize keyring file: {}", keyring.display()))?;
-
-        let request_body = serde_json::json!({
-            "threshold": threshold,
-            "max": max,
-            "keyring": keyring_data,
-            "label": {},
-        });
-
-        output::status(format!(
-            "Generating quorum (threshold={}, max={})...",
-            threshold, max
-        ));
-
-        let response = self
-            .client
-            .post(format!("{}/generate_quorum", keymaker_url))
-            .json(&request_body)
-            .send()
-            .await
-            .context("Failed to connect to Keymaker service")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error = response.text().await?;
-            bail!("Keymaker error ({}): {}", status, error);
-        }
-
-        let quorum_response: GenerateQuorumResponse = response
-            .json()
-            .await
-            .context("Failed to parse Keymaker response")?;
-
-        let json = serde_json::to_string_pretty(&quorum_response)?;
-
-        let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
-        let in_caution_repo = PathBuf::from("Procfile").exists()
-            || PathBuf::from(".caution/deployment.json").exists();
-
-        // Always save to file when in a caution repo
-        if in_caution_repo {
-            let secret_path = PathBuf::from(".caution/quorum-bundle.json");
-            fs::write(&secret_path, &json)
-                .with_context(|| format!("Failed to write secret to {}", secret_path.display()))?;
-            output::status(format!("Saved to: {}", secret_path.display()));
-        }
-
-        // When not uploading (no QR, not in caution repo), output to stdout
-        if !self.qr && (!is_tty || !in_caution_repo) {
-            if !in_caution_repo {
-                output::warning("Warning: not in a Caution repository, outputting bundle to stdout");
-            }
-            output::data(&json)?;
-            return Ok(());
-        }
-
-        if upload || self.qr {
-            if self.qr {
-                output::status(
-                    "\nUploading public key material bundle to Caution via QR code signing..."
-                );
-            } else {
-                output::status("\nTo back up public key material bundle to Caution, tap your key.");
-            }
-            if in_caution_repo {
-                output::status(
-                    "The key material bundle is also accessible at .caution/quorum-bundle.json"
-                );
-            }
-            output::status("Press Ctrl+C to cancel.");
-
-            let config = self.ensure_authenticated().await?;
-
-            let label_map: serde_json::Map<String, serde_json::Value> = labels
-                .iter()
-                .filter_map(|l| l.split_once('='))
-                .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
-                .collect();
-
-            let upload_body = serde_json::json!({
-                "data": quorum_response,
-                "name": name,
-                "labels": label_map,
-            });
-
-            let response = self
-                .signed_post(&config.session_id, "/api/quorum-bundles", &upload_body)
-                .await?;
-
-            if response.status().is_success() {
-                let result: serde_json::Value = response.json().await?;
-                if let Some(id) = result.get("id") {
-                    output::success(format!("\nQuorum bundle stored successfully (bundle ID: {})", id));
-                } else {
-                    output::success("\nQuorum bundle stored successfully.");
-                }
-            } else {
-                let status = response.status();
-                let error = self.api_error_message(response).await;
-                bail!("Failed to store quorum bundle ({}): {}", status, error);
-            }
-        }
-
-        Ok(())
-    }
-
-    fn secret_keygen(
-        &self,
-        output: PathBuf,
-        private_keyring: Option<PathBuf>,
-        name: String,
-        email: String,
-        force: bool,
-        shoot_self_in_foot: bool,
-    ) -> Result<()> {
-        anyhow::ensure!(
-            shoot_self_in_foot,
-            "Refusing to generate an unencrypted private keyring without \
-             --shoot-self-in-foot.\n\n{}",
-            PLAINTEXT_KEYGEN_WARNING
-        );
-
-        let name = name.trim();
-        let email = email.trim();
-
-        anyhow::ensure!(!name.is_empty(), "--name must not be empty");
-        anyhow::ensure!(!email.is_empty(), "--email must not be empty");
-        anyhow::ensure!(
-            !name.chars().any(|ch| matches!(ch, '\n' | '\r' | '<' | '>'))
-                && !email
-                    .chars()
-                    .any(|ch| matches!(ch, '\n' | '\r' | '<' | '>')),
-            "--name and --email must not contain newlines or angle brackets"
-        );
-        anyhow::ensure!(email.contains('@'), "--email must be an email address");
-
-        let private_keyring =
-            private_keyring.unwrap_or_else(|| default_private_keyring_path(&output));
-        anyhow::ensure!(
-            output != private_keyring,
-            "public and private keyring paths must be different"
-        );
-        if !force {
-            anyhow::ensure!(
-                !output.exists(),
-                "{} already exists; pass --force to overwrite it",
-                output.display()
-            );
-            anyhow::ensure!(
-                !private_keyring.exists(),
-                "{} already exists; pass --force to overwrite it",
-                private_keyring.display()
-            );
-        }
-
-        let user_id = format!("{name} <{email}>");
-        output::status(format!("Generating OpenPGP key for {user_id}..."));
-
-        let cert = keymaker_cert(user_id)?;
-        let fingerprint = cert.fingerprint();
-        let (public_keyring, private_keyring_contents) = armored_keyrings_for_cert(&cert)?;
-
-        let public_keyring_text = std::str::from_utf8(&public_keyring)
-            .context("Generated public keyring is not valid UTF-8")?;
-        let eligible_certs = keymaker_eligible_cert_count(public_keyring_text)
-            .context("Generated keyring is not Keymaker-eligible")?;
-        anyhow::ensure!(
-            eligible_certs == 1,
-            "generated keyring should contain exactly one eligible certificate, found {}",
-            eligible_certs
-        );
-
-        write_keyring(&output, &public_keyring, force, false)?;
-        write_keyring(&private_keyring, &private_keyring_contents, force, true)?;
-
-        output::success(format!("Wrote public keyring to {}", output.display()));
-        output::status(format!("Fingerprint: {}", fingerprint));
-        output::success(format!("Wrote private keyring to {}", private_keyring.display()));
-        output::warning(PLAINTEXT_KEYGEN_WARNING);
-        output::warning(format!(
-            "Use the private keyring with: caution secret send-shard --keyring {}",
-            private_keyring.display()
-        ));
-
-        Ok(())
-    }
-
-    fn secret_encrypt(
-        &self,
-        keys: Vec<String>,
-        env_file: PathBuf,
-        bundle: PathBuf,
-        secrets_dir: PathBuf,
-    ) -> Result<()> {
-        encrypt_env_file(&env_file, &bundle, &secrets_dir, &keys)?;
-
-        Ok(())
-    }
-
-    async fn secret_rename(&self, id: String, name: String) -> Result<()> {
-        let config = self.ensure_authenticated().await?;
-
-        let body = serde_json::json!({
-            "name": name,
-        });
-
-        let response = self
-            .client
-            .patch(format!("{}/api/quorum-bundles/{}", self.base_url, id))
-            .header("X-Session-ID", &config.session_id)
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to connect to server")?;
-
-        if response.status().is_success() {
-            output::success(format!("Quorum bundle renamed to \"{}\"", name));
-        } else {
-            let status = response.status();
-            let error = self.api_error_message(response).await;
-            bail!("Failed to rename quorum bundle ({}): {}", status, error);
-        }
-
-        Ok(())
-    }
-
-    async fn secret_label_set(&self, id: String, labels: Vec<String>) -> Result<()> {
-        let config = self.ensure_authenticated().await?;
-
-        // Get current bundle to read existing labels
-        let bundle: serde_json::Value = self
-            .get_protected_json(
-                &config.session_id,
-                &format!("/api/quorum-bundles/{}", id),
-                "Failed to fetch quorum bundle"
-            )
-            .await?;
-        
-        let mut current_labels = bundle
-            .get("labels")
-            .and_then(|l| l.as_object().cloned())
-            .unwrap_or_default();
-
-        // Merge new labels
-        for label in &labels {
-            let (k, v) = label.split_once('=').ok_or_else(|| {
-                anyhow::anyhow!("Invalid label format '{}', expected key=value", label)
-            })?;
-            current_labels.insert(k.to_string(), serde_json::Value::String(v.to_string()));
-        }
-
-        let body = serde_json::json!({ "labels": current_labels });
-
-        let response = self
-            .client
-            .patch(format!("{}/api/quorum-bundles/{}", self.base_url, id))
-            .header("X-Session-ID", &config.session_id)
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to connect to server")?;
-
-        if response.status().is_success() {
-            output::success("Labels updated successfully");
-        } else {
-            let status = response.status();
-            let error = self.api_error_message(response).await;
-            bail!("Failed to update labels ({}): {}", status, error);
-        }
-
-        Ok(())
-    }
-
-    async fn secret_label_remove(&self, id: String, keys: Vec<String>) -> Result<()> {
-        let config = self.ensure_authenticated().await?;
-
-        // Get current bundle to read existing labels
-        let bundle: serde_json::Value = self
-            .get_protected_json(
-                &config.session_id,
-                &format!("/api/quorum-bundles/{}", id),
-                "Failed to fetch quorum bundle"
-            )
-            .await?;
-        
-        let mut current_labels = bundle
-            .get("labels")
-            .and_then(|l| l.as_object().cloned())
-            .unwrap_or_default();
-
-        for key in &keys {
-            current_labels.remove(key);
-        }
-
-        let body = serde_json::json!({ "labels": current_labels });
-
-        let response = self
-            .client
-            .patch(format!("{}/api/quorum-bundles/{}", self.base_url, id))
-            .header("X-Session-ID", &config.session_id)
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to connect to server")?;
-
-        if response.status().is_success() {
-            output::success("Labels removed successfully");
-        } else {
-            let status = response.status();
-            let error = self.api_error_message(response).await;
-            bail!("Failed to remove labels ({}): {}", status, error);
-        }
-
-        Ok(())
-    }
-
-    async fn secret_send_shard(
-        &self,
-        app: Option<String>,
-        bundle_path: Option<PathBuf>,
-        private_keyring: Option<PathBuf>,
-    ) -> Result<()> {
-        // Resolve the app to get the enclave's public IP
-        let app_info = match app {
-            Some(id) => self.fetch_app(&id).await?,
-            None => self.get_current_app().await?,
-        };
-
-        let public_ip = app_info
-            .public_ip
-            .context("App has no public IP. Is the enclave running?")?;
-
-        // Resolve the bundle file
-        let bundle_file = if let Some(path) = bundle_path {
-            path
-        } else {
-            // Check local paths first
-            let local_paths = [
-                PathBuf::from(".caution/secrets/bundle.json"),
-                PathBuf::from(".caution/quorum-bundle.json"),
-            ];
-            let found = local_paths.iter().find(|p| p.exists());
-
-            if let Some(path) = found {
-                path.clone()
-            } else {
-                // Try to pull from Caution API
-                output::status("No local bundle found, checking Caution...");
-                let config = self.ensure_authenticated().await?;
-                
-                let bundles: Vec<serde_json::Value> = self
-                    .get_protected_json(
-                        &config.session_id,
-                        "/api/quorum-bundles",
-                        "Failed to fetch quorum bundles from Caution"
-                    )
-                    .await?;
-
-                if bundles.is_empty() {
-                    bail!(
-                        "No bundle found locally or on Caution. Create one with: caution secret new <keyring>"
-                    );
-                }
-
-                // Use the first bundle's data
-                let bundle_data = bundles[0].get("data").context("Bundle has no data field")?;
-
-                let secrets_dir = PathBuf::from(".caution/secrets");
-                fs::create_dir_all(&secrets_dir).context("Failed to create .caution/secrets/")?;
-                let path = secrets_dir.join("bundle.json");
-                let json = serde_json::to_string_pretty(bundle_data)?;
-                fs::write(&path, &json)
-                    .with_context(|| format!("Failed to write bundle to {}", path.display()))?;
-                output::status(format!("Bundle saved to {}", path.display()));
-                path
-            }
-        };
-
-        anyhow::ensure!(
-            bundle_file.exists(),
-            "Bundle file not found: {}",
-            bundle_file.display()
-        );
-
-        // Load trusted hashes from a prior `caution verify`
-        let hashes_path = PathBuf::from(".caution/trusted_hashes.json");
-        let hashes_text = fs::read_to_string(&hashes_path).context(
-            "No trusted hashes found. Run `caution verify` first to establish trusted PCR values."
-        )?;
-        let hashes: serde_json::Value = serde_json::from_str(&hashes_text)
-            .context("Failed to parse .caution/trusted_hashes.json")?;
-
-        let pcrs = std::collections::HashMap::from([
-            (
-                0u8,
-                hex::decode(hashes["pcr0"].as_str().context("missing pcr0")?)
-                    .context("invalid pcr0 hex")?,
-            ),
-            (
-                1u8,
-                hex::decode(hashes["pcr1"].as_str().context("missing pcr1")?)
-                    .context("invalid pcr1 hex")?,
-            ),
-            (
-                2u8,
-                hex::decode(hashes["pcr2"].as_str().context("missing pcr2")?)
-                    .context("invalid pcr2 hex")?,
-            ),
-        ]);
-
-        if let Some(verified_at) = hashes["verified_at"].as_str() {
-            output::status(format!("Using trusted hashes from {}", verified_at));
-        }
-
-        // Parse the quorum bundle
-        let bundle_text = fs::read_to_string(&bundle_file)
-            .with_context(|| format!("Failed to read bundle file: {}", bundle_file.display()))?;
-        let bundle: GenerateQuorumResponse =
-            serde_json::from_str(&bundle_text).context("Failed to parse bundle JSON")?;
-
-        let address_str = format!("{}:49504", public_ip);
-        output::status(format!("Sending shard to enclave at {}...", address_str));
-        let address: std::net::SocketAddr = address_str.parse().context("Invalid address")?;
-
-        let status = locksmith::client::send_shard(address, pcrs, &bundle, private_keyring)
-            .await
-            .context("Failed to send shard to enclave")?;
-
-        match status {
-            locksmith::models::SendSignedEncryptedShardResponse::Accepted { remaining } => {
-                output::success(format!(
-                    "Shard accepted, {} remaining shards until reconstitution",
-                    remaining
-                ));
-            }
-            locksmith::models::SendSignedEncryptedShardResponse::Rejected { reason } => {
-                bail!("Shard rejected by enclave: {}", reason);
-            }
-        }
-
-        Ok(())
-    }
 }
 
-fn resolve_procfile_build_command(content: &str, work_dir: &Path) -> Result<String> {
+fn resolve_procfile_build_command(
+    content: &str,
+    work_dir: &Path,
+) -> Result<String, ResolveProcfileBuildCommandError> {
+    use ResolveProcfileBuildCommandErrorCtx as Ctx;
+
     let mut build_command = None;
     let mut containerfile = None;
 
@@ -9842,17 +3393,17 @@ fn resolve_procfile_build_command(content: &str, work_dir: &Path) -> Result<Stri
             match key {
                 "build" => {
                     if value.is_empty() {
-                        bail!(
-                            "Procfile has empty build command. Expected format: build: docker build -t myapp ."
-                        );
+                        return Err(ResolveProcfileBuildCommandError::EmptyBuildCommand {
+                            location: std::panic::Location::caller(),
+                        });
                     }
                     build_command = Some(value.to_string());
                 }
                 "containerfile" => {
                     if value.is_empty() {
-                        bail!(
-                            "Procfile has empty containerfile path. Expected format: containerfile: Containerfile"
-                        );
+                        return Err(ResolveProcfileBuildCommandError::EmptyContainerfile {
+                            location: std::panic::Location::caller(),
+                        });
                     }
                     containerfile = Some(value.to_string());
                 }
@@ -9861,23 +3412,27 @@ fn resolve_procfile_build_command(content: &str, work_dir: &Path) -> Result<Stri
         }
     }
 
-    let containerfile = if !has_explicit_build_command(build_command.as_deref()) {
-        match containerfile.as_deref() {
-            Some(containerfile) => {
-                let containerfile = validate_explicit_containerfile_path(containerfile)?;
-                if !work_dir.join(&containerfile).is_file() {
-                    bail!(
-                        "Procfile field `containerfile:` points to missing file: {}",
-                        containerfile
-                    );
+    let containerfile =
+        if !has_explicit_build_command(build_command.as_deref()) {
+            match containerfile.as_deref() {
+                Some(containerfile) => {
+                    let containerfile =
+                        validate_explicit_containerfile_path(containerfile).with_context(
+                            Ctx::invalid_containerfile(),
+                        )?;
+                    if !work_dir.join(&containerfile).is_file() {
+                        return Err(ResolveProcfileBuildCommandError::MissingContainerfile {
+                            path: containerfile,
+                            location: std::panic::Location::caller(),
+                        });
+                    }
+                    Some(containerfile)
                 }
-                Some(containerfile)
+                None => None,
             }
-            None => None,
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     Ok(resolve_build_command_in_dir(
         build_command.as_deref(),
@@ -9889,16 +3444,18 @@ fn resolve_procfile_build_command(content: &str, work_dir: &Path) -> Result<Stri
 fn resolve_local_build_command_from_dir(
     work_dir: &Path,
     allow_missing_procfile: bool,
-) -> Result<String> {
+) -> Result<String, ResolveLocalBuildCommandFromDirError> {
+    use ResolveLocalBuildCommandFromDirErrorCtx as Ctx;
+
     let config_path = work_dir.join("caution.hcl");
     let procfile_path = work_dir.join("Procfile");
     let has_containerfile = work_dir.join("Containerfile").is_file();
     let has_dockerfile = work_dir.join("Dockerfile").is_file();
 
     if config_path.exists() {
-        let content = fs::read_to_string(&config_path).context("Failed to read caution.hcl")?;
+        let content = fs::read_to_string(&config_path).with_context(Ctx::read_caution_hcl())?;
         let config = caution_config::ConfigurationFile::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("Invalid caution.hcl: {}", e))?;
+            .with_context(Ctx::parse_caution_hcl())?;
         let containerfile = config
             .enclave
             .and_then(|e| e.into_iter().next().map(|(_, v)| v))
@@ -9906,9 +3463,13 @@ fn resolve_local_build_command_from_dir(
             .and_then(|b| b.containerfile);
 
         if let Some(ref cf) = containerfile {
-            let cf = validate_explicit_containerfile_path(cf)?;
+            let cf = validate_explicit_containerfile_path(cf)
+                .with_context(Ctx::invalid_containerfile())?;
             if !work_dir.join(&cf).is_file() {
-                bail!("caution.hcl `containerfile` points to missing file: {}", cf);
+                return Err(ResolveLocalBuildCommandFromDirError::MissingContainerfile {
+                    path: cf,
+                    location: std::panic::Location::caller(),
+                });
             }
         }
 
@@ -9920,12 +3481,15 @@ fn resolve_local_build_command_from_dir(
     }
 
     if procfile_path.exists() {
-        let content = fs::read_to_string(&procfile_path).context("Failed to read Procfile")?;
-        return resolve_procfile_build_command(&content, work_dir);
+        let content = fs::read_to_string(&procfile_path).with_context(Ctx::read_procfile())?;
+        return resolve_procfile_build_command(&content, work_dir)
+            .with_context(Ctx::procfile_resolve());
     }
 
     if !allow_missing_procfile {
-        bail!("No caution.hcl or Procfile found");
+        return Err(ResolveLocalBuildCommandFromDirError::NoConfigFound {
+            location: std::panic::Location::caller(),
+        });
     }
 
     if has_containerfile || has_dockerfile {
@@ -9935,41 +3499,46 @@ fn resolve_local_build_command_from_dir(
     Ok("echo 'Please configure your configuration file'".to_string())
 }
 
-struct AssertionResult {
-    response_json: Vec<u8>,
-}
-
 /// `--qr` is global, so it parses on every subcommand. It only means something
 /// for flows that authenticate an existing credential (signing, login);
 /// registration creates one and has no cross-device path.
 fn validate_global_qr(command: &Commands, qr: bool) -> Result<(), RunError> {
     if qr && matches!(command, Commands::Register { .. }) {
-        return Err(RunError::ArgValidation(
-            "--qr is not supported for register: creating a credential requires a local authenticator. Register on this device, then use --qr for login and deploys.",
-        ));
+        return Err(RunError::ArgValidation {
+            detail: "--qr is not supported for register: creating a credential requires a local authenticator. Register on this device, then use --qr for login and deploys.",
+            location: std::panic::Location::caller(),
+        });
     }
     Ok(())
 }
 
 pub async fn run() -> Result<(), RunError> {
+    use RunErrorCtx as Ctx;
+
     let cli = Cli::parse();
 
     output::verbose(cli.verbose, "API CLI v0.1.0");
-    output::verbose(cli.verbose, &format!("Gateway URL: {}", cli.url));
-    output::verbose(cli.verbose, &format!("Command: {:?}", cli.command));
+    output::verbose(cli.verbose, format!("Gateway URL: {}", cli.url));
+    output::verbose(cli.verbose, format!("Command: {:?}", cli.command));
 
     validate_global_qr(&cli.command, cli.qr)?;
 
     if let Err(e) = check_dependencies(cli.verbose) {
         output::error(format!("Dependency check failed: {}", e));
-        return Err(RunError::DependencyCheck(e));
+        return Err(RunError::DependencyCheck {
+            location: std::panic::Location::caller(),
+            source: e.into(),
+        });
     }
 
     match &cli.command {
         Commands::Register { .. } | Commands::Login { .. } => {
             if let Err(e) = check_gateway_connectivity(&cli.url, cli.verbose).await {
                 output::error("Pre-flight check failed");
-                return Err(RunError::GatewayConnectivity(e));
+                return Err(RunError::GatewayConnectivity {
+                    location: std::panic::Location::caller(),
+                    source: e.into(),
+                });
             }
         }
         _ => {}
@@ -9977,7 +3546,7 @@ pub async fn run() -> Result<(), RunError> {
 
     output::verbose(cli.verbose, "Initializing API client...");
     let client = ApiClient::new(&cli.url, cli.verbose, cli.qr, cli.workdir.clone())
-        .map_err(RunError::ApiClientInit)?;
+        .with_context(Ctx::api_client_init())?;
     output::verbose(cli.verbose, "API client ready");
 
     match cli.command {
@@ -9985,40 +3554,37 @@ pub async fn run() -> Result<(), RunError> {
             alpha_code,
             username,
         } => {
-            let username = resolve_register_username(
+            let username = auth::resolve_register_username(
                 username,
                 std::io::IsTerminal::is_terminal(&std::io::stdin()),
                 &mut std::io::stdin().lock(),
             )
-            .context("Failed to read username")
-            .map_err(RunError::CommandDispatch)?;
-            client
-                .register(&alpha_code, &username)
+            .with_context(Ctx::command_dispatch())?;
+            auth::register(&client, &alpha_code, &username)
                 .await
-                .map_err(RunError::CommandDispatch)?;
+                .with_context(Ctx::command_dispatch())?;
         }
         Commands::Login { qr, username } => {
             if qr {
-                client
-                    .login_qr(username.as_deref())
+                auth::login_qr(&client, username.as_deref())
                     .await
-                    .map_err(RunError::CommandDispatch)?;
+                    .with_context(Ctx::command_dispatch())?;
             } else {
-                client
-                    .login(username)
+                auth::login(&client, username)
                     .await
-                    .map_err(RunError::CommandDispatch)?;
+                    .with_context(Ctx::command_dispatch())?;
             }
         }
         Commands::Logout => {
-            client.logout().await.map_err(RunError::CommandDispatch)?;
+            auth::logout(&client)
+                .await
+                .with_context(Ctx::command_dispatch())?;
         }
         Commands::Account { command } => match command {
             AccountCommands::Id => {
-                client
-                    .print_account_id()
+                auth::print_account_id(&client)
                     .await
-                    .map_err(RunError::CommandDispatch)?;
+                    .with_context(Ctx::command_dispatch())?;
             }
         },
         Commands::Init {
@@ -10031,14 +3597,22 @@ pub async fn run() -> Result<(), RunError> {
             yes,
         } => {
             if bring_your_own_cloud && platform != "aws" {
-                return Err(RunError::ArgValidation(
-                    "Only --platform aws is currently supported for bring-your-own-compute deployments",
-                ));
+                return Err(RunError::ArgValidation {
+                    detail: "Only --platform aws is currently supported for bring-your-own-compute deployments",
+                    location: std::panic::Location::caller(),
+                });
             }
-            client
-                .init(bring_your_own_cloud, name, region, local, config, yes)
-                .await
-                .map_err(RunError::CommandDispatch)?;
+            byoc::init(
+                &client,
+                bring_your_own_cloud,
+                name,
+                region,
+                local,
+                config,
+                yes,
+            )
+            .await
+            .with_context(Ctx::command_dispatch())?;
         }
         Commands::Teardown {
             bring_your_own_cloud,
@@ -10048,15 +3622,19 @@ pub async fn run() -> Result<(), RunError> {
         } => {
             if bring_your_own_cloud {
                 if platform != "aws" {
-                    return Err(RunError::ArgValidation(
-                        "Only --platform aws is currently supported for bring-your-own-compute deployments",
-                    ));
+                    return Err(RunError::ArgValidation {
+                        detail: "Only --platform aws is currently supported for bring-your-own-compute deployments",
+                        location: std::panic::Location::caller(),
+                    });
                 }
-                client.teardown_byoc(force, local).await.map_err(RunError::CommandDispatch)?;
+                byoc::teardown(&client, force, local)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             } else {
-                return Err(RunError::ArgValidation(
-                    "Please specify --byoc to tear down BYOC infrastructure",
-                ));
+                return Err(RunError::ArgValidation {
+                    detail: "Please specify --byoc to tear down BYOC infrastructure",
+                    location: std::panic::Location::caller(),
+                });
             }
         }
         Commands::Verify {
@@ -10069,32 +3647,38 @@ pub async fn run() -> Result<(), RunError> {
             save_pcrs,
             inspect_attestation,
         } => {
-            client
-                .verify(
-                    attestation_url,
-                    from_local,
-                    from_tarball,
-                    app_source_url,
-                    pcrs,
-                    no_cache,
-                    save_pcrs,
-                    inspect_attestation,
-                )
-                .await
-                .map_err(RunError::CommandDispatch)?;
+            verify::verify(
+                &client,
+                attestation_url,
+                from_local,
+                from_tarball,
+                app_source_url,
+                pcrs,
+                no_cache,
+                save_pcrs,
+                inspect_attestation,
+            )
+            .await
+            .with_context(Ctx::command_dispatch())?;
         }
         Commands::Apps { command } => match command {
             AppCommands::Create => {
-                client.create_app().await.map_err(RunError::CommandDispatch)?;
+                apps::crud::create(&client)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
             AppCommands::List => {
-                client.list_apps().await.map_err(RunError::CommandDispatch)?;
+                apps::crud::list(&client)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
             AppCommands::Get {
                 id,
                 this_is_a_ci_machine,
             } => {
-                client.get_app(id, this_is_a_ci_machine).await.map_err(RunError::CommandDispatch)?;
+                apps::crud::get(&client, id, this_is_a_ci_machine)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
             AppCommands::Destroy {
                 id,
@@ -10102,25 +3686,29 @@ pub async fn run() -> Result<(), RunError> {
                 force_delete,
                 this_is_a_ci_machine,
             } => {
-                client
-                    .destroy_app(id, force, force_delete, this_is_a_ci_machine)
+                apps::crud::destroy(&client, id, force, force_delete, this_is_a_ci_machine)
                     .await
-                    .map_err(RunError::CommandDispatch)?;
+                    .with_context(Ctx::command_dispatch())?;
             }
             AppCommands::Build { no_cache } => {
-                client.build_local(no_cache).await
-                    .map_err(|e| RunError::CommandDispatch(anyhow::Error::from(e)))?;
+                verify::build_local(&client, no_cache)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
             AppCommands::Rename { name, id } => {
-                client.rename_app(id, name).await.map_err(RunError::CommandDispatch)?;
+                apps::crud::rename(&client, id, name)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
             AppCommands::DownloadEif(args) => {
-                apps::download_eif::download_eif(&client, &args).await
-                    .map_err(|e| RunError::CommandDispatch(e.into()))?;
+                apps::download_eif::download_eif(&client, &args)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
             AppCommands::MigrateProcfile(args) => {
-                apps::migrate_procfile::migrate_procfile(&client, &args).await
-                    .map_err(|e| RunError::CommandDispatch(e.into()))?;
+                apps::migrate_procfile::migrate_procfile(&client, &args)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
         },
         Commands::SshKeys { command } => match command {
@@ -10130,47 +3718,50 @@ pub async fn run() -> Result<(), RunError> {
                 key,
                 name,
             } => {
-                client.add_ssh_key(key_file, from_agent, key, name).await.map_err(RunError::CommandDispatch)?;
+                ssh_keys::add(&client, key_file, from_agent, key, name)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
             SshKeyCommands::List => {
-                client.list_ssh_keys().await.map_err(RunError::CommandDispatch)?;
+                ssh_keys::list(&client)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
             SshKeyCommands::Remove { fingerprint } => {
-                client.remove_ssh_key(&fingerprint).await.map_err(RunError::CommandDispatch)?;
+                ssh_keys::remove(&client, &fingerprint)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
         },
         Commands::PgpKeys { command } => match command {
             PgpKeyCommands::Add { key_file, name } => {
-                client
-                    .add_pgp_key(key_file, name)
+                pgp_keys::add(&client, key_file, name)
                     .await
-                    .map_err(RunError::CommandDispatch)?;
+                    .with_context(Ctx::command_dispatch())?;
             }
             PgpKeyCommands::List => {
-                client
-                    .list_pgp_keys()
+                pgp_keys::list(&client)
                     .await
-                    .map_err(RunError::CommandDispatch)?;
+                    .with_context(Ctx::command_dispatch())?;
             }
             PgpKeyCommands::Remove { fingerprint } => {
-                client
-                    .remove_pgp_key(&fingerprint)
+                pgp_keys::remove(&client, &fingerprint)
                     .await
-                    .map_err(RunError::CommandDispatch)?;
+                    .with_context(Ctx::command_dispatch())?;
             }
         },
         Commands::Cache { command } => match command {
             CacheCommands::Path => {
-                client.cache_path().map_err(RunError::CommandDispatch)?;
+                cache::path(&client).with_context(Ctx::command_dispatch())?;
             }
             CacheCommands::Size => {
-                client.cache_size().map_err(RunError::CommandDispatch)?;
+                cache::size(&client).with_context(Ctx::command_dispatch())?;
             }
             CacheCommands::List => {
-                client.cache_list().map_err(RunError::CommandDispatch)?;
+                cache::list(&client).with_context(Ctx::command_dispatch())?;
             }
             CacheCommands::Destroy { force } => {
-                client.cache_destroy(force).map_err(RunError::CommandDispatch)?;
+                cache::destroy(&client, force).with_context(Ctx::command_dispatch())?;
             }
         },
         Commands::Credentials { command } => match command {
@@ -10180,24 +3771,32 @@ pub async fn run() -> Result<(), RunError> {
                 default,
                 region,
             } => {
-                client
-                    .add_credential(platform, name, default, region)
+                credentials::add(&client, platform, name, default, region)
                     .await
-                    .map_err(RunError::CommandDispatch)?;
+                    .with_context(Ctx::command_dispatch())?;
             }
             CredentialCommands::List => {
-                client.list_credentials().await.map_err(RunError::CommandDispatch)?;
+                credentials::list(&client)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
             CredentialCommands::Remove { id, force } => {
-                client.remove_credential(&id, force).await.map_err(RunError::CommandDispatch)?;
+                credentials::remove(&client, &id, force)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
             CredentialCommands::SetDefault { id } => {
-                client.set_default_credential(&id).await.map_err(RunError::CommandDispatch)?;
+                credentials::set_default(&client, &id)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
         },
         Commands::Capacity { command } => match command {
             CapacityCommands::Waitlist { email, vcpus } => {
-                client.join_capacity_waitlist(&email, vcpus).await.map_err(RunError::CommandDispatch)?;
+                client
+                    .join_capacity_waitlist(&email, vcpus)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
         },
         Commands::Secret { command } => match command {
@@ -10209,7 +3808,7 @@ pub async fn run() -> Result<(), RunError> {
                 force,
                 shoot_self_in_foot,
             } => {
-                client.secret_keygen(
+                secrets::keygen(
                     output,
                     private_keyring,
                     name,
@@ -10217,7 +3816,7 @@ pub async fn run() -> Result<(), RunError> {
                     force,
                     shoot_self_in_foot,
                 )
-                .map_err(RunError::CommandDispatch)?;
+                .with_context(Ctx::command_dispatch())?;
             }
             SecretCommands::New {
                 keyring,
@@ -10227,10 +3826,9 @@ pub async fn run() -> Result<(), RunError> {
                 name,
                 labels,
             } => {
-                client
-                    .secret_new(keyring, threshold, max, !no_upload, name, labels)
+                secrets::new(&client, keyring, threshold, max, !no_upload, name, labels)
                     .await
-                    .map_err(RunError::CommandDispatch)?;
+                    .with_context(Ctx::command_dispatch())?;
             }
             SecretCommands::Encrypt {
                 keys,
@@ -10238,18 +3836,24 @@ pub async fn run() -> Result<(), RunError> {
                 bundle,
                 secrets_dir,
             } => {
-                client.secret_encrypt(keys, env_file, bundle, secrets_dir)
-                    .map_err(RunError::CommandDispatch)?;
+                secrets::encrypt(keys, env_file, bundle, secrets_dir)
+                    .with_context(Ctx::command_dispatch())?;
             }
             SecretCommands::Rename { id, name } => {
-                client.secret_rename(id, name).await.map_err(RunError::CommandDispatch)?;
+                secrets::rename(&client, id, name)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
             SecretCommands::Label { command } => match command {
                 LabelCommands::Set { id, labels } => {
-                    client.secret_label_set(id, labels).await.map_err(RunError::CommandDispatch)?;
+                    secrets::label_set(&client, id, labels)
+                        .await
+                        .with_context(Ctx::command_dispatch())?;
                 }
                 LabelCommands::Remove { id, keys } => {
-                    client.secret_label_remove(id, keys).await.map_err(RunError::CommandDispatch)?;
+                    secrets::label_remove(&client, id, keys)
+                        .await
+                        .with_context(Ctx::command_dispatch())?;
                 }
             },
             SecretCommands::SendShard {
@@ -10257,7 +3861,9 @@ pub async fn run() -> Result<(), RunError> {
                 bundle,
                 keyring,
             } => {
-                client.secret_send_shard(app, bundle, keyring).await.map_err(RunError::CommandDispatch)?;
+                secrets::send_shard(&client, app, bundle, keyring)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
         },
     }
@@ -10268,34 +3874,30 @@ pub async fn run() -> Result<(), RunError> {
 #[cfg(test)]
 mod tests {
     use super::openpgp;
-    use super::{
-        AccountCommands, ApiClient, ArchivePreflightStatus, Cli, Commands, LoginUsernameError,
-        ARCHIVE_PREFLIGHT_ATTEMPTS, MAX_ATTESTATION_RESPONSE_BYTES, PgpKeyCommands,
-        RegisterUsernameError, RunError, TlsConnection, TlsExpectation, TrustedHashes, TrustedTls,
+    use super::verify::{
+        ARCHIVE_PREFLIGHT_ATTEMPTS, ArchivePreflightStatus, MAX_ATTESTATION_RESPONSE_BYTES,
+        TlsConnection, TlsExpectation, TrustedHashes, TrustedTls,
         append_attestation_response_chunk, archive_preflight_urls, attestation_inspection_json,
-        attestation_user_data, classify_archive_preflight, configured_enclave, display_user_data,
-        dns_answer_is_absent,
-        dns_contains_deployment_ip, encrypt_env_file, encrypt_secret_value,
-        keymaker_cert_eligibility, load_recipient_cert, login_begin_request_body,
-        measured_build_cache_key, normalize_keyring, parse_env_assignments, persist_trusted_hashes,
-        persist_trusted_hashes_with_backup, prepare_pgp_public_key_for_upload, prompt_line_from,
-        prompt_optional_line_from, reproduction_uses_steve, resolve_local_build_command_from_dir,
-        resolve_login_username, resolve_procfile_build_command, resolve_quorum_parameters,
-        resolve_register_username, resolve_reproduction_e2e_mode, tls_connection,
-        tls_expectation_from_config, validate_attested_tls, validate_global_qr,
-        verify_deprecation_warnings, aws_credentials_error, deployment_target_summary,
-        extract_resource_id_from_git_url, inspect_checkout_link, linked_checkout_error,
-        linked_encrypted_byoc_config, relink_candidate,
+        attestation_user_data, classify_app_source_refs, classify_archive_preflight,
+        configured_enclave, display_user_data, dns_answer_is_absent, dns_contains_deployment_ip,
+        git_command, measured_build_cache_key, persist_trusted_hashes,
+        persist_trusted_hashes_with_backup, preflight_archive_urls, reproduction_uses_steve,
+        resolve_reproduction_e2e_mode, tls_connection, tls_expectation_from_config,
+        validate_attested_tls, verify_deprecation_warnings,
+    };
+    use super::{
+        AccountCommands, ApiClient, Cli, Commands, PgpKeyCommands, RunError,
+        deployment_target_summary, inspect_checkout_link, linked_checkout_error,
+        prepare_pgp_public_key_for_upload, resolve_local_build_command_from_dir,
+        resolve_procfile_build_command, validate_global_qr,
     };
     use caution_config::{ConfigurationFile, E2eEncryption, E2eMode};
     use clap::Parser;
-    use keymaker_models::generate_quorum::v0::GenerateQuorumResponse;
     use openpgp::cert::prelude::*;
-    use openpgp::parse::Parse;
     use openpgp::serialize::SerializeInto;
     use sha2::Digest;
     use std::collections::HashMap;
-    use std::io::{self, Cursor};
+    use std::io;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
@@ -10708,11 +4310,9 @@ enclave "main" {{
         std::fs::write(&path, b"original").unwrap();
 
         assert!(
-            persist_trusted_hashes_with_backup(
-                &path,
-                &trusted_hashes("new", None),
-                |_, _| Err(io::Error::new(io::ErrorKind::PermissionDenied, "injected"))
-            )
+            persist_trusted_hashes_with_backup(&path, &trusted_hashes("new", None), |_, _| Err(
+                io::Error::new(io::ErrorKind::PermissionDenied, "injected")
+            ))
             .is_err()
         );
         assert_eq!(std::fs::read(&path).unwrap(), b"original");
@@ -10746,9 +4346,7 @@ enclave "main" {{
 
         let directory_state = work_dir.path().join("directory-state");
         std::fs::create_dir(&directory_state).unwrap();
-        assert!(
-            persist_trusted_hashes(&directory_state, &trusted_hashes("new", None)).is_err()
-        );
+        assert!(persist_trusted_hashes(&directory_state, &trusted_hashes("new", None)).is_err());
         assert!(directory_state.is_dir());
     }
 
@@ -10789,9 +4387,7 @@ enclave "main" {{
     async fn serve_preflight_responses(
         responses: Vec<(reqwest::StatusCode, Option<String>)>,
     ) -> (String, tokio::task::JoinHandle<usize>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
             let mut requests = 0;
@@ -10880,16 +4476,6 @@ enclave "main" {{
         ));
     }
 
-    fn test_public_key() -> String {
-        let (cert, _revocation) = CertBuilder::new()
-            .add_userid("test@example.org")
-            .add_storage_encryption_subkey()
-            .generate()
-            .unwrap();
-
-        String::from_utf8(cert.armored().to_vec().unwrap()).unwrap()
-    }
-
     #[test]
     fn pgp_key_upload_preparation_rejects_private_material() {
         let (cert, _revocation) = CertBuilder::new()
@@ -10901,148 +4487,6 @@ enclave "main" {{
 
         let error = prepare_pgp_public_key_for_upload(&private_key).unwrap_err();
         assert!(error.to_string().contains("private key material"));
-    }
-
-    #[test]
-    fn normalize_keyring_merges_concatenated_armor_blocks() {
-        // Simulate `cat alice.asc bob.asc > keyring.asc`
-        let concatenated = format!("{}{}", test_public_key(), test_public_key());
-        assert_eq!(concatenated.matches("BEGIN PGP").count(), 2);
-
-        let normalized = normalize_keyring(&concatenated).unwrap();
-        assert_eq!(normalized.matches("BEGIN PGP").count(), 1);
-
-        // Both certificates survive normalization.
-        let certs: Vec<_> = openpgp::cert::CertParser::from_bytes(normalized.as_bytes())
-            .unwrap()
-            .collect::<openpgp::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(certs.len(), 2);
-    }
-
-    #[test]
-    fn parse_env_assignments_supports_export_and_matching_quotes() {
-        let assignments = parse_env_assignments(
-            "\
-# comment\n\
-export FOO=\"bar\"\n\
-BAR='baz'\n\
-EMPTY=\n\
-INLINE=\"value # preserved\"\n\
-BAD-KEY=no\n\
-SPACED =no\n\
-PADDED = \" spaced \" \n\
-ESCAPED=\"say \\\"hi\\\"\"\n\
-COMMENTED=\"bar\" # trailing comment\n\
-export MISSING_EQUALS\n",
-        );
-
-        let pairs: Vec<_> = assignments
-            .iter()
-            .map(|assignment| (assignment.key.as_str(), assignment.value.as_str()))
-            .collect();
-
-        assert_eq!(
-            pairs,
-            vec![
-                ("FOO", "bar"),
-                ("BAR", "baz"),
-                ("EMPTY", "''"),
-                ("INLINE", "'value # preserved'"),
-                ("SPACED", "no"),
-                ("PADDED", "' spaced '"),
-                ("ESCAPED", "'say \"hi\"'"),
-                ("COMMENTED", "bar"),
-            ]
-        );
-    }
-
-    #[test]
-    fn encrypt_secret_value_outputs_armored_pgp_message() {
-        let public_key = test_public_key();
-        let recipient = load_recipient_cert(&public_key).unwrap();
-        let encrypted = encrypt_secret_value(&recipient, "super-secret").unwrap();
-
-        assert!(encrypted.starts_with("-----BEGIN PGP MESSAGE-----"));
-        assert!(encrypted.contains("-----END PGP MESSAGE-----"));
-    }
-
-    #[test]
-    fn encrypt_env_file_writes_requested_secret_files() {
-        let work_dir = tempdir().unwrap();
-        let caution_dir = work_dir.path().join(".caution");
-        let env_file = work_dir.path().join(".env");
-        let bundle_file = caution_dir.join("quorum-bundle.json");
-        let secrets_dir = caution_dir.join("secrets");
-
-        std::fs::create_dir_all(&caution_dir).unwrap();
-        std::fs::write(
-            &env_file,
-            "\
-FOO=bar\n\
-EMPTY=\n\
-export QUOTED=\"baz\"\n\
-UNREQUESTED=nope\n",
-        )
-        .unwrap();
-
-        let bundle = GenerateQuorumResponse {
-            label: HashMap::new(),
-            keyring: String::new(),
-            keyring_hash: Vec::new(),
-            shardfile: String::new(),
-            public_key: test_public_key(),
-            necroproof: Vec::new(),
-        };
-        std::fs::write(&bundle_file, serde_json::to_string(&bundle).unwrap()).unwrap();
-
-        let count = encrypt_env_file(
-            &env_file,
-            &bundle_file,
-            &secrets_dir,
-            &["FOO".to_string(), "QUOTED".to_string()],
-        )
-        .unwrap();
-
-        assert_eq!(count, 2);
-        assert!(
-            std::fs::read_to_string(secrets_dir.join("FOO.asc"))
-                .unwrap()
-                .starts_with("-----BEGIN PGP MESSAGE-----")
-        );
-        assert!(
-            std::fs::read_to_string(secrets_dir.join("QUOTED.asc"))
-                .unwrap()
-                .starts_with("-----BEGIN PGP MESSAGE-----")
-        );
-        assert!(!secrets_dir.join("EMPTY.asc").exists());
-        assert!(!secrets_dir.join("UNREQUESTED.asc").exists());
-    }
-
-    #[test]
-    fn resolve_quorum_parameters_infers_max_from_keyring() {
-        assert_eq!(resolve_quorum_parameters(None, None, 10).unwrap(), (1, 10));
-    }
-
-    #[test]
-    fn resolve_quorum_parameters_rejects_mismatched_max() {
-        let err = resolve_quorum_parameters(Some(2), Some(4), 10).unwrap_err();
-
-        assert!(
-            err.to_string().contains("--max (4) must match"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn resolve_quorum_parameters_rejects_threshold_above_max() {
-        let err = resolve_quorum_parameters(Some(11), Some(10), 10).unwrap_err();
-
-        assert!(
-            err.to_string()
-                .contains("--threshold must be between 1 and --max"),
-            "unexpected error: {err}"
-        );
     }
 
     #[test]
@@ -11164,7 +4608,7 @@ containerfile: Missing.Containerfile\n",
 
     #[test]
     fn git_command_disables_interactive_ssh_prompts() {
-        let cmd = ApiClient::git_command(&[
+        let cmd = git_command(&[
             "ls-remote",
             "ssh://git@codeberg.org/caution/demo-pq-enclave-binding.git",
         ]);
@@ -11284,10 +4728,8 @@ enclave "default" {
         )
         .unwrap();
 
-        let e2e_v1 =
-            measured_build_cache_key("deadbeef", &e2e_config, Some("steve-v1")).unwrap();
-        let e2e_v2 =
-            measured_build_cache_key("deadbeef", &e2e_config, Some("steve-v2")).unwrap();
+        let e2e_v1 = measured_build_cache_key("deadbeef", &e2e_config, Some("steve-v1")).unwrap();
+        let e2e_v2 = measured_build_cache_key("deadbeef", &e2e_config, Some("steve-v2")).unwrap();
         assert_ne!(e2e_v1, e2e_v2);
 
         let plain = measured_build_cache_key("deadbeef", &e2e_config, None).unwrap();
@@ -11318,18 +4760,21 @@ enclave "default" {
     }
 
     fn init_test_git_repo(path: &Path) {
-        assert!(std::process::Command::new("git")
-            .arg("-C")
-            .arg(path)
-            .arg("init")
-            .output()
-            .unwrap()
-            .status
-            .success());
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .arg("init")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
     }
 
     #[test]
     fn linked_checkout_preflight_matrix() {
+        use crate::apps::crud::relink_candidate;
         let state_id = "550e8400-e29b-41d4-a716-446655440000";
         let remote_id = "123e4567-e89b-12d3-a456-426614174000";
         let work_dir = tempdir().unwrap();
@@ -11343,7 +4788,8 @@ enclave "default" {
         let provider = ConfigurationFile::from_str(
             "caution {\n provider {\n type = \"aws\"\n region = \"us-east-1\"\n }\n }\n\
              enclave \"main\" {\n unit \"default\" {\n command = \"/app\"\n }\n }",
-        ).unwrap();
+        )
+        .unwrap();
         let provider_only =
             inspect_checkout_link(&deployment_path, work_dir.path(), Some(&provider)).unwrap();
         assert!(provider_only.blocks_managed_creation());
@@ -11378,19 +4824,21 @@ enclave "default" {
         assert!(relink_candidate(&invalid_state).is_err());
 
         std::fs::remove_file(&deployment_path).unwrap();
-        assert!(std::process::Command::new("git")
-            .arg("-C")
-            .arg(work_dir.path())
-            .args([
-                "remote",
-                "add",
-                "caution",
-                &format!("git@example.test:{}.git", remote_id),
-            ])
-            .output()
-            .unwrap()
-            .status
-            .success());
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(work_dir.path())
+                .args([
+                    "remote",
+                    "add",
+                    "caution",
+                    &format!("git@example.test:{}.git", remote_id),
+                ])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
         let remote = inspect_checkout_link(&deployment_path, work_dir.path(), None).unwrap();
         assert!(remote.blocks_managed_creation());
         assert!(remote.blocks_explicit_byoc_creation());
@@ -11414,14 +4862,21 @@ enclave "default" {
             format!(r#"{{"resource_id":"{}"}}"#, state_id),
         )
         .unwrap();
-        assert!(std::process::Command::new("git")
-            .arg("-C")
-            .arg(work_dir.path())
-            .args(["remote", "set-url", "caution", "git@example.test:not-an-id.git"])
-            .output()
-            .unwrap()
-            .status
-            .success());
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(work_dir.path())
+                .args([
+                    "remote",
+                    "set-url",
+                    "caution",
+                    "git@example.test:not-an-id.git"
+                ])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
         let state_precedes_remote =
             inspect_checkout_link(&deployment_path, work_dir.path(), None).unwrap();
         assert_eq!(
@@ -11430,73 +4885,9 @@ enclave "default" {
         );
 
         std::fs::remove_file(&deployment_path).unwrap();
-        let invalid_remote = inspect_checkout_link(&deployment_path, work_dir.path(), None).unwrap();
+        let invalid_remote =
+            inspect_checkout_link(&deployment_path, work_dir.path(), None).unwrap();
         assert!(relink_candidate(&invalid_remote).is_err());
-    }
-
-    #[test]
-    fn linked_encrypted_byoc_config_requires_decrypted_update() {
-        assert!(linked_encrypted_byoc_config(true, Some("existing-app")));
-        assert!(!linked_encrypted_byoc_config(false, Some("existing-app")));
-        assert!(!linked_encrypted_byoc_config(true, None));
-    }
-
-    #[test]
-    fn extract_resource_id_from_git_url_parses_ssh_format() {
-        let uuid = "550e8400-e29b-41d4-a716-446655440000";
-        let url = format!("git@codeberg.org:{}.git", uuid);
-        assert_eq!(extract_resource_id_from_git_url(&url), Some(uuid.to_string()));
-    }
-
-    #[test]
-    fn extract_resource_id_from_git_url_parses_ssh_with_port() {
-        let uuid = "550e8400-e29b-41d4-a716-446655440000";
-        let url = format!("ssh://git@codeberg.org:23/{}.git", uuid);
-        assert_eq!(extract_resource_id_from_git_url(&url), Some(uuid.to_string()));
-    }
-
-    #[test]
-    fn extract_resource_id_from_git_url_rejects_unsupported_formats() {
-        let uuid = "550e8400-e29b-41d4-a716-446655440000";
-        assert_eq!(
-            extract_resource_id_from_git_url(&format!(
-                "https://codeberg.org/caution/{}.git",
-                uuid
-            )),
-            None
-        );
-        assert_eq!(
-            extract_resource_id_from_git_url(&format!("ssh://deploy@example.test/{}.git", uuid)),
-            None
-        );
-        assert_eq!(
-            extract_resource_id_from_git_url(&format!(
-                "ssh://git@example.test/apps/{}.git",
-                uuid
-            )),
-            None
-        );
-    }
-
-    #[test]
-    fn extract_resource_id_from_git_url_rejects_non_uuid_paths() {
-        assert_eq!(
-            extract_resource_id_from_git_url("git@codeberg.org:user/repo.git"),
-            None
-        );
-        assert_eq!(
-            extract_resource_id_from_git_url("git@example.test:app.git"),
-            None
-        );
-    }
-
-    #[test]
-    fn extract_resource_id_from_git_url_handles_missing_dot_git() {
-        let uuid = "550e8400-e29b-41d4-a716-446655440000";
-        assert_eq!(
-            extract_resource_id_from_git_url(&format!("git@codeberg.org:{}", uuid)),
-            None
-        );
     }
 
     #[tokio::test]
@@ -11539,9 +4930,14 @@ enclave "default" {
                 byoc_provider: false,
             };
 
-            let error = client.try_relink(&checkout_link).await.unwrap_err();
+            let error = crate::apps::crud::try_relink(&client, &checkout_link)
+                .await
+                .unwrap_err();
             assert!(error.to_string().contains("refusing to create a successor"));
-            assert_eq!(std::fs::read_to_string(&deployment_path).unwrap(), deployment);
+            assert_eq!(
+                std::fs::read_to_string(&deployment_path).unwrap(),
+                deployment
+            );
             assert_eq!(server.await.unwrap(), 1);
         }
     }
@@ -11549,77 +4945,31 @@ enclave "default" {
     #[test]
     fn byoc_yes_and_target_help_are_explicit() {
         assert!(matches!(
-            Cli::try_parse_from(["caution", "init", "--byoc", "--yes"]).unwrap().command,
+            Cli::try_parse_from(["caution", "init", "--byoc", "--yes"])
+                .unwrap()
+                .command,
             Commands::Init { yes: true, .. }
         ));
         assert!(Cli::try_parse_from(["caution", "init", "--yes"]).is_err());
-        assert!(Cli::try_parse_from([
-            "caution", "init", "--byoc", "--config", "credentials.json", "--yes"
-        ]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "caution",
+                "init",
+                "--byoc",
+                "--config",
+                "credentials.json",
+                "--yes"
+            ])
+            .is_err()
+        );
         assert_eq!(
             deployment_target_summary("BYOC", "123456789012", "us-east-1"),
             "Deployment target: capacity=BYOC, aws_account=123456789012, region=us-east-1"
         );
-        let error = aws_credentials_error("production", "caution init --byoc");
-        assert!(error.contains("aws configure export-credentials --profile production --format env"));
-    }
-
-    #[tokio::test]
-    async fn init_byoc_requires_login_before_reading_credentials_file() {
-        let work_dir = tempdir().unwrap();
-        let missing_credentials = work_dir.path().join("missing-byoc-credentials.json");
-        let client = ApiClient {
-            config_path: work_dir.path().join("missing-session.json"),
-            ..test_api_client()
-        };
-
-        let err = client.init_byoc(&missing_credentials).await.unwrap_err();
-
+        let error = crate::byoc::aws_credentials_error("production", "caution init --byoc");
         assert!(
-            err.to_string()
-                .contains("Not logged in. Run 'login' command first"),
-            "BYOC init should check authentication before reading credential material: {err:?}"
+            error.contains("aws configure export-credentials --profile production --format env")
         );
-    }
-
-    fn cert_armor(builder: CertBuilder) -> String {
-        let (cert, _revocation) = builder.generate().unwrap();
-        String::from_utf8(cert.armored().to_vec().unwrap()).unwrap()
-    }
-
-    // A3: a cert carrying all three subkeys is Keymaker-eligible.
-    #[test]
-    fn cert_eligibility_accepts_full_cert() {
-        let keyring = cert_armor(
-            CertBuilder::new()
-                .add_userid("alice@example.org")
-                .add_signing_subkey()
-                .add_authentication_subkey()
-                .add_storage_encryption_subkey(),
-        );
-
-        let certs = keymaker_cert_eligibility(&keyring).unwrap();
-        assert_eq!(certs.len(), 1);
-        assert!(certs[0].is_eligible());
-        assert!(certs[0].missing().is_empty());
-        assert_eq!(certs[0].user_id, "alice@example.org");
-    }
-
-    // A3: a default-style cert without an authentication subkey is reported as ineligible,
-    // naming exactly the missing role.
-    #[test]
-    fn cert_eligibility_reports_missing_authentication_subkey() {
-        let keyring = cert_armor(
-            CertBuilder::new()
-                .add_userid("bob@example.org")
-                .add_signing_subkey()
-                .add_storage_encryption_subkey(),
-        );
-
-        let certs = keymaker_cert_eligibility(&keyring).unwrap();
-        assert_eq!(certs.len(), 1);
-        assert!(!certs[0].is_eligible());
-        assert_eq!(certs[0].missing(), vec!["authentication"]);
     }
 
     // Sample `git ls-remote` output: "<sha>\t<ref>" lines.
@@ -11633,14 +4983,46 @@ enclave "default" {
     fn archive_preflight_classifies_pass_failure_retry_and_exhaustion() {
         for (status, attempt, expected) in [
             (reqwest::StatusCode::OK, 1, ArchivePreflightStatus::Passed),
-            (reqwest::StatusCode::NOT_FOUND, 1, ArchivePreflightStatus::Missing),
-            (reqwest::StatusCode::GONE, 1, ArchivePreflightStatus::Missing),
-            (reqwest::StatusCode::FOUND, 1, ArchivePreflightStatus::Failed),
-            (reqwest::StatusCode::METHOD_NOT_ALLOWED, 1, ArchivePreflightStatus::Failed),
-            (reqwest::StatusCode::REQUEST_TIMEOUT, 1, ArchivePreflightStatus::Retry),
-            (reqwest::StatusCode::TOO_MANY_REQUESTS, 1, ArchivePreflightStatus::Retry),
-            (reqwest::StatusCode::SERVICE_UNAVAILABLE, 1, ArchivePreflightStatus::Retry),
-            (reqwest::StatusCode::SERVICE_UNAVAILABLE, 2, ArchivePreflightStatus::Failed),
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                1,
+                ArchivePreflightStatus::Missing,
+            ),
+            (
+                reqwest::StatusCode::GONE,
+                1,
+                ArchivePreflightStatus::Missing,
+            ),
+            (
+                reqwest::StatusCode::FOUND,
+                1,
+                ArchivePreflightStatus::Failed,
+            ),
+            (
+                reqwest::StatusCode::METHOD_NOT_ALLOWED,
+                1,
+                ArchivePreflightStatus::Failed,
+            ),
+            (
+                reqwest::StatusCode::REQUEST_TIMEOUT,
+                1,
+                ArchivePreflightStatus::Retry,
+            ),
+            (
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                1,
+                ArchivePreflightStatus::Retry,
+            ),
+            (
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                1,
+                ArchivePreflightStatus::Retry,
+            ),
+            (
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                2,
+                ArchivePreflightStatus::Failed,
+            ),
         ] {
             assert_eq!(
                 classify_archive_preflight(status, attempt, ARCHIVE_PREFLIGHT_ATTEMPTS),
@@ -11673,8 +5055,7 @@ enclave "default" {
             serve_preflight_responses(vec![(reqwest::StatusCode::SERVICE_UNAVAILABLE, None)]).await;
         let client = test_api_client();
 
-        client
-            .preflight_archive_urls("Framework source", &[primary, mirror])
+        preflight_archive_urls(&client, "Framework source", &[primary, mirror])
             .await
             .unwrap();
 
@@ -11693,8 +5074,7 @@ enclave "default" {
         let mirror = "http://127.0.0.1:1/archive.tar.gz".to_string();
         let client = test_api_client();
 
-        client
-            .preflight_archive_urls("Framework source", &[primary, mirror])
+        preflight_archive_urls(&client, "Framework source", &[primary, mirror])
             .await
             .unwrap();
 
@@ -11710,18 +5090,37 @@ enclave "default" {
         .await;
         let client = test_api_client();
 
-        client
-            .preflight_archive_urls("Enclave source", &[url])
+        preflight_archive_urls(&client, "Enclave source", &[url])
             .await
             .unwrap();
 
         assert_eq!(server.await.unwrap(), 2);
     }
 
+    #[tokio::test]
+    async fn archive_preflight_follows_redirect_for_single_url() {
+        // Regression: a single forge URL that redirects (e.g. GitHub → codeload)
+        // must still pass. Disabling redirects for single URLs misclassified the
+        // 3xx as Failed and hard-failed the preflight with "archive is not
+        // available on the remote."
+        let (target, target_server) =
+            serve_preflight_responses(vec![(reqwest::StatusCode::OK, None)]).await;
+        let (primary, primary_server) =
+            serve_preflight_responses(vec![(reqwest::StatusCode::FOUND, Some(target))]).await;
+        let client = test_api_client();
+
+        preflight_archive_urls(&client, "Enclave source", &[primary])
+            .await
+            .unwrap();
+
+        assert_eq!(primary_server.await.unwrap(), 1);
+        assert_eq!(target_server.await.unwrap(), 1);
+    }
+
     #[test]
     fn preflight_fails_when_branch_absent_from_remote() {
         // The reported regression: branch was never pushed.
-        let result = ApiClient::classify_app_source_refs(
+        let result = classify_app_source_refs(
             LS_REMOTE,
             "6d1c5d3550cdaf45411052e7194bdcd34c41dac4",
             Some("deploy-tests-missing"),
@@ -11733,7 +5132,7 @@ enclave "default" {
     fn preflight_passes_when_branch_present() {
         // Branch exists even though the deployed commit is an older,
         // non-tip commit on that branch — reachable, proceed.
-        let result = ApiClient::classify_app_source_refs(
+        let result = classify_app_source_refs(
             LS_REMOTE,
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
             Some("deploy-tests"),
@@ -11744,11 +5143,8 @@ enclave "default" {
     #[test]
     fn preflight_passes_when_commit_is_ref_tip_without_branch_hint() {
         // No branch in the manifest, but the commit is a current ref tip.
-        let result = ApiClient::classify_app_source_refs(
-            LS_REMOTE,
-            "2222222222222222222222222222222222222222",
-            None,
-        );
+        let result =
+            classify_app_source_refs(LS_REMOTE, "2222222222222222222222222222222222222222", None);
         assert_eq!(result, Ok(true));
     }
 
@@ -11756,11 +5152,8 @@ enclave "default" {
     fn preflight_inconclusive_when_commit_not_tip_without_branch_hint() {
         // No branch hint and the commit isn't a ref tip; can't prove it's gone
         // (may be deep in history), so stay inconclusive and let the fetch decide.
-        let result = ApiClient::classify_app_source_refs(
-            LS_REMOTE,
-            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-            None,
-        );
+        let result =
+            classify_app_source_refs(LS_REMOTE, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", None);
         assert_eq!(result, Ok(false));
     }
 
@@ -11768,8 +5161,7 @@ enclave "default" {
     fn preflight_matches_short_commit_against_full_ref_sha() {
         // Manifests may carry an abbreviated commit; it should still match the
         // full SHA advertised by ls-remote.
-        let result =
-            ApiClient::classify_app_source_refs(LS_REMOTE, "3333333", None);
+        let result = classify_app_source_refs(LS_REMOTE, "3333333", None);
         assert_eq!(result, Ok(true));
     }
 
@@ -11777,7 +5169,7 @@ enclave "default" {
     fn preflight_dangerously_short_commit_does_not_false_match() {
         // A 1-char commit prefixes "1111..." but must NOT be treated as a ref
         // tip — below the 7-char minimum it's not matchable.
-        let result = ApiClient::classify_app_source_refs(LS_REMOTE, "1", None);
+        let result = classify_app_source_refs(LS_REMOTE, "1", None);
         assert_eq!(result, Ok(false));
     }
 
@@ -11785,7 +5177,7 @@ enclave "default" {
     fn preflight_empty_commit_is_inconclusive_not_a_match() {
         // An empty commit must never match a ref tip (would otherwise prefix-match
         // every line). No branch hint => inconclusive.
-        let result = ApiClient::classify_app_source_refs(LS_REMOTE, "", None);
+        let result = classify_app_source_refs(LS_REMOTE, "", None);
         assert_eq!(result, Ok(false));
     }
 
@@ -11794,11 +5186,8 @@ enclave "default" {
         // A malformed/blank line yields an empty sha field; it must not match the
         // commit and flip an inconclusive result to reachable.
         let listing = "\n   \n\t\n";
-        let result = ApiClient::classify_app_source_refs(
-            listing,
-            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-            None,
-        );
+        let result =
+            classify_app_source_refs(listing, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", None);
         assert_eq!(result, Ok(false));
     }
 
@@ -11806,8 +5195,7 @@ enclave "default" {
     fn preflight_empty_branch_name_absent_bails() {
         // Defensive: Some("") builds refs/heads/ which won't be present, so it is
         // reported absent rather than silently passing.
-        let result =
-            ApiClient::classify_app_source_refs(LS_REMOTE, "1111111", Some(""));
+        let result = classify_app_source_refs(LS_REMOTE, "1111111", Some(""));
         assert_eq!(result, Err("".to_string()));
     }
 
@@ -11856,7 +5244,7 @@ enclave "default" {
             Cli::try_parse_from(["caution", "register", "--qr", "--alpha-code", "abc"]).unwrap();
         let err = validate_global_qr(&cli.command, cli.qr)
             .expect_err("register --qr must be rejected, not silently fall back to a local key");
-        assert!(matches!(err, RunError::ArgValidation(_)));
+        assert!(matches!(err, RunError::ArgValidation { .. }));
     }
 
     #[test]
@@ -11875,127 +5263,6 @@ enclave "default" {
             Ok(_) => unreachable!(),
         };
         assert!(err_str.contains("--username") || err_str.contains("MissingRequiredArgument"));
-    }
-
-    #[test]
-    fn prompt_line_from_returns_typed_line() {
-        let mut input = Cursor::new(b"carol\n".to_vec());
-        let username = prompt_line_from(&mut input, "Username: ", "cannot be empty").unwrap();
-        assert_eq!(username, "carol");
-    }
-
-    #[test]
-    fn prompt_line_from_trims_whitespace() {
-        let mut input = Cursor::new(b"  dave  \n".to_vec());
-        let username = prompt_line_from(&mut input, "Username: ", "cannot be empty").unwrap();
-        assert_eq!(username, "dave");
-    }
-
-    #[test]
-    fn prompt_line_from_reprompts_on_blank_lines() {
-        // Two blank lines, then a real answer: simulates the user hitting
-        // Enter accidentally before typing a username.
-        let mut input = Cursor::new(b"\n\nerin\n".to_vec());
-        let username = prompt_line_from(&mut input, "Username: ", "cannot be empty").unwrap();
-        assert_eq!(username, "erin");
-    }
-
-    #[test]
-    fn prompt_optional_line_from_returns_typed_line() {
-        let mut input = Cursor::new(b"frank\n".to_vec());
-        let username = prompt_optional_line_from(&mut input, "Username: ").unwrap();
-        assert_eq!(username, "frank");
-    }
-
-    #[test]
-    fn prompt_optional_line_from_accepts_blank_line_on_first_try() {
-        // A plain Enter keypress (not just EOF) must resolve to an empty
-        // string immediately — this is the legacy/no-username login path,
-        // and it must not loop asking the user to try again.
-        let mut input = Cursor::new(b"\n".to_vec());
-        let username = prompt_optional_line_from(&mut input, "Username: ").unwrap();
-        assert_eq!(username, "");
-    }
-
-    #[test]
-    fn prompt_optional_line_from_accepts_immediate_eof() {
-        let mut input = Cursor::new(b"".to_vec());
-        let username = prompt_optional_line_from(&mut input, "Username: ").unwrap();
-        assert_eq!(username, "");
-    }
-
-    #[test]
-    fn resolve_login_username_returns_provided_username_without_prompting() {
-        // An explicit --username wins regardless of terminal state; the reader
-        // must never be touched (empty input would otherwise yield "").
-        let mut input = Cursor::new(b"".to_vec());
-        let username =
-            resolve_login_username(Some("alice".to_string()), false, &mut input).unwrap();
-        assert_eq!(username, "alice");
-    }
-
-    #[test]
-    fn resolve_login_username_prompts_when_interactive() {
-        let mut input = Cursor::new(b"bob\n".to_vec());
-        let username = resolve_login_username(None, true, &mut input).unwrap();
-        assert_eq!(username, "bob");
-    }
-
-    #[test]
-    fn resolve_login_username_errors_non_interactive_instead_of_hanging() {
-        // The #3 regression guard: a headless auto-relogin (no username, no TTY)
-        // must fail fast rather than block on a stdin read that never returns.
-        let mut input = Cursor::new(b"".to_vec());
-        let err = resolve_login_username(None, false, &mut input).unwrap_err();
-        assert!(matches!(err, LoginUsernameError::NonInteractive));
-    }
-
-    #[test]
-    fn resolve_register_username_returns_provided_username_without_prompting() {
-        let mut input = Cursor::new(b"".to_vec());
-        let username =
-            resolve_register_username(Some("alice".to_string()), false, &mut input).unwrap();
-        assert_eq!(username, "alice");
-    }
-
-    #[test]
-    fn resolve_register_username_prompts_when_interactive() {
-        let mut input = Cursor::new(b"bob\n".to_vec());
-        let username = resolve_register_username(None, true, &mut input).unwrap();
-        assert_eq!(username, "bob");
-    }
-
-    #[test]
-    fn resolve_register_username_errors_non_interactive_instead_of_hanging() {
-        // Finding 4: register lacked the noninteractive guard that login has
-        // (`resolve_login_username_errors_non_interactive_instead_of_hanging`
-        // above) — a noninteractive caller with no --username must fail fast
-        // instead of getting an empty username silently sent to the server.
-        let mut input = Cursor::new(b"".to_vec());
-        let err = resolve_register_username(None, false, &mut input).unwrap_err();
-        assert!(matches!(err, RegisterUsernameError::NonInteractive));
-    }
-
-    #[test]
-    fn resolve_register_username_treats_blank_provided_as_absent() {
-        let mut input = Cursor::new(b"bob\n".to_vec());
-        let username =
-            resolve_register_username(Some("   ".to_string()), true, &mut input).unwrap();
-        assert_eq!(username, "bob");
-    }
-
-    #[test]
-    fn login_begin_request_body_carries_username() {
-        let body = login_begin_request_body("frank");
-        assert_eq!(body, serde_json::json!({ "username": "frank" }));
-    }
-
-    #[test]
-    fn login_begin_request_body_does_not_leak_other_fields() {
-        let body = login_begin_request_body("grace");
-        let obj = body.as_object().unwrap();
-        assert_eq!(obj.len(), 1);
-        assert_eq!(obj.get("username").and_then(|v| v.as_str()), Some("grace"));
     }
 
     #[test]

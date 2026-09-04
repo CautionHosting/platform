@@ -41,7 +41,7 @@ webauthn-rs-proto = "0.5"
 russh = "0.61"
 ssh-key = { version = "0.6.7", features = ["crypto"] }
 thiserror = { workspace = true }
-dterror = "0.1.0"
+dterror = { workspace = true }
 bytes = "1"
 rand010 = { package = "rand", version = "0.10", features = ["thread_rng"] }
 futures = "0.3"

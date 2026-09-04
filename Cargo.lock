@@ -186,6 +186,7 @@ dependencies = [
  "caution-config",
  "chrono",
  "dirs",
+ "dterror 0.3.0",
  "enclave-builder",
  "futures",
  "hcl-rs",
@@ -1807,7 +1808,6 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 name = "cli"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "authenticator",
  "base64 0.22.1",
  "bootproof-sdk",
@@ -1817,6 +1817,7 @@ dependencies = [
  "clap",
  "coset 0.3.8",
  "dirs",
+ "dterror 0.3.0",
  "enclave-builder",
  "flate2",
  "hcl-rs",
@@ -2679,7 +2680,8 @@ checksum = "e05ee8f3f4ed77223f1ff7b12051ec44fc36d3e67ea217452dc8434559df9ded"
 [[package]]
 name = "dterror"
 version = "0.3.0"
-source = "git+https://git.distrust.co/public/dterror?branch=main#f745354f9949ca8235e4e52ebb8aabc708c38efb"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bebabf231a2d9c237ce1d1bcd40669688a848a315e5ff9ed83a18111d6a59032"
 dependencies = [
  "dterror-derive",
 ]
@@ -2687,7 +2689,8 @@ dependencies = [
 [[package]]
 name = "dterror-derive"
 version = "0.2.0"
-source = "git+https://git.distrust.co/public/dterror?branch=main#f745354f9949ca8235e4e52ebb8aabc708c38efb"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87a41d1bee8909555a51d033bd56d620126d3569e2e1c691436a45d467f981b4"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3252,7 +3255,7 @@ dependencies = [
  "bytes",
  "cookie",
  "dotenvy",
- "dterror 0.1.0",
+ "dterror 0.3.0",
  "futures",
  "hex",
  "hmac 0.12.1",

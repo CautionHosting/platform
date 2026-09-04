@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use clap::Args;
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::output;
 use crate::ApiClient;
+use crate::output;
 
 #[derive(Args, Debug)]
 pub(crate) struct MigrateProcfileArgs {
@@ -20,26 +21,47 @@ pub(crate) struct MigrateProcfileArgs {
     pub(crate) force: bool,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum MigrateProcfileError {
-    #[error("failed to read {path}: {source}")]
-    ReadError {
+    #[error("failed to read {path} [{location:?}]")]
+    Read {
+        #[context(borrow = Path)]
         path: PathBuf,
+
+        #[location]
+        location: Location,
+
         #[source]
-        source: std::io::Error,
+        source: BoxError,
     },
 
-    #[error("failed to parse Procfile: {0}")]
-    ParseError(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("failed to parse Procfile [{location:?}]")]
+    Parse {
+        #[location]
+        location: Location,
 
-    #[error("output file already exists: {0}; use --force to overwrite")]
-    OutputExists(PathBuf),
-
-    #[error("failed to write {path}: {source}")]
-    WriteError {
-        path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: BoxError,
+    },
+
+    #[error("output file already exists: {path}; use --force to overwrite [{location:?}]")]
+    OutputExists {
+        path: PathBuf,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("failed to write {path} [{location:?}]")]
+    Write {
+        #[context(borrow = Path)]
+        path: PathBuf,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
     },
 }
 
@@ -47,6 +69,8 @@ pub(crate) async fn migrate_procfile(
     _client: &ApiClient,
     args: &MigrateProcfileArgs,
 ) -> Result<(), MigrateProcfileError> {
+    use MigrateProcfileErrorCtx as Ctx;
+
     let procfile_path = args
         .procfile
         .clone()
@@ -57,28 +81,21 @@ pub(crate) async fn migrate_procfile(
         .clone()
         .unwrap_or_else(|| PathBuf::from("caution.hcl"));
 
-    let content = fs::read_to_string(&procfile_path).map_err(|source| {
-        MigrateProcfileError::ReadError {
-            path: procfile_path.clone(),
-            source,
-        }
-    })?;
+    let content = fs::read_to_string(&procfile_path).with_context(Ctx::read(&procfile_path))?;
 
-    let config = caution_config::ConfigurationFile::from_procfile(&content)
-        .map_err(|e| MigrateProcfileError::ParseError(e.into()))?;
+    let config =
+        caution_config::ConfigurationFile::from_procfile(&content).with_context(Ctx::parse())?;
 
     if output_path.exists() && !args.force {
-        return Err(MigrateProcfileError::OutputExists(output_path));
+        return Err(MigrateProcfileError::OutputExists {
+            path: output_path,
+            location: std::panic::Location::caller(),
+        });
     }
 
     let hcl_output = build_body(&config);
 
-    fs::write(&output_path, &hcl_output).map_err(|source| {
-        MigrateProcfileError::WriteError {
-            path: output_path.clone(),
-            source,
-        }
-    })?;
+    fs::write(&output_path, &hcl_output).with_context(Ctx::write(&output_path))?;
 
     output::success(format!(
         "✓ Migrated {} → {}",
@@ -111,13 +128,13 @@ fn build_caution_block(caution: &Option<caution_config::CautionConfig>) -> Strin
     if let Some(config) = caution
         && let Some(ref provider) = config.provider
     {
-            let formatted = hcl::format::to_string(&build_provider_block(provider)).unwrap();
-            for line in formatted.lines() {
-                s.push_str("  ");
-                s.push_str(line);
-                s.push('\n');
-            }
+        let formatted = hcl::format::to_string(&build_provider_block(provider)).unwrap();
+        for line in formatted.lines() {
+            s.push_str("  ");
+            s.push_str(line);
             s.push('\n');
+        }
+        s.push('\n');
     }
 
     s.push_str("  # managed_credentials = \"credentials.pgp\"\n");
@@ -131,8 +148,7 @@ fn build_caution_block(caution: &Option<caution_config::CautionConfig>) -> Strin
 fn build_provider_block(provider: &caution_config::Provider) -> hcl::Block {
     match provider {
         caution_config::Provider::Aws(aws) => {
-            let mut builder = hcl::Block::builder("provider")
-                .add_attribute(("type", "aws"));
+            let mut builder = hcl::Block::builder("provider").add_attribute(("type", "aws"));
 
             builder = builder.add_attribute(("region", aws.region.as_str()));
 
@@ -165,7 +181,6 @@ fn build_build_block(build: &caution_config::BuildConfig) -> Option<hcl::Block> 
         builder = builder.add_attribute(("containerfile", val.as_str()));
         has_content = true;
     }
-
 
     if !build.app_sources.is_empty() {
         let exprs: Vec<hcl::Expression> = build
@@ -322,7 +337,9 @@ fn build_resources_block(resources: &caution_config::ResourceConfig) -> Option<h
     )
 }
 
-fn build_unit_blocks(units: &std::collections::BTreeMap<String, caution_config::UnitConfig>) -> Option<Vec<hcl::Block>> {
+fn build_unit_blocks(
+    units: &std::collections::BTreeMap<String, caution_config::UnitConfig>,
+) -> Option<Vec<hcl::Block>> {
     if units.is_empty() {
         return None;
     }
@@ -403,7 +420,10 @@ mod tests {
     fn empty_procfile_produces_caution_block_only() {
         let config = caution_config::ConfigurationFile::from_procfile("").unwrap();
         let output = build_body(&config);
-        assert!(output.starts_with("caution {"), "should start with caution block");
+        assert!(
+            output.starts_with("caution {"),
+            "should start with caution block"
+        );
         assert!(
             output.contains("# managed_credentials = \"credentials.pgp\""),
             "should contain commented placeholder"
@@ -413,14 +433,20 @@ mod tests {
             "should not contain an enclave block"
         );
         assert!(!output.contains("= null"), "should not contain null");
-        assert!(!output.contains("= {"), "should not use map attribute syntax");
+        assert!(
+            !output.contains("= {"),
+            "should not use map attribute syntax"
+        );
     }
 
     #[test]
     fn run_only_procfile_uses_block_syntax() {
         let config = caution_config::ConfigurationFile::from_procfile("run: /app/start\n").unwrap();
         let output = build_body(&config);
-        assert!(output.starts_with("caution {"), "should start with caution block");
+        assert!(
+            output.starts_with("caution {"),
+            "should start with caution block"
+        );
         assert!(
             output.contains("enclave \"default\""),
             "should use labeled enclave block"
@@ -446,7 +472,10 @@ ports: 8083
 "#;
         let config = caution_config::ConfigurationFile::from_procfile(procfile).unwrap();
         let output = build_body(&config);
-        assert!(output.contains("enclave \"default\""), "labeled enclave block");
+        assert!(
+            output.contains("enclave \"default\""),
+            "labeled enclave block"
+        );
         assert!(output.contains("build {"), "build block");
         assert!(output.contains("port = 8083"), "port attribute in ingress");
         assert!(output.contains("ingress {"), "ingress block");
@@ -460,7 +489,11 @@ ports: 8083
         let config = caution_config::ConfigurationFile::from_procfile(procfile).unwrap();
         let output = build_body(&config);
         let reparsed = caution_config::ConfigurationFile::from_str(&output);
-        assert!(reparsed.is_ok(), "generated HCL should parse: {:?}", reparsed.err());
+        assert!(
+            reparsed.is_ok(),
+            "generated HCL should parse: {:?}",
+            reparsed.err()
+        );
     }
 
     #[test]
@@ -537,7 +570,10 @@ e2e: true
         assert!(output.contains("http {"), "http block");
         assert!(output.contains("resources {"), "resources block");
         assert!(output.contains("unit \"default\""), "unit with label");
-        assert!(!output.contains("key_exchange"), "default key exchange stays implicit");
+        assert!(
+            !output.contains("key_exchange"),
+            "default key exchange stays implicit"
+        );
         assert!(!output.contains("= null"), "no null values");
     }
 
@@ -546,7 +582,10 @@ e2e: true
         let procfile = "run: /app\nports: 8080\n";
         let config = caution_config::ConfigurationFile::from_procfile(procfile).unwrap();
         let output = build_body(&config);
-        assert!(!output.contains("= null"), "should not have null value attributes");
+        assert!(
+            !output.contains("= null"),
+            "should not have null value attributes"
+        );
         assert!(
             !output.contains("enclave = {"),
             "should not use flat map attribute syntax for enclave"
