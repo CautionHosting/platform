@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-pub(crate) fn terminal_text(value: &str) -> String {
+pub fn terminal_text(value: &str) -> String {
     value
         .chars()
         .flat_map(|character| match character {

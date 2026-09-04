@@ -6,6 +6,7 @@ use std::{env, error::Error, fmt, io, io::IsTerminal as _, io::Write as _, proce
 use caution_admin::{
     db::Database,
     model::{RelatedResource, Relation, Resource, ResourceKind, ResourceSummary},
+    terminal::terminal_text as terminal_safe,
     tui,
 };
 use clap::{Parser, Subcommand};
@@ -14,9 +15,6 @@ use serde::Serialize;
 use uuid::Uuid;
 
 mod findings;
-mod terminal;
-
-use terminal::terminal_text as terminal_safe;
 
 #[derive(Debug, Parser)]
 #[command(

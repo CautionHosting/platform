@@ -446,13 +446,13 @@ fn truncate_detail_value(label: &str, value: &str, line_width: usize) -> String 
 
     let mut truncated = String::new();
     let mut width = 0;
+    let mut buf = [0u8; 4];
     for character in value.chars() {
-        let character = character.to_string();
-        let character_width = Span::raw(character.as_str()).width();
+        let character_width = Span::raw(&*character.encode_utf8(&mut buf)).width();
         if width + character_width + ellipsis_width > available {
             break;
         }
-        truncated.push_str(&character);
+        truncated.push(character);
         width += character_width;
     }
     truncated.push_str(ellipsis);
