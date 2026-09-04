@@ -10,6 +10,7 @@
 
 use aws_config::SdkConfig;
 use aws_sdk_ec2::Client as Ec2Client;
+use aws_sdk_ec2::config::Region;
 use aws_sdk_ec2::error::SdkError as Ec2SdkError;
 use aws_sdk_ec2::operation::describe_instances::DescribeInstancesError;
 use aws_sdk_ec2::operation::describe_regions::DescribeRegionsError;
@@ -27,11 +28,11 @@ pub enum AwsError {
         region: String,
         /// The underlying AWS SDK error.
         #[source]
-        source: Ec2SdkError<DescribeInstancesError>,
+        source: Box<Ec2SdkError<DescribeInstancesError>>,
     },
     /// Failed to discover the enabled AWS regions.
     #[error("failed to discover enabled AWS regions")]
-    DescribeRegions(#[source] Ec2SdkError<DescribeRegionsError>),
+    DescribeRegions(#[source] Box<Ec2SdkError<DescribeRegionsError>>),
 }
 
 /// Represents an EC2 instance in AWS.
@@ -41,6 +42,10 @@ pub struct Ec2Instance {
     pub instance_id: String,
     /// The region the instance was observed in (e.g. `us-west-2`).
     pub region: String,
+    /// The availability zone reported by AWS, when known.
+    pub availability_zone: Option<String>,
+    /// The instance launch time as Unix seconds, when known.
+    pub launch_time_epoch_secs: Option<i64>,
     /// The instance type reported by AWS (e.g. `c5.xlarge`), when known.
     pub instance_type: Option<String>,
     /// The current lifecycle state reported by AWS.
@@ -92,6 +97,23 @@ pub struct Ec2Inspector {
 }
 
 impl Ec2Inspector {
+    /// Create an EC2 inspector from an already-resolved AWS configuration.
+    ///
+    /// This keeps credentials and retry settings shared with other AWS clients.
+    #[must_use]
+    pub fn from_sdk_config(sdk_config: &SdkConfig) -> Self {
+        let region = sdk_config
+            .region()
+            .map_or_else(|| "us-west-2".to_string(), ToString::to_string);
+        let mut config = aws_sdk_ec2::config::Builder::from(sdk_config);
+        config.set_region(Some(Region::new(region.clone())));
+        Self {
+            client: Ec2Client::from_conf(config.build()),
+            region,
+            sdk_config: sdk_config.clone(),
+        }
+    }
+
     /// Create a new EC2 inspector from credentials.
     ///
     /// Configuration loading does not perform any network I/O and cannot fail;
@@ -190,7 +212,7 @@ impl Ec2Inspector {
         while let Some(page) = paginator.next().await {
             let page = page.map_err(|source| AwsError::DescribeInstances {
                 region: region.to_string(),
-                source,
+                source: Box::new(source),
             })?;
 
             for reservation in page.reservations() {
@@ -244,8 +266,8 @@ impl Ec2Inspector {
         self.describe_instances(&filters).await
     }
 
-    /// List all instances that still exist in AWS: pending, running, or
-    /// stopped.
+    /// List all instances that still exist in AWS: pending, running, stopping,
+    /// or stopped.
     ///
     /// Terminated instances are excluded; AWS reaps them quickly and they
     /// cannot be drift-checked. Stopped instances are included so that
@@ -258,14 +280,7 @@ impl Ec2Inspector {
     /// Returns [`AwsError::DescribeInstances`] when the AWS API call fails in
     /// the region this inspector is based in.
     pub async fn list_live_instances(&self) -> Result<Vec<Ec2Instance>, AwsError> {
-        let filters = vec![
-            Filter::builder()
-                .name("instance-state-name")
-                .values("pending")
-                .values("running")
-                .values("stopped")
-                .build(),
-        ];
+        let filters = vec![live_instance_filter()];
 
         self.describe_instances(&filters).await
     }
@@ -285,7 +300,7 @@ impl Ec2Inspector {
             .all_regions(true)
             .send()
             .await
-            .map_err(AwsError::DescribeRegions)?;
+            .map_err(|source| AwsError::DescribeRegions(Box::new(source)))?;
 
         let mut regions: Vec<String> = output
             .regions()
@@ -309,14 +324,7 @@ impl Ec2Inspector {
         &self,
         region: &str,
     ) -> Result<Vec<Ec2Instance>, AwsError> {
-        let filters = vec![
-            Filter::builder()
-                .name("instance-state-name")
-                .values("pending")
-                .values("running")
-                .values("stopped")
-                .build(),
-        ];
+        let filters = vec![live_instance_filter()];
 
         let client = self.client_for_region(region);
         Self::describe_instances_in_region(&client, &filters, region).await
@@ -359,6 +367,11 @@ impl Ec2Inspector {
         Ec2Instance {
             instance_id: instance.instance_id().unwrap_or_default().to_string(),
             region: region.to_string(),
+            availability_zone: instance
+                .placement()
+                .and_then(|placement| placement.availability_zone())
+                .map(ToString::to_string),
+            launch_time_epoch_secs: instance.launch_time().map(|time| time.secs()),
             instance_type: instance.instance_type().map(|t| t.as_str().to_string()),
             state: match instance.state().and_then(|s| s.name()) {
                 Some(s) => s.clone(),
@@ -386,6 +399,16 @@ fn region_usable(opt_in_status: Option<&str>) -> bool {
     opt_in_status.is_none_or(|status| matches!(status, "opt-in-not-required" | "opted-in"))
 }
 
+fn live_instance_filter() -> Filter {
+    ["pending", "running", "stopping", "stopped"]
+        .into_iter()
+        .fold(
+            Filter::builder().name("instance-state-name"),
+            |filter, state| filter.values(state),
+        )
+        .build()
+}
+
 impl std::fmt::Debug for Ec2Inspector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Ec2Inspector")
@@ -398,6 +421,18 @@ impl std::fmt::Debug for Ec2Inspector {
 mod tests {
     use super::*;
     use aws_sdk_ec2::types::Tag;
+
+    #[test]
+    fn live_instance_filter_includes_stopping_hosts() {
+        assert_eq!(
+            live_instance_filter()
+                .values()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["pending", "running", "stopping", "stopped"]
+        );
+    }
 
     #[test]
     fn test_aws_credentials_debug_redacts_secret() {
@@ -420,6 +455,8 @@ mod tests {
         let instance = Ec2Instance {
             instance_id: "i-1234567890abcdef0".to_string(),
             region: "us-west-2".to_string(),
+            availability_zone: Some("us-west-2a".to_string()),
+            launch_time_epoch_secs: Some(1_788_000_000),
             instance_type: Some("c5.xlarge".to_string()),
             state: InstanceStateName::Running,
             public_ip: Some("54.123.45.67".to_string()),
@@ -440,6 +477,15 @@ mod tests {
     fn test_convert_instance_preserves_tags() {
         let instance = Instance::builder()
             .instance_id("i-1234567890abcdef0")
+            .placement(
+                aws_sdk_ec2::types::Placement::builder()
+                    .availability_zone("eu-west-1a")
+                    .build(),
+            )
+            .launch_time(aws_sdk_ec2::primitives::DateTime::from_secs(1_788_000_000))
+            .private_ip_address("10.0.0.10")
+            .vpc_id("vpc-1")
+            .subnet_id("subnet-1")
             .tags(
                 Tag::builder()
                     .key("ResourceId")
@@ -452,6 +498,11 @@ mod tests {
         let converted = Ec2Inspector::convert_instance(&instance, "eu-west-1");
 
         assert_eq!(converted.region, "eu-west-1");
+        assert_eq!(converted.availability_zone.as_deref(), Some("eu-west-1a"));
+        assert_eq!(converted.launch_time_epoch_secs, Some(1_788_000_000));
+        assert_eq!(converted.private_ip.as_deref(), Some("10.0.0.10"));
+        assert_eq!(converted.vpc_id.as_deref(), Some("vpc-1"));
+        assert_eq!(converted.subnet_id.as_deref(), Some("subnet-1"));
         assert_eq!(converted.tags.len(), 2);
         assert_eq!(
             converted.tags.get("ResourceId"),
@@ -464,9 +515,9 @@ mod tests {
     fn test_aws_error_display_includes_region() {
         let err = AwsError::DescribeInstances {
             region: "eu-west-1".to_string(),
-            source: Ec2SdkError::<DescribeInstancesError>::construction_failure(
+            source: Box::new(Ec2SdkError::<DescribeInstancesError>::construction_failure(
                 std::io::Error::other("boom"),
-            ),
+            )),
         };
 
         let display = err.to_string();
@@ -478,10 +529,11 @@ mod tests {
 
     #[test]
     fn test_aws_error_describe_regions_display() {
-        let err =
-            AwsError::DescribeRegions(Ec2SdkError::<DescribeRegionsError>::construction_failure(
-                std::io::Error::other("boom"),
-            ));
+        let err = AwsError::DescribeRegions(Box::new(
+            Ec2SdkError::<DescribeRegionsError>::construction_failure(std::io::Error::other(
+                "boom",
+            )),
+        ));
 
         let display = err.to_string();
         assert_eq!(display, "failed to discover enabled AWS regions");

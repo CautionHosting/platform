@@ -41,7 +41,7 @@ Reads expected state from the database:
 
 ### `aws` - AWS API Client
 
-Queries actual state from AWS EC2, optionally across every enabled region. `enabled_regions` lists the regions the account can use, excluding opt-in regions the account has not enabled; `list_live_instances_in_region` lists the pending, running, and stopped instances of one region, each stamped with the region it was found in:
+Queries actual state from AWS EC2, optionally across every enabled region. `enabled_regions` lists the regions the account can use, excluding opt-in regions the account has not enabled; `list_live_instances_in_region` lists the pending, running, stopping, and stopped instances of one region, each stamped with the region it was found in:
 
 ```rust
 use drift_detector::aws::{AwsCredentials, Ec2Inspector};
