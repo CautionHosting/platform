@@ -78,6 +78,7 @@ fn build_frontend_routes(frontend_dir: &Path) -> Router {
         .route_service("/login", ServeFile::new(frontend_index.clone()))
         .route_service("/onboarding", ServeFile::new(frontend_index.clone()))
         .route_service("/invite", ServeFile::new(frontend_index.clone()))
+        .route_service("/reset", ServeFile::new(frontend_index.clone()))
         .route_service("/dashboard", ServeFile::new(frontend_index.clone()))
         .route_service("/qr-login", ServeFile::new(frontend_index.clone()))
         .route_service("/qr-sign", ServeFile::new(frontend_index.clone()))
@@ -327,6 +328,18 @@ async fn main() -> Result<()> {
         .route(
             "/auth/qr-sign/authenticate/finish",
             post(handlers::qr_sign_authenticate_finish_handler),
+        )
+        // CSRF posture: these routes have no session cookie or CSRF token by
+        // design. The WebAuthn registration ceremony itself enforces origin
+        // binding (rpId must match page origin) and user verification, so a
+        // cross-site attacker cannot forge a ceremony even if they can POST here.
+        .route(
+            "/auth/reset/begin",
+            post(handlers::begin_reset_register_handler),
+        )
+        .route(
+            "/auth/reset/finish",
+            post(handlers::finish_reset_register_handler),
         );
 
     #[cfg(feature = "e2e-testing-unsafe")]

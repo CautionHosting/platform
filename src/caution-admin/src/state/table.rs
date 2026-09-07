@@ -131,6 +131,7 @@ fn row_type(row: &Row) -> String {
         Row::Relation(_) => "relationship".to_string(),
         Row::Browse(kind) => kind.singular().to_string(),
         Row::AwsRoot => "aws".to_string(),
+        Row::Action(_) => "action".to_string(),
     }
 }
 
@@ -146,6 +147,7 @@ fn row_name(row: &Row) -> String {
         Row::Relation(relation) => relation.relation.label().to_ascii_lowercase(),
         Row::Browse(kind) => kind.plural().to_ascii_lowercase(),
         Row::AwsRoot => "aws".to_string(),
+        Row::Action(action) => action.label().to_ascii_lowercase(),
     }
 }
 
@@ -168,7 +170,7 @@ fn row_details(row: &Row) -> String {
             .unwrap_or_default()
             .to_ascii_lowercase(),
         Row::Relation(relation) => relation.count.to_string(),
-        Row::Browse(_) | Row::AwsRoot => String::new(),
+        Row::Browse(_) | Row::AwsRoot | Row::Action(_) => String::new(),
     }
 }
 

@@ -64,6 +64,7 @@ mod types;
 mod users;
 mod validated_types;
 mod validation;
+mod webauthn_reset;
 
 const DEFAULT_DEPLOYMENT_HEALTH_TIMEOUT_SECS: u64 = 600;
 const LIFECYCLE_RECONCILE_INTERVAL_SECS: u64 = 30;
@@ -3661,6 +3662,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/internal/legal-notices/send",
             post(legal::send_legal_notices),
+        )
+        .route(
+            "/internal/webauthn/reset",
+            post(webauthn_reset::reset_webauthn_credentials),
         );
 
     #[cfg(feature = "e2e-testing-unsafe")]

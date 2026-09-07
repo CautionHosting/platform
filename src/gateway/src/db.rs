@@ -452,8 +452,8 @@ fn generate_user_identifier() -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn save_fido2_credential(
-    pool: &PgPool,
+pub async fn save_fido2_credential<'e, E>(
+    executor: E,
     credential_id: &[u8],
     user_id: Uuid,
     public_key: &[u8],
@@ -464,7 +464,10 @@ pub async fn save_fido2_credential(
     transport: Option<serde_json::Value>,
     flags: Option<serde_json::Value>,
     resident: Option<bool>,
-) -> Result<()> {
+) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     sqlx::query(
         "INSERT INTO fido2_credentials (
             credential_id,
@@ -491,19 +494,22 @@ pub async fn save_fido2_credential(
     .bind(transport)
     .bind(flags)
     .bind(resident)
-    .execute(pool)
+    .execute(executor)
     .await
     .context("Failed to save credential")?;
 
     Ok(())
 }
 
-pub async fn credential_exists(pool: &PgPool, credential_id: &[u8]) -> Result<bool> {
+pub async fn credential_exists<'e, E>(executor: E, credential_id: &[u8]) -> Result<bool>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM fido2_credentials WHERE credential_id = $1)",
     )
     .bind(credential_id)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await
     .context("Failed to check credential existence")?;
 
@@ -727,12 +733,15 @@ pub async fn update_fido2_credential(
     Ok(())
 }
 
-pub async fn create_auth_session(
-    pool: &PgPool,
+pub async fn create_auth_session<'e, E>(
+    executor: E,
     session_id: &str,
     credential_id: &[u8],
     expires_at: OffsetDateTime,
-) -> Result<()> {
+) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     sqlx::query(
         "INSERT INTO auth_sessions (session_id, credential_id, created_at, expires_at, last_used_at)
          VALUES ($1, $2, NOW(), $3, NOW())"
@@ -740,7 +749,7 @@ pub async fn create_auth_session(
     .bind(session_id)
     .bind(credential_id)
     .bind(expires_at)
-    .execute(pool)
+    .execute(executor)
     .await
     .context("Failed to create session")?;
 
@@ -1490,6 +1499,39 @@ pub async fn user_requires_pin(pool: &PgPool, user_id: Uuid) -> Result<bool, sql
     .await?;
 
     Ok(requires_pin.unwrap_or(false))
+}
+
+/// Atomically consume a reset token by marking it used, but only if it hasn't
+/// expired. Returns the number of rows affected (0 means expired or already used).
+pub async fn consume_reset_token(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    token_hash: &str,
+) -> Result<u64> {
+    let result = sqlx::query(
+        "UPDATE webauthn_reset_tokens SET used_at = NOW() WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()",
+    )
+    .bind(token_hash)
+    .execute(executor)
+    .await
+    .context("Failed to consume reset token")?;
+
+    Ok(result.rows_affected())
+}
+
+/// Look up a valid (unexpired, unused) reset token by its raw bytes.
+/// Hashes the token with SHA-256 before querying, matching the stored `token_hash` column.
+/// Returns the associated user_id if the token is still redeemable.
+pub async fn get_valid_reset_token(pool: &PgPool, token: &[u8]) -> Result<Option<Uuid>> {
+    let token_hash = hex::encode(Sha256::digest(token));
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT user_id FROM webauthn_reset_tokens WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()",
+    )
+    .bind(&token_hash)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to look up reset token")?;
+
+    Ok(row.map(|(uid,)| uid))
 }
 
 #[cfg(test)]

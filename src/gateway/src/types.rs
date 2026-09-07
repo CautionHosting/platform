@@ -48,6 +48,12 @@ pub struct PendingPasskeyRegistration {
     pub user_id: Uuid,
     pub name: Option<String>,
     pub expires_at: time::OffsetDateTime,
+    /// The hex-encoded SHA-256 hash of the reset token that authorized this
+    /// registration. Carried from `begin_reset_register_handler` through to
+    /// `finish_reset_register_handler` so the finish handler can mark *that
+    /// specific* token as used rather than burning all unused tokens for the
+    /// user (TOCTOU fix). `None` for non-reset flows (e.g. adding a passkey).
+    pub token_hash: Option<String>,
 }
 
 /// Which webauthn-rs authentication ceremony a pending `/auth/login` challenge is

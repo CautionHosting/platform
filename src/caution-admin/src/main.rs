@@ -4,6 +4,7 @@
 use std::{env, error::Error, fmt, io, io::IsTerminal as _, io::Write as _, process::ExitCode};
 
 use caution_admin::{
+    actions,
     db::Database,
     model::{RelatedResource, Relation, Resource, ResourceKind, ResourceSummary},
     tui,
@@ -22,9 +23,13 @@ use terminal::terminal_text as terminal_safe;
 #[command(
     name = "caution-admin",
     version,
-    about = "Read-only Caution administration explorer (development pilot)"
+    about = "Caution administration explorer (development pilot)"
 )]
 struct Cli {
+    /// Enable write actions (requires API_SERVICE_URL and INTERNAL_SERVICE_SECRET).
+    #[arg(long, global = true)]
+    enable_write: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -74,6 +79,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Reset all WebAuthn credentials for a user and send a re-registration email.
+    /// Requires --enable-write.
+    ResetWebauthn {
+        /// The UUID of the user whose credentials should be reset.
+        user_id: Uuid,
+    },
 }
 
 #[tokio::main]
@@ -108,7 +119,7 @@ async fn run_admin() -> Result<(), RunAdminError> {
                     source: None,
                 });
             }
-            tui::run(database, env::var("PLATFORM_GIT_SHA").ok())
+            tui::run(database, env::var("PLATFORM_GIT_SHA").ok(), cli.enable_write)
                 .await
                 .with_context(Ctx::new(RunAdminStage::Browse))
         }
@@ -209,6 +220,21 @@ async fn run_admin() -> Result<(), RunAdminError> {
                     .with_context(Ctx::new(RunAdminStage::PrintRelated))
             }
         }
+        Some(Command::ResetWebauthn { user_id }) => {
+            if !cli.enable_write {
+                return Err(RunAdminError {
+                    stage: RunAdminStage::WriteRequired,
+                    location: std::panic::Location::caller(),
+                    source: None,
+                });
+            }
+            actions::reset_webauthn(user_id)
+                .await
+                .with_context(Ctx::new(RunAdminStage::ResetWebauthn))?;
+            let stdout = io::stdout();
+            writeln!(stdout.lock(), "WebAuthn credentials reset for user {user_id}")
+                .with_context(Ctx::new(RunAdminStage::PrintResetResult))
+        }
     }
 }
 
@@ -252,6 +278,7 @@ enum RunAdminStage {
     ReadDatabaseUrl,
     ConnectDatabase,
     RequireTty,
+    WriteRequired,
     Browse,
     Findings,
     Search,
@@ -259,11 +286,13 @@ enum RunAdminStage {
     Show,
     ParseRelation,
     Follow,
+    ResetWebauthn,
     PrintJson,
     PrintSearchWarning,
     PrintSummaries,
     PrintResource,
     PrintRelated,
+    PrintResetResult,
 }
 
 impl fmt::Display for RunAdminStage {
@@ -275,6 +304,7 @@ impl fmt::Display for RunAdminStage {
             Self::RequireTty => {
                 "requiring a TTY; use findings, search, list, show, or follow for headless access"
             }
+            Self::WriteRequired => "requiring --enable-write for this action",
             Self::Browse => "running the terminal explorer",
             Self::Findings => "printing AWS findings",
             Self::Search => "searching resources",
@@ -282,11 +312,13 @@ impl fmt::Display for RunAdminStage {
             Self::Show => "showing a resource",
             Self::ParseRelation => "parsing a relationship",
             Self::Follow => "following a relationship",
+            Self::ResetWebauthn => "resetting WebAuthn credentials",
             Self::PrintJson => "writing JSON output",
             Self::PrintSearchWarning => "writing the search pagination notice",
             Self::PrintSummaries => "writing resource summaries",
             Self::PrintResource => "writing resource details",
             Self::PrintRelated => "writing related resources",
+            Self::PrintResetResult => "writing the reset result",
         })
     }
 }
@@ -504,6 +536,7 @@ mod tests {
     fn no_arguments_selects_the_tui() {
         let cli = Cli::try_parse_from(["caution-admin"]).expect("parse no arguments");
         assert!(cli.command.is_none());
+        assert!(!cli.enable_write);
     }
 
     #[test]
@@ -521,6 +554,33 @@ mod tests {
             cli.command,
             Some(Command::Follow { json: true, .. })
         ));
+    }
+
+    #[test]
+    fn parses_reset_webauthn_with_enable_write() {
+        let cli = Cli::try_parse_from([
+            "caution-admin",
+            "--enable-write",
+            "reset-webauthn",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ])
+        .expect("parse reset-webauthn command");
+        assert!(cli.enable_write);
+        assert!(matches!(
+            cli.command,
+            Some(Command::ResetWebauthn { user_id }) if user_id == uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap()
+        ));
+    }
+
+    #[test]
+    fn reset_webauthn_without_enable_write_sets_flag_false() {
+        let cli = Cli::try_parse_from([
+            "caution-admin",
+            "reset-webauthn",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ])
+        .expect("parse without flag still parses, runtime rejects");
+        assert!(!cli.enable_write);
     }
 
     #[test]
