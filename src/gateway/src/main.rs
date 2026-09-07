@@ -335,11 +335,11 @@ async fn main() -> Result<()> {
         // cross-site attacker cannot forge a ceremony even if they can POST here.
         .route(
             "/auth/reset/begin",
-            post(handlers::begin_reset_register_handler),
+            post(handlers::reset_webauthn::begin_reset_register_handler),
         )
         .route(
             "/auth/reset/finish",
-            post(handlers::finish_reset_register_handler),
+            post(handlers::reset_webauthn::finish_reset_register_handler),
         );
 
     #[cfg(feature = "e2e-testing-unsafe")]
