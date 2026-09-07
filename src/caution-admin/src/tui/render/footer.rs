@@ -83,7 +83,8 @@ fn actions(state: &AppState) -> String {
             | Row::AwsFinding(_)
             | Row::AwsHost(_)
             | Row::BuildHistory(_)
-            | Row::Build(_),
+            | Row::Build(_)
+            | Row::Action(_),
         ) => true,
         None => false,
     };

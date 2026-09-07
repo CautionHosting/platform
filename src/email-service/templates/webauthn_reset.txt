@@ -1,0 +1,10 @@
+An administrator has reset your authentication methods on Caution.
+
+All of your previously registered passkeys have been removed. To regain access to your account, use the link below to register a new passkey.
+
+Set up new passkey: {reset_url}
+
+This link expires at {expires_at} and can only be used once. If you did not expect this email, contact Caution support immediately.
+
+--
+Caution Team

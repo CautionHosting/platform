@@ -304,6 +304,7 @@ async fn send_email_handler(
         "legal_notice" => generate_legal_notice_email(&req.data),
         "fully_managed_capacity_alert" => generate_fully_managed_capacity_alert_email(&req.data),
         "organization_invite" => generate_organization_invite_email(&req.data),
+        "webauthn_reset" => generate_webauthn_reset_email(&req.data),
         _ => {
             return Ok(Json(SendEmailResponse {
                 success: false,
@@ -1074,6 +1075,32 @@ fn generate_suspension_notice_email(data: &serde_json::Value) -> (String, String
          --\n\
          Caution Team",
         amount_raw, app_count, BILLING_URL
+    );
+
+    (subject, html_body, text_body)
+}
+
+fn generate_webauthn_reset_email(data: &serde_json::Value) -> (String, String, String) {
+    let reset_url_raw = data["reset_url"]
+        .as_str()
+        .unwrap_or("https://dashboard.caution.co");
+    let expires_at_raw = data["expires_at"].as_str().unwrap_or("soon");
+
+    let reset_url = html_escape(reset_url_raw);
+    let expires_at = html_escape(expires_at_raw);
+    let subject = "Your authentication methods have been reset".to_string();
+
+    let html_body = format!(
+        include_str!("../templates/webauthn_reset.html"),
+        reset_url = reset_url,
+        expires_at = expires_at,
+        footer = html_email_footer()
+    );
+
+    let text_body = format!(
+        include_str!("../templates/webauthn_reset.txt"),
+        reset_url = reset_url_raw,
+        expires_at = expires_at_raw
     );
 
     (subject, html_body, text_body)

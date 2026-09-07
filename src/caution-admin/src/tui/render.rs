@@ -61,6 +61,8 @@ pub fn render(frame: &mut Frame<'_>, state: &mut AppState, platform_sha: Option<
 
     if state.aws_loading.is_some() {
         render_aws_loading(frame, state);
+    } else if let Some(ref confirmation) = state.pending_confirmation {
+        render_confirmation(frame, confirmation);
     } else if state.show_help {
         render_help(frame);
     }
@@ -271,6 +273,10 @@ fn table_row(row: &Row) -> Option<TableRow<'static>> {
         )),
         Row::Aws(row) => Some(aws::table_row(row)),
         Row::AwsFinding(finding) => Some(aws::finding_row(finding)),
+        Row::Action(action) => Some(TableRow::new([
+            Cell::from("ACTION").style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Cell::from(terminal_text(action.label())),
+        ])),
         Row::AwsHost(_)
         | Row::BuildHistory(_)
         | Row::Build(_)
@@ -387,11 +393,17 @@ fn render_resource(
                 Cell::from("Build history"),
                 Cell::from("View"),
             ])),
+            Row::Action(action) => Some(TableRow::new([
+                Cell::from(terminal_text(action.label())).style(Style::default().fg(Color::Magenta)),
+                Cell::from("Execute").style(Style::default().fg(Color::Red)),
+            ])),
             _ => None,
         })
         .collect::<Vec<_>>();
     let navigation_title = if resource.kind == crate::model::ResourceKind::App {
         " Navigate "
+    } else if resource.kind == crate::model::ResourceKind::User && state.enable_write {
+        " Relationships · Actions "
     } else {
         " Relationships "
     };
@@ -552,6 +564,54 @@ fn render_help(frame: &mut Frame<'_>) {
     )
     .wrap(Wrap { trim: false });
     frame.render_widget(help, area);
+}
+
+fn render_confirmation(frame: &mut Frame<'_>, confirmation: &crate::state::PendingConfirmation) {
+    let area = centered_rect(60, 30, frame.area());
+    frame.render_widget(Clear, area);
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Action: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                terminal_text(confirmation.action.label()),
+                Style::default().fg(Color::Magenta),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Target: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(terminal_text(&confirmation.username)),
+        ]),
+        Line::from(vec![
+            Span::styled("User ID: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                confirmation.user_id.to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" to confirm · "),
+            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" to cancel"),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .padding(Padding::left(1))
+                .title(Span::styled(
+                    " CONFIRM ACTION ",
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD),
+                )),
+        ),
+        area,
+    );
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

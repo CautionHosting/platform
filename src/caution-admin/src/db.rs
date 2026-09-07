@@ -24,7 +24,7 @@ const MAX_PAGE_SIZE: u32 = 200;
 
 #[derive(Clone)]
 pub struct Database {
-    pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl Database {

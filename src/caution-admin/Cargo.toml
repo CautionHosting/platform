@@ -24,6 +24,7 @@ dterror = { workspace = true }
 drift-detector = { path = "../drift-detector" }
 futures-util = "0.3"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }

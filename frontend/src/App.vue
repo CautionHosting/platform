@@ -30,6 +30,7 @@ import AuthLogin from './views/AuthLogin.vue'
 import Dashboard from './views/Dashboard.vue'
 import QrLogin from './views/QrLogin.vue'
 import InviteAccept from './views/InviteAccept.vue'
+import ResetAccept from './views/ResetAccept.vue'
 import PublicAttestation from './views/PublicAttestation.vue'
 import PublicE2ee from './views/PublicE2ee.vue'
 import LegalAcceptanceModal from './components/LegalAcceptanceModal.vue'
@@ -47,6 +48,7 @@ export default {
     Dashboard,
     QrLogin,
     InviteAccept,
+    ResetAccept,
     PublicAttestation,
     PublicE2ee,
     LegalAcceptanceModal
@@ -109,6 +111,11 @@ export default {
         title: 'Accept invite • Caution',
         description: 'Join a Caution organization with a passkey.',
         path: '/invite'
+      },
+      '/reset': {
+        title: 'Reset passkey • Caution',
+        description: 'Reset your Caution passkey to regain account access.',
+        path: '/reset'
       },
       '/qr-login': {
         title: 'CLI login • Caution',
@@ -372,6 +379,9 @@ export default {
         return 'Onboarding'
       } else if (path === '/invite') {
         return 'InviteAccept'
+      } else if (path === '/reset') {
+        // Public route - passkey reset (no auth required)
+        return 'ResetAccept'
       } else if (path === '/dashboard') {
         // Protected route - show nothing until auth check completes
         if (!authChecked.value) return null

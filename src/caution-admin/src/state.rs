@@ -86,6 +86,20 @@ pub enum Row {
     Resource(ResourceSummary),
     Relation(RelationSummary),
     Related(RelatedResource),
+    Action(ActionKind),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActionKind {
+    ResetWebauthn,
+}
+
+impl ActionKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ResetWebauthn => "Reset WebAuthn credentials",
+        }
+    }
 }
 
 impl Row {
@@ -111,6 +125,7 @@ impl Row {
             }
             (Self::BuildHistory(left), Self::BuildHistory(right)) => left.id == right.id,
             (Self::Build(left), Self::Build(right)) => left.id == right.id,
+            (Self::Action(left), Self::Action(right)) => left == right,
             _ => self == other,
         }
     }
@@ -170,6 +185,15 @@ pub struct AppState {
     pub aws_cache: Option<AwsSnapshot>,
     pub aws_loading: Option<AwsLoadMode>,
     pub aws_loading_frame: usize,
+    pub enable_write: bool,
+    pub pending_confirmation: Option<PendingConfirmation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingConfirmation {
+    pub action: ActionKind,
+    pub user_id: uuid::Uuid,
+    pub username: String,
 }
 
 impl Default for AppState {
@@ -188,6 +212,8 @@ impl AppState {
             aws_cache: None,
             aws_loading: None,
             aws_loading_frame: 0,
+            enable_write: false,
+            pending_confirmation: None,
         }
     }
 
@@ -330,8 +356,19 @@ impl AppState {
         self.current.status = None;
     }
 
+    fn build_resource_rows(&self, resource: &Resource, relations: Vec<RelationSummary>) -> Vec<Row> {
+        let mut rows = relations.into_iter().map(Row::Relation).collect::<Vec<_>>();
+        if resource.kind == crate::model::ResourceKind::App {
+            rows.push(Row::BuildHistory(resource.summary()));
+        }
+        if self.enable_write && resource.kind == crate::model::ResourceKind::User {
+            rows.push(Row::Action(ActionKind::ResetWebauthn));
+        }
+        rows
+    }
+
     pub fn open_resource(&mut self, resource: Resource, relations: Vec<RelationSummary>) {
-        let rows = resource_rows(&resource, relations);
+        let rows = self.build_resource_rows(&resource, relations);
         self.push(Snapshot {
             screen: Screen::Resource(resource),
             rows,
@@ -388,7 +425,7 @@ impl AppState {
     }
 
     pub fn replace_resource(&mut self, resource: Resource, relations: Vec<RelationSummary>) {
-        let rows = resource_rows(&resource, relations);
+        let rows = self.build_resource_rows(&resource, relations);
         self.current.screen = Screen::Resource(resource);
         self.current.rows = rows;
         self.current.selected = self
@@ -503,14 +540,6 @@ impl AppState {
         self.history.push(self.current.clone());
         self.current = next;
     }
-}
-
-fn resource_rows(resource: &Resource, relations: Vec<RelationSummary>) -> Vec<Row> {
-    let mut rows = relations.into_iter().map(Row::Relation).collect::<Vec<_>>();
-    if resource.kind == ResourceKind::App {
-        rows.push(Row::BuildHistory(resource.summary()));
-    }
-    rows
 }
 
 #[cfg(test)]
