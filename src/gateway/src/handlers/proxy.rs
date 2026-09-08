@@ -78,6 +78,7 @@ fn is_internal_api_target(target_url: &reqwest::Url) -> bool {
 }
 
 /// Proxy webhooks to the metering service (no auth — verified by signature)
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn metering_proxy_handler(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -145,6 +146,7 @@ pub async fn metering_proxy_handler(
     })
 }
 
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn proxy_handler(
     State(state): State<AppState>,
     req: Request,
