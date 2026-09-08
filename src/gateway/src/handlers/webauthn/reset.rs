@@ -17,7 +17,7 @@ use crate::db;
 use crate::types::*;
 use sha2::Digest as _;
 
-use super::{
+use crate::handlers::{
     build_auth_cookies, read_credprops_rk, relax_registration_extensions, MAX_PENDING_CHALLENGES,
     RegisterBeginResponse, RegisterError,
 };
