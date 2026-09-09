@@ -17,7 +17,68 @@ use crate::db;
 use crate::decoy;
 use crate::types::*;
 
-use super::super::{build_auth_cookies, AppError, LoginError, MAX_PENDING_CHALLENGES};
+use super::super::{build_auth_cookies, LoginError, LoginErrorCtx as Ctx, MAX_PENDING_CHALLENGES};
+use dterror::{BoxError, CtxError, Location, ResultExt};
+
+/// Error type for [`begin_login_handler`]. All variants produce a generic 500
+/// response.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum BeginLoginError {
+    #[error("scoped challenge failed [{location:?}]")]
+    ScopedChallenge {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to fetch credentials from database [{location:?}]")]
+    FetchCredentials {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to deserialize stored credential at index {index} [{location:?}]")]
+    DeserializeCredential {
+        index: usize,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to start authentication challenge [{location:?}]")]
+    StartAuthentication {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("too many pending logins [{location:?}]")]
+    TooManyPending {
+        #[location]
+        location: Location,
+    },
+}
+
+impl IntoResponse for BeginLoginError {
+    fn into_response(self) -> Response {
+        tracing::error!(?self, "Begin login error");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "An internal error occurred",
+        )
+            .into_response()
+    }
+}
 
 /// Normalize a caller-supplied optional username for login lookup: trim,
 /// lowercase, and treat an all-whitespace/empty value the same as "absent"
@@ -29,18 +90,80 @@ pub(crate) fn normalize_login_username(username: Option<String>) -> Option<Strin
         .filter(|u| !u.is_empty())
 }
 
+/// A caller-supplied username failed the scope check at login-finish time:
+/// the resolved credential belongs to a different user than the one the
+/// challenge was scoped to (or to no user at all, for a decoy). Returned by
+/// [`check_username_scope`]; each flow's handler error type converts from it.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "resolved credential belongs to a different user than the login was scoped to [{location}]"
+)]
+pub(crate) struct CredentialScopeMismatch {
+    pub(crate) expected_user_id: Option<Uuid>,
+    pub(crate) actual_user_id: Uuid,
+    pub(crate) location: dterror::Location,
+}
+
+/// A stored `public_key` blob failed to deserialize (pure decode failure —
+/// no database access is involved in this error's origin).
+#[derive(Debug, thiserror::Error)]
+#[error("could not deserialize stored credential at index {index} [{location}]")]
+pub(crate) struct DeserializeCredentialError {
+    pub(crate) index: usize,
+    pub(crate) location: dterror::Location,
+    #[source]
+    pub(crate) source: serde_json::Error,
+}
+
+/// Everything that can fail while building a username-scoped (or decoy) login
+/// challenge in [`scoped_or_decoy_challenge`] / [`force_decoy_challenge`].
+/// Each caller converts it into its own handler error type.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ScopedChallengeError {
+    #[error("could not look up user for scoped login [{location}]")]
+    UserLookup {
+        #[source]
+        source: db::DbError,
+        location: dterror::Location,
+    },
+    #[error("could not fetch credentials for scoped login [{location}]")]
+    CredentialFetch {
+        #[source]
+        source: db::DbError,
+        location: dterror::Location,
+    },
+    #[error("could not deserialize stored credentials [{location}]")]
+    DeserializeCredentials {
+        source: DeserializeCredentialError,
+        location: dterror::Location,
+    },
+    #[error("could not start authentication challenge [{location}]")]
+    StartAuthentication {
+        #[source]
+        source: WebauthnError,
+        location: dterror::Location,
+    },
+}
+
 /// Deserialize a set of stored `public_key` blobs into `SecurityKey`s for use
 /// as an `allowCredentials` list.
 #[tracing::instrument(skip_all, err)]
-fn deserialize_security_keys(public_keys: &[Vec<u8>]) -> Result<Vec<SecurityKey>, anyhow::Error> {
+fn deserialize_security_keys(
+    public_keys: &[Vec<u8>],
+) -> Result<Vec<SecurityKey>, DeserializeCredentialError> {
     public_keys
         .iter()
         .enumerate()
         .map(|(i, cred_bytes)| {
-            serde_json::from_slice(cred_bytes).map_err(|e| {
-                tracing::error!("Failed to deserialize credential {}", i);
-                anyhow::anyhow!("Failed to deserialize credential: {}", e)
-            })
+            serde_json::from_slice(cred_bytes)
+                .inspect_err(|_| {
+                    tracing::error!("Failed to deserialize credential {}", i);
+                })
+                .map_err(|source| DeserializeCredentialError {
+                    index: i,
+                    source,
+                    location: std::panic::Location::caller(),
+                })
         })
         .collect()
 }
@@ -99,7 +222,7 @@ fn equalize_decoy_work(state: &AppState, n: usize) {
     match deserialize_security_keys(&blobs) {
         Ok(keys) => {
             let result = state.webauthn.start_securitykey_authentication(&keys);
-            std::hint::black_box(result);
+            let _ = std::hint::black_box(result);
         }
         Err(e) => {
             tracing::warn!(
@@ -138,16 +261,17 @@ pub(crate) enum UsernameScope {
 pub(crate) fn check_username_scope(
     scope: &UsernameScope,
     resolved_user_id: Uuid,
-) -> Result<(), LoginError> {
+) -> Result<(), CredentialScopeMismatch> {
     match scope {
         UsernameScope::Unscoped => Ok(()),
         UsernameScope::Decoy { expected_user_id } => {
             if *expected_user_id == Some(resolved_user_id) {
                 Ok(())
             } else {
-                Err(LoginError::UnexpectedCredentialOwner {
+                Err(CredentialScopeMismatch {
                     expected_user_id: *expected_user_id,
                     actual_user_id: resolved_user_id,
+                    location: std::panic::Location::caller(),
                 })
             }
         }
@@ -196,11 +320,17 @@ async fn force_decoy_challenge(
     username: &str,
     expected_user_id: Option<Uuid>,
     equalize: bool,
-) -> anyhow::Result<(RequestChallengeResponse, AuthState)> {
-    let (mut rcr, auth_state) = state.webauthn.start_discoverable_authentication().map_err(|e| {
-        tracing::error!("Failed to start decoy challenge: {:?}", e);
-        anyhow::anyhow!("Failed to start authentication: {}", e)
-    })?;
+) -> Result<(RequestChallengeResponse, AuthState), ScopedChallengeError> {
+    let (mut rcr, auth_state) = state
+        .webauthn
+        .start_discoverable_authentication()
+        .inspect_err(|e| {
+            tracing::error!("Failed to start decoy challenge: {:?}", e);
+        })
+        .map_err(|source| ScopedChallengeError::StartAuthentication {
+            source,
+            location: std::panic::Location::caller(),
+        })?;
     apply_decoy_shape(&mut rcr, &state.csrf_secret, username);
     if equalize {
         equalize_decoy_work(state, rcr.public_key.allow_credentials.len());
@@ -247,19 +377,26 @@ async fn force_decoy_challenge(
 pub(crate) async fn scoped_or_decoy_challenge(
     state: &AppState,
     username: &str,
-) -> anyhow::Result<(RequestChallengeResponse, AuthState)> {
+) -> Result<(RequestChallengeResponse, AuthState), ScopedChallengeError> {
     if crate::validation::validate_username(username).is_err() {
         return force_decoy_challenge(state, username, None, false).await;
     }
 
-    if !state.username_begin_limiter.check_rate_limit(username).await {
-        tracing::warn!(
-            "Per-username begin-login rate limit exceeded; forcing decoy response"
-        );
+    if !state
+        .username_begin_limiter
+        .check_rate_limit(username)
+        .await
+    {
+        tracing::warn!("Per-username begin-login rate limit exceeded; forcing decoy response");
         return force_decoy_challenge(state, username, None, true).await;
     }
 
-    let user_id = db::get_user_id_by_username(&state.db, username).await?;
+    let user_id = db::get_user_id_by_username(&state.db, username)
+        .await
+        .map_err(|source| ScopedChallengeError::UserLookup {
+            source,
+            location: std::panic::Location::caller(),
+        })?;
 
     // Timing equalization: always issue the same shape of DB work (a user
     // lookup followed by a credential fetch keyed on a real/plausible user
@@ -286,12 +423,20 @@ pub(crate) async fn scoped_or_decoy_challenge(
     let credential_lookup_id = user_id.unwrap_or_else(Uuid::new_v4);
     let public_keys = db::get_credential_public_keys_by_user_id(&state.db, credential_lookup_id)
         .await
-        .map_err(|e| {
+        .inspect_err(|e| {
             tracing::error!("Failed to fetch credentials for scoped login: {:?}", e);
-            anyhow::anyhow!("Failed to fetch credentials: {}", e)
+        })
+        .map_err(|source| ScopedChallengeError::CredentialFetch {
+            source,
+            location: std::panic::Location::caller(),
         })?;
     let allow_credentials = match user_id {
-        Some(_) => deserialize_security_keys(&public_keys)?,
+        Some(_) => deserialize_security_keys(&public_keys).map_err(|source| {
+            ScopedChallengeError::DeserializeCredentials {
+                source,
+                location: std::panic::Location::caller(),
+            }
+        })?,
         None => Vec::new(),
     };
 
@@ -304,9 +449,12 @@ pub(crate) async fn scoped_or_decoy_challenge(
         let (mut rcr, auth_state) = state
             .webauthn
             .start_securitykey_authentication(&allow_credentials)
-            .map_err(|e| {
+            .inspect_err(|e| {
                 tracing::error!("Failed to start scoped authentication: {:?}", e);
-                anyhow::anyhow!("Failed to start authentication: {}", e)
+            })
+            .map_err(|source| ScopedChallengeError::StartAuthentication {
+                source,
+                location: std::panic::Location::caller(),
             })?;
         rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
         return Ok((rcr, AuthState::SecurityKey(auth_state)));
@@ -353,7 +501,9 @@ pub async fn begin_login_handler(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     body: axum::body::Bytes,
-) -> Result<Response, AppError> {
+) -> Result<Response, BeginLoginError> {
+    use BeginLoginErrorCtx as BeginCtx;
+
     let username: Option<String> = normalize_login_username(if body.is_empty() {
         None
     } else {
@@ -374,7 +524,10 @@ pub async fn begin_login_handler(
             .check_rate_limit(&addr.ip().to_string())
             .await
         {
-            tracing::warn!("Scoped begin-login rate limit exceeded for IP: {}", addr.ip());
+            tracing::warn!(
+                "Scoped begin-login rate limit exceeded for IP: {}",
+                addr.ip()
+            );
             return Ok((
                 StatusCode::TOO_MANY_REQUESTS,
                 "Rate limit exceeded. Please try again later.",
@@ -385,20 +538,28 @@ pub async fn begin_login_handler(
         // Username-scoped fallback path (e.g. CLI / non-resident keys).
         // `scoped_or_decoy_challenge` additionally enforces a per-username
         // budget and forces a decoy (never a 429) once that's exceeded.
-        scoped_or_decoy_challenge(&state, &username).await?
+        scoped_or_decoy_challenge(&state, &username)
+            .await
+            .with_context(BeginCtx::scoped_challenge())?
     } else if state.login_allow_broadcast {
         // Legacy behavior: broadcast every credential in the DB. Kept
         // byte-for-byte unchanged pending the Phase 3 flip.
         let all_public_keys = db::get_all_credential_public_keys(&state.db)
             .await
-            .map_err(|e| {
+            .inspect_err(|e| {
                 tracing::error!("Failed to fetch credentials from DB: {:?}", e);
-                anyhow::anyhow!("Failed to fetch credentials: {}", e)
-            })?;
+            })
+            .with_context(BeginCtx::fetch_credentials())?;
 
         tracing::debug!("Found {} credentials in database", all_public_keys.len());
 
-        let allow_credentials = deserialize_security_keys(&all_public_keys)?;
+        let allow_credentials = deserialize_security_keys(&all_public_keys).map_err(|e| {
+            BeginLoginError::DeserializeCredential {
+                index: e.index,
+                location: std::panic::Location::caller(),
+                source: Box::new(e),
+            }
+        })?;
 
         tracing::debug!(
             "Starting authentication challenge with {} credentials",
@@ -409,10 +570,10 @@ pub async fn begin_login_handler(
         let (mut rcr, auth_state) = state
             .webauthn
             .start_securitykey_authentication(&allow_credentials)
-            .map_err(|e| {
+            .inspect_err(|e| {
                 tracing::error!("Failed to start authentication: {:?}", e);
-                anyhow::anyhow!("Failed to start authentication: {}", e)
-            })?;
+            })
+            .with_context(BeginCtx::start_authentication())?;
 
         // Always use Preferred - we enforce PIN requirement in finish_login based on org settings
         // This allows the authenticator to decide, and we validate server-side
@@ -427,10 +588,13 @@ pub async fn begin_login_handler(
         (rcr, AuthState::SecurityKey(auth_state))
     } else {
         // Primary path: username-less discoverable / conditional UI login.
-        let (rcr, auth_state) = state.webauthn.start_discoverable_authentication().map_err(|e| {
-            tracing::error!("Failed to start discoverable authentication: {:?}", e);
-            anyhow::anyhow!("Failed to start authentication: {}", e)
-        })?;
+        let (rcr, auth_state) = state
+            .webauthn
+            .start_discoverable_authentication()
+            .inspect_err(|e| {
+                tracing::error!("Failed to start discoverable authentication: {:?}", e);
+            })
+            .with_context(BeginCtx::start_authentication())?;
         (
             rcr,
             AuthState::Discoverable {
@@ -448,7 +612,9 @@ pub async fn begin_login_handler(
     {
         let mut auth_states = state.auth_states.write().await;
         if auth_states.len() >= MAX_PENDING_CHALLENGES {
-            return Err(anyhow::anyhow!("Too many pending logins").into());
+            return Err(BeginLoginError::TooManyPending {
+                location: std::panic::Location::caller(),
+            });
         }
         auth_states.insert(session_key.clone(), pending);
     }
@@ -468,7 +634,10 @@ pub async fn finish_login_handler(
     let session_key = req
         .get("session")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| LoginError::InvalidSession("missing session field".into()))?
+        .ok_or_else(|| LoginError::InvalidSession {
+            session_id: "missing session field".into(),
+            location: std::panic::Location::caller(),
+        })?
         .to_string();
 
     // Remove (rather than read+clone then remove) so this is the single
@@ -478,15 +647,20 @@ pub async fn finish_login_handler(
         let mut auth_states = state.auth_states.write().await;
         auth_states.remove(&session_key)
     }
-    .ok_or_else(|| LoginError::InvalidSession(session_key.clone()))?;
+    .ok_or_else(|| LoginError::InvalidSession {
+        session_id: session_key.clone(),
+        location: std::panic::Location::caller(),
+    })?;
 
     // Check if the authentication challenge has expired.
     if time::OffsetDateTime::now_utc() > pending.expires_at {
-        return Err(LoginError::ChallengeExpired);
+        return Err(LoginError::ChallengeExpired {
+            location: std::panic::Location::caller(),
+        });
     }
 
-    let auth_response: PublicKeyCredential = serde_json::from_value(req.clone())
-        .map_err(|source| LoginError::ParsePubkeyCredential { source })?;
+    let auth_response: PublicKeyCredential =
+        serde_json::from_value(req.clone()).with_context(Ctx::parse_pubkey_credential())?;
 
     tracing::debug!("Received authentication response");
 
@@ -499,23 +673,22 @@ pub async fn finish_login_handler(
 
             let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
                 .await
-                .map_err(|source| LoginError::DbGetUserIdByCredential {
-                    provided_bytes: credential_id_bytes.clone(),
-                    source,
-                })?;
+                .with_context(Ctx::db_get_user_id_by_credential(
+                    credential_id_bytes.clone(),
+                ))?;
 
             let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
                 .await
-                .map_err(|source| LoginError::DbGetPublicKeyForCredential { user_id, source })?;
+                .with_context(Ctx::db_get_public_key_for_credential(user_id))?;
             let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
-                .map_err(|source| LoginError::ParseSecurityKey { user_id, source })?;
+                .with_context(Ctx::parse_security_key(user_id))?;
 
             tracing::debug!("Credential fetched, performing securitykey authentication");
 
             let auth_result = state
                 .webauthn
                 .finish_securitykey_authentication(&auth_response, &auth_state)
-                .map_err(|source| LoginError::FinishSecurityKeyAuthentication { user_id, source })?;
+                .with_context(Ctx::finish_security_key_authentication(user_id))?;
 
             (user_id, credential_id_bytes, seckey, auth_result)
         }
@@ -527,7 +700,7 @@ pub async fn finish_login_handler(
             let (_user_handle, cred_id) = state
                 .webauthn
                 .identify_discoverable_authentication(&auth_response)
-                .map_err(|source| LoginError::IdentifyDiscoverableCredential { source })?;
+                .with_context(Ctx::identify_discoverable_credential())?;
             let credential_id_bytes = cred_id.to_vec();
             tracing::debug!(
                 "Discoverable credential ID: {}",
@@ -536,16 +709,15 @@ pub async fn finish_login_handler(
 
             let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
                 .await
-                .map_err(|source| LoginError::DbGetUserIdByCredential {
-                    provided_bytes: credential_id_bytes.clone(),
-                    source,
-                })?;
+                .with_context(Ctx::db_get_user_id_by_credential(
+                    credential_id_bytes.clone(),
+                ))?;
 
             let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
                 .await
-                .map_err(|source| LoginError::DbGetPublicKeyForCredential { user_id, source })?;
+                .with_context(Ctx::db_get_public_key_for_credential(user_id))?;
             let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
-                .map_err(|source| LoginError::ParseSecurityKey { user_id, source })?;
+                .with_context(Ctx::parse_security_key(user_id))?;
 
             // SecurityKey -> Credential -> Passkey -> DiscoverableKey, per
             // webauthn-rs 0.5's discoverable-auth API (needs the
@@ -560,7 +732,7 @@ pub async fn finish_login_handler(
             let auth_result = state
                 .webauthn
                 .finish_discoverable_authentication(&auth_response, auth_state, &[discoverable_key])
-                .map_err(|source| LoginError::FinishDiscoverableAuthentication { user_id, source })?;
+                .with_context(Ctx::finish_discoverable_authentication(user_id))?;
 
             // Ceremony is consumed (challenge validated) at this point even
             // if the scope check below rejects it, so a decoy challenge can't
@@ -569,7 +741,13 @@ pub async fn finish_login_handler(
             // identical to every other credential-verification failure (see
             // `LoginError::into_response`) to avoid a username-enumeration
             // oracle.
-            check_username_scope(&scope, user_id)?;
+            if let Err(mismatch) = check_username_scope(&scope, user_id) {
+                return Err(LoginError::UnexpectedCredentialOwner {
+                    expected_user_id: mismatch.expected_user_id,
+                    actual_user_id: mismatch.actual_user_id,
+                    location: std::panic::Location::caller(),
+                });
+            }
 
             // Opportunistic residency backfill: a successful discoverable
             // finish proves the authenticator surfaced this credential via
@@ -593,21 +771,23 @@ pub async fn finish_login_handler(
     // Check if user's org requires PIN verification.
     let requires_pin = db::user_requires_pin(&state.db, user_id)
         .await
-        .map_err(|source| LoginError::DbUserPinRequired { user_id, source })?;
+        .with_context(Ctx::db_user_pin_required(user_id))?;
     if requires_pin && !auth_result.user_verified() {
         tracing::warn!(
             "User {} login rejected: org requires PIN but user_verified=false",
             user_id
         );
-        return Err(LoginError::PinRequired);
+        return Err(LoginError::PinRequired {
+            location: std::panic::Location::caller(),
+        });
     }
 
     if auth_result.needs_update() {
         let update_result = seckey.update_credential(&auth_result);
 
         if let Some(true) = update_result {
-            let updated_key_json = serde_json::to_vec(&seckey)
-                .map_err(|source| LoginError::SerializeSecurityKey { user_id, source })?;
+            let updated_key_json =
+                serde_json::to_vec(&seckey).with_context(Ctx::serialize_security_key(user_id))?;
 
             db::update_fido2_credential(
                 &state.db,
@@ -616,7 +796,7 @@ pub async fn finish_login_handler(
                 auth_result.counter(),
             )
             .await
-            .map_err(|source| LoginError::DbUpdateFido2Credential { user_id, source })?;
+            .with_context(Ctx::db_update_fido2_credential(user_id))?;
         }
     }
 
@@ -626,7 +806,7 @@ pub async fn finish_login_handler(
 
     db::create_auth_session(&state.db, &session_id, &credential_id_bytes, expires_at)
         .await
-        .map_err(|source| LoginError::DbCreateAuthSession { user_id, source })?;
+        .with_context(Ctx::db_create_auth_session(user_id))?;
 
     let credential_id_hex = hex::encode(&credential_id_bytes);
     tracing::debug!(
@@ -652,7 +832,7 @@ pub async fn finish_login_handler(
     );
 
     let body = serde_json::to_string(&response_body)
-        .map_err(|source| LoginError::SerializeLoginFinishResponse { user_id, source })?;
+        .with_context(Ctx::serialize_login_finish_response(user_id))?;
 
     // Use HeaderMap with append to properly set multiple Set-Cookie headers
     let mut headers = HeaderMap::new();
@@ -672,11 +852,11 @@ pub async fn finish_login_handler(
     Ok((StatusCode::OK, headers, body).into_response())
 }
 
-#[tracing::instrument(skip_all, err(Debug))]
+#[tracing::instrument(skip_all)]
 pub async fn logout_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-) -> Result<Response, AppError> {
+) -> Response {
     // Get session from header (CLI) or cookie (browser)
     let session_id = headers
         .get("X-Session-ID")
@@ -714,15 +894,38 @@ pub async fn logout_handler(
     );
 
     if deletion_failed {
-        Ok((
+        (
             StatusCode::INTERNAL_SERVER_ERROR,
             headers,
             r#"{"error":"Failed to delete session"}"#,
         )
-            .into_response())
+            .into_response()
     } else {
-        Ok((StatusCode::OK, headers, r#"{"status":"logged_out"}"#).into_response())
+        (StatusCode::OK, headers, r#"{"status":"logged_out"}"#).into_response()
     }
+}
+
+/// Build cookies that clear auth state (for logout)
+#[tracing::instrument(skip_all)]
+fn build_logout_cookies(secure: bool) -> (String, String) {
+    // Set cookies with immediate expiration to clear them
+    let session_cookie = Cookie::build(("caution_session", ""))
+        .path("/")
+        .http_only(true)
+        .secure(secure)
+        .same_site(SameSite::Strict)
+        .max_age(cookie::time::Duration::ZERO)
+        .build();
+
+    let csrf_cookie = Cookie::build(("caution_csrf", ""))
+        .path("/")
+        .http_only(false)
+        .secure(secure)
+        .same_site(SameSite::Strict)
+        .max_age(cookie::time::Duration::ZERO)
+        .build();
+
+    (session_cookie.to_string(), csrf_cookie.to_string())
 }
 
 #[cfg(test)]
@@ -817,11 +1020,16 @@ mod tests {
         // Username didn't resolve to any user at all: no expected_user_id,
         // but must still always reject, not just no-op like `Unscoped`.
         let resolved = Uuid::new_v4();
-        let err = check_username_scope(&UsernameScope::Decoy { expected_user_id: None }, resolved)
-            .unwrap_err();
+        let err = check_username_scope(
+            &UsernameScope::Decoy {
+                expected_user_id: None,
+            },
+            resolved,
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
-            LoginError::UnexpectedCredentialOwner { expected_user_id: None, actual_user_id }
+            CredentialScopeMismatch { expected_user_id: None, actual_user_id, .. }
             if actual_user_id == resolved
         ));
     }
@@ -831,13 +1039,15 @@ mod tests {
         let expected = Uuid::new_v4();
         let resolved = Uuid::new_v4();
         let err = check_username_scope(
-            &UsernameScope::Decoy { expected_user_id: Some(expected) },
+            &UsernameScope::Decoy {
+                expected_user_id: Some(expected),
+            },
             resolved,
         )
         .unwrap_err();
         assert!(matches!(
             err,
-            LoginError::UnexpectedCredentialOwner { expected_user_id: Some(e), actual_user_id }
+            CredentialScopeMismatch { expected_user_id: Some(e), actual_user_id, .. }
             if e == expected && actual_user_id == resolved
         ));
     }
@@ -848,10 +1058,13 @@ mod tests {
         // credentials to resolve to), but if the expected user ever does
         // match the resolved one, it should be honored rather than rejected.
         let user = Uuid::new_v4();
-        assert!(
-            check_username_scope(&UsernameScope::Decoy { expected_user_id: Some(user) }, user)
-                .is_ok()
-        );
+        assert!(check_username_scope(
+            &UsernameScope::Decoy {
+                expected_user_id: Some(user)
+            },
+            user
+        )
+        .is_ok());
     }
 
     // --- apply_decoy_shape -----------------------------------------------
@@ -902,7 +1115,10 @@ mod tests {
     fn apply_decoy_shape_sets_preferred_user_verification() {
         let mut rcr = dummy_discoverable_rcr();
         apply_decoy_shape(&mut rcr, "secret", "nobody");
-        assert_eq!(rcr.public_key.user_verification, UserVerificationPolicy::Preferred);
+        assert_eq!(
+            rcr.public_key.user_verification,
+            UserVerificationPolicy::Preferred
+        );
     }
 
     #[test]
@@ -911,9 +1127,22 @@ mod tests {
         let mut b = dummy_discoverable_rcr();
         apply_decoy_shape(&mut a, "secret", "alice");
         apply_decoy_shape(&mut b, "secret", "alice");
-        let ids_a: Vec<_> = a.public_key.allow_credentials.iter().map(|c| c.id.as_ref().to_vec()).collect();
-        let ids_b: Vec<_> = b.public_key.allow_credentials.iter().map(|c| c.id.as_ref().to_vec()).collect();
-        assert_eq!(ids_a, ids_b, "decoy for a given username must be stable across calls");
+        let ids_a: Vec<_> = a
+            .public_key
+            .allow_credentials
+            .iter()
+            .map(|c| c.id.as_ref().to_vec())
+            .collect();
+        let ids_b: Vec<_> = b
+            .public_key
+            .allow_credentials
+            .iter()
+            .map(|c| c.id.as_ref().to_vec())
+            .collect();
+        assert_eq!(
+            ids_a, ids_b,
+            "decoy for a given username must be stable across calls"
+        );
     }
 
     #[test]
@@ -1032,8 +1261,18 @@ mod tests {
         let state = test_app_state(1);
 
         // Exhaust the budget directly rather than via a real DB-backed call.
-        assert!(state.username_begin_limiter.check_rate_limit("realuser").await);
-        assert!(!state.username_begin_limiter.check_rate_limit("realuser").await);
+        assert!(
+            state
+                .username_begin_limiter
+                .check_rate_limit("realuser")
+                .await
+        );
+        assert!(
+            !state
+                .username_begin_limiter
+                .check_rate_limit("realuser")
+                .await
+        );
 
         let (rcr, auth_state) = scoped_or_decoy_challenge(&state, "realuser")
             .await
@@ -1044,12 +1283,20 @@ mod tests {
             "forced decoy must still carry a non-empty allowCredentials list"
         );
         assert!(rcr.mediation.is_none());
-        assert_eq!(rcr.public_key.user_verification, UserVerificationPolicy::Preferred);
+        assert_eq!(
+            rcr.public_key.user_verification,
+            UserVerificationPolicy::Preferred
+        );
 
         match auth_state {
             AuthState::Discoverable { scope, .. } => {
                 assert!(
-                    matches!(scope, UsernameScope::Decoy { expected_user_id: None }),
+                    matches!(
+                        scope,
+                        UsernameScope::Decoy {
+                            expected_user_id: None
+                        }
+                    ),
                     "a forced decoy never did the DB lookup, so expected_user_id must be None"
                 );
             }
@@ -1067,8 +1314,18 @@ mod tests {
         // observer must not be able to tell "rate limited" apart from
         // "unknown username" apart from "known but zero creds".
         let state = test_app_state(1);
-        assert!(state.username_begin_limiter.check_rate_limit("someone").await);
-        assert!(!state.username_begin_limiter.check_rate_limit("someone").await);
+        assert!(
+            state
+                .username_begin_limiter
+                .check_rate_limit("someone")
+                .await
+        );
+        assert!(
+            !state
+                .username_begin_limiter
+                .check_rate_limit("someone")
+                .await
+        );
 
         let (forced_rcr, _) = scoped_or_decoy_challenge(&state, "someone").await.unwrap();
 
@@ -1079,7 +1336,10 @@ mod tests {
             forced_rcr.public_key.allow_credentials.len(),
             natural_rcr.public_key.allow_credentials.len()
         );
-        assert_eq!(forced_rcr.mediation.is_none(), natural_rcr.mediation.is_none());
+        assert_eq!(
+            forced_rcr.mediation.is_none(),
+            natural_rcr.mediation.is_none()
+        );
         assert_eq!(
             forced_rcr.public_key.user_verification,
             natural_rcr.public_key.user_verification
@@ -1100,11 +1360,19 @@ mod tests {
 
         assert!(!rcr.public_key.allow_credentials.is_empty());
         assert!(rcr.mediation.is_none());
-        assert_eq!(rcr.public_key.user_verification, UserVerificationPolicy::Preferred);
+        assert_eq!(
+            rcr.public_key.user_verification,
+            UserVerificationPolicy::Preferred
+        );
 
         match auth_state {
             AuthState::Discoverable { scope, .. } => {
-                assert!(matches!(scope, UsernameScope::Decoy { expected_user_id: None }));
+                assert!(matches!(
+                    scope,
+                    UsernameScope::Decoy {
+                        expected_user_id: None
+                    }
+                ));
             }
             AuthState::SecurityKey(_) => {
                 panic!("invalid-format username must never produce a real SecurityKey auth state")
@@ -1119,27 +1387,4 @@ mod tests {
             "format short-circuit must not have consumed a rate-limit slot for this username"
         );
     }
-}
-
-/// Build cookies that clear auth state (for logout)
-#[tracing::instrument(skip_all)]
-fn build_logout_cookies(secure: bool) -> (String, String) {
-    // Set cookies with immediate expiration to clear them
-    let session_cookie = Cookie::build(("caution_session", ""))
-        .path("/")
-        .http_only(true)
-        .secure(secure)
-        .same_site(SameSite::Strict)
-        .max_age(cookie::time::Duration::ZERO)
-        .build();
-
-    let csrf_cookie = Cookie::build(("caution_csrf", ""))
-        .path("/")
-        .http_only(false)
-        .secure(secure)
-        .same_site(SameSite::Strict)
-        .max_age(cookie::time::Duration::ZERO)
-        .build();
-
-    (session_cookie.to_string(), csrf_cookie.to_string())
 }

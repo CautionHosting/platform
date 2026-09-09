@@ -15,18 +15,32 @@ use crate::types::{AppState, AuthenticatedUserId};
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB
 
 #[derive(Debug, thiserror::Error)]
-#[error("failed to construct backend URL")]
-pub struct BuildTargetUrlError(#[from] url::ParseError);
+#[error("failed to construct backend URL [{location}]")]
+pub struct BuildTargetUrlError {
+    #[source]
+    source: url::ParseError,
+    location: dterror::Location,
+}
 
+impl BuildTargetUrlError {
+    #[track_caller]
+    fn new(source: url::ParseError) -> Self {
+        Self {
+            source,
+            location: std::panic::Location::caller(),
+        }
+    }
+}
+
+#[track_caller]
 fn build_api_target_url(
     api_service_url: &str,
     path: &str,
     query: Option<&str>,
 ) -> Result<reqwest::Url, BuildTargetUrlError> {
     let query = query.map(|q| format!("?{q}")).unwrap_or_default();
-    Ok(reqwest::Url::parse(&format!(
-        "{api_service_url}{path}{query}"
-    ))?)
+    reqwest::Url::parse(&format!("{api_service_url}{path}{query}"))
+        .map_err(|source| BuildTargetUrlError::new(source))
 }
 
 fn is_internal_api_target(target_url: &reqwest::Url) -> bool {

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use crate::db;
+use crate::db::{self, DbErrorKind};
 use crate::types::*;
 use axum::{
     extract::{Extension, State},
@@ -9,6 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -22,27 +23,59 @@ pub struct UsernameStatusResponse {
     pub username_is_placeholder: bool,
 }
 
-#[derive(Debug, thiserror::Error)]
+/// Strict dterror convention: every variant carries `#[location]`; source-bearing
+/// variants use `.with_context(Ctx::…)` at call sites; source-less (domain)
+/// variants are hand-built with `std::panic::Location::caller()`.
+#[derive(Debug, thiserror::Error, CtxError)]
 pub enum UsernameClaimError {
-    #[error("Invalid username: {0}")]
-    InvalidUsername(String),
-    #[error("This username is already taken.")]
-    UsernameTaken,
-    #[error("You have already set your username.")]
-    AlreadyClaimed,
-    #[error(transparent)]
-    Internal(#[from] anyhow::Error),
+    #[error("Invalid username: {username_error} [{location}]")]
+    InvalidUsername {
+        username_error: String,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("This username is already taken. [{location}]")]
+    UsernameTaken {
+        #[location]
+        location: Location,
+    },
+
+    #[error("You have already set your username. [{location}]")]
+    AlreadyClaimed {
+        #[location]
+        location: Location,
+    },
+
+    #[error("internal error [{location}]")]
+    Internal {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
 }
 
 impl IntoResponse for UsernameClaimError {
     fn into_response(self) -> Response {
         match self {
-            Self::InvalidUsername(_) => (StatusCode::BAD_REQUEST, self.to_string()).into_response(),
-            Self::UsernameTaken | Self::AlreadyClaimed => {
-                (StatusCode::CONFLICT, self.to_string()).into_response()
+            Self::InvalidUsername {
+                ref username_error, ..
+            } => (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid username: {username_error}"),
+            )
+                .into_response(),
+            Self::UsernameTaken { .. } => {
+                (StatusCode::CONFLICT, "This username is already taken.").into_response()
             }
-            Self::Internal(ref err) => {
-                tracing::error!(?err, "Username claim error");
+            Self::AlreadyClaimed { .. } => {
+                (StatusCode::CONFLICT, "You have already set your username.").into_response()
+            }
+            Self::Internal { .. } => {
+                tracing::error!(?self, "Username claim error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred",
@@ -61,8 +94,11 @@ pub async fn get_username_status_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
 ) -> Result<Json<UsernameStatusResponse>, UsernameClaimError> {
-    let (username, username_is_placeholder) =
-        db::get_username_status(&state.db, user_id).await?;
+    use UsernameClaimErrorCtx as Ctx;
+
+    let (username, username_is_placeholder) = db::get_username_status(&state.db, user_id)
+        .await
+        .with_context(Ctx::internal())?;
 
     Ok(Json(UsernameStatusResponse {
         username,
@@ -81,21 +117,32 @@ pub async fn claim_username_handler(
     Json(req): Json<ClaimUsernameRequest>,
 ) -> Result<Json<UsernameStatusResponse>, UsernameClaimError> {
     let username = req.username.trim().to_lowercase();
-    crate::validation::validate_username(&username)
-        .map_err(|e| UsernameClaimError::InvalidUsername(e.to_string()))?;
+    if let Err(e) = crate::validation::validate_username(&username) {
+        return Err(UsernameClaimError::InvalidUsername {
+            username_error: e.to_string(),
+            location: std::panic::Location::caller(),
+        });
+    }
 
     let claimed = db::claim_username(&state.db, user_id, &username)
         .await
         .map_err(|e| {
-            if db::is_username_taken_error(&e) {
-                UsernameClaimError::UsernameTaken
+            if e.kind == DbErrorKind::UsernameTaken {
+                UsernameClaimError::UsernameTaken {
+                    location: std::panic::Location::caller(),
+                }
             } else {
-                UsernameClaimError::Internal(e)
+                UsernameClaimError::Internal {
+                    source: Box::new(e),
+                    location: std::panic::Location::caller(),
+                }
             }
         })?;
 
     if !claimed {
-        return Err(UsernameClaimError::AlreadyClaimed);
+        return Err(UsernameClaimError::AlreadyClaimed {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(Json(UsernameStatusResponse {

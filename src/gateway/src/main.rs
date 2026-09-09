@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result};
 use axum::{middleware, routing::{delete, get, post}, Router};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use russh::keys::{Algorithm, PrivateKey};
 use russh::keys::ssh_key::LineEnding;
 use sqlx::postgres::PgPoolOptions;
@@ -30,8 +30,185 @@ mod validation;
 use config::Config;
 use types::AppState;
 
+#[derive(Debug, thiserror::Error, CtxError)]
+enum MainError {
+    #[error("failed to load configuration [{location:?}]")]
+    Config {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to connect to database [{location:?}]")]
+    DatabaseConnection {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("no valid RP origins configured [{location:?}]")]
+    NoValidOrigins {
+        #[location]
+        location: Location,
+    },
+
+    #[error("non-localhost RP origin must use HTTPS in production: {origin} [{location:?}]")]
+    InsecureOrigin {
+        origin: String,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("failed to create WebAuthn builder [{location:?}]")]
+    WebauthnBuilder {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to build WebAuthn [{location:?}]")]
+    WebauthnBuild {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to load SSH host key [{location:?}]")]
+    HostKey {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to build HTTP client [{location:?}]")]
+    HttpClient {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to bind to address {addr} [{location:?}]")]
+    BindAddress {
+        addr: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("server error [{location:?}]")]
+    Server {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+enum LoadHostKeyError {
+    #[error("failed to read SSH host key from {path} [{location:?}]")]
+    ReadKeyFile {
+        #[context(borrow = str)]
+        path: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to decode SSH host key [{location:?}]")]
+    DecodeKey {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to generate Ed25519 key [{location:?}]")]
+    GenerateKey {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to create directory {parent} [{location:?}]")]
+    CreateDirectory {
+        #[context(borrow = std::path::Path)]
+        parent: std::path::PathBuf,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to encode SSH host key [{location:?}]")]
+    EncodeKey {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to write SSH host key to {path} [{location:?}]")]
+    WriteKeyFile {
+        #[context(borrow = str)]
+        path: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to set permissions on SSH host key [{location:?}]")]
+    SetPermissions {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to read SSH host key metadata [{location:?}]")]
+    ReadMetadata {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), MainError> {
+    use MainErrorCtx as Ctx;
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -50,7 +227,7 @@ async fn main() -> Result<()> {
         tracing::warn!("e2e-testing-unsafe feature is enabled — /auth/e2e-login endpoint is active. Do NOT use in production.");
     }
 
-    let config = Config::from_env().context("Failed to load configuration")?;
+    let config = Config::from_env().with_context(Ctx::config())?;
 
     let max_db_connections: u32 = std::env::var("DB_MAX_CONNECTIONS")
         .ok()
@@ -61,7 +238,7 @@ async fn main() -> Result<()> {
         .max_connections(max_db_connections)
         .connect(&config.database_url)
         .await
-        .context("Failed to connect to database")?;
+        .with_context(Ctx::database_connection())?;
 
     tracing::info!("Database connected");
 
@@ -72,7 +249,9 @@ async fn main() -> Result<()> {
         .collect();
 
     if origins.is_empty() {
-        anyhow::bail!("No valid RP origins configured");
+        return Err(MainError::NoValidOrigins {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let is_production = std::env::var("ENVIRONMENT")
@@ -81,17 +260,17 @@ async fn main() -> Result<()> {
     if is_production {
         for origin in &origins {
             if origin.scheme() == "http" && origin.host_str() != Some("localhost") {
-                anyhow::bail!(
-                    "Non-localhost RP origin must use HTTPS in production: {}",
-                    origin
-                );
+                return Err(MainError::InsecureOrigin {
+                    origin: origin.to_string(),
+                    location: std::panic::Location::caller(),
+                });
             }
         }
     }
 
     let rp_id = &config.rp_id;
     let mut builder =
-        WebauthnBuilder::new(rp_id, &origins[0]).context("Failed to create WebAuthn builder")?;
+        WebauthnBuilder::new(rp_id, &origins[0]).with_context(Ctx::webauthn_builder())?;
 
     for origin in origins.iter().skip(1) {
         builder = builder.append_allowed_origin(origin);
@@ -100,7 +279,7 @@ async fn main() -> Result<()> {
     let webauthn = builder
         .rp_name(&config.rp_display_name)
         .build()
-        .context("Failed to build WebAuthn")?;
+        .with_context(Ctx::webauthn_build())?;
 
     // Fail fast if the login-begin decoy timing-equalization fixtures ever
     // stop deserializing (e.g. a future webauthn-rs upgrade changing
@@ -114,7 +293,7 @@ async fn main() -> Result<()> {
     tracing::info!("  RP Origins: {:?}", config.rp_origins);
 
     let host_key = load_or_generate_host_key(&config.ssh_host_key_path)
-        .context("Failed to load SSH host key")?;
+        .with_context(Ctx::host_key())?;
 
     // Kill-switch for legacy credential-broadcast login (see AppState::login_allow_broadcast
     // doc comment). Read once at startup — toggling requires an env var change + restart.
@@ -153,6 +332,11 @@ async fn main() -> Result<()> {
         rate_limit::USERNAME_BEGIN_WINDOW_SECS,
     );
 
+    let http_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .with_context(Ctx::http_client())?;
+
     let state = AppState {
         db: pool.clone(),
         webauthn,
@@ -164,9 +348,7 @@ async fn main() -> Result<()> {
         // across redirects. A backend 3xx (attacker-influenced or not) would
         // otherwise leak the internal secret/body to the redirect target.
         // Backend 3xx responses are relayed to the caller instead.
-        http_client: reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?,
+        http_client,
         reg_states: Arc::new(RwLock::new(HashMap::new())),
         passkey_reg_states: Arc::new(RwLock::new(HashMap::new())),
         auth_states: Arc::new(RwLock::new(HashMap::new())),
@@ -494,7 +676,7 @@ async fn main() -> Result<()> {
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .context("Failed to bind to address")?;
+        .with_context(Ctx::bind_address(addr.clone()))?;
 
     tracing::info!("Gateway listening on {}", addr);
     tracing::info!("SSH server listening on port {}", config.ssh_port);
@@ -505,7 +687,7 @@ async fn main() -> Result<()> {
     )
     .with_graceful_shutdown(shutdown_signal())
     .await
-    .context("Server error")?;
+    .with_context(Ctx::server())?;
 
     Ok(())
 }
@@ -520,7 +702,8 @@ async fn shutdown_signal() {
     }
 }
 
-fn load_or_generate_host_key(path: &str) -> Result<PrivateKey> {
+fn load_or_generate_host_key(path: &str) -> Result<PrivateKey, LoadHostKeyError> {
+    use LoadHostKeyErrorCtx as Ctx;
     use std::fs;
     use std::path::Path;
 
@@ -528,10 +711,10 @@ fn load_or_generate_host_key(path: &str) -> Result<PrivateKey> {
 
     if key_path.exists() {
         let key_str = fs::read_to_string(key_path)
-            .with_context(|| format!("Failed to read SSH host key from {}", path))?;
+            .with_context(Ctx::read_key_file(path))?;
 
         let key = russh::keys::decode_secret_key(&key_str, None)
-            .context("Failed to decode SSH host key")?;
+            .with_context(Ctx::decode_key())?;
 
         tracing::debug!("Loaded SSH host key");
         Ok(key)
@@ -539,24 +722,26 @@ fn load_or_generate_host_key(path: &str) -> Result<PrivateKey> {
         tracing::info!("Generating new SSH host key");
 
         let key = PrivateKey::random(&mut rand010::rng(), Algorithm::Ed25519)
-            .context("Failed to generate Ed25519 key")?;
+            .with_context(Ctx::generate_key())?;
 
         if let Some(parent) = key_path.parent() {
             fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+                .with_context(Ctx::create_directory(parent))?;
         }
 
         let key_pem = key.to_openssh(LineEnding::LF)
-            .context("Failed to encode SSH host key")?;
+            .with_context(Ctx::encode_key())?;
         fs::write(key_path, key_pem.as_bytes())
-            .with_context(|| format!("Failed to write SSH host key to {}", path))?;
+            .with_context(Ctx::write_key_file(path))?;
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(key_path)?.permissions();
+            let mut perms = fs::metadata(key_path)
+                .with_context(Ctx::read_metadata())?.permissions();
             perms.set_mode(0o600);
-            fs::set_permissions(key_path, perms)?;
+            fs::set_permissions(key_path, perms)
+                .with_context(Ctx::set_permissions())?;
         }
 
         tracing::info!("SSH host key generated");

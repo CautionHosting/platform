@@ -9,8 +9,9 @@ use axum::{
 use crate::db;
 use crate::types::*;
 
+use super::super::{RegisterBeginResponse, RegisterError, RegisterErrorCtx as Ctx};
 use super::register::begin_registration_challenge;
-use super::super::{RegisterBeginResponse, RegisterError};
+use dterror::ResultExt;
 
 #[tracing::instrument(skip_all, err)]
 pub async fn invite_preview_handler(
@@ -19,14 +20,20 @@ pub async fn invite_preview_handler(
 ) -> Result<Json<InvitePreviewResponse>, RegisterError> {
     let token = params.token.trim();
     if token.is_empty() {
-        return Err(RegisterError::InvalidInvitation);
+        return Err(RegisterError::InvalidInvitation {
+            location: std::panic::Location::caller(),
+        });
     }
 
-    let token_hash = db::hash_invitation_token(token).ok_or(RegisterError::InvalidInvitation)?;
+    let token_hash = db::hash_invitation_token(token).ok_or(RegisterError::InvalidInvitation {
+        location: std::panic::Location::caller(),
+    })?;
     let invitation = db::get_valid_invitation(&state.db, &token_hash)
         .await
-        .map_err(|e| RegisterError::Internal(e))?
-        .ok_or(RegisterError::InvalidInvitation)?;
+        .with_context(Ctx::internal())?
+        .ok_or(RegisterError::InvalidInvitation {
+            location: std::panic::Location::caller(),
+        })?;
 
     Ok(Json(InvitePreviewResponse {
         email: invitation.email,
@@ -42,20 +49,30 @@ pub async fn begin_invite_register_handler(
 ) -> Result<Json<RegisterBeginResponse>, RegisterError> {
     let token = req.token.trim();
     if token.is_empty() {
-        return Err(RegisterError::InvalidInvitation);
+        return Err(RegisterError::InvalidInvitation {
+            location: std::panic::Location::caller(),
+        });
     }
 
-    let token_hash = db::hash_invitation_token(token).ok_or(RegisterError::InvalidInvitation)?;
+    let token_hash = db::hash_invitation_token(token).ok_or(RegisterError::InvalidInvitation {
+        location: std::panic::Location::caller(),
+    })?;
     let invitation = db::get_valid_invitation(&state.db, &token_hash)
         .await
-        .map_err(|e| RegisterError::Internal(e))?
-        .ok_or(RegisterError::InvalidInvitation)?;
+        .with_context(Ctx::internal())?
+        .ok_or(RegisterError::InvalidInvitation {
+            location: std::panic::Location::caller(),
+        })?;
 
     // Validate username if provided, otherwise use email
     let username_for_registration = if let Some(username) = req.username {
         let username = username.trim().to_lowercase();
-        crate::validation::validate_username(&username)
-            .map_err(|e| RegisterError::InvalidUsername(e.to_string()))?;
+        if let Err(e) = crate::validation::validate_username(&username) {
+            return Err(RegisterError::InvalidUsername {
+                username_error: e.to_string(),
+                location: std::panic::Location::caller(),
+            });
+        }
         username
     } else {
         invitation.email.clone()

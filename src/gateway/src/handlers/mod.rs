@@ -9,8 +9,8 @@ mod credentials;
 #[cfg(feature = "e2e-testing-unsafe")]
 mod e2e;
 pub(crate) mod frontend;
-mod qr_auth;
 mod proxy;
+mod qr_auth;
 mod user_profile;
 mod webauthn;
 
@@ -24,8 +24,8 @@ pub(crate) use user_profile::{claim_username_handler, get_username_status_handle
 
 pub(crate) use credentials::{
     add_pgp_key_handler, add_ssh_key_handler, begin_add_passkey_handler, delete_passkey_handler,
-    delete_ssh_key_handler, finish_add_passkey_handler, list_passkeys_handler, list_pgp_keys_handler,
-    list_ssh_keys_handler, remove_pgp_key_handler,
+    delete_ssh_key_handler, finish_add_passkey_handler, list_passkeys_handler,
+    list_pgp_keys_handler, list_ssh_keys_handler, remove_pgp_key_handler,
 };
 
 pub(crate) use qr_auth::{
@@ -36,8 +36,9 @@ pub(crate) use qr_auth::{
 };
 
 pub(crate) use common::{
-    build_auth_cookies, read_credprops_rk, relax_registration_extensions, AppError, LoginError,
-    RegisterBeginResponse, RegisterError, SignRequestError, MAX_PENDING_CHALLENGES,
+    build_auth_cookies, generic_auth_failure_response, read_credprops_rk,
+    relax_registration_extensions, DomainError, LoginError, LoginErrorCtx, RegisterBeginResponse,
+    RegisterError, RegisterErrorCtx, SignRequestError, SignRequestErrorCtx, MAX_PENDING_CHALLENGES,
 };
 
 pub(crate) use webauthn::{
@@ -57,5 +58,3 @@ pub struct RegisterFinishRequestCli {
 pub async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
-
-

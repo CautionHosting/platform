@@ -27,59 +27,83 @@ impl ValidatedPgpPublicKey {
     }
 }
 
+/// Leaf error for PGP public key parsing.
+///
+/// Location is Debug-only: the `Display` output of this type feeds client-facing
+/// bodies (via `AddPgpKeyError::InvalidPublicKey`'s transparent forwarding).
 #[derive(Debug, thiserror::Error)]
 pub enum ParsePgpPublicKeyError {
     #[error("PGP public key is empty")]
-    Empty,
+    Empty { location: dterror::Location },
 
     #[error("PGP public key is too large (maximum {max} bytes, got {actual})")]
-    TooLarge { max: usize, actual: usize },
+    TooLarge {
+        max: usize,
+        actual: usize,
+        location: dterror::Location,
+    },
 
     #[error("PGP public key must be an ASCII-armored public certificate")]
-    InvalidArmor,
+    InvalidArmor { location: dterror::Location },
 
     #[error("PGP public key is malformed")]
     Parse {
         #[source]
-        source: anyhow::Error,
+        source: dterror::BoxError,
+        location: dterror::Location,
     },
 
     #[error("PGP input must contain exactly one public certificate (got {actual})")]
-    CertificateCount { actual: usize },
+    CertificateCount {
+        actual: usize,
+        location: dterror::Location,
+    },
 
     #[error(
         "PGP input contains private key material; export and submit only the public certificate"
     )]
-    PrivateKeyMaterial,
+    PrivateKeyMaterial { location: dterror::Location },
 
     #[error("PGP public certificate is not valid under the standard OpenPGP policy")]
     Policy {
         #[source]
-        source: anyhow::Error,
+        source: dterror::BoxError,
+        location: dterror::Location,
     },
 
     #[error("Unable to normalize PGP public certificate")]
     Serialize {
         #[source]
-        source: anyhow::Error,
+        source: dterror::BoxError,
+        location: dterror::Location,
     },
 
     #[error("Normalized PGP public certificate is not valid UTF-8")]
     Utf8 {
         #[source]
         source: std::string::FromUtf8Error,
+        location: dterror::Location,
     },
 }
 
+/// Leaf error for PGP key name validation.
+///
+/// Location is Debug-only: the `Display` output of this type feeds client-facing
+/// bodies (via `AddPgpKeyError::InvalidName`'s transparent forwarding).
 #[derive(Debug, thiserror::Error)]
 pub enum ValidatePgpKeyNameError {
     #[error("PGP key name must be at most {max} characters (got {actual})")]
-    TooLong { max: usize, actual: usize },
+    TooLong {
+        max: usize,
+        actual: usize,
+        location: dterror::Location,
+    },
 
     #[error("PGP key name cannot contain control characters")]
-    ControlCharacter,
+    ControlCharacter { location: dterror::Location },
 }
 
+#[track_caller]
 pub fn parse_public_key(input: &str) -> Result<ValidatedPgpPublicKey, ParsePgpPublicKeyError> {
     let actual = input.len();
 
@@ -87,51 +111,81 @@ pub fn parse_public_key(input: &str) -> Result<ValidatedPgpPublicKey, ParsePgpPu
         return Err(ParsePgpPublicKeyError::TooLarge {
             max: PGP_PUBLIC_KEY_MAX_BYTES,
             actual,
+            location: std::panic::Location::caller(),
         });
     }
     let input = input.trim();
     if input.is_empty() {
-        return Err(ParsePgpPublicKeyError::Empty);
+        return Err(ParsePgpPublicKeyError::Empty {
+            location: std::panic::Location::caller(),
+        });
     }
     if input.starts_with(PGP_PRIVATE_KEY_ARMOR_BEGIN) {
-        return Err(ParsePgpPublicKeyError::PrivateKeyMaterial);
+        return Err(ParsePgpPublicKeyError::PrivateKeyMaterial {
+            location: std::panic::Location::caller(),
+        });
     }
     if !input.starts_with(PGP_PUBLIC_KEY_ARMOR_BEGIN) || !input.ends_with(PGP_PUBLIC_KEY_ARMOR_END)
     {
-        return Err(ParsePgpPublicKeyError::InvalidArmor);
+        return Err(ParsePgpPublicKeyError::InvalidArmor {
+            location: std::panic::Location::caller(),
+        });
     }
 
-    let parser = CertParser::from_bytes(input.as_bytes())
-        .map_err(|source| ParsePgpPublicKeyError::Parse { source })?;
+    let parser = CertParser::from_bytes(input.as_bytes()).map_err(|source| {
+        ParsePgpPublicKeyError::Parse {
+            source: source.into_boxed_dyn_error(),
+            location: std::panic::Location::caller(),
+        }
+    })?;
     let certs = parser
         .collect::<openpgp::Result<Vec<_>>>()
-        .map_err(|source| ParsePgpPublicKeyError::Parse { source })?;
+        .map_err(|source| ParsePgpPublicKeyError::Parse {
+            source: source.into_boxed_dyn_error(),
+            location: std::panic::Location::caller(),
+        })?;
 
     if certs.len() != 1 {
         return Err(ParsePgpPublicKeyError::CertificateCount {
             actual: certs.len(),
+            location: std::panic::Location::caller(),
         });
     }
 
-    let cert = certs
-        .into_iter()
-        .next()
-        .ok_or(ParsePgpPublicKeyError::CertificateCount { actual: 0 })?;
+    let cert =
+        certs
+            .into_iter()
+            .next()
+            .ok_or_else(|| ParsePgpPublicKeyError::CertificateCount {
+                actual: 0,
+                location: std::panic::Location::caller(),
+            })?;
 
     if cert.is_tsk() {
-        return Err(ParsePgpPublicKeyError::PrivateKeyMaterial);
+        return Err(ParsePgpPublicKeyError::PrivateKeyMaterial {
+            location: std::panic::Location::caller(),
+        });
     }
 
     cert.with_policy(&StandardPolicy::new(), None)
-        .map_err(|source| ParsePgpPublicKeyError::Policy { source })?;
+        .map_err(|source| ParsePgpPublicKeyError::Policy {
+            source: source.into_boxed_dyn_error(),
+            location: std::panic::Location::caller(),
+        })?;
 
     let fingerprint = cert.fingerprint().to_string();
     let mut serialized = Vec::new();
     cert.armored()
         .serialize(&mut serialized)
-        .map_err(|source| ParsePgpPublicKeyError::Serialize { source })?;
+        .map_err(|source| ParsePgpPublicKeyError::Serialize {
+            source: source.into_boxed_dyn_error(),
+            location: std::panic::Location::caller(),
+        })?;
     let mut armored =
-        String::from_utf8(serialized).map_err(|source| ParsePgpPublicKeyError::Utf8 { source })?;
+        String::from_utf8(serialized).map_err(|source| ParsePgpPublicKeyError::Utf8 {
+            source,
+            location: std::panic::Location::caller(),
+        })?;
     if !armored.ends_with('\n') {
         armored.push('\n');
     }
@@ -139,6 +193,7 @@ pub fn parse_public_key(input: &str) -> Result<ValidatedPgpPublicKey, ParsePgpPu
         return Err(ParsePgpPublicKeyError::TooLarge {
             max: PGP_PUBLIC_KEY_MAX_BYTES,
             actual: armored.len(),
+            location: std::panic::Location::caller(),
         });
     }
 
@@ -148,6 +203,7 @@ pub fn parse_public_key(input: &str) -> Result<ValidatedPgpPublicKey, ParsePgpPu
     })
 }
 
+#[track_caller]
 pub fn validate_key_name(name: &str) -> Result<(), ValidatePgpKeyNameError> {
     let actual = name.chars().count();
 
@@ -155,10 +211,13 @@ pub fn validate_key_name(name: &str) -> Result<(), ValidatePgpKeyNameError> {
         return Err(ValidatePgpKeyNameError::TooLong {
             max: PGP_KEY_NAME_MAX_CHARS,
             actual,
+            location: std::panic::Location::caller(),
         });
     }
     if name.chars().any(char::is_control) {
-        return Err(ValidatePgpKeyNameError::ControlCharacter);
+        return Err(ValidatePgpKeyNameError::ControlCharacter {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(())
@@ -205,7 +264,7 @@ mod tests {
 
         assert!(matches!(
             parse_public_key(&private_key),
-            Err(ParsePgpPublicKeyError::PrivateKeyMaterial)
+            Err(ParsePgpPublicKeyError::PrivateKeyMaterial { .. })
         ));
     }
 
@@ -224,7 +283,7 @@ mod tests {
     fn rejects_malformed_and_oversized_input() {
         assert!(matches!(
             parse_public_key("not a PGP certificate"),
-            Err(ParsePgpPublicKeyError::InvalidArmor)
+            Err(ParsePgpPublicKeyError::InvalidArmor { .. })
         ));
         let with_trailing_data = format!("{}unexpected", armored_public_key(&test_cert()));
         assert!(matches!(
@@ -251,7 +310,7 @@ mod tests {
         assert!(validate_key_name("Work laptop").is_ok());
         assert!(matches!(
             validate_key_name("line\nbreak"),
-            Err(ValidatePgpKeyNameError::ControlCharacter)
+            Err(ValidatePgpKeyNameError::ControlCharacter { .. })
         ));
         assert!(matches!(
             validate_key_name(&"x".repeat(PGP_KEY_NAME_MAX_CHARS + 1)),
