@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use std::env;
 use url::Url;
 
@@ -21,8 +21,69 @@ pub struct Config {
     pub csrf_secret: String,
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ConfigError {
+    #[error("invalid API_SERVICE_URL [{location:?}]")]
+    InvalidApiServiceUrl {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("invalid origin in RP_ORIGINS: {origin} [{location:?}]")]
+    InvalidOrigin {
+        origin: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("invalid PORT [{location:?}]")]
+    InvalidPort {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("invalid SSH_PORT [{location:?}]")]
+    InvalidSshPort {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("invalid SESSION_TIMEOUT_HOURS [{location:?}]")]
+    InvalidSessionTimeoutHours {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("CSRF_SECRET environment variable must be set [{location:?}]")]
+    CsrfSecretMissing {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+}
+
 impl Config {
-    pub fn from_env() -> Result<Self> {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        use ConfigErrorCtx as Ctx;
+
         dotenvy::dotenv().ok();
 
         let database_url = env::var("DATABASE_URL").unwrap_or_else(|_| {
@@ -38,7 +99,7 @@ impl Config {
             .to_string();
 
         // Validate API service URL
-        Url::parse(&api_service_url).context("Invalid API_SERVICE_URL")?;
+        Url::parse(&api_service_url).with_context(Ctx::invalid_api_service_url())?;
 
         let metering_service_url =
             env::var("METERING_SERVICE_URL").unwrap_or_else(|_| "http://metering:8083".to_string());
@@ -59,19 +120,18 @@ impl Config {
 
         // Validate RP origins
         for origin in rp_origins.iter() {
-            Url::parse(origin.as_str())
-                .with_context(|| format!("Invalid origin in RP_ORIGINS: {}", origin))?;
+            Url::parse(origin.as_str()).with_context(Ctx::invalid_origin(origin.clone()))?;
         }
 
         let port = env::var("PORT")
             .unwrap_or_else(|_| "8080".to_string())
             .parse()
-            .context("Invalid PORT")?;
+            .with_context(Ctx::invalid_port())?;
 
         let ssh_port = env::var("SSH_PORT")
             .unwrap_or_else(|_| "2222".to_string())
             .parse()
-            .context("Invalid SSH_PORT")?;
+            .with_context(Ctx::invalid_ssh_port())?;
 
         let ssh_host_key_path = env::var("SSH_HOST_KEY_PATH")
             .unwrap_or_else(|_| "/var/cache/caution/ssh_host_ed25519_key".to_string());
@@ -79,13 +139,13 @@ impl Config {
         let session_timeout_hours: i64 = env::var("SESSION_TIMEOUT_HOURS")
             .unwrap_or_else(|_| "24".to_string())
             .parse()
-            .context("Invalid SESSION_TIMEOUT_HOURS")?;
+            .with_context(Ctx::invalid_session_timeout_hours())?;
 
         let data_dir =
             env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
 
         let csrf_secret =
-            env::var("CSRF_SECRET").context("CSRF_SECRET environment variable must be set")?;
+            env::var("CSRF_SECRET").with_context(Ctx::csrf_secret_missing())?;
 
         Ok(Config {
             database_url,

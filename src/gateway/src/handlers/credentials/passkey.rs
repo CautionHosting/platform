@@ -3,8 +3,8 @@
 
 use crate::db;
 use crate::handlers::{
-    authenticate_session, read_credprops_rk, relax_registration_extensions, MAX_PENDING_CHALLENGES,
-    RegisterBeginResponse, SignRequestError,
+    authenticate_session, read_credprops_rk, relax_registration_extensions, RegisterBeginResponse,
+    SignRequestError, MAX_PENDING_CHALLENGES,
 };
 use crate::types::*;
 use axum::{
@@ -13,6 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use serde::{Deserialize, Serialize};
 use time::Duration;
 use uuid::Uuid;
@@ -42,48 +43,134 @@ pub struct PasskeyBeginRequest {
     pub name: Option<String>,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 pub enum PasskeyError {
-    #[error("No matching passkey registration state found. Please start over.")]
-    NoRegistrationState,
-    #[error("Passkey registration challenge has expired. Please try again.")]
-    ChallengeExpired,
-    #[error("This passkey is already registered.")]
-    CredentialAlreadyRegistered,
-    #[error("Too many pending passkey registrations. Please try again later.")]
-    TooManyPending,
-    #[error("Passkey not found.")]
-    CredentialNotFound,
-    #[error("You must keep at least one passkey on your account.")]
-    LastCredential,
-    #[error("{0}")]
-    BadRequest(String),
-    #[error("{0}")]
-    Forbidden(String),
-    #[error(transparent)]
-    Auth(#[from] SignRequestError),
-    #[error(transparent)]
-    Internal(#[from] anyhow::Error),
+    #[error("No matching passkey registration state found. Please start over. [{location}]")]
+    NoRegistrationState {
+        #[location]
+        location: Location,
+    },
+
+    #[error("Passkey registration challenge has expired. Please try again. [{location}]")]
+    ChallengeExpired {
+        #[location]
+        location: Location,
+    },
+
+    #[error("This passkey is already registered. [{location}]")]
+    CredentialAlreadyRegistered {
+        #[location]
+        location: Location,
+    },
+
+    #[error("Too many pending passkey registrations. Please try again later. [{location}]")]
+    TooManyPending {
+        #[location]
+        location: Location,
+    },
+
+    #[error("Passkey not found. [{location}]")]
+    CredentialNotFound {
+        #[location]
+        location: Location,
+    },
+
+    #[error("You must keep at least one passkey on your account. [{location}]")]
+    LastCredential {
+        #[location]
+        location: Location,
+    },
+
+    #[error("{message} [{location}]")]
+    BadRequest {
+        message: String,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("{message} [{location}]")]
+    Forbidden {
+        message: String,
+
+        #[location]
+        location: Location,
+    },
+
+    /// Auth failure forwarded from `authenticate_session`. The typed inner error
+    /// is deliberate (deviating from the usual boxed `BoxError` source): the
+    /// `SignRequestError`'s own `IntoResponse` drives the client-facing status
+    /// and body, so it must be preserved rather than erased into a boxed
+    /// dyn-error. The field is therefore NOT marked `#[source]`: the `CtxError`
+    /// derive's `from_context` assigns a boxed dyn-error to any `#[source]`
+    /// field, which cannot hold the typed inner error. The variant carries no
+    /// generated `Ctx` constructor and is hand-built with `.map_err(...)`.
+    #[error("authentication failed [{location}]")]
+    Auth {
+        #[location]
+        location: Location,
+
+        source: SignRequestError,
+    },
+
+    #[error("user is missing a WebAuthn handle [{location}]")]
+    MissingWebAuthnHandle {
+        #[location]
+        location: Location,
+    },
+
+    #[error("internal error [{location}]")]
+    Internal {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
 }
 
 impl IntoResponse for PasskeyError {
     fn into_response(self) -> Response {
         match self {
-            Self::Auth(err) => err.into_response(),
-            Self::NoRegistrationState => (StatusCode::GONE, self.to_string()).into_response(),
-            Self::ChallengeExpired => (StatusCode::GONE, self.to_string()).into_response(),
-            Self::CredentialAlreadyRegistered => {
-                (StatusCode::CONFLICT, self.to_string()).into_response()
+            Self::Auth { source, .. } => source.into_response(),
+            Self::NoRegistrationState { .. } => (
+                StatusCode::GONE,
+                "No matching passkey registration state found. Please start over.",
+            )
+                .into_response(),
+            Self::ChallengeExpired { .. } => (
+                StatusCode::GONE,
+                "Passkey registration challenge has expired. Please try again.",
+            )
+                .into_response(),
+            Self::CredentialAlreadyRegistered { .. } => {
+                (StatusCode::CONFLICT, "This passkey is already registered.").into_response()
             }
-            Self::TooManyPending => {
-                (StatusCode::TOO_MANY_REQUESTS, self.to_string()).into_response()
+            Self::TooManyPending { .. } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many pending passkey registrations. Please try again later.",
+            )
+                .into_response(),
+            Self::CredentialNotFound { .. } => {
+                (StatusCode::NOT_FOUND, "Passkey not found.").into_response()
             }
-            Self::CredentialNotFound => (StatusCode::NOT_FOUND, self.to_string()).into_response(),
-            Self::LastCredential => (StatusCode::CONFLICT, self.to_string()).into_response(),
-            Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message).into_response(),
-            Self::Forbidden(message) => (StatusCode::FORBIDDEN, message).into_response(),
-            Self::Internal(err) => {
-                tracing::error!(?err, "Passkey management error");
+            Self::LastCredential { .. } => (
+                StatusCode::CONFLICT,
+                "You must keep at least one passkey on your account.",
+            )
+                .into_response(),
+            Self::BadRequest { message, .. } => (StatusCode::BAD_REQUEST, message).into_response(),
+            Self::Forbidden { message, .. } => (StatusCode::FORBIDDEN, message).into_response(),
+            Self::MissingWebAuthnHandle { .. } => {
+                tracing::error!("user is missing a WebAuthn handle");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "An internal error occurred",
+                )
+                    .into_response()
+            }
+            Self::Internal { ref source, .. } => {
+                tracing::error!(?source, "Passkey management error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred",
@@ -133,14 +220,20 @@ pub async fn list_passkeys_handler(
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<PasskeySummary>>, PasskeyError> {
+    use PasskeyErrorCtx as Ctx;
+
     let current_session_credential = if let Some(session_id) = get_session_id_from_headers(&headers)
     {
-        db::validate_auth_session(&state.db, &session_id).await?
+        db::validate_auth_session(&state.db, &session_id)
+            .await
+            .with_context(Ctx::internal())?
     } else {
         None
     };
 
-    let mut credentials = db::list_user_credentials(&state.db, user_id).await?;
+    let mut credentials = db::list_user_credentials(&state.db, user_id)
+        .await
+        .with_context(Ctx::internal())?;
 
     if let Some(current) = current_session_credential.as_deref() {
         let has_current = credentials
@@ -149,7 +242,9 @@ pub async fn list_passkeys_handler(
 
         if !has_current {
             if let Some(current_credential) =
-                db::get_user_credential_by_credential_id(&state.db, user_id, current).await?
+                db::get_user_credential_by_credential_id(&state.db, user_id, current)
+                    .await
+                    .with_context(Ctx::internal())?
             {
                 credentials.push(current_credential);
             }
@@ -193,26 +288,38 @@ pub async fn begin_add_passkey_handler(
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
     Json(req): Json<PasskeyBeginRequest>,
 ) -> Result<Json<RegisterBeginResponse>, PasskeyError> {
+    use PasskeyErrorCtx as Ctx;
+
     let name = req
         .name
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| {
-            crate::validation::validate_passkey_name(value)
-                .map_err(|e| PasskeyError::BadRequest(e.to_string()))?;
+            crate::validation::validate_passkey_name(value).map_err(|e| {
+                PasskeyError::BadRequest {
+                    message: e.to_string(),
+                    location: std::panic::Location::caller(),
+                }
+            })?;
             Ok::<String, PasskeyError>(value.to_string())
         })
         .transpose()?;
 
-    let registration_user = db::get_registration_user(&state.db, user_id).await?;
-    let user_handle = registration_user
-        .fido2_user_handle
-        .ok_or_else(|| anyhow::anyhow!("User is missing a WebAuthn handle"))?;
-    let user_unique_id = Uuid::from_slice(&user_handle)
-        .map_err(|e| anyhow::anyhow!("Failed to parse FIDO2 user handle: {}", e))?;
+    let registration_user = db::get_registration_user(&state.db, user_id)
+        .await
+        .with_context(Ctx::internal())?;
+    let user_handle =
+        registration_user
+            .fido2_user_handle
+            .ok_or_else(|| PasskeyError::MissingWebAuthnHandle {
+                location: std::panic::Location::caller(),
+            })?;
+    let user_unique_id = Uuid::from_slice(&user_handle).with_context(Ctx::internal())?;
 
-    let existing_cred_ids = db::get_all_credential_ids(&state.db).await?;
+    let existing_cred_ids = db::get_all_credential_ids(&state.db)
+        .await
+        .with_context(Ctx::internal())?;
     let exclude_credentials: Vec<CredentialID> = existing_cred_ids
         .into_iter()
         .map(CredentialID::from)
@@ -228,7 +335,7 @@ pub async fn begin_add_passkey_handler(
             None,
             None,
         )
-        .map_err(|e| anyhow::anyhow!("Failed to start passkey registration: {}", e))?;
+        .with_context(Ctx::internal())?;
 
     if let Some(ref mut auth_sel) = ccr.public_key.authenticator_selection {
         auth_sel.user_verification = UserVerificationPolicy::Preferred;
@@ -248,7 +355,9 @@ pub async fn begin_add_passkey_handler(
     {
         let mut reg_states = state.passkey_reg_states.write().await;
         if reg_states.len() >= MAX_PENDING_CHALLENGES {
-            return Err(PasskeyError::TooManyPending);
+            return Err(PasskeyError::TooManyPending {
+                location: std::panic::Location::caller(),
+            });
         }
         reg_states.insert(state_key.clone(), pending);
     }
@@ -265,10 +374,14 @@ pub async fn finish_add_passkey_handler(
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
     Json(req): Json<serde_json::Value>,
 ) -> Result<Json<PasskeyFinishResponse>, PasskeyError> {
+    use PasskeyErrorCtx as Ctx;
+
     let session_key = req
         .get("session")
         .and_then(|v| v.as_str())
-        .ok_or(PasskeyError::NoRegistrationState)?
+        .ok_or_else(|| PasskeyError::NoRegistrationState {
+            location: std::panic::Location::caller(),
+        })?
         .to_string();
 
     let pending = state
@@ -276,35 +389,45 @@ pub async fn finish_add_passkey_handler(
         .write()
         .await
         .remove(&session_key)
-        .ok_or(PasskeyError::NoRegistrationState)?;
+        .ok_or_else(|| PasskeyError::NoRegistrationState {
+            location: std::panic::Location::caller(),
+        })?;
 
     if time::OffsetDateTime::now_utc() > pending.expires_at {
-        return Err(PasskeyError::ChallengeExpired);
+        return Err(PasskeyError::ChallengeExpired {
+            location: std::panic::Location::caller(),
+        });
     }
 
     if pending.user_id != user_id {
-        return Err(PasskeyError::Forbidden(
-            "Passkey registration does not belong to this session.".to_string(),
-        ));
+        return Err(PasskeyError::Forbidden {
+            message: "Passkey registration does not belong to this session.".to_string(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     let reg_response: RegisterPublicKeyCredential =
-        serde_json::from_value(req.clone()).map_err(|e| {
-            PasskeyError::BadRequest(format!("Failed to parse registration response: {}", e))
+        serde_json::from_value(req.clone()).map_err(|e| PasskeyError::BadRequest {
+            message: format!("Failed to parse registration response: {}", e),
+            location: std::panic::Location::caller(),
         })?;
 
     let seckey = state
         .webauthn
         .finish_securitykey_registration(&reg_response, &pending.reg_state)
-        .map_err(|e| anyhow::anyhow!("Failed to finish passkey registration: {}", e))?;
+        .with_context(Ctx::internal())?;
 
     let credential_id = seckey.cred_id().clone();
-    if db::credential_exists(&state.db, &credential_id).await? {
-        return Err(PasskeyError::CredentialAlreadyRegistered);
+    if db::credential_exists(&state.db, &credential_id)
+        .await
+        .with_context(Ctx::internal())?
+    {
+        return Err(PasskeyError::CredentialAlreadyRegistered {
+            location: std::panic::Location::caller(),
+        });
     }
 
-    let passkey_json = serde_json::to_vec(&seckey)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize credential: {}", e))?;
+    let passkey_json = serde_json::to_vec(&seckey).with_context(Ctx::internal())?;
     let transports = req
         .get("transports")
         .cloned()
@@ -324,7 +447,8 @@ pub async fn finish_add_passkey_handler(
         None,
         resident,
     )
-    .await?;
+    .await
+    .with_context(Ctx::internal())?;
 
     Ok(Json(PasskeyFinishResponse {
         status: "success".to_string(),
@@ -339,22 +463,39 @@ pub async fn delete_passkey_handler(
     headers: HeaderMap,
     Path(passkey_id): Path<Uuid>,
 ) -> Result<StatusCode, PasskeyError> {
-    authenticate_session(&state, &headers).await?;
-    let credentials = db::list_user_credentials(&state.db, user_id).await?;
+    use PasskeyErrorCtx as Ctx;
+
+    authenticate_session(&state, &headers)
+        .await
+        .map_err(|source| PasskeyError::Auth {
+            location: std::panic::Location::caller(),
+            source,
+        })?;
+    let credentials = db::list_user_credentials(&state.db, user_id)
+        .await
+        .with_context(Ctx::internal())?;
     if !credentials
         .iter()
         .any(|credential| credential.id == passkey_id)
     {
-        return Err(PasskeyError::CredentialNotFound);
+        return Err(PasskeyError::CredentialNotFound {
+            location: std::panic::Location::caller(),
+        });
     }
 
     if credentials.len() <= 1 {
-        return Err(PasskeyError::LastCredential);
+        return Err(PasskeyError::LastCredential {
+            location: std::panic::Location::caller(),
+        });
     }
 
-    let deleted = db::delete_user_credential(&state.db, user_id, passkey_id).await?;
+    let deleted = db::delete_user_credential(&state.db, user_id, passkey_id)
+        .await
+        .with_context(Ctx::internal())?;
     if deleted == 0 {
-        return Err(PasskeyError::CredentialNotFound);
+        return Err(PasskeyError::CredentialNotFound {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(StatusCode::NO_CONTENT)

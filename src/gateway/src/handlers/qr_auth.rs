@@ -10,6 +10,7 @@ use axum::{
     Json,
 };
 use base64::Engine as _;
+use dterror::{BoxError, CtxError, Location};
 use serde::Deserialize;
 use time::Duration;
 use uuid::Uuid;
@@ -17,81 +18,361 @@ use webauthn_rs::prelude::*;
 use webauthn_rs_proto::UserVerificationPolicy;
 
 use super::{
-    check_username_scope, normalize_login_username, scoped_or_decoy_challenge, LoginError,
-    MAX_PENDING_CHALLENGES, SignRequestError,
+    check_username_scope, generic_auth_failure_response, normalize_login_username,
+    scoped_or_decoy_challenge, DomainError, SignRequestError, SignRequestErrorCtx as Ctx,
+    MAX_PENDING_CHALLENGES,
 };
+use dterror::ResultExt;
 
-#[derive(Debug, thiserror::Error)]
+/// Error type for the QR login ceremony's finish step only. Mirrors the
+/// behavior of `LoginError::into_response`: every credential-verification and
+/// session-lifecycle failure collapses into the same byte-for-byte identical
+/// generic 401 (see `GENERIC_AUTH_FAILURE_BODY` in `handlers/common.rs`) so
+/// the cross-device finish endpoint can't become a username-enumeration
+/// oracle. Kept as its own type because several of its variants (`TokenNotFound`
+/// style lookup failures, token completion) describe the QR-token lifecycle,
+/// not the direct cookie-login one. Strict dterror convention: every variant
+/// carries `#[location]`; source-bearing variants use `.with_context(Ctx::…)`
+/// at call sites; source-less (domain) variants are hand-built with
+/// `std::panic::Location::caller()`.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum QrLoginFinishError {
+    #[error("invalid or expired QR login session: {reason} [{location}]")]
+    InvalidSession {
+        reason: String,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("authentication challenge has expired [{location}]")]
+    ChallengeExpired {
+        #[location]
+        location: Location,
+    },
+
+    #[error("failed to parse pubkey credential [{location}]")]
+    ParsePubkeyCredential {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error(
+        "could not find user ID for the asserted credential ({provided_bytes:?}) [{location}]"
+    )]
+    DbGetUserIdByCredential {
+        provided_bytes: Vec<u8>,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not get public key for user {user_id} [{location}]")]
+    DbGetPublicKeyForCredential {
+        user_id: Uuid,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not get security key for user {user_id} [{location}]")]
+    ParseSecurityKey {
+        user_id: Uuid,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("security key authentication could not be finalized for user {user_id} [{location}]")]
+    FinishSecurityKeyAuthentication {
+        user_id: Uuid,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not identify discoverable credential from assertion [{location}]")]
+    IdentifyDiscoverableCredential {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("discoverable authentication could not be finalized for user {user_id} [{location}]")]
+    FinishDiscoverableAuthentication {
+        user_id: Uuid,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error(
+        "resolved credential belongs to a different user than the login was scoped to [{location}]"
+    )]
+    UnexpectedCredentialOwner {
+        expected_user_id: Option<Uuid>,
+        actual_user_id: Uuid,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("your organization requires PIN verification [{location}]")]
+    PinRequired {
+        #[location]
+        location: Location,
+    },
+
+    #[error("could not serialize security credential result for user {user_id} [{location}]")]
+    SerializeSecurityKey {
+        user_id: Uuid,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not query PIN verification info for user {user_id} [{location}]")]
+    DbUserPinRequired {
+        user_id: Uuid,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not update fido2 credentials for user {user_id} [{location}]")]
+    DbUpdateFido2Credential {
+        user_id: Uuid,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not create auth session for user {user_id} [{location}]")]
+    DbCreateAuthSession {
+        user_id: Uuid,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not complete QR login token for user {user_id} [{location}]")]
+    DbCompleteQrLoginToken {
+        user_id: Uuid,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for QrLoginFinishError {
+    fn into_response(self) -> Response {
+        match self {
+            // Session/challenge lifecycle errors are folded into the same
+            // generic 401 as credential-verification failures (same oracle
+            // rationale as `LoginError::into_response`).
+            Self::InvalidSession { .. } | Self::ChallengeExpired { .. } => {
+                tracing::debug!(?self, "QR login finish: session/challenge error");
+                generic_auth_failure_response().into_response()
+            }
+            Self::PinRequired { .. } => (
+                StatusCode::FORBIDDEN,
+                "your organization requires PIN verification",
+            )
+                .into_response(),
+            Self::ParsePubkeyCredential { .. } => {
+                (StatusCode::BAD_REQUEST, "failed to parse pubkey credential").into_response()
+            }
+            // Every credential-verification outcome collapses to the same
+            // generic 401 response so none of them is distinguishable from
+            // another by status code or body.
+            Self::UnexpectedCredentialOwner { .. } => {
+                tracing::debug!(?self, "QR login finish: decoy/scope rejection");
+                generic_auth_failure_response().into_response()
+            }
+            Self::DbGetUserIdByCredential { .. } => {
+                tracing::error!(?self, "QR login finish: credential not found");
+                generic_auth_failure_response().into_response()
+            }
+            Self::DbGetPublicKeyForCredential { .. } | Self::ParseSecurityKey { .. } => {
+                tracing::warn!(?self, "QR login finish: credential lookup/parse failure");
+                generic_auth_failure_response().into_response()
+            }
+            Self::IdentifyDiscoverableCredential { .. } => {
+                tracing::error!(
+                    ?self,
+                    "QR login finish: could not identify discoverable credential"
+                );
+                generic_auth_failure_response().into_response()
+            }
+            Self::FinishSecurityKeyAuthentication { .. }
+            | Self::FinishDiscoverableAuthentication { .. } => {
+                tracing::warn!(?self, "QR login finish: signature verification failed");
+                generic_auth_failure_response().into_response()
+            }
+            _ => {
+                tracing::error!(?self, "QR login error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "an internal error occurred",
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
 pub enum QrLoginError {
-    #[error("QR login token not found")]
-    TokenNotFound,
-    #[error("QR login token has expired")]
-    TokenExpired,
-    #[error("QR login token in unexpected state: {0}")]
-    UnexpectedState(String),
-    #[error("QR login token already claimed")]
-    AlreadyClaimed,
-    #[error("username is required for QR login")]
-    MissingUsername,
-    #[error("could not create QR login token")]
+    #[error("QR login token not found [{location}]")]
+    TokenNotFound {
+        #[location]
+        location: Location,
+    },
+
+    #[error("QR login token has expired [{location}]")]
+    TokenExpired {
+        #[location]
+        location: Location,
+    },
+
+    #[error("QR login token in unexpected state: {status} [{location}]")]
+    UnexpectedState {
+        status: String,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("QR login token already claimed [{location}]")]
+    AlreadyClaimed {
+        #[location]
+        location: Location,
+    },
+
+    #[error("username is required for QR login [{location}]")]
+    MissingUsername {
+        #[location]
+        location: Location,
+    },
+
+    #[error("could not create QR login token [{location}]")]
     DbCreateToken {
+        #[location]
+        location: Location,
+
         #[source]
-        source: anyhow::Error,
+        source: BoxError,
     },
-    #[error("could not query QR login token")]
+
+    #[error("could not query QR login token [{location}]")]
     DbGetToken {
+        #[location]
+        location: Location,
+
         #[source]
-        source: anyhow::Error,
+        source: BoxError,
     },
-    #[error("could not claim QR login token")]
+
+    #[error("could not claim QR login token [{location}]")]
     DbClaimToken {
+        #[location]
+        location: Location,
+
         #[source]
-        source: anyhow::Error,
+        source: BoxError,
     },
-    #[error("could not query auth session")]
+
+    #[error("could not query auth session [{location}]")]
     DbGetSession {
+        #[location]
+        location: Location,
+
         #[source]
-        source: anyhow::Error,
+        source: BoxError,
     },
-    #[error("could not fetch credentials")]
-    DbGetCredentials {
-        #[source]
-        source: anyhow::Error,
-    },
-    #[error("could not deserialize credential")]
-    DeserializeCredential {
-        #[source]
-        source: serde_json::Error,
-    },
-    #[error("could not start authentication challenge")]
-    StartAuthentication {
-        #[source]
-        source: WebauthnError,
-    },
-    #[error("could not build username-scoped challenge")]
+
+    #[error("could not build username-scoped challenge [{location}]")]
     ScopedChallenge {
+        #[location]
+        location: Location,
+
         #[source]
-        source: anyhow::Error,
+        source: BoxError,
     },
-    #[error("Rate limit exceeded. Please try again later.")]
-    RateLimited,
+
+    #[error("Rate limit exceeded. Please try again later. [{location}]")]
+    RateLimited {
+        #[location]
+        location: Location,
+    },
 }
 
 impl IntoResponse for QrLoginError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            Self::TokenNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            Self::TokenExpired => (StatusCode::GONE, self.to_string()),
-            Self::UnexpectedState(_) | Self::AlreadyClaimed => {
-                (StatusCode::CONFLICT, self.to_string())
+            Self::TokenNotFound { .. } => (
+                StatusCode::NOT_FOUND,
+                "QR login token not found".to_string(),
+            ),
+            Self::TokenExpired { .. } => {
+                (StatusCode::GONE, "QR login token has expired".to_string())
             }
-            Self::MissingUsername => (StatusCode::BAD_REQUEST, self.to_string()),
-            Self::RateLimited => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
+            Self::UnexpectedState { ref status, .. } => (
+                StatusCode::CONFLICT,
+                format!("QR login token in unexpected state: {status}"),
+            ),
+            Self::AlreadyClaimed { .. } => (
+                StatusCode::CONFLICT,
+                "QR login token already claimed".to_string(),
+            ),
+            Self::MissingUsername { .. } => (
+                StatusCode::BAD_REQUEST,
+                "username is required for QR login".to_string(),
+            ),
+            Self::RateLimited { .. } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Rate limit exceeded. Please try again later.".to_string(),
+            ),
             _ => {
                 tracing::error!(?self, "QR login error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "an internal error occurred".into(),
+                    "an internal error occurred".to_string(),
                 )
             }
         };
@@ -113,24 +394,20 @@ async fn create_sign_challenge(
 ) -> Result<(webauthn_rs_proto::RequestChallengeResponse, String), SignRequestError> {
     let user_id = db::get_user_id_by_credential(&state.db, credential_id)
         .await
-        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
+        .with_context(Ctx::internal())?;
     let requires_pin = db::user_requires_pin(&state.db, user_id)
         .await
-        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
+        .with_context(Ctx::internal())?;
 
     let cred_bytes = db::get_credential_public_key(&state.db, credential_id)
         .await
-        .map_err(|e| SignRequestError::Internal(e.to_string()))?;
-    let seckey: SecurityKey = serde_json::from_slice(&cred_bytes).map_err(|e| {
-        SignRequestError::Internal(format!("Failed to deserialize credential: {}", e))
-    })?;
+        .with_context(Ctx::internal())?;
+    let seckey: SecurityKey = serde_json::from_slice(&cred_bytes).with_context(Ctx::internal())?;
 
     let (mut rcr, auth_state) = state
         .webauthn
         .start_securitykey_authentication(&[seckey])
-        .map_err(|e| {
-            SignRequestError::Internal(format!("Failed to start signing challenge: {}", e))
-        })?;
+        .with_context(Ctx::internal())?;
 
     if requires_pin {
         rcr.public_key.user_verification = UserVerificationPolicy::Required;
@@ -153,9 +430,10 @@ async fn create_sign_challenge(
     {
         let mut sign_challenges = state.sign_challenges.write().await;
         if sign_challenges.len() >= MAX_PENDING_CHALLENGES {
-            return Err(SignRequestError::Internal(
-                "Too many pending sign challenges".to_string(),
-            ));
+            return Err(SignRequestError::Internal {
+                location: std::panic::Location::caller(),
+                source: Box::new(DomainError("too many pending sign challenges")),
+            });
         }
         sign_challenges.insert(challenge_id.to_string(), pending);
     }
@@ -179,22 +457,33 @@ pub(crate) async fn authenticate_session(
     } else if let Some(cookie_session) = crate::csrf::get_cookie(headers, "caution_session") {
         (cookie_session, false)
     } else {
-        return Err(SignRequestError::MissingSession);
+        return Err(SignRequestError::MissingSession {
+            location: std::panic::Location::caller(),
+        });
     };
 
     let credential_id = db::validate_auth_session(&state.db, &session_id)
         .await
-        .map_err(|e| SignRequestError::Internal(e.to_string()))?
-        .ok_or_else(|| SignRequestError::InvalidSession(session_id.clone()))?;
+        .with_context(Ctx::internal())?
+        .ok_or_else(|| SignRequestError::InvalidSession {
+            session_id: session_id.clone(),
+            location: std::panic::Location::caller(),
+        })?;
 
     if !using_header_auth {
         let expected_csrf = crate::csrf::derive_csrf_token(&session_id, &state.csrf_secret);
         let csrf_header = headers
             .get("X-CSRF-Token")
             .and_then(|h| h.to_str().ok())
-            .ok_or_else(|| SignRequestError::CsrfMissing(session_id.clone()))?;
+            .ok_or_else(|| SignRequestError::CsrfMissing {
+                session_id: session_id.clone(),
+                location: std::panic::Location::caller(),
+            })?;
         if !crate::csrf::constant_time_compare(&expected_csrf, csrf_header) {
-            return Err(SignRequestError::CsrfInvalid(session_id.clone()));
+            return Err(SignRequestError::CsrfInvalid {
+                session_id: session_id.clone(),
+                location: std::panic::Location::caller(),
+            });
         }
     }
 
@@ -260,13 +549,17 @@ pub async fn qr_login_begin_handler(
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
     body: axum::body::Bytes,
 ) -> Result<Json<crate::types::QrLoginBeginResponse>, QrLoginError> {
+    use QrLoginErrorCtx as QrCtx;
+
     // Parse request body and validate username is present and non-empty.
     let Some(username) = normalize_login_username(
         serde_json::from_slice::<crate::types::QrLoginBeginRequest>(&body)
             .ok()
             .map(|r| r.username),
     ) else {
-        return Err(QrLoginError::MissingUsername);
+        return Err(QrLoginError::MissingUsername {
+            location: std::panic::Location::caller(),
+        });
     };
 
     let token = db::generate_session_id();
@@ -285,7 +578,7 @@ pub async fn qr_login_begin_handler(
         &username,
     )
     .await
-    .map_err(|source| QrLoginError::DbCreateToken { source })?;
+    .with_context(QrCtx::db_create_token())?;
 
     Ok(Json(crate::types::QrLoginBeginResponse {
         token,
@@ -299,9 +592,11 @@ pub async fn qr_login_status_handler(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<QrLoginStatusQuery>,
 ) -> Result<Json<crate::types::QrLoginStatusResponse>, QrLoginError> {
+    use QrLoginErrorCtx as QrCtx;
+
     let row = db::get_qr_login_token(&state.db, &query.token)
         .await
-        .map_err(|source| QrLoginError::DbGetToken { source })?;
+        .with_context(QrCtx::db_get_token())?;
 
     let Some(row) = row else {
         return Ok(Json(crate::types::QrLoginStatusResponse {
@@ -334,7 +629,7 @@ pub async fn qr_login_status_handler(
             // session_id intact and the next poll can retry.
             let session = db::get_auth_session(&state.db, &sid)
                 .await
-                .map_err(|source| QrLoginError::DbGetSession { source })?;
+                .with_context(QrCtx::db_get_session())?;
 
             let session_expires = session.map(|s| s.expires_at.to_string());
 
@@ -342,7 +637,7 @@ pub async fn qr_login_status_handler(
             // concurrent-poll race. Only hand back the session if we did.
             let consumed = db::consume_qr_login_session_id(&state.db, &query.token)
                 .await
-                .map_err(|source| QrLoginError::DbGetToken { source })?;
+                .with_context(QrCtx::db_get_token())?;
 
             if consumed.is_some() {
                 return Ok(Json(crate::types::QrLoginStatusResponse {
@@ -381,36 +676,55 @@ pub async fn qr_login_authenticate_handler(
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
     Json(req): Json<crate::types::QrLoginAuthenticateRequest>,
 ) -> Result<Json<crate::types::QrLoginAuthenticateResponse>, QrLoginError> {
+    use QrLoginErrorCtx as QrCtx;
+
     // Verify requestee token exists and is pending
     let row = db::get_qr_login_token_by_requestee_token(&state.db, &req.token)
         .await
-        .map_err(|source| QrLoginError::DbGetToken { source })?
-        .ok_or(QrLoginError::TokenNotFound)?;
+        .with_context(QrCtx::db_get_token())?
+        .ok_or_else(|| QrLoginError::TokenNotFound {
+            location: std::panic::Location::caller(),
+        })?;
 
     if time::OffsetDateTime::now_utc() > row.expires_at {
-        return Err(QrLoginError::TokenExpired);
+        return Err(QrLoginError::TokenExpired {
+            location: std::panic::Location::caller(),
+        });
     }
 
     match QrStatus::from_db(&row.status) {
         Some(QrStatus::Pending) => {}
         Some(QrStatus::Authenticated) | Some(QrStatus::Completed) => {
-            return Err(QrLoginError::AlreadyClaimed)
+            return Err(QrLoginError::AlreadyClaimed {
+                location: std::panic::Location::caller(),
+            })
         }
-        _ => return Err(QrLoginError::UnexpectedState(row.status)),
+        _ => {
+            return Err(QrLoginError::UnexpectedState {
+                status: row.status,
+                location: std::panic::Location::caller(),
+            })
+        }
     }
 
     // A username stored on the token scopes the challenge to that user's own
     // credentials — needed for non-resident/legacy keys.
     let (rcr, auth_state) = {
         let ip = connect_info.0.ip();
-        if !state.scoped_begin_limiter.check_rate_limit(&ip.to_string()).await {
+        if !state
+            .scoped_begin_limiter
+            .check_rate_limit(&ip.to_string())
+            .await
+        {
             tracing::warn!("Scoped begin-login rate limit exceeded for IP: {}", ip);
-            return Err(QrLoginError::RateLimited);
+            return Err(QrLoginError::RateLimited {
+                location: std::panic::Location::caller(),
+            });
         }
 
         scoped_or_decoy_challenge(&state, &row.username)
             .await
-            .map_err(|source| QrLoginError::ScopedChallenge { source })?
+            .with_context(QrCtx::scoped_challenge())?
     };
 
     let session_key = uuid::Uuid::new_v4().to_string();
@@ -423,16 +737,19 @@ pub async fn qr_login_authenticate_handler(
     let browser_ip = connect_info.0.ip().to_string();
     let claimed = db::claim_qr_login_token(&state.db, &req.token, &session_key, Some(&browser_ip))
         .await
-        .map_err(|source| QrLoginError::DbClaimToken { source })?;
+        .with_context(QrCtx::db_claim_token())?;
     if !claimed {
-        return Err(QrLoginError::AlreadyClaimed);
+        return Err(QrLoginError::AlreadyClaimed {
+            location: std::panic::Location::caller(),
+        });
     }
     {
         let mut auth_states = state.auth_states.write().await;
         if auth_states.len() >= MAX_PENDING_CHALLENGES {
-            return Err(QrLoginError::UnexpectedState(
-                "Too many pending challenges".to_string(),
-            ));
+            return Err(QrLoginError::UnexpectedState {
+                status: "Too many pending challenges".to_string(),
+                location: std::panic::Location::caller(),
+            });
         }
         auth_states.insert(session_key.clone(), pending);
     }
@@ -448,15 +765,28 @@ pub async fn qr_login_authenticate_handler(
 pub async fn qr_login_authenticate_finish_handler(
     State(state): State<AppState>,
     Json(req): Json<crate::types::QrLoginAuthenticateFinishRequest>,
-) -> Result<Json<serde_json::Value>, LoginError> {
+) -> Result<Json<serde_json::Value>, QrLoginFinishError> {
+    use QrLoginFinishErrorCtx as FinishCtx;
+
     let token = req.token;
     let session_key = req.session;
 
     // Verify requestee token is authenticated and session key matches
-    let row = db::get_qr_login_token_by_requestee_token(&state.db, &token)
-        .await
-        .map_err(|e| LoginError::InvalidSession(e.to_string()))?
-        .ok_or_else(|| LoginError::InvalidSession("invalid QR login token".into()))?;
+    let row = match db::get_qr_login_token_by_requestee_token(&state.db, &token).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return Err(QrLoginFinishError::InvalidSession {
+                reason: "invalid QR login token".into(),
+                location: std::panic::Location::caller(),
+            });
+        }
+        Err(e) => {
+            return Err(QrLoginFinishError::InvalidSession {
+                reason: e.to_string(),
+                location: std::panic::Location::caller(),
+            });
+        }
+    };
 
     match QrStatus::from_db(&row.status) {
         Some(QrStatus::Authenticated) => {}
@@ -466,10 +796,10 @@ pub async fn qr_login_authenticate_finish_handler(
                 other,
                 token
             );
-            return Err(LoginError::InvalidSession(format!(
-                "QR login token in unexpected state: {}",
-                row.status
-            )));
+            return Err(QrLoginFinishError::InvalidSession {
+                reason: format!("QR login token in unexpected state: {}", row.status),
+                location: std::panic::Location::caller(),
+            });
         }
     }
 
@@ -480,7 +810,10 @@ pub async fn qr_login_authenticate_finish_handler(
             session_key,
             token
         );
-        return Err(LoginError::InvalidSession("session key mismatch".into()));
+        return Err(QrLoginFinishError::InvalidSession {
+            reason: "session key mismatch".into(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     // Take the pending auth state (single write guard for get + remove)
@@ -488,16 +821,20 @@ pub async fn qr_login_authenticate_finish_handler(
         let mut auth_states = state.auth_states.write().await;
         auth_states
             .remove(&session_key)
-            .ok_or_else(|| LoginError::InvalidSession(session_key.clone()))?
+            .ok_or_else(|| QrLoginFinishError::InvalidSession {
+                reason: session_key.clone(),
+                location: std::panic::Location::caller(),
+            })?
     };
 
     if time::OffsetDateTime::now_utc() > pending.expires_at {
-        return Err(LoginError::ChallengeExpired);
+        return Err(QrLoginFinishError::ChallengeExpired {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let auth_response: webauthn_rs::prelude::PublicKeyCredential =
-        serde_json::from_value(req.credential)
-            .map_err(|source| LoginError::ParsePubkeyCredential { source })?;
+        serde_json::from_value(req.credential).with_context(FinishCtx::parse_pubkey_credential())?;
 
     let (user_id, credential_id_bytes, mut seckey, auth_result) = match pending.auth_state {
         AuthState::SecurityKey(auth_state) => {
@@ -505,21 +842,20 @@ pub async fn qr_login_authenticate_finish_handler(
 
             let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
                 .await
-                .map_err(|source| LoginError::DbGetUserIdByCredential {
-                    provided_bytes: credential_id_bytes.clone(),
-                    source,
-                })?;
+                .with_context(FinishCtx::db_get_user_id_by_credential(
+                    credential_id_bytes.clone(),
+                ))?;
 
             let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
                 .await
-                .map_err(|source| LoginError::DbGetPublicKeyForCredential { user_id, source })?;
+                .with_context(FinishCtx::db_get_public_key_for_credential(user_id))?;
             let seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(&cred_bytes)
-                .map_err(|source| LoginError::ParseSecurityKey { user_id, source })?;
+                .with_context(FinishCtx::parse_security_key(user_id))?;
 
             let auth_result = state
                 .webauthn
                 .finish_securitykey_authentication(&auth_response, &auth_state)
-                .map_err(|source| LoginError::FinishSecurityKeyAuthentication { user_id, source })?;
+                .with_context(FinishCtx::finish_security_key_authentication(user_id))?;
 
             (user_id, credential_id_bytes, seckey, auth_result)
         }
@@ -527,21 +863,20 @@ pub async fn qr_login_authenticate_finish_handler(
             let (_user_handle, cred_id) = state
                 .webauthn
                 .identify_discoverable_authentication(&auth_response)
-                .map_err(|source| LoginError::IdentifyDiscoverableCredential { source })?;
+                .with_context(FinishCtx::identify_discoverable_credential())?;
             let credential_id_bytes = cred_id.to_vec();
 
             let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
                 .await
-                .map_err(|source| LoginError::DbGetUserIdByCredential {
-                    provided_bytes: credential_id_bytes.clone(),
-                    source,
-                })?;
+                .with_context(FinishCtx::db_get_user_id_by_credential(
+                    credential_id_bytes.clone(),
+                ))?;
 
             let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
                 .await
-                .map_err(|source| LoginError::DbGetPublicKeyForCredential { user_id, source })?;
+                .with_context(FinishCtx::db_get_public_key_for_credential(user_id))?;
             let seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(&cred_bytes)
-                .map_err(|source| LoginError::ParseSecurityKey { user_id, source })?;
+                .with_context(FinishCtx::parse_security_key(user_id))?;
 
             let credential: Credential = seckey.clone().into();
             let passkey: Passkey = credential.into();
@@ -550,11 +885,17 @@ pub async fn qr_login_authenticate_finish_handler(
             let auth_result = state
                 .webauthn
                 .finish_discoverable_authentication(&auth_response, auth_state, &[discoverable_key])
-                .map_err(|source| LoginError::FinishDiscoverableAuthentication { user_id, source })?;
+                .with_context(FinishCtx::finish_discoverable_authentication(user_id))?;
 
             // See the equivalent check in `finish_login_handler` (Finding 1):
             // ceremony is consumed above regardless of outcome.
-            check_username_scope(&scope, user_id)?;
+            if let Err(mismatch) = check_username_scope(&scope, user_id) {
+                return Err(QrLoginFinishError::UnexpectedCredentialOwner {
+                    expected_user_id: mismatch.expected_user_id,
+                    actual_user_id: mismatch.actual_user_id,
+                    location: std::panic::Location::caller(),
+                });
+            }
 
             if let Err(e) =
                 db::mark_credential_resident_if_unknown(&state.db, &credential_id_bytes).await
@@ -569,16 +910,18 @@ pub async fn qr_login_authenticate_finish_handler(
     // Check PIN requirement
     let requires_pin = db::user_requires_pin(&state.db, user_id)
         .await
-        .map_err(|source| LoginError::DbUserPinRequired { user_id, source })?;
+        .with_context(FinishCtx::db_user_pin_required(user_id))?;
     if requires_pin && !auth_result.user_verified() {
-        return Err(LoginError::PinRequired);
+        return Err(QrLoginFinishError::PinRequired {
+            location: std::panic::Location::caller(),
+        });
     }
 
     if auth_result.needs_update() {
         let update_result = seckey.update_credential(&auth_result);
         if let Some(true) = update_result {
             let updated_key_json = serde_json::to_vec(&seckey)
-                .map_err(|source| LoginError::SerializeSecurityKey { user_id, source })?;
+                .with_context(FinishCtx::serialize_security_key(user_id))?;
             db::update_fido2_credential(
                 &state.db,
                 &credential_id_bytes,
@@ -586,7 +929,7 @@ pub async fn qr_login_authenticate_finish_handler(
                 auth_result.counter(),
             )
             .await
-            .map_err(|source| LoginError::DbUpdateFido2Credential { user_id, source })?;
+            .with_context(FinishCtx::db_update_fido2_credential(user_id))?;
         }
     }
 
@@ -596,12 +939,12 @@ pub async fn qr_login_authenticate_finish_handler(
 
     db::create_auth_session(&state.db, &session_id, &credential_id_bytes, expires_at)
         .await
-        .map_err(|source| LoginError::DbCreateAuthSession { user_id, source })?;
+        .with_context(FinishCtx::db_create_auth_session(user_id))?;
 
     // Mark token completed
     db::complete_qr_login_token(&state.db, &token, &session_id)
         .await
-        .map_err(|source| LoginError::DbCompleteQrLoginToken { user_id, source })?;
+        .with_context(FinishCtx::db_complete_qr_login_token(user_id))?;
 
     tracing::debug!("QR login complete for user {}", user_id);
 
@@ -613,29 +956,60 @@ pub async fn qr_login_authenticate_finish_handler(
 
 // QR Sign handlers (mid-session signing via phone)
 
-#[derive(Debug, thiserror::Error)]
+/// Error type for the cross-device sign flow. Strict dterror convention: every
+/// variant carries `#[location]`; source-bearing variants use
+/// `.with_context(Ctx::internal())` at call sites; source-less (domain)
+/// variants are hand-built with `std::panic::Location::caller()`.
+#[derive(Debug, thiserror::Error, CtxError)]
 pub enum QrSignError {
-    #[error("QR sign token not found")]
-    TokenNotFound,
-    #[error("QR sign token has expired")]
-    TokenExpired,
-    #[error("QR sign token in unexpected state: {0}")]
-    UnexpectedState(String),
-    #[error("{0}")]
-    Internal(String),
+    #[error("QR sign token not found [{location}]")]
+    TokenNotFound {
+        #[location]
+        location: Location,
+    },
+
+    #[error("QR sign token has expired [{location}]")]
+    TokenExpired {
+        #[location]
+        location: Location,
+    },
+
+    #[error("QR sign token in unexpected state: {status} [{location}]")]
+    UnexpectedState {
+        status: String,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("QR sign internal error [{location}]")]
+    Internal {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
 }
 
 impl IntoResponse for QrSignError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            Self::TokenNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            Self::TokenExpired => (StatusCode::GONE, self.to_string()),
-            Self::UnexpectedState(_) => (StatusCode::CONFLICT, self.to_string()),
-            Self::Internal(_) => {
+            Self::TokenNotFound { .. } => {
+                (StatusCode::NOT_FOUND, "QR sign token not found".to_string())
+            }
+            Self::TokenExpired { .. } => {
+                (StatusCode::GONE, "QR sign token has expired".to_string())
+            }
+            Self::UnexpectedState { ref status, .. } => (
+                StatusCode::CONFLICT,
+                format!("QR sign token in unexpected state: {status}"),
+            ),
+            Self::Internal { .. } => {
                 tracing::error!(?self, "QR sign error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "an internal error occurred".into(),
+                    "an internal error occurred".to_string(),
                 )
             }
         };
@@ -672,8 +1046,7 @@ pub async fn qr_sign_begin_handler(
     let expires_at = time::OffsetDateTime::now_utc() + Duration::minutes(3);
     let ip_address = connect_info.0.ip().to_string();
 
-    let challenge_json = serde_json::to_string(&rcr)
-        .map_err(|e| SignRequestError::Internal(format!("Failed to serialize challenge: {}", e)))?;
+    let challenge_json = serde_json::to_string(&rcr).with_context(Ctx::internal())?;
 
     db::create_qr_sign_token(
         &state.db,
@@ -688,7 +1061,7 @@ pub async fn qr_sign_begin_handler(
         expires_at,
     )
     .await
-    .map_err(|e| SignRequestError::Internal(e.to_string()))?;
+    .with_context(Ctx::internal())?;
 
     let url = format!("{}/qr-sign?token={}", get_rp_origin(), token);
 
@@ -705,9 +1078,11 @@ pub async fn qr_sign_status_handler(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<QrSignStatusQuery>,
 ) -> Result<Json<crate::types::QrSignStatusResponse>, QrSignError> {
+    use QrSignErrorCtx as SignCtx;
+
     let row = db::get_qr_sign_token(&state.db, &query.token)
         .await
-        .map_err(|e| QrSignError::Internal(e.to_string()))?;
+        .with_context(SignCtx::internal())?;
 
     let Some(row) = row else {
         return Ok(Json(crate::types::QrSignStatusResponse {
@@ -748,32 +1123,44 @@ pub async fn qr_sign_authenticate_handler(
     connect_info: ConnectInfo<std::net::SocketAddr>,
     Json(req): Json<crate::types::QrSignAuthenticateRequest>,
 ) -> Result<Json<crate::types::QrSignAuthenticateResponse>, QrSignError> {
+    use QrSignErrorCtx as SignCtx;
+
     let row = db::get_qr_sign_token(&state.db, &req.token)
         .await
-        .map_err(|e| QrSignError::Internal(e.to_string()))?
-        .ok_or(QrSignError::TokenNotFound)?;
+        .with_context(SignCtx::internal())?
+        .ok_or_else(|| QrSignError::TokenNotFound {
+            location: std::panic::Location::caller(),
+        })?;
 
     if time::OffsetDateTime::now_utc() > row.expires_at {
-        return Err(QrSignError::TokenExpired);
+        return Err(QrSignError::TokenExpired {
+            location: std::panic::Location::caller(),
+        });
     }
 
     match QrStatus::from_db(&row.status) {
         Some(QrStatus::Pending) => {}
-        other => return Err(QrSignError::UnexpectedState(format!("{:?}", other))),
+        other => {
+            return Err(QrSignError::UnexpectedState {
+                status: format!("{:?}", other),
+                location: std::panic::Location::caller(),
+            })
+        }
     }
 
     let browser_ip = connect_info.0.ip().to_string();
     let claimed = db::claim_qr_sign_token(&state.db, &req.token, Some(&browser_ip))
         .await
-        .map_err(|e| QrSignError::Internal(e.to_string()))?;
+        .with_context(SignCtx::internal())?;
     if !claimed {
-        return Err(QrSignError::UnexpectedState("already claimed".into()));
+        return Err(QrSignError::UnexpectedState {
+            status: "already claimed".into(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     let challenge: webauthn_rs_proto::RequestChallengeResponse =
-        serde_json::from_str(&row.challenge_json).map_err(|e| {
-            QrSignError::Internal(format!("Failed to deserialize challenge: {}", e))
-        })?;
+        serde_json::from_str(&row.challenge_json).with_context(SignCtx::internal())?;
 
     Ok(Json(crate::types::QrSignAuthenticateResponse {
         challenge,
@@ -786,28 +1173,38 @@ pub async fn qr_sign_authenticate_finish_handler(
     State(state): State<AppState>,
     Json(req): Json<crate::types::QrSignAuthenticateFinishRequest>,
 ) -> Result<Json<serde_json::Value>, QrSignError> {
+    use QrSignErrorCtx as SignCtx;
+
     let row = db::get_qr_sign_token(&state.db, &req.token)
         .await
-        .map_err(|e| QrSignError::Internal(e.to_string()))?
-        .ok_or(QrSignError::TokenNotFound)?;
+        .with_context(SignCtx::internal())?
+        .ok_or_else(|| QrSignError::TokenNotFound {
+            location: std::panic::Location::caller(),
+        })?;
 
     if time::OffsetDateTime::now_utc() > row.expires_at {
-        return Err(QrSignError::TokenExpired);
+        return Err(QrSignError::TokenExpired {
+            location: std::panic::Location::caller(),
+        });
     }
 
     match QrStatus::from_db(&row.status) {
         Some(QrStatus::Authenticated) => {}
-        other => return Err(QrSignError::UnexpectedState(format!("{:?}", other))),
+        other => {
+            return Err(QrSignError::UnexpectedState {
+                status: format!("{:?}", other),
+                location: std::panic::Location::caller(),
+            })
+        }
     }
 
     // base64url-encode the assertion — same format fido2_sign_middleware expects in X-Fido2-Response
-    let credential_json = serde_json::to_vec(&req.credential)
-        .map_err(|e| QrSignError::Internal(format!("Failed to serialize credential: {}", e)))?;
+    let credential_json = serde_json::to_vec(&req.credential).with_context(SignCtx::internal())?;
     let fido2_response = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&credential_json);
 
     db::complete_qr_sign_token(&state.db, &req.token, &fido2_response)
         .await
-        .map_err(|e| QrSignError::Internal(e.to_string()))?;
+        .with_context(SignCtx::internal())?;
 
     tracing::debug!("QR sign token completed");
 

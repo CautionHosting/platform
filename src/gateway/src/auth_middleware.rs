@@ -763,7 +763,7 @@ async fn verify_ssh_signed_request(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to query SSH public key",
             )
-            .with_boxed_source(source.into_boxed_dyn_error())
+            .with_boxed_source(Box::new(source))
         })?
         .ok_or_else(|| {
             VerifySshSignedRequestError::new(
@@ -830,7 +830,7 @@ async fn verify_ssh_signed_request(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Failed to query SSH key authorization",
                 )
-                .with_boxed_source(source.into_boxed_dyn_error())
+                .with_boxed_source(Box::new(source))
             })?
             .ok_or_else(|| {
                 VerifySshSignedRequestError::new(

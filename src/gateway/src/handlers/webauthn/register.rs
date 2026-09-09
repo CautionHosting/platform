@@ -12,13 +12,14 @@ use uuid::Uuid;
 use webauthn_rs::prelude::*;
 use webauthn_rs_proto::{ResidentKeyRequirement, UserVerificationPolicy};
 
-use crate::db;
+use crate::db::{self, DbErrorKind};
 use crate::types::*;
 
 use super::super::{
     build_auth_cookies, read_credprops_rk, relax_registration_extensions, RegisterBeginResponse,
-    RegisterError, MAX_PENDING_CHALLENGES,
+    RegisterError, RegisterErrorCtx as Ctx, MAX_PENDING_CHALLENGES,
 };
+use dterror::ResultExt;
 
 #[tracing::instrument(skip_all, err)]
 pub async fn begin_register_handler(
@@ -29,14 +30,20 @@ pub async fn begin_register_handler(
 
     let alpha_code_id = db::validate_alpha_code(&state.db, &req.alpha_code)
         .await
-        .map_err(|e| RegisterError::Internal(e))?
-        .ok_or(RegisterError::InvalidAccessCode)?;
+        .with_context(Ctx::internal())?
+        .ok_or(RegisterError::InvalidAccessCode {
+            location: std::panic::Location::caller(),
+        })?;
 
     tracing::debug!("Alpha code validated: id={}", alpha_code_id);
 
     let username = req.username.trim().to_lowercase();
-    crate::validation::validate_username(&username)
-        .map_err(|e| RegisterError::InvalidUsername(e.to_string()))?;
+    if let Err(e) = crate::validation::validate_username(&username) {
+        return Err(RegisterError::InvalidUsername {
+            username_error: e.to_string(),
+            location: std::panic::Location::caller(),
+        });
+    }
 
     begin_registration_challenge(
         &state,
@@ -56,7 +63,7 @@ pub(crate) async fn begin_registration_challenge(
     // This prevents the same authenticator from registering multiple accounts
     let existing_cred_ids = db::get_all_credential_ids(&state.db)
         .await
-        .map_err(|e| RegisterError::Internal(e))?;
+        .with_context(Ctx::internal())?;
     let exclude_credentials: Vec<CredentialID> = existing_cred_ids
         .into_iter()
         .map(CredentialID::from)
@@ -79,9 +86,7 @@ pub(crate) async fn begin_registration_challenge(
             None,
             None,
         )
-        .map_err(|e| {
-            RegisterError::Internal(anyhow::anyhow!("Failed to start registration: {}", e))
-        })?;
+        .with_context(Ctx::internal())?;
 
     // Override authenticator selection to be maximally compatible:
     // - UV Preferred: authenticators that support PIN/biometric will use it, but won't block
@@ -112,7 +117,9 @@ pub(crate) async fn begin_registration_challenge(
     {
         let mut reg_states = state.reg_states.write().await;
         if reg_states.len() >= MAX_PENDING_CHALLENGES {
-            return Err(RegisterError::TooManyPending);
+            return Err(RegisterError::TooManyPending {
+                location: std::panic::Location::caller(),
+            });
         }
         reg_states.insert(state_key.clone(), pending);
     }
@@ -133,7 +140,9 @@ pub(crate) async fn finish_register_handler(
     let session_key = req
         .get("session")
         .and_then(|v| v.as_str())
-        .ok_or(RegisterError::NoRegistrationState)?
+        .ok_or(RegisterError::NoRegistrationState {
+            location: std::panic::Location::caller(),
+        })?
         .to_string();
 
     let pending = state
@@ -142,42 +151,40 @@ pub(crate) async fn finish_register_handler(
         .await
         .get(&session_key)
         .cloned()
-        .ok_or(RegisterError::NoRegistrationState)?;
+        .ok_or(RegisterError::NoRegistrationState {
+            location: std::panic::Location::caller(),
+        })?;
 
     // Check if the registration challenge has expired
     if time::OffsetDateTime::now_utc() > pending.expires_at {
         state.reg_states.write().await.remove(&session_key);
-        return Err(RegisterError::ChallengeExpired);
+        return Err(RegisterError::ChallengeExpired {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let reg_response: RegisterPublicKeyCredential =
-        serde_json::from_value(req.clone()).map_err(|e| {
-            RegisterError::Internal(anyhow::anyhow!(
-                "Failed to parse registration response: {}",
-                e
-            ))
-        })?;
+        serde_json::from_value(req.clone()).with_context(Ctx::invalid_payload())?;
 
     let seckey = state
         .webauthn
         .finish_securitykey_registration(&reg_response, &pending.reg_state)
-        .map_err(|e| {
-            RegisterError::Internal(anyhow::anyhow!("Failed to finish registration: {}", e))
-        })?;
+        .with_context(Ctx::internal())?;
 
     let credential_id = seckey.cred_id().clone();
     if db::credential_exists(&state.db, &credential_id)
         .await
-        .map_err(|e| RegisterError::Internal(e))?
+        .with_context(Ctx::internal())?
     {
         tracing::warn!("Registration rejected - credential already registered");
-        return Err(RegisterError::CredentialAlreadyRegistered);
+        return Err(RegisterError::CredentialAlreadyRegistered {
+            location: std::panic::Location::caller(),
+        });
     }
 
     state.reg_states.write().await.remove(&session_key);
 
-    let user_unique_id = Uuid::parse_str(&session_key)
-        .map_err(|e| RegisterError::Internal(anyhow::anyhow!("Failed to parse user ID: {}", e)))?;
+    let user_unique_id = Uuid::parse_str(&session_key).with_context(Ctx::internal())?;
 
     let legal = db::SignupLegalContext {
         ip_address: Some(connect_info.0.ip().to_string()),
@@ -198,12 +205,19 @@ pub(crate) async fn finish_register_handler(
             )
             .await
             .map_err(|e| {
-                if db::is_username_taken_error(&e) {
-                    RegisterError::UsernameTaken
-                } else if db::is_alpha_code_unavailable_error(&e) {
-                    RegisterError::InvalidAccessCode
+                if e.kind == DbErrorKind::UsernameTaken {
+                    RegisterError::UsernameTaken {
+                        location: std::panic::Location::caller(),
+                    }
+                } else if e.kind == DbErrorKind::AlphaCodeUnavailable {
+                    RegisterError::InvalidAccessCode {
+                        location: std::panic::Location::caller(),
+                    }
                 } else {
-                    RegisterError::Internal(anyhow::anyhow!("Failed to create user: {}", e))
+                    RegisterError::Internal {
+                        source: Box::new(e),
+                        location: std::panic::Location::caller(),
+                    }
                 }
             })?;
 
@@ -224,13 +238,15 @@ pub(crate) async fn finish_register_handler(
             )
             .await
             .map_err(|e| {
-                if db::is_username_taken_error(&e) {
-                    RegisterError::UsernameTaken
+                if e.kind == DbErrorKind::UsernameTaken {
+                    RegisterError::UsernameTaken {
+                        location: std::panic::Location::caller(),
+                    }
                 } else {
-                    RegisterError::Internal(anyhow::anyhow!(
-                        "Failed to accept organization invitation: {}",
-                        e
-                    ))
+                    RegisterError::Internal {
+                        source: Box::new(e),
+                        location: std::panic::Location::caller(),
+                    }
                 }
             })?;
 
@@ -239,9 +255,7 @@ pub(crate) async fn finish_register_handler(
         }
     };
 
-    let passkey_json = serde_json::to_vec(&seckey).map_err(|e| {
-        RegisterError::Internal(anyhow::anyhow!("Failed to serialize credential: {}", e))
-    })?;
+    let passkey_json = serde_json::to_vec(&seckey).with_context(Ctx::internal())?;
     let resident = read_credprops_rk(&reg_response);
 
     db::save_fido2_credential(
@@ -258,7 +272,7 @@ pub(crate) async fn finish_register_handler(
         resident,
     )
     .await
-    .map_err(|e| RegisterError::Internal(e))?;
+    .with_context(Ctx::internal())?;
 
     let credential_id_hex = hex::encode(&credential_id);
 
@@ -268,7 +282,7 @@ pub(crate) async fn finish_register_handler(
 
     db::create_auth_session(&state.db, &session_id, &credential_id, expires_at)
         .await
-        .map_err(|e| RegisterError::Internal(e))?;
+        .with_context(Ctx::internal())?;
 
     tracing::debug!(
         "Registration complete with automatic session creation (expires in {} hours)",
@@ -293,9 +307,7 @@ pub(crate) async fn finish_register_handler(
         secure,
     );
 
-    let body = serde_json::to_string(&response_body).map_err(|e| {
-        RegisterError::Internal(anyhow::anyhow!("Failed to serialize response: {}", e))
-    })?;
+    let body = serde_json::to_string(&response_body).with_context(Ctx::internal())?;
 
     // Use HeaderMap with append to properly set multiple Set-Cookie headers
     let mut headers = HeaderMap::new();

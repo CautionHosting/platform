@@ -1,17 +1,17 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{bail, Context, Result};
 use bytes::Bytes;
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use futures::StreamExt;
 use russh::keys::{PrivateKey, PublicKey, PublicKeyBase64};
 use russh::server::{Auth, Msg, Server, Session};
 use russh::{Channel, ChannelId};
 use sqlx::PgPool;
-use std::time::Instant;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Child;
 use tokio::sync::Mutex;
@@ -32,6 +32,316 @@ done
 
 const ZERO_SHA1: &str = "0000000000000000000000000000000000000000";
 
+// ---------------------------------------------------------------------------
+// Error types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SshHandlerError {
+    #[error("not authenticated [{location}]")]
+    NotAuthenticated {
+        #[location]
+        location: Location,
+    },
+
+    #[error("failed to write to git stdin [{location:?}]")]
+    StdinWrite {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("protocol error [{location:?}]")]
+    Protocol {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl From<russh::Error> for SshHandlerError {
+    fn from(e: russh::Error) -> Self {
+        Self::Protocol {
+            location: std::panic::Location::caller(),
+            source: Box::new(e),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum EnsureGitRepoExistsError {
+    #[error("failed to create git repos directory [{location:?}]")]
+    CreateDirectory {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to execute git init [{location:?}]")]
+    GitInitSpawn {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("git init failed [{location:?}]")]
+    GitInitFailed {
+        stderr: String,
+        #[location]
+        location: Location,
+    },
+}
+
+impl EnsureGitRepoExistsError {
+    /// Returns the client-visible error message matching HEAD's anyhow Display
+    /// output (the outermost `.context()` string or `bail!` message).
+    fn client_message(&self) -> String {
+        match self {
+            Self::CreateDirectory { .. } => "Failed to create git repos directory".to_string(),
+            Self::GitInitSpawn { .. } => "Failed to execute git init".to_string(),
+            Self::GitInitFailed { stderr, .. } => {
+                format!("Git init failed: {}", stderr)
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum PreparePushRefHookError {
+    #[error("failed to create temporary git hook directory [{location:?}]")]
+    CreateTempDir {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to write post-receive hook [{location:?}]")]
+    WriteHook {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to stat post-receive hook [{location:?}]")]
+    StatHook {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to make post-receive hook executable [{location:?}]")]
+    SetPermissions {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl PreparePushRefHookError {
+    /// Returns the client-visible error message matching HEAD's anyhow Display
+    /// output (the `.context()` string for each failure path).
+    fn client_message(&self) -> String {
+        match self {
+            Self::CreateTempDir { .. } => {
+                "Failed to create temporary git hook directory".to_string()
+            }
+            Self::WriteHook { .. } => "Failed to write post-receive hook".to_string(),
+            Self::StatHook { .. } => "Failed to stat post-receive hook".to_string(),
+            Self::SetPermissions { .. } => {
+                "Failed to make post-receive hook executable".to_string()
+            }
+        }
+    }
+}
+
+/// Error type for parsing the pushed-ref log lines. All variants are source-less
+/// (leaf error), so only `thiserror::Error` is derived — no `CtxError`.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ParsePushedBranchRefError {
+    #[error("Malformed pushed ref log line {line_number} [{location}]")]
+    MalformedLine {
+        line_number: usize,
+        location: dterror::Location,
+    },
+
+    #[error("Invalid commit SHA in pushed ref log line {line_number} [{location}]")]
+    InvalidSha {
+        line_number: usize,
+        location: dterror::Location,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ReadPushedBranchRefError {
+    #[error("failed to read pushed ref log [{location:?}]")]
+    Io {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to parse pushed ref log [{location:?}]")]
+    Parse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SetRepoHeadError {
+    #[error("failed to update HEAD [{location:?}]")]
+    CommandFailed {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetRepoHeadBranchError {
+    #[error("failed to read repo HEAD [{location:?}]")]
+    ReadHead {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to resolve repo HEAD branch [{location:?}]")]
+    ResolveBranch {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("repo HEAD resolved to invalid commit SHA [{location}]")]
+    InvalidSha {
+        #[location]
+        location: Location,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum HandleGitPushError {
+    #[error("invalid app ID format [{location:?}]")]
+    InvalidAppId {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to check existing resource [{location:?}]")]
+    QueryResource {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error(
+        "App '{app_id}' is in state '{state}'. In-place redeploy is not supported. \
+         `caution apps destroy {app_id}` causes downtime and temporarily withdraws managed DNS. \
+         After destroy completes, redeploy the same app ID, managed hostname, and any BYOC \
+         linkage with `git push caution HEAD:main` using the existing remote. \
+         Do not run `caution apps create` or plain `caution init`. \
+         For BYOC apps, do not run `caution teardown --byoc`. [{location}]"
+    )]
+    RunningApp {
+        app_id: String,
+        state: String,
+        #[location]
+        location: Location,
+    },
+
+    #[error("App '{app_id}' not found. Run 'caution init' first. [{location}]")]
+    AppNotFound {
+        app_id: String,
+        #[location]
+        location: Location,
+    },
+
+    /// Typed inner errors as unmarked fields: these feed `client_message()`
+    /// directly (documented deviation, same pattern as `PasskeyError::Auth`).
+    #[error("failed to ensure git repo exists [{location}]")]
+    EnsureRepo {
+        #[location]
+        location: Location,
+        source: EnsureGitRepoExistsError,
+    },
+
+    #[error("failed to prepare push ref hook [{location}]")]
+    PrepareHook {
+        #[location]
+        location: Location,
+        source: PreparePushRefHookError,
+    },
+
+    #[error("failed to spawn git receive-pack [{location:?}]")]
+    SpawnReceivePack {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl HandleGitPushError {
+    /// Returns the client-visible error message without the internal `[{location}]`
+    /// suffix. Byte-identical to what HEAD's `bail!`/`.context(...)` produced via
+    /// anyhow's Display (which only shows the outermost context string). For
+    /// EnsureRepo and PrepareHook, this delegates to the inner error's own
+    /// `client_message()` since at HEAD those propagated their specific message
+    /// directly (no call-site `.context()` was added).
+    pub(crate) fn client_message(&self) -> String {
+        match self {
+            Self::InvalidAppId { .. } => "Invalid app ID format".to_string(),
+            Self::QueryResource { .. } => "Failed to check existing resource".to_string(),
+            Self::RunningApp { app_id, state, .. } => {
+                [
+                    "App '", app_id.as_str(), "' is in state '", state.as_str(),
+                    "'. In-place redeploy is not supported. `caution apps destroy ", app_id.as_str(),
+                    "` causes downtime and temporarily withdraws managed DNS. After destroy completes, redeploy the same app ID, managed hostname, and any BYOC linkage with `git push caution HEAD:main` using the existing remote. Do not run `caution apps create` or plain `caution init`. For BYOC apps, do not run `caution teardown --byoc`.",
+                ].concat()
+            }
+            Self::AppNotFound { app_id, .. } => {
+                format!("App '{}' not found. Run 'caution init' first.", app_id)
+            }
+            Self::EnsureRepo { source, .. } => source.client_message(),
+            Self::PrepareHook { source, .. } => source.client_message(),
+            Self::SpawnReceivePack { .. } => "Failed to spawn git receive-pack".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum RunSshServerError {
+    #[error("failed to start SSH server [{location:?}]")]
+    Listen {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Domain types
+// ---------------------------------------------------------------------------
+
 #[derive(Debug)]
 struct PushedBranchRef {
     branch: String,
@@ -46,7 +356,7 @@ enum PushedBranchSelection {
 }
 
 #[derive(Clone)]
-pub struct SshServer {
+pub(crate) struct SshServer {
     pub pool: PgPool,
     pub api_service_url: String,
     pub data_dir: String,
@@ -69,7 +379,7 @@ impl SshServer {
     }
 }
 
-pub struct SshSession {
+pub(crate) struct SshSession {
     pool: PgPool,
     api_service_url: String,
     data_dir: String,
@@ -135,7 +445,7 @@ fn contains_non_line_terminal_control(message: &str) -> bool {
 }
 
 impl russh::server::Handler for SshSession {
-    type Error = anyhow::Error;
+    type Error = SshHandlerError;
 
     async fn channel_open_session(
         &mut self,
@@ -203,10 +513,12 @@ impl russh::server::Handler for SshSession {
         let command = String::from_utf8_lossy(data);
         tracing::info!("SSH exec request: {}", command);
 
-        let fingerprint = self
-            .ssh_fingerprint
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not authenticated"))?;
+        let fingerprint =
+            self.ssh_fingerprint
+                .as_ref()
+                .ok_or(SshHandlerError::NotAuthenticated {
+                    location: std::panic::Location::caller(),
+                })?;
 
         if let Some(app_id) = parse_git_receive_pack(&command) {
             tracing::info!("Git push for app: {}", app_id);
@@ -287,7 +599,7 @@ impl russh::server::Handler for SshSession {
                 }
                 Err(e) => {
                     tracing::error!("Git push failed: {:?}", e);
-                    let error_msg = format!("remote: error: {}\n", e);
+                    let error_msg = format!("remote: error: {}\n", e.client_message());
                     let _ = session.extended_data(channel, 1, Bytes::from(error_msg.into_bytes()));
                     let _ = session.exit_status_request(channel, 1);
                     let _ = session.close(channel);
@@ -314,7 +626,10 @@ impl russh::server::Handler for SshSession {
             if let Some(stdin) = child.stdin.as_mut() {
                 if let Err(e) = stdin.write_all(data).await {
                     tracing::error!("Failed to write to git stdin: {}", e);
-                    return Err(e.into());
+                    return Err(SshHandlerError::StdinWrite {
+                        location: std::panic::Location::caller(),
+                        source: Box::new(e),
+                    });
                 }
             }
         }
@@ -352,7 +667,7 @@ fn parse_git_receive_pack(command: &str) -> Option<String> {
     Some(app_id.to_string())
 }
 
-fn ensure_git_repo_exists(repo_path: &str) -> Result<()> {
+fn ensure_git_repo_exists(repo_path: &str) -> Result<(), EnsureGitRepoExistsError> {
     use std::fs;
     use std::process::Command;
 
@@ -364,44 +679,48 @@ fn ensure_git_repo_exists(repo_path: &str) -> Result<()> {
     tracing::info!("Initializing bare git repository at {}", repo_path);
 
     if let Some(parent) = std::path::Path::new(repo_path).parent() {
-        fs::create_dir_all(parent).context("Failed to create git repos directory")?;
+        fs::create_dir_all(parent).with_context(EnsureGitRepoExistsErrorCtx::create_directory())?;
     }
 
     let output = Command::new("git")
         .args(&["init", "--bare", repo_path])
         .output()
-        .context("Failed to execute git init")?;
+        .with_context(EnsureGitRepoExistsErrorCtx::git_init_spawn())?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Git init failed: {}", stderr);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(EnsureGitRepoExistsError::GitInitFailed {
+            stderr,
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(())
 }
 
-fn prepare_push_ref_hook() -> Result<(tempfile::TempDir, std::path::PathBuf)> {
+fn prepare_push_ref_hook(
+) -> Result<(tempfile::TempDir, std::path::PathBuf), PreparePushRefHookError> {
     use std::fs;
+    use PreparePushRefHookErrorCtx as Ctx;
 
     let hook_dir = tempfile::Builder::new()
         .prefix("caution-push-hooks-")
         .tempdir()
-        .context("Failed to create temporary git hook directory")?;
+        .with_context(Ctx::create_temp_dir())?;
     let hook_path = hook_dir.path().join("post-receive");
     let log_path = hook_dir.path().join("pushed-refs.log");
 
-    fs::write(&hook_path, POST_RECEIVE_HOOK).context("Failed to write post-receive hook")?;
+    fs::write(&hook_path, POST_RECEIVE_HOOK).with_context(Ctx::write_hook())?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
         let mut permissions = fs::metadata(&hook_path)
-            .context("Failed to stat post-receive hook")?
+            .with_context(Ctx::stat_hook())?
             .permissions();
         permissions.set_mode(0o700);
-        fs::set_permissions(&hook_path, permissions)
-            .context("Failed to make post-receive hook executable")?;
+        fs::set_permissions(&hook_path, permissions).with_context(Ctx::set_permissions())?;
     }
 
     Ok((hook_dir, log_path))
@@ -411,7 +730,9 @@ fn is_sha1_hex(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn parse_pushed_branch_ref(log_content: &str) -> Result<PushedBranchSelection> {
+fn parse_pushed_branch_ref(
+    log_content: &str,
+) -> Result<PushedBranchSelection, ParsePushedBranchRefError> {
     let mut pushed_ref = None;
 
     for (line_index, line) in log_content.lines().enumerate() {
@@ -422,16 +743,28 @@ fn parse_pushed_branch_ref(log_content: &str) -> Result<PushedBranchSelection> {
         let mut parts = line.split_whitespace();
         let _old = parts
             .next()
-            .with_context(|| format!("Malformed pushed ref log line {}", line_index + 1))?;
+            .ok_or_else(|| ParsePushedBranchRefError::MalformedLine {
+                line_number: line_index + 1,
+                location: std::panic::Location::caller(),
+            })?;
         let new = parts
             .next()
-            .with_context(|| format!("Malformed pushed ref log line {}", line_index + 1))?;
+            .ok_or_else(|| ParsePushedBranchRefError::MalformedLine {
+                line_number: line_index + 1,
+                location: std::panic::Location::caller(),
+            })?;
         let ref_name = parts
             .next()
-            .with_context(|| format!("Malformed pushed ref log line {}", line_index + 1))?;
+            .ok_or_else(|| ParsePushedBranchRefError::MalformedLine {
+                line_number: line_index + 1,
+                location: std::panic::Location::caller(),
+            })?;
 
         if parts.next().is_some() {
-            bail!("Malformed pushed ref log line {}", line_index + 1);
+            return Err(ParsePushedBranchRefError::MalformedLine {
+                line_number: line_index + 1,
+                location: std::panic::Location::caller(),
+            });
         }
 
         let Some(branch) = ref_name.strip_prefix("refs/heads/") else {
@@ -443,14 +776,17 @@ fn parse_pushed_branch_ref(log_content: &str) -> Result<PushedBranchSelection> {
         }
 
         if branch.is_empty() {
-            bail!("Malformed pushed ref log line {}", line_index + 1);
+            return Err(ParsePushedBranchRefError::MalformedLine {
+                line_number: line_index + 1,
+                location: std::panic::Location::caller(),
+            });
         }
 
         if !is_sha1_hex(new) {
-            bail!(
-                "Invalid commit SHA in pushed ref log line {}",
-                line_index + 1
-            );
+            return Err(ParsePushedBranchRefError::InvalidSha {
+                line_number: line_index + 1,
+                location: std::panic::Location::caller(),
+            });
         }
 
         let next_ref = PushedBranchRef {
@@ -468,18 +804,29 @@ fn parse_pushed_branch_ref(log_content: &str) -> Result<PushedBranchSelection> {
     })
 }
 
-fn read_pushed_branch_ref(log_path: &Path) -> Result<PushedBranchSelection> {
+fn read_pushed_branch_ref(
+    log_path: &Path,
+) -> Result<PushedBranchSelection, ReadPushedBranchRefError> {
     match std::fs::read_to_string(log_path) {
-        Ok(content) => parse_pushed_branch_ref(&content),
+        Ok(content) => {
+            parse_pushed_branch_ref(&content).map_err(|e| ReadPushedBranchRefError::Parse {
+                location: std::panic::Location::caller(),
+                source: Box::new(e),
+            })
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Ok(PushedBranchSelection::None)
         }
-        Err(error) => Err(error).context("Failed to read pushed ref log"),
+        Err(error) => Err(ReadPushedBranchRefError::Io {
+            location: std::panic::Location::caller(),
+            source: Box::new(error),
+        }),
     }
 }
 
-fn set_repo_head(repo_path: &str, branch: &str) -> Result<()> {
+fn set_repo_head(repo_path: &str, branch: &str) -> Result<(), SetRepoHeadError> {
     use std::process::Command;
+    use SetRepoHeadErrorCtx as Ctx;
 
     tracing::info!("Setting HEAD to refs/heads/{}", branch);
 
@@ -493,7 +840,7 @@ fn set_repo_head(repo_path: &str, branch: &str) -> Result<()> {
             &format!("refs/heads/{}", branch),
         ])
         .output()
-        .context("Failed to update HEAD")?;
+        .with_context(Ctx::command_failed())?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -505,13 +852,16 @@ fn set_repo_head(repo_path: &str, branch: &str) -> Result<()> {
     Ok(())
 }
 
-fn get_repo_head_branch(repo_path: &str) -> Result<Option<PushedBranchRef>> {
+fn get_repo_head_branch(
+    repo_path: &str,
+) -> Result<Option<PushedBranchRef>, GetRepoHeadBranchError> {
     use std::process::Command;
+    use GetRepoHeadBranchErrorCtx as Ctx;
 
     let output = Command::new("git")
         .args(&["--git-dir", repo_path, "symbolic-ref", "--short", "HEAD"])
         .output()
-        .context("Failed to read repo HEAD")?;
+        .with_context(Ctx::read_head())?;
 
     if !output.status.success() {
         return Ok(None);
@@ -526,7 +876,7 @@ fn get_repo_head_branch(repo_path: &str) -> Result<Option<PushedBranchRef>> {
     let output = Command::new("git")
         .args(&["--git-dir", repo_path, "rev-parse", &ref_name])
         .output()
-        .context("Failed to resolve repo HEAD branch")?;
+        .with_context(Ctx::resolve_branch())?;
 
     if !output.status.success() {
         return Ok(None);
@@ -534,7 +884,9 @@ fn get_repo_head_branch(repo_path: &str) -> Result<Option<PushedBranchRef>> {
 
     let commit_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if !is_sha1_hex(&commit_sha) {
-        bail!("Repo HEAD resolved to invalid commit SHA");
+        return Err(GetRepoHeadBranchError::InvalidSha {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(Some(PushedBranchRef {
@@ -545,14 +897,6 @@ fn get_repo_head_branch(repo_path: &str) -> Result<Option<PushedBranchRef>> {
 
 fn resource_state_allows_noop_redeploy(state: &str) -> bool {
     matches!(state, "initialized" | "terminated" | "failed")
-}
-
-fn running_app_redeploy_error(app_id: &str, state: &str) -> String {
-    [
-        "App '", app_id, "' is in state '", state,
-        "'. In-place redeploy is not supported. `caution apps destroy ", app_id,
-        "` causes downtime and temporarily withdraws managed DNS. After destroy completes, redeploy the same app ID, managed hostname, and any BYOC linkage with `git push caution HEAD:main` using the existing remote. Do not run `caution apps create` or plain `caution init`. For BYOC apps, do not run `caution teardown --byoc`.",
-    ].concat()
 }
 
 async fn handle_git_push(
@@ -566,8 +910,10 @@ async fn handle_git_push(
     channel: ChannelId,
     session: &mut Session,
     git_processes: Arc<Mutex<HashMap<ChannelId, Child>>>,
-) -> Result<()> {
-    let app_uuid = Uuid::parse_str(app_id).context("Invalid app ID format")?;
+) -> Result<(), HandleGitPushError> {
+    use HandleGitPushErrorCtx as Ctx;
+
+    let app_uuid = Uuid::parse_str(app_id).with_context(Ctx::invalid_app_id())?;
 
     let existing: Option<(String,)> = sqlx::query_as(
         "SELECT state::text FROM compute_resources
@@ -577,12 +923,16 @@ async fn handle_git_push(
     .bind(org_id)
     .fetch_optional(pool)
     .await
-    .context("Failed to check existing resource")?;
+    .with_context(Ctx::query_resource())?;
 
     let resource_state = match existing {
         Some((state,)) => {
             if state == "running" || state == "stopped" {
-                bail!(running_app_redeploy_error(app_id, &state));
+                return Err(HandleGitPushError::RunningApp {
+                    app_id: app_id.to_string(),
+                    state,
+                    location: std::panic::Location::caller(),
+                });
             }
             tracing::info!(
                 "App '{}' exists in state '{}', allowing push",
@@ -592,14 +942,24 @@ async fn handle_git_push(
             state
         }
         None => {
-            bail!("App '{}' not found. Run 'caution init' first.", app_id);
+            return Err(HandleGitPushError::AppNotFound {
+                app_id: app_id.to_string(),
+                location: std::panic::Location::caller(),
+            });
         }
     };
     let allow_noop_redeploy = resource_state_allows_noop_redeploy(&resource_state);
 
     let repo_path = format!("{}/git-repos/{}.git", data_dir, app_id);
-    ensure_git_repo_exists(&repo_path)?;
-    let (push_hook_dir, push_ref_log_path) = prepare_push_ref_hook()?;
+    ensure_git_repo_exists(&repo_path).map_err(|source| HandleGitPushError::EnsureRepo {
+        location: std::panic::Location::caller(),
+        source,
+    })?;
+    let (push_hook_dir, push_ref_log_path) =
+        prepare_push_ref_hook().map_err(|source| HandleGitPushError::PrepareHook {
+            location: std::panic::Location::caller(),
+            source,
+        })?;
     let hooks_path = push_hook_dir.path().to_path_buf();
 
     tracing::info!("Spawning git receive-pack for {}", repo_path);
@@ -614,7 +974,7 @@ async fn handle_git_push(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .context("Failed to spawn git receive-pack")?;
+        .with_context(Ctx::spawn_receive_pack())?;
 
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
@@ -694,10 +1054,9 @@ async fn handle_git_push(
                     Ok(status) => status,
                     Err(e) => {
                         tracing::error!("Failed to wait for git process: {}", e);
-                        let error_msg =
-                            format!("remote: error: Failed to complete git receive-pack\n");
+                        let error_msg = "remote: error: Failed to complete git receive-pack\n";
                         let _ = session_handle
-                            .extended_data(channel, 1, Bytes::from(error_msg.into_bytes()))
+                            .extended_data(channel, 1, Bytes::from(error_msg))
                             .await;
                         let _ = session_handle.exit_status_request(channel, 1).await;
                         let _ = session_handle.close(channel).await;
@@ -934,7 +1293,11 @@ async fn handle_git_push(
                                 let done_msg = deploy_progress_completed_message(elapsed);
                                 if !done_msg.is_empty() {
                                     let _ = session_handle
-                                        .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
+                                        .extended_data(
+                                            channel,
+                                            1,
+                                            Bytes::from(done_msg.into_bytes()),
+                                        )
                                         .await;
                                 }
                             }
@@ -945,7 +1308,11 @@ async fn handle_git_push(
                                 let done_msg = deploy_progress_completed_message(elapsed);
                                 if !done_msg.is_empty() {
                                     let _ = session_handle
-                                        .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
+                                        .extended_data(
+                                            channel,
+                                            1,
+                                            Bytes::from(done_msg.into_bytes()),
+                                        )
                                         .await;
                                 }
                             }
@@ -963,7 +1330,11 @@ async fn handle_git_push(
                                 let done_msg = deploy_progress_finished_message(elapsed, failed);
                                 if !done_msg.is_empty() {
                                     let _ = session_handle
-                                        .extended_data(channel, 1, Bytes::from(done_msg.into_bytes()))
+                                        .extended_data(
+                                            channel,
+                                            1,
+                                            Bytes::from(done_msg.into_bytes()),
+                                        )
                                         .await;
                                 }
                             }
@@ -1029,9 +1400,9 @@ async fn handle_git_push(
                     e,
                     last_line
                 );
-                let error_msg = format!("remote: error: Invalid deployment response\n");
+                let error_msg = "remote: error: Invalid deployment response\n";
                 let _ = session_handle
-                    .extended_data(channel, 1, Bytes::from(error_msg.into_bytes()))
+                    .extended_data(channel, 1, Bytes::from(error_msg))
                     .await;
                 let _ = session_handle.exit_status_request(channel, 1).await;
                 let _ = session_handle.close(channel).await;
@@ -1098,13 +1469,57 @@ fn managed_dns_note(
     note
 }
 
+/// Build the SSH server config.
+///
+/// The default `Preferred` algorithm set leads with the post-quantum
+/// `mlkem768x25519-sha256` key exchange, so clients (incl. recent OpenSSH)
+/// negotiate a PQ kex and avoid "store now, decrypt later" warnings. We rely
+/// on that default rather than hand-rolling a kex list so we stay current as
+/// russh adds algorithms.
+fn ssh_server_config(host_key: PrivateKey) -> russh::server::Config {
+    russh::server::Config {
+        inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
+        // Keep silent deploy phases alive without writing into Git's output channel.
+        keepalive_interval: Some(std::time::Duration::from_secs(30)),
+        keepalive_max: 3,
+        auth_rejection_time: std::time::Duration::from_secs(3),
+        auth_rejection_time_initial: Some(std::time::Duration::from_secs(0)),
+        keys: vec![host_key],
+        ..Default::default()
+    }
+}
+
+pub async fn run_ssh_server(
+    pool: PgPool,
+    api_service_url: String,
+    data_dir: String,
+    internal_service_secret: Option<String>,
+    host_key: PrivateKey,
+    bind_addr: &str,
+) -> Result<(), RunSshServerError> {
+    use RunSshServerErrorCtx as Ctx;
+
+    let config = Arc::new(ssh_server_config(host_key));
+
+    let mut server = SshServer::new(pool, api_service_url, data_dir, internal_service_secret);
+
+    tracing::info!("Starting SSH server on {}", bind_addr);
+
+    server
+        .run_on_address(config, bind_addr)
+        .await
+        .with_context(Ctx::listen())?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         contains_non_line_terminal_control, deploy_progress_completed_message,
         deploy_progress_finished_message, deploy_progress_started_message, managed_dns_note,
-        parse_pushed_branch_ref, resource_state_allows_noop_redeploy,
-        running_app_redeploy_error, PushedBranchSelection, ZERO_SHA1,
+        parse_pushed_branch_ref, resource_state_allows_noop_redeploy, PushedBranchSelection,
+        ZERO_SHA1,
     };
 
     const OLD_SHA: &str = "1111111111111111111111111111111111111111";
@@ -1281,6 +1696,28 @@ mod tests {
     }
 
     #[test]
+    fn running_app_error_preserves_identity_instructions() {
+        let err = super::HandleGitPushError::RunningApp {
+            app_id: "my-app".into(),
+            state: "running".into(),
+            location: std::panic::Location::caller(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("caution apps destroy my-app"),
+            "must contain the destroy instruction: {msg}"
+        );
+        assert!(
+            msg.contains("git push caution HEAD:main"),
+            "must contain the redeploy instruction: {msg}"
+        );
+        assert!(
+            msg.contains("Do not run `caution apps create`"),
+            "must warn against creating a new app: {msg}"
+        );
+    }
+
+    #[test]
     fn noop_redeploy_is_only_allowed_for_deployable_inactive_states() {
         assert!(resource_state_allows_noop_redeploy("initialized"));
         assert!(resource_state_allows_noop_redeploy("terminated"));
@@ -1289,15 +1726,6 @@ mod tests {
         assert!(!resource_state_allows_noop_redeploy("pending"));
         assert!(!resource_state_allows_noop_redeploy("running"));
         assert!(!resource_state_allows_noop_redeploy("stopped"));
-    }
-
-    #[test]
-    fn running_app_error_preserves_identity_instructions() {
-        let message = running_app_redeploy_error("app-id", "running");
-        assert!(message.contains("caution apps destroy app-id"));
-        assert!(message.contains("git push caution HEAD:main"));
-        assert!(message.contains("same app ID, managed hostname, and any BYOC linkage"));
-        assert!(message.contains("Do not run `caution apps create`"));
     }
 
     #[test]
@@ -1370,43 +1798,4 @@ mod tests {
             .output()
             .unwrap()
     }
-}
-
-/// Build the SSH server config.
-///
-/// The default `Preferred` algorithm set leads with the post-quantum
-/// `mlkem768x25519-sha256` key exchange, so clients (incl. recent OpenSSH)
-/// negotiate a PQ kex and avoid "store now, decrypt later" warnings. We rely
-/// on that default rather than hand-rolling a kex list so we stay current as
-/// russh adds algorithms.
-fn ssh_server_config(host_key: PrivateKey) -> russh::server::Config {
-    russh::server::Config {
-        inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
-        // Keep silent deploy phases alive without writing into Git's output channel.
-        keepalive_interval: Some(std::time::Duration::from_secs(30)),
-        keepalive_max: 3,
-        auth_rejection_time: std::time::Duration::from_secs(3),
-        auth_rejection_time_initial: Some(std::time::Duration::from_secs(0)),
-        keys: vec![host_key],
-        ..Default::default()
-    }
-}
-
-pub async fn run_ssh_server(
-    pool: PgPool,
-    api_service_url: String,
-    data_dir: String,
-    internal_service_secret: Option<String>,
-    host_key: PrivateKey,
-    bind_addr: &str,
-) -> Result<()> {
-    let config = Arc::new(ssh_server_config(host_key));
-
-    let mut server = SshServer::new(pool, api_service_url, data_dir, internal_service_secret);
-
-    tracing::info!("Starting SSH server on {}", bind_addr);
-
-    server.run_on_address(config, bind_addr).await?;
-
-    Ok(())
 }
