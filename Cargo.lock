@@ -2875,13 +2875,14 @@ dependencies = [
 name = "email-service"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "axum",
  "chrono",
  "dotenvy",
+ "dterror 0.3.0",
  "lettre",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
  "tokio",
  "tower 0.4.13",
  "tower-http",
