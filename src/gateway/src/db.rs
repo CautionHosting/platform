@@ -29,7 +29,7 @@ pub(crate) enum DbErrorKind {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 #[context(derive(Debug))]
-#[error("database error ({kind:?}): {operation} [{location:?}]")]
+#[error("database error ({kind:?}): {operation} [{location}]")]
 pub(crate) struct DbError {
     pub(crate) kind: DbErrorKind,
     #[context(borrow = str)]

@@ -23,7 +23,7 @@ pub struct Config {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ConfigError {
-    #[error("invalid API_SERVICE_URL [{location:?}]")]
+    #[error("invalid API_SERVICE_URL [{location}]")]
     InvalidApiServiceUrl {
         #[location]
         location: Location,
@@ -32,7 +32,7 @@ pub(crate) enum ConfigError {
         source: BoxError,
     },
 
-    #[error("invalid origin in RP_ORIGINS: {origin} [{location:?}]")]
+    #[error("invalid origin in RP_ORIGINS: {origin} [{location}]")]
     InvalidOrigin {
         origin: String,
 
@@ -43,7 +43,7 @@ pub(crate) enum ConfigError {
         source: BoxError,
     },
 
-    #[error("invalid PORT [{location:?}]")]
+    #[error("invalid PORT [{location}]")]
     InvalidPort {
         #[location]
         location: Location,
@@ -52,7 +52,7 @@ pub(crate) enum ConfigError {
         source: BoxError,
     },
 
-    #[error("invalid SSH_PORT [{location:?}]")]
+    #[error("invalid SSH_PORT [{location}]")]
     InvalidSshPort {
         #[location]
         location: Location,
@@ -61,7 +61,7 @@ pub(crate) enum ConfigError {
         source: BoxError,
     },
 
-    #[error("invalid SESSION_TIMEOUT_HOURS [{location:?}]")]
+    #[error("invalid SESSION_TIMEOUT_HOURS [{location}]")]
     InvalidSessionTimeoutHours {
         #[location]
         location: Location,
@@ -70,7 +70,7 @@ pub(crate) enum ConfigError {
         source: BoxError,
     },
 
-    #[error("CSRF_SECRET environment variable must be set [{location:?}]")]
+    #[error("CSRF_SECRET environment variable must be set [{location}]")]
     CsrfSecretMissing {
         #[location]
         location: Location,

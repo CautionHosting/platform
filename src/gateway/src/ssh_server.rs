@@ -44,7 +44,7 @@ pub(crate) enum SshHandlerError {
         location: Location,
     },
 
-    #[error("failed to write to git stdin [{location:?}]")]
+    #[error("failed to write to git stdin [{location}]")]
     StdinWrite {
         #[location]
         location: Location,
@@ -52,7 +52,7 @@ pub(crate) enum SshHandlerError {
         source: BoxError,
     },
 
-    #[error("protocol error [{location:?}]")]
+    #[error("protocol error [{location}]")]
     Protocol {
         #[location]
         location: Location,
@@ -72,7 +72,7 @@ impl From<russh::Error> for SshHandlerError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum EnsureGitRepoExistsError {
-    #[error("failed to create git repos directory [{location:?}]")]
+    #[error("failed to create git repos directory [{location}]")]
     CreateDirectory {
         #[location]
         location: Location,
@@ -80,7 +80,7 @@ pub(crate) enum EnsureGitRepoExistsError {
         source: BoxError,
     },
 
-    #[error("failed to execute git init [{location:?}]")]
+    #[error("failed to execute git init [{location}]")]
     GitInitSpawn {
         #[location]
         location: Location,
@@ -88,7 +88,7 @@ pub(crate) enum EnsureGitRepoExistsError {
         source: BoxError,
     },
 
-    #[error("git init failed [{location:?}]")]
+    #[error("git init failed [{location}]")]
     GitInitFailed {
         stderr: String,
         #[location]
@@ -112,7 +112,7 @@ impl EnsureGitRepoExistsError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum PreparePushRefHookError {
-    #[error("failed to create temporary git hook directory [{location:?}]")]
+    #[error("failed to create temporary git hook directory [{location}]")]
     CreateTempDir {
         #[location]
         location: Location,
@@ -120,7 +120,7 @@ pub(crate) enum PreparePushRefHookError {
         source: BoxError,
     },
 
-    #[error("failed to write post-receive hook [{location:?}]")]
+    #[error("failed to write post-receive hook [{location}]")]
     WriteHook {
         #[location]
         location: Location,
@@ -128,7 +128,7 @@ pub(crate) enum PreparePushRefHookError {
         source: BoxError,
     },
 
-    #[error("failed to stat post-receive hook [{location:?}]")]
+    #[error("failed to stat post-receive hook [{location}]")]
     StatHook {
         #[location]
         location: Location,
@@ -136,7 +136,7 @@ pub(crate) enum PreparePushRefHookError {
         source: BoxError,
     },
 
-    #[error("failed to make post-receive hook executable [{location:?}]")]
+    #[error("failed to make post-receive hook executable [{location}]")]
     SetPermissions {
         #[location]
         location: Location,
@@ -181,7 +181,7 @@ pub(crate) enum ParsePushedBranchRefError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ReadPushedBranchRefError {
-    #[error("failed to read pushed ref log [{location:?}]")]
+    #[error("failed to read pushed ref log [{location}]")]
     Io {
         #[location]
         location: Location,
@@ -189,7 +189,7 @@ pub(crate) enum ReadPushedBranchRefError {
         source: BoxError,
     },
 
-    #[error("failed to parse pushed ref log [{location:?}]")]
+    #[error("failed to parse pushed ref log [{location}]")]
     Parse {
         #[location]
         location: Location,
@@ -200,7 +200,7 @@ pub(crate) enum ReadPushedBranchRefError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum SetRepoHeadError {
-    #[error("failed to update HEAD [{location:?}]")]
+    #[error("failed to update HEAD [{location}]")]
     CommandFailed {
         #[location]
         location: Location,
@@ -211,7 +211,7 @@ pub(crate) enum SetRepoHeadError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum GetRepoHeadBranchError {
-    #[error("failed to read repo HEAD [{location:?}]")]
+    #[error("failed to read repo HEAD [{location}]")]
     ReadHead {
         #[location]
         location: Location,
@@ -219,7 +219,7 @@ pub(crate) enum GetRepoHeadBranchError {
         source: BoxError,
     },
 
-    #[error("failed to resolve repo HEAD branch [{location:?}]")]
+    #[error("failed to resolve repo HEAD branch [{location}]")]
     ResolveBranch {
         #[location]
         location: Location,
@@ -236,7 +236,7 @@ pub(crate) enum GetRepoHeadBranchError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum HandleGitPushError {
-    #[error("invalid app ID format [{location:?}]")]
+    #[error("invalid app ID format [{location}]")]
     InvalidAppId {
         #[location]
         location: Location,
@@ -244,7 +244,7 @@ pub(crate) enum HandleGitPushError {
         source: BoxError,
     },
 
-    #[error("failed to check existing resource [{location:?}]")]
+    #[error("failed to check existing resource [{location}]")]
     QueryResource {
         #[location]
         location: Location,
@@ -290,7 +290,7 @@ pub(crate) enum HandleGitPushError {
         source: PreparePushRefHookError,
     },
 
-    #[error("failed to spawn git receive-pack [{location:?}]")]
+    #[error("failed to spawn git receive-pack [{location}]")]
     SpawnReceivePack {
         #[location]
         location: Location,
@@ -329,7 +329,7 @@ impl HandleGitPushError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum RunSshServerError {
-    #[error("failed to start SSH server [{location:?}]")]
+    #[error("failed to start SSH server [{location}]")]
     Listen {
         #[location]
         location: Location,

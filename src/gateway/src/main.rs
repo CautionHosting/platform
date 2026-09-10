@@ -32,7 +32,7 @@ use types::AppState;
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum MainError {
-    #[error("failed to load configuration [{location:?}]")]
+    #[error("failed to load configuration [{location}]")]
     Config {
         #[location]
         location: Location,
@@ -41,7 +41,7 @@ enum MainError {
         source: BoxError,
     },
 
-    #[error("failed to connect to database [{location:?}]")]
+    #[error("failed to connect to database [{location}]")]
     DatabaseConnection {
         #[location]
         location: Location,
@@ -50,13 +50,13 @@ enum MainError {
         source: BoxError,
     },
 
-    #[error("no valid RP origins configured [{location:?}]")]
+    #[error("no valid RP origins configured [{location}]")]
     NoValidOrigins {
         #[location]
         location: Location,
     },
 
-    #[error("non-localhost RP origin must use HTTPS in production: {origin} [{location:?}]")]
+    #[error("non-localhost RP origin must use HTTPS in production: {origin} [{location}]")]
     InsecureOrigin {
         origin: String,
 
@@ -64,7 +64,7 @@ enum MainError {
         location: Location,
     },
 
-    #[error("failed to create WebAuthn builder [{location:?}]")]
+    #[error("failed to create WebAuthn builder [{location}]")]
     WebauthnBuilder {
         #[location]
         location: Location,
@@ -73,7 +73,7 @@ enum MainError {
         source: BoxError,
     },
 
-    #[error("failed to build WebAuthn [{location:?}]")]
+    #[error("failed to build WebAuthn [{location}]")]
     WebauthnBuild {
         #[location]
         location: Location,
@@ -82,7 +82,7 @@ enum MainError {
         source: BoxError,
     },
 
-    #[error("failed to load SSH host key [{location:?}]")]
+    #[error("failed to load SSH host key [{location}]")]
     HostKey {
         #[location]
         location: Location,
@@ -91,7 +91,7 @@ enum MainError {
         source: BoxError,
     },
 
-    #[error("failed to build HTTP client [{location:?}]")]
+    #[error("failed to build HTTP client [{location}]")]
     HttpClient {
         #[location]
         location: Location,
@@ -100,7 +100,7 @@ enum MainError {
         source: BoxError,
     },
 
-    #[error("failed to bind to address {addr} [{location:?}]")]
+    #[error("failed to bind to address {addr} [{location}]")]
     BindAddress {
         addr: String,
 
@@ -111,7 +111,7 @@ enum MainError {
         source: BoxError,
     },
 
-    #[error("server error [{location:?}]")]
+    #[error("server error [{location}]")]
     Server {
         #[location]
         location: Location,
@@ -123,7 +123,7 @@ enum MainError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum LoadHostKeyError {
-    #[error("failed to read SSH host key from {path} [{location:?}]")]
+    #[error("failed to read SSH host key from {path} [{location}]")]
     ReadKeyFile {
         #[context(borrow = str)]
         path: String,
@@ -135,7 +135,7 @@ enum LoadHostKeyError {
         source: BoxError,
     },
 
-    #[error("failed to decode SSH host key [{location:?}]")]
+    #[error("failed to decode SSH host key [{location}]")]
     DecodeKey {
         #[location]
         location: Location,
@@ -144,7 +144,7 @@ enum LoadHostKeyError {
         source: BoxError,
     },
 
-    #[error("failed to generate Ed25519 key [{location:?}]")]
+    #[error("failed to generate Ed25519 key [{location}]")]
     GenerateKey {
         #[location]
         location: Location,
@@ -153,7 +153,7 @@ enum LoadHostKeyError {
         source: BoxError,
     },
 
-    #[error("failed to create directory {parent} [{location:?}]")]
+    #[error("failed to create directory {parent} [{location}]")]
     CreateDirectory {
         #[context(borrow = std::path::Path)]
         parent: std::path::PathBuf,
@@ -165,7 +165,7 @@ enum LoadHostKeyError {
         source: BoxError,
     },
 
-    #[error("failed to encode SSH host key [{location:?}]")]
+    #[error("failed to encode SSH host key [{location}]")]
     EncodeKey {
         #[location]
         location: Location,
@@ -174,7 +174,7 @@ enum LoadHostKeyError {
         source: BoxError,
     },
 
-    #[error("failed to write SSH host key to {path} [{location:?}]")]
+    #[error("failed to write SSH host key to {path} [{location}]")]
     WriteKeyFile {
         #[context(borrow = str)]
         path: String,
@@ -186,7 +186,7 @@ enum LoadHostKeyError {
         source: BoxError,
     },
 
-    #[error("failed to set permissions on SSH host key [{location:?}]")]
+    #[error("failed to set permissions on SSH host key [{location}]")]
     SetPermissions {
         #[location]
         location: Location,
@@ -195,7 +195,7 @@ enum LoadHostKeyError {
         source: BoxError,
     },
 
-    #[error("failed to read SSH host key metadata [{location:?}]")]
+    #[error("failed to read SSH host key metadata [{location}]")]
     ReadMetadata {
         #[location]
         location: Location,
