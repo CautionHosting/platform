@@ -90,6 +90,7 @@ pub enum LoginError {
 
     #[error("could not find user ID for: {provided_bytes:?} [{location}]")]
     DbGetUserIdByCredential {
+        #[context(borrow = [u8])]
         provided_bytes: Vec<u8>,
 
         #[location]

@@ -34,6 +34,7 @@ pub(crate) enum ConfigError {
 
     #[error("invalid origin in RP_ORIGINS: {origin} [{location}]")]
     InvalidOrigin {
+        #[context(borrow = str)]
         origin: String,
 
         #[location]
@@ -120,7 +121,7 @@ impl Config {
 
         // Validate RP origins
         for origin in rp_origins.iter() {
-            Url::parse(origin.as_str()).with_context(Ctx::invalid_origin(origin.clone()))?;
+            Url::parse(origin.as_str()).with_context(Ctx::invalid_origin(origin.as_str()))?;
         }
 
         let port = env::var("PORT")

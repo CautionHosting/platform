@@ -102,6 +102,7 @@ enum MainError {
 
     #[error("failed to bind to address {addr} [{location}]")]
     BindAddress {
+        #[context(borrow = str)]
         addr: String,
 
         #[location]
@@ -676,7 +677,7 @@ async fn main() -> Result<(), MainError> {
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .with_context(Ctx::bind_address(addr.clone()))?;
+        .with_context(Ctx::bind_address(&addr))?;
 
     tracing::info!("Gateway listening on {}", addr);
     tracing::info!("SSH server listening on port {}", config.ssh_port);
