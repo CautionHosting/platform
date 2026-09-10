@@ -219,9 +219,10 @@ fn validate_catalog(
             paddle_enabled,
         )?;
         if let Some(id) = tier.paddle_price_id.as_deref()
-            && !ids.insert(id) {
-                return invalid("duplicate nonempty Paddle price ID");
-            }
+            && !ids.insert(id)
+        {
+            return invalid("duplicate nonempty Paddle price ID");
+        }
     }
     Ok(())
 }
@@ -303,8 +304,14 @@ mod tests {
     #[test]
     fn parses_documented_shape_with_exact_values() {
         let parsed = PricingConfig::parse(&catalog(true).to_string(), true).unwrap();
-        assert_eq!(parsed.subscription_tiers["3_enclaves"].monthly_cents(), 50000);
-        assert_eq!(parsed.subscription_tiers["3_enclaves"].annual_cents(), 600000);
+        assert_eq!(
+            parsed.subscription_tiers["3_enclaves"].monthly_cents(),
+            50000
+        );
+        assert_eq!(
+            parsed.subscription_tiers["3_enclaves"].annual_cents(),
+            600000
+        );
         assert_eq!(parsed.credit_packages["1000"].bonus_percent, 2.5);
     }
 

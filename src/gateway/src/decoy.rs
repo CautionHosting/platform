@@ -55,8 +55,8 @@ const ID_LENGTHS: [usize; 3] = [16, 32, 64];
 /// baseline for all usernames at once, not per-username, so it leaks nothing.
 /// If decoys ever need to survive CSRF rotation, give them a dedicated key.
 pub fn decoy_secret(csrf_secret: &str) -> [u8; 32] {
-    let mut mac = HmacSha256::new_from_slice(csrf_secret.as_bytes())
-        .expect("HMAC can take key of any size");
+    let mut mac =
+        HmacSha256::new_from_slice(csrf_secret.as_bytes()).expect("HMAC can take key of any size");
     mac.update(b":decoy"); // domain separation from csrf::derive_csrf_token
     let bytes = mac.finalize().into_bytes();
     let mut out = [0u8; 32];
@@ -72,8 +72,7 @@ pub fn decoy_secret(csrf_secret: &str) -> [u8; 32] {
 /// per-credential transports). Distinct `tag` strings provide domain
 /// separation between the different purposes so they don't correlate.
 fn keystream_block(decoy_secret: &[u8; 32], normalized_username: &str, tag: &str) -> [u8; 32] {
-    let mut mac =
-        HmacSha256::new_from_slice(decoy_secret).expect("HMAC can take key of any size");
+    let mut mac = HmacSha256::new_from_slice(decoy_secret).expect("HMAC can take key of any size");
     // Length-prefix each field (fixed-width big-endian u64) before feeding
     // its bytes. Plain concatenation would let a ':' in the username be
     // ambiguous with the tag's own separators — e.g. (username="alice",
@@ -266,7 +265,13 @@ mod tests {
 
     #[test]
     fn test_synthesize_non_empty_and_shape() {
-        for username in ["alice", "bob", "carol@example.com", "", "x".repeat(200).as_str()] {
+        for username in [
+            "alice",
+            "bob",
+            "carol@example.com",
+            "",
+            "x".repeat(200).as_str(),
+        ] {
             let creds = synthesize_allow_credentials("secret", username);
             assert!(!creds.is_empty(), "must never be empty for {username:?}");
             assert!(creds.len() <= 3, "count should stay within modeled range");

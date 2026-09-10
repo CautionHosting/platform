@@ -111,9 +111,7 @@ impl Config {
             env::var("RP_DISPLAY_NAME").unwrap_or_else(|_| "Hybrid API".to_string());
 
         let rp_origins: Vec<String> = env::var("RP_ORIGINS")
-            .unwrap_or_else(|_| {
-                "http://localhost:8080,http://localhost:8000".to_string()
-            })
+            .unwrap_or_else(|_| "http://localhost:8080,http://localhost:8000".to_string())
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -145,8 +143,7 @@ impl Config {
         let data_dir =
             env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
 
-        let csrf_secret =
-            env::var("CSRF_SECRET").with_context(Ctx::csrf_secret_missing())?;
+        let csrf_secret = env::var("CSRF_SECRET").with_context(Ctx::csrf_secret_missing())?;
 
         Ok(Config {
             database_url,

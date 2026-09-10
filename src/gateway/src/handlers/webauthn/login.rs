@@ -673,9 +673,7 @@ pub async fn finish_login_handler(
 
             let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
                 .await
-                .with_context(Ctx::db_get_user_id_by_credential(
-                    &credential_id_bytes,
-                ))?;
+                .with_context(Ctx::db_get_user_id_by_credential(&credential_id_bytes))?;
 
             let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
                 .await
@@ -709,9 +707,7 @@ pub async fn finish_login_handler(
 
             let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
                 .await
-                .with_context(Ctx::db_get_user_id_by_credential(
-                    &credential_id_bytes,
-                ))?;
+                .with_context(Ctx::db_get_user_id_by_credential(&credential_id_bytes))?;
 
             let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
                 .await

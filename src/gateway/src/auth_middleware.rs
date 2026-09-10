@@ -593,12 +593,17 @@ pub async fn username_claim_gate_middleware(
         return Ok(next.run(req).await);
     };
 
-    let (_username, is_placeholder) = db::get_username_status(&state.db, user_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to check username placeholder status: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to check account status").into_response()
-        })?;
+    let (_username, is_placeholder) =
+        db::get_username_status(&state.db, user_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to check username placeholder status: {:?}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to check account status",
+                )
+                    .into_response()
+            })?;
 
     if is_placeholder {
         return Err((
