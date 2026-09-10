@@ -64,6 +64,7 @@ pub enum QrLoginFinishError {
         "could not find user ID for the asserted credential ({provided_bytes:?}) [{location}]"
     )]
     DbGetUserIdByCredential {
+        #[context(borrow = [u8])]
         provided_bytes: Vec<u8>,
 
         #[location]
@@ -843,7 +844,7 @@ pub async fn qr_login_authenticate_finish_handler(
             let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
                 .await
                 .with_context(FinishCtx::db_get_user_id_by_credential(
-                    credential_id_bytes.clone(),
+                    &credential_id_bytes,
                 ))?;
 
             let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
@@ -869,7 +870,7 @@ pub async fn qr_login_authenticate_finish_handler(
             let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
                 .await
                 .with_context(FinishCtx::db_get_user_id_by_credential(
-                    credential_id_bytes.clone(),
+                    &credential_id_bytes,
                 ))?;
 
             let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
