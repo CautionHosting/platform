@@ -431,12 +431,13 @@ pub(crate) async fn list(client: &ApiClient) -> Result<(), ListError> {
 
             if let Some(config) = &app.configuration
                 && let Some(enclave_config) = config.get("enclave_config")
-                    && let (Some(mem), Some(cpus)) = (
-                        enclave_config.get("memory_mb").and_then(|v| v.as_u64()),
-                        enclave_config.get("cpus").and_then(|v| v.as_u64()),
-                    ) {
-                        details.push(format!("{}MB/{}cpu", mem, cpus));
-                    }
+                && let (Some(mem), Some(cpus)) = (
+                    enclave_config.get("memory_mb").and_then(|v| v.as_u64()),
+                    enclave_config.get("cpus").and_then(|v| v.as_u64()),
+                )
+            {
+                details.push(format!("{}MB/{}cpu", mem, cpus));
+            }
 
             if let Some(ip) = &app.public_ip {
                 details.push(ip.clone());
@@ -527,30 +528,34 @@ pub(crate) async fn get(
     }
 
     if let Some(config) = &app.configuration
-        && let Some(enclave_config) = config.get("enclave_config") {
-            if let Some(memory) = enclave_config.get("memory_mb").and_then(|v| v.as_u64()) {
-                output::status(format!("  Memory: {} MB", memory));
-            }
-            if let Some(cpus) = enclave_config.get("cpus").and_then(|v| v.as_u64()) {
-                output::status(format!("  CPUs: {}", cpus));
-            }
-            if let Some(debug) = enclave_config.get("debug").and_then(|v| v.as_bool())
-                && debug {
-                    output::status("  Debug Mode: enabled");
-                }
-            if let Some(ports) = enclave_config.get("ports").and_then(|v| v.as_array())
-                && !ports.is_empty() {
-                    let ports_str: Vec<String> = ports
-                        .iter()
-                        .filter_map(|p| p.as_u64().map(|n| n.to_string()))
-                        .collect();
-                    output::status(format!("  Ports: {}", ports_str.join(", ")));
-                }
-            if let Some(http_port) = enclave_config.get("http_port").and_then(|v| v.as_u64())
-                && http_port > 0 {
-                    output::status(format!("  HTTP Port: {}", http_port));
-                }
+        && let Some(enclave_config) = config.get("enclave_config")
+    {
+        if let Some(memory) = enclave_config.get("memory_mb").and_then(|v| v.as_u64()) {
+            output::status(format!("  Memory: {} MB", memory));
         }
+        if let Some(cpus) = enclave_config.get("cpus").and_then(|v| v.as_u64()) {
+            output::status(format!("  CPUs: {}", cpus));
+        }
+        if let Some(debug) = enclave_config.get("debug").and_then(|v| v.as_bool())
+            && debug
+        {
+            output::status("  Debug Mode: enabled");
+        }
+        if let Some(ports) = enclave_config.get("ports").and_then(|v| v.as_array())
+            && !ports.is_empty()
+        {
+            let ports_str: Vec<String> = ports
+                .iter()
+                .filter_map(|p| p.as_u64().map(|n| n.to_string()))
+                .collect();
+            output::status(format!("  Ports: {}", ports_str.join(", ")));
+        }
+        if let Some(http_port) = enclave_config.get("http_port").and_then(|v| v.as_u64())
+            && http_port > 0
+        {
+            output::status(format!("  HTTP Port: {}", http_port));
+        }
+    }
 
     if let Some(ip) = &app.public_ip {
         output::status(format!("  Public IP: {}", ip));
@@ -1016,7 +1021,6 @@ pub(crate) async fn try_relink(
             ["Found existing deployment with ID: ", &resource_id].concat(),
         );
     }
-
 
     let app = client
         .fetch_app(&resource_id)
