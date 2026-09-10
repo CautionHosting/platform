@@ -1555,6 +1555,7 @@ pub async fn consume_qr_login_session_id(
 // QR sign token operations
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_qr_sign_token(
     pool: &PgPool,
     token: &str,

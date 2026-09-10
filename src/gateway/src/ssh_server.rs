@@ -683,7 +683,7 @@ fn ensure_git_repo_exists(repo_path: &str) -> Result<(), EnsureGitRepoExistsErro
     }
 
     let output = Command::new("git")
-        .args(&["init", "--bare", repo_path])
+        .args(["init", "--bare", repo_path])
         .output()
         .with_context(EnsureGitRepoExistsErrorCtx::git_init_spawn())?;
 
@@ -831,7 +831,7 @@ fn set_repo_head(repo_path: &str, branch: &str) -> Result<(), SetRepoHeadError> 
     tracing::info!("Setting HEAD to refs/heads/{}", branch);
 
     let output = Command::new("git")
-        .args(&[
+        .args([
             "--git-dir",
             repo_path,
             "symbolic-ref",
@@ -859,7 +859,7 @@ fn get_repo_head_branch(
     use GetRepoHeadBranchErrorCtx as Ctx;
 
     let output = Command::new("git")
-        .args(&["--git-dir", repo_path, "symbolic-ref", "--short", "HEAD"])
+        .args(["--git-dir", repo_path, "symbolic-ref", "--short", "HEAD"])
         .output()
         .with_context(Ctx::read_head())?;
 
@@ -874,7 +874,7 @@ fn get_repo_head_branch(
 
     let ref_name = format!("refs/heads/{}", branch);
     let output = Command::new("git")
-        .args(&["--git-dir", repo_path, "rev-parse", &ref_name])
+        .args(["--git-dir", repo_path, "rev-parse", &ref_name])
         .output()
         .with_context(Ctx::resolve_branch())?;
 
@@ -899,6 +899,7 @@ fn resource_state_allows_noop_redeploy(state: &str) -> bool {
     matches!(state, "initialized" | "terminated" | "failed")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_git_push(
     pool: &PgPool,
     api_service_url: &str,
