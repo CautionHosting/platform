@@ -24,7 +24,7 @@ use dterror::{BoxError, CtxError, Location, ResultExt};
 /// response.
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum BeginLoginError {
-    #[error("scoped challenge failed [{location:?}]")]
+    #[error("scoped challenge failed [{location}]")]
     ScopedChallenge {
         #[location]
         location: Location,
@@ -33,7 +33,7 @@ pub(crate) enum BeginLoginError {
         source: BoxError,
     },
 
-    #[error("failed to fetch credentials from database [{location:?}]")]
+    #[error("failed to fetch credentials from database [{location}]")]
     FetchCredentials {
         #[location]
         location: Location,
@@ -42,7 +42,7 @@ pub(crate) enum BeginLoginError {
         source: BoxError,
     },
 
-    #[error("failed to deserialize stored credential at index {index} [{location:?}]")]
+    #[error("failed to deserialize stored credential at index {index} [{location}]")]
     DeserializeCredential {
         index: usize,
 
@@ -53,7 +53,7 @@ pub(crate) enum BeginLoginError {
         source: BoxError,
     },
 
-    #[error("failed to start authentication challenge [{location:?}]")]
+    #[error("failed to start authentication challenge [{location}]")]
     StartAuthentication {
         #[location]
         location: Location,
@@ -62,7 +62,7 @@ pub(crate) enum BeginLoginError {
         source: BoxError,
     },
 
-    #[error("too many pending logins [{location:?}]")]
+    #[error("too many pending logins [{location}]")]
     TooManyPending {
         #[location]
         location: Location,

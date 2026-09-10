@@ -17,7 +17,7 @@ use time::Duration;
 /// location must be an enum per the dterror convention.
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum E2eLoginError {
-    #[error("database query failed [{location:?}]")]
+    #[error("database query failed [{location}]")]
     DatabaseQuery {
         #[location]
         location: Location,
