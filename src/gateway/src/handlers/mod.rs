@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{response::IntoResponse, Json};
-use serde::{Deserialize, Serialize};
 
 mod common;
 mod credentials;
@@ -47,13 +46,6 @@ pub(crate) use webauthn::{
     logout_handler, normalize_login_username, scoped_or_decoy_challenge,
     validate_decoy_timing_fixtures, UsernameScope,
 };
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RegisterFinishRequestCli {
-    #[serde(flatten)]
-    pub credential: serde_json::Value,
-    pub session: String,
-}
 
 pub async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))

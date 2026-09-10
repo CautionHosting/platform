@@ -4,15 +4,11 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
-const APP_NAME_MIN_LEN: usize = 3;
-const APP_NAME_MAX_LEN: usize = 63;
-const APP_NAME_PATTERN: &str = r"^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$";
 const PASSKEY_NAME_MAX_LEN: usize = 80;
 const USERNAME_MIN_LEN: usize = 3;
 const USERNAME_MAX_LEN: usize = 32;
 const USERNAME_PATTERN: &str = r"^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$";
 
-static APP_NAME_REGEX: OnceLock<Regex> = OnceLock::new();
 static USERNAME_REGEX: OnceLock<Regex> = OnceLock::new();
 
 /// Error type returned by all validation functions in this module.
@@ -23,24 +19,6 @@ static USERNAME_REGEX: OnceLock<Regex> = OnceLock::new();
 pub enum ValidationError {
     #[error("Invalid app ID format, expected UUID")]
     InvalidAppId { location: dterror::Location },
-
-    #[error("App name must be at least {min} characters")]
-    AppNameTooShort {
-        min: usize,
-        location: dterror::Location,
-    },
-
-    #[error("App name must be at most {max} characters")]
-    AppNameTooLong {
-        max: usize,
-        location: dterror::Location,
-    },
-
-    #[error(
-        "App name must contain only letters, numbers, hyphens, and underscores, \
-         and must start/end with alphanumeric"
-    )]
-    AppNameInvalidChars { location: dterror::Location },
 
     #[error("Username must be at least {min} characters")]
     UsernameTooShort {
@@ -107,10 +85,6 @@ pub enum ValidationError {
     PasskeyNameControlChars { location: dterror::Location },
 }
 
-fn get_app_name_regex() -> &'static Regex {
-    APP_NAME_REGEX.get_or_init(|| Regex::new(APP_NAME_PATTERN).unwrap())
-}
-
 fn get_username_regex() -> &'static Regex {
     USERNAME_REGEX.get_or_init(|| Regex::new(USERNAME_PATTERN).unwrap())
 }
@@ -120,30 +94,6 @@ pub fn validate_app_id(id: &str) -> Result<(), ValidationError> {
     uuid::Uuid::parse_str(id).map_err(|_| ValidationError::InvalidAppId {
         location: std::panic::Location::caller(),
     })?;
-    Ok(())
-}
-
-#[track_caller]
-pub fn validate_app_name(name: &str) -> Result<(), ValidationError> {
-    if name.len() < APP_NAME_MIN_LEN {
-        return Err(ValidationError::AppNameTooShort {
-            min: APP_NAME_MIN_LEN,
-            location: std::panic::Location::caller(),
-        });
-    }
-    if name.len() > APP_NAME_MAX_LEN {
-        return Err(ValidationError::AppNameTooLong {
-            max: APP_NAME_MAX_LEN,
-            location: std::panic::Location::caller(),
-        });
-    }
-
-    if !get_app_name_regex().is_match(name) {
-        return Err(ValidationError::AppNameInvalidChars {
-            location: std::panic::Location::caller(),
-        });
-    }
-
     Ok(())
 }
 
@@ -297,60 +247,6 @@ fn is_valid_base64(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_app_name_valid() {
-        assert!(validate_app_name("my-app").is_ok());
-        assert!(validate_app_name("web-frontend").is_ok());
-        assert!(validate_app_name("api-v2").is_ok());
-        assert!(validate_app_name("test123").is_ok());
-        assert!(validate_app_name("a1b").is_ok());
-        assert!(validate_app_name("My-App").is_ok());
-        assert!(validate_app_name("app--name").is_ok());
-        assert!(validate_app_name("app_name").is_ok());
-    }
-
-    #[test]
-    fn test_app_name_invalid() {
-        assert!(validate_app_name("ab").is_err());
-        assert!(validate_app_name("-app").is_err());
-        assert!(validate_app_name("app-").is_err());
-        assert!(validate_app_name("_app").is_err());
-        assert!(validate_app_name("app_").is_err());
-        assert!(validate_app_name("app.name").is_err());
-        assert!(validate_app_name("app name").is_err());
-    }
-
-    #[test]
-    fn test_app_name_boundary_lengths() {
-        // Exactly min length (3)
-        assert!(validate_app_name("abc").is_ok());
-        // Exactly max length (63)
-        assert!(validate_app_name(&"a".repeat(63)).is_ok());
-        // One over max
-        assert!(validate_app_name(&"a".repeat(64)).is_err());
-        // One under min
-        assert!(validate_app_name("ab").is_err());
-        // Single char
-        assert!(validate_app_name("a").is_err());
-        // Empty
-        assert!(validate_app_name("").is_err());
-    }
-
-    #[test]
-    fn test_app_name_special_characters() {
-        assert!(validate_app_name("app.name").is_err());
-        assert!(validate_app_name("app name").is_err());
-        assert!(validate_app_name("app@name").is_err());
-        assert!(validate_app_name("app/name").is_err());
-        assert!(validate_app_name("app\nname").is_err());
-    }
-
-    #[test]
-    fn test_app_name_numeric_only() {
-        assert!(validate_app_name("123").is_ok());
-        assert!(validate_app_name("1-2-3").is_ok());
-    }
 
     #[test]
     fn test_validate_app_id() {
