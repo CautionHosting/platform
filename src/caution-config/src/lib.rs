@@ -385,9 +385,7 @@ pub enum FromStrError {
     #[error("http_port {0} must also be present in ingress rules")]
     HttpPortNotInPorts(u16),
 
-    #[error(
-        "key_exchange is only supported when e2e_encryption resolves to mode = \"steve\""
-    )]
+    #[error("key_exchange is only supported when e2e_encryption resolves to mode = \"steve\"")]
     KeyExchangeRequiresSteve,
 
     #[error(
@@ -630,20 +628,19 @@ impl ConfigurationFile {
                             aws_subnet_id = Some(value);
                         }
                     }
-                    "aws_security_group_id"
-                        if !value.is_empty() => {
-                            aws_security_group_id = Some(value);
-                        }
+                    "aws_security_group_id" if !value.is_empty() => {
+                        aws_security_group_id = Some(value);
+                    }
                     _ => {}
                 }
             }
         }
 
-
         if let Some(hp) = http_port
-            && !ports.contains(&hp) {
-                return Err(FromProcfileError::HttpPortNotInPorts(hp));
-            }
+            && !ports.contains(&hp)
+        {
+            return Err(FromProcfileError::HttpPortNotInPorts(hp));
+        }
 
         let explicit_http_port = http_port;
 
@@ -808,7 +805,10 @@ impl ConfigurationFile {
         Ok(ConfigurationFile { caution, enclave })
     }
 
-    #[allow(clippy::should_implement_trait, reason = "has more business logic than FromStr")]
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "has more business logic than FromStr"
+    )]
     pub fn from_str(s: &str) -> Result<Self, FromStrError> {
         let config: ConfigurationFile = hcl::from_str(s)?;
 
@@ -2572,11 +2572,14 @@ caution {
         let tls = hcl::from_str::<E2eEncryption>(r#"mode = "tls""#).unwrap();
         assert_eq!(tls.effective_mode(), Some(E2eMode::Tls));
 
-        let http = hcl::from_str::<HttpConfig>(r#"
+        let http = hcl::from_str::<HttpConfig>(
+            r#"
             domain = "app.example.com"
             port = 8080
             upstream_protocol = "h2c"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(http.upstream_protocol, Some(HttpUpstreamProtocol::H2c));
 
         let legacy_enabled = hcl::from_str::<E2eEncryption>(r#"enabled = true"#).unwrap();
@@ -2681,16 +2684,14 @@ enclave "main" {{
         let default = hcl::from_str::<E2eEncryption>("enabled = true").unwrap();
         assert!(!default.allow_plaintext_fallback());
 
-        let enabled = hcl::from_str::<E2eEncryption>(
-            "enabled = true\nallow_plaintext_fallback = true",
-        )
-        .unwrap();
+        let enabled =
+            hcl::from_str::<E2eEncryption>("enabled = true\nallow_plaintext_fallback = true")
+                .unwrap();
         assert!(enabled.allow_plaintext_fallback());
 
-        let disabled = hcl::from_str::<E2eEncryption>(
-            "enabled = true\nallow_plaintext_fallback = false",
-        )
-        .unwrap();
+        let disabled =
+            hcl::from_str::<E2eEncryption>("enabled = true\nallow_plaintext_fallback = false")
+                .unwrap();
         assert!(!disabled.allow_plaintext_fallback());
     }
 

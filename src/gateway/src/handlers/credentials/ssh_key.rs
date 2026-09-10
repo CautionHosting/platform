@@ -241,16 +241,16 @@ pub async fn add_ssh_key_handler(
         }
     })?;
 
-    let key_type = req
-        .public_key
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| AddSshKeyError::Input {
-            source: SshKeyInputError::InvalidKeyType {
+    let key_type =
+        req.public_key
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| AddSshKeyError::Input {
+                source: SshKeyInputError::InvalidKeyType {
+                    location: std::panic::Location::caller(),
+                },
                 location: std::panic::Location::caller(),
-            },
-            location: std::panic::Location::caller(),
-        })?;
+            })?;
 
     let added = db::add_ssh_key(
         &state.db,

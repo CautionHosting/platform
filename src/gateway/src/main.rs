@@ -1,10 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use axum::{middleware, routing::{delete, get, post}, Router};
+use axum::{
+    middleware,
+    routing::{delete, get, post},
+    Router,
+};
 use dterror::{BoxError, CtxError, Location, ResultExt};
-use russh::keys::{Algorithm, PrivateKey};
 use russh::keys::ssh_key::LineEnding;
+use russh::keys::{Algorithm, PrivateKey};
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -293,8 +297,8 @@ async fn main() -> Result<(), MainError> {
     tracing::info!("  RP Display Name: {}", config.rp_display_name);
     tracing::info!("  RP Origins: {:?}", config.rp_origins);
 
-    let host_key = load_or_generate_host_key(&config.ssh_host_key_path)
-        .with_context(Ctx::host_key())?;
+    let host_key =
+        load_or_generate_host_key(&config.ssh_host_key_path).with_context(Ctx::host_key())?;
 
     // Kill-switch for legacy credential-broadcast login (see AppState::login_allow_broadcast
     // doc comment). Read once at startup — toggling requires an env var change + restart.
@@ -502,10 +506,7 @@ async fn main() -> Result<(), MainError> {
             "/ssh-keys/{fingerprint}",
             delete(handlers::delete_ssh_key_handler),
         )
-        .route(
-            "/user/username",
-            get(handlers::get_username_status_handler),
-        )
+        .route("/user/username", get(handlers::get_username_status_handler))
         .route("/user/username", post(handlers::claim_username_handler))
         .route("/pgp-keys", post(handlers::add_pgp_key_handler))
         .route("/pgp-keys", get(handlers::list_pgp_keys_handler))
@@ -559,7 +560,8 @@ async fn main() -> Result<(), MainError> {
         std::env::var("FRONTEND_DIR").unwrap_or_else(|_| "/app/frontend".to_string());
 
     let frontend_service = ServeDir::new(&frontend_dir).append_index_html_on_directories(true);
-    let frontend_routes = handlers::frontend::build_frontend_routes(std::path::Path::new(&frontend_dir));
+    let frontend_routes =
+        handlers::frontend::build_frontend_routes(std::path::Path::new(&frontend_dir));
 
     // Webhook proxy to metering service (no auth required — Paddle verifies via signature)
     let webhook_proxy = Router::new()
@@ -571,7 +573,10 @@ async fn main() -> Result<(), MainError> {
     // Public, unauthenticated, root-level (must NOT be nested under /api): the
     // platform's current enclave build inputs, proxied to the API's same path.
     let well_known_proxy = Router::new()
-        .route("/.well-known/caution/build-inputs", get(handlers::proxy_handler))
+        .route(
+            "/.well-known/caution/build-inputs",
+            get(handlers::proxy_handler),
+        )
         .with_state(state.clone())
         .layer(cors.clone());
 
@@ -704,18 +709,16 @@ async fn shutdown_signal() {
 }
 
 fn load_or_generate_host_key(path: &str) -> Result<PrivateKey, LoadHostKeyError> {
-    use LoadHostKeyErrorCtx as Ctx;
     use std::fs;
     use std::path::Path;
+    use LoadHostKeyErrorCtx as Ctx;
 
     let key_path = Path::new(path);
 
     if key_path.exists() {
-        let key_str = fs::read_to_string(key_path)
-            .with_context(Ctx::read_key_file(path))?;
+        let key_str = fs::read_to_string(key_path).with_context(Ctx::read_key_file(path))?;
 
-        let key = russh::keys::decode_secret_key(&key_str, None)
-            .with_context(Ctx::decode_key())?;
+        let key = russh::keys::decode_secret_key(&key_str, None).with_context(Ctx::decode_key())?;
 
         tracing::debug!("Loaded SSH host key");
         Ok(key)
@@ -726,23 +729,22 @@ fn load_or_generate_host_key(path: &str) -> Result<PrivateKey, LoadHostKeyError>
             .with_context(Ctx::generate_key())?;
 
         if let Some(parent) = key_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(Ctx::create_directory(parent))?;
+            fs::create_dir_all(parent).with_context(Ctx::create_directory(parent))?;
         }
 
-        let key_pem = key.to_openssh(LineEnding::LF)
+        let key_pem = key
+            .to_openssh(LineEnding::LF)
             .with_context(Ctx::encode_key())?;
-        fs::write(key_path, key_pem.as_bytes())
-            .with_context(Ctx::write_key_file(path))?;
+        fs::write(key_path, key_pem.as_bytes()).with_context(Ctx::write_key_file(path))?;
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = fs::metadata(key_path)
-                .with_context(Ctx::read_metadata())?.permissions();
+                .with_context(Ctx::read_metadata())?
+                .permissions();
             perms.set_mode(0o600);
-            fs::set_permissions(key_path, perms)
-                .with_context(Ctx::set_permissions())?;
+            fs::set_permissions(key_path, perms).with_context(Ctx::set_permissions())?;
         }
 
         tracing::info!("SSH host key generated");
