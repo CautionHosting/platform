@@ -150,7 +150,7 @@ impl E2eEncryption {
 
 impl E2eEncryption {
     pub fn effective_mode(&self) -> Option<E2eMode> {
-        self.mode.or_else(|| match self.enabled {
+        self.mode.or(match self.enabled {
             Some(true) => Some(E2eMode::Steve),
             _ => None,
         })
@@ -630,22 +630,20 @@ impl ConfigurationFile {
                             aws_subnet_id = Some(value);
                         }
                     }
-                    "aws_security_group_id" => {
-                        if !value.is_empty() {
+                    "aws_security_group_id"
+                        if !value.is_empty() => {
                             aws_security_group_id = Some(value);
                         }
-                    }
                     _ => {}
                 }
             }
         }
 
 
-        if let Some(hp) = http_port {
-            if !ports.contains(&hp) {
+        if let Some(hp) = http_port
+            && !ports.contains(&hp) {
                 return Err(FromProcfileError::HttpPortNotInPorts(hp));
             }
-        }
 
         let explicit_http_port = http_port;
 
@@ -810,6 +808,7 @@ impl ConfigurationFile {
         Ok(ConfigurationFile { caution, enclave })
     }
 
+    #[allow(clippy::should_implement_trait, reason = "has more business logic than FromStr")]
     pub fn from_str(s: &str) -> Result<Self, FromStrError> {
         let config: ConfigurationFile = hcl::from_str(s)?;
 
