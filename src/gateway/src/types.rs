@@ -122,6 +122,7 @@ pub struct AppState {
     pub username_begin_limiter: crate::rate_limit::RateLimiter,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DbUser {
     pub id: Uuid,
@@ -130,6 +131,7 @@ pub struct DbUser {
     pub fido2_user_handle: Option<Vec<u8>>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DbCredential {
     pub id: Uuid,
@@ -143,6 +145,7 @@ pub struct DbCredential {
     pub flags: Option<sqlx::types::JsonValue>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DbSession {
     pub session_id: String,
@@ -150,21 +153,6 @@ pub struct DbSession {
     pub expires_at: time::OffsetDateTime,
     pub created_at: time::OffsetDateTime,
     pub last_used_at: time::OffsetDateTime,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RegisterFinishRequest {
-    pub id: String,
-    pub raw_id: String,
-    pub response: AuthenticatorAttestationResponseRaw,
-    #[serde(rename = "type")]
-    pub type_: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AuthenticatorAttestationResponseRaw {
-    pub attestation_object: String,
-    pub client_data_json: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -188,24 +176,6 @@ pub struct LoginBeginResponse {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LoginBeginRequest {
     pub username: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct LoginFinishRequest {
-    pub id: String,
-    pub raw_id: String,
-    pub response: AuthenticatorAssertionResponseRaw,
-    #[serde(rename = "type")]
-    pub type_: String,
-    pub session: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AuthenticatorAssertionResponseRaw {
-    pub authenticator_data: String,
-    pub client_data_json: String,
-    pub signature: String,
-    pub user_handle: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -238,12 +208,6 @@ pub struct InvitePreviewResponse {
     pub email: String,
     pub organization_name: String,
     pub expires_at: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SessionData {
-    pub passkey_authentication: PasskeyAuthentication,
-    pub user_id: Uuid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,6 +326,7 @@ pub struct QrLoginAuthenticateFinishRequest {
     pub credential: serde_json::Value,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DbQrLoginToken {
     pub token: String,
@@ -386,6 +351,7 @@ pub struct QrSignChallengeRequest {
 
 // QR Sign types (mid-session signing via phone)
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DbQrSignToken {
     pub token: String,
