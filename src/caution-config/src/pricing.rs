@@ -218,11 +218,10 @@ fn validate_catalog(
             &format!("price for tier `{key}`"),
             paddle_enabled,
         )?;
-        if let Some(id) = tier.paddle_price_id.as_deref() {
-            if !ids.insert(id) {
+        if let Some(id) = tier.paddle_price_id.as_deref()
+            && !ids.insert(id) {
                 return invalid("duplicate nonempty Paddle price ID");
             }
-        }
     }
     Ok(())
 }
