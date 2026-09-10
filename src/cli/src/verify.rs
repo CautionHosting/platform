@@ -3847,9 +3847,10 @@ pub(crate) fn classify_app_source_refs(
             commit_is_ref_tip = true;
         }
         if let Some(ref br) = branch_ref
-            && r == br {
-                branch_present = true;
-            }
+            && r == br
+        {
+            branch_present = true;
+        }
     }
 
     match branch {

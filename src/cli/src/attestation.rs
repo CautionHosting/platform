@@ -45,12 +45,15 @@ pub enum ParseError {
 pub fn parse(attestation_bytes: &[u8]) -> Result<CborValue, ParseError> {
     use ParseErrorCtx as Ctx;
 
-    let cose_sign1 = coset::CoseSign1::from_slice(attestation_bytes)
-        .with_context(Ctx::parse_cose_sign1())?;
+    let cose_sign1 =
+        coset::CoseSign1::from_slice(attestation_bytes).with_context(Ctx::parse_cose_sign1())?;
 
-    let payload = cose_sign1.payload.as_ref().ok_or_else(|| ParseError::NoPayload {
-        location: std::panic::Location::caller(),
-    })?;
+    let payload = cose_sign1
+        .payload
+        .as_ref()
+        .ok_or_else(|| ParseError::NoPayload {
+            location: std::panic::Location::caller(),
+        })?;
     serde_cbor::from_slice(payload).with_context(Ctx::decode_payload())
 }
 
@@ -144,9 +147,12 @@ pub fn payload_json(value: &CborValue) -> Result<JsonValue, PayloadJsonError> {
             JsonValue::String(encoded)
         }
         CborValue::Text(value) => JsonValue::String(value.clone()),
-        CborValue::Array(values) => {
-            JsonValue::Array(values.iter().map(payload_json).collect::<Result<Vec<_>, _>>()?)
-        }
+        CborValue::Array(values) => JsonValue::Array(
+            values
+                .iter()
+                .map(payload_json)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
         CborValue::Map(values) => {
             let mut map = JsonMap::new();
             for (key, value) in values {

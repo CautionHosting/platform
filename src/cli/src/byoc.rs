@@ -992,11 +992,12 @@ async fn init_byoc(client: &ApiClient, config_path: &PathBuf) -> Result<(), Init
         }
 
         if let Some(value) = config_json.get("builder_instance_profile_name")
-            && !value.is_string() {
-                return Err(InitByocError::BuilderInstanceProfileNotString {
-                    location: std::panic::Location::caller(),
-                });
-            }
+            && !value.is_string()
+        {
+            return Err(InitByocError::BuilderInstanceProfileNotString {
+                location: std::panic::Location::caller(),
+            });
+        }
 
         output::verbose(client.verbose, "Config file validated");
         serde_json::to_string(&config_json).with_context(Ctx::serialize_config_file())?
@@ -1161,17 +1162,16 @@ fn parse_aws_credentials_file(
             in_target_section = trimmed == section_header;
             continue;
         }
-        if in_target_section
-            && let Some((key, value)) = trimmed.split_once('=') {
-                let key = key.trim();
-                let value = value.trim();
-                match key {
-                    "aws_access_key_id" => access_key = Some(value.to_string()),
-                    "aws_secret_access_key" => secret_key = Some(value.to_string()),
-                    "aws_session_token" => session_token = Some(value.to_string()),
-                    _ => {}
-                }
+        if in_target_section && let Some((key, value)) = trimmed.split_once('=') {
+            let key = key.trim();
+            let value = value.trim();
+            match key {
+                "aws_access_key_id" => access_key = Some(value.to_string()),
+                "aws_secret_access_key" => secret_key = Some(value.to_string()),
+                "aws_session_token" => session_token = Some(value.to_string()),
+                _ => {}
             }
+        }
     }
 
     (access_key, secret_key, session_token)
@@ -1196,9 +1196,10 @@ fn parse_aws_config_region(content: &str, profile: &str) -> Option<String> {
         }
         if in_target_section
             && let Some((key, value)) = trimmed.split_once('=')
-                && key.trim() == "region" {
-                    region = Some(value.trim().to_string());
-                }
+            && key.trim() == "region"
+        {
+            region = Some(value.trim().to_string());
+        }
     }
 
     region
@@ -1584,12 +1585,13 @@ pub(crate) async fn teardown(
                 let state_path = byoc_state_read_path(&entry.path());
                 if state_path.exists()
                     && let Ok(content) = fs::read_to_string(&state_path)
-                        && let Ok(state) = serde_json::from_str::<serde_json::Value>(&content)
-                            && state.get("resource_id").and_then(|v| v.as_str()) == Some(rid) {
-                                byoc_state = Some(state);
-                                byoc_state_dir = Some(entry.path());
-                                break;
-                            }
+                    && let Ok(state) = serde_json::from_str::<serde_json::Value>(&content)
+                    && state.get("resource_id").and_then(|v| v.as_str()) == Some(rid)
+                {
+                    byoc_state = Some(state);
+                    byoc_state_dir = Some(entry.path());
+                    break;
+                }
             }
         }
     }
@@ -1761,10 +1763,10 @@ pub(crate) async fn teardown(
 
 #[cfg(test)]
 mod tests {
-     use super::{init_byoc, linked_encrypted_byoc_config};
-     use crate::ApiClient;
-     use std::path::PathBuf;
-     use tempfile::tempdir;
+    use super::{init_byoc, linked_encrypted_byoc_config};
+    use crate::ApiClient;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
 
     fn test_api_client() -> ApiClient {
         ApiClient {
