@@ -28,6 +28,7 @@ use uuid::Uuid;
 /// [`SshKeyInputError::client_message`], not from `Display` (which carries a
 /// `[{location}]` suffix for logs only).
 #[derive(Debug, thiserror::Error)]
+#[allow(clippy::enum_variant_names)]
 pub enum SshKeyInputError {
     #[error("missing or invalid authenticated user ID [{location}]")]
     InvalidUserId { location: dterror::Location },
@@ -242,7 +243,6 @@ pub async fn add_ssh_key_handler(
 
     let key_type = req
         .public_key
-        .trim()
         .split_whitespace()
         .next()
         .ok_or_else(|| AddSshKeyError::Input {

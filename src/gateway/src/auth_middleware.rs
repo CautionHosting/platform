@@ -481,6 +481,7 @@ fn validate_csrf(
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn fido2_auth_middleware(
     State(state): State<AppState>,
     mut req: Request,
@@ -574,6 +575,7 @@ fn username_gate_exempt_path(path: &str) -> bool {
 /// `{"error": "username_required"}` until they claim a real username. This
 /// applies uniformly to web, CLI, and QR clients since it's enforced at the
 /// gateway rather than in UI.
+#[allow(clippy::result_large_err)]
 pub async fn username_claim_gate_middleware(
     State(state): State<AppState>,
     req: Request,
@@ -888,6 +890,7 @@ fn requires_fido2_signature(method: &Method, path: &str) -> bool {
         || (path.starts_with("/passkeys/") && *method == Method::DELETE)
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn fido2_sign_middleware(
     State(state): State<AppState>,
     mut req: Request,
