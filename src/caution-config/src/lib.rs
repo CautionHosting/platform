@@ -367,6 +367,9 @@ pub enum FromProcfileError {
     #[error("invalid domain: {0}")]
     InvalidDomain(String),
 
+    #[error("invalid ssh key: {0}")]
+    InvalidSshKey(String),
+
     #[error("invalid provider config: {0}")]
     InvalidProvider(String),
 }
@@ -408,12 +411,20 @@ pub enum FromStrError {
     #[error("invalid domain: {0}")]
     InvalidDomain(String),
 
+    #[error("invalid ssh key: {0}")]
+    InvalidSshKey(String),
+
     #[error("invalid provider config: {0}")]
     InvalidProvider(String),
 }
 
 const RESERVED_INTERNAL_PORT_START: u16 = 49_500;
 const RESERVED_INTERNAL_PORT_END: u16 = 49_600;
+
+/// Upper bound on a single authorized-keys line. Well below the EC2 user-data
+/// budget that the rendered bootstrap script must fit within, and far above any
+/// real key, so it only bounds pathological input before we parse it.
+const MAX_SSH_KEY_LEN: usize = 8192;
 
 fn is_reserved(port: u16) -> bool {
     (RESERVED_INTERNAL_PORT_START..=RESERVED_INTERNAL_PORT_END).contains(&port)
@@ -452,6 +463,68 @@ fn validate_domain(domain: Option<&str>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Returns `true` for characters that are safe to embed in the instance bootstrap
+/// script. The set covers everything a real authorized-keys line uses (key type,
+/// base64 body, and a typical comment) while excluding every character that would
+/// carry shell or HCL meaning (`$`, `%`, `{`, `}`, quotes, backticks, `\`, `;`,
+/// `&`, `|`, parentheses, angle brackets, newlines, etc.).
+fn is_safe_ssh_key_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '.' | '_' | ':' | '@')
+}
+
+/// Validate and sanitize an OpenSSH authorized-keys line for safe embedding.
+///
+/// A key is `<type> <body>[ <comment>…]`. The *key material* (the type and body
+/// fields) must be free of characters that carry meaning in the bootstrap script;
+/// if either field looks wrong (unrecognized type, or an unsafe character in the
+/// type/body) the whole entry is rejected.
+///
+/// The trailing comment is not key material and is **not** preserved faithfully:
+/// any character outside [`is_safe_ssh_key_char`]'s allowlist (including any
+/// non-ASCII byte) marks the comment unsafe, and an unsafe comment is dropped in
+/// full rather than failing the config. Only the `<type> <body>` material is
+/// guaranteed to survive; a comment survives only when it is entirely safe.
+///
+/// Returns the line to store: the original when every field is safe, or
+/// `<type> <body>` with the offending comment removed.
+fn sanitize_ssh_key(key: &str) -> Result<String, String> {
+    if key.len() > MAX_SSH_KEY_LEN {
+        return Err(format!(
+            "ssh key exceeds the maximum length of {MAX_SSH_KEY_LEN} characters"
+        ));
+    }
+
+    let mut fields = key.split_whitespace();
+    let key_type = fields
+        .next()
+        .ok_or_else(|| "ssh key is missing a key type field".to_string())?;
+    let body = fields
+        .next()
+        .ok_or_else(|| "ssh key is missing a base64 body field".to_string())?;
+
+    if !(key_type.starts_with("ssh-")
+        || key_type.starts_with("ecdsa-")
+        || key_type.starts_with("sk-"))
+    {
+        return Err(format!("unrecognized ssh key type '{key_type}'"));
+    }
+    if !key_type.chars().all(is_safe_ssh_key_char) {
+        return Err("ssh key type contains characters that are not safe to embed".to_string());
+    }
+    if !body.chars().all(is_safe_ssh_key_char) {
+        return Err("ssh key body contains characters that are not safe to embed".to_string());
+    }
+
+    // The remainder is an optional comment. Keep it only when every character is
+    // safe; otherwise drop it rather than rejecting the whole configuration.
+    let comment_is_safe = fields.all(|field| field.chars().all(is_safe_ssh_key_char));
+    if comment_is_safe {
+        Ok(key.to_string())
+    } else {
+        Ok(format!("{key_type} {body}"))
+    }
 }
 
 /// Validate that `value` is a well-formed AWS resource id of the form
@@ -562,12 +635,10 @@ impl ConfigurationFile {
                     "ssh_keys" | "ssh_key" => {
                         if !value.is_empty() {
                             let unquoted = value.trim_matches('"').trim_matches('\'').trim();
-                            if !unquoted.is_empty()
-                                && (unquoted.starts_with("ssh-")
-                                    || unquoted.starts_with("ecdsa-")
-                                    || unquoted.starts_with("sk-"))
-                            {
-                                ssh_keys.push(unquoted.to_string());
+                            if !unquoted.is_empty() {
+                                let sanitized = sanitize_ssh_key(unquoted)
+                                    .map_err(FromProcfileError::InvalidSshKey)?;
+                                ssh_keys.push(sanitized);
                             }
                         }
                     }
@@ -810,7 +881,7 @@ impl ConfigurationFile {
         reason = "has more business logic than FromStr"
     )]
     pub fn from_str(s: &str) -> Result<Self, FromStrError> {
-        let config: ConfigurationFile = hcl::from_str(s)?;
+        let mut config: ConfigurationFile = hcl::from_str(s)?;
 
         if let Some(provider) = config.caution.as_ref().and_then(|c| c.provider.as_ref()) {
             validate_provider(provider).map_err(FromStrError::InvalidProvider)?;
@@ -893,6 +964,16 @@ impl ConfigurationFile {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        if let Some(enclaves) = config.enclave.as_mut() {
+            for enclave in enclaves.values_mut() {
+                if let Some(debug) = enclave.debug.as_mut() {
+                    for key in debug.ssh_keys.iter_mut() {
+                        *key = sanitize_ssh_key(key).map_err(FromStrError::InvalidSshKey)?;
                     }
                 }
             }
@@ -1614,6 +1695,80 @@ enclave "main" {
             ConfigurationFile::from_str(hcl),
             Err(FromStrError::InvalidDomain(_))
         ));
+    }
+
+    #[test]
+    fn test_from_procfile_preserves_safe_ssh_key() {
+        // A fully safe key (type, base64 body, and comment) is stored unchanged.
+        let procfile = "run: /app\nports: 8080\ndebug: true\nssh_keys: ssh-ed25519 AAAAC3Nza ryan@left\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let debug = enclave.get("default").unwrap().debug.as_ref().unwrap();
+        assert_eq!(debug.ssh_keys, vec!["ssh-ed25519 AAAAC3Nza ryan@left"]);
+    }
+
+    #[test]
+    fn test_from_procfile_strips_unsafe_ssh_key_comment() {
+        // An injection payload in the comment is stripped; the key material survives.
+        let procfile = "run: /app\nports: 8080\ndebug: true\nssh_keys: ssh-rsa AAAAB3Nza ; rm -rf /\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let debug = enclave.get("default").unwrap().debug.as_ref().unwrap();
+        assert_eq!(debug.ssh_keys, vec!["ssh-rsa AAAAB3Nza"]);
+    }
+
+    #[test]
+    fn test_from_procfile_rejects_unsafe_ssh_key_body() {
+        // Unsafe characters in the body (key material) reject the whole config.
+        let procfile = "run: /app\nports: 8080\ndebug: true\nssh_keys: ssh-rsa AAAA$(evil)\n";
+        assert!(matches!(
+            ConfigurationFile::from_procfile(procfile),
+            Err(FromProcfileError::InvalidSshKey(_))
+        ));
+    }
+
+    #[test]
+    fn test_from_procfile_rejects_bad_ssh_key_type_or_missing_body() {
+        for bad in ["foobar AAAA", "ssh-rsa"] {
+            let procfile = format!("run: /app\nports: 8080\ndebug: true\nssh_keys: {bad}\n");
+            assert!(
+                matches!(
+                    ConfigurationFile::from_procfile(&procfile),
+                    Err(FromProcfileError::InvalidSshKey(_))
+                ),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_str_sanitizes_ssh_keys() {
+        let hcl = r#"
+enclave "main" {
+  debug {
+    enabled = true
+    ssh_keys = [
+      "ssh-ed25519 AAAAC3Nza ryan@left",
+      "ssh-rsa AAAAB3Nza $(evil) here",
+    ]
+  }
+  unit "default" {
+    command = "/app"
+  }
+}
+"#;
+        let config = ConfigurationFile::from_str(hcl).unwrap();
+        let enclave = config.enclave.unwrap();
+        let debug = enclave.get("main").unwrap().debug.as_ref().unwrap();
+        assert_eq!(
+            debug.ssh_keys,
+            vec![
+                "ssh-ed25519 AAAAC3Nza ryan@left".to_string(),
+                // The `$(evil)` token is unsafe, so the comment is dropped while
+                // the key material is preserved.
+                "ssh-rsa AAAAB3Nza".to_string(),
+            ]
+        );
     }
 
     #[test]
