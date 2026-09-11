@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+use dterror::ResultExt;
 use serde::{Deserialize, Deserializer, de::MapAccess, de::Visitor};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -103,32 +104,53 @@ impl<'de> Deserialize<'de> for DuplicateCheckedTiers {
 }
 
 impl PricingConfig {
-    pub fn parse(contents: &str, paddle_enabled: bool) -> Result<Self, PricingConfigError> {
-        let mut config: Self = serde_json::from_str(contents).map_err(PricingConfigError::Json)?;
-        normalize_tiers(&mut config.subscription_tiers)?;
+    #[tracing::instrument(skip_all, err)]
+    pub fn parse(contents: &str, paddle_enabled: bool) -> Result<Self, ParsePricingError> {
+        use ParsePricingErrorCtx as Ctx;
+
+        let mut config: Self = serde_json::from_str(contents)
+            .with_context(Ctx::json())?;
+        normalize_tiers(&mut config.subscription_tiers).map_err(|e| {
+            ParsePricingError::NormalizeTiers {
+                reason: e,
+                location: std::panic::Location::caller(),
+            }
+        })?;
 
         if let Some(catalog) = &config.paddle_catalog {
-            validate_catalog(catalog, &config.subscription_tiers, paddle_enabled)?;
+            validate_catalog(catalog, &config.subscription_tiers, paddle_enabled).map_err(|e| {
+                ParsePricingError::ValidateCatalog {
+                    reason: e,
+                    location: std::panic::Location::caller(),
+                }
+            })?;
         } else if paddle_enabled {
-            return invalid(
-                "paddle_catalog is required when BYOC_PADDLE_SUBSCRIPTIONS_ENABLED is true",
-            );
+            return Err(ParsePricingError::MissingCatalog {
+                reason: "paddle_catalog is required when BYOC_PADDLE_SUBSCRIPTIONS_ENABLED is true"
+                    .into(),
+                location: std::panic::Location::caller(),
+            });
         }
         Ok(config)
     }
 }
 
-fn normalize_tiers(tiers: &mut DuplicateCheckedTiers) -> Result<(), PricingConfigError> {
+#[tracing::instrument(skip_all, err)]
+fn normalize_tiers(tiers: &mut DuplicateCheckedTiers) -> Result<(), NormalizeTiersError> {
     for (key, tier) in &mut tiers.0 {
         match (tier.monthly_cents, tier.legacy_annual_cents) {
             (Some(_), Some(_)) => {
-                return invalid(format!(
-                    "tier `{key}` has both monthly_cents and annual_cents"
-                ));
+                return Err(NormalizeTiersError::BothAmounts {
+                    key: key.clone(),
+                    location: std::panic::Location::caller(),
+                });
             }
             (Some(monthly), None) if monthly > 0 => {
                 tier.annual_cents = monthly.checked_mul(12).ok_or_else(|| {
-                    PricingConfigError::Validation(format!("tier `{key}` monthly_cents overflows"))
+                    NormalizeTiersError::Overflow {
+                        key: key.clone(),
+                        location: std::panic::Location::caller(),
+                    }
                 })?
             }
             (None, Some(annual)) if annual > 0 && annual % 12 == 0 => {
@@ -136,43 +158,59 @@ fn normalize_tiers(tiers: &mut DuplicateCheckedTiers) -> Result<(), PricingConfi
                 tier.annual_cents = annual;
             }
             (None, Some(_)) => {
-                return invalid(format!(
-                    "tier `{key}` annual_cents must be positive and divisible by 12"
-                ));
+                return Err(NormalizeTiersError::InvalidAnnual {
+                    key: key.clone(),
+                    location: std::panic::Location::caller(),
+                });
             }
             _ => {
-                return invalid(format!(
-                    "tier `{key}` requires a positive monthly_cents or annual_cents"
-                ));
+                return Err(NormalizeTiersError::MissingAmount {
+                    key: key.clone(),
+                    location: std::panic::Location::caller(),
+                });
             }
         }
     }
     Ok(())
 }
 
+#[tracing::instrument(skip_all, err)]
 fn validate_catalog(
     catalog: &PaddleCatalog,
     tiers: &DuplicateCheckedTiers,
     paddle_enabled: bool,
-) -> Result<(), PricingConfigError> {
+) -> Result<(), ValidateCatalogError> {
     if catalog.version == 0 {
-        return invalid("paddle_catalog.version must be positive");
+        return Err(ValidateCatalogError::VersionNotPositive {
+            location: std::panic::Location::caller(),
+        });
     }
     if catalog.currency_code != "USD" {
-        return invalid("paddle_catalog.currency_code must be USD");
+        return Err(ValidateCatalogError::CurrencyNotUsd {
+            location: std::panic::Location::caller(),
+        });
     }
     if catalog.billing_cycle.interval != "month" || catalog.billing_cycle.frequency != 1 {
-        return invalid("paddle_catalog.billing_cycle must be month with frequency 1");
+        return Err(ValidateCatalogError::InvalidBillingCycle {
+            location: std::panic::Location::caller(),
+        });
     }
     if catalog.tax_category.trim().is_empty() {
-        return invalid("paddle_catalog.tax_category must not be empty");
+        return Err(ValidateCatalogError::EmptyTaxCategory {
+            location: std::panic::Location::caller(),
+        });
     }
-    validate_optional_id(
-        catalog.product_id.as_deref(),
-        "pro_",
-        "product",
-        paddle_enabled,
-    )?;
+    validate_optional_id(catalog.product_id.as_deref(), "pro_", "product", paddle_enabled)
+        .map_err(|e| match e {
+            ValidateOptionalIdError::Missing { kind, .. } => ValidateCatalogError::IdRequired {
+                kind,
+                location: std::panic::Location::caller(),
+            },
+            ValidateOptionalIdError::Malformed { kind, .. } => ValidateCatalogError::MalformedId {
+                kind,
+                location: std::panic::Location::caller(),
+            },
+        })?;
 
     let expected = [
         ("1_enclave", 1, 25000),
@@ -182,7 +220,9 @@ fn validate_catalog(
         ("5_enclaves", 5, 75000),
     ];
     if tiers.len() != expected.len() {
-        return invalid("subscription_tiers must contain exactly five self-service tiers");
+        return Err(ValidateCatalogError::WrongTierCount {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let uses_monthly = tiers.values().any(|tier| tier.monthly_cents.is_some());
@@ -190,26 +230,40 @@ fn validate_catalog(
         .values()
         .any(|tier| tier.legacy_annual_cents.is_some());
     if uses_monthly && uses_annual {
-        return invalid("subscription_tiers must not mix monthly_cents and annual_cents");
+        return Err(ValidateCatalogError::MixedCycles {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let mut limits = HashSet::new();
     let mut ids = HashSet::new();
     for (key, expected_enclaves, expected_monthly) in expected {
-        let tier = tiers.get(key).ok_or_else(|| {
-            PricingConfigError::Validation(format!("subscription_tiers missing tier `{key}`"))
+        let tier = tiers.get(key).ok_or_else(|| ValidateCatalogError::MissingTier {
+            key: key.to_owned(),
+            location: std::panic::Location::caller(),
         })?;
         if !(1..=5).contains(&tier.enclaves) {
-            return invalid(format!("tier `{key}` enclave limit must be in 1..=5"));
+            return Err(ValidateCatalogError::EnclaveOutOfRange {
+                key: key.to_owned(),
+                location: std::panic::Location::caller(),
+            });
         }
         if !limits.insert(tier.enclaves) {
-            return invalid("duplicate enclave limit");
+            return Err(ValidateCatalogError::DuplicateEnclaveLimit {
+                location: std::panic::Location::caller(),
+            });
         }
         if tier.enclaves != expected_enclaves {
-            return invalid(format!("tier `{key}` has an invalid enclave limit"));
+            return Err(ValidateCatalogError::InvalidEnclaveLimit {
+                key: key.to_owned(),
+                location: std::panic::Location::caller(),
+            });
         }
         if tier.monthly_cents() != expected_monthly {
-            return invalid(format!("tier `{key}` has an invalid monthly amount"));
+            return Err(ValidateCatalogError::InvalidMonthlyAmount {
+                key: key.to_owned(),
+                location: std::panic::Location::caller(),
+            });
         }
 
         validate_optional_id(
@@ -217,25 +271,46 @@ fn validate_catalog(
             "pri_",
             &format!("price for tier `{key}`"),
             paddle_enabled,
-        )?;
+        )
+        .map_err(|e| match e {
+            ValidateOptionalIdError::Missing { kind, .. } => ValidateCatalogError::IdRequired {
+                kind,
+                location: std::panic::Location::caller(),
+            },
+            ValidateOptionalIdError::Malformed { kind, .. } => ValidateCatalogError::MalformedId {
+                kind,
+                location: std::panic::Location::caller(),
+            },
+        })?;
         if let Some(id) = tier.paddle_price_id.as_deref()
             && !ids.insert(id)
         {
-            return invalid("duplicate nonempty Paddle price ID");
+            return Err(ValidateCatalogError::DuplicatePriceId {
+                location: std::panic::Location::caller(),
+            });
         }
     }
     Ok(())
 }
 
+#[tracing::instrument(skip_all, err)]
 fn validate_optional_id(
     id: Option<&str>,
     prefix: &str,
     kind: &str,
     required: bool,
-) -> Result<(), PricingConfigError> {
+) -> Result<(), ValidateOptionalIdError> {
     match id {
-        None if required => invalid(format!("Paddle {kind} ID is required")),
-        Some(id) if !valid_id(id, prefix) => invalid(format!("malformed Paddle {kind} ID")),
+        None if required => Err(ValidateOptionalIdError::Missing {
+            kind: kind.to_owned(),
+            location: std::panic::Location::caller(),
+        }),
+        Some(id) if !valid_id(id, prefix) => Err(ValidateOptionalIdError::Malformed {
+            id: id.to_owned(),
+            prefix: prefix.to_owned(),
+            kind: kind.to_owned(),
+            location: std::panic::Location::caller(),
+        }),
         _ => Ok(()),
     }
 }
@@ -249,21 +324,114 @@ fn valid_id(id: &str, prefix: &str) -> bool {
     })
 }
 
-fn invalid<T>(message: impl Into<String>) -> Result<T, PricingConfigError> {
-    Err(PricingConfigError::Validation(message.into()))
+/// Error type for `PricingConfig::parse` — the public entry point.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum ParsePricingError {
+    #[error("invalid pricing JSON [{location}]")]
+    Json {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("invalid pricing configuration: {reason} [{location}]")]
+    NormalizeTiers {
+        reason: NormalizeTiersError,
+        location: dterror::Location,
+    },
+
+    #[error("invalid pricing configuration: {reason} [{location}]")]
+    ValidateCatalog {
+        reason: ValidateCatalogError,
+        location: dterror::Location,
+    },
+
+    #[error("invalid pricing configuration: {reason} [{location}]")]
+    MissingCatalog { reason: String, location: dterror::Location },
 }
 
+/// Leaf error for tier normalization.
 #[derive(Debug, thiserror::Error)]
-pub enum PricingConfigError {
-    #[error("invalid pricing JSON")]
-    Json(#[source] serde_json::Error),
-    #[error("invalid pricing configuration: {0}")]
-    Validation(String),
+pub enum NormalizeTiersError {
+    #[error("tier `{key}` has both monthly_cents and annual_cents")]
+    BothAmounts { key: String, location: dterror::Location },
+
+    #[error("tier `{key}` monthly_cents overflows")]
+    Overflow { key: String, location: dterror::Location },
+
+    #[error("tier `{key}` annual_cents must be positive and divisible by 12")]
+    InvalidAnnual { key: String, location: dterror::Location },
+
+    #[error("tier `{key}` requires a positive monthly_cents or annual_cents")]
+    MissingAmount { key: String, location: dterror::Location },
+}
+
+/// Leaf error for catalog validation.
+#[derive(Debug, thiserror::Error)]
+pub enum ValidateCatalogError {
+    #[error("paddle_catalog.version must be positive")]
+    VersionNotPositive { location: dterror::Location },
+
+    #[error("paddle_catalog.currency_code must be USD")]
+    CurrencyNotUsd { location: dterror::Location },
+
+    #[error("paddle_catalog.billing_cycle must be month with frequency 1")]
+    InvalidBillingCycle { location: dterror::Location },
+
+    #[error("paddle_catalog.tax_category must not be empty")]
+    EmptyTaxCategory { location: dterror::Location },
+
+    #[error("Paddle {kind} ID is required")]
+    IdRequired { kind: String, location: dterror::Location },
+
+    #[error("malformed Paddle {kind} ID")]
+    MalformedId { kind: String, location: dterror::Location },
+
+    #[error("subscription_tiers must contain exactly five self-service tiers")]
+    WrongTierCount { location: dterror::Location },
+
+    #[error("subscription_tiers must not mix monthly_cents and annual_cents")]
+    MixedCycles { location: dterror::Location },
+
+    #[error("subscription_tiers missing tier `{key}`")]
+    MissingTier { key: String, location: dterror::Location },
+
+    #[error("tier `{key}` enclave limit must be in 1..=5")]
+    EnclaveOutOfRange { key: String, location: dterror::Location },
+
+    #[error("duplicate enclave limit")]
+    DuplicateEnclaveLimit { location: dterror::Location },
+
+    #[error("tier `{key}` has an invalid enclave limit")]
+    InvalidEnclaveLimit { key: String, location: dterror::Location },
+
+    #[error("tier `{key}` has an invalid monthly amount")]
+    InvalidMonthlyAmount { key: String, location: dterror::Location },
+
+    #[error("duplicate nonempty Paddle price ID")]
+    DuplicatePriceId { location: dterror::Location },
+}
+
+/// Leaf error for optional Paddle ID validation.
+#[derive(Debug, thiserror::Error)]
+pub enum ValidateOptionalIdError {
+    #[error("Paddle {kind} ID is required")]
+    Missing { kind: String, location: dterror::Location },
+
+    #[error("malformed Paddle {kind} ID")]
+    Malformed {
+        id: String,
+        prefix: String,
+        kind: String,
+        location: dterror::Location,
+    },
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PricingConfig, PricingConfigError};
+    use super::{ParsePricingError, PricingConfig};
     use serde_json::{Value, json};
 
     fn tiers(ids: bool) -> Value {
@@ -379,7 +547,7 @@ mod tests {
         let raw = r#"{"compute_margin_percent":0,"subscription_tiers":{"x":{"monthly_cents":1,"enclaves":1},"x":{"monthly_cents":1,"enclaves":1}}}"#;
         assert!(matches!(
             PricingConfig::parse(raw, false),
-            Err(PricingConfigError::Json(_))
+            Err(ParsePricingError::Json { .. })
         ));
     }
 
