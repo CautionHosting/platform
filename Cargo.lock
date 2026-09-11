@@ -1611,6 +1611,7 @@ dependencies = [
 name = "caution-config"
 version = "0.1.0"
 dependencies = [
+ "dterror 0.3.0",
  "hcl-rs",
  "serde",
  "serde_json",
