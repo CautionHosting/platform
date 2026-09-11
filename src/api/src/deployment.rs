@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use anyhow::{Context, Result, bail};
+use dterror::{BoxError, CtxError, Location};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,7 +31,7 @@ fn generate_provider_lock_config() -> String {
         }
     );
 
-    hcl::to_string(&structure).expect("static structure can be built")
+    hcl::to_string(&structure).expect("static terraform block body must serialize")
 }
 
 /// Default timeout for tofu init/apply/destroy operations (10 minutes).
@@ -48,8 +49,9 @@ pub fn cached_lockfile_path(data_dir: &str) -> PathBuf {
 /// - If missing: writes temp .tf with hashicorp/aws ~> 5.0, runs tofu providers lock,
 ///   copies resulting lockfile to cache dir, returns path
 /// - Always fail-open: logs warning on error, releases semaphore, returns None
+#[tracing::instrument(skip_all)]
 pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
-    let _permit = LOCKFILE_SEMAPHORE.acquire().await.expect("Semaphore closed");
+    let _permit = LOCKFILE_SEMAPHORE.acquire().await.expect("lockfile semaphore is never closed");
 
     let lockfile_path = cached_lockfile_path(data_dir);
 
@@ -125,42 +127,135 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
     }
 }
 
+/// Failure modes for [`run_with_timeout`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum RunCommandError {
+    #[error("could not spawn command [{location}]")]
+    Spawn {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not wait on command [{location}]")]
+    Wait {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not read command output [{location}]")]
+    ReadOutput {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("command timed out after {timeout_secs}s [{location}]")]
+    TimedOut { timeout_secs: u64, location: Location },
+    #[error("command timed out after {timeout_secs}s; failed to read output [{location}]")]
+    TimedOutReadOutput {
+        timeout_secs: u64,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for `tofu init`.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum TofuInitError {
+    #[error("could not run tofu init [{location}]")]
+    RunCommand {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("tofu init failed (exit code {exit_code:?}) [{location}]")]
+    NonZeroExit { exit_code: Option<i32>, location: Location },
+}
+
+/// Failure modes for `tofu apply`.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum TofuApplyError {
+    #[error("could not run tofu apply [{location}]")]
+    RunCommand {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("tofu apply failed (exit code {exit_code:?}) [{location}]")]
+    NonZeroExit { exit_code: Option<i32>, location: Location },
+}
+
+/// Failure modes for `tofu destroy`.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum TofuDestroyError {
+    #[error("could not run tofu destroy [{location}]")]
+    RunCommand {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("tofu destroy failed (exit code {exit_code:?}) [{location}]")]
+    NonZeroExit { exit_code: Option<i32>, location: Location },
+}
+
 /// Run a command with a timeout. Kills the process if deadline expires.
 #[tracing::instrument(skip_all, err)]
-fn run_with_timeout(cmd: &mut Command, timeout_secs: u64) -> Result<std::process::Output> {
-    let mut child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("Failed to spawn command")?;
+fn run_with_timeout(
+    cmd: &mut Command,
+    timeout_secs: u64,
+) -> std::result::Result<std::process::Output, RunCommandError> {
+    use RunCommandErrorCtx as Ctx;
+
+    let mut child = dterror::ResultExt::with_context(
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn(),
+        Ctx::spawn(),
+    )?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return child.wait_with_output().context("Failed to read output"),
-            Ok(None) => {
+        let status = dterror::ResultExt::with_context(child.try_wait(), Ctx::wait())?;
+        match status {
+            Some(_) => {
+                return dterror::ResultExt::with_context(
+                    child.wait_with_output(),
+                    Ctx::read_output(),
+                );
+            }
+            None => {
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
                     match child.wait_with_output() {
                         Ok(output) => {
-                            let stdout = String::from_utf8_lossy(&output.stdout);
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            bail!(
-                                "Command timed out after {}s\nstdout: {}\nstderr: {}",
-                                timeout_secs,
-                                stdout,
-                                stderr
+                            tracing::error!(
+                                stdout = %String::from_utf8_lossy(&output.stdout),
+                                stderr = %String::from_utf8_lossy(&output.stderr),
+                                "command timed out"
                             );
+                            return Err(RunCommandError::TimedOut {
+                                timeout_secs,
+                                location: std::panic::Location::caller(),
+                            });
                         }
                         Err(e) => {
-                            bail!("Command timed out after {}s; failed to read output: {}", timeout_secs, e);
+                            return dterror::ResultExt::with_context(
+                                std::result::Result::<std::process::Output, _>::Err(e),
+                                Ctx::timed_out_read_output(timeout_secs),
+                            );
                         }
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
-            Err(e) => bail!("Failed to wait on command: {}", e),
         }
     }
 }
@@ -373,7 +468,9 @@ pub async fn destroy_app_with_credentials(
         &config,
         credentials.as_ref(),
     )
-    .await
+    .await?;
+
+    Ok(())
 }
 
 /// Scale down ASG to 0 and wait for instances to terminate
@@ -430,6 +527,10 @@ async fn scale_down_asg(asg_name: &str, credentials: &AwsCredentials) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn norm(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
 
     fn assert_template_references_guarded_by_debug(user_data: &str, needle: &str) {
         const DEBUG_IF: &str = r#"%{ if debug_mode == "true" ~}"#;
@@ -597,14 +698,13 @@ mod tests {
             .unwrap();
 
         let main_tf = std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap();
-        assert!(main_tf.contains("from_port   = 49500"));
-        assert!(main_tf.contains("to_port     = 49500"));
+        assert!(norm(&main_tf).contains("from_port = 49500"));
+        assert!(norm(&main_tf).contains("to_port = 49500"));
         assert!(main_tf.contains("Allow STEVE encrypted transport"));
-        assert!(main_tf.contains(r#"e2e         = "true""#));
-        assert!(!main_tf.contains("from_port   = 49501"));
-        assert!(!main_tf.contains("from_port   = 49502"));
-        assert!(main_tf.contains("Locksmith ingress disabled"));
-        assert!(!main_tf.contains("from_port   = 49504"));
+        assert!(norm(&main_tf).contains(r#"e2e = "true""#));
+        assert!(!norm(&main_tf).contains("from_port = 49501"));
+        assert!(!norm(&main_tf).contains("from_port = 49502"));
+        assert!(!norm(&main_tf).contains("from_port = 49504"));
     }
 
     #[tokio::test]
@@ -618,12 +718,11 @@ mod tests {
             .unwrap();
 
         let main_tf = std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap();
-        assert!(main_tf.contains("STEVE ingress disabled"));
-        assert!(main_tf.contains(r#"e2e         = "false""#));
-        assert!(!main_tf.contains("from_port   = 49500"));
-        assert!(!main_tf.contains("from_port   = 49501"));
-        assert!(!main_tf.contains("from_port   = 49502"));
-        assert!(!main_tf.contains("from_port   = 49504"));
+        assert!(norm(&main_tf).contains(r#"e2e = "false""#));
+        assert!(!norm(&main_tf).contains("from_port = 49500"));
+        assert!(!norm(&main_tf).contains("from_port = 49501"));
+        assert!(!norm(&main_tf).contains("from_port = 49502"));
+        assert!(!norm(&main_tf).contains("from_port = 49504"));
     }
 
     #[tokio::test]
@@ -645,11 +744,70 @@ mod tests {
         .unwrap();
 
         let main_tf = std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap();
-        assert!(main_tf.contains("from_port   = 49500"));
-        assert!(main_tf.contains("to_port     = 49500"));
-        assert!(main_tf.contains(r#"e2e         = "true""#));
-        assert!(main_tf.contains("from_port   = 49504"));
+        assert!(norm(&main_tf).contains("from_port = 49500"));
+        assert!(norm(&main_tf).contains("to_port = 49500"));
+        assert!(norm(&main_tf).contains(r#"e2e = "true""#));
+        assert!(norm(&main_tf).contains("from_port = 49504"));
         assert!(main_tf.contains("Allow Locksmith shard receiver"));
+        assert!(norm(&main_tf).contains(r#"e2e_mode = "steve""#));
+        assert!(norm(&main_tf).contains(r#"locksmith = "true""#));
+        assert!(
+            norm(&main_tf).contains("(local.scope_tag_key) = local.deployment_tag"),
+            "scoped deployment tag key must be present in the rendered tags maps"
+        );
+        assert!(
+            norm(&main_tf).contains(r#"name = "runtime-profile""#),
+            "instance profile name from managed_onprem config must be wired into the launch template"
+        );
+        assert!(
+            norm(&main_tf).contains(r#"value = "https://${aws_eip.enclave.public_ip}""#),
+            "url output falls back to the EIP public IP when no domain is configured"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_managed_onprem_tf_locksmith_port_absent_when_disabled() {
+        let mut request = deployment_request(
+            "s3://customer-bucket/eifs/org/key.eif",
+            Some("eifs/org/key.eif"),
+        );
+        request.e2e = false;
+        request.locksmith = false;
+
+        let work_dir = TempDir::new().unwrap();
+        generate_managed_onprem_deployment_tf(
+            work_dir.path(),
+            &request,
+            "s3://customer-bucket/enclave.eif",
+        )
+        .await
+        .unwrap();
+
+        let main_tf = std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap();
+        assert!(norm(&main_tf).contains(r#"e2e = "false""#));
+        assert!(!norm(&main_tf).contains("from_port = 49500"));
+        assert!(!norm(&main_tf).contains("from_port = 49504"));
+    }
+
+    #[tokio::test]
+    async fn test_managed_onprem_tf_url_output_uses_configured_domain() {
+        let mut request = deployment_request(
+            "s3://customer-bucket/eifs/org/key.eif",
+            Some("eifs/org/key.eif"),
+        );
+        request.domain = Some("example.com".to_string());
+
+        let work_dir = TempDir::new().unwrap();
+        generate_managed_onprem_deployment_tf(
+            work_dir.path(),
+            &request,
+            "s3://customer-bucket/enclave.eif",
+        )
+        .await
+        .unwrap();
+
+        let main_tf = std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap();
+        assert!(norm(&main_tf).contains(r#"value = "https://example.com""#));
     }
 
     #[tokio::test]
@@ -664,7 +822,7 @@ mod tests {
             .unwrap();
 
         let main_tf = std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap();
-        assert!(main_tf.contains(r#"egress      = "true""#));
+        assert!(norm(&main_tf).contains(r#"egress = "true""#));
     }
 
     #[test]
@@ -746,6 +904,78 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn test_generate_backend_config_produces_correct_structure() {
+        let org_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let resource_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+
+        generate_backend_config(temp_dir.path(), org_id, resource_id, "my-bucket")
+            .await
+            .unwrap();
+
+        let content = std::fs::read_to_string(temp_dir.path().join("backend.tf")).unwrap();
+        let normalized: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(normalized.contains("terraform"), "missing terraform block");
+        assert!(
+            normalized.contains(r#"backend "s3""#),
+            "missing backend s3 block"
+        );
+        assert!(
+            normalized.contains(r#"bucket = "my-bucket""#),
+            "missing bucket attribute"
+        );
+        assert!(
+            normalized.contains(&format!(
+                r#"key = "organizations/{}/resources/{}/terraform.tfstate""#,
+                org_id, resource_id
+            )),
+            "missing or incorrect key attribute"
+        );
+        assert!(
+            normalized.contains(r#"region = "us-west-2""#),
+            "missing region attribute"
+        );
+        assert!(
+            normalized.contains("encrypt = true"),
+            "missing encrypt attribute"
+        );
+    }
+
+    #[test]
+    fn test_destroy_tf_body_without_credentials_uses_plain_provider() {
+        let content = hcl::to_string(&build_destroy_tf_body(false, "us-east-1")).unwrap();
+        let norm = content.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(norm.contains(r#"required_version = ">= 1.0""#));
+        assert!(norm.contains(r#"source = "hashicorp/aws""#));
+        assert!(norm.contains(r#"version = "~> 5.0""#));
+        assert!(norm.contains(r#"region = "us-east-1""#));
+        assert!(!norm.contains("provider_access_key"));
+        assert!(!norm.contains("provider_secret_key"));
+        assert!(!norm.contains("provider_region"));
+    }
+
+    #[test]
+    fn test_destroy_tf_body_with_credentials_includes_variables_and_conditionals() {
+        let content = hcl::to_string(&build_destroy_tf_body(true, "eu-west-1")).unwrap();
+        let norm = content.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(norm.contains(r#"required_version = ">= 1.0""#));
+        assert!(norm.contains(r#"variable "provider_access_key""#));
+        assert!(norm.contains("sensitive = true"));
+        assert!(norm.contains(r#"variable "provider_secret_key""#));
+        assert!(norm.contains(r#"variable "provider_region""#));
+        assert!(norm.contains("var.provider_region != \"\" ? var.provider_region : \"eu-west-1\""));
+        assert!(norm.contains("var.provider_access_key != \"\" ? var.provider_access_key : null"));
+        assert!(norm.contains("var.provider_secret_key != \"\" ? var.provider_secret_key : null"));
+    }
+
+    #[test]
+    fn test_destroy_tf_body_has_no_default_tags() {
+        let content = hcl::to_string(&build_destroy_tf_body(true, "us-west-2")).unwrap();
+        assert!(!content.contains("default_tags"));
+    }
+
 }
 
 struct TerraformConfig {
@@ -765,125 +995,218 @@ impl Default for TerraformConfig {
     }
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum DestroyEc2Error {
+    #[error("could not create temporary directory [{location}]")]
+    TempDir {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not generate backend config [{location}]")]
+    Backend {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not serialize main.tf [{location}]")]
+    Serialize {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not write main.tf [{location}]")]
+    WriteMainTf {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not run tofu init [{location}]")]
+    Init {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not run tofu destroy [{location}]")]
+    Destroy {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn destroy_ec2_app(
     org_id: Uuid,
     resource_id: Uuid,
     resource_name: &str,
     config: &TerraformConfig,
     credentials: Option<&AwsCredentials>,
-) -> Result<()> {
+) -> std::result::Result<(), DestroyEc2Error> {
+    use DestroyEc2ErrorCtx as Ctx;
+
     tracing::info!("Starting Terraform destroy for resource: {}", resource_name);
 
-    let temp_dir = TempDir::new().context("Failed to create temporary directory")?;
+    let temp_dir = dterror::ResultExt::with_context(TempDir::new(), Ctx::temp_dir())?;
     let work_dir = temp_dir.path();
 
-    generate_backend_config(work_dir, org_id, resource_id, &config.s3_bucket)
-        .await
-        .context("Failed to generate backend config")?;
+    dterror::ResultExt::with_context(
+        generate_backend_config(work_dir, org_id, resource_id, &config.s3_bucket).await,
+        Ctx::backend(),
+    )?;
 
     let aws_region = credentials
         .map(|c| c.region.clone())
         .unwrap_or_else(|| std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()));
 
-    let minimal_tf = if credentials.is_some() {
-        format!(
-            r#"terraform {{
-  required_version = ">= 1.0"
+    let body = build_destroy_tf_body(credentials.is_some(), &aws_region);
+    let content = dterror::ResultExt::with_context(hcl::to_string(&body), Ctx::serialize())?;
 
-  required_providers {{
-    aws = {{
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }}
-  }}
-}}
+    dterror::ResultExt::with_context(
+        fs::write(work_dir.join("main.tf"), &content).await,
+        Ctx::write_main_tf(),
+    )?;
 
-variable "provider_access_key" {{
-  type      = string
-  sensitive = true
-  default   = ""
-}}
-
-variable "provider_secret_key" {{
-  type      = string
-  sensitive = true
-  default   = ""
-}}
-
-variable "provider_region" {{
-  type    = string
-  default = ""
-}}
-
-provider "aws" {{
-  region     = var.provider_region != "" ? var.provider_region : "{}"
-  access_key = var.provider_access_key != "" ? var.provider_access_key : null
-  secret_key = var.provider_secret_key != "" ? var.provider_secret_key : null
-}}
-"#,
-            aws_region
-        )
-    } else {
-        format!(
-            r#"terraform {{
-  required_version = ">= 1.0"
-
-  required_providers {{
-    aws = {{
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }}
-  }}
-}}
-
-provider "aws" {{
-  region = "{}"
-}}
-"#,
-            aws_region
-        )
-    };
-
-    fs::write(work_dir.join("main.tf"), minimal_tf)
-        .await
-        .context("Failed to write main.tf")?;
-
-    // Get or generate lockfile for deployment init
-    let data_dir = std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
+    let data_dir =
+        std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
     let lockfile_path = get_or_generate_lockfile(&data_dir).await;
 
-    run_tofu_init(work_dir, lockfile_path.as_deref(), None).await.context("Failed to run tofu init")?;
+    dterror::ResultExt::with_context(
+        run_tofu_init(work_dir, lockfile_path.as_deref(), None).await,
+        Ctx::init(),
+    )?;
 
-    run_tofu_destroy(work_dir, resource_name, credentials).context("Failed to run tofu destroy")?;
+    dterror::ResultExt::with_context(
+        run_tofu_destroy(work_dir, resource_name, credentials),
+        Ctx::destroy(),
+    )?;
 
     tracing::info!("Successfully destroyed EC2 for resource {}", resource_name);
 
     Ok(())
 }
 
+fn build_destroy_tf_body(has_credentials: bool, aws_region: &str) -> hcl::Body {
+    let mut body = hcl::Body::builder();
+
+    body = body.add_block(
+        hcl::Block::builder("terraform")
+            .add_attribute(("required_version", ">= 1.0"))
+            .add_block(
+                hcl::Block::builder("required_providers")
+                    .add_attribute((
+                        "aws",
+                        hcl::Expression::Object(
+                            vec![
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "source",
+                                    )),
+                                    hcl::Expression::String("hashicorp/aws".into()),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "version",
+                                    )),
+                                    hcl::Expression::String("~> 5.0".into()),
+                                ),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        ),
+                    ))
+                    .build(),
+            )
+            .build(),
+    );
+
+    if has_credentials {
+        body = body
+            .add_block(provider_credential_variable("provider_access_key", true))
+            .add_block(provider_credential_variable("provider_secret_key", true))
+            .add_block(provider_credential_variable("provider_region", false));
+
+        body = body.add_block(
+            hcl::Block::builder("provider")
+                .add_label("aws")
+                .add_attribute(hcl::Attribute::new(
+                    "region",
+                    region_conditional(aws_region),
+                ))
+                .add_attribute(credential_conditional("access_key", "provider_access_key"))
+                .add_attribute(credential_conditional("secret_key", "provider_secret_key"))
+                .build(),
+        );
+    } else {
+        body = body.add_block(
+            hcl::Block::builder("provider")
+                .add_label("aws")
+                .add_attribute(("region", aws_region))
+                .build(),
+        );
+    }
+
+    body.build()
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GenerateBackendConfigError {
+    #[error("could not serialize backend config [{location}]")]
+    Serialize {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not write backend.tf [{location}]")]
+    Write {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn generate_backend_config(
     work_dir: &Path,
     org_id: Uuid,
     resource_id: Uuid,
     s3_bucket: &str,
-) -> Result<()> {
-    let backend_content = format!(
-        r#"terraform {{
-  backend "s3" {{
-    bucket  = "{}"
-    key     = "organizations/{}/resources/{}/terraform.tfstate"
-    region  = "us-west-2"
-    encrypt = true
-  }}
-}}
-"#,
-        s3_bucket, org_id, resource_id
+) -> std::result::Result<(), GenerateBackendConfigError> {
+    use GenerateBackendConfigErrorCtx as Ctx;
+
+    let key = format!(
+        "organizations/{}/resources/{}/terraform.tfstate",
+        org_id, resource_id
     );
 
+    let body = hcl::Body::builder()
+        .add_block(
+            hcl::Block::builder("terraform")
+                .add_block(
+                    hcl::Block::builder("backend")
+                        .add_label("s3")
+                        .add_attribute(("bucket", s3_bucket))
+                        .add_attribute(("key", key.as_str()))
+                        .add_attribute(("region", "us-west-2"))
+                        .add_attribute(("encrypt", true))
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+
+    let content = dterror::ResultExt::with_context(hcl::to_string(&body), Ctx::serialize())?;
+
     let backend_path = work_dir.join("backend.tf");
-    fs::write(&backend_path, backend_content)
-        .await
-        .context("Failed to write backend.tf")?;
+    dterror::ResultExt::with_context(fs::write(&backend_path, &content).await, Ctx::write())?;
 
     Ok(())
 }
@@ -893,7 +1216,9 @@ async fn run_tofu_init(
     work_dir: &Path,
     lockfile_path: Option<&Path>,
     credentials: Option<&AwsCredentials>,
-) -> Result<()> {
+) -> std::result::Result<(), TofuInitError> {
+    use TofuInitErrorCtx as Ctx;
+
     tracing::info!("Running tofu init in {}...", work_dir.display());
 
     // Copy lockfile into work dir if provided
@@ -915,18 +1240,22 @@ async fn run_tofu_init(
             .env("AWS_REGION", &creds.region);
     }
 
-    let output = run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS).context("tofu init failed")?;
+    let output = dterror::ResultExt::with_context(
+        run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS),
+        Ctx::run_command(),
+    )?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
         tracing::error!(
-            "Tofu init failed (exit code {:?}):\nstderr: {}\nstdout: {}",
-            output.status.code(),
-            stderr,
-            stdout
+            exit_code = ?output.status.code(),
+            stdout = %String::from_utf8_lossy(&output.stdout),
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "tofu init failed"
         );
-        bail!("Infrastructure initialization failed");
+        return Err(TofuInitError::NonZeroExit {
+            exit_code: output.status.code(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -942,7 +1271,9 @@ fn run_tofu_apply_with_provider_creds(
     ports: &[u16],
     http_port: Option<u16>,
     credentials: Option<&AwsCredentials>,
-) -> Result<()> {
+) -> std::result::Result<(), TofuApplyError> {
+    use TofuApplyErrorCtx as Ctx;
+
     let public_ports = ports
         .iter()
         .copied()
@@ -979,19 +1310,22 @@ fn run_tofu_apply_with_provider_creds(
         cmd.env("TF_VAR_provider_region", &creds.region);
     }
 
-    let output = run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS).context("tofu apply failed")?;
+    let output = dterror::ResultExt::with_context(
+        run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS),
+        Ctx::run_command(),
+    )?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
         tracing::error!(
-            "Tofu apply failed for {} (exit code {:?}):\nstderr: {}\nstdout: {}",
-            resource_name,
-            output.status.code(),
-            stderr,
-            stdout
+            exit_code = ?output.status.code(),
+            stdout = %String::from_utf8_lossy(&output.stdout),
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "tofu apply failed"
         );
-        bail!("Failed to run tofu apply");
+        return Err(TofuApplyError::NonZeroExit {
+            exit_code: output.status.code(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1000,40 +1334,79 @@ fn run_tofu_apply_with_provider_creds(
     Ok(())
 }
 
-fn get_tofu_outputs(work_dir: &Path) -> Result<DeploymentResult> {
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetTofuOutputsError {
+    #[error("could not run tofu output command [{location}]")]
+    RunCommand {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("tofu output exited with code {exit_code:?} [{location}]")]
+    NonZeroExit { exit_code: Option<i32>, location: Location },
+    #[error("could not parse tofu output JSON [{location}]")]
+    JsonParse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("tofu output missing required field '{field}' [{location}]")]
+    MissingField { field: String, location: Location },
+}
+
+#[tracing::instrument(skip_all, err)]
+fn get_tofu_outputs(work_dir: &Path) -> std::result::Result<DeploymentResult, GetTofuOutputsError> {
+    use GetTofuOutputsErrorCtx as Ctx;
+
     tracing::info!("Retrieving tofu outputs...");
 
-    let output = run_with_timeout(
-        Command::new("tofu")
-            .args(&["output", "-json", "-no-color"])
-            .current_dir(work_dir),
-        TOFU_TIMEOUT_SECS,
-    )
-    .context("tofu output failed")?;
+    let output = dterror::ResultExt::with_context(
+        run_with_timeout(
+            Command::new("tofu")
+                .args(&["output", "-json", "-no-color"])
+                .current_dir(work_dir),
+            TOFU_TIMEOUT_SECS,
+        ),
+        Ctx::run_command(),
+    )?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::error!("Tofu output failed: {}", stderr);
-        bail!("Failed to read infrastructure outputs");
+        return Err(GetTofuOutputsError::NonZeroExit {
+            exit_code: output.status.code(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let outputs: serde_json::Value =
-        serde_json::from_str(&stdout).context("Failed to parse tofu output JSON")?;
+        dterror::ResultExt::with_context(serde_json::from_str(&stdout), Ctx::json_parse())?;
 
     let instance_id = outputs["instance_id"]["value"]
         .as_str()
-        .context("Missing instance_id in tofu output")?
+        .ok_or_else(|| GetTofuOutputsError::MissingField {
+            field: "instance_id".to_string(),
+            location: std::panic::Location::caller(),
+        })?
         .to_string();
 
     let public_ip = outputs["public_ip"]["value"]
         .as_str()
-        .context("Missing public_ip in tofu output")?
+        .ok_or_else(|| GetTofuOutputsError::MissingField {
+            field: "public_ip".to_string(),
+            location: std::panic::Location::caller(),
+        })?
         .to_string();
 
     let url = outputs["url"]["value"]
         .as_str()
-        .context("Missing url in tofu output")?
+        .ok_or_else(|| GetTofuOutputsError::MissingField {
+            field: "url".to_string(),
+            location: std::panic::Location::caller(),
+        })?
         .to_string();
 
     let instance_type = outputs["instance_type"]["value"]
@@ -1059,47 +1432,94 @@ struct ManagedOnPremTerraformOutputs {
     instance_type: String,
 }
 
-fn get_managed_onprem_tofu_outputs(work_dir: &Path) -> Result<ManagedOnPremTerraformOutputs> {
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetManagedOnpremOutputsError {
+    #[error("could not run tofu output command [{location}]")]
+    RunCommand {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("tofu output exited with code {exit_code:?} [{location}]")]
+    NonZeroExit { exit_code: Option<i32>, location: Location },
+    #[error("could not parse tofu output JSON [{location}]")]
+    JsonParse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("tofu output missing required field '{field}' [{location}]")]
+    MissingField { field: String, location: Location },
+}
+
+#[tracing::instrument(skip_all, err)]
+fn get_managed_onprem_tofu_outputs(
+    work_dir: &Path,
+) -> std::result::Result<ManagedOnPremTerraformOutputs, GetManagedOnpremOutputsError> {
+    use GetManagedOnpremOutputsErrorCtx as Ctx;
+
     tracing::info!("Retrieving managed on-prem tofu outputs...");
 
-    let output = run_with_timeout(
-        Command::new("tofu")
-            .args(&["output", "-json", "-no-color"])
-            .current_dir(work_dir),
-        TOFU_TIMEOUT_SECS,
-    )
-    .context("tofu output failed")?;
+    let output = dterror::ResultExt::with_context(
+        run_with_timeout(
+            Command::new("tofu")
+                .args(&["output", "-json", "-no-color"])
+                .current_dir(work_dir),
+            TOFU_TIMEOUT_SECS,
+        ),
+        Ctx::run_command(),
+    )?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::error!("Tofu output failed: {}", stderr);
-        bail!("Failed to read infrastructure outputs");
+        return Err(GetManagedOnpremOutputsError::NonZeroExit {
+            exit_code: output.status.code(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let outputs: serde_json::Value =
-        serde_json::from_str(&stdout).context("Failed to parse tofu output JSON")?;
+        dterror::ResultExt::with_context(serde_json::from_str(&stdout), Ctx::json_parse())?;
 
     Ok(ManagedOnPremTerraformOutputs {
         launch_template_id: outputs["launch_template_id"]["value"]
             .as_str()
-            .context("Missing launch_template_id in tofu output")?
+            .ok_or_else(|| GetManagedOnpremOutputsError::MissingField {
+                field: "launch_template_id".to_string(),
+                location: std::panic::Location::caller(),
+            })?
             .to_string(),
         launch_template_version: outputs["launch_template_version"]["value"]
             .as_str()
-            .context("Missing launch_template_version in tofu output")?
+            .ok_or_else(|| GetManagedOnpremOutputsError::MissingField {
+                field: "launch_template_version".to_string(),
+                location: std::panic::Location::caller(),
+            })?
             .to_string(),
         eip_allocation_id: outputs["eip_allocation_id"]["value"]
             .as_str()
-            .context("Missing eip_allocation_id in tofu output")?
+            .ok_or_else(|| GetManagedOnpremOutputsError::MissingField {
+                field: "eip_allocation_id".to_string(),
+                location: std::panic::Location::caller(),
+            })?
             .to_string(),
         public_ip: outputs["public_ip"]["value"]
             .as_str()
-            .context("Missing public_ip in tofu output")?
+            .ok_or_else(|| GetManagedOnpremOutputsError::MissingField {
+                field: "public_ip".to_string(),
+                location: std::panic::Location::caller(),
+            })?
             .to_string(),
         url: outputs["url"]["value"]
             .as_str()
-            .context("Missing url in tofu output")?
+            .ok_or_else(|| GetManagedOnpremOutputsError::MissingField {
+                field: "url".to_string(),
+                location: std::panic::Location::caller(),
+            })?
             .to_string(),
         instance_type: outputs["instance_type"]["value"]
             .as_str()
@@ -1238,7 +1658,9 @@ fn run_tofu_destroy(
     work_dir: &Path,
     resource_name: &str,
     credentials: Option<&AwsCredentials>,
-) -> Result<()> {
+) -> std::result::Result<(), TofuDestroyError> {
+    use TofuDestroyErrorCtx as Ctx;
+
     tracing::info!("Running tofu destroy for {}...", resource_name);
 
     let mut cmd = Command::new("tofu");
@@ -1252,19 +1674,22 @@ fn run_tofu_destroy(
         cmd.env("TF_VAR_provider_region", &creds.region);
     }
 
-    let output = run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS).context("tofu destroy failed")?;
+    let output = dterror::ResultExt::with_context(
+        run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS),
+        Ctx::run_command(),
+    )?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
         tracing::error!(
-            "Tofu destroy failed for {} (exit code {:?}):\nstderr: {}\nstdout: {}",
-            resource_name,
-            output.status.code(),
-            stderr,
-            stdout
+            exit_code = ?output.status.code(),
+            stdout = %String::from_utf8_lossy(&output.stdout),
+            stderr = %String::from_utf8_lossy(&output.stderr),
+            "tofu destroy failed"
         );
-        bail!("Infrastructure teardown failed");
+        return Err(TofuDestroyError::NonZeroExit {
+            exit_code: output.status.code(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1660,38 +2085,49 @@ pub(crate) struct EnclaveSizing {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum EnclaveSizingError {
-    #[error("Enclave vCPU count must be at least 1")]
-    ZeroCpu,
-    #[error("Enclave memory_mb must be at least 1")]
-    ZeroMemory,
-    #[error("Enclave resource request is too large")]
-    Overflow,
+    #[error("Enclave vCPU count must be at least 1 [{location}]")]
+    ZeroCpu { location: dterror::Location },
+    #[error("Enclave memory_mb must be at least 1 [{location}]")]
+    ZeroMemory { location: dterror::Location },
+    #[error("Enclave resource request is too large [{location}]")]
+    Overflow { location: dterror::Location },
     #[error(
-        "Requested enclave resources ({cpu_count} vCPUs, {memory_mb} MiB) exceed the supported r6i.12xlarge host capacity"
+        "Requested enclave resources ({cpu_count} vCPUs, {memory_mb} MiB) exceed the supported r6i.12xlarge host capacity [{location}]"
     )]
-    NoSupportedInstance { cpu_count: u32, memory_mb: u32 },
+    NoSupportedInstance { cpu_count: u32, memory_mb: u32, location: dterror::Location },
 }
 
+#[tracing::instrument(skip_all, err)]
 pub(crate) fn enclave_sizing(
     cpu_count: u32,
     memory_mb: u32,
 ) -> std::result::Result<EnclaveSizing, EnclaveSizingError> {
     if cpu_count == 0 {
-        return Err(EnclaveSizingError::ZeroCpu);
+        return Err(EnclaveSizingError::ZeroCpu {
+            location: std::panic::Location::caller(),
+        });
     }
     if memory_mb == 0 {
-        return Err(EnclaveSizingError::ZeroMemory);
+        return Err(EnclaveSizingError::ZeroMemory {
+            location: std::panic::Location::caller(),
+        });
     }
 
-    let cpu_count_rounded = cpu_count
-        .checked_add(cpu_count % 2)
-        .ok_or(EnclaveSizingError::Overflow)?;
-    let total_vcpus_needed = cpu_count_rounded
-        .checked_add(PARENT_VCPU_RESERVE)
-        .ok_or(EnclaveSizingError::Overflow)?;
-    let total_memory_mib_needed = memory_mb
-        .checked_add(PARENT_MEMORY_RESERVE_MIB)
-        .ok_or(EnclaveSizingError::Overflow)?;
+    let cpu_count_rounded = cpu_count.checked_add(cpu_count % 2).ok_or(EnclaveSizingError::Overflow {
+        location: std::panic::Location::caller(),
+    })?;
+    let total_vcpus_needed =
+        cpu_count_rounded
+            .checked_add(PARENT_VCPU_RESERVE)
+            .ok_or(EnclaveSizingError::Overflow {
+                location: std::panic::Location::caller(),
+            })?;
+    let total_memory_mib_needed =
+        memory_mb
+            .checked_add(PARENT_MEMORY_RESERVE_MIB)
+            .ok_or(EnclaveSizingError::Overflow {
+                location: std::panic::Location::caller(),
+            })?;
 
     let (instance_type, host_vcpus, _) = *NITRO_INSTANCE_SPECS
         .iter()
@@ -1699,6 +2135,7 @@ pub(crate) fn enclave_sizing(
         .ok_or(EnclaveSizingError::NoSupportedInstance {
             cpu_count,
             memory_mb,
+            location: std::panic::Location::caller(),
         })?;
 
     Ok(EnclaveSizing {
@@ -1724,6 +2161,7 @@ pub(crate) fn host_vcpus_for_instance_type(instance_type: &str) -> Option<u32> {
     }
 }
 
+#[tracing::instrument(skip_all, err)]
 fn compute_enclave_sizing(
     request: &NitroDeploymentRequest,
 ) -> std::result::Result<(u32, &'static str), EnclaveSizingError> {
@@ -1749,471 +2187,1313 @@ fn compute_enclave_sizing(
     Ok((sizing.cpu_count, sizing.instance_type))
 }
 
-fn platform_internal_ingress(e2e: bool, locksmith: bool) -> String {
-    let mut ingress = if e2e {
-        r#"# STEVE encrypted transport ingress enabled
-  ingress {
-    from_port   = 49500
-    to_port     = 49500
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow STEVE encrypted transport"
-  }"#
-        .to_string()
-    } else {
-        "# STEVE ingress disabled".to_string()
-    };
+fn platform_internal_ingress(e2e: bool, locksmith: bool) -> Vec<hcl::Block> {
+    let mut blocks = Vec::new();
 
-    if locksmith {
-        ingress.push_str(
-            r#"
-
-  # Locksmith shard receiver ingress enabled
-  ingress {
-    from_port   = 49504
-    to_port     = 49504
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow Locksmith shard receiver"
-  }"#,
-        );
-    } else {
-        ingress.push_str(
-            r#"
-
-  # Locksmith ingress disabled"#,
+    if e2e {
+        blocks.push(
+            hcl::Block::builder("ingress")
+                .add_attribute(("from_port", 49500u64))
+                .add_attribute(("to_port", 49500u64))
+                .add_attribute(("protocol", "tcp"))
+                .add_attribute((
+                    "cidr_blocks",
+                    hcl::Expression::Array(vec![hcl::Expression::String("0.0.0.0/0".into())]),
+                ))
+                .add_attribute(("description", "Allow STEVE encrypted transport"))
+                .build(),
         );
     }
 
-    ingress
+    if locksmith {
+        blocks.push(
+            hcl::Block::builder("ingress")
+                .add_attribute(("from_port", 49504u64))
+                .add_attribute(("to_port", 49504u64))
+                .add_attribute(("protocol", "tcp"))
+                .add_attribute((
+                    "cidr_blocks",
+                    hcl::Expression::Array(vec![hcl::Expression::String("0.0.0.0/0".into())]),
+                ))
+                .add_attribute(("description", "Allow Locksmith shard receiver"))
+                .build(),
+        );
+    }
+
+    blocks
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GenerateMainTfError {
+    #[error("deployment region is required [{location}]")]
+    MissingRegion { location: Location },
+    #[error("could not compute enclave sizing [{location}]")]
+    Sizing {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not serialize main.tf [{location}]")]
+    Serialize {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not write main.tf [{location}]")]
+    Write {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn generate_nitro_deployment_main_tf(
     work_dir: &Path,
     request: &NitroDeploymentRequest,
     eif_s3_path: &str,
-) -> Result<()> {
+) -> std::result::Result<(), GenerateMainTfError> {
+    use GenerateMainTfErrorCtx as Ctx;
+
     let aws_region = request
         .credentials
         .as_ref()
         .map(|c| c.region.clone())
         .or_else(|| request.region.clone())
-        .context("Deployment region is required")?;
+        .ok_or_else(|| GenerateMainTfError::MissingRegion {
+            location: std::panic::Location::caller(),
+        })?;
     let ssh_key_name = std::env::var("SSH_KEY_NAME").ok();
 
-    let (cpu_count_rounded, instance_type) = compute_enclave_sizing(request)?;
+    let (cpu_count_rounded, instance_type) =
+        dterror::ResultExt::with_context(compute_enclave_sizing(request), Ctx::sizing())?;
 
-    let provider_block = if request.credentials.is_some() {
-        format!(
-            r#"variable "provider_access_key" {{
-  type      = string
-  sensitive = true
-  default   = ""
-}}
-
-variable "provider_secret_key" {{
-  type      = string
-  sensitive = true
-  default   = ""
-}}
-
-variable "provider_region" {{
-  type    = string
-  default = ""
-}}
-
-provider "aws" {{
-  region     = var.provider_region != "" ? var.provider_region : "{region}"
-  access_key = var.provider_access_key != "" ? var.provider_access_key : null
-  secret_key = var.provider_secret_key != "" ? var.provider_secret_key : null
-
-  default_tags {{
-    tags = {{
-      org_id    = "{org_id}"
-      ManagedBy = "caution+tofu"
-    }}
-  }}
-}}"#,
-            region = aws_region,
-            org_id = request.org_id,
-        )
-    } else {
-        format!(
-            r#"provider "aws" {{
-  region = "{region}"
-
-  default_tags {{
-    tags = {{
-      org_id    = "{org_id}"
-      ManagedBy = "caution+tofu"
-    }}
-  }}
-}}"#,
-            region = aws_region,
-            org_id = request.org_id,
-        )
-    };
+    let short_id: String = request.resource_id.to_string()[..8].to_owned();
+    let resource_id_str = request.resource_id.to_string();
+    let org_id_str = request.org_id.to_string();
 
     let eif_bucket = std::env::var("EIF_S3_BUCKET")
         .unwrap_or_else(|_| format!("caution-eif-storage-{}", request.aws_account_id));
 
-    let main_tf_content = format!(
-        r#"terraform {{
-  required_version = ">= 1.0"
+    let mut body = hcl::Body::builder();
 
-  required_providers {{
-    aws = {{
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }}
-  }}
-}}
-
-{provider_block}
-
-# Data source for availability zones
-data "aws_availability_zones" "available" {{
-  state = "available"
-}}
-
-# Restrict the subnet to an Availability Zone that offers the selected host.
-data "aws_ec2_instance_type_offerings" "enclave" {{
-  location_type = "availability-zone"
-
-  filter {{
-    name   = "instance-type"
-    values = ["{instance_type}"]
-  }}
-
-  filter {{
-    name   = "location"
-    values = data.aws_availability_zones.available.names
-  }}
-}}
-
-# Data source for latest Amazon Linux 2023 AMI
-data "aws_ami" "amazon_linux_2023" {{
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {{
-    name   = "name"
-    values = ["al2023-ami-*-x86_64"]
-  }}
-
-  filter {{
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }}
-
-  filter {{
-    name   = "root-device-type"
-    values = ["ebs"]
-  }}
-}}
-
-# IAM role for EC2 instance to access S3
-resource "aws_iam_role" "enclave" {{
-  name_prefix = "enclave-{short_id}-"
-
-  assume_role_policy = jsonencode({{
-    Version = "2012-10-17"
-    Statement = [
-      {{
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {{
-          Service = "ec2.amazonaws.com"
-        }}
-      }}
-    ]
-  }})
-
-  tags = {{
-    Name         = "enclave-role-{resource_id}"
-    ResourceId   = "{resource_id}"
-  }}
-}}
-
-# IAM policy for S3 access (scoped to org prefix)
-resource "aws_iam_role_policy" "enclave_s3" {{
-  name_prefix = "enclave-s3-{short_id}-"
-  role        = aws_iam_role.enclave.id
-
-  policy = jsonencode({{
-    Version = "2012-10-17"
-    Statement = [
-      {{
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject"
-        ]
-        Resource = [
-          "arn:aws:s3:::{eif_bucket}/eifs/{org_id}/*"
-        ]
-      }}
-    ]
-  }})
-}}
-
-# IAM instance profile
-resource "aws_iam_instance_profile" "enclave" {{
-  name_prefix = "enclave-{short_id}-"
-  role        = aws_iam_role.enclave.name
-
-  tags = {{
-    Name         = "enclave-profile-{resource_id}"
-    ResourceId   = "{resource_id}"
-  }}
-}}
-
-# VPC for this resource
-resource "aws_vpc" "enclave" {{
-  cidr_block           = "10.0.0.0/16"
-  enable_dns_hostnames = true
-  enable_dns_support   = true
-
-  tags = {{
-    Name         = "vpc-{resource_id}"
-    ResourceId   = "{resource_id}"
-  }}
-}}
-
-# Internet Gateway
-resource "aws_internet_gateway" "enclave" {{
-  vpc_id = aws_vpc.enclave.id
-
-  tags = {{
-    Name         = "igw-{resource_id}"
-    ResourceId   = "{resource_id}"
-  }}
-}}
-
-# Public subnet
-resource "aws_subnet" "enclave" {{
-  vpc_id                  = aws_vpc.enclave.id
-  cidr_block              = "10.0.1.0/24"
-  map_public_ip_on_launch = true
-  availability_zone       = sort(data.aws_ec2_instance_type_offerings.enclave.locations)[0]
-
-  tags = {{
-    Name         = "subnet-{resource_id}"
-    ResourceId   = "{resource_id}"
-  }}
-}}
-
-# Route table
-resource "aws_route_table" "enclave" {{
-  vpc_id = aws_vpc.enclave.id
-
-  route {{
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.enclave.id
-  }}
-
-  tags = {{
-    Name         = "rt-{resource_id}"
-    ResourceId   = "{resource_id}"
-  }}
-}}
-
-# Route table association
-resource "aws_route_table_association" "enclave" {{
-  subnet_id      = aws_subnet.enclave.id
-  route_table_id = aws_route_table.enclave.id
-}}
-
-# User ports variable
-# Note: Attestation is served via Caddy on port 443 at /attestation path
-
-variable "ports" {{
-  type    = list(number)
-  default = []
-}}
-
-variable "http_port" {{
-  type    = number
-  default = 0
-}}
-
-# Security group for the enclave
-resource "aws_security_group" "enclave" {{
-  name_prefix = "enclave-{short_id}-"
-  description = "Security group for {resource_id} Nitro Enclave"
-  vpc_id      = aws_vpc.enclave.id
-
-  {ssh_ingress}
-
-  ingress {{
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow HTTP"
-  }}
-
-  ingress {{
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow HTTPS"
-  }}
-
-  {platform_internal_ingress}
-
-  # Dynamic user ports
-  dynamic "ingress" {{
-    for_each = var.ports
-    content {{
-      from_port   = ingress.value
-      to_port     = ingress.value
-      protocol    = "tcp"
-      cidr_blocks = ["0.0.0.0/0"]
-      description = "Allow user port ${{ingress.value}}"
-    }}
-  }}
-
-  egress {{
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow all outbound"
-  }}
-
-  tags = {{
-    Name         = "enclave-{resource_id}"
-    ResourceId   = "{resource_id}"
-  }}
-}}
-
-# EC2 instance for Nitro Enclave
-resource "aws_instance" "enclave" {{
-  ami                  = data.aws_ami.amazon_linux_2023.id
-  instance_type        = "{instance_type}"
-  iam_instance_profile = aws_iam_instance_profile.enclave.name
-
-  vpc_security_group_ids = [aws_security_group.enclave.id]
-  subnet_id              = aws_subnet.enclave.id
-{ssh_key_line}
-  enclave_options {{
-    enabled = true
-  }}
-
-  metadata_options {{
-    http_endpoint = "enabled"
-    http_tokens   = "required"
-  }}
-
-  root_block_device {{
-    volume_size           = {disk_gb}
-    volume_type           = "gp3"
-    delete_on_termination = true
-    encrypted             = true
-  }}
-
-  user_data_replace_on_change = true
-  user_data = base64encode(templatefile("./user-data.sh", {{
-    eif_s3_path = "{eif_s3_path}"
-    memory_mb   = {memory_mb}
-    cpu_count   = {cpu_count}
-    debug_mode  = "{debug_mode}"
-    ports       = var.ports
-    http_port   = var.http_port
-    e2e         = "{e2e}"
-    e2e_mode    = "{e2e_mode}"
-    locksmith   = "{locksmith}"
-    egress      = "{egress}"
-    ssh_keys    = {ssh_keys_json}
-    domain      = "{domain}"
-  }}))
-
-  tags = {{
-    Name         = "{resource_id}"
-    ResourceId   = "{resource_id}"
-    ConfigDomain = "{domain}"
-  }}
-}}
-
-# Elastic IP for the enclave
-resource "aws_eip" "enclave" {{
-  domain   = "vpc"
-  instance = aws_instance.enclave.id
-
-  tags = {{
-    Name         = "enclave-{resource_id}"
-    ResourceId   = "{resource_id}"
-  }}
-}}
-
-output "instance_id" {{
-  value = aws_instance.enclave.id
-}}
-
-output "public_ip" {{
-  value = aws_eip.enclave.public_ip
-}}
-
-output "url" {{
-  value = "{url_output}"
-}}
-
-output "instance_type" {{
-  value = "{instance_type}"
-}}
-"#,
-        provider_block = provider_block,
-        instance_type = instance_type,
-        ssh_key_line = ssh_key_name
-            .as_ref()
-            .map(|key| format!("\n  key_name = \"{}\"", key))
-            .unwrap_or_default(),
-        resource_id = request.resource_id,
-        short_id = &request.resource_id.to_string()[..8],
-        org_id = request.org_id,
-        eif_s3_path = eif_s3_path,
-        eif_bucket = eif_bucket,
-        memory_mb = request.memory_mb,
-        cpu_count = cpu_count_rounded,
-        disk_gb = request.disk_gb,
-        debug_mode = if request.debug_mode { "true" } else { "false" },
-        ssh_keys_json =
-            serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string()),
-        ssh_ingress = if request.ssh_keys.is_empty() {
-            "# SSH ingress disabled (no ssh_keys in Procfile)".to_string()
-        } else {
-            "# SSH enabled (ssh_keys configured in Procfile)\n  ingress {\n    from_port   = 22\n    to_port     = 22\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow SSH\"\n  }".to_string()
-        },
-        platform_internal_ingress = platform_internal_ingress(request.e2e, request.locksmith),
-        e2e = if request.e2e { "true" } else { "false" },
-        e2e_mode = effective_e2e_mode(request.e2e, &request.e2e_mode),
-        locksmith = if request.locksmith { "true" } else { "false" },
-        egress = if request.egress { "true" } else { "false" },
-        domain = request.domain.as_deref().unwrap_or(""),
-        url_output = if let Some(ref domain) = request.domain {
-            format!("https://{}", domain)
-        } else {
-            "https://${aws_eip.enclave.public_ip}".to_string()
-        },
+    // terraform block
+    body = body.add_block(
+        hcl::Block::builder("terraform")
+            .add_attribute(("required_version", ">= 1.0"))
+            .add_block(
+                hcl::Block::builder("required_providers")
+                    .add_attribute((
+                        "aws",
+                        hcl::Expression::Object(
+                            vec![
+                                (
+                                    hcl::expr::ObjectKey::Identifier(
+                                        hcl::Identifier::unchecked("source"),
+                                    ),
+                                    hcl::Expression::String("hashicorp/aws".into()),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(
+                                        hcl::Identifier::unchecked("version"),
+                                    ),
+                                    hcl::Expression::String("~> 5.0".into()),
+                                ),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        ),
+                    ))
+                    .build(),
+            )
+            .build(),
     );
 
-    fs::write(work_dir.join("main.tf"), main_tf_content)
-        .await
-        .context("Failed to write main.tf")?;
+    // provider section
+    if request.credentials.is_some() {
+        body = body
+            .add_block(
+                hcl::Block::builder("variable")
+                    .add_label("provider_access_key")
+                    .add_attribute(("type", "string"))
+                    .add_attribute(("sensitive", true))
+                    .add_attribute(("default", ""))
+                    .build(),
+            )
+            .add_block(
+                hcl::Block::builder("variable")
+                    .add_label("provider_secret_key")
+                    .add_attribute(("type", "string"))
+                    .add_attribute(("sensitive", true))
+                    .add_attribute(("default", ""))
+                    .build(),
+            )
+            .add_block(
+                hcl::Block::builder("variable")
+                    .add_label("provider_region")
+                    .add_attribute(("type", "string"))
+                    .add_attribute(("default", ""))
+                    .build(),
+            );
+
+        let provider_block = hcl::Block::builder("provider")
+            .add_label("aws")
+            .add_attribute(hcl::Attribute::new(
+                "region",
+                hcl::expr::Conditional::new(
+                    hcl::expr::BinaryOp::new(
+                        hcl::expr::Traversal::builder(
+                            hcl::expr::Variable::unchecked("var"),
+                        )
+                        .attr("provider_region")
+                        .build(),
+                        hcl::expr::BinaryOperator::NotEq,
+                        hcl::Expression::String(String::new()),
+                    ),
+                    hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
+                        .attr("provider_region")
+                        .build(),
+                    hcl::Expression::String(aws_region.clone()),
+                ),
+            ))
+            .add_attribute(hcl::Attribute::new(
+                "access_key",
+                hcl::expr::Conditional::new(
+                    hcl::expr::BinaryOp::new(
+                        hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
+                            .attr("provider_access_key")
+                            .build(),
+                        hcl::expr::BinaryOperator::NotEq,
+                        hcl::Expression::String(String::new()),
+                    ),
+                    hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
+                        .attr("provider_access_key")
+                        .build(),
+                    hcl::Expression::Null,
+                ),
+            ))
+            .add_attribute(hcl::Attribute::new(
+                "secret_key",
+                hcl::expr::Conditional::new(
+                    hcl::expr::BinaryOp::new(
+                        hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
+                            .attr("provider_secret_key")
+                            .build(),
+                        hcl::expr::BinaryOperator::NotEq,
+                        hcl::Expression::String(String::new()),
+                    ),
+                    hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
+                        .attr("provider_secret_key")
+                        .build(),
+                    hcl::Expression::Null,
+                ),
+            ))
+            .add_block(
+                hcl::Block::builder("default_tags")
+                    .add_attribute((
+                        "tags",
+                        hcl::Expression::Object(
+                            vec![
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "org_id",
+                                    )),
+                                    hcl::Expression::String(org_id_str.clone()),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "ManagedBy",
+                                    )),
+                                    hcl::Expression::String("caution+tofu".into()),
+                                ),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        ),
+                    ))
+                    .build(),
+            )
+            .build();
+        body = body.add_block(provider_block);
+    } else {
+        body = body.add_block(
+            hcl::Block::builder("provider")
+                .add_label("aws")
+                .add_attribute(("region", aws_region.as_str()))
+                .add_block(
+                    hcl::Block::builder("default_tags")
+                        .add_attribute((
+                            "tags",
+                            hcl::Expression::Object(
+                                vec![
+                                    (
+                                        hcl::expr::ObjectKey::Identifier(
+                                            hcl::Identifier::unchecked("org_id"),
+                                        ),
+                                        hcl::Expression::String(org_id_str.clone()),
+                                    ),
+                                    (
+                                        hcl::expr::ObjectKey::Identifier(
+                                            hcl::Identifier::unchecked("ManagedBy"),
+                                        ),
+                                        hcl::Expression::String("caution+tofu".into()),
+                                    ),
+                                ]
+                                .into_iter()
+                                .collect(),
+                            ),
+                        ))
+                        .build(),
+                )
+                .build(),
+        );
+    }
+
+    // data "aws_availability_zones" "available"
+    body = body.add_block(
+        hcl::Block::builder("data")
+            .add_label("aws_availability_zones")
+            .add_label("available")
+            .add_attribute(("state", "available"))
+            .build(),
+    );
+
+    // data "aws_ec2_instance_type_offerings" "enclave"
+    body = body.add_block(
+        hcl::Block::builder("data")
+            .add_label("aws_ec2_instance_type_offerings")
+            .add_label("enclave")
+            .add_attribute(("location_type", "availability-zone"))
+            .add_block(
+                hcl::Block::builder("filter")
+                    .add_attribute(("name", "instance-type"))
+                    .add_attribute((
+                        "values",
+                        hcl::Expression::Array(vec![hcl::Expression::String(
+                            instance_type.into(),
+                        )]),
+                    ))
+                    .build(),
+            )
+            .add_block(
+                hcl::Block::builder("filter")
+                    .add_attribute(("name", "location"))
+                    .add_attribute((
+                        "values",
+                        hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("data"))
+                            .attr("aws_availability_zones")
+                            .attr("available")
+                            .attr("names")
+                            .build(),
+                    ))
+                    .build(),
+            )
+            .build(),
+    );
+
+    // data "aws_ami" "amazon_linux_2023"
+    body = body.add_block(
+        hcl::Block::builder("data")
+            .add_label("aws_ami")
+            .add_label("amazon_linux_2023")
+            .add_attribute(("most_recent", true))
+            .add_attribute((
+                "owners",
+                hcl::Expression::Array(vec![hcl::Expression::String("amazon".into())]),
+            ))
+            .add_block(
+                hcl::Block::builder("filter")
+                    .add_attribute(("name", "name"))
+                    .add_attribute((
+                        "values",
+                        hcl::Expression::Array(vec![hcl::Expression::String(
+                            "al2023-ami-*-x86_64".into(),
+                        )]),
+                    ))
+                    .build(),
+            )
+            .add_block(
+                hcl::Block::builder("filter")
+                    .add_attribute(("name", "virtualization-type"))
+                    .add_attribute((
+                        "values",
+                        hcl::Expression::Array(vec![hcl::Expression::String("hvm".into())]),
+                    ))
+                    .build(),
+            )
+            .add_block(
+                hcl::Block::builder("filter")
+                    .add_attribute(("name", "root-device-type"))
+                    .add_attribute((
+                        "values",
+                        hcl::Expression::Array(vec![hcl::Expression::String("ebs".into())]),
+                    ))
+                    .build(),
+            )
+            .build(),
+    );
+
+    // resource "aws_iam_role" "enclave"
+    body = body.add_block(
+        hcl::Block::builder("resource")
+            .add_label("aws_iam_role")
+            .add_label("enclave")
+            .add_attribute(("name_prefix", format!("enclave-{short_id}-")))
+            .add_attribute(hcl::Attribute::new(
+                "assume_role_policy",
+                hcl::expr::FuncCall::builder("jsonencode")
+                    .arg(hcl::Expression::Object(
+                        vec![
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "Version",
+                                )),
+                                hcl::Expression::String("2012-10-17".into()),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "Statement",
+                                )),
+                                hcl::Expression::Array(vec![hcl::Expression::Object(
+                                    vec![
+                                        (
+                                            hcl::expr::ObjectKey::Identifier(
+                                                hcl::Identifier::unchecked("Action"),
+                                            ),
+                                            hcl::Expression::String("sts:AssumeRole".into()),
+                                        ),
+                                        (
+                                            hcl::expr::ObjectKey::Identifier(
+                                                hcl::Identifier::unchecked("Effect"),
+                                            ),
+                                            hcl::Expression::String("Allow".into()),
+                                        ),
+                                        (
+                                            hcl::expr::ObjectKey::Identifier(
+                                                hcl::Identifier::unchecked("Principal"),
+                                            ),
+                                            hcl::Expression::Object(
+                                                vec![(
+                                                    hcl::expr::ObjectKey::Identifier(
+                                                        hcl::Identifier::unchecked("Service"),
+                                                    ),
+                                                    hcl::Expression::String(
+                                                        "ec2.amazonaws.com".into(),
+                                                    ),
+                                                )]
+                                                .into_iter()
+                                                .collect(),
+                                            ),
+                                        ),
+                                    ]
+                                    .into_iter()
+                                    .collect(),
+                                )]),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ))
+                    .build(),
+            ))
+            .add_attribute((
+                "tags",
+                hcl::Expression::Object(
+                    vec![
+                        (
+                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
+                            hcl::Expression::String(format!("enclave-role-{resource_id_str}")),
+                        ),
+                        (
+                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                "ResourceId",
+                            )),
+                            hcl::Expression::String(resource_id_str.clone()),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ))
+            .build(),
+    );
+
+    // resource "aws_iam_role_policy" "enclave_s3"
+    body = body.add_block(
+        hcl::Block::builder("resource")
+            .add_label("aws_iam_role_policy")
+            .add_label("enclave_s3")
+            .add_attribute(("name_prefix", format!("enclave-s3-{short_id}-")))
+            .add_attribute((
+                "role",
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_iam_role"))
+                    .attr("enclave")
+                    .attr("id")
+                    .build(),
+            ))
+            .add_attribute(hcl::Attribute::new(
+                "policy",
+                hcl::expr::FuncCall::builder("jsonencode")
+                    .arg(hcl::Expression::Object(
+                        vec![
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "Version",
+                                )),
+                                hcl::Expression::String("2012-10-17".into()),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "Statement",
+                                )),
+                                hcl::Expression::Array(vec![hcl::Expression::Object(
+                                    vec![
+                                        (
+                                            hcl::expr::ObjectKey::Identifier(
+                                                hcl::Identifier::unchecked("Effect"),
+                                            ),
+                                            hcl::Expression::String("Allow".into()),
+                                        ),
+                                        (
+                                            hcl::expr::ObjectKey::Identifier(
+                                                hcl::Identifier::unchecked("Action"),
+                                            ),
+                                            hcl::Expression::Array(vec![hcl::Expression::String(
+                                                "s3:GetObject".into(),
+                                            )]),
+                                        ),
+                                        (
+                                            hcl::expr::ObjectKey::Identifier(
+                                                hcl::Identifier::unchecked("Resource"),
+                                            ),
+                                            hcl::Expression::Array(vec![hcl::Expression::String(
+                                                format!(
+                                                    "arn:aws:s3:::{eif_bucket}/eifs/{org_id_str}/*"
+                                                ),
+                                            )]),
+                                        ),
+                                    ]
+                                    .into_iter()
+                                    .collect(),
+                                )]),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ))
+                    .build(),
+            ))
+            .build(),
+    );
+
+    // resource "aws_iam_instance_profile" "enclave"
+    body = body.add_block(
+        hcl::Block::builder("resource")
+            .add_label("aws_iam_instance_profile")
+            .add_label("enclave")
+            .add_attribute(("name_prefix", format!("enclave-{short_id}-")))
+            .add_attribute((
+                "role",
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_iam_role"))
+                    .attr("enclave")
+                    .attr("name")
+                    .build(),
+            ))
+            .add_attribute((
+                "tags",
+                hcl::Expression::Object(
+                    vec![
+                        (
+                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
+                            hcl::Expression::String(format!("enclave-profile-{resource_id_str}")),
+                        ),
+                        (
+                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                "ResourceId",
+                            )),
+                            hcl::Expression::String(resource_id_str.clone()),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ))
+            .build(),
+    );
+
+    // resource "aws_vpc" "enclave"
+    body = body.add_block(
+        hcl::Block::builder("resource")
+            .add_label("aws_vpc")
+            .add_label("enclave")
+            .add_attribute(("cidr_block", "10.0.0.0/16"))
+            .add_attribute(("enable_dns_hostnames", true))
+            .add_attribute(("enable_dns_support", true))
+            .add_attribute((
+                "tags",
+                hcl::Expression::Object(
+                    vec![
+                        (
+                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
+                            hcl::Expression::String(format!("vpc-{resource_id_str}")),
+                        ),
+                        (
+                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                "ResourceId",
+                            )),
+                            hcl::Expression::String(resource_id_str.clone()),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ))
+            .build(),
+    );
+
+    // resource "aws_internet_gateway" "enclave"
+    body = body.add_block(
+        hcl::Block::builder("resource")
+            .add_label("aws_internet_gateway")
+            .add_label("enclave")
+            .add_attribute((
+                "vpc_id",
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_vpc"))
+                    .attr("enclave")
+                    .attr("id")
+                    .build(),
+            ))
+            .add_attribute((
+                "tags",
+                hcl::Expression::Object(
+                    vec![
+                        (
+                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
+                            hcl::Expression::String(format!("igw-{resource_id_str}")),
+                        ),
+                        (
+                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                "ResourceId",
+                            )),
+                            hcl::Expression::String(resource_id_str.clone()),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ))
+            .build(),
+    );
+
+    // resource "aws_subnet" "enclave"
+    body = body.add_block(
+        hcl::Block::builder("resource")
+            .add_label("aws_subnet")
+            .add_label("enclave")
+            .add_attribute((
+                "vpc_id",
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_vpc"))
+                    .attr("enclave")
+                    .attr("id")
+                    .build(),
+            ))
+            .add_attribute(("cidr_block", "10.0.1.0/24"))
+            .add_attribute(("map_public_ip_on_launch", true))
+            .add_attribute(hcl::Attribute::new(
+                "availability_zone",
+                hcl::expr::Traversal::builder(
+                    hcl::expr::FuncCall::builder("sort")
+                        .arg(
+                            hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("data"))
+                                .attr("aws_ec2_instance_type_offerings")
+                                .attr("enclave")
+                                .attr("locations")
+                                .build(),
+                        )
+                        .build(),
+                )
+                .index(0u64)
+                .build(),
+            ))
+            .add_attribute((
+                "tags",
+                hcl::Expression::Object(
+                    vec![
+                        (
+                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
+                            hcl::Expression::String(format!("subnet-{resource_id_str}")),
+                        ),
+                        (
+                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                "ResourceId",
+                            )),
+                            hcl::Expression::String(resource_id_str.clone()),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ))
+            .build(),
+    );
+
+    // resource "aws_route_table" "enclave"
+    body = body.add_block(
+        hcl::Block::builder("resource")
+            .add_label("aws_route_table")
+            .add_label("enclave")
+            .add_attribute((
+                "vpc_id",
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_vpc"))
+                    .attr("enclave")
+                    .attr("id")
+                    .build(),
+            ))
+            .add_block(
+                hcl::Block::builder("route")
+                    .add_attribute(("cidr_block", "0.0.0.0/0"))
+                    .add_attribute((
+                        "gateway_id",
+                        hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(
+                            "aws_internet_gateway",
+                        ))
+                        .attr("enclave")
+                        .attr("id")
+                        .build(),
+                    ))
+                    .build(),
+            )
+            .add_attribute((
+                "tags",
+                hcl::Expression::Object(
+                    vec![
+                        (
+                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
+                            hcl::Expression::String(format!("rt-{resource_id_str}")),
+                        ),
+                        (
+                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                "ResourceId",
+                            )),
+                            hcl::Expression::String(resource_id_str.clone()),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ))
+            .build(),
+    );
+
+    // resource "aws_route_table_association" "enclave"
+    body = body.add_block(
+        hcl::Block::builder("resource")
+            .add_label("aws_route_table_association")
+            .add_label("enclave")
+            .add_attribute((
+                "subnet_id",
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_subnet"))
+                    .attr("enclave")
+                    .attr("id")
+                    .build(),
+            ))
+            .add_attribute((
+                "route_table_id",
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_route_table"))
+                    .attr("enclave")
+                    .attr("id")
+                    .build(),
+            ))
+            .build(),
+    );
+
+    // variable "ports"
+    body = body.add_block(
+        hcl::Block::builder("variable")
+            .add_label("ports")
+            .add_attribute((
+                "type",
+                hcl::expr::FuncCall::builder("list")
+                    .arg(hcl::Expression::from(
+                        hcl::expr::Variable::unchecked("number"),
+                    ))
+                    .build(),
+            ))
+            .add_attribute(("default", hcl::Expression::Array(vec![])))
+            .build(),
+    );
+
+    // variable "http_port"
+    body = body.add_block(
+        hcl::Block::builder("variable")
+            .add_label("http_port")
+            .add_attribute(("type", "number"))
+            .add_attribute(("default", 0u64))
+            .build(),
+    );
+
+    // resource "aws_security_group" "enclave"
+    let mut sg_builder = hcl::Block::builder("resource")
+        .add_label("aws_security_group")
+        .add_label("enclave")
+        .add_attribute(("name_prefix", format!("enclave-{short_id}-")))
+        .add_attribute((
+            "description",
+            format!("Security group for {resource_id_str} Nitro Enclave"),
+        ))
+        .add_attribute((
+            "vpc_id",
+            hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_vpc"))
+                .attr("enclave")
+                .attr("id")
+                .build(),
+        ));
+
+    // SSH ingress (only when ssh_keys non-empty)
+    if !request.ssh_keys.is_empty() {
+        sg_builder = sg_builder.add_block(
+            hcl::Block::builder("ingress")
+                .add_attribute(("from_port", 22u64))
+                .add_attribute(("to_port", 22u64))
+                .add_attribute(("protocol", "tcp"))
+                .add_attribute((
+                    "cidr_blocks",
+                    hcl::Expression::Array(vec![hcl::Expression::String("0.0.0.0/0".into())]),
+                ))
+                .add_attribute(("description", "Allow SSH"))
+                .build(),
+        );
+    }
+
+    // HTTP ingress
+    sg_builder = sg_builder.add_block(
+        hcl::Block::builder("ingress")
+            .add_attribute(("from_port", 80u64))
+            .add_attribute(("to_port", 80u64))
+            .add_attribute(("protocol", "tcp"))
+            .add_attribute((
+                "cidr_blocks",
+                hcl::Expression::Array(vec![hcl::Expression::String("0.0.0.0/0".into())]),
+            ))
+            .add_attribute(("description", "Allow HTTP"))
+            .build(),
+    );
+
+    // HTTPS ingress
+    sg_builder = sg_builder.add_block(
+        hcl::Block::builder("ingress")
+            .add_attribute(("from_port", 443u64))
+            .add_attribute(("to_port", 443u64))
+            .add_attribute(("protocol", "tcp"))
+            .add_attribute((
+                "cidr_blocks",
+                hcl::Expression::Array(vec![hcl::Expression::String("0.0.0.0/0".into())]),
+            ))
+            .add_attribute(("description", "Allow HTTPS"))
+            .build(),
+    );
+
+    // platform internal ingress blocks
+    for block in platform_internal_ingress(request.e2e, request.locksmith) {
+        sg_builder = sg_builder.add_block(block);
+    }
+
+    // dynamic "ingress" block
+    sg_builder = sg_builder.add_block(
+        hcl::Block::builder("dynamic")
+            .add_label("ingress")
+            .add_attribute((
+                "for_each",
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
+                    .attr("ports")
+                    .build(),
+            ))
+            .add_block(
+                hcl::Block::builder("content")
+                    .add_attribute((
+                        "from_port",
+                        hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("ingress"))
+                            .attr("value")
+                            .build(),
+                    ))
+                    .add_attribute((
+                        "to_port",
+                        hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("ingress"))
+                            .attr("value")
+                            .build(),
+                    ))
+                    .add_attribute(("protocol", "tcp"))
+                    .add_attribute((
+                        "cidr_blocks",
+                        hcl::Expression::Array(vec![hcl::Expression::String("0.0.0.0/0".into())]),
+                    ))
+                    .add_attribute(hcl::Attribute::new(
+                        "description",
+                        hcl::expr::TemplateExpr::from("Allow user port ${ingress.value}".to_string()),
+                    ))
+                    .build(),
+            )
+            .build(),
+    );
+
+    // egress block
+    sg_builder = sg_builder.add_block(
+        hcl::Block::builder("egress")
+            .add_attribute(("from_port", 0u64))
+            .add_attribute(("to_port", 0u64))
+            .add_attribute(("protocol", "-1"))
+            .add_attribute((
+                "cidr_blocks",
+                hcl::Expression::Array(vec![hcl::Expression::String("0.0.0.0/0".into())]),
+            ))
+            .add_attribute(("description", "Allow all outbound"))
+            .build(),
+    );
+
+    // security group tags
+    sg_builder = sg_builder.add_attribute((
+        "tags",
+        hcl::Expression::Object(
+            vec![
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
+                    hcl::Expression::String(format!("enclave-{resource_id_str}")),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("ResourceId")),
+                    hcl::Expression::String(resource_id_str.clone()),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+    ));
+
+    body = body.add_block(sg_builder.build());
+
+    // resource "aws_instance" "enclave"
+    let mut instance_builder = hcl::Block::builder("resource")
+        .add_label("aws_instance")
+        .add_label("enclave")
+        .add_attribute((
+            "ami",
+            hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("data"))
+                .attr("aws_ami")
+                .attr("amazon_linux_2023")
+                .attr("id")
+                .build(),
+        ))
+        .add_attribute(("instance_type", instance_type))
+        .add_attribute((
+            "iam_instance_profile",
+            hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(
+                "aws_iam_instance_profile",
+            ))
+            .attr("enclave")
+            .attr("name")
+            .build(),
+        ))
+        .add_attribute((
+            "vpc_security_group_ids",
+            hcl::Expression::Array(vec![hcl::expr::Traversal::builder(
+                hcl::expr::Variable::unchecked("aws_security_group"),
+            )
+            .attr("enclave")
+            .attr("id")
+            .build()
+            .into()]),
+        ))
+        .add_attribute((
+            "subnet_id",
+            hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_subnet"))
+                .attr("enclave")
+                .attr("id")
+                .build(),
+        ));
+
+    if let Some(ref key) = ssh_key_name {
+        instance_builder = instance_builder.add_attribute(("key_name", key.as_str()));
+    }
+
+    instance_builder = instance_builder
+        .add_block(
+            hcl::Block::builder("enclave_options")
+                .add_attribute(("enabled", true))
+                .build(),
+        )
+        .add_block(
+            hcl::Block::builder("metadata_options")
+                .add_attribute(("http_endpoint", "enabled"))
+                .add_attribute(("http_tokens", "required"))
+                .build(),
+        )
+        .add_block(
+            hcl::Block::builder("root_block_device")
+                .add_attribute(("volume_size", request.disk_gb))
+                .add_attribute(("volume_type", "gp3"))
+                .add_attribute(("delete_on_termination", true))
+                .add_attribute(("encrypted", true))
+                .build(),
+        )
+        .add_attribute(("user_data_replace_on_change", true));
+
+    // user_data = base64encode(templatefile("./user-data.sh", { ... }))
+    let ssh_keys_json =
+        serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string());
+    let domain_str = request.domain.as_deref().unwrap_or("");
+    let url_output = if let Some(ref d) = request.domain {
+        format!("https://{d}")
+    } else {
+        "https://${aws_eip.enclave.public_ip}".to_string()
+    };
+
+    instance_builder = instance_builder.add_attribute(hcl::Attribute::new(
+        "user_data",
+        hcl::expr::FuncCall::builder("base64encode")
+            .arg(
+                hcl::expr::FuncCall::builder("templatefile")
+                    .arg(hcl::Expression::String("./user-data.sh".into()))
+                    .arg(hcl::Expression::Object(
+                        vec![
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "eif_s3_path",
+                                )),
+                                hcl::Expression::String(eif_s3_path.into()),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "memory_mb",
+                                )),
+                                hcl::Expression::Number(request.memory_mb.into()),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "cpu_count",
+                                )),
+                                hcl::Expression::Number(cpu_count_rounded.into()),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "debug_mode",
+                                )),
+                                hcl::Expression::String(
+                                    if request.debug_mode { "true" } else { "false" }.into(),
+                                ),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "ports",
+                                )),
+                                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
+                                    .attr("ports")
+                                    .build()
+                                    .into(),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "http_port",
+                                )),
+                                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
+                                    .attr("http_port")
+                                    .build()
+                                    .into(),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("e2e")),
+                                hcl::Expression::String(
+                                    if request.e2e { "true" } else { "false" }.into(),
+                                ),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "e2e_mode",
+                                )),
+                                hcl::Expression::String(
+                                    effective_e2e_mode(request.e2e, &request.e2e_mode).into(),
+                                ),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "locksmith",
+                                )),
+                                hcl::Expression::String(
+                                    if request.locksmith { "true" } else { "false" }.into(),
+                                ),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "egress",
+                                )),
+                                hcl::Expression::String(
+                                    if request.egress { "true" } else { "false" }.into(),
+                                ),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "ssh_keys",
+                                )),
+                                hcl::Expression::from(serde_json::from_str::<Vec<String>>(&ssh_keys_json).unwrap_or_default()),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "domain",
+                                )),
+                                hcl::Expression::String(domain_str.into()),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ))
+                    .build(),
+            )
+            .build(),
+    ));
+
+    // instance tags
+    instance_builder = instance_builder.add_attribute((
+        "tags",
+        hcl::Expression::Object(
+            vec![
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
+                    hcl::Expression::String(resource_id_str.clone()),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("ResourceId")),
+                    hcl::Expression::String(resource_id_str.clone()),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("ConfigDomain")),
+                    hcl::Expression::String(domain_str.into()),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+    ));
+
+    body = body.add_block(instance_builder.build());
+
+    // resource "aws_eip" "enclave"
+    body = body.add_block(
+        hcl::Block::builder("resource")
+            .add_label("aws_eip")
+            .add_label("enclave")
+            .add_attribute(("domain", "vpc"))
+            .add_attribute((
+                "instance",
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_instance"))
+                    .attr("enclave")
+                    .attr("id")
+                    .build(),
+            ))
+            .add_attribute((
+                "tags",
+                hcl::Expression::Object(
+                    vec![
+                        (
+                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
+                            hcl::Expression::String(format!("enclave-{resource_id_str}")),
+                        ),
+                        (
+                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                "ResourceId",
+                            )),
+                            hcl::Expression::String(resource_id_str.clone()),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ))
+            .build(),
+    );
+
+    // outputs
+    body = body.add_block(
+        hcl::Block::builder("output")
+            .add_label("instance_id")
+            .add_attribute((
+                "value",
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_instance"))
+                    .attr("enclave")
+                    .attr("id")
+                    .build(),
+            ))
+            .build(),
+    );
+
+    body = body.add_block(
+        hcl::Block::builder("output")
+            .add_label("public_ip")
+            .add_attribute((
+                "value",
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_eip"))
+                    .attr("enclave")
+                    .attr("public_ip")
+                    .build(),
+            ))
+            .build(),
+    );
+
+    body = body.add_block(
+        hcl::Block::builder("output")
+            .add_label("url")
+            .add_attribute(hcl::Attribute::new(
+                "value",
+                hcl::expr::TemplateExpr::from(url_output),
+            ))
+            .build(),
+    );
+
+    body = body.add_block(
+        hcl::Block::builder("output")
+            .add_label("instance_type")
+            .add_attribute(("value", instance_type))
+            .build(),
+    );
+
+    let content = dterror::ResultExt::with_context(
+        hcl::to_string(&body.build()),
+        Ctx::serialize(),
+    )?;
+
+    dterror::ResultExt::with_context(
+        fs::write(work_dir.join("main.tf"), &content).await,
+        Ctx::write(),
+    )?;
 
     Ok(())
 }
 
+/// The scoped deployment tag key, rendered as the parenthesized object-key form
+/// `(local.scope_tag_key)` via an `ObjectKey` wrapping a parenthesized traversal.
+fn scoped_tag_key() -> hcl::expr::ObjectKey {
+    hcl::expr::ObjectKey::Expression(hcl::Expression::Parenthesis(Box::new(
+        hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("local"))
+            .attr("scope_tag_key")
+            .build()
+            .into(),
+    )))
+}
+
+/// A traversal to `local.deployment_tag`, the value paired with [`scoped_tag_key`].
+fn deployment_tag_value() -> hcl::Expression {
+    hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("local"))
+        .attr("deployment_tag")
+        .build()
+        .into()
+}
+
+/// The provider/locals conditional `var.provider_region != "" ? var.provider_region : aws_region`.
+fn region_conditional(aws_region: &str) -> hcl::expr::Conditional {
+    hcl::expr::Conditional::new(
+        hcl::expr::BinaryOp::new(
+            hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
+                .attr("provider_region")
+                .build(),
+            hcl::expr::BinaryOperator::NotEq,
+            hcl::Expression::String(String::new()),
+        ),
+        hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
+            .attr("provider_region")
+            .build(),
+        hcl::Expression::String(aws_region.to_string()),
+    )
+}
+
+/// A conditional credential attribute named `attr_name`, referencing the variable
+/// `var_name`: `var.<var_name> != "" ? var.<var_name> : null`.
+fn credential_conditional(attr_name: &str, var_name: &str) -> hcl::Attribute {
+    hcl::Attribute::new(
+        attr_name,
+        hcl::expr::Conditional::new(
+            hcl::expr::BinaryOp::new(
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
+                    .attr(var_name)
+                    .build(),
+                hcl::expr::BinaryOperator::NotEq,
+                hcl::Expression::String(String::new()),
+            ),
+            hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
+                .attr(var_name)
+                .build(),
+            hcl::Expression::Null,
+        ),
+    )
+}
+
+/// An ingress block opening `cidr_blocks = ["0.0.0.0/0"]` traffic on a single port.
+fn cidr_ingress_block(port: u64, description: &str) -> hcl::Block {
+    hcl::Block::builder("ingress")
+        .add_attribute(("from_port", port))
+        .add_attribute(("to_port", port))
+        .add_attribute(("protocol", "tcp"))
+        .add_attribute((
+            "cidr_blocks",
+            hcl::Expression::Array(vec![hcl::Expression::String("0.0.0.0/0".into())]),
+        ))
+        .add_attribute(("description", description))
+        .build()
+}
+
+/// A `variable` block of type `string` (optionally sensitive) with an empty default.
+fn provider_credential_variable(name: &str, sensitive: bool) -> hcl::Block {
+    let mut builder = hcl::Block::builder("variable")
+        .add_label(name)
+        .add_attribute(("type", "string"));
+    if sensitive {
+        builder = builder.add_attribute(("sensitive", true));
+    }
+    builder.add_attribute(("default", "")).build()
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GenerateOnpremTfError {
+    #[error("missing managed_onprem config [{location}]")]
+    MissingConfig { location: Location },
+    #[error("could not compute enclave sizing [{location}]")]
+    Sizing {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not serialize main.tf [{location}]")]
+    Serialize {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not write main.tf [{location}]")]
+    Write {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn generate_managed_onprem_deployment_tf(
     work_dir: &Path,
     request: &NitroDeploymentRequest,
     eif_s3_path: &str,
-) -> Result<()> {
-    let onprem = request
-        .managed_onprem
-        .as_ref()
-        .context("Missing managed_onprem config")?;
+) -> std::result::Result<(), GenerateOnpremTfError> {
+    use GenerateOnpremTfErrorCtx as Ctx;
+
+    let onprem =
+        request
+            .managed_onprem
+            .as_ref()
+            .ok_or_else(|| GenerateOnpremTfError::MissingConfig {
+                location: std::panic::Location::caller(),
+            })?;
 
     let aws_region = request
         .credentials
@@ -2221,285 +3501,642 @@ async fn generate_managed_onprem_deployment_tf(
         .map(|c| c.region.clone())
         .unwrap_or_else(|| std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()));
 
-    let (cpu_count_rounded, instance_type) = compute_enclave_sizing(request)?;
+    let (cpu_count_rounded, instance_type) =
+        dterror::ResultExt::with_context(compute_enclave_sizing(request), Ctx::sizing())?;
 
-    let main_tf_content = format!(
-        r#"terraform {{
-  required_version = ">= 1.0"
+    let short_id: String = request.resource_id.to_string()[..8].to_owned();
+    let resource_id_str = request.resource_id.to_string();
+    let org_id_str = request.org_id.to_string();
+    let domain_str = request.domain.as_deref().unwrap_or("");
+    let url_output = if let Some(ref d) = request.domain {
+        format!("https://{d}")
+    } else {
+        "https://${aws_eip.enclave.public_ip}".to_string()
+    };
 
-  required_providers {{
-    aws = {{
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }}
-  }}
-}}
+    let mut body = hcl::Body::builder();
 
-variable "provider_access_key" {{
-  type      = string
-  sensitive = true
-  default   = ""
-}}
-
-variable "provider_secret_key" {{
-  type      = string
-  sensitive = true
-  default   = ""
-}}
-
-variable "provider_region" {{
-  type    = string
-  default = ""
-}}
-
-variable "asg_name" {{
-  type    = string
-  default = "{asg_name}"
-}}
-
-provider "aws" {{
-  region     = var.provider_region != "" ? var.provider_region : "{region}"
-  access_key = var.provider_access_key != "" ? var.provider_access_key : null
-  secret_key = var.provider_secret_key != "" ? var.provider_secret_key : null
-
-  default_tags {{
-    tags = {{
-      org_id    = "{org_id}"
-      ManagedBy = "caution+tofu"
-    }}
-  }}
-}}
-
-variable "ports" {{
-  type    = list(number)
-  default = []
-}}
-
-variable "http_port" {{
-  type    = number
-  default = 0
-}}
-
-locals {{
-  deployment_tag = "{deployment_id}"
-  scope_tag_key  = "caution:deployment-id"
-  aws_region     = var.provider_region != "" ? var.provider_region : "{region}"
-}}
-
-data "aws_ami" "amazon_linux_2023" {{
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {{
-    name   = "name"
-    values = ["al2023-ami-*-x86_64"]
-  }}
-
-  filter {{
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }}
-
-  filter {{
-    name   = "root-device-type"
-    values = ["ebs"]
-  }}
-}}
-
-resource "aws_security_group" "enclave" {{
-  name_prefix = "enclave-{short_id}-"
-  description = "Security group for {resource_id} Nitro Enclave"
-  vpc_id      = "{vpc_id}"
-
-  {ssh_ingress}
-
-  ingress {{
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow HTTP"
-  }}
-
-  ingress {{
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow HTTPS"
-  }}
-
-  {platform_internal_ingress}
-
-  dynamic "ingress" {{
-    for_each = var.ports
-    content {{
-      from_port   = ingress.value
-      to_port     = ingress.value
-      protocol    = "tcp"
-      cidr_blocks = ["0.0.0.0/0"]
-      description = "Allow user port ${{ingress.value}}"
-    }}
-  }}
-
-  egress {{
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow all outbound"
-  }}
-
-  tags = {{
-    Name                  = "enclave-{resource_id}"
-    ResourceId            = "{resource_id}"
-    (local.scope_tag_key) = local.deployment_tag
-  }}
-}}
-
-resource "aws_launch_template" "enclave" {{
-  name_prefix   = "enclave-{resource_id}-"
-  image_id      = data.aws_ami.amazon_linux_2023.id
-  instance_type = "{instance_type}"
-
-  iam_instance_profile {{
-    name = "{instance_profile_name}"
-  }}
-
-  vpc_security_group_ids = [aws_security_group.enclave.id]
-
-  enclave_options {{
-    enabled = true
-  }}
-
-  metadata_options {{
-    http_endpoint = "enabled"
-    http_tokens   = "required"
-  }}
-
-  block_device_mappings {{
-    device_name = "/dev/xvda"
-    ebs {{
-      volume_size           = {disk_gb}
-      volume_type           = "gp3"
-      delete_on_termination = true
-      encrypted             = true
-    }}
-  }}
-
-  user_data = base64encode(templatefile("./user-data.sh", {{
-    eif_s3_path = "{eif_s3_path}"
-    memory_mb   = {memory_mb}
-    cpu_count   = {cpu_count}
-    debug_mode  = "{debug_mode}"
-    ports       = var.ports
-    http_port   = var.http_port
-    e2e         = "{e2e}"
-    e2e_mode    = "{e2e_mode}"
-    locksmith   = "{locksmith}"
-    egress      = "{egress}"
-    ssh_keys    = {ssh_keys_json}
-    domain      = "{domain}"
-  }}))
-
-  tag_specifications {{
-    resource_type = "instance"
-    tags = {{
-      Name                  = "{resource_id}"
-      ResourceId            = "{resource_id}"
-      ConfigDomain          = "{domain}"
-      (local.scope_tag_key) = local.deployment_tag
-    }}
-  }}
-
-  tag_specifications {{
-    resource_type = "volume"
-    tags = {{
-      Name                  = "enclave-{resource_id}"
-      ResourceId            = "{resource_id}"
-      (local.scope_tag_key) = local.deployment_tag
-    }}
-  }}
-
-  tags = {{
-    Name                  = "lt-{resource_id}"
-    ResourceId            = "{resource_id}"
-    (local.scope_tag_key) = local.deployment_tag
-  }}
-}}
-
-resource "aws_eip" "enclave" {{
-  domain = "vpc"
-
-  tags = {{
-    Name                  = "enclave-{resource_id}"
-    ResourceId            = "{resource_id}"
-    (local.scope_tag_key) = local.deployment_tag
-  }}
-}}
-
-# Outputs - ASG update and EIP association are handled by the API server
-output "launch_template_id" {{
-  value = aws_launch_template.enclave.id
-}}
-
-output "launch_template_version" {{
-  value = tostring(aws_launch_template.enclave.latest_version)
-}}
-
-output "eip_allocation_id" {{
-  value = aws_eip.enclave.id
-}}
-
-output "public_ip" {{
-  value = aws_eip.enclave.public_ip
-}}
-
-output "url" {{
-  value = "{url_output}"
-}}
-
-output "instance_type" {{
-  value = "{instance_type}"
-}}
-"#,
-        region = aws_region,
-        deployment_id = onprem.deployment_id,
-        vpc_id = onprem.vpc_id,
-        asg_name = onprem.asg_name,
-        instance_type = instance_type,
-        instance_profile_name = onprem.instance_profile_name,
-        resource_id = request.resource_id,
-        short_id = &request.resource_id.to_string()[..8],
-        org_id = request.org_id,
-        eif_s3_path = eif_s3_path,
-        memory_mb = request.memory_mb,
-        cpu_count = cpu_count_rounded,
-        disk_gb = request.disk_gb,
-        debug_mode = if request.debug_mode { "true" } else { "false" },
-        ssh_keys_json =
-            serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string()),
-        ssh_ingress = if request.ssh_keys.is_empty() {
-            "# SSH ingress disabled (no ssh_keys in Procfile)".to_string()
-        } else {
-            "# SSH enabled (ssh_keys configured in Procfile)\n  ingress {\n    from_port   = 22\n    to_port     = 22\n    protocol    = \"tcp\"\n    cidr_blocks = [\"0.0.0.0/0\"]\n    description = \"Allow SSH\"\n  }".to_string()
-        },
-        platform_internal_ingress = platform_internal_ingress(request.e2e, request.locksmith),
-        e2e = if request.e2e { "true" } else { "false" },
-        e2e_mode = effective_e2e_mode(request.e2e, &request.e2e_mode),
-        locksmith = if request.locksmith { "true" } else { "false" },
-        egress = if request.egress { "true" } else { "false" },
-        domain = request.domain.as_deref().unwrap_or(""),
-        url_output = if let Some(ref domain) = request.domain {
-            format!("https://{}", domain)
-        } else {
-            "https://${aws_eip.enclave.public_ip}".to_string()
-        },
+    // terraform block
+    body = body.add_block(
+        hcl::Block::builder("terraform")
+            .add_attribute(("required_version", ">= 1.0"))
+            .add_block(
+                hcl::Block::builder("required_providers")
+                    .add_attribute((
+                        "aws",
+                        hcl::Expression::Object(
+                            vec![
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "source",
+                                    )),
+                                    hcl::Expression::String("hashicorp/aws".into()),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "version",
+                                    )),
+                                    hcl::Expression::String("~> 5.0".into()),
+                                ),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        ),
+                    ))
+                    .build(),
+            )
+            .build(),
     );
 
-    fs::write(work_dir.join("main.tf"), main_tf_content)
-        .await
-        .context("Failed to write main.tf")?;
+    // provider credential variables
+    body = body
+        .add_block(provider_credential_variable("provider_access_key", true))
+        .add_block(provider_credential_variable("provider_secret_key", true))
+        .add_block(provider_credential_variable("provider_region", false));
+
+    // variable "asg_name"
+    body = body.add_block(
+        hcl::Block::builder("variable")
+            .add_label("asg_name")
+            .add_attribute(("type", "string"))
+            .add_attribute(("default", onprem.asg_name.clone()))
+            .build(),
+    );
+
+    // provider "aws" block with conditional region/access_key/secret_key and default_tags
+    body = body.add_block(
+        hcl::Block::builder("provider")
+            .add_label("aws")
+            .add_attribute(hcl::Attribute::new("region", region_conditional(&aws_region)))
+            .add_attribute(credential_conditional("access_key", "provider_access_key"))
+            .add_attribute(credential_conditional("secret_key", "provider_secret_key"))
+            .add_block(
+                hcl::Block::builder("default_tags")
+                    .add_attribute((
+                        "tags",
+                        hcl::Expression::Object(
+                            vec![
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "org_id",
+                                    )),
+                                    hcl::Expression::String(org_id_str.clone()),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "ManagedBy",
+                                    )),
+                                    hcl::Expression::String("caution+tofu".into()),
+                                ),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        ),
+                    ))
+                    .build(),
+            )
+            .build(),
+    );
+
+    // variable "ports"
+    body = body.add_block(
+        hcl::Block::builder("variable")
+            .add_label("ports")
+            .add_attribute((
+                "type",
+                hcl::expr::FuncCall::builder("list")
+                    .arg(hcl::Expression::from(hcl::expr::Variable::unchecked("number")))
+                    .build(),
+            ))
+            .add_attribute(("default", hcl::Expression::Array(vec![])))
+            .build(),
+    );
+
+    // variable "http_port"
+    body = body.add_block(
+        hcl::Block::builder("variable")
+            .add_label("http_port")
+            .add_attribute(("type", "number"))
+            .add_attribute(("default", 0u64))
+            .build(),
+    );
+
+    // locals block
+    body = body.add_block(
+        hcl::Block::builder("locals")
+            .add_attribute((
+                "deployment_tag",
+                hcl::Expression::String(onprem.deployment_id.clone()),
+            ))
+            .add_attribute((
+                "scope_tag_key",
+                hcl::Expression::String("caution:deployment-id".into()),
+            ))
+            .add_attribute(hcl::Attribute::new("aws_region", region_conditional(&aws_region)))
+            .build(),
+    );
+
+    // data "aws_ami" "amazon_linux_2023"
+    body = body.add_block(
+        hcl::Block::builder("data")
+            .add_label("aws_ami")
+            .add_label("amazon_linux_2023")
+            .add_attribute(("most_recent", true))
+            .add_attribute((
+                "owners",
+                hcl::Expression::Array(vec![hcl::Expression::String("amazon".into())]),
+            ))
+            .add_block(
+                hcl::Block::builder("filter")
+                    .add_attribute(("name", "name"))
+                    .add_attribute((
+                        "values",
+                        hcl::Expression::Array(vec![hcl::Expression::String(
+                            "al2023-ami-*-x86_64".into(),
+                        )]),
+                    ))
+                    .build(),
+            )
+            .add_block(
+                hcl::Block::builder("filter")
+                    .add_attribute(("name", "virtualization-type"))
+                    .add_attribute((
+                        "values",
+                        hcl::Expression::Array(vec![hcl::Expression::String("hvm".into())]),
+                    ))
+                    .build(),
+            )
+            .add_block(
+                hcl::Block::builder("filter")
+                    .add_attribute(("name", "root-device-type"))
+                    .add_attribute((
+                        "values",
+                        hcl::Expression::Array(vec![hcl::Expression::String("ebs".into())]),
+                    ))
+                    .build(),
+            )
+            .build(),
+    );
+
+    // resource "aws_security_group" "enclave"
+    let mut sg_builder = hcl::Block::builder("resource")
+        .add_label("aws_security_group")
+        .add_label("enclave")
+        .add_attribute(("name_prefix", format!("enclave-{short_id}-")))
+        .add_attribute((
+            "description",
+            format!("Security group for {resource_id_str} Nitro Enclave"),
+        ))
+        .add_attribute(("vpc_id", onprem.vpc_id.clone()));
+
+    if !request.ssh_keys.is_empty() {
+        sg_builder = sg_builder.add_block(cidr_ingress_block(22, "Allow SSH"));
+    }
+
+    sg_builder = sg_builder
+        .add_block(cidr_ingress_block(80, "Allow HTTP"))
+        .add_block(cidr_ingress_block(443, "Allow HTTPS"));
+
+    for block in platform_internal_ingress(request.e2e, request.locksmith) {
+        sg_builder = sg_builder.add_block(block);
+    }
+
+    // dynamic "ingress" over var.ports
+    sg_builder = sg_builder.add_block(
+        hcl::Block::builder("dynamic")
+            .add_label("ingress")
+            .add_attribute((
+                "for_each",
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
+                    .attr("ports")
+                    .build(),
+            ))
+            .add_block(
+                hcl::Block::builder("content")
+                    .add_attribute((
+                        "from_port",
+                        hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("ingress"))
+                            .attr("value")
+                            .build(),
+                    ))
+                    .add_attribute((
+                        "to_port",
+                        hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("ingress"))
+                            .attr("value")
+                            .build(),
+                    ))
+                    .add_attribute(("protocol", "tcp"))
+                    .add_attribute((
+                        "cidr_blocks",
+                        hcl::Expression::Array(vec![hcl::Expression::String("0.0.0.0/0".into())]),
+                    ))
+                    .add_attribute(hcl::Attribute::new(
+                        "description",
+                        hcl::expr::TemplateExpr::from(
+                            "Allow user port ${ingress.value}".to_string(),
+                        ),
+                    ))
+                    .build(),
+            )
+            .build(),
+    );
+
+    // egress block
+    sg_builder = sg_builder.add_block(
+        hcl::Block::builder("egress")
+            .add_attribute(("from_port", 0u64))
+            .add_attribute(("to_port", 0u64))
+            .add_attribute(("protocol", "-1"))
+            .add_attribute((
+                "cidr_blocks",
+                hcl::Expression::Array(vec![hcl::Expression::String("0.0.0.0/0".into())]),
+            ))
+            .add_attribute(("description", "Allow all outbound"))
+            .build(),
+    );
+
+    // security group tags
+    sg_builder = sg_builder.add_attribute((
+        "tags",
+        hcl::Expression::Object(
+            vec![
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
+                    hcl::Expression::String(format!("enclave-{resource_id_str}")),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("ResourceId")),
+                    hcl::Expression::String(resource_id_str.clone()),
+                ),
+                (scoped_tag_key(), deployment_tag_value()),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+    ));
+
+    body = body.add_block(sg_builder.build());
+
+    // resource "aws_launch_template" "enclave"
+    let ssh_keys_json =
+        serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string());
+
+    let lt_builder = hcl::Block::builder("resource")
+        .add_label("aws_launch_template")
+        .add_label("enclave")
+        .add_attribute(("name_prefix", format!("enclave-{resource_id_str}-")))
+        .add_attribute((
+            "image_id",
+            hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("data"))
+                .attr("aws_ami")
+                .attr("amazon_linux_2023")
+                .attr("id")
+                .build(),
+        ))
+        .add_attribute(("instance_type", instance_type))
+        .add_block(
+            hcl::Block::builder("iam_instance_profile")
+                .add_attribute(("name", onprem.instance_profile_name.clone()))
+                .build(),
+        )
+        .add_attribute((
+            "vpc_security_group_ids",
+            hcl::Expression::Array(vec![
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_security_group"))
+                    .attr("enclave")
+                    .attr("id")
+                    .build()
+                    .into(),
+            ]),
+        ))
+        .add_block(
+            hcl::Block::builder("enclave_options")
+                .add_attribute(("enabled", true))
+                .build(),
+        )
+        .add_block(
+            hcl::Block::builder("metadata_options")
+                .add_attribute(("http_endpoint", "enabled"))
+                .add_attribute(("http_tokens", "required"))
+                .build(),
+        )
+        .add_block(
+            hcl::Block::builder("block_device_mappings")
+                .add_attribute(("device_name", "/dev/xvda"))
+                .add_block(
+                    hcl::Block::builder("ebs")
+                        .add_attribute(("volume_size", request.disk_gb))
+                        .add_attribute(("volume_type", "gp3"))
+                        .add_attribute(("delete_on_termination", true))
+                        .add_attribute(("encrypted", true))
+                        .build(),
+                )
+                .build(),
+        )
+        .add_attribute(hcl::Attribute::new(
+            "user_data",
+            hcl::expr::FuncCall::builder("base64encode")
+                .arg(
+                    hcl::expr::FuncCall::builder("templatefile")
+                        .arg(hcl::Expression::String("./user-data.sh".into()))
+                        .arg(hcl::Expression::Object(
+                            vec![
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "eif_s3_path",
+                                    )),
+                                    hcl::Expression::String(eif_s3_path.into()),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "memory_mb",
+                                    )),
+                                    hcl::Expression::Number(request.memory_mb.into()),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "cpu_count",
+                                    )),
+                                    hcl::Expression::Number(cpu_count_rounded.into()),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "debug_mode",
+                                    )),
+                                    hcl::Expression::String(
+                                        if request.debug_mode { "true" } else { "false" }.into(),
+                                    ),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "ports",
+                                    )),
+                                    hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(
+                                        "var",
+                                    ))
+                                    .attr("ports")
+                                    .build()
+                                    .into(),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "http_port",
+                                    )),
+                                    hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(
+                                        "var",
+                                    ))
+                                    .attr("http_port")
+                                    .build()
+                                    .into(),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "e2e",
+                                    )),
+                                    hcl::Expression::String(
+                                        if request.e2e { "true" } else { "false" }.into(),
+                                    ),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "e2e_mode",
+                                    )),
+                                    hcl::Expression::String(
+                                        effective_e2e_mode(request.e2e, &request.e2e_mode).into(),
+                                    ),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "locksmith",
+                                    )),
+                                    hcl::Expression::String(
+                                        if request.locksmith { "true" } else { "false" }.into(),
+                                    ),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "egress",
+                                    )),
+                                    hcl::Expression::String(
+                                        if request.egress { "true" } else { "false" }.into(),
+                                    ),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "ssh_keys",
+                                    )),
+                                    hcl::Expression::from(
+                                        serde_json::from_str::<Vec<String>>(&ssh_keys_json)
+                                            .unwrap_or_default(),
+                                    ),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "domain",
+                                    )),
+                                    hcl::Expression::String(domain_str.into()),
+                                ),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        ))
+                        .build(),
+                )
+                .build(),
+        ))
+        .add_block(
+            hcl::Block::builder("tag_specifications")
+                .add_attribute(("resource_type", "instance"))
+                .add_attribute((
+                    "tags",
+                    hcl::Expression::Object(
+                        vec![
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "Name",
+                                )),
+                                hcl::Expression::String(resource_id_str.clone()),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "ResourceId",
+                                )),
+                                hcl::Expression::String(resource_id_str.clone()),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "ConfigDomain",
+                                )),
+                                hcl::Expression::String(domain_str.into()),
+                            ),
+                            (scoped_tag_key(), deployment_tag_value()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ),
+                ))
+                .build(),
+        )
+        .add_block(
+            hcl::Block::builder("tag_specifications")
+                .add_attribute(("resource_type", "volume"))
+                .add_attribute((
+                    "tags",
+                    hcl::Expression::Object(
+                        vec![
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "Name",
+                                )),
+                                hcl::Expression::String(format!("enclave-{resource_id_str}")),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "ResourceId",
+                                )),
+                                hcl::Expression::String(resource_id_str.clone()),
+                            ),
+                            (scoped_tag_key(), deployment_tag_value()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ),
+                ))
+                .build(),
+        )
+        .add_attribute((
+            "tags",
+            hcl::Expression::Object(
+                vec![
+                    (
+                        hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
+                        hcl::Expression::String(format!("lt-{resource_id_str}")),
+                    ),
+                    (
+                        hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("ResourceId")),
+                        hcl::Expression::String(resource_id_str.clone()),
+                    ),
+                    (scoped_tag_key(), deployment_tag_value()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        ));
+
+    body = body.add_block(lt_builder.build());
+
+    // resource "aws_eip" "enclave"
+    body = body.add_block(
+        hcl::Block::builder("resource")
+            .add_label("aws_eip")
+            .add_label("enclave")
+            .add_attribute(("domain", "vpc"))
+            .add_attribute((
+                "tags",
+                hcl::Expression::Object(
+                    vec![
+                        (
+                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
+                            hcl::Expression::String(format!("enclave-{resource_id_str}")),
+                        ),
+                        (
+                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                "ResourceId",
+                            )),
+                            hcl::Expression::String(resource_id_str.clone()),
+                        ),
+                        (scoped_tag_key(), deployment_tag_value()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ))
+            .build(),
+    );
+
+    // outputs
+    body = body.add_block(
+        hcl::Block::builder("output")
+            .add_label("launch_template_id")
+            .add_attribute((
+                "value",
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_launch_template"))
+                    .attr("enclave")
+                    .attr("id")
+                    .build(),
+            ))
+            .build(),
+    );
+
+    body = body.add_block(
+        hcl::Block::builder("output")
+            .add_label("launch_template_version")
+            .add_attribute(hcl::Attribute::new(
+                "value",
+                hcl::expr::FuncCall::builder("tostring")
+                    .arg(
+                        hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(
+                            "aws_launch_template",
+                        ))
+                        .attr("enclave")
+                        .attr("latest_version")
+                        .build(),
+                    )
+                    .build(),
+            ))
+            .build(),
+    );
+
+    body = body.add_block(
+        hcl::Block::builder("output")
+            .add_label("eip_allocation_id")
+            .add_attribute((
+                "value",
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_eip"))
+                    .attr("enclave")
+                    .attr("id")
+                    .build(),
+            ))
+            .build(),
+    );
+
+    body = body.add_block(
+        hcl::Block::builder("output")
+            .add_label("public_ip")
+            .add_attribute((
+                "value",
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_eip"))
+                    .attr("enclave")
+                    .attr("public_ip")
+                    .build(),
+            ))
+            .build(),
+    );
+
+    body = body.add_block(
+        hcl::Block::builder("output")
+            .add_label("url")
+            .add_attribute(hcl::Attribute::new(
+                "value",
+                hcl::expr::TemplateExpr::from(url_output),
+            ))
+            .build(),
+    );
+
+    body = body.add_block(
+        hcl::Block::builder("output")
+            .add_label("instance_type")
+            .add_attribute(("value", instance_type))
+            .build(),
+    );
+
+    let content =
+        dterror::ResultExt::with_context(hcl::to_string(&body.build()), Ctx::serialize())?;
+
+    dterror::ResultExt::with_context(
+        fs::write(work_dir.join("main.tf"), &content).await,
+        Ctx::write(),
+    )?;
 
     Ok(())
 }
