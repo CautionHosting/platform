@@ -299,19 +299,15 @@ impl CostCalculator {
     fn find_rate(&self, usage: &ResourceUsage) -> Option<f64> {
         // First try to find a specific match (with instance_type/region)
         for rate in &self.pricing.rates {
-            if rate.instance_type.is_some() || rate.region.is_some() {
-                if rate.matches(usage) {
-                    return Some(rate.rate_per_unit);
-                }
+            if (rate.instance_type.is_some() || rate.region.is_some()) && rate.matches(usage) {
+                return Some(rate.rate_per_unit);
             }
         }
 
         // Fall back to a general match (no instance_type/region)
         for rate in &self.pricing.rates {
-            if rate.instance_type.is_none() && rate.region.is_none() {
-                if rate.matches(usage) {
-                    return Some(rate.rate_per_unit);
-                }
+            if rate.instance_type.is_none() && rate.region.is_none() && rate.matches(usage) {
+                return Some(rate.rate_per_unit);
             }
         }
 
@@ -349,9 +345,7 @@ mod tests {
     use uuid::Uuid;
 
     fn default_rules_with_margin(margin_percent: f64) -> PricingRules {
-        let mut rules = PricingRules::default();
-        rules.margin_percent = margin_percent;
-        rules
+        PricingRules { margin_percent, ..Default::default() }
     }
 
     fn make_usage(

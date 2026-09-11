@@ -112,20 +112,3 @@ pub struct TrackedResource {
     pub stopped_at: Option<time::OffsetDateTime>,
     pub last_billed_at: time::OffsetDateTime,
 }
-
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
-pub struct UsageRecord {
-    pub id: Uuid,
-    pub organization_id: Uuid,
-    pub user_id: Option<Uuid>,
-    pub application_id: Option<Uuid>,
-    pub resource_id: String,
-    pub provider: String,
-    pub resource_type: String,
-    pub quantity: f64,
-    pub unit: String,
-    pub base_unit_cost_usd: Option<f64>,
-    pub margin_percent: Option<f64>,
-    pub recorded_at: time::OffsetDateTime,
-    pub metadata: serde_json::Value,
-}

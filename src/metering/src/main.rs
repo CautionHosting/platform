@@ -23,7 +23,6 @@ mod calculator;
 mod cost_explorer;
 mod credits;
 mod paddle;
-mod providers;
 mod types;
 mod webhooks;
 
@@ -293,7 +292,7 @@ impl RateLimiter {
             map.retain(|_, entries| {
                 entries
                     .last()
-                    .map_or(false, |t| now.duration_since(*t) < self.window)
+                    .is_some_and(|t| now.duration_since(*t) < self.window)
             });
         }
 
@@ -324,7 +323,7 @@ async fn webhook_rate_limit_middleware(
         .headers()
         .get("x-forwarded-for")
         .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.split(',').last())
+        .and_then(|s| s.split(',').next_back())
         .unwrap_or("unknown")
         .trim()
         .to_string();
@@ -745,7 +744,7 @@ async fn test_simulate_paddle_transaction(
     let event_type = req
         .event_type
         .unwrap_or_else(|| "transaction.billed".to_string());
-    let invoice_number = format!("TEST-{}", &transaction_id[9..17].to_uppercase());
+    let invoice_number = format!("TEST-{}", transaction_id[9..17].to_uppercase());
 
     // Ensure the org has a paddle_customer_id in billing_config
     let org_id = req.organization_id.unwrap_or(req.user_id);

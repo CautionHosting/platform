@@ -106,7 +106,7 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
 
             if stage == "suspended" {
                 // Unsuspend: call API to restart instances
-                unsuspend_org(&state, *org_id).await;
+                unsuspend_org(state, *org_id).await;
             }
 
             sqlx::query(
@@ -124,7 +124,7 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
             "none" => {
                 // Day 0: send initial payment failure email
                 send_dunning_email(
-                    &state,
+                    state,
                     *org_id,
                     "payment_failure",
                     serde_json::json!({
@@ -143,7 +143,7 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
             "warning_sent" if days_overdue >= 3 => {
                 // Day 3: send suspension warning
                 send_dunning_email(
-                    &state,
+                    state,
                     *org_id,
                     "suspension_warning",
                     serde_json::json!({
@@ -167,7 +167,7 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
                     org_id,
                     days_overdue
                 );
-                suspend_org(&state, *org_id).await;
+                suspend_org(state, *org_id).await;
             }
             _ => {}
         }
