@@ -32,28 +32,10 @@ pub struct OrgCostData {
     pub costs_by_service: HashMap<String, f64>,
 }
 
-/// Daily cost breakdown
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DailyCost {
-    pub date: String,
-    pub cost: f64,
-    pub currency: String,
-}
-
 impl CostExplorerClient {
     /// Create a new Cost Explorer client using default AWS credentials
     pub async fn new() -> Result<Self> {
         let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-        let client = Client::new(&config);
-        Ok(Self { client })
-    }
-
-    /// Create with explicit region
-    pub async fn with_region(region: &str) -> Result<Self> {
-        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(aws_config::Region::new(region.to_string()))
-            .load()
-            .await;
         let client = Client::new(&config);
         Ok(Self { client })
     }
@@ -150,66 +132,6 @@ impl CostExplorerClient {
         })
     }
 
-    /// Get daily cost breakdown for an organization
-    pub async fn get_org_daily_costs(
-        &self,
-        org_id: &str,
-        start_date: &str,
-        end_date: &str,
-    ) -> Result<Vec<DailyCost>> {
-        let tag_filter = Expression::builder()
-            .tags(TagValues::builder().key(ORG_TAG_KEY).values(org_id).build())
-            .build();
-
-        let response = self
-            .client
-            .get_cost_and_usage()
-            .time_period(
-                DateInterval::builder()
-                    .start(start_date)
-                    .end(end_date)
-                    .build()
-                    .context("Failed to build date interval")?,
-            )
-            .granularity(Granularity::Daily)
-            .filter(tag_filter)
-            .metrics("UnblendedCost")
-            .send()
-            .await
-            .context("Failed to query AWS Cost Explorer")?;
-
-        let mut daily_costs = Vec::new();
-
-        for result in response.results_by_time() {
-            let date = result
-                .time_period()
-                .map(|tp| tp.start().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-
-            let mut cost = 0.0;
-            let mut currency = "USD".to_string();
-
-            if let Some(total) = result.total() {
-                if let Some(cost_metric) = total.get("UnblendedCost") {
-                    if let Some(amount_str) = cost_metric.amount() {
-                        cost = amount_str.parse().unwrap_or(0.0);
-                    }
-                    if let Some(unit) = cost_metric.unit() {
-                        currency = unit.to_string();
-                    }
-                }
-            }
-
-            daily_costs.push(DailyCost {
-                date,
-                cost,
-                currency,
-            });
-        }
-
-        Ok(daily_costs)
-    }
-
     /// Get costs for all organizations (returns HashMap of org_id -> cost)
     pub async fn get_all_org_costs(
         &self,
@@ -255,7 +177,7 @@ impl CostExplorerClient {
                     .first()
                     .map(|s| {
                         // Tag values come as "org_id$value", extract the value
-                        s.split('$').last().unwrap_or(s).to_string()
+                        s.split('$').next_back().unwrap_or(s).to_string()
                     })
                     .unwrap_or_else(|| "untagged".to_string());
 
