@@ -5,7 +5,7 @@ use anyhow::Result;
 use sqlx::Row;
 
 use crate::credits::get_ledger_balance_cents;
-use crate::dunning::send_dunning_email;
+use crate::handlers::send_dunning_email;
 use crate::AppState;
 
 const LOW_BALANCE_WARNING_CENTS: i64 = 2_500;

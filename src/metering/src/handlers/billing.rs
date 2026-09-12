@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::AppState;
 use crate::balance::check_balance_thresholds;
-use crate::collection::{
+use super::collection::{
     LOCK_MONTHLY_BILLING, LOCK_SUBSCRIPTION_BILLING, advisory_unlock, try_advisory_lock,
 };
 use crate::cost_explorer;
