@@ -1716,7 +1716,7 @@ mod build_inputs_tests {
 
     #[tokio::test]
     async fn build_inputs_returns_commits_and_repos() {
-        let _platform_sha = EnvVarGuard::set("PLATFORM_GIT_SHA", "test-sha");
+        let platform_sha = EnvVarGuard::set("PLATFORM_GIT_SHA", "test-sha");
 
         let resp = build_inputs().await.into_response();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
@@ -1741,6 +1741,7 @@ mod build_inputs_tests {
                 "missing {tool}.repo"
             );
         }
+        drop(platform_sha);
     }
 }
 

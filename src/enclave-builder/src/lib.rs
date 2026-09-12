@@ -863,7 +863,7 @@ mod tests {
 
     #[test]
     fn classify_enclave_source_dispatches_by_source_kind() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("ENCLAVEOS_COMMIT");
 
         // 1. Archive URL -> GitArchive carrying the source URL + resolved commit.
@@ -923,6 +923,7 @@ mod tests {
             EnclaveSource::Local { path } => assert_eq!(path, "/local/enclaveos"),
             other => panic!("expected Local, got {other:?}"),
         }
+        drop(guard);
     }
 
     #[test]

@@ -51,13 +51,14 @@ pub fn cached_lockfile_path(data_dir: &str) -> PathBuf {
 /// - Always fail-open: logs warning on error, releases semaphore, returns None
 #[tracing::instrument(skip_all)]
 pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
-    let _permit = LOCKFILE_SEMAPHORE.acquire().await.expect("lockfile semaphore is never closed");
+    let permit = LOCKFILE_SEMAPHORE.acquire().await.expect("lockfile semaphore is never closed");
 
     let lockfile_path = cached_lockfile_path(data_dir);
 
     // Check if lockfile already exists (common case after first generation)
     if tokio::fs::try_exists(&lockfile_path).await.unwrap_or(false) {
         tracing::info!("Provider lockfile cache hit at {}", lockfile_path.display());
+        drop(permit);
         return Some(lockfile_path);
     }
 
@@ -68,6 +69,7 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!("Failed to create temp dir for lockfile generation: {}; proceeding without cache", e);
+            drop(permit);
             return None;
         }
     };
@@ -78,6 +80,7 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
     let main_tf_path = temp_dir.path().join("main.tf");
     if let Err(e) = std::fs::write(&main_tf_path, minimal_tf) {
         tracing::warn!("Failed to write temp .tf for lockfile generation: {}; proceeding without cache", e);
+        drop(permit);
         return None;
     }
 
@@ -90,6 +93,7 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
         Ok(o) => o,
         Err(e) => {
             tracing::warn!("tofu providers lock failed: {}; proceeding without cache", e);
+            drop(permit);
             return None;
         }
     };
@@ -103,6 +107,7 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
             stderr,
             stdout
         );
+        drop(permit);
         return None;
     }
 
@@ -112,10 +117,11 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
 
     if let Err(e) = tokio::fs::create_dir_all(&cache_terraform_dir).await {
         tracing::warn!("Failed to create terraform cache dir {}: {}; proceeding without cache", cache_terraform_dir.display(), e);
+        drop(permit);
         return None;
     }
 
-    match tokio::fs::copy(&temp_lockfile, &lockfile_path).await {
+    let result = match tokio::fs::copy(&temp_lockfile, &lockfile_path).await {
         Ok(_) => {
             tracing::info!("Provider lockfile cached at {}", lockfile_path.display());
             Some(lockfile_path)
@@ -124,7 +130,9 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
             tracing::warn!("Failed to copy lockfile to {}: {}; proceeding without cache", lockfile_path.display(), e);
             None
         }
-    }
+    };
+    drop(permit);
+    result
 }
 
 /// Failure modes for [`run_with_timeout`].
