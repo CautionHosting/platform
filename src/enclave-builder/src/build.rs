@@ -125,6 +125,7 @@ fn resolve_templates_dir() -> Result<PathBuf> {
     Ok(dev_path)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn stage_eif_components(
     user_fs_path: &Path,
     enclave_source_path: &Path,
@@ -318,6 +319,7 @@ fn process_template_blocks(content: &str, enabled_blocks: &[&str]) -> String {
     output
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn render_run_sh_template(
     template_path: &Path,
     run_command: Option<String>,
@@ -513,6 +515,7 @@ async fn render_containerfile_template(
         .replace("{{LOCKSMITH_COMMIT}}", locksmith_commit))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn build_eif_from_filesystems(
     user_fs_path: &Path,
     _bootproofd_path: &Path,
