@@ -3,13 +3,13 @@
 
 //! AWS Cost Explorer integration for fetching real costs by org tag
 
-use anyhow::{Context, Result};
 use aws_sdk_costexplorer::{
     types::{
         DateInterval, Expression, Granularity, GroupDefinition, GroupDefinitionType, TagValues,
     },
     Client,
 };
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -32,21 +32,57 @@ pub struct OrgCostData {
     pub costs_by_service: HashMap<String, f64>,
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum CostExplorerClientNewError {
+    #[error("could not initialize AWS config for Cost Explorer [{location}]")]
+    AwsConfig {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetOrgCostsError {
+    #[error("could not fetch org costs from AWS Cost Explorer [{location}]")]
+    Api {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetAllOrgCostsError {
+    #[error("could not fetch all org costs from AWS Cost Explorer [{location}]")]
+    Api {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 impl CostExplorerClient {
     /// Create a new Cost Explorer client using default AWS credentials
-    pub async fn new() -> Result<Self> {
+    pub(crate) async fn new() -> Result<Self, CostExplorerClientNewError> {
         let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         let client = Client::new(&config);
         Ok(Self { client })
     }
 
     /// Get total costs for an organization within a date range
-    pub async fn get_org_costs(
+    #[tracing::instrument(skip_all, err)]
+    pub(crate) async fn get_org_costs(
         &self,
         org_id: &str,
-        start_date: &str, // YYYY-MM-DD
-        end_date: &str,   // YYYY-MM-DD
-    ) -> Result<OrgCostData> {
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<OrgCostData, GetOrgCostsError> {
+        use GetOrgCostsErrorCtx as Ctx;
+
         tracing::info!(
             "Fetching AWS costs for org {} from {} to {}",
             org_id,
@@ -54,22 +90,20 @@ impl CostExplorerClient {
             end_date
         );
 
-        // Build filter for this org's tag
         let tag_filter = Expression::builder()
             .tags(TagValues::builder().key(ORG_TAG_KEY).values(org_id).build())
             .build();
 
-        // Query Cost Explorer grouped by service
+        let date_interval = DateInterval::builder()
+            .start(start_date)
+            .end(end_date)
+            .build()
+            .with_context(Ctx::api())?;
+
         let response = self
             .client
             .get_cost_and_usage()
-            .time_period(
-                DateInterval::builder()
-                    .start(start_date)
-                    .end(end_date)
-                    .build()
-                    .context("Failed to build date interval")?,
-            )
+            .time_period(date_interval)
             .granularity(Granularity::Monthly)
             .filter(tag_filter)
             .group_by(
@@ -81,23 +115,20 @@ impl CostExplorerClient {
             .metrics("UnblendedCost")
             .send()
             .await
-            .context("Failed to query AWS Cost Explorer")?;
+            .with_context(Ctx::api())?;
 
         let mut total_cost = 0.0;
         let mut costs_by_service = HashMap::new();
         let mut currency = "USD".to_string();
 
-        // Parse results - results_by_time() returns a slice
         for result in response.results_by_time() {
             for group in result.groups() {
-                // Get service name
                 let service = group
                     .keys()
                     .first()
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| "Unknown".to_string());
 
-                // Get cost amount
                 if let Some(metrics) = group.metrics() {
                     if let Some(cost_metric) = metrics.get("UnblendedCost") {
                         if let Some(amount_str) = cost_metric.amount() {
@@ -133,28 +164,30 @@ impl CostExplorerClient {
     }
 
     /// Get costs for all organizations (returns HashMap of org_id -> cost)
-    pub async fn get_all_org_costs(
+    #[tracing::instrument(skip_all, err)]
+    pub(crate) async fn get_all_org_costs(
         &self,
         start_date: &str,
         end_date: &str,
-    ) -> Result<HashMap<String, OrgCostData>> {
+    ) -> Result<HashMap<String, OrgCostData>, GetAllOrgCostsError> {
+        use GetAllOrgCostsErrorCtx as Ctx;
+
         tracing::info!(
             "Fetching AWS costs for all orgs from {} to {}",
             start_date,
             end_date
         );
 
-        // Group by org_id tag
+        let date_interval = DateInterval::builder()
+            .start(start_date)
+            .end(end_date)
+            .build()
+            .with_context(Ctx::api())?;
+
         let response = self
             .client
             .get_cost_and_usage()
-            .time_period(
-                DateInterval::builder()
-                    .start(start_date)
-                    .end(end_date)
-                    .build()
-                    .context("Failed to build date interval")?,
-            )
+            .time_period(date_interval)
             .granularity(Granularity::Monthly)
             .group_by(
                 GroupDefinition::builder()
@@ -165,28 +198,24 @@ impl CostExplorerClient {
             .metrics("UnblendedCost")
             .send()
             .await
-            .context("Failed to query AWS Cost Explorer")?;
+            .with_context(Ctx::api())?;
 
         let mut org_costs = HashMap::new();
 
         for result in response.results_by_time() {
             for group in result.groups() {
-                // Get org_id from tag
                 let org_id = group
                     .keys()
                     .first()
                     .map(|s| {
-                        // Tag values come as "org_id$value", extract the value
                         s.split('$').next_back().unwrap_or(s).to_string()
                     })
                     .unwrap_or_else(|| "untagged".to_string());
 
-                // Skip untagged or empty
                 if org_id.is_empty() || org_id == "untagged" {
                     continue;
                 }
 
-                // Get cost
                 let mut cost = 0.0;
                 let mut currency = "USD".to_string();
 
@@ -220,24 +249,25 @@ impl CostExplorerClient {
 }
 
 /// Helper to get current billing period dates (first of current month to today)
+#[tracing::instrument(skip_all)]
 pub fn current_billing_period() -> (String, String) {
     let now = time::OffsetDateTime::now_utc();
     let start = time::Date::from_calendar_date(now.year(), now.month(), 1).expect("valid date");
     let end = now.date();
 
     (
-        start.to_string(), // YYYY-MM-DD format
+        start.to_string(),
         end.to_string(),
     )
 }
 
 /// Helper to get previous month's billing period
+#[tracing::instrument(skip_all)]
 pub fn previous_month_billing_period() -> (String, String) {
     let now = time::OffsetDateTime::now_utc();
     let first_of_current =
         time::Date::from_calendar_date(now.year(), now.month(), 1).expect("valid date");
 
-    // Go back one day to get into previous month, then get first of that month
     let last_of_prev = first_of_current - time::Duration::days(1);
     let first_of_prev =
         time::Date::from_calendar_date(last_of_prev.year(), last_of_prev.month(), 1)
@@ -253,7 +283,7 @@ mod tests {
     #[test]
     fn test_billing_period_dates() {
         let (start, end) = current_billing_period();
-        assert!(start.starts_with("20")); // Year starts with 20xx
+        assert!(start.starts_with("20"));
         assert!(end.starts_with("20"));
         assert!(start <= end);
     }

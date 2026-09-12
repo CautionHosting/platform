@@ -7,10 +7,11 @@
 //! invoicing, payment collection, tax, and compliance. Usage accumulates
 //! locally; a single Paddle transaction is created at billing cycle end.
 
-use anyhow::{Context, Result};
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+#[allow(dead_code)]
 pub struct PaddleClient {
     client: Client,
     base_url: String,
@@ -26,6 +27,7 @@ pub struct LineItem {
     pub unit_price_currency: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct PaddleCustomer {
     pub id: String,
@@ -33,11 +35,82 @@ pub struct PaddleCustomer {
     pub name: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct PaddleTransaction {
     pub id: String,
     pub status: String,
     pub customer_id: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum CreateCustomerError {
+    #[error("could not create Paddle customer [{location}]")]
+    Api {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[allow(dead_code)]
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum CreateTransactionError {
+    #[error("could not create Paddle transaction [{location}]")]
+    Api {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[allow(dead_code)]
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetTransactionError {
+    #[error("could not get Paddle transaction [{location}]")]
+    Api {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum VerifyWebhookSignatureError {
+    #[error("Paddle webhook secret not configured [{location}]")]
+    SecretNotConfigured {
+        location: Location,
+    },
+
+    #[error("missing Paddle-Signature header [{location}]")]
+    MissingHeader {
+        location: Location,
+    },
+
+    #[error("invalid Paddle-Signature format [{location}]")]
+    InvalidFormat {
+        location: Location,
+    },
+
+    #[error("HMAC initialization failed [{location}]")]
+    HmacInit {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("invalid hex in signature [{location}]")]
+    InvalidHex {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 impl PaddleClient {
@@ -50,17 +123,22 @@ impl PaddleClient {
         }
     }
 
+    #[allow(dead_code)]
     fn is_configured(&self) -> bool {
         !self.api_key.is_empty()
     }
 
     /// Create a customer in Paddle
-    pub async fn create_customer(
+    #[allow(dead_code)]
+    #[tracing::instrument(skip_all, err)]
+    pub(crate) async fn create_customer(
         &self,
         org_id: uuid::Uuid,
         email: &str,
         name: Option<&str>,
-    ) -> Result<PaddleCustomer> {
+    ) -> Result<PaddleCustomer, CreateCustomerError> {
+        use CreateCustomerErrorCtx as Ctx;
+
         if !self.is_configured() {
             tracing::debug!("Paddle API key not configured, returning stub customer");
             return Ok(PaddleCustomer {
@@ -89,16 +167,14 @@ impl PaddleClient {
             .json(&body)
             .send()
             .await
-            .context("Failed to create Paddle customer")?;
+            .with_context(Ctx::api())?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body_text = response.text().await.unwrap_or_default();
 
-            // Handle 409 Conflict — customer already exists with this email
             if status == 409 {
                 if let Ok(err_body) = serde_json::from_str::<serde_json::Value>(&body_text) {
-                    // Extract existing customer ID from error detail
                     if let Some(detail) = err_body["error"]["detail"].as_str() {
                         if let Some(id_start) = detail.find("ctm_") {
                             let existing_id = &detail[id_start..];
@@ -113,27 +189,34 @@ impl PaddleClient {
                 }
             }
 
-            anyhow::bail!(
+            let err_msg = format!(
                 "Paddle API error creating customer: {} - {}",
-                status,
-                body_text
+                status, body_text
             );
+            return Err(CreateCustomerError::Api {
+                location: std::panic::Location::caller(),
+                source: Box::<dyn std::error::Error + Send + Sync>::from(err_msg),
+            });
         }
 
-        let resp: serde_json::Value = response.json().await?;
+        let resp: serde_json::Value = response.json().await.with_context(Ctx::api())?;
         let customer: PaddleCustomer = serde_json::from_value(resp["data"].clone())
-            .context("Failed to parse Paddle customer response")?;
+            .with_context(Ctx::api())?;
 
         tracing::info!("Created Paddle customer: {}", customer.id);
         Ok(customer)
     }
 
     /// Create a transaction (one-time charge) for accumulated usage
-    pub async fn create_transaction(
+    #[allow(dead_code)]
+    #[tracing::instrument(skip_all, err)]
+    pub(crate) async fn create_transaction(
         &self,
         customer_id: &str,
         items: Vec<LineItem>,
-    ) -> Result<PaddleTransaction> {
+    ) -> Result<PaddleTransaction, CreateTransactionError> {
+        use CreateTransactionErrorCtx as Ctx;
+
         if !self.is_configured() {
             tracing::debug!("Paddle API key not configured, returning stub transaction");
             return Ok(PaddleTransaction {
@@ -177,28 +260,38 @@ impl PaddleClient {
             .json(&body)
             .send()
             .await
-            .context("Failed to create Paddle transaction")?;
+            .with_context(Ctx::api())?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            anyhow::bail!(
+            let err_msg = format!(
                 "Paddle API error creating transaction: {} - {}",
-                status,
-                body
+                status, body
             );
+            return Err(CreateTransactionError::Api {
+                location: std::panic::Location::caller(),
+                source: Box::<dyn std::error::Error + Send + Sync>::from(err_msg),
+            });
         }
 
-        let resp: serde_json::Value = response.json().await?;
+        let resp: serde_json::Value = response.json().await.with_context(Ctx::api())?;
         let transaction: PaddleTransaction = serde_json::from_value(resp["data"].clone())
-            .context("Failed to parse Paddle transaction response")?;
+            .with_context(Ctx::api())?;
 
         tracing::info!("Created Paddle transaction: {}", transaction.id);
         Ok(transaction)
     }
 
     /// Get a transaction by ID
-    pub async fn get_transaction(&self, transaction_id: &str) -> Result<PaddleTransaction> {
+    #[allow(dead_code)]
+    #[tracing::instrument(skip_all, err)]
+    pub(crate) async fn get_transaction(
+        &self,
+        transaction_id: &str,
+    ) -> Result<PaddleTransaction, GetTransactionError> {
+        use GetTransactionErrorCtx as Ctx;
+
         if !self.is_configured() {
             return Ok(PaddleTransaction {
                 id: transaction_id.to_string(),
@@ -213,21 +306,24 @@ impl PaddleClient {
             .header("Authorization", format!("Bearer {}", self.api_key))
             .send()
             .await
-            .context("Failed to get Paddle transaction")?;
+            .with_context(Ctx::api())?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            anyhow::bail!(
+            let err_msg = format!(
                 "Paddle API error getting transaction: {} - {}",
-                status,
-                body
+                status, body
             );
+            return Err(GetTransactionError::Api {
+                location: std::panic::Location::caller(),
+                source: Box::<dyn std::error::Error + Send + Sync>::from(err_msg),
+            });
         }
 
-        let resp: serde_json::Value = response.json().await?;
+        let resp: serde_json::Value = response.json().await.with_context(Ctx::api())?;
         let transaction: PaddleTransaction = serde_json::from_value(resp["data"].clone())
-            .context("Failed to parse Paddle transaction response")?;
+            .with_context(Ctx::api())?;
 
         Ok(transaction)
     }
@@ -236,25 +332,29 @@ impl PaddleClient {
     ///
     /// Paddle sends a `Paddle-Signature` header in the format:
     /// `ts=<timestamp>;h1=<hex_signature>`
-    pub fn verify_webhook_signature(
+    #[tracing::instrument(skip_all, err)]
+    pub(crate) fn verify_webhook_signature(
         &self,
         headers: &axum::http::HeaderMap,
         body: &[u8],
-    ) -> Result<bool> {
+    ) -> Result<bool, VerifyWebhookSignatureError> {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
 
         if self.webhook_secret.is_empty() {
             tracing::warn!("Paddle webhook secret not configured — rejecting webhook");
-            anyhow::bail!("PADDLE_WEBHOOK_SECRET not configured, cannot verify webhook");
+            return Err(VerifyWebhookSignatureError::SecretNotConfigured {
+                location: std::panic::Location::caller(),
+            });
         }
 
         let signature_header = headers
             .get("Paddle-Signature")
             .and_then(|v| v.to_str().ok())
-            .context("Missing Paddle-Signature header")?;
+            .ok_or_else(|| VerifyWebhookSignatureError::MissingHeader {
+                location: std::panic::Location::caller(),
+            })?;
 
-        // Parse ts=<timestamp>;h1=<signature>
         let mut timestamp = "";
         let mut signature = "";
         for part in signature_header.split(';') {
@@ -266,17 +366,20 @@ impl PaddleClient {
         }
 
         if timestamp.is_empty() || signature.is_empty() {
-            anyhow::bail!("Invalid Paddle-Signature format");
+            return Err(VerifyWebhookSignatureError::InvalidFormat {
+                location: std::panic::Location::caller(),
+            });
         }
 
-        // Compute HMAC-SHA256 of "timestamp:body"
         let signed_payload = format!("{}:{}", timestamp, String::from_utf8_lossy(body));
 
+        use VerifyWebhookSignatureErrorCtx as Ctx;
+
         let mut mac = Hmac::<Sha256>::new_from_slice(self.webhook_secret.as_bytes())
-            .context("Invalid webhook secret for HMAC")?;
+            .with_context(Ctx::hmac_init())?;
         mac.update(signed_payload.as_bytes());
 
-        let expected = hex::decode(signature).context("Invalid hex in signature")?;
+        let expected = hex::decode(signature).with_context(Ctx::invalid_hex())?;
 
         Ok(mac.verify_slice(&expected).is_ok())
     }
@@ -288,7 +391,6 @@ impl PaddleClient {
         billing_period: &str,
         _services: &serde_json::Value,
     ) -> Vec<LineItem> {
-        // Convert cost to cents as string (Paddle uses minor units)
         let amount_cents = (total_cost * 100.0).round() as i64;
 
         if amount_cents <= 0 {
@@ -327,7 +429,6 @@ mod tests {
         let body = b"{\"event_id\":\"evt_123\",\"event_type\":\"transaction.completed\"}";
         let timestamp = "1234567890";
 
-        // Compute the expected signature
         let signed_payload = format!("{}:{}", timestamp, String::from_utf8_lossy(body));
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(signed_payload.as_bytes());
@@ -363,7 +464,7 @@ mod tests {
 
         let result = client.verify_webhook_signature(&headers, body);
         assert!(result.is_ok());
-        assert!(!result.unwrap()); // signature should not match
+        assert!(!result.unwrap());
     }
 
     #[test]
@@ -410,11 +511,10 @@ mod tests {
     async fn test_client_graceful_when_unconfigured() {
         let client = PaddleClient::new(
             "https://api.paddle.com".to_string(),
-            "".to_string(), // empty API key
+            "".to_string(),
             "".to_string(),
         );
 
-        // Should return stub data without making HTTP calls
         let customer = client
             .create_customer(uuid::Uuid::new_v4(), "test@example.com", Some("Test"))
             .await;
@@ -505,7 +605,6 @@ mod tests {
             return;
         };
 
-        // 1. Create customer
         let customer = client
             .create_customer(
                 uuid::Uuid::new_v4(),
@@ -517,18 +616,17 @@ mod tests {
 
         assert!(customer.id.starts_with("ctm_"));
 
-        // 2. Create transaction with multiple line items
         let items = vec![
             LineItem {
                 description: "Compute: m5.xlarge (720 hrs)".to_string(),
                 quantity: 1,
-                unit_price_amount: "24192".to_string(), // $241.92
+                unit_price_amount: "24192".to_string(),
                 unit_price_currency: "USD".to_string(),
             },
             LineItem {
                 description: "Network egress (50 GB)".to_string(),
                 quantity: 1,
-                unit_price_amount: "788".to_string(), // $7.88
+                unit_price_amount: "788".to_string(),
                 unit_price_currency: "USD".to_string(),
             },
         ];
@@ -540,7 +638,6 @@ mod tests {
 
         assert!(transaction.id.starts_with("txn_"));
 
-        // 3. Retrieve the transaction
         let fetched = client
             .get_transaction(&transaction.id)
             .await
@@ -558,7 +655,6 @@ mod tests {
 
         let email = format!("sandbox-dup-{}@example.com", uuid::Uuid::new_v4());
 
-        // First creation should succeed
         let customer1 = client
             .create_customer(uuid::Uuid::new_v4(), &email, Some("Dup Test"))
             .await
@@ -566,12 +662,10 @@ mod tests {
 
         assert!(customer1.id.starts_with("ctm_"));
 
-        // Second creation with same email — Paddle may return 409 or create a new customer
         let result = client
             .create_customer(uuid::Uuid::new_v4(), &email, Some("Dup Test 2"))
             .await;
 
-        // Either succeeds with a new customer or fails gracefully — shouldn't panic
         match result {
             Ok(customer2) => {
                 assert!(customer2.id.starts_with("ctm_"));

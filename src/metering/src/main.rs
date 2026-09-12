@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -10,6 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use sqlx::Row;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
@@ -42,14 +42,24 @@ pub struct AppState {
     pub internal_service_secret: String,
 }
 
-fn load_internal_service_secret() -> Result<String> {
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum LoadSecretError {
+    #[error("INTERNAL_SERVICE_SECRET must be set for the metering service [{location}]")]
+    Missing { location: dterror::Location },
+}
+
+#[tracing::instrument(skip_all, err)]
+fn load_internal_service_secret() -> Result<String, LoadSecretError> {
     std::env::var("INTERNAL_SERVICE_SECRET")
         .ok()
         .map(|secret| secret.trim().to_string())
         .filter(|secret| !secret.is_empty())
-        .context("INTERNAL_SERVICE_SECRET must be set for the metering service")
+        .ok_or(LoadSecretError::Missing {
+            location: std::panic::Location::caller(),
+        })
 }
 
+#[tracing::instrument(skip_all)]
 fn has_valid_internal_service_secret(
     configured_secret: &str,
     provided_secret: Option<&str>,
@@ -57,18 +67,8 @@ fn has_valid_internal_service_secret(
     matches!(provided_secret, Some(secret) if secret == configured_secret)
 }
 
-#[cfg(test)]
-mod billing_url_tests {
-    use super::BILLING_URL;
-
-    #[test]
-    fn billing_url_points_to_dashboard_billing_hash() {
-        assert_eq!(BILLING_URL, "https://dashboard.caution.co/#billing");
-    }
-}
-
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     dotenvy::dotenv().ok();
 
     tracing_subscriber::registry()
@@ -78,39 +78,60 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        eprintln!("FATAL: DATABASE_URL must be set");
+        std::process::exit(1);
+    });
 
     let paddle_api_url = std::env::var("PADDLE_API_URL").unwrap_or_default();
     let paddle_api_key = std::env::var("PADDLE_API_KEY").unwrap_or_default();
     let paddle_webhook_secret = std::env::var("PADDLE_WEBHOOK_SECRET").unwrap_or_default();
 
     if !paddle_api_key.is_empty() && paddle_api_url.is_empty() {
-        anyhow::bail!(
-            "PADDLE_API_KEY is set but PADDLE_API_URL is not — set PADDLE_API_URL to the Paddle API base URL (e.g. https://sandbox-api.paddle.com or https://api.paddle.com)"
+        eprintln!(
+            "FATAL: PADDLE_API_KEY is set but PADDLE_API_URL is not — set PADDLE_API_URL to the Paddle API base URL (e.g. https://sandbox-api.paddle.com or https://api.paddle.com)"
         );
+        std::process::exit(1);
     }
 
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await
-        .context("Failed to connect to database")?;
+        .unwrap_or_else(|e| {
+            eprintln!("FATAL: Failed to connect to database: {e}");
+            std::process::exit(1);
+        });
 
     tracing::info!("Connected to database");
 
-    let internal_service_secret = load_internal_service_secret()?;
+    let internal_service_secret = load_internal_service_secret().unwrap_or_else(|e| {
+        eprintln!("FATAL: {e}");
+        std::process::exit(1);
+    });
 
     let paddle = paddle::PaddleClient::new(paddle_api_url, paddle_api_key, paddle_webhook_secret);
-    let pricing_contents = std::fs::read_to_string("prices.json")
-        .context("prices.json not found. Configure explicit pricing before starting metering.")?;
+    let pricing_contents = std::fs::read_to_string("prices.json").unwrap_or_else(|e| {
+        eprintln!("FATAL: prices.json not found. Configure explicit pricing before starting metering: {e}");
+        std::process::exit(1);
+    });
     let paddle_subscriptions_enabled = std::env::var("BYOC_PADDLE_SUBSCRIPTIONS_ENABLED")
         .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
     let pricing = caution_config::pricing::PricingConfig::parse(
         &pricing_contents,
         paddle_subscriptions_enabled,
     )
-    .context("Failed to parse prices.json for Paddle subscription processing")?;
-    let calculator = calculator::CostCalculator::new(calculator::PricingRules::load()?);
+    .unwrap_or_else(|e| {
+        eprintln!("FATAL: Failed to parse prices.json for Paddle subscription processing: {e}");
+        std::process::exit(1);
+    });
+    let calculator = calculator::CostCalculator::new(
+        calculator::PricingRules::load()
+            .unwrap_or_else(|e| {
+                eprintln!("FATAL: Failed to load pricing rules: {e}");
+                std::process::exit(1);
+            }),
+    );
 
     let aws_config = aws_config::load_from_env().await;
     let cloudwatch = aws_sdk_cloudwatch::Client::new(&aws_config);
@@ -253,10 +274,14 @@ async fn main() -> Result<()> {
     let addr = "0.0.0.0:8083";
     tracing::info!("Metering service listening on {}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
-
-    Ok(())
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| {
+        eprintln!("FATAL: Failed to bind listener on {addr}: {e}");
+        std::process::exit(1);
+    });
+    axum::serve(listener, app).await.unwrap_or_else(|e| {
+        eprintln!("FATAL: Server error: {e}");
+        std::process::exit(1);
+    });
 }
 
 async fn health_check() -> &'static str {
@@ -314,6 +339,7 @@ impl RateLimiter {
 /// `gateway::proxy::metering_proxy_handler`), discarding whatever the original
 /// client sent. Without that, this header would be client-controlled and every
 /// caller could collapse into the same rate-limit bucket.
+#[tracing::instrument(skip_all)]
 async fn webhook_rate_limit_middleware(
     State(limiter): State<RateLimiter>,
     req: axum::http::Request<axum::body::Body>,
@@ -336,6 +362,7 @@ async fn webhook_rate_limit_middleware(
 }
 
 /// Internal service auth middleware — checks x-internal-service-secret header.
+#[tracing::instrument(skip_all)]
 async fn internal_auth_middleware(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -357,59 +384,229 @@ async fn internal_auth_middleware(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{has_valid_internal_service_secret, load_internal_service_secret};
-    use std::sync::{Mutex, OnceLock};
+// =============================================================================
+// Handler error types
+// =============================================================================
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum TrackResourceError {
+    #[error("could not track resource [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
 
-    #[test]
-    fn load_internal_service_secret_accepts_non_empty_value() {
-        let _guard = env_lock().lock().expect("env lock");
-        unsafe {
-            std::env::set_var("INTERNAL_SERVICE_SECRET", "super-secret");
-        }
-        let secret = load_internal_service_secret().expect("secret should load");
-        assert_eq!(secret, "super-secret");
-    }
-
-    #[test]
-    fn load_internal_service_secret_rejects_missing_value() {
-        let _guard = env_lock().lock().expect("env lock");
-        unsafe {
-            std::env::remove_var("INTERNAL_SERVICE_SECRET");
-        }
-        let err = load_internal_service_secret().expect_err("missing secret should fail");
-        assert!(
-            err.to_string()
-                .contains("INTERNAL_SERVICE_SECRET must be set")
-        );
-    }
-
-    #[test]
-    fn load_internal_service_secret_rejects_empty_value() {
-        let _guard = env_lock().lock().expect("env lock");
-        unsafe {
-            std::env::set_var("INTERNAL_SERVICE_SECRET", "   ");
-        }
-        let err = load_internal_service_secret().expect_err("empty secret should fail");
-        assert!(
-            err.to_string()
-                .contains("INTERNAL_SERVICE_SECRET must be set")
-        );
-    }
-
-    #[test]
-    fn has_valid_internal_service_secret_requires_exact_match() {
-        assert!(has_valid_internal_service_secret("secret", Some("secret")));
-        assert!(!has_valid_internal_service_secret("secret", Some("wrong")));
-        assert!(!has_valid_internal_service_secret("secret", None));
+impl IntoResponse for TrackResourceError {
+    fn into_response(self) -> Response {
+        tracing::error!(?self, "track resource error");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response()
     }
 }
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum UntrackResourceError {
+    #[error("could not untrack resource [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for UntrackResourceError {
+    fn into_response(self) -> Response {
+        tracing::error!(?self, "untrack resource error");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ListTrackedResourcesError {
+    #[error("could not list tracked resources [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for ListTrackedResourcesError {
+    fn into_response(self) -> Response {
+        tracing::error!(?self, "list tracked resources error");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetUserUsageError {
+    #[error("could not get user usage [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for GetUserUsageError {
+    fn into_response(self) -> Response {
+        tracing::error!(?self, "get user usage error");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SyncAwsCostsError {
+    #[error("could not sync AWS costs [{location}]")]
+    Aws {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for SyncAwsCostsError {
+    fn into_response(self) -> Response {
+        tracing::error!(?self, "sync AWS costs error");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetAwsOrgCostsError {
+    #[error("could not get AWS org costs [{location}]")]
+    Aws {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for GetAwsOrgCostsError {
+    fn into_response(self) -> Response {
+        tracing::error!(?self, "get AWS org costs error");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetAllAwsCostsError {
+    #[error("could not get all AWS costs [{location}]")]
+    Aws {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for GetAllAwsCostsError {
+    fn into_response(self) -> Response {
+        tracing::error!(?self, "get all AWS costs error");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum TestSimulateUsageError {
+    #[error("no pricing configured for resource type '{resource_type}' [{location}]")]
+    NoPricing {
+        resource_type: String,
+        location: Location,
+    },
+    #[error("could not record simulated usage [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for TestSimulateUsageError {
+    fn into_response(self) -> Response {
+        let err = &self;
+        match self {
+            Self::NoPricing { .. } => {
+                tracing::error!(?err, "test simulate usage: no pricing");
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "no pricing configured for this resource type"})),
+                )
+                    .into_response()
+            }
+            Self::Database { .. } => {
+                tracing::error!(?err, "test simulate usage: database error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "internal error"})),
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum TestSimulatePaddleTransactionError {
+    #[error("could not process paddle transaction [{location}]")]
+    Webhook {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for TestSimulatePaddleTransactionError {
+    fn into_response(self) -> Response {
+        tracing::error!(?self, "test simulate paddle transaction error");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response()
+    }
+}
+
+// =============================================================================
+// Handlers
+// =============================================================================
 
 #[derive(serde::Deserialize)]
 struct TrackResourceRequest {
@@ -425,13 +622,16 @@ struct TrackResourceRequest {
     metadata: Option<serde_json::Value>,
 }
 
+#[tracing::instrument(skip_all, err, fields(resource_id = %req.resource_id))]
 async fn track_resource(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TrackResourceRequest>,
-) -> impl IntoResponse {
+) -> Result<(StatusCode, Json<serde_json::Value>), TrackResourceError> {
+    use TrackResourceErrorCtx as Ctx;
+
     let metadata = req.metadata.unwrap_or(serde_json::json!({}));
 
-    let result = sqlx::query(
+    sqlx::query(
         r#"
         INSERT INTO tracked_resources (resource_id, organization_id, user_id, application_id, provider, instance_type, region, metadata, status, started_at, last_billed_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'running', NOW(), NOW())
@@ -464,38 +664,30 @@ async fn track_resource(
     .bind(&req.region)
     .bind(&metadata)
     .execute(&state.pool)
-    .await;
+    .await
+    .with_context(Ctx::database())?;
 
-    match result {
-        Ok(_) => {
-            tracing::info!("Now tracking resource: {}", req.resource_id);
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({"status": "tracking"})),
-            )
-        }
-        Err(e) => {
-            tracing::error!("Failed to track resource: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        }
-    }
+    tracing::info!("Now tracking resource: {}", req.resource_id);
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "tracking"})),
+    ))
 }
 
+#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
 async fn untrack_resource(
     State(state): State<Arc<AppState>>,
     Path(resource_id): Path<String>,
-) -> impl IntoResponse {
-    // First collect any remaining usage before stopping tracking
+) -> Result<(StatusCode, Json<serde_json::Value>), UntrackResourceError> {
+    use UntrackResourceErrorCtx as Ctx;
+
     if let Err(e) =
         collection::collect_resource_usage(&state, &resource_id, std::time::Duration::ZERO).await
     {
         tracing::warn!("Failed to collect final usage for {}: {}", resource_id, e);
     }
 
-    let result = sqlx::query(
+    sqlx::query(
         r#"
         UPDATE tracked_resources
         SET status = 'stopped', stopped_at = NOW()
@@ -504,28 +696,23 @@ async fn untrack_resource(
     )
     .bind(&resource_id)
     .execute(&state.pool)
-    .await;
+    .await
+    .with_context(Ctx::database())?;
 
-    match result {
-        Ok(_) => {
-            tracing::info!("Stopped tracking resource: {}", resource_id);
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({"status": "stopped"})),
-            )
-        }
-        Err(e) => {
-            tracing::error!("Failed to untrack resource: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-        }
-    }
+    tracing::info!("Stopped tracking resource: {}", resource_id);
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "stopped"})),
+    ))
 }
 
-async fn list_tracked_resources(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let result = sqlx::query_as::<_, TrackedResource>(
+#[tracing::instrument(skip_all, err)]
+async fn list_tracked_resources(
+    State(state): State<Arc<AppState>>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ListTrackedResourcesError> {
+    use ListTrackedResourcesErrorCtx as Ctx;
+
+    let resources = sqlx::query_as::<_, TrackedResource>(
         r#"
         SELECT resource_id, organization_id, user_id, application_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
         FROM tracked_resources
@@ -534,25 +721,23 @@ async fn list_tracked_resources(State(state): State<Arc<AppState>>) -> impl Into
         "#,
     )
     .fetch_all(&state.pool)
-    .await;
+    .await
+    .with_context(Ctx::database())?;
 
-    match result {
-        Ok(resources) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"resources": resources})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
-    }
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({"resources": resources})),
+    ))
 }
 
+#[tracing::instrument(skip_all, err, fields(user_id = %user_id))]
 async fn get_user_usage(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<uuid::Uuid>,
-) -> impl IntoResponse {
-    let result = sqlx::query(
+) -> Result<(StatusCode, Json<serde_json::Value>), GetUserUsageError> {
+    use GetUserUsageErrorCtx as Ctx;
+
+    let rows = sqlx::query(
         r#"
         SELECT
             provider,
@@ -567,51 +752,43 @@ async fn get_user_usage(
     )
     .bind(user_id)
     .fetch_all(&state.pool)
-    .await;
+    .await
+    .with_context(Ctx::database())?;
 
-    match result {
-        Ok(rows) => {
-            let mut usage_map = std::collections::BTreeMap::<(String, String), (f64, f64)>::new();
+    let mut usage_map = std::collections::BTreeMap::<(String, String), (f64, f64)>::new();
 
-            for row in &rows {
-                let provider = row.get::<String, _>("provider");
-                let resource_type = row.get::<String, _>("resource_type");
-                let quantity = row.get::<f64, _>("quantity");
-                let base_unit_cost_usd = row.get::<f64, _>("base_unit_cost_usd");
-                let margin_percent = row.get::<f64, _>("margin_percent");
-                let total_cost = crate::calculator::PricingBreakdown {
-                    base_unit_cost_usd,
-                    margin_percent,
-                }
-                .total_cost_usd(quantity);
-
-                let entry = usage_map
-                    .entry((provider, resource_type))
-                    .or_insert((0.0, 0.0));
-                entry.0 += quantity;
-                entry.1 += total_cost;
-            }
-
-            let usage: Vec<serde_json::Value> = usage_map
-                .into_iter()
-                .map(
-                    |((provider, resource_type), (total_quantity, total_cost))| {
-                        serde_json::json!({
-                            "provider": provider,
-                            "resource_type": resource_type,
-                            "total_quantity": total_quantity,
-                            "total_cost": total_cost,
-                        })
-                    },
-                )
-                .collect();
-            (StatusCode::OK, Json(serde_json::json!({"usage": usage})))
+    for row in &rows {
+        let provider = row.get::<String, _>("provider");
+        let resource_type = row.get::<String, _>("resource_type");
+        let quantity = row.get::<f64, _>("quantity");
+        let base_unit_cost_usd = row.get::<f64, _>("base_unit_cost_usd");
+        let margin_percent = row.get::<f64, _>("margin_percent");
+        let total_cost = crate::calculator::PricingBreakdown {
+            base_unit_cost_usd,
+            margin_percent,
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        .total_cost_usd(quantity);
+
+        let entry = usage_map
+            .entry((provider, resource_type))
+            .or_insert((0.0, 0.0));
+        entry.0 += quantity;
+        entry.1 += total_cost;
     }
+
+    let usage: Vec<serde_json::Value> = usage_map
+        .into_iter()
+        .map(|((provider, resource_type), (total_quantity, total_cost))| {
+            serde_json::json!({
+                "provider": provider,
+                "resource_type": resource_type,
+                "total_quantity": total_quantity,
+                "total_cost": total_cost,
+            })
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(serde_json::json!({"usage": usage}))))
 }
 
 // =============================================================================
@@ -628,10 +805,13 @@ struct TestSimulateUsageRequest {
 }
 
 /// Simulate resource usage for testing the billing pipeline
+#[tracing::instrument(skip_all, err)]
 async fn test_simulate_usage(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TestSimulateUsageRequest>,
-) -> impl IntoResponse {
+) -> Result<(StatusCode, Json<serde_json::Value>), TestSimulateUsageError> {
+    use TestSimulateUsageErrorCtx as Ctx;
+
     let hours = req.hours.unwrap_or(1.0);
     let instance_type = req.instance_type.unwrap_or_else(|| "m5.xlarge".to_string());
     let resource_id = format!("test-{}", uuid::Uuid::new_v4());
@@ -654,17 +834,14 @@ async fn test_simulate_usage(
     };
 
     let Some(pricing) = state.calculator.calculate_pricing(&usage) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!("No pricing configured for resource type {} with metadata {}", usage.resource_type.as_str(), usage.metadata)
-            })),
-        );
+        return Err(TestSimulateUsageError::NoPricing {
+            resource_type: usage.resource_type.as_str().to_string(),
+            location: std::panic::Location::caller(),
+        });
     };
     let cost = pricing.total_cost_usd(usage.quantity);
 
-    // Record locally
-    let result = sqlx::query(
+    sqlx::query(
         r#"
         INSERT INTO usage_ledger (
             organization_id, user_id, application_id, resource_id, provider, resource_type,
@@ -686,37 +863,28 @@ async fn test_simulate_usage(
     .bind(now)
     .bind(&usage.metadata)
     .execute(&state.pool)
-    .await;
+    .await
+    .with_context(Ctx::database())?;
 
-    match result {
-        Ok(_) => {
-            tracing::info!(
-                "TEST: Simulated {} hours of {} usage for user {}, cost: ${:.4}",
-                hours,
-                instance_type,
-                req.user_id,
-                cost
-            );
+    tracing::info!(
+        "TEST: Simulated {} hours of {} usage for user {}, cost: ${:.4}",
+        hours,
+        instance_type,
+        req.user_id,
+        cost
+    );
 
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "success",
-                    "resource_id": resource_id,
-                    "hours": hours,
-                    "instance_type": instance_type,
-                    "cost_usd": cost,
-                    "message": "Usage recorded locally. Paddle transaction will be created at billing cycle end."
-                })),
-            )
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": e.to_string()
-            })),
-        ),
-    }
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "success",
+            "resource_id": resource_id,
+            "hours": hours,
+            "instance_type": instance_type,
+            "cost_usd": cost,
+            "message": "Usage recorded locally. Paddle transaction will be created at billing cycle end."
+        })),
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -734,10 +902,13 @@ struct TestSimulatePaddleTransactionRequest {
 }
 
 /// Simulate a Paddle transaction webhook for testing email and billing flow
+#[tracing::instrument(skip_all, err)]
 async fn test_simulate_paddle_transaction(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TestSimulatePaddleTransactionRequest>,
-) -> impl IntoResponse {
+) -> Result<(StatusCode, Json<serde_json::Value>), TestSimulatePaddleTransactionError> {
+    use TestSimulatePaddleTransactionErrorCtx as Ctx;
+
     let transaction_id = req
         .transaction_id
         .unwrap_or_else(|| format!("txn_test_{}", uuid::Uuid::new_v4()));
@@ -800,25 +971,21 @@ async fn test_simulate_paddle_transaction(
         req.amount_cents as f64 / 100.0
     );
 
-    match webhooks::handle_paddle_transaction_test(&state, payload).await {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "success",
-                "transaction_id": transaction_id,
-                "event_type": event_type,
-                "invoice_number": invoice_number,
-                "amount_cents": req.amount_cents,
-                "message": "Paddle transaction processed. Check email service logs for notifications."
-            })),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({
-                "error": e.to_string()
-            })),
-        ),
-    }
+    webhooks::handle_paddle_transaction_test(&state, payload)
+        .await
+        .with_context(Ctx::webhook())?;
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "success",
+            "transaction_id": transaction_id,
+            "event_type": event_type,
+            "invoice_number": invoice_number,
+            "amount_cents": req.amount_cents,
+            "message": "Paddle transaction processed. Check email service logs for notifications."
+        })),
+    ))
 }
 
 // =============================================================================
@@ -834,45 +1001,31 @@ struct SyncAwsCostsRequest {
 }
 
 /// Sync costs from AWS Cost Explorer for all orgs and record as usage
+#[tracing::instrument(skip_all, err)]
 async fn sync_aws_costs(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SyncAwsCostsRequest>,
-) -> impl IntoResponse {
-    // Get date range
+) -> Result<(StatusCode, Json<serde_json::Value>), SyncAwsCostsError> {
+    use SyncAwsCostsErrorCtx as Ctx;
+
     let (default_start, default_end) = cost_explorer::current_billing_period();
     let start_date = req.start_date.unwrap_or(default_start);
     let end_date = req.end_date.unwrap_or(default_end);
 
     tracing::info!("Syncing AWS costs from {} to {}", start_date, end_date);
 
-    // Create Cost Explorer client
-    let ce_client = match cost_explorer::CostExplorerClient::new().await {
-        Ok(client) => client,
-        Err(e) => {
-            tracing::error!("Failed to create Cost Explorer client: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to initialize AWS: {}", e)})),
-            );
-        }
-    };
+    let ce_client = cost_explorer::CostExplorerClient::new()
+        .await
+        .with_context(Ctx::aws())?;
 
-    // Get costs for all orgs
-    let org_costs = match ce_client.get_all_org_costs(&start_date, &end_date).await {
-        Ok(costs) => costs,
-        Err(e) => {
-            tracing::error!("Failed to fetch AWS costs: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to fetch costs: {}", e)})),
-            );
-        }
-    };
+    let org_costs = ce_client
+        .get_all_org_costs(&start_date, &end_date)
+        .await
+        .with_context(Ctx::aws())?;
 
     let mut synced_count = 0;
     let mut total_cost = 0.0;
 
-    // Record each org's costs
     for (org_id, cost_data) in &org_costs {
         let parsed_org_id: uuid::Uuid = match org_id.parse() {
             Ok(id) => id,
@@ -882,7 +1035,6 @@ async fn sync_aws_costs(
             }
         };
 
-        // Record in our usage table
         let now = time::OffsetDateTime::now_utc();
         let result = sqlx::query(
             r#"
@@ -922,7 +1074,7 @@ async fn sync_aws_costs(
         }
     }
 
-    (
+    Ok((
         StatusCode::OK,
         Json(serde_json::json!({
             "status": "success",
@@ -934,7 +1086,7 @@ async fn sync_aws_costs(
             },
             "org_costs": org_costs,
         })),
-    )
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -944,73 +1096,126 @@ struct GetAwsCostsQuery {
 }
 
 /// Get AWS costs for a specific org
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 async fn get_aws_org_costs(
     Path(org_id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<GetAwsCostsQuery>,
-) -> impl IntoResponse {
+) -> Result<(StatusCode, Json<serde_json::Value>), GetAwsOrgCostsError> {
+    use GetAwsOrgCostsErrorCtx as Ctx;
+
     let (default_start, default_end) = cost_explorer::current_billing_period();
     let start_date = query.start_date.unwrap_or(default_start);
     let end_date = query.end_date.unwrap_or(default_end);
 
-    let ce_client = match cost_explorer::CostExplorerClient::new().await {
-        Ok(client) => client,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to initialize AWS: {}", e)})),
-            );
-        }
-    };
+    let ce_client = cost_explorer::CostExplorerClient::new()
+        .await
+        .with_context(Ctx::aws())?;
 
-    match ce_client
+    let cost_data = ce_client
         .get_org_costs(&org_id, &start_date, &end_date)
         .await
-    {
-        Ok(cost_data) => (StatusCode::OK, Json(serde_json::json!(cost_data))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
-    }
+        .with_context(Ctx::aws())?;
+
+    Ok((StatusCode::OK, Json(serde_json::json!(cost_data))))
 }
 
 /// Get AWS costs for all orgs (summary)
+#[tracing::instrument(skip_all, err)]
 async fn get_all_aws_costs(
     axum::extract::Query(query): axum::extract::Query<GetAwsCostsQuery>,
-) -> impl IntoResponse {
+) -> Result<(StatusCode, Json<serde_json::Value>), GetAllAwsCostsError> {
+    use GetAllAwsCostsErrorCtx as Ctx;
+
     let (default_start, default_end) = cost_explorer::current_billing_period();
     let start_date = query.start_date.unwrap_or(default_start);
     let end_date = query.end_date.unwrap_or(default_end);
 
-    let ce_client = match cost_explorer::CostExplorerClient::new().await {
-        Ok(client) => client,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to initialize AWS: {}", e)})),
-            );
-        }
-    };
+    let ce_client = cost_explorer::CostExplorerClient::new()
+        .await
+        .with_context(Ctx::aws())?;
 
-    match ce_client.get_all_org_costs(&start_date, &end_date).await {
-        Ok(org_costs) => {
-            let total: f64 = org_costs.values().map(|c| c.total_cost).sum();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "period": {
-                        "start": start_date,
-                        "end": end_date,
-                    },
-                    "total_cost": total,
-                    "org_count": org_costs.len(),
-                    "orgs": org_costs,
-                })),
-            )
+    let org_costs = ce_client
+        .get_all_org_costs(&start_date, &end_date)
+        .await
+        .with_context(Ctx::aws())?;
+
+    let total: f64 = org_costs.values().map(|c| c.total_cost).sum();
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "period": {
+                "start": start_date,
+                "end": end_date,
+            },
+            "total_cost": total,
+            "org_count": org_costs.len(),
+            "orgs": org_costs,
+        })),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BILLING_URL, has_valid_internal_service_secret, load_internal_service_secret};
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn billing_url_points_to_dashboard_billing_hash() {
+        assert_eq!(BILLING_URL, "https://dashboard.caution.co/#billing");
+    }
+
+    #[test]
+    fn load_internal_service_secret_accepts_non_empty_value() {
+        let guard = env_lock().lock().expect("env lock");
+        // SAFETY: test serialized by env_lock mutex, no concurrent env access.
+        unsafe {
+            std::env::set_var("INTERNAL_SERVICE_SECRET", "super-secret");
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        let secret = load_internal_service_secret().expect("secret should load");
+        assert_eq!(secret, "super-secret");
+        drop(guard);
+    }
+
+    #[test]
+    fn load_internal_service_secret_rejects_missing_value() {
+        let guard = env_lock().lock().expect("env lock");
+        // SAFETY: test serialized by env_lock mutex, no concurrent env access.
+        unsafe {
+            std::env::remove_var("INTERNAL_SERVICE_SECRET");
+        }
+        let err = load_internal_service_secret().expect_err("missing secret should fail");
+        assert!(
+            err.to_string()
+                .contains("INTERNAL_SERVICE_SECRET must be set")
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn load_internal_service_secret_rejects_empty_value() {
+        let guard = env_lock().lock().expect("env lock");
+        // SAFETY: test serialized by env_lock mutex, no concurrent env access.
+        unsafe {
+            std::env::set_var("INTERNAL_SERVICE_SECRET", "   ");
+        }
+        let err = load_internal_service_secret().expect_err("empty secret should fail");
+        assert!(
+            err.to_string()
+                .contains("INTERNAL_SERVICE_SECRET must be set")
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn has_valid_internal_service_secret_requires_exact_match() {
+        assert!(has_valid_internal_service_secret("secret", Some("secret")));
+        assert!(!has_valid_internal_service_secret("secret", Some("wrong")));
+        assert!(!has_valid_internal_service_secret("secret", None));
     }
 }

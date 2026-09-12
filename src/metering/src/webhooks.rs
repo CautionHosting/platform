@@ -10,9 +10,10 @@ use axum::{
     Json,
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::sync::Arc;
@@ -30,42 +31,92 @@ pub struct PaddleWebhookPayload {
     pub data: serde_json::Value,
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum PaddleWebhookError {
+    #[error("paddle webhook signature verification error [{location}]")]
+    SignatureVerification {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("invalid paddle webhook signature [{location}]")]
+    InvalidSignature {
+        location: Location,
+    },
+
+    #[error("malformed paddle webhook payload [{location}]")]
+    MalformedPayload {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("paddle webhook processing failed [{location}]")]
+    Processing {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for PaddleWebhookError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::SignatureVerification { .. } | Self::InvalidSignature { .. } => {
+                tracing::warn!(error = ?self, "paddle webhook signature rejected");
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "invalid signature"})),
+                )
+                    .into_response()
+            }
+            Self::MalformedPayload { .. } => {
+                tracing::warn!(error = ?self, "malformed paddle webhook payload");
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "malformed webhook payload"})),
+                )
+                    .into_response()
+            }
+            Self::Processing { .. } => {
+                tracing::error!(error = ?self, "paddle webhook processing failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "internal error"})),
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
 /// Handle incoming Paddle webhooks
+#[tracing::instrument(skip_all, err)]
 pub async fn paddle_webhook_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
-) -> impl IntoResponse {
-    // Verify webhook signature
+) -> Result<(StatusCode, Json<serde_json::Value>), PaddleWebhookError> {
+    use PaddleWebhookErrorCtx as Ctx;
+
     match state.paddle.verify_webhook_signature(&headers, &body) {
         Ok(true) => {}
         Ok(false) => {
-            tracing::warn!("Invalid Paddle webhook signature");
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "invalid signature"})),
-            );
+            return Err(PaddleWebhookError::InvalidSignature {
+                location: std::panic::Location::caller(),
+            });
         }
         Err(e) => {
-            tracing::warn!("Paddle webhook signature verification error: {}", e);
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "signature verification failed"})),
-            );
+            return Err(e).with_context(Ctx::signature_verification());
         }
     }
 
-    // Parse the payload
-    let payload: PaddleWebhookPayload = match serde_json::from_slice(&body) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("Failed to parse Paddle webhook: {}", e);
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "malformed webhook payload"})),
-            );
-        }
-    };
+    let payload: PaddleWebhookPayload = serde_json::from_slice(&body)
+        .with_context(Ctx::malformed_payload())?;
 
     tracing::info!(
         "Received Paddle webhook: {} ({})",
@@ -73,8 +124,6 @@ pub async fn paddle_webhook_handler(
         payload.event_id
     );
 
-    // Acquire advisory lock to serialize concurrent processing of same event_id.
-    // This prevents two simultaneous deliveries from both passing the INSERT check.
     let lock_key = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -82,30 +131,18 @@ pub async fn paddle_webhook_handler(
         hasher.finish() as i64
     };
 
-    let mut tx = match state.pool.begin().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::error!("Failed to begin transaction: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "internal error"})),
-            );
-        }
-    };
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .with_context(Ctx::processing())?;
 
-    if let Err(e) = sqlx::query("SELECT pg_advisory_xact_lock($1)")
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(lock_key)
         .execute(&mut *tx)
         .await
-    {
-        tracing::error!("Failed to acquire advisory lock: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "internal error"})),
-        );
-    }
+        .with_context(Ctx::processing())?;
 
-    // Idempotency check (serialized by advisory lock)
     let idempotency_result = sqlx::query(
         r#"
         INSERT INTO paddle_webhook_events (event_id, event_type, payload)
@@ -117,102 +154,130 @@ pub async fn paddle_webhook_handler(
     .bind(&payload.event_type)
     .bind(&payload.data)
     .execute(&mut *tx)
-    .await;
+    .await
+    .with_context(Ctx::processing())?;
 
-    match idempotency_result {
-        Ok(result) if result.rows_affected() == 0 => {
-            tracing::debug!("Webhook {} already processed, skipping", payload.event_id);
-            // tx drops here, releasing the advisory lock
-            return (
-                StatusCode::OK,
-                Json(serde_json::json!({"status": "already_processed"})),
-            );
-        }
-        Err(e) => {
-            tracing::error!("Failed to record webhook event for idempotency: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "idempotency check failed"})),
-            );
-        }
-        Ok(_) => {} // rows_affected=1, new event — proceed
+    if idempotency_result.rows_affected() == 0 {
+        tracing::debug!("Webhook {} already processed, skipping", payload.event_id);
+        return Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "already_processed"})),
+        ));
     }
 
-    // Keep the claim transaction and advisory lock open while applying the business
-    // effect. A crash rolls the claim back, and concurrent deliveries wait until
-    // the first delivery has either completed or failed.
-
-    // Dispatch by event type
-    let result = match payload.event_type.as_str() {
-        "transaction.completed" => handle_transaction_completed(&state, &payload).await,
-        "transaction.billed" => handle_transaction_billed(&state, &payload).await,
-        "transaction.payment_failed" => handle_payment_failed(&state, &payload).await,
+    let result: Result<(), BoxError> = match payload.event_type.as_str() {
+        "transaction.completed" => handle_transaction_completed(&state, &payload)
+            .await
+            .map_err(|e| e.into()),
+        "transaction.billed" => handle_transaction_billed(&state, &payload)
+            .await
+            .map_err(|e| e.into()),
+        "transaction.payment_failed" => handle_payment_failed(&state, &payload)
+            .await
+            .map_err(|e| e.into()),
         "subscription.created"
         | "subscription.updated"
         | "subscription.activated"
         | "subscription.resumed"
         | "subscription.paused"
-        | "subscription.canceled" => handle_subscription_event(&state, &payload).await,
+        | "subscription.canceled" => handle_subscription_event(&state, &payload)
+            .await
+            .map_err(|e| e.into()),
         _ => {
             tracing::debug!("Ignoring Paddle event type: {}", payload.event_type);
             Ok(())
         }
     };
 
-    if let Err(e) = result {
-        tracing::error!(
-            "Failed to handle Paddle webhook {}: {}",
-            payload.event_type,
-            e
-        );
-        // Dropping the open claim transaction rolls back the event row, so a
-        // Paddle retry can process it again.
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "webhook processing failed"})),
-        );
-    }
+    result.with_context(Ctx::processing())?;
 
-    if let Err(e) = tx.commit().await {
-        tracing::error!("Failed to commit Paddle webhook claim: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "internal error"})),
-        );
-    }
+    tx.commit().await.with_context(Ctx::processing())?;
 
-    (
+    Ok((
         StatusCode::OK,
         Json(serde_json::json!({"status": "processed"})),
-    )
+    ))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum HandleSubscriptionEventErrorKind {
+    InvalidSubscriptionId,
+    InvalidCustomerId,
+    InvalidOccurredAt,
+    MissingStatus,
+    UnsupportedStatus,
+    NoMatchingTier,
+    MissingBillingPeriod,
+    MissingCustomData,
+    MissingOrgMapping,
+    MissingCheckoutIntent,
+    IntentMismatch,
+    AlreadySubscribed,
+    CatalogNotConfigured,
+    CatalogVersionOverflow,
+    Database,
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("subscription event processing failed ({kind:?}) [{location}]")]
+pub(crate) struct HandleSubscriptionEventError {
+    kind: HandleSubscriptionEventErrorKind,
+    #[location]
+    location: Location,
+    #[source]
+    #[context(option)]
+    source: Option<BoxError>,
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn handle_subscription_event(
     state: &AppState,
     payload: &PaddleWebhookPayload,
-) -> anyhow::Result<()> {
+) -> Result<(), HandleSubscriptionEventError> {
+    use HandleSubscriptionEventErrorCtx as Ctx;
+
     let data = &payload.data;
     let paddle_subscription_id = data["id"]
         .as_str()
         .filter(|id| id.starts_with("sub_"))
-        .ok_or_else(|| anyhow::anyhow!("subscription event is missing a valid subscription id"))?;
+        .ok_or_else(|| HandleSubscriptionEventError {
+            kind: HandleSubscriptionEventErrorKind::InvalidSubscriptionId,
+            location: std::panic::Location::caller(),
+            source: None,
+        })?;
     let paddle_customer_id = data["customer_id"]
         .as_str()
         .filter(|id| id.starts_with("ctm_"))
-        .ok_or_else(|| anyhow::anyhow!("subscription event is missing a valid customer id"))?;
+        .ok_or_else(|| HandleSubscriptionEventError {
+            kind: HandleSubscriptionEventErrorKind::InvalidCustomerId,
+            location: std::panic::Location::caller(),
+            source: None,
+        })?;
     let occurred_at = DateTime::parse_from_rfc3339(&payload.occurred_at)
-        .map_err(|_| anyhow::anyhow!("subscription event has an invalid occurred_at"))?
-        .with_timezone(&Utc);
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|_| HandleSubscriptionEventError {
+            kind: HandleSubscriptionEventErrorKind::InvalidOccurredAt,
+            location: std::panic::Location::caller(),
+            source: None,
+        })?;
 
-    let provider_status = data["status"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("subscription event is missing status"))?;
+    let provider_status = data["status"].as_str().ok_or_else(|| HandleSubscriptionEventError {
+        kind: HandleSubscriptionEventErrorKind::MissingStatus,
+        location: std::panic::Location::caller(),
+        source: None,
+    })?;
     let status = match provider_status {
         "active" | "trialing" => "active",
         "past_due" => "past_due",
         "paused" => "paused",
         "canceled" => "canceled",
-        _ => return Err(anyhow::anyhow!("unsupported Paddle subscription status")),
+        _ => {
+            return Err(HandleSubscriptionEventError {
+                kind: HandleSubscriptionEventErrorKind::UnsupportedStatus,
+                location: std::panic::Location::caller(),
+                source: None,
+            });
+        }
     };
 
     let price_ids: Vec<&str> = data["items"]
@@ -234,9 +299,11 @@ async fn handle_subscription_event(
     let (tier_id, tier) = match matched_tiers.as_slice() {
         [(tier_id, tier)] if price_ids.len() == 1 => ((*tier_id).clone(), *tier),
         _ => {
-            return Err(anyhow::anyhow!(
-                "subscription event does not contain exactly one configured tier price"
-            ));
+            return Err(HandleSubscriptionEventError {
+                kind: HandleSubscriptionEventErrorKind::NoMatchingTier,
+                location: std::panic::Location::caller(),
+                source: None,
+            });
         }
     };
 
@@ -249,17 +316,24 @@ async fn handle_subscription_event(
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
         .map(|value| value.with_timezone(&Utc));
     if status != "canceled" && (period_start.is_none() || period_end.is_none()) {
-        return Err(anyhow::anyhow!(
-            "active subscription event is missing its billing period"
-        ));
+        return Err(HandleSubscriptionEventError {
+            kind: HandleSubscriptionEventErrorKind::MissingBillingPeriod,
+            location: std::panic::Location::caller(),
+            source: None,
+        });
     }
     let cancel_at_period_end = data["scheduled_change"]["action"].as_str() == Some("cancel");
 
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .with_context(Ctx::new(HandleSubscriptionEventErrorKind::Database))?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(paddle_subscription_id)
         .execute(&mut *tx)
-        .await?;
+        .await
+        .with_context(Ctx::new(HandleSubscriptionEventErrorKind::Database))?;
 
     let existing = sqlx::query(
         "SELECT id, organization_id, user_id, current_period_start, current_period_end
@@ -267,7 +341,8 @@ async fn handle_subscription_event(
     )
     .bind(paddle_subscription_id)
     .fetch_optional(&mut *tx)
-    .await?;
+    .await
+    .with_context(Ctx::new(HandleSubscriptionEventErrorKind::Database))?;
 
     let (subscription_id, organization_id, user_id, effective_start, effective_end) =
         if let Some(row) = existing {
@@ -281,21 +356,31 @@ async fn handle_subscription_event(
                 period_end.unwrap_or(current_end),
             )
         } else {
-            let custom_data = data["custom_data"]
-                .as_object()
-                .ok_or_else(|| anyhow::anyhow!("new subscription is missing custom_data"))?;
+            let custom_data = data["custom_data"].as_object().ok_or_else(|| {
+                HandleSubscriptionEventError {
+                    kind: HandleSubscriptionEventErrorKind::MissingCustomData,
+                    location: std::panic::Location::caller(),
+                    source: None,
+                }
+            })?;
             let organization_id = custom_data
                 .get("caution_organization_id")
                 .and_then(|value| value.as_str())
                 .and_then(|value| Uuid::parse_str(value).ok())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("new subscription is missing organization mapping")
+                .ok_or_else(|| HandleSubscriptionEventError {
+                    kind: HandleSubscriptionEventErrorKind::MissingOrgMapping,
+                    location: std::panic::Location::caller(),
+                    source: None,
                 })?;
             let intent_id = custom_data
                 .get("caution_checkout_intent_id")
                 .and_then(|value| value.as_str())
                 .and_then(|value| Uuid::parse_str(value).ok())
-                .ok_or_else(|| anyhow::anyhow!("new subscription is missing checkout intent"))?;
+                .ok_or_else(|| HandleSubscriptionEventError {
+                    kind: HandleSubscriptionEventErrorKind::MissingCheckoutIntent,
+                    location: std::panic::Location::caller(),
+                    source: None,
+                })?;
             let intent = sqlx::query(
                 "SELECT requested_by_user_id, new_tier, new_limit
                  FROM subscription_intents
@@ -307,14 +392,21 @@ async fn handle_subscription_event(
             .bind(intent_id)
             .bind(organization_id)
             .fetch_optional(&mut *tx)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("new subscription checkout intent is not valid"))?;
+            .await
+            .with_context(Ctx::new(HandleSubscriptionEventErrorKind::Database))?
+            .ok_or_else(|| HandleSubscriptionEventError {
+                kind: HandleSubscriptionEventErrorKind::MissingCheckoutIntent,
+                location: std::panic::Location::caller(),
+                source: None,
+            })?;
             if intent.get::<Option<String>, _>("new_tier").as_deref() != Some(tier_id.as_str())
                 || intent.get::<Option<i32>, _>("new_limit") != Some(tier.enclaves)
             {
-                return Err(anyhow::anyhow!(
-                    "new subscription does not match its checkout intent"
-                ));
+                return Err(HandleSubscriptionEventError {
+                    kind: HandleSubscriptionEventErrorKind::IntentMismatch,
+                    location: std::panic::Location::caller(),
+                    source: None,
+                });
             }
             let conflicting_source: Option<String> = sqlx::query_scalar(
                 "SELECT billing_source FROM subscriptions
@@ -322,20 +414,29 @@ async fn handle_subscription_event(
             )
             .bind(organization_id)
             .fetch_optional(&mut *tx)
-            .await?;
+            .await
+            .with_context(Ctx::new(HandleSubscriptionEventErrorKind::Database))?;
             if conflicting_source.is_some() {
-                return Err(anyhow::anyhow!(
-                    "organization already has a non-canceled subscription"
-                ));
+                return Err(HandleSubscriptionEventError {
+                    kind: HandleSubscriptionEventErrorKind::AlreadySubscribed,
+                    location: std::panic::Location::caller(),
+                    source: None,
+                });
             }
             (
                 Uuid::new_v4(),
                 organization_id,
                 intent.get::<Uuid, _>("requested_by_user_id"),
-                period_start
-                    .ok_or_else(|| anyhow::anyhow!("new subscription is missing period start"))?,
-                period_end
-                    .ok_or_else(|| anyhow::anyhow!("new subscription is missing period end"))?,
+                period_start.ok_or_else(|| HandleSubscriptionEventError {
+                    kind: HandleSubscriptionEventErrorKind::MissingBillingPeriod,
+                    location: std::panic::Location::caller(),
+                    source: None,
+                })?,
+                period_end.ok_or_else(|| HandleSubscriptionEventError {
+                    kind: HandleSubscriptionEventErrorKind::MissingBillingPeriod,
+                    location: std::panic::Location::caller(),
+                    source: None,
+                })?,
             )
         };
 
@@ -344,10 +445,18 @@ async fn handle_subscription_event(
             .pricing
             .paddle_catalog
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Paddle catalog is not configured"))?
+            .ok_or_else(|| HandleSubscriptionEventError {
+                kind: HandleSubscriptionEventErrorKind::CatalogNotConfigured,
+                location: std::panic::Location::caller(),
+                source: None,
+            })?
             .version,
     )
-    .map_err(|_| anyhow::anyhow!("Paddle catalog version is too large"))?;
+    .map_err(|_| HandleSubscriptionEventError {
+        kind: HandleSubscriptionEventErrorKind::CatalogVersionOverflow,
+        location: std::panic::Location::caller(),
+        source: None,
+    })?;
     let projection = sqlx::query(
         "INSERT INTO subscriptions
          (id, user_id, organization_id, tier, max_vcpus, max_apps,
@@ -409,7 +518,8 @@ async fn handle_subscription_event(
     .bind(cancel_at_period_end)
     .bind(occurred_at)
     .execute(&mut *tx)
-    .await?;
+    .await
+    .with_context(Ctx::new(HandleSubscriptionEventErrorKind::Database))?;
     if projection.rows_affected() == 0 {
         return Ok(());
     }
@@ -428,7 +538,8 @@ async fn handle_subscription_event(
         .bind(intent_id)
         .bind(organization_id)
         .execute(&mut *tx)
-        .await?;
+        .await
+        .with_context(Ctx::new(HandleSubscriptionEventErrorKind::Database))?;
     }
     if let Some(intent_id) = data["custom_data"]["caution_change_intent_id"]
         .as_str()
@@ -443,7 +554,8 @@ async fn handle_subscription_event(
         .bind(organization_id)
         .bind(subscription_id)
         .execute(&mut *tx)
-        .await?;
+        .await
+        .with_context(Ctx::new(HandleSubscriptionEventErrorKind::Database))?;
         if applied.rows_affected() == 1 {
             sqlx::query(
                 "UPDATE subscriptions SET pending_tier = NULL, pending_max_apps = NULL, updated_at = NOW()
@@ -451,7 +563,8 @@ async fn handle_subscription_event(
             )
             .bind(subscription_id)
             .execute(&mut *tx)
-            .await?;
+            .await
+            .with_context(Ctx::new(HandleSubscriptionEventErrorKind::Database))?;
         }
     }
     if cancel_at_period_end || status == "canceled" {
@@ -463,7 +576,8 @@ async fn handle_subscription_event(
         .bind(organization_id)
         .bind(paddle_subscription_id)
         .execute(&mut *tx)
-        .await?;
+        .await
+        .with_context(Ctx::new(HandleSubscriptionEventErrorKind::Database))?;
     }
     sqlx::query(
         "INSERT INTO billing_config (organization_id, paddle_customer_id, updated_at)
@@ -474,17 +588,33 @@ async fn handle_subscription_event(
     .bind(organization_id)
     .bind(paddle_customer_id)
     .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
+    .await
+    .with_context(Ctx::new(HandleSubscriptionEventErrorKind::Database))?;
+    tx.commit()
+        .await
+        .with_context(Ctx::new(HandleSubscriptionEventErrorKind::Database))?;
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ClearCreditSuspensionError {
+    #[error("could not clear credit suspension [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
 
+#[tracing::instrument(skip_all, err)]
 async fn clear_credit_suspension_if_needed(
     state: &AppState,
     org_id: uuid::Uuid,
     new_balance: i64,
-) -> anyhow::Result<()> {
+) -> Result<(), ClearCreditSuspensionError> {
+    use ClearCreditSuspensionErrorCtx as Ctx;
+
     if new_balance <= 0 {
         return Ok(());
     }
@@ -493,7 +623,8 @@ async fn clear_credit_suspension_if_needed(
         sqlx::query_scalar("SELECT credit_suspended_at FROM organizations WHERE id = $1")
             .bind(org_id)
             .fetch_optional(&state.pool)
-            .await?
+            .await
+            .with_context(Ctx::database())?
             .flatten();
 
     if suspended.is_none() {
@@ -507,14 +638,16 @@ async fn clear_credit_suspension_if_needed(
     sqlx::query("UPDATE organizations SET credit_suspended_at = NULL WHERE id = $1")
         .bind(org_id)
         .execute(&state.pool)
-        .await?;
+        .await
+        .with_context(Ctx::database())?;
 
     let unsuspend_user_id: Option<uuid::Uuid> = sqlx::query_scalar(
         "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1",
     )
     .bind(org_id)
     .fetch_optional(&state.pool)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
     if let Some(uid) = unsuspend_user_id {
         let api_url = std::env::var("API_URL").unwrap_or_else(|_| "http://api:8080".to_string());
@@ -536,11 +669,25 @@ async fn clear_credit_suspension_if_needed(
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum HandleTransactionCompletedError {
+    #[error("could not process completed transaction [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 /// Handle transaction.completed — payment was collected successfully
+#[tracing::instrument(skip_all, err)]
 async fn handle_transaction_completed(
     state: &AppState,
     payload: &PaddleWebhookPayload,
-) -> anyhow::Result<()> {
+) -> Result<(), HandleTransactionCompletedError> {
+    use HandleTransactionCompletedErrorCtx as Ctx;
+
     let transaction_id = payload.data["id"].as_str().unwrap_or_default();
     let customer_id = payload.data["customer_id"].as_str().unwrap_or_default();
 
@@ -550,12 +697,12 @@ async fn handle_transaction_completed(
         customer_id
     );
 
-    // Find the org by paddle_customer_id (billing_config is keyed by organization_id)
     let org_row =
         sqlx::query("SELECT organization_id FROM billing_config WHERE paddle_customer_id = $1")
             .bind(customer_id)
             .fetch_optional(&state.pool)
-            .await?;
+            .await
+            .with_context(Ctx::database())?;
 
     let Some(org_row) = org_row else {
         tracing::warn!(
@@ -567,7 +714,6 @@ async fn handle_transaction_completed(
 
     let org_id: uuid::Uuid = org_row.get("organization_id");
 
-    // Update invoice status to paid
     sqlx::query(
         r#"
         UPDATE invoices
@@ -577,9 +723,9 @@ async fn handle_transaction_completed(
     )
     .bind(transaction_id)
     .execute(&state.pool)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
-    // Also mark any subscription billing event as paid
     if let Err(e) = sqlx::query(
         r#"
         UPDATE subscription_ledger sl
@@ -600,29 +746,27 @@ async fn handle_transaction_completed(
         );
     }
 
-    // Send confirmation email (find a user in the org for the email)
     let user_id: Option<uuid::Uuid> = sqlx::query_scalar(
         "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1",
     )
     .bind(org_id)
     .fetch_optional(&state.pool)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
     if let Some(user_id) = user_id {
-        send_payment_confirmation_email(state, user_id, transaction_id).await?;
+        send_payment_confirmation_email(state, user_id, transaction_id)
+            .await
+            .with_context(Ctx::database())?;
     }
 
-    // Credit prepaid purchases only against a server-authoritative intent row
-    // recorded by the API when the transaction was created. The credited amount
-    // comes from that row, never from client-controlled custom_data. A missing
-    // row means we cannot trust the amount, so we refuse and leave it for manual
-    // reconciliation rather than minting an attacker-declared value.
     let intent = sqlx::query(
         "SELECT organization_id, user_id, credit_cents FROM credit_purchase_intents WHERE paddle_transaction_id = $1",
     )
     .bind(transaction_id)
     .fetch_optional(&state.pool)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
     if let Some(intent) = intent {
         let intent_org_id: uuid::Uuid = intent.get("organization_id");
@@ -639,8 +783,6 @@ async fn handle_transaction_completed(
             return Ok(());
         }
 
-        // The UNIQUE(paddle_transaction_id) constraint is the durable
-        // one-payment-to-one-grant gate; a redundant webhook/callback is a no-op.
         match credit_ledger_once(
             &state.pool,
             org_id,
@@ -653,7 +795,8 @@ async fn handle_transaction_completed(
             ),
             transaction_id,
         )
-        .await?
+        .await
+        .with_context(Ctx::database())?
         {
             CreditOutcome::AlreadyCredited => {
                 tracing::info!(
@@ -669,7 +812,9 @@ async fn handle_transaction_completed(
                     credit_cents,
                     new_balance
                 );
-                clear_credit_suspension_if_needed(state, org_id, new_balance).await?;
+                clear_credit_suspension_if_needed(state, org_id, new_balance)
+                    .await
+                    .with_context(Ctx::database())?;
             }
         }
         return Ok(());
@@ -678,11 +823,25 @@ async fn handle_transaction_completed(
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum HandleTransactionBilledError {
+    #[error("could not process billed transaction [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 /// Handle transaction.billed — invoice was created/issued
+#[tracing::instrument(skip_all, err)]
 async fn handle_transaction_billed(
     state: &AppState,
     payload: &PaddleWebhookPayload,
-) -> anyhow::Result<()> {
+) -> Result<(), HandleTransactionBilledError> {
+    use HandleTransactionBilledErrorCtx as Ctx;
+
     let transaction_id = payload.data["id"].as_str().unwrap_or_default();
     let customer_id = payload.data["customer_id"].as_str().unwrap_or_default();
     let total = payload.data["details"]["totals"]["total"]
@@ -703,12 +862,12 @@ async fn handle_transaction_billed(
         customer_id
     );
 
-    // Find the user
     let user_row =
         sqlx::query("SELECT organization_id FROM billing_config WHERE paddle_customer_id = $1")
             .bind(customer_id)
             .fetch_optional(&state.pool)
-            .await?;
+            .await
+            .with_context(Ctx::database())?;
 
     let Some(user_row) = user_row else {
         tracing::warn!(
@@ -720,15 +879,14 @@ async fn handle_transaction_billed(
 
     let org_id: uuid::Uuid = user_row.get("organization_id");
 
-    // Resolve actual user_id for invoice (invoices table still uses user_id FK)
     let invoice_user_id: uuid::Uuid = sqlx::query_scalar(
         "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1",
     )
     .bind(org_id)
     .fetch_one(&state.pool)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
-    // Record the invoice
     sqlx::query(
         r#"
         INSERT INTO invoices (
@@ -752,26 +910,35 @@ async fn handle_transaction_billed(
     .bind(tax)
     .bind(currency)
     .execute(&state.pool)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
-    // Send invoice email
-    send_invoice_email(
-        state,
-        invoice_user_id,
-        transaction_id,
-        total,
-        invoice_number,
-    )
-    .await?;
+    send_invoice_email(state, invoice_user_id, transaction_id, total, invoice_number)
+        .await
+        .with_context(Ctx::database())?;
 
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum HandlePaymentFailedError {
+    #[error("could not process failed payment [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 /// Handle transaction.payment_failed — payment collection failed
+#[tracing::instrument(skip_all, err)]
 async fn handle_payment_failed(
     state: &AppState,
     payload: &PaddleWebhookPayload,
-) -> anyhow::Result<()> {
+) -> Result<(), HandlePaymentFailedError> {
+    use HandlePaymentFailedErrorCtx as Ctx;
+
     let transaction_id = payload.data["id"].as_str().unwrap_or_default();
     let customer_id = payload.data["customer_id"].as_str().unwrap_or_default();
 
@@ -781,12 +948,12 @@ async fn handle_payment_failed(
         customer_id
     );
 
-    // Find the user
     let user_row =
         sqlx::query("SELECT organization_id FROM billing_config WHERE paddle_customer_id = $1")
             .bind(customer_id)
             .fetch_optional(&state.pool)
-            .await?;
+            .await
+            .with_context(Ctx::database())?;
 
     let Some(user_row) = user_row else {
         return Ok(());
@@ -794,7 +961,6 @@ async fn handle_payment_failed(
 
     let org_id: uuid::Uuid = user_row.get("organization_id");
 
-    // Resolve user for email notifications
     let user_id: uuid::Uuid = sqlx::query_scalar(
         "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1",
     )
@@ -803,15 +969,14 @@ async fn handle_payment_failed(
     .await
     .unwrap_or(org_id);
 
-    // Update invoice status
     sqlx::query(
         r#"UPDATE invoices SET payment_status = 'failed' WHERE paddle_transaction_id = $1"#,
     )
     .bind(transaction_id)
     .execute(&state.pool)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
-    // Mark subscription as past_due if this was a subscription payment
     if let Err(e) = sqlx::query(
         r#"
         UPDATE subscriptions SET status = 'past_due', updated_at = NOW()
@@ -834,7 +999,6 @@ async fn handle_payment_failed(
         );
     }
 
-    // Mark the billing event as failed
     if let Err(e) = sqlx::query(
         r#"
         UPDATE subscription_ledger sl
@@ -855,17 +1019,32 @@ async fn handle_payment_failed(
         );
     }
 
-    send_payment_failure_email(state, user_id, transaction_id).await?;
+    send_payment_failure_email(state, user_id, transaction_id)
+        .await
+        .with_context(Ctx::database())?;
 
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum HandlePaddleTransactionTestError {
+    #[error("paddle transaction test handler failed [{location}]")]
+    Wrapped {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 /// Public entry point for test simulation
+#[tracing::instrument(skip_all, err)]
 pub async fn handle_paddle_transaction_test(
     state: &AppState,
     payload: PaddleWebhookPayload,
-) -> anyhow::Result<()> {
-    // Record the event for idempotency (same as real webhook handler)
+) -> Result<(), HandlePaddleTransactionTestError> {
+    use HandlePaddleTransactionTestErrorCtx as Ctx;
+
     if let Err(e) = sqlx::query(
         r#"
         INSERT INTO paddle_webhook_events (event_id, event_type, payload)
@@ -887,28 +1066,47 @@ pub async fn handle_paddle_transaction_test(
     }
 
     match payload.event_type.as_str() {
-        "transaction.completed" => handle_transaction_completed(state, &payload).await,
-        "transaction.billed" => handle_transaction_billed(state, &payload).await,
-        "transaction.payment_failed" => handle_payment_failed(state, &payload).await,
-        _ => Ok(()),
+        "transaction.completed" => handle_transaction_completed(state, &payload)
+            .await
+            .with_context(Ctx::wrapped())?,
+        "transaction.billed" => handle_transaction_billed(state, &payload)
+            .await
+            .with_context(Ctx::wrapped())?,
+        "transaction.payment_failed" => handle_payment_failed(state, &payload)
+            .await
+            .with_context(Ctx::wrapped())?,
+        _ => {}
     }
+
+    Ok(())
 }
 
-// =============================================================================
-// Email helpers (same as before, adapted for Paddle data)
-// =============================================================================
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SendInvoiceEmailError {
+    #[error("could not query user for invoice email [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
 
+#[tracing::instrument(skip_all, err)]
 async fn send_invoice_email(
     state: &AppState,
     user_id: uuid::Uuid,
     transaction_id: &str,
     amount_cents: i64,
     invoice_number: &str,
-) -> anyhow::Result<()> {
+) -> Result<(), SendInvoiceEmailError> {
+    use SendInvoiceEmailErrorCtx as Ctx;
+
     let user = sqlx::query(r#"SELECT email FROM users WHERE id = $1"#)
         .bind(user_id)
         .fetch_optional(&state.pool)
-        .await?;
+        .await
+        .with_context(Ctx::database())?;
 
     let Some(user) = user else {
         tracing::warn!("User {} not found for invoice email", user_id);
@@ -966,15 +1164,30 @@ async fn send_invoice_email(
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SendPaymentConfirmationEmailError {
+    #[error("could not query user for payment confirmation email [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn send_payment_confirmation_email(
     state: &AppState,
     user_id: uuid::Uuid,
     transaction_id: &str,
-) -> anyhow::Result<()> {
+) -> Result<(), SendPaymentConfirmationEmailError> {
+    use SendPaymentConfirmationEmailErrorCtx as Ctx;
+
     let user = sqlx::query(r#"SELECT email FROM users WHERE id = $1"#)
         .bind(user_id)
         .fetch_optional(&state.pool)
-        .await?;
+        .await
+        .with_context(Ctx::database())?;
 
     let Some(user) = user else {
         return Ok(());
@@ -1013,15 +1226,30 @@ async fn send_payment_confirmation_email(
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SendPaymentFailureEmailError {
+    #[error("could not query user for payment failure email [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn send_payment_failure_email(
     state: &AppState,
     user_id: uuid::Uuid,
     transaction_id: &str,
-) -> anyhow::Result<()> {
+) -> Result<(), SendPaymentFailureEmailError> {
+    use SendPaymentFailureEmailErrorCtx as Ctx;
+
     let user = sqlx::query(r#"SELECT email FROM users WHERE id = $1"#)
         .bind(user_id)
         .fetch_optional(&state.pool)
-        .await?;
+        .await
+        .with_context(Ctx::database())?;
 
     let Some(user) = user else {
         return Ok(());
@@ -1150,6 +1378,5 @@ mod tests {
 
         let payload: PaddleWebhookPayload = serde_json::from_value(json).unwrap();
         assert_eq!(payload.event_type, "subscription.activated");
-        // Should parse without error — unknown events are simply ignored
     }
 }
