@@ -89,10 +89,9 @@ mod tests {
             std::env::remove_var("INTERNAL_SERVICE_SECRET");
         }
         let err = load_internal_service_secret().expect_err("missing secret should fail");
-        assert!(
-            err.to_string()
-                .contains("INTERNAL_SERVICE_SECRET must be set")
-        );
+        assert!(err
+            .to_string()
+            .contains("INTERNAL_SERVICE_SECRET must be set"));
         drop(guard);
     }
 
@@ -104,10 +103,9 @@ mod tests {
             std::env::set_var("INTERNAL_SERVICE_SECRET", "   ");
         }
         let err = load_internal_service_secret().expect_err("empty secret should fail");
-        assert!(
-            err.to_string()
-                .contains("INTERNAL_SERVICE_SECRET must be set")
-        );
+        assert!(err
+            .to_string()
+            .contains("INTERNAL_SERVICE_SECRET must be set"));
         drop(guard);
     }
 

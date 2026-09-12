@@ -207,9 +207,7 @@ impl CostExplorerClient {
                 let org_id = group
                     .keys()
                     .first()
-                    .map(|s| {
-                        s.split('$').next_back().unwrap_or(s).to_string()
-                    })
+                    .map(|s| s.split('$').next_back().unwrap_or(s).to_string())
                     .unwrap_or_else(|| "untagged".to_string());
 
                 if org_id.is_empty() || org_id == "untagged" {
@@ -255,10 +253,7 @@ pub fn current_billing_period() -> (String, String) {
     let start = time::Date::from_calendar_date(now.year(), now.month(), 1).expect("valid date");
     let end = now.date();
 
-    (
-        start.to_string(),
-        end.to_string(),
-    )
+    (start.to_string(), end.to_string())
 }
 
 /// Helper to get previous month's billing period
